@@ -806,6 +806,39 @@ Item {
         }
     }
 
+    /// A name with its suffix. The name leads; `.LEZ` follows in smaller,
+    /// quieter capitals, so it reads as a mark rather than part of the word.
+    component NameLabel: Item {
+        id: label
+        property string name: ""
+        property int size: 15
+        property int weight: Font.Medium
+        implicitWidth: bare.implicitWidth + suffix.implicitWidth
+        implicitHeight: bare.implicitHeight
+        Text {
+            id: bare
+            width: Math.min(implicitWidth, Math.max(0, label.width - suffix.implicitWidth))
+            text: label.name
+            color: root.ink
+            font.family: root.sans
+            font.weight: label.weight
+            font.pixelSize: label.size
+            elide: Text.ElideRight
+        }
+        Text {
+            id: suffix
+            anchors.left: bare.right
+            anchors.baseline: bare.baseline
+            visible: label.name !== ""
+            text: ".LEZ"
+            color: root.dim
+            font.family: root.sans
+            font.weight: label.weight
+            font.pixelSize: Math.round(label.size * 0.7)
+            font.letterSpacing: label.size * 0.04
+        }
+    }
+
     /// A quiet text button, for the small things beside the main actions.
     component Link: Text {
         id: link
@@ -1122,15 +1155,11 @@ Item {
                                 anchors.leftMargin: 8
                                 anchors.rightMargin: 4
                                 spacing: 4
-                                Text {
+                                NameLabel {
                                     Layout.fillWidth: true
-                                    textFormat: Text.StyledText
-                                    text: myRow.modelData.name + "<font color=\"" + root.dim + "\">.LEZ</font>"
-                                    color: root.ink
-                                    font.family: root.sans
-                                    font.weight: Font.Medium
-                                    font.pixelSize: 15
-                                    elide: Text.ElideRight
+                                    name: myRow.modelData.name
+                                    size: 15
+                                    weight: Font.Medium
                                 }
                                 IconButton {
                                     kind: "gear"
@@ -1278,15 +1307,11 @@ Item {
                     Layout.fillWidth: true
                     Layout.topMargin: 24
                     spacing: 14
-                    Text {
+                    NameLabel {
                         Layout.fillWidth: true
-                        textFormat: Text.StyledText
-                        text: root.missing + "<font color=\"" + root.dim + "\">.LEZ</font>"
-                        color: root.ink
-                        font.family: root.sans
-                        font.weight: Font.DemiBold
-                        font.pixelSize: 44
-                        elide: Text.ElideRight
+                        name: root.missing
+                        size: 44
+                        weight: Font.DemiBold
                     }
                     Text {
                         text: "Nobody holds this name."
@@ -1339,15 +1364,11 @@ Item {
                         ColumnLayout {
                             Layout.fillWidth: true
                             spacing: 2
-                            Text {
+                            NameLabel {
                                 Layout.fillWidth: true
-                                textFormat: Text.StyledText
-                                text: root.record !== null ? root.record.name + "<font color=\"" + root.dim + "\">.LEZ</font>" : ""
-                                color: root.ink
-                                font.family: root.sans
-                                font.weight: Font.DemiBold
-                                font.pixelSize: 44
-                                elide: Text.ElideRight
+                                name: root.record !== null ? root.record.name : ""
+                                size: 44
+                                weight: Font.DemiBold
                             }
                             Text {
                                 text: root.record === null ? "" : root.record.npk !== null && root.record.account !== null ? "Takes public and private payments" : root.record.npk !== null ? "Takes private payments" : root.record.account !== null ? "Takes public payments" : "Does not take payments yet"
