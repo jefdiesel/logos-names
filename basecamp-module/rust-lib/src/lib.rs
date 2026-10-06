@@ -122,7 +122,7 @@ pub trait NamesModule: Send + 'static {
     /// a name on the chain in the clear.
     fn set_primary(&mut self, account: String, name: String) -> String;
 
-    /// The sequencer URL and registry program ID in use.
+    /// The sequencer URL, registry program ID and wallet files in use.
     fn get_config(&mut self) -> String;
 
     /// Use the registry with this program account ID (base58), and remember it
@@ -133,6 +133,12 @@ pub trait NamesModule: Send + 'static {
     /// Read from the sequencer at this URL, and remember it across restarts.
     /// Returns false and changes nothing unless it is an http or https URL.
     fn set_sequencer(&mut self, url: String) -> bool;
+
+    /// Names the wallet to open when the LEZ wallet module is running with no
+    /// wallet open: the paths of its configuration and storage files, as the
+    /// LEZ Wallet app writes them. Remembered across restarts; two empty paths
+    /// forget it. Returns false and changes nothing if a file does not exist.
+    fn set_wallet_files(&mut self, config_path: String, storage_path: String) -> bool;
 
     /// Called once the module is wired to the host.
     fn on_context_ready(&mut self, _ctx: &RustModuleContext) {}
@@ -152,6 +158,8 @@ struct Names {
     /// Deriving a name's identifier and key is slow on purpose, so each name
     /// asked about is derived once.
     derived: HashMap<String, Derived>,
+    /// The wallet's configuration and storage files, if one was named.
+    wallet_files: Option<(String, String)>,
 }
 
 /// Where this module keeps what it remembers between runs.
@@ -166,6 +174,7 @@ impl Default for Names {
             sequencer: DEFAULT_SEQUENCER.to_owned(),
             program: registry::parse_account(DEFAULT_REGISTRY).ok(),
             derived: HashMap::new(),
+            wallet_files: None,
         };
         // A missing or unreadable file just means the defaults stand.
         let saved = config_dir()
@@ -177,6 +186,9 @@ impl Default for Names {
             }
             if let Some(program) = saved["registry"].as_str() {
                 names.program = registry::parse_account(program).ok().or(names.program);
+            }
+            if let (Some(config), Some(storage)) = (saved["wallet_config"].as_str(), saved["wallet_storage"].as_str()) {
+                names.wallet_files = Some((config.to_owned(), storage.to_owned()));
             }
         }
         names
@@ -272,7 +284,21 @@ impl Names {
         json!({
             "sequencer": self.sequencer,
             "registry": self.program.as_ref().map(registry::account_text),
+            "wallet_config": self.wallet_files.as_ref().map(|(config, _)| config),
+            "wallet_storage": self.wallet_files.as_ref().map(|(_, storage)| storage),
         })
+    }
+
+    /// The open wallet's accounts. If the wallet module is running with no
+    /// wallet open and one has been named, it is asked to open that one first.
+    fn held(&self) -> Result<Held, String> {
+        match (wallet::accounts(), &self.wallet_files) {
+            (Err(problem), Some((config, storage))) if problem == wallet::CLOSED => {
+                wallet::open(config, storage)?;
+                wallet::accounts()
+            }
+            (outcome, _) => outcome,
+        }
     }
 
     /// Writes the configuration for the next run. Failing to save is not an
@@ -317,8 +343,9 @@ impl Names {
     fn change(&self, name: &str, build: impl FnOnce(&Registry) -> Result<Change, String>) -> String {
         reply((|| {
             let registry = self.registry()?;
+            let held = self.held()?;
             let change = build(&registry)?;
-            if !wallet::accounts()?.public.contains(&change.signer) {
+            if !held.public.contains(&change.signer) {
                 return Err(format!(
                     "the open wallet does not hold {}, which must sign this",
                     registry::account_text(&change.signer)
@@ -415,7 +442,7 @@ impl NamesModule for Names {
     fn wallet(&mut self) -> String {
         reply((|| {
             let registry = self.registry()?;
-            let held = wallet::accounts()?;
+            let held = self.held()?;
             let mut accounts = Vec::new();
             for account in held.public.iter().take(MAX_WALLET_ACCOUNTS) {
                 accounts.push(registry.account_summary(account)?);
@@ -430,7 +457,7 @@ impl NamesModule for Names {
     fn mine(&mut self) -> String {
         reply((|| {
             let registry = self.registry()?;
-            let held = wallet::accounts()?.public;
+            let held = self.held()?.public;
             let mut memory = memory()?;
             let remembered = memory.names(&registry.program);
             let mut names = Vec::new();
@@ -567,6 +594,19 @@ impl NamesModule for Names {
         }
     }
 
+    fn set_wallet_files(&mut self, config_path: String, storage_path: String) -> bool {
+        let (config, storage) = (config_path.trim(), storage_path.trim());
+        if config.is_empty() && storage.is_empty() {
+            self.wallet_files = None;
+        } else if std::path::Path::new(config).is_file() && std::path::Path::new(storage).is_file() {
+            self.wallet_files = Some((config.to_owned(), storage.to_owned()));
+        } else {
+            return false;
+        }
+        self.save();
+        true
+    }
+
     fn set_sequencer(&mut self, url: String) -> bool {
         let url = url.trim();
         if is_http_url(url) {
@@ -597,6 +637,8 @@ mod wallet {
     use std::time::Duration;
 
     const MODULE: &str = "lez_core";
+    /// What `accounts` answers when the wallet module runs with no wallet open.
+    pub const CLOSED: &str = "no LEZ wallet is open; open LEZ Wallet first";
     /// Asking for the accounts is also how a missing wallet is noticed, and
     /// the caller waits for the answer, so it gives up quickly.
     const LOOK: Duration = Duration::from_secs(3);
@@ -632,9 +674,21 @@ mod wallet {
             }
         }
         if held.public.is_empty() && held.private.is_empty() {
-            return Err("no LEZ wallet is open; open LEZ Wallet first".to_owned());
+            return Err(CLOSED.to_owned());
         }
         Ok(held)
+    }
+
+    /// Asks the wallet module to open the wallet kept in these files. Its
+    /// statistics file sits beside its storage file.
+    pub fn open(config: &str, storage: &str) -> Result<(), String> {
+        let statistics = std::path::Path::new(storage).with_file_name("statistics.json");
+        let opened = call("open", json!([config, storage, statistics.to_string_lossy()]), SEND)?;
+        // 0 is success and 99 says a wallet is already open.
+        match opened.as_i64() {
+            Some(0 | 99) => Ok(()),
+            _ => Err(format!("the LEZ wallet could not open {storage}")),
+        }
     }
 
     /// The keys others use to pay the wallet's private account `account`:
@@ -698,10 +752,14 @@ mod wallet {
 mod wallet {
     use super::{AccountId, Change, Held};
 
-    const CLOSED: &str = "no LEZ wallet is open; open LEZ Wallet first";
+    pub const CLOSED: &str = "no LEZ wallet is open; open LEZ Wallet first";
 
     pub fn accounts() -> Result<Held, String> {
         Err(CLOSED.to_owned())
+    }
+
+    pub fn open(_config: &str, _storage: &str) -> Result<(), String> {
+        Err("the LEZ wallet is not running; install LEZ Wallet and open it".to_owned())
     }
 
     pub fn private_keys(_account: &AccountId) -> Result<([u8; 32], Vec<u8>), String> {
@@ -751,6 +809,7 @@ mod tests {
             sequencer: DEFAULT_SEQUENCER.to_owned(),
             program: None,
             derived: HashMap::new(),
+            wallet_files: None,
         }
     }
 
@@ -815,6 +874,18 @@ mod tests {
         assert_eq!(reloaded.names(&[8; 32]).len(), 1);
         assert!(reloaded.names(&[9; 32]).is_empty());
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_named_wallet_is_opened_when_none_is_open() {
+        let mut names = fresh();
+        names.program = Some([7; 32]);
+        // With no wallet named, the answer is that none is open.
+        assert_eq!(names.held().unwrap_err(), wallet::CLOSED);
+        // With one named, the module tries to open it; here no wallet module runs.
+        names.wallet_files = Some(("config.json".into(), "storage.json".into()));
+        assert!(names.held().unwrap_err().contains("not running"));
+        assert_eq!(parsed(&names.get_config())["wallet_storage"], "storage.json");
     }
 
     #[test]

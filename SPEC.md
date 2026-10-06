@@ -372,10 +372,11 @@ module names {
   method get_config() -> tstr
   method set_registry(program_id: tstr) -> bool
   method set_sequencer(url: tstr) -> bool
+  method set_wallet_files(config_path: tstr, storage_path: tstr) -> bool
 }
 ```
 
-Every method except `normalize` and the three configuration methods answers
+Every method except `normalize` and the four configuration methods answers
 with JSON text in the envelope Logos modules use:
 
 ```json
@@ -396,6 +397,10 @@ A wallet's send field calls `recipient` when the input ends in `.lez`, then
 sends to the `private` keys if there are any, otherwise to `public_hex`. Both
 are in the form the LEZ wallet module's `transfer_shielded`, `transfer_private`
 and `transfer_public` take.
+
+`set_wallet_files` names a wallet's files for the module to hand to `lez_core`
+when that module is running with no wallet open, so a person does not have to
+open the wallet by hand first.
 
 **Changing.** The module holds no keys. It builds the instruction, checks it
 against the chain, and asks the LEZ wallet module (`lez_core`) to sign and send

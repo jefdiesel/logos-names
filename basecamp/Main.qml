@@ -29,6 +29,9 @@ Item {
     property var pending: null         // a change that was sent and is not confirmed yet
     property string registry: ""
     property string sequencer: ""
+    property string walletConfig: ""   // the wallet files the names module opens by itself
+    property string walletStorage: ""
+    property bool wokeWallet: false
     property string notice: ""
     property bool noticeIsError: false
     property bool settingsOpen: false
@@ -140,6 +143,8 @@ Item {
             var config = call("names", "get_config", [])
             registry = config && config.registry ? config.registry : ""
             sequencer = config && config.sequencer ? config.sequencer : ""
+            walletConfig = config && config.wallet_config ? config.wallet_config : ""
+            walletStorage = config && config.wallet_storage ? config.wallet_storage : ""
             settingsOpen = registry === ""
         } catch (error) {
             say(error.message, true)
@@ -157,6 +162,21 @@ Item {
         }
         loadConfig()
         loadWallet(false)
+    }
+
+    /// Names the wallet the names module should open by itself.
+    function saveWalletFiles(configPath, storagePath) {
+        try {
+            if (!call("names", "set_wallet_files", [configPath, storagePath])) {
+                say("One of those files does not exist.", true)
+                return
+            }
+        } catch (error) {
+            say(error.message, true)
+            return
+        }
+        loadConfig()
+        loadWallet(true)
     }
 
     /// Reads the names this device remembers that the open wallet holds. The
@@ -202,6 +222,12 @@ Item {
             fromIndex = 0
             myNames = []
             console.log("names_ui: no wallet:", message)
+            // The wallet module starts when something asks for it. Ask once,
+            // then look again: the names module can open the wallet from there.
+            if (/not running/.test(message) && !wokeWallet && logos.callModuleAsync) {
+                wokeWallet = true
+                logos.callModuleAsync("lez_core", "list_accounts", [], function() { root.loadWallet(false) }, 20000)
+            }
             if (announce)
                 say(walletProblem, true)
         })
@@ -1184,6 +1210,26 @@ Item {
                         text: root.sequencer
                         hint: "https://testnet.lez.logos.co"
                         onEdited: root.saveConfig(sequencerField.text.trim(), root.registry)
+                    }
+                    Part { text: "Wallet" }
+                    Hint { text: "The wallet that signs for your names. Give the two files the LEZ Wallet keeps it in and it is opened for you whenever it is needed." }
+                    Field {
+                        id: walletConfigField
+                        Layout.fillWidth: true
+                        size: 13
+                        text: root.walletConfig
+                        hint: "Path of the wallet's config file"
+                    }
+                    Field {
+                        id: walletStorageField
+                        Layout.fillWidth: true
+                        size: 13
+                        text: root.walletStorage
+                        hint: "Path of the wallet's storage file"
+                    }
+                    Action {
+                        label: "Use this wallet"
+                        onPressed: root.saveWalletFiles(walletConfigField.text.trim(), walletStorageField.text.trim())
                     }
                     Text {
                         visible: root.lastReply !== ""
