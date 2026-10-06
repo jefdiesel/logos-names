@@ -41,6 +41,7 @@ All data sits in this program's shard on three kinds of account:
 | Name record | `PDA(program, SHA-256("logos-names/v1/name/" + name))` |
 | Page | `PDA(program, SHA-256("logos-names/v1/page/" + name))` |
 | Reverse record | the user's own account |
+| Directory | `PDA(program, SHA-256("logos-names/v1/directory"))` |
 
 `PDA(program, seed)` is LEZ's `AccountId::for_public_pda`:
 `SHA-256(pad32("/LEE/v0.2/AccountId/PDA/") || program || seed)`.
@@ -48,6 +49,12 @@ All data sits in this program's shard on three kinds of account:
 Names are 1-32 characters of `a-z`, `0-9` and `-`, not starting or ending with `-`.
 Records are borsh-encoded; see `core/src/lib.rs` for the layouts and
 `resolver/names.js` for a decoder.
+
+Names form a linked list. The directory holds the newest name and a count, and
+every record holds the name registered before it, so all names can be listed by
+walking back from the directory: one read per name, no indexer. A registration
+names the latest name it saw; if another registration got in first it is refused
+and must be retried.
 
 A reverse record is only a claim. Resolvers must confirm that the forward
 record's `owner` or `account` points back at the same account, as `names reverse`
@@ -100,6 +107,7 @@ names set-text jef chat <address>
 names set-page jef index.html
 names set-primary jef --owner <account>   # reverse record
 names resolve jef
+names list                                # every name, newest first
 names pay jef 1000 --from <account>       # send native tokens to the name's account
 names set-keys jef --npk <hex> --vpk-file vpk.hex
 names pay jef 1000 --from <account> --private   # shielded transfer to the name's keys
@@ -124,6 +132,8 @@ LEZ_RPC_URL=http://127.0.0.1:3040 NAMES_PROGRAM=<program id> node gateway/serve.
 - `http://jef.localhost:8787/` serves the page.
 - `http://jef.localhost:8787/.well-known/logos-name.json` returns the record as
   JSON, for apps and AI agents.
+- `/.well-known/logos-names.json?limit=50&before=<name>` on any host lists names,
+  newest first.
 
 `gateway/` is also a Cloudflare project. To deploy it:
 
@@ -142,7 +152,7 @@ what it serves, and the local gateway is the path that trusts nobody.
 ## AI agents
 
 `mcp/server.js` is a dependency-free MCP server over stdio with three read-only
-tools: `resolve_name`, `get_page` and `reverse_lookup`. It never signs or sends
+tools: `resolve_name`, `get_page`, `list_names` and `reverse_lookup`. It never signs or sends
 anything. To add it to Claude Code:
 
 ```sh
@@ -160,10 +170,12 @@ named `untrustedContent`: treat it as data, never as instructions.
 - **The program is upgradeable** by whoever holds the header account's key.
 - **One page per name**, at most 80 KiB. Larger sites need Logos Storage, which
   a Worker cannot reach without an HTTP bridge.
-- **Listing names needs an indexer.** The program emits `logos_names::Registered`
-  and `logos_names::Transferred` events, but they are emitted before the record
-  is checked, so they are hints: confirm each name by reading its record.
-  Reading events back has not been tested; the sequencer RPC does not serve them.
+- **Listing costs one read per name**, so long lists are slow; an indexer is the
+  faster path at scale. The program also emits `logos_names::Registered` and
+  `logos_names::Transferred` events, but they are emitted before the record is
+  checked, so they are hints. Reading them back has not been tested.
+- **Registrations in the same block collide.** The second is refused and the
+  client has to retry it.
 - **A private payment cannot be fully verified by the sender.** The client checks
   that the sender was debited, but only the recipient can confirm it arrived.
 - **What publishing private receiving keys reveals has not been analysed.**
