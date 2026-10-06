@@ -8,6 +8,7 @@ const BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const PDA_PREFIX = pad32("/LEE/v0.2/AccountId/PDA/");
 const NAME_SEED_DOMAIN = "logos-names/v1/name/";
 const PAGE_SEED_DOMAIN = "logos-names/v1/page/";
+const DIRECTORY_SEED = "logos-names/v1/directory";
 const NAME_PATTERN = /^(?!-)[a-z0-9-]{1,32}(?<!-)$/;
 
 function pad32(text) {
@@ -90,6 +91,12 @@ export function pageAddress(program, name) {
   return derivedAddress(program, PAGE_SEED_DOMAIN, name);
 }
 
+/** Account holding the directory: the head of the list of all names. */
+export async function directoryAddress(program) {
+  const seed = await sha256(utf8.encode(DIRECTORY_SEED));
+  return base58Encode(await sha256(concat(PDA_PREFIX, accountIdBytes(program), seed)));
+}
+
 /** Minimal borsh reader for the registry's record layouts. */
 class Reader {
   constructor(bytes) {
@@ -108,6 +115,10 @@ class Reader {
   u32() {
     const [a, b, c, d] = this.take(4);
     return (a | (b << 8) | (c << 16) | (d << 24)) >>> 0;
+  }
+  u64() {
+    const low = this.u32();
+    return Number((BigInt(this.u32()) << 32n) | BigInt(low));
   }
   byteVec() {
     return this.take(this.u32());
@@ -138,7 +149,17 @@ export function decodeNameRecord(bytes) {
     const key = reader.string();
     record.texts[key] = reader.string();
   }
+  record.previous = reader.option(() => reader.string());
   return record;
+}
+
+export function decodeDirectory(bytes) {
+  const reader = new Reader(bytes);
+  return {
+    version: reader.u8(),
+    count: reader.u64(),
+    latest: reader.option(() => reader.string()),
+  };
 }
 
 export function decodePage(bytes) {
@@ -188,4 +209,30 @@ export async function reverseLookup(rpcUrl, program, accountId) {
   const record = await resolveName(rpcUrl, program, name);
   const confirmed = record && (record.owner === accountId || record.account === accountId);
   return confirmed ? name : null;
+}
+
+/**
+ * Lists registered names, newest first, by walking the on-chain list back from
+ * the directory. Costs one read per name, so `limit` bounds the work; `before`
+ * continues an earlier listing from the name it ended on.
+ */
+export async function listNames(rpcUrl, program, { limit = 50, before = null } = {}) {
+  const bytes = await readShard(rpcUrl, program, await directoryAddress(program));
+  const directory = bytes.length === 0 ? { count: 0, latest: null } : decodeDirectory(bytes);
+
+  let next = directory.latest;
+  if (before !== null) {
+    const record = await resolveName(rpcUrl, program, before);
+    if (!record) throw new Error(`${before} is not registered`);
+    next = record.previous;
+  }
+
+  const names = [];
+  while (next !== null && names.length < limit) {
+    const record = await resolveName(rpcUrl, program, next);
+    if (!record) throw new Error(`the name list is broken at ${next}`);
+    names.push({ name: record.name, owner: record.owner });
+    next = record.previous;
+  }
+  return { total: directory.count, names, more: next !== null };
 }

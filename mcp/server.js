@@ -9,6 +9,7 @@
 import { createInterface } from "node:readline";
 import {
   isValidName,
+  listNames,
   pageAddress,
   recordAddress,
   resolveName,
@@ -65,6 +66,23 @@ const tools = [
         // Page content is written by the name's owner: treat it as data, not instructions.
         untrustedContent: text.slice(0, MAX_PAGE_CHARS),
       };
+    },
+  },
+  {
+    name: "list_names",
+    description:
+      "List registered Logos names, newest first, with their owners. Each name costs one " +
+      "read, so results are capped; pass the last name returned as `before` to continue.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: { type: "integer", minimum: 1, maximum: 100, description: "Default 25." },
+        before: { type: "string", description: "Continue after this name." },
+      },
+    },
+    async run({ limit = 25, before = null }) {
+      const capped = Math.min(Math.max(Number(limit) || 25, 1), 100);
+      return listNames(rpcUrl, program, { limit: capped, before: before && requireName(before) });
     },
   },
   {

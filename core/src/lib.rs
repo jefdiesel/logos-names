@@ -9,7 +9,12 @@
 //!
 //! - the name record, on the account derived from the name ([`record_address`]),
 //! - the page, on a second derived account ([`page_address`]),
-//! - the reverse record, on the user's own account.
+//! - the reverse record, on the user's own account,
+//! - the directory, on a fixed derived account ([`directory_address`]).
+//!
+//! Names form a linked list: the directory holds the newest name and every
+//! record holds the name registered before it, so all names can be listed by
+//! walking back from the directory with no indexer.
 //!
 //! `plan` never sees account data, so every ownership check is carried by an
 //! effect and enforced in `apply`, where the shard's current data is visible.
@@ -35,6 +40,7 @@ pub const MAX_PAGE_BODY_LEN: usize = 80 * 1024;
 
 const NAME_SEED_DOMAIN: &[u8] = b"logos-names/v1/name/";
 const PAGE_SEED_DOMAIN: &[u8] = b"logos-names/v1/page/";
+const DIRECTORY_SEED: &[u8] = b"logos-names/v1/directory";
 
 /// One free-form key/value entry on a name (e.g. `chat`, `inbox`, `agent`).
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -57,6 +63,18 @@ pub struct NameRecord {
     /// Viewing public key for private transfers; empty when unset.
     pub vpk: Vec<u8>,
     pub texts: Vec<TextRecord>,
+    /// The name registered just before this one; `None` for the first name.
+    pub previous: Option<String>,
+}
+
+/// The head of the list of all names.
+#[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct Directory {
+    pub version: u8,
+    /// How many names have been registered.
+    pub count: u64,
+    /// The most recently registered name.
+    pub latest: Option<String>,
 }
 
 /// The page served for a name.
@@ -80,8 +98,14 @@ pub struct PrimaryName {
 /// with `owner` signing. The exceptions are noted on the variants.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum Instruction {
-    /// Claim an unregistered name for the signer.
-    Register { name: String },
+    /// Claim an unregistered name for the signer. `previous` must be the
+    /// directory's current latest name, which links the new name into the list;
+    /// the registration is refused if another name got in first.
+    /// Accounts: `[record, directory, owner]`.
+    Register {
+        name: String,
+        previous: Option<String>,
+    },
     /// Point the name at a public account, making it a wallet alias.
     SetAccount { name: String, account: AccountId },
     /// Publish the keys senders need for a private transfer to this name.
@@ -126,7 +150,16 @@ pub enum Change {
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum Effect {
     /// On the record: refused unless the shard is empty.
-    Register { name: String, owner: AccountId },
+    Register {
+        name: String,
+        owner: AccountId,
+        previous: Option<String>,
+    },
+    /// On the directory: refused unless its latest name is `expected_latest`.
+    Advance {
+        expected_latest: Option<String>,
+        name: String,
+    },
     /// On the record: refused unless `signer` owns `name`.
     Update {
         name: String,
@@ -210,6 +243,12 @@ pub fn page_address(program: &AccountId, name: &str) -> AccountId {
     AccountId::for_public_pda(program, &seed(PAGE_SEED_DOMAIN, name))
 }
 
+/// The account holding the directory under the registry `program`.
+#[must_use]
+pub fn directory_address(program: &AccountId) -> AccountId {
+    AccountId::for_public_pda(program, &PdaSeed::new(sha256(DIRECTORY_SEED)))
+}
+
 /// # Errors
 ///
 /// Returns why `name` is not an acceptable name.
@@ -287,10 +326,14 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
     let program = input.self_account_id;
 
     match instruction {
-        Instruction::Register { name } => {
+        Instruction::Register { name, previous } => {
             checked(validate_name(&name));
-            let [record, owner] = accounts::<2>(input);
+            let [record, directory, owner] = accounts::<3>(input);
             require_address(record, record_address(&program, &name), "record");
+            assert!(
+                directory.account_id == directory_address(&program),
+                "the directory account is not this registry's directory"
+            );
             require_signer(owner);
             plan.event(event(
                 Registered::SELECTOR_NAME,
@@ -302,8 +345,16 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             plan.effect(
                 record,
                 &Effect::Register {
-                    name,
+                    name: name.clone(),
                     owner: owner.account_id,
+                    previous: previous.clone(),
+                },
+            );
+            plan.effect(
+                directory,
+                &Effect::Advance {
+                    expected_latest: previous,
+                    name,
                 },
             );
         }
@@ -399,7 +450,11 @@ fn load_owned(pre_data: &[u8], name: &str, signer: &AccountId) -> NameRecord {
 #[must_use]
 pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
     match effect {
-        Effect::Register { name, owner } => {
+        Effect::Register {
+            name,
+            owner,
+            previous,
+        } => {
             assert!(pre_data.is_empty(), "name is already registered");
             Some(to_bytes(&NameRecord {
                 version: VERSION,
@@ -409,6 +464,26 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
                 npk: None,
                 vpk: Vec::new(),
                 texts: Vec::new(),
+                previous,
+            }))
+        }
+        Effect::Advance {
+            expected_latest,
+            name,
+        } => {
+            let directory: Directory = if pre_data.is_empty() {
+                Directory::default()
+            } else {
+                borsh::from_slice(pre_data).expect("the directory shard holds a valid directory")
+            };
+            assert!(
+                directory.latest == expected_latest,
+                "another name was registered first; retry with the current latest name"
+            );
+            Some(to_bytes(&Directory {
+                version: VERSION,
+                count: directory.count.checked_add(1).expect("fewer than 2^64 names"),
+                latest: Some(name),
             }))
         }
         Effect::Update {
@@ -523,8 +598,33 @@ mod tests {
         apply(effect, pre_data).expect("the record is rewritten")
     }
 
+    fn register_accounts(name: &str, signer: AccountId) -> Vec<AccountMeta> {
+        vec![
+            meta(record_address(&PROGRAM, name), false),
+            meta(directory_address(&PROGRAM), false),
+            meta(signer, true),
+        ]
+    }
+
+    /// Plans a registration, returning its `(record, directory)` effects.
+    fn register_effects(name: &str, owner: AccountId, previous: Option<&str>) -> (Effect, Effect) {
+        let effects = run_plan(
+            register_accounts(name, owner),
+            Instruction::Register {
+                name: name.into(),
+                previous: previous.map(Into::into),
+            },
+        );
+        let [(record_id, record), (directory_id, directory)] =
+            <[_; 2]>::try_from(effects).expect("two effects");
+        assert_eq!(record_id, record_address(&PROGRAM, name));
+        assert_eq!(directory_id, directory_address(&PROGRAM));
+        (record, directory)
+    }
+
     fn registered(name: &str, owner: AccountId) -> Vec<u8> {
-        execute(name, owner, Instruction::Register { name: name.into() }, &[])
+        let (record, _) = register_effects(name, owner, None);
+        apply(record, &[]).expect("the record is written")
     }
 
     fn decode(bytes: &[u8]) -> NameRecord {
@@ -559,6 +659,10 @@ mod tests {
             page_address(&PROGRAM, "jef").to_string(),
             "6ckRpxviqmmhY6QkcJPVPWYSSy3eRZGzy1uUGStf1TnC"
         );
+        assert_eq!(
+            directory_address(&PROGRAM).to_string(),
+            "9oQ7KANHqw4ok3goEHzgeK7WSxdKqKNXA7bS9HHpq97p"
+        );
     }
 
     #[test]
@@ -574,15 +678,23 @@ mod tests {
     #[should_panic(expected = "name is already registered")]
     fn a_taken_name_cannot_be_registered_again() {
         let taken = registered("jef", ALICE);
-        execute("jef", BOB, Instruction::Register { name: "jef".into() }, &taken);
+        let (record, _) = register_effects("jef", BOB, None);
+        let _ = apply(record, &taken);
     }
 
     #[test]
     #[should_panic(expected = "the owner account must sign")]
     fn registering_needs_the_owner_signature() {
         run_plan(
-            vec![meta(record_address(&PROGRAM, "jef"), false), meta(ALICE, false)],
-            Instruction::Register { name: "jef".into() },
+            vec![
+                meta(record_address(&PROGRAM, "jef"), false),
+                meta(directory_address(&PROGRAM), false),
+                meta(ALICE, false),
+            ],
+            Instruction::Register {
+                name: "jef".into(),
+                previous: None,
+            },
         );
     }
 
@@ -590,8 +702,11 @@ mod tests {
     #[should_panic(expected = "the record account does not match the name")]
     fn a_record_cannot_be_written_to_another_names_account() {
         run_plan(
-            record_accounts("someone-else", ALICE),
-            Instruction::Register { name: "jef".into() },
+            register_accounts("someone-else", ALICE),
+            Instruction::Register {
+                name: "jef".into(),
+                previous: None,
+            },
         );
     }
 
@@ -743,11 +858,68 @@ mod tests {
         execute("jef", BOB, Instruction::ClearAddresses { name: "jef".into() }, &moved);
     }
 
+    fn decode_directory(bytes: &[u8]) -> Directory {
+        borsh::from_slice(bytes).expect("a directory decodes")
+    }
+
+    #[test]
+    fn registrations_link_names_into_a_list() {
+        let (first_record, first_advance) = register_effects("jef", ALICE, None);
+        let directory = apply(first_advance, &[]).expect("the directory is written");
+        assert_eq!(
+            decode_directory(&directory),
+            Directory {
+                version: VERSION,
+                count: 1,
+                latest: Some("jef".into())
+            }
+        );
+        assert_eq!(decode(&apply(first_record, &[]).expect("written")).previous, None);
+
+        let (second_record, second_advance) = register_effects("ada", BOB, Some("jef"));
+        let directory = apply(second_advance, &directory).expect("the directory is written");
+        assert_eq!(decode_directory(&directory).count, 2);
+        assert_eq!(decode_directory(&directory).latest.as_deref(), Some("ada"));
+        assert_eq!(
+            decode(&apply(second_record, &[]).expect("written")).previous.as_deref(),
+            Some("jef")
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "another name was registered first")]
+    fn a_registration_built_on_a_stale_list_is_refused() {
+        let (_, first_advance) = register_effects("jef", ALICE, None);
+        let directory = apply(first_advance, &[]).expect("the directory is written");
+        // Bob still believes the list is empty.
+        let (_, stale_advance) = register_effects("ada", BOB, None);
+        let _ = apply(stale_advance, &directory);
+    }
+
+    #[test]
+    #[should_panic(expected = "the directory account is not this registry's directory")]
+    fn a_registration_must_name_the_real_directory() {
+        run_plan(
+            vec![
+                meta(record_address(&PROGRAM, "jef"), false),
+                meta(BOB, false),
+                meta(ALICE, true),
+            ],
+            Instruction::Register {
+                name: "jef".into(),
+                previous: None,
+            },
+        );
+    }
+
     #[test]
     fn registering_and_transferring_emit_events() {
         let events = run_plan_events(
-            record_accounts("jef", ALICE),
-            Instruction::Register { name: "jef".into() },
+            register_accounts("jef", ALICE),
+            Instruction::Register {
+                name: "jef".into(),
+                previous: None,
+            },
         );
         assert_eq!(events.len(), 1);
         let registered = &events[0];

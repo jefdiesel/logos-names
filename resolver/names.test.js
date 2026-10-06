@@ -4,9 +4,11 @@ import { test } from "node:test";
 import {
   base58Decode,
   base58Encode,
+  decodeDirectory,
   decodeNameRecord,
   decodePage,
   decodePrimaryName,
+  directoryAddress,
   isValidName,
   pageAddress,
   recordAddress,
@@ -18,6 +20,7 @@ const PROGRAM = base58Encode(new Uint8Array(32).fill(7));
 test("addresses match the Rust implementation", async () => {
   assert.equal(await recordAddress(PROGRAM, "jef"), "28mUmKUyH1dJgmwdjVxS22P12iUHVotLcvk2nbrFw29Y");
   assert.equal(await pageAddress(PROGRAM, "jef"), "6ckRpxviqmmhY6QkcJPVPWYSSy3eRZGzy1uUGStf1TnC");
+  assert.equal(await directoryAddress(PROGRAM), "9oQ7KANHqw4ok3goEHzgeK7WSxdKqKNXA7bS9HHpq97p");
 });
 
 test("base58 round-trips, including leading zero bytes", () => {
@@ -58,6 +61,7 @@ test("a name record decodes", () => {
       0, // npk: None
       Uint8Array.of(0, 0, 0, 0), // empty vpk
       Uint8Array.of(1, 0, 0, 0), "chat", "hello", // one text entry
+      1, "ada", // previous: Some("ada")
     ),
   );
   assert.deepEqual(record, {
@@ -68,6 +72,7 @@ test("a name record decodes", () => {
     npk: null,
     vpk: null,
     texts: { chat: "hello" },
+    previous: "ada",
   });
 });
 
@@ -77,4 +82,10 @@ test("a page and a primary name decode, and truncated data is refused", () => {
   assert.deepEqual([...page.body], [104, 105]);
   assert.deepEqual(decodePrimaryName(borsh(1, "jef")), { version: 1, name: "jef" });
   assert.throws(() => decodeNameRecord(Uint8Array.of(1, 9, 0, 0, 0)), /truncated/);
+});
+
+test("a directory decodes", () => {
+  const count = Uint8Array.of(3, 0, 0, 0, 0, 0, 0, 0);
+  assert.deepEqual(decodeDirectory(borsh(1, count, 1, "jef")), { version: 1, count: 3, latest: "jef" });
+  assert.deepEqual(decodeDirectory(borsh(1, count, 0)), { version: 1, count: 3, latest: null });
 });

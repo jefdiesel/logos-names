@@ -12,8 +12,8 @@ use lee_core::{
     program::{AccountMeta, PlanInput},
 };
 use names_core::{
-    Effect, Instruction, NameRecord, Page, PrimaryName, page_address, record_address,
-    validate_name,
+    Directory, Effect, Instruction, NameRecord, Page, PrimaryName, directory_address,
+    page_address, record_address, validate_name,
 };
 use wallet::{
     AccountIdentity, WalletCore, program_facades::native_token_transfer::NativeTokenTransfer,
@@ -94,6 +94,12 @@ enum Command {
     Resolve { name: String },
     /// Print the name an account is shown as, checked against the forward record.
     Reverse { account: AccountId },
+    /// List registered names, newest first.
+    List {
+        /// Stop after this many names; each one costs a read.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
     /// Print the accounts that hold a name's record and page.
     Address { name: String },
 }
@@ -121,6 +127,48 @@ impl Client {
         Ok(Some(
             borsh::from_slice(&bytes).context("the record shard does not hold a name record")?,
         ))
+    }
+
+    async fn directory(&self) -> Result<Directory> {
+        let bytes = self.shard(directory_address(&self.program)).await?;
+        if bytes.is_empty() {
+            return Ok(Directory::default());
+        }
+        borsh::from_slice(&bytes).context("the directory shard does not hold a directory")
+    }
+
+    /// Registers `name`, linking it after the directory's current latest name.
+    async fn register(&self, name: String, owner: AccountId) -> Result<()> {
+        let previous = self.directory().await?.latest;
+        self.send(
+            vec![
+                (record_address(&self.program, &name), false),
+                (directory_address(&self.program), false),
+                (owner, true),
+            ],
+            &Instruction::Register { name, previous },
+        )
+        .await
+    }
+
+    /// Prints up to `limit` names, newest first, walking the on-chain list.
+    async fn list(&self, limit: usize) -> Result<()> {
+        let directory = self.directory().await?;
+        println!("{} names registered", directory.count);
+        let mut next = directory.latest;
+        for _ in 0..limit {
+            let Some(name) = next else { return Ok(()) };
+            let record = self
+                .record(&name)
+                .await?
+                .ok_or_else(|| anyhow!("the name list is broken at {name}"))?;
+            println!("{name}  {}", record.owner);
+            next = record.previous;
+        }
+        if next.is_some() {
+            println!("... more; raise --limit to see them");
+        }
+        Ok(())
     }
 
     async fn owner_of(&self, name: &str) -> Result<AccountId> {
@@ -344,6 +392,7 @@ impl Client {
             "npk": record.npk.map(hex::encode),
             "vpk": (!record.vpk.is_empty()).then(|| hex::encode(&record.vpk)),
             "texts": texts,
+            "previous": record.previous,
             "page": page,
             "record_address": record_address(&self.program, name).to_string(),
             "page_address": page_address(&self.program, name).to_string(),
@@ -410,10 +459,9 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Register { name, owner } => {
             validate_name(&name).map_err(|reason| anyhow!(reason))?;
-            client
-                .update(&name.clone(), owner, &Instruction::Register { name })
-                .await
+            client.register(name, owner).await
         }
+        Command::List { limit } => client.list(limit).await,
         Command::SetAccount { name, account } => {
             let owner = client.owner_of(&name).await?;
             client
