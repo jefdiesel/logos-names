@@ -1,11 +1,11 @@
 {
   "name": "names",
   "display_name": "Names",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "core",
   "interface": "cdylib",
   "category": "identity",
-  "description": "Resolve, register and manage .lez names for any Logos app",
+  "description": "Resolve, register and manage private .lez names for any Logos app",
   "main": "names_plugin",
   "dependencies": [],
 

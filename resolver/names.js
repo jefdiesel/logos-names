@@ -1,14 +1,23 @@
-// Logos Names resolver: derives a name's accounts and reads them over the LEZ
-// sequencer's JSON-RPC. No dependencies; runs in Node 20+, browsers and
-// Cloudflare Workers (anything with fetch and WebCrypto).
+// Logos Names resolver: derives a name's identifier, key and accounts, reads
+// them over the LEZ sequencer's JSON-RPC and opens what they hold. No
+// dependencies; runs in Node 20+, browsers and Cloudflare Workers (anything
+// with fetch and WebCrypto).
 
 const utf8 = new TextEncoder();
 
 const BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const PDA_PREFIX = pad32("/LEE/v0.2/AccountId/PDA/");
-const NAME_SEED_DOMAIN = "logos-names/v1/name/";
-const PAGE_SEED_DOMAIN = "logos-names/v1/page/";
-const DIRECTORY_SEED = "logos-names/v1/directory";
+const DERIVE_SALT = "logos-names/v2";
+const DERIVE_ITERATIONS = 100000;
+const ID_DOMAIN = "logos-names/v2/id";
+const KEY_DOMAIN = "logos-names/v2/key";
+const NAME_SEED_DOMAIN = "logos-names/v2/name/";
+const PAGE_SEED_DOMAIN = "logos-names/v2/page/";
+// Sealed data is bound to its kind, so a sealed page never opens as a record.
+const ASSOCIATED_DATA = { record: "logos-names/v2/record", page: "logos-names/v2/page" };
+const NONCE_LENGTH = 12;
+const TAG_LENGTH = 16;
+const PROFILE_BLOCK = 256;
 const NAME_PATTERN = /^(?!-)[a-z0-9-]{1,32}(?<!-)$/;
 
 function pad32(text) {
@@ -71,12 +80,25 @@ function accountIdBytes(accountId) {
   return bytes;
 }
 
-/** How names are written for people: `jef.lez`. The chain only knows the bare name. */
+const toHex = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+
+function fromHex(text) {
+  if (!/^([0-9a-f]{2})*$/i.test(text)) throw new Error(`invalid hex: ${text}`);
+  return Uint8Array.from(text.match(/../g) ?? [], (pair) => parseInt(pair, 16));
+}
+
+/** How names are written for people: `jef.lez`. The suffix is not part of the name. */
 export const NAME_SUFFIX = ".lez";
 
-/** Turns what a person typed, such as `Jef.lez`, into the bare on-chain name `jef`. */
+/**
+ * Turns what a person typed, such as `Jef.lez`, into the bare name `jef`. Only
+ * ASCII letters are lowered, so no other character can turn into a valid one.
+ * The result still has to pass `isValidName`.
+ */
 export function normalizeName(input) {
-  const lowered = String(input).trim().toLowerCase();
+  const lowered = String(input)
+    .trim()
+    .replace(/[A-Z]/g, (letter) => letter.toLowerCase());
   return lowered.endsWith(NAME_SUFFIX) ? lowered.slice(0, -NAME_SUFFIX.length) : lowered;
 }
 
@@ -84,29 +106,80 @@ export function isValidName(name) {
   return typeof name === "string" && NAME_PATTERN.test(name);
 }
 
-async function derivedAddress(program, domain, name) {
+/**
+ * The identifier and key of `name`. The chain knows the name only by `id`;
+ * `key` opens and seals what the name resolves to and is never sent anywhere.
+ * The derivation is slow on purpose, to make scanning for names expensive.
+ */
+export async function deriveName(name) {
   if (!isValidName(name)) throw new Error(`invalid name: ${name}`);
-  const seed = await sha256(utf8.encode(domain + name));
+  const usages = ["deriveBits"];
+  const password = await crypto.subtle.importKey("raw", utf8.encode(name), "PBKDF2", false, usages);
+  const params = {
+    name: "PBKDF2",
+    hash: "SHA-256",
+    salt: utf8.encode(DERIVE_SALT),
+    iterations: DERIVE_ITERATIONS,
+  };
+  const master = new Uint8Array(await crypto.subtle.deriveBits(params, password, 256));
+  return {
+    id: await sha256(concat(utf8.encode(ID_DOMAIN), master)),
+    key: await sha256(concat(utf8.encode(KEY_DOMAIN), master)),
+  };
+}
+
+async function derivedAddress(program, domain, id) {
+  if (!(id instanceof Uint8Array) || id.length !== 32) throw new Error("name ID must be 32 bytes");
+  const seed = await sha256(concat(utf8.encode(domain), id));
   return base58Encode(await sha256(concat(PDA_PREFIX, accountIdBytes(program), seed)));
 }
 
-/** Account holding the record for `name` under the registry `program`. */
-export function recordAddress(program, name) {
-  return derivedAddress(program, NAME_SEED_DOMAIN, name);
+/** Account holding the record of the name `id` under the registry `program`. */
+export function recordAddress(program, id) {
+  return derivedAddress(program, NAME_SEED_DOMAIN, id);
 }
 
-/** Account holding the page for `name` under the registry `program`. */
-export function pageAddress(program, name) {
-  return derivedAddress(program, PAGE_SEED_DOMAIN, name);
+/** Account holding the page of the name `id` under the registry `program`. */
+export function pageAddress(program, id) {
+  return derivedAddress(program, PAGE_SEED_DOMAIN, id);
 }
 
-/** Account holding the directory: the head of the list of all names. */
-export async function directoryAddress(program) {
-  const seed = await sha256(utf8.encode(DIRECTORY_SEED));
-  return base58Encode(await sha256(concat(PDA_PREFIX, accountIdBytes(program), seed)));
+function sealingKey(key, usage) {
+  return crypto.subtle.importKey("raw", key, "AES-GCM", false, [usage]);
 }
 
-/** Minimal borsh reader for the registry's record layouts. */
+function sealingParams(nonce, kind) {
+  const associated = ASSOCIATED_DATA[kind];
+  if (!associated) throw new Error(`unknown kind of sealed data: ${kind}`);
+  return { name: "AES-GCM", iv: nonce, additionalData: utf8.encode(associated) };
+}
+
+/**
+ * Seals `plaintext` under a name's `key` as a "record" or a "page": the nonce,
+ * then the ciphertext and its tag. The nonce is random; only tests pass one.
+ */
+export async function seal(key, plaintext, kind, nonce = null) {
+  nonce ??= crypto.getRandomValues(new Uint8Array(NONCE_LENGTH));
+  if (nonce.length !== NONCE_LENGTH) throw new Error(`nonce must be ${NONCE_LENGTH} bytes`);
+  const params = sealingParams(nonce, kind);
+  const sealed = await crypto.subtle.encrypt(params, await sealingKey(key, "encrypt"), plaintext);
+  return concat(nonce, new Uint8Array(sealed));
+}
+
+/** The plaintext of `sealed`, or null when it does not open with `key` as that kind. */
+export async function openSealed(key, sealed, kind) {
+  const params = sealingParams(sealed.subarray(0, NONCE_LENGTH), kind);
+  if (sealed.length < NONCE_LENGTH + TAG_LENGTH) return null;
+  try {
+    const opening = await sealingKey(key, "decrypt");
+    const ciphertext = sealed.subarray(NONCE_LENGTH);
+    return new Uint8Array(await crypto.subtle.decrypt(params, opening, ciphertext));
+  } catch {
+    return null;
+  }
+}
+
+/** Minimal borsh reader for the registry's layouts. */
 class Reader {
   constructor(bytes) {
     this.bytes = bytes;
@@ -125,10 +198,6 @@ class Reader {
     const [a, b, c, d] = this.take(4);
     return (a | (b << 8) | (c << 16) | (d << 24)) >>> 0;
   }
-  u64() {
-    const low = this.u32();
-    return Number((BigInt(this.u32()) << 32n) | BigInt(low));
-  }
   byteVec() {
     return this.take(this.u32());
   }
@@ -140,14 +209,42 @@ class Reader {
   }
 }
 
-const toHex = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+/** Minimal borsh writers, the counterparts of the reader. */
+const writeU32 = (value) => Uint8Array.of(value, value >>> 8, value >>> 16, value >>> 24);
+const writeByteVec = (bytes) => concat(writeU32(bytes.length), bytes);
+const writeString = (text) => writeByteVec(utf8.encode(text));
+const writeOption = (bytes) =>
+  bytes === null ? Uint8Array.of(0) : concat(Uint8Array.of(1), bytes);
+
+function fixed32(bytes, what) {
+  if (bytes.length !== 32) throw new Error(`${what} must be 32 bytes`);
+  return bytes;
+}
 
 export function decodeNameRecord(bytes) {
   const reader = new Reader(bytes);
-  const record = {
+  return {
     version: reader.u8(),
-    name: reader.string(),
     owner: base58Encode(reader.take(32)),
+    sealed: reader.byteVec(),
+  };
+}
+
+export function decodePage(bytes) {
+  const reader = new Reader(bytes);
+  return { version: reader.u8(), sealed: reader.byteVec() };
+}
+
+export function decodePrimaryName(bytes) {
+  const reader = new Reader(bytes);
+  return { version: reader.u8(), name: reader.string() };
+}
+
+/** Decodes the profile at the start of an opened record; the zero padding after it is ignored. */
+export function decodeProfile(bytes) {
+  const reader = new Reader(bytes);
+  const profile = {
+    name: reader.string(),
     account: reader.option(() => base58Encode(reader.take(32))),
     npk: reader.option(() => toHex(reader.take(32))),
     vpk: toHex(reader.byteVec()) || null,
@@ -156,30 +253,34 @@ export function decodeNameRecord(bytes) {
   const count = reader.u32();
   for (let index = 0; index < count; index += 1) {
     const key = reader.string();
-    record.texts[key] = reader.string();
+    profile.texts[key] = reader.string();
   }
-  record.previous = reader.option(() => reader.string());
-  record.next = reader.option(() => reader.string());
-  return record;
+  return profile;
 }
 
-export function decodeDirectory(bytes) {
-  const reader = new Reader(bytes);
-  return {
-    version: reader.u8(),
-    count: reader.u64(),
-    latest: reader.option(() => reader.string()),
-  };
+/** Encodes a profile, padded with zeros to a whole number of blocks so its length says little. */
+export function encodeProfile({ name, account = null, npk = null, vpk = null, texts = {} }) {
+  const entries = Object.entries(texts);
+  const encoded = concat(
+    writeString(name),
+    writeOption(account === null ? null : accountIdBytes(account)),
+    writeOption(npk === null ? null : fixed32(fromHex(npk), "npk")),
+    writeByteVec(vpk === null ? new Uint8Array(0) : fromHex(vpk)),
+    writeU32(entries.length),
+    ...entries.flatMap(([key, value]) => [writeString(key), writeString(value)]),
+  );
+  const padded = new Uint8Array(Math.ceil(encoded.length / PROFILE_BLOCK) * PROFILE_BLOCK);
+  padded.set(encoded);
+  return padded;
 }
 
-export function decodePage(bytes) {
+export function decodePageContent(bytes) {
   const reader = new Reader(bytes);
-  return { version: reader.u8(), contentType: reader.string(), body: reader.byteVec() };
+  return { contentType: reader.string(), body: reader.byteVec() };
 }
 
-export function decodePrimaryName(bytes) {
-  const reader = new Reader(bytes);
-  return { version: reader.u8(), name: reader.string() };
+export function encodePageContent({ contentType, body }) {
+  return concat(writeString(contentType), writeByteVec(body));
 }
 
 /** Reads the registry's shard on `accountId`; empty when the account holds none. */
@@ -195,16 +296,42 @@ export async function readShard(rpcUrl, program, accountId) {
   return Uint8Array.from(result?.data?.shards?.[program] ?? []);
 }
 
-/** The record for `name`, or null when it is not registered. */
-export async function resolveName(rpcUrl, program, name) {
-  const bytes = await readShard(rpcUrl, program, await recordAddress(program, name));
-  return bytes.length === 0 ? null : decodeNameRecord(bytes);
+/** Opens and decodes `sealed`, or null when it is empty, does not open or does not decode. */
+async function openAs(key, sealed, kind, decode) {
+  if (sealed.length === 0) return null;
+  const plaintext = await openSealed(key, sealed, kind);
+  if (plaintext === null) return null;
+  try {
+    return decode(plaintext);
+  } catch {
+    return null;
+  }
 }
 
-/** The page for `name`, or null when it has none. */
+/**
+ * What `name` resolves to, or null when it is not registered. A record whose
+ * sealed profile is empty, does not open with the name's key or names another
+ * name is a registered name with nothing set.
+ */
+export async function resolveName(rpcUrl, program, name) {
+  const { id, key } = await deriveName(name);
+  const bytes = await readShard(rpcUrl, program, await recordAddress(program, id));
+  if (bytes.length === 0) return null;
+  const { owner, sealed } = decodeNameRecord(bytes);
+  const profile = await openAs(key, sealed, "record", decodeProfile);
+  if (profile === null || profile.name !== name) {
+    return { name, owner, account: null, npk: null, vpk: null, texts: {} };
+  }
+  const { account, npk, vpk, texts } = profile;
+  return { name, owner, account, npk, vpk, texts };
+}
+
+/** The page for `name`, or null when it has none or it does not open with the name's key. */
 export async function resolvePage(rpcUrl, program, name) {
-  const bytes = await readShard(rpcUrl, program, await pageAddress(program, name));
-  return bytes.length === 0 ? null : decodePage(bytes);
+  const { id, key } = await deriveName(name);
+  const bytes = await readShard(rpcUrl, program, await pageAddress(program, id));
+  if (bytes.length === 0) return null;
+  return openAs(key, decodePage(bytes).sealed, "page", decodePageContent);
 }
 
 /**
@@ -219,30 +346,4 @@ export async function reverseLookup(rpcUrl, program, accountId) {
   const record = await resolveName(rpcUrl, program, name);
   const confirmed = record && (record.owner === accountId || record.account === accountId);
   return confirmed ? name : null;
-}
-
-/**
- * Lists registered names, newest first, by walking the on-chain list back from
- * the directory. Costs one read per name, so `limit` bounds the work; `before`
- * continues an earlier listing from the name it ended on.
- */
-export async function listNames(rpcUrl, program, { limit = 50, before = null } = {}) {
-  const bytes = await readShard(rpcUrl, program, await directoryAddress(program));
-  const directory = bytes.length === 0 ? { count: 0, latest: null } : decodeDirectory(bytes);
-
-  let next = directory.latest;
-  if (before !== null) {
-    const record = await resolveName(rpcUrl, program, before);
-    if (!record) throw new Error(`${before} is not registered`);
-    next = record.previous;
-  }
-
-  const names = [];
-  while (next !== null && names.length < limit) {
-    const record = await resolveName(rpcUrl, program, next);
-    if (!record) throw new Error(`the name list is broken at ${next}`);
-    names.push({ name: record.name, owner: record.owner });
-    next = record.previous;
-  }
-  return { total: directory.count, names, more: next !== null };
 }

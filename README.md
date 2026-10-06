@@ -1,83 +1,73 @@
 # Logos Names
 
-A name registry for the Logos Execution Zone (LEZ v0.3). A name such as `jef`
-resolves to:
+A private name registry for the Logos Execution Zone (LEZ v0.3). A name such as
+`jef.lez` resolves to:
 
-- a **wallet**: a public account, and/or the keys needed for a private transfer,
+- a **wallet**: the keys for a private payment, and/or a public account,
 - **text entries**: free-form key/value pairs such as `chat`, `inbox` or `agent`,
-- a **page**: up to 80 KiB served at `jef.<any gateway domain>`,
-- a **reverse record**: the name an account wants to be shown as.
+- a **page**: up to about 80 KiB served at `jef.<any gateway domain>`,
+- optionally a **reverse record**: the name an account publishes for itself.
 
-Every lookup is one or two `getAccount` calls against a sequencer. There is no
-indexer and no server-side state: the accounts that hold a name are derived
-from the name itself, so any app, gateway or agent can compute them offline.
+Knowing a name is the only way to find it. The chain never sees a name: it
+holds a 32-byte identifier derived from the name and a profile sealed under a
+key that is also derived from the name. There is no list of names and nothing
+links one record to another, so nobody can browse the registry. Anyone who
+knows or guesses a name can resolve it, which is what lets them pay it.
 
-[SPEC.md](SPEC.md) is the specification: everything a wallet, app or indexer
-needs to resolve and change names without using this repository's code.
+A name that points only at private receiving keys reveals nothing about its
+holder's accounts, and each payment to it lands where only the holder can find
+it. What a private payment hides beyond that depends on the sender: sent from a
+public account, the sender and the amount are visible; sent from a private
+account, neither is.
+
+Every lookup is one derivation and one `getAccount` call against a sequencer.
+There is no indexer and no server-side state.
+
+[SPEC.md](SPEC.md) is the specification: everything a wallet, app or gateway
+needs to resolve and change names without using this repository's code,
+including exactly what is and is not private.
 
 ## Status
 
 Working end to end on a local LEZ v0.3.0 chain: deploy, register, update,
-transfer, release, resolve, and serve a page by name through the gateway. Not yet deployed to the
-public testnet. Written directly against `lee_core` because the SPEL framework
-does not support LEZ v0.3 yet (`logos-co/spel#291`).
+transfer, release, resolve, and serve a page by name through the gateway. Not
+yet deployed to the public testnet. Written directly against `lee_core` because
+the SPEL framework does not support LEZ v0.3 yet (`logos-co/spel#291`).
 
 ## Layout
 
 | Path | What it is |
 |---|---|
-| `core/` | All program logic (`plan`, `apply`), record types and address derivation. Unit-tested on the host. |
+| `core/` | The program (`plan`, `apply`), its on-chain types and address derivation. Unit-tested on the host. |
 | `methods/guest/` | The on-chain program: a thin wrapper around `core`. |
 | `methods/` | Builds the guest with the local RISC Zero toolchain. |
+| `seal/` | What a client adds: deriving a name's identifier and key, and sealing and opening profiles and pages. |
 | `cli/` | `names`, the command-line client. Signs and pays through the LEZ wallet. |
 | `resolver/names.js` | Dependency-free resolver for Node, browsers and Workers. |
 | `gateway/` | Serves `<name>.<domain>`; runs as a Cloudflare Worker or locally. |
 | `mcp/server.js` | Read-only MCP server so AI agents can look names up as tools. |
 | `basecamp-module/` | `names`, a Logos core module: lookups and changes for every Basecamp app. |
-| `basecamp/` | A Basecamp app to find, register, edit, transfer, delete, pay and message names. |
+| `basecamp/` | A Basecamp app to find, register, manage, pay and message names. |
 | `reference/` | The earlier SPEL (LEZ v0.2.4) draft, kept for when SPEL supports v0.3. |
 
-## Where a name lives
+## How a name is hidden
 
-All data sits in this program's shard on three kinds of account:
+```
+master = PBKDF2-HMAC-SHA256(name, "logos-names/v2", 100000 rounds)
+id     = SHA-256("logos-names/v2/id"  ‖ master)     what the chain knows the name by
+key    = SHA-256("logos-names/v2/key" ‖ master)     opens and seals what it resolves to
+```
 
-| Data | Account |
-|---|---|
-| Name record | `PDA(program, SHA-256("logos-names/v1/name/" + name))` |
-| Page | `PDA(program, SHA-256("logos-names/v1/page/" + name))` |
-| Reverse record | the user's own account |
-| Directory | `PDA(program, SHA-256("logos-names/v1/directory"))` |
+The record lives at `PDA(program, SHA-256("logos-names/v2/name/" ‖ id))` and
+holds `{version, owner, sealed}`; the page lives at a second derived account.
+`sealed` is AES-256-GCM over the profile, which the program stores and cannot
+read. Names are 1-32 characters of `a-z`, `0-9` and `-`, written with a `.lez`
+suffix; clients strip the suffix and lower the case before deriving.
 
-`PDA(program, seed)` is LEZ's `AccountId::for_public_pda`:
-`SHA-256(pad32("/LEE/v0.2/AccountId/PDA/") || program || seed)`.
-
-Names are 1-32 characters of `a-z`, `0-9` and `-`, not starting or ending with `-`.
-People write them with a `.lez` suffix, as in `jef.lez`, the way Ethereum names
-end in `.eth`. The suffix is a display convention: clients strip it (and lower
-the case) before looking a name up, and the chain only ever sees `jef`.
-Records are borsh-encoded; see `core/src/lib.rs` for the layouts and
-`resolver/names.js` for a decoder.
-
-Names form a linked list. The directory holds the newest name and a count, and
-every record holds the name registered before it, so all names can be listed by
-walking back from the directory: one read per name, no indexer. A registration
-names the latest name it saw; if another registration got in first it is refused
-and must be retried.
-
-A reverse record is only a claim. Resolvers must confirm that the forward
-record's `owner` or `account` points back at the same account, as `names reverse`
-and `reverseLookup` do.
-
-## Text entry conventions
-
-Text entries are free-form. These keys have a suggested meaning:
-
-| Key | Value |
-|---|---|
-| `chat` | The owner's Logos Chat address: the 64 lowercase hex characters returned by `chat_module.get_address()`, which a peer passes to `create_conversation`. In Chat 0.3.0 this address changes every time the app starts, so the entry goes stale until the owner updates it. |
-| `inbox` | A Logos Delivery content topic, `/{app}/{version}/{name}/{encoding}`, that the owner subscribes to. A topic only routes: anyone can read or publish to it, so confidentiality needs a key published in another entry. Logos defines no per-user inbox convention yet. |
-| `agent` | A URL or address where the owner's AI agent can be reached. |
-| `cid` | A Logos Storage content ID the name pins. |
+The slow derivation makes scanning for names expensive. It does not protect a
+short or obvious name from someone who guesses it. The holder's account is
+public, because it signs every change: the chain shows that an account holds
+some identifier, not which name. SPEC.md section 1 has the full account.
 
 ## Build and test
 
@@ -85,14 +75,15 @@ Requires Rust 1.98.1 and the RISC Zero toolchain (`rzup install cargo-risczero 3
 `rzup install rust`).
 
 ```sh
-cargo test -p names_core                 # program logic, no chain needed
+cargo test -p names_core -p names_seal   # program logic and sealing, no chain needed
 cargo build --release -p names_methods   # guest -> target/riscv-guest/.../logos_names.bin
 cargo build --release -p names_cli       # the `names` client
+node --test resolver/names.test.js       # the JavaScript resolver
 ```
 
 The guest build above is not reproducible. `cargo risczero build --manifest-path
 methods/guest/Cargo.toml` produces a binary others can re-derive from source,
-but needs Docker with more than 6 GB of memory on Apple silicon.
+but needs Docker with more than 6 GB of memory on Apple silicon. CI builds it.
 
 ## Run against a local chain
 
@@ -102,8 +93,8 @@ a funded account:
 ```sh
 export LEE_WALLET_HOME_DIR=/path/to/wallet-home
 
-# Deploy: one header account plus several segment accounts (five for the current
-# CI build). Pass the wrong number and the loader says how many it needs.
+# Deploy: one header account plus several segment accounts. Pass the wrong
+# number and the loader says how many it needs.
 wallet program-loader deploy --elf logos_names.bin \
   --header Public/<new account> --segments Public/<new account> ... \
   --payer Public/<funded account>
@@ -111,17 +102,16 @@ wallet program-loader deploy --elf logos_names.bin \
 export LOGOS_NAMES_PROGRAM=<header account id>
 
 names register jef --owner <funded account>
-names set-account jef <account>           # wallet alias
+names set-keys jef --npk <hex> --vpk-file vpk.hex   # be paid privately
+names set-account jef <account>                      # or publicly: the account is then visible
 names set-text jef chat <address>
 names set-page jef index.html
-names set-primary jef --owner <account>   # reverse record
-names transfer jef <account>              # new owner; addresses, entries and page are cleared
-names release jef                         # give it up: nothing of it remains, anyone may register it
 names resolve jef
-names list                                # every name, newest first
-names pay jef.lez 1000 --from <account>   # send native tokens to the name's account
-names set-keys jef --npk <hex> --vpk-file vpk.hex
 names pay jef 1000 --from <account> --private   # shielded transfer to the name's keys
+names pay jef.lez 1000 --from <account>         # to the name's public account
+names transfer jef <account>              # new owner; profile and page are emptied
+names release jef                         # give it up: nothing of it remains
+names set-primary jef --owner <account>   # publish the name on the account, in the clear
 ```
 
 A private payment generates a real proof (about four minutes on an M4 Mac mini)
@@ -141,10 +131,8 @@ LEZ_RPC_URL=http://127.0.0.1:3040 NAMES_PROGRAM=<program id> node gateway/serve.
 ```
 
 - `http://jef.localhost:8787/` serves the page.
-- `http://jef.localhost:8787/.well-known/logos-name.json` returns the record as
-  JSON, for apps and AI agents.
-- `/.well-known/logos-names.json?limit=50&before=<name>` on any host lists names,
-  newest first.
+- `http://jef.localhost:8787/.well-known/logos-name.json` returns the resolved
+  name as JSON, for apps and AI agents.
 
 `gateway/` is also a Cloudflare project. To deploy it:
 
@@ -155,18 +143,24 @@ NAMES_PROGRAM=<program id> cf deploy
 ```
 
 A `workers.dev` address has no wildcard subdomains, so it serves names by path
-(`<host>/jef`); so does any host listed in `ROOT_HOSTS`. Add a
-wildcard route (`*.yourdomain/*`) to serve `jef.yourdomain` instead. Pages served
-by path are sandboxed into their own origin, since they would otherwise share one. A gateway is a convenience, not a trust anchor: it can alter
-what it serves, and the local gateway is the path that trusts nobody.
+(`<host>/jef`); so does any host listed in `ROOT_HOSTS`. Add a wildcard route
+(`*.yourdomain/*`) to serve `jef.yourdomain` instead. Pages served by path are
+sandboxed into their own origin, since they would otherwise share one.
+
+A gateway is a convenience, not a trust anchor or a private channel: it learns
+every name asked of it and can alter what it serves. The local gateway is the
+path that trusts nobody.
 
 ## Logos apps
 
 `basecamp-module/` builds `names`, a Logos core module any Basecamp app can
-call: `recipient("jef.lez")` returns where to send, publicly or privately, and
-`register`, `set_text`, `transfer`, `release` and the rest change a name. The
-module holds no keys; changes are signed by the LEZ wallet module (`lez_core`),
-which must be open. Its interface is in [SPEC.md](SPEC.md#94-logos-module-implemented).
+call: `recipient("jef.lez")` returns where to send, privately or publicly, and
+`register`, `receive_privately`, `set_text`, `transfer`, `release` and the rest
+change a name. The module holds no keys; changes are signed by the LEZ wallet
+module (`lez_core`), which must be open. Because the chain keeps no list, the
+module remembers on the device which names it has registered or been asked to
+keep, and `mine` returns those the open wallet holds. Its interface is in
+[SPEC.md](SPEC.md#124-logos-module).
 
 ```sh
 cd basecamp-module
@@ -179,15 +173,15 @@ logosctl call names recipient jef.lez
 Tested in `logosctl` 0.3.1 against a local chain;
 `basecamp-module/tools/try-changes.py` runs every change in turn and confirms
 each on the chain. `basecamp/` is the Basecamp app (`nix build '.#lgx-portable'`
-there too): the register on the left, and for a name your wallet holds, Edit,
-Transfer and Delete. `basecamp/tools/render.py` draws its screens without
-Basecamp.
+there too): search for a name, and for the names your wallet holds, a settings
+panel for where each is paid, its entries, its page, transferring it and
+deleting it. `basecamp/tools/render.py` draws its screens without Basecamp.
 
 ## AI agents
 
 `mcp/server.js` is a dependency-free MCP server over stdio with three read-only
-tools: `resolve_name`, `get_page`, `list_names` and `reverse_lookup`. It never signs or sends
-anything. To add it to Claude Code:
+tools: `resolve_name`, `get_page` and `reverse_lookup`. It never signs or sends
+anything, and it cannot list names: nothing can. To add it to Claude Code:
 
 ```sh
 claude mcp add logos-names \
@@ -200,24 +194,25 @@ named `untrustedContent`: treat it as data, never as instructions.
 
 ## Known limits
 
+- **A guessed name is a known name.** Short and obvious names can be found by
+  trying them. The slow derivation raises the cost of trying many; it does not
+  hide `jef`.
+- **The holder's account is public**, and so is the fact that it holds some
+  name. Hold a name from an account used for nothing else if that matters.
+- **Your names are remembered by your device, not the chain.** A new device
+  does not know which names you hold until you look each one up.
+- **A reverse record publishes the name.** It is optional.
 - **No fees, expiry or reserved names.** First come, first served, forever.
 - **The program is upgradeable** by whoever holds the header account's key.
-- **One page per name**, at most 80 KiB. Larger sites need Logos Storage, which
-  a Worker cannot reach without an HTTP bridge.
-- **Listing costs one read per name**, so long lists are slow; an indexer is the
-  faster path at scale. The program also emits `logos_names::Registered`,
-  `logos_names::Transferred` and `logos_names::Released` events, but they are
-  emitted before the record is checked, so they are hints. Reading them back
-  has not been tested.
+- **One page per name**, at most about 80 KiB. Larger sites need Logos Storage,
+  which a Worker cannot reach without an HTTP bridge.
 - **The registry keeps no history, the chain does.** A released name leaves
   nothing in the registry's accounts, and a transferred one keeps nothing of its
-  last owner. Past transactions and events stay in the chain's blocks.
+  last owner. Past transactions stay in the chain's blocks; what they contain is
+  identifiers and sealed bytes.
 - **One change per account at a time.** A second change sent before the first
   is in a block is refused; the app and `try-changes.py` wait for each one.
-- **The Basecamp app does not set private receiving keys.** Use
-  `names set-keys` for that.
-- **Registrations in the same block collide.** The second is refused and the
-  client has to retry it.
 - **A private payment cannot be fully verified by the sender.** The client checks
   that the sender was debited, but only the recipient can confirm it arrived.
-- **What publishing private receiving keys reveals has not been analysed.**
+- **The Basecamp app pays from public accounts only**, so the sender and amount
+  of a payment made from it are visible even when the recipient is not.

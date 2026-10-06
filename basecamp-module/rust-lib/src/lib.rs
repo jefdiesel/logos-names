@@ -1,4 +1,5 @@
-//! Logos Names module: lets any Logos app resolve a `.lez` name with one call.
+//! Logos Names module: lets any Logos app resolve and manage `.lez` names
+//! with one call.
 //!
 //! The trait below is the module's contract; the builder derives the `.lidl`
 //! from it. Every method that answers a question returns JSON text in the
@@ -11,6 +12,10 @@
 //!
 //! A wallet's send field needs only `recipient`.
 //!
+//! Names are private: the chain holds an identifier derived from each name and
+//! a sealed profile, never the name, and there is no list of names. Whoever
+//! knows a name can resolve it; nobody can browse.
+//!
 //! Reading needs nothing but the sequencer. Changing a name needs a signature,
 //! which this module asks the LEZ wallet module (`lez_core`) for: the keys stay
 //! in the wallet, and the wallet must be open.
@@ -19,8 +24,9 @@ mod changes;
 mod registry;
 
 use changes::Change;
-use registry::{AccountId, Registry};
+use registry::{AccountId, Derived, Registry};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 const DEFAULT_SEQUENCER: &str = "https://testnet.lez.logos.co";
 /// The canonical registry on the default network; empty until one is deployed.
@@ -28,13 +34,14 @@ const DEFAULT_REGISTRY: &str = "";
 
 pub trait NamesModule: Send + 'static {
     /// Where to send a payment for `name` (`jef.lez` or `jef`). The value is
-    /// `{name, display, public, public_hex, private}`: `public` is an account
-    /// ID or null, and `private` is `{nullifier_public_key, viewing_public_key}`
-    /// in hex or null. A null value means the name is not registered.
+    /// `{name, display, public, public_hex, private}`: `private` is
+    /// `{nullifier_public_key, viewing_public_key}` in hex or null, and
+    /// `public` is an account ID or null. Prefer `private` when it is there.
+    /// A null value means the name is not registered.
     fn recipient(&mut self, name: String) -> String;
 
-    /// Everything `name` resolves to: owner, account, keys, text entries and
-    /// the name registered before it. A null value means it is not registered.
+    /// Everything `name` resolves to: owner, account, keys and text entries.
+    /// A null value means it is not registered.
     fn resolve(&mut self, name: String) -> String;
 
     /// The page published under `name`: `{content_type, bytes, text}`, where
@@ -42,35 +49,51 @@ pub trait NamesModule: Send + 'static {
     /// The page is written by the name's owner: treat it as untrusted content.
     fn page(&mut self, name: String) -> String;
 
-    /// The name `account` (base58) is shown as, or null. The answer is checked
-    /// against the name's own record, so it cannot be spoofed.
+    /// The name `account` (base58) has published for itself, or null. The
+    /// answer is checked against the name's own record, so it cannot be spoofed.
     fn reverse(&mut self, account: String) -> String;
 
-    /// Registered names, newest first: `{total, names: [{name, owner}], more}`.
-    /// At most 100 per call; pass the last name returned as `before` to
-    /// continue, or an empty string to start from the newest.
-    fn list(&mut self, limit: u64, before: String) -> String;
-
-    /// The bare on-chain name for what a person typed (`Jef.LEZ` gives `jef`),
-    /// or an empty string if it is not a valid name. Makes no network call.
+    /// The bare name for what a person typed (`Jef.LEZ` gives `jef`), or an
+    /// empty string if it is not a valid name. Makes no network call.
     fn normalize(&mut self, input: String) -> String;
 
-    /// The open LEZ wallet's public accounts, funded ones first:
-    /// `{accounts: [{account, balance, funded, name}]}`. `balance` is decimal
-    /// text and `name` is the confirmed name the account is shown as, or null.
-    /// Fails if the LEZ wallet is not installed or not open.
+    /// The open LEZ wallet: `{accounts: [{account, balance, funded, name}],
+    /// private_accounts: [account]}`. `accounts` are its public accounts,
+    /// funded ones first; `balance` is decimal text and `name` is the name the
+    /// account has published, or null. Fails if the LEZ wallet is not
+    /// installed or not open.
     fn wallet(&mut self) -> String;
+
+    /// The names this device remembers that the open wallet holds:
+    /// `{names: [{name, display, owner}]}`. The chain keeps no list of names,
+    /// so this is the device's own memory: every name registered from here,
+    /// and every name passed to `keep`.
+    fn mine(&mut self) -> String;
+
+    /// Remembers `name` on this device, so `mine` returns it while the open
+    /// wallet holds it. The value is the bare name.
+    fn keep(&mut self, name: String) -> String;
 
     // Changing a name. Each method below checks the change against the chain,
     // has the LEZ wallet sign it with the account that must authorise it, and
     // sends it. The value is `{name, signer, tx}`. A sent transaction can
     // still be refused, so confirm by calling `resolve` until the change
-    // shows; it normally takes one block.
+    // shows; it normally takes one block. Send one change per account at a
+    // time.
 
     /// Registers `name` to `owner` (base58), an account in the open wallet.
-    fn register(&mut self, name: String, owner: String) -> String;
+    /// `private_account` makes the name payable privately from the start: one
+    /// of the wallet's private accounts (base58), `auto` for its first one
+    /// (made if it has none), or empty to set nothing.
+    fn register(&mut self, name: String, owner: String, private_account: String) -> String;
 
-    /// Points `name` at a public account (base58), making it a wallet alias.
+    /// Makes `name` payable privately and only privately: publishes the
+    /// receiving keys of `private_account` (as for `register`, `auto` allowed)
+    /// and removes any public account from the name.
+    fn receive_privately(&mut self, name: String, private_account: String) -> String;
+
+    /// Points `name` at a public account (base58). Anyone who resolves the
+    /// name then sees that account, its balance and its history.
     fn set_account(&mut self, name: String, account: String) -> String;
 
     /// Publishes the keys for private payments to `name`, both in hex: a
@@ -87,15 +110,16 @@ pub trait NamesModule: Send + 'static {
     fn set_page(&mut self, name: String, content_type: String, body: String) -> String;
 
     /// Hands `name` to `new_owner` (base58). The addresses, entries and page
-    /// the current owner set are cleared.
+    /// the current owner set are emptied.
     fn transfer(&mut self, name: String, new_owner: String) -> String;
 
-    /// Gives `name` up. Its record and page are cleared and anyone may
+    /// Gives `name` up. Its record and page are emptied and anyone may
     /// register it again.
     fn release(&mut self, name: String) -> String;
 
-    /// Shows `account` (base58, in the open wallet) as `name`; an empty name
-    /// removes that.
+    /// Publishes `name` as what `account` (base58, in the open wallet) is
+    /// shown as; an empty name withdraws it. This is the one change that puts
+    /// a name on the chain in the clear.
     fn set_primary(&mut self, account: String, name: String) -> String;
 
     /// The sequencer URL and registry program ID in use.
@@ -124,13 +148,16 @@ pub struct RustModuleContext;
 
 struct Names {
     sequencer: String,
-    program: Option<registry::AccountId>,
+    program: Option<AccountId>,
+    /// Deriving a name's identifier and key is slow on purpose, so each name
+    /// asked about is derived once.
+    derived: HashMap<String, Derived>,
 }
 
-/// Where the chosen sequencer and registry are remembered between runs.
-fn config_path() -> Option<std::path::PathBuf> {
+/// Where this module keeps what it remembers between runs.
+fn config_dir() -> Option<std::path::PathBuf> {
     let home = std::env::var_os("HOME")?;
-    Some(std::path::Path::new(&home).join(".config/logos-names/config.json"))
+    Some(std::path::Path::new(&home).join(".config/logos-names"))
 }
 
 impl Default for Names {
@@ -138,10 +165,11 @@ impl Default for Names {
         let mut names = Self {
             sequencer: DEFAULT_SEQUENCER.to_owned(),
             program: registry::parse_account(DEFAULT_REGISTRY).ok(),
+            derived: HashMap::new(),
         };
         // A missing or unreadable file just means the defaults stand.
-        let saved = config_path()
-            .and_then(|path| std::fs::read_to_string(path).ok())
+        let saved = config_dir()
+            .and_then(|dir| std::fs::read_to_string(dir.join("config.json")).ok())
             .and_then(|text| serde_json::from_str::<Value>(&text).ok());
         if let Some(saved) = saved {
             if let Some(url) = saved["sequencer"].as_str().filter(|url| is_http_url(url)) {
@@ -167,6 +195,78 @@ fn reply(outcome: Result<Value, String>) -> String {
     .to_string()
 }
 
+/// The names this device remembers, per registry. The chain keeps no list, so
+/// without this a person could not be shown the names they hold.
+struct Memory {
+    path: std::path::PathBuf,
+    registries: serde_json::Map<String, Value>,
+}
+
+/// A remembered name that is not registered is dropped after this long. Until
+/// then it may be a registration that has not reached a block.
+const FORGET_UNREGISTERED_AFTER: u64 = 24 * 60 * 60;
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
+impl Memory {
+    fn load(path: std::path::PathBuf) -> Self {
+        let registries = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .and_then(|saved| saved.as_object().cloned())
+            .unwrap_or_default();
+        Self { path, registries }
+    }
+
+    /// The names remembered for `program`, each with when it was added.
+    fn names(&self, program: &AccountId) -> Vec<(String, u64)> {
+        self.registries
+            .get(&registry::account_text(program))
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|entry| Some((entry["name"].as_str()?.to_owned(), entry["added"].as_u64()?)))
+            .collect()
+    }
+
+    fn set(&mut self, program: &AccountId, names: &[(String, u64)]) {
+        let entries: Vec<Value> = names
+            .iter()
+            .map(|(name, added)| json!({ "name": name, "added": added }))
+            .collect();
+        self.registries.insert(registry::account_text(program), Value::from(entries));
+    }
+
+    /// Adds `name` for `program` unless it is already there.
+    fn remember(&mut self, program: &AccountId, name: &str) {
+        let mut names = self.names(program);
+        if !names.iter().any(|(held, _)| held == name) {
+            names.push((name.to_owned(), now()));
+            self.set(program, &names);
+        }
+    }
+
+    /// Failing to save is not an error for the caller: the memory still
+    /// serves this run.
+    fn save(&self) {
+        if let Some(parent) = self.path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&self.path, Value::Object(self.registries.clone()).to_string());
+    }
+}
+
+fn memory() -> Result<Memory, String> {
+    config_dir()
+        .map(|dir| Memory::load(dir.join("names.json")))
+        .ok_or_else(|| "this device has nowhere to remember names".to_owned())
+}
+
 impl Names {
     fn config(&self) -> Value {
         json!({
@@ -178,12 +278,38 @@ impl Names {
     /// Writes the configuration for the next run. Failing to save is not an
     /// error for the caller: the setting still applies to this run.
     fn save(&self) {
-        if let Some(path) = config_path() {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::write(path, self.config().to_string());
+        if let Some(dir) = config_dir() {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join("config.json"), self.config().to_string());
         }
+    }
+
+    fn registry(&self) -> Result<Registry, String> {
+        let program = self
+            .program
+            .ok_or("no registry is configured; call set_registry with its program ID")?;
+        Ok(Registry {
+            sequencer: self.sequencer.clone(),
+            program,
+        })
+    }
+
+    /// The identifier and key of `name`, derived the first time it is asked for.
+    fn derived(&mut self, name: &str) -> Derived {
+        self.derived
+            .entry(name.to_owned())
+            .or_insert_with(|| registry::derive(name))
+            .clone()
+    }
+
+    /// Answers a question about the name a person typed.
+    fn about(&mut self, typed: &str, answer: impl FnOnce(&Registry, &str, &Derived) -> Result<Value, String>) -> String {
+        reply((|| {
+            let name = registry::parse_name(typed)?;
+            let registry = self.registry()?;
+            let derived = self.derived(&name);
+            answer(&registry, &name, &derived)
+        })())
     }
 
     /// Has the wallet sign and send the change `build` makes. The signer must
@@ -192,7 +318,7 @@ impl Names {
         reply((|| {
             let registry = self.registry()?;
             let change = build(&registry)?;
-            if !wallet::accounts()?.contains(&change.signer) {
+            if !wallet::accounts()?.public.contains(&change.signer) {
                 return Err(format!(
                     "the open wallet does not hold {}, which must sign this",
                     registry::account_text(&change.signer)
@@ -214,46 +340,62 @@ impl Names {
     }
 
     /// The same, for a change to a name a person typed.
-    fn change_name(&self, typed: &str, build: impl FnOnce(&Registry, &str) -> Result<Change, String>) -> String {
+    fn change_name(
+        &mut self,
+        typed: &str,
+        build: impl FnOnce(&Registry, &str, &Derived) -> Result<Change, String>,
+    ) -> String {
         match registry::parse_name(typed) {
-            Ok(name) => self.change(&name, |registry| build(registry, &name)),
+            Ok(name) => {
+                let derived = self.derived(&name);
+                self.change(&name, |registry| build(registry, &name, &derived))
+            }
             Err(error) => reply(Err(error)),
         }
     }
+}
 
-    fn registry(&self) -> Result<Registry, String> {
-        let program = self
-            .program
-            .ok_or("no registry is configured; call set_registry with its program ID")?;
-        Ok(Registry {
-            sequencer: self.sequencer.clone(),
-            program,
-        })
-    }
+/// The receiving keys of the wallet's private account `choice`: an account ID,
+/// or `auto` for its first private account, which is made if it has none.
+fn private_keys(choice: &str) -> Result<([u8; 32], Vec<u8>), String> {
+    let held = wallet::accounts()?.private;
+    let account = if choice.trim() == "auto" {
+        match held.first() {
+            Some(account) => *account,
+            None => wallet::new_private_account()?,
+        }
+    } else {
+        let account = registry::parse_account(choice)?;
+        if !held.contains(&account) {
+            return Err(format!(
+                "{} is not one of the open wallet's private accounts",
+                registry::account_text(&account)
+            ));
+        }
+        account
+    };
+    wallet::private_keys(&account)
 }
 
 impl NamesModule for Names {
     fn recipient(&mut self, name: String) -> String {
-        reply((|| {
-            let name = registry::parse_name(&name)?;
-            let record = self.registry()?.resolve(&name)?;
-            Ok(record.map_or(Value::Null, |record| record.recipient_json()))
-        })())
+        self.about(&name, |registry, name, derived| {
+            let resolved = registry.resolve(name, derived)?;
+            Ok(resolved.map_or(Value::Null, |resolved| resolved.recipient_json()))
+        })
     }
 
     fn resolve(&mut self, name: String) -> String {
-        reply((|| {
-            let name = registry::parse_name(&name)?;
-            let record = self.registry()?.resolve(&name)?;
-            Ok(record.map_or(Value::Null, |record| record.to_json()))
-        })())
+        self.about(&name, |registry, name, derived| {
+            let resolved = registry.resolve(name, derived)?;
+            Ok(resolved.map_or(Value::Null, |resolved| resolved.to_json()))
+        })
     }
 
     fn page(&mut self, name: String) -> String {
-        reply((|| {
-            let name = registry::parse_name(&name)?;
-            Ok(self.registry()?.page(&name)?.unwrap_or(Value::Null))
-        })())
+        self.about(&name, |registry, _name, derived| {
+            Ok(registry.page(derived)?.unwrap_or(Value::Null))
+        })
     }
 
     fn reverse(&mut self, account: String) -> String {
@@ -266,17 +408,6 @@ impl NamesModule for Names {
         })())
     }
 
-    fn list(&mut self, limit: u64, before: String) -> String {
-        reply((|| {
-            let before = if before.trim().is_empty() {
-                None
-            } else {
-                Some(registry::parse_name(&before)?)
-            };
-            self.registry()?.list(limit, before.as_deref())
-        })())
-    }
-
     fn normalize(&mut self, input: String) -> String {
         registry::parse_name(&input).unwrap_or_default()
     }
@@ -284,58 +415,126 @@ impl NamesModule for Names {
     fn wallet(&mut self) -> String {
         reply((|| {
             let registry = self.registry()?;
+            let held = wallet::accounts()?;
             let mut accounts = Vec::new();
-            for account in wallet::accounts()?.iter().take(MAX_WALLET_ACCOUNTS) {
+            for account in held.public.iter().take(MAX_WALLET_ACCOUNTS) {
                 accounts.push(registry.account_summary(account)?);
             }
             // A stable sort: funded accounts first, each group in wallet order.
             accounts.sort_by_key(|account| account["funded"] != true);
-            Ok(json!({ "accounts": accounts }))
+            let private: Vec<String> = held.private.iter().map(registry::account_text).collect();
+            Ok(json!({ "accounts": accounts, "private_accounts": private }))
         })())
     }
 
-    fn register(&mut self, name: String, owner: String) -> String {
-        self.change_name(&name, |registry, name| {
-            registry.register(name, &registry::parse_account(&owner)?)
+    fn mine(&mut self) -> String {
+        reply((|| {
+            let registry = self.registry()?;
+            let held = wallet::accounts()?.public;
+            let mut memory = memory()?;
+            let remembered = memory.names(&registry.program);
+            let mut names = Vec::new();
+            let mut kept = Vec::new();
+            for (name, added) in remembered.iter().cloned() {
+                let derived = self.derived(&name);
+                match registry.resolve(&name, &derived)? {
+                    Some(resolved) => {
+                        if held.contains(&resolved.owner) {
+                            names.push(json!({
+                                "name": name,
+                                "display": format!("{name}{}", registry::NAME_SUFFIX),
+                                "owner": registry::account_text(&resolved.owner),
+                            }));
+                        }
+                        // A name another wallet holds is kept: it may be this
+                        // person's other wallet.
+                        kept.push((name, added));
+                    }
+                    None if now().saturating_sub(added) < FORGET_UNREGISTERED_AFTER => kept.push((name, added)),
+                    None => {}
+                }
+            }
+            if kept.len() != remembered.len() {
+                memory.set(&registry.program, &kept);
+                memory.save();
+            }
+            Ok(json!({ "names": names }))
+        })())
+    }
+
+    fn keep(&mut self, name: String) -> String {
+        reply((|| {
+            let name = registry::parse_name(&name)?;
+            let registry = self.registry()?;
+            let mut memory = memory()?;
+            memory.remember(&registry.program, &name);
+            memory.save();
+            Ok(Value::from(name))
+        })())
+    }
+
+    fn register(&mut self, name: String, owner: String, private_account: String) -> String {
+        let sent = self.change_name(&name, |registry, name, derived| {
+            let keys = if private_account.trim().is_empty() {
+                None
+            } else {
+                Some(private_keys(&private_account)?)
+            };
+            registry.register(name, derived, &registry::parse_account(&owner)?, keys)
+        });
+        // Remembered as soon as it is sent: `mine` shows it once it is on the
+        // chain, and forgets it if it never gets there.
+        if sent.contains("\"success\":true") {
+            let _ = self.keep(name);
+        }
+        sent
+    }
+
+    fn receive_privately(&mut self, name: String, private_account: String) -> String {
+        self.change_name(&name, |registry, name, derived| {
+            let (npk, vpk) = private_keys(&private_account)?;
+            registry.set_private_keys(name, derived, &npk, &vpk, true)
         })
     }
 
     fn set_account(&mut self, name: String, account: String) -> String {
-        self.change_name(&name, |registry, name| {
-            registry.set_account(name, &registry::parse_account(&account)?)
+        self.change_name(&name, |registry, name, derived| {
+            registry.set_account(name, derived, &registry::parse_account(&account)?)
         })
     }
 
     fn set_private_keys(&mut self, name: String, nullifier_public_key: String, viewing_public_key: String) -> String {
-        self.change_name(&name, |registry, name| {
+        self.change_name(&name, |registry, name, derived| {
             let npk = registry::unhex(&nullifier_public_key)?;
             let vpk = registry::unhex(&viewing_public_key)?;
-            registry.set_private_keys(name, &npk, &vpk)
+            registry.set_private_keys(name, derived, &npk, &vpk, false)
         })
     }
 
     fn clear_addresses(&mut self, name: String) -> String {
-        self.change_name(&name, |registry, name| registry.clear_addresses(name))
+        self.change_name(&name, |registry, name, derived| registry.clear_addresses(name, derived))
     }
 
     fn set_text(&mut self, name: String, key: String, value: String) -> String {
-        self.change_name(&name, |registry, name| registry.set_text(name, key.trim(), &value))
+        self.change_name(&name, |registry, name, derived| {
+            registry.set_text(name, derived, key.trim(), &value)
+        })
     }
 
     fn set_page(&mut self, name: String, content_type: String, body: String) -> String {
-        self.change_name(&name, |registry, name| {
-            registry.set_page(name, content_type.trim(), body.as_bytes())
+        self.change_name(&name, |registry, name, derived| {
+            registry.set_page(name, derived, content_type.trim(), body.as_bytes())
         })
     }
 
     fn transfer(&mut self, name: String, new_owner: String) -> String {
-        self.change_name(&name, |registry, name| {
-            registry.transfer(name, &registry::parse_account(&new_owner)?)
+        self.change_name(&name, |registry, name, derived| {
+            registry.transfer(name, derived, &registry::parse_account(&new_owner)?)
         })
     }
 
     fn release(&mut self, name: String) -> String {
-        self.change_name(&name, |registry, name| registry.release(name))
+        self.change_name(&name, |registry, name, derived| registry.release(name, derived))
     }
 
     fn set_primary(&mut self, account: String, name: String) -> String {
@@ -347,8 +546,9 @@ impl NamesModule for Names {
                 Err(error) => return reply(Err(error)),
             }
         };
+        let derived = (!name.is_empty()).then(|| self.derived(&name));
         self.change(&name, |registry| {
-            registry.set_primary(&registry::parse_account(&account)?, &name)
+            registry.set_primary(&registry::parse_account(&account)?, &name, derived.as_ref())
         })
     }
 
@@ -382,10 +582,17 @@ impl NamesModule for Names {
 /// A wallet can hold many accounts and each costs a read, so `wallet` stops here.
 const MAX_WALLET_ACCOUNTS: usize = 64;
 
+/// The accounts in the open wallet, each kind in the wallet's own order.
+#[derive(Debug, Default)]
+struct Held {
+    public: Vec<AccountId>,
+    private: Vec<AccountId>,
+}
+
 /// The LEZ wallet module, which holds the keys and signs.
 #[cfg(not(test))]
 mod wallet {
-    use super::{base64url, json, registry, AccountId, Change, Value};
+    use super::{base64url, json, registry, AccountId, Change, Held, Value};
     use logos_rust_sdk::LogosModuleSDK;
     use std::time::Duration;
 
@@ -409,21 +616,52 @@ mod wallet {
         })
     }
 
-    /// The wallet's public accounts, in its own order.
-    pub fn accounts() -> Result<Vec<AccountId>, String> {
+    /// The wallet's accounts.
+    pub fn accounts() -> Result<Held, String> {
         let listed = call("list_accounts", json!([]), LOOK)?;
-        let accounts: Vec<AccountId> = listed
-            .as_array()
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-            .iter()
-            .filter(|entry| entry["is_public"] == true)
-            .filter_map(|entry| registry::unhex(entry["account_id"].as_str()?).ok()?.try_into().ok())
-            .collect();
-        if accounts.is_empty() {
+        let mut held = Held::default();
+        for entry in listed.as_array().map(Vec::as_slice).unwrap_or_default() {
+            let account = entry["account_id"]
+                .as_str()
+                .and_then(|hex| registry::unhex(hex).ok())
+                .and_then(|bytes| AccountId::try_from(bytes).ok());
+            match (account, entry["is_public"] == true) {
+                (Some(account), true) => held.public.push(account),
+                (Some(account), false) => held.private.push(account),
+                (None, _) => {}
+            }
+        }
+        if held.public.is_empty() && held.private.is_empty() {
             return Err("no LEZ wallet is open; open LEZ Wallet first".to_owned());
         }
-        Ok(accounts)
+        Ok(held)
+    }
+
+    /// The keys others use to pay the wallet's private account `account`:
+    /// its nullifier public key and its viewing public key.
+    pub fn private_keys(account: &AccountId) -> Result<([u8; 32], Vec<u8>), String> {
+        let keys = call("get_private_account_keys", json!([registry::hex(account)]), LOOK)?;
+        let read = |field: &str| keys[field].as_str().and_then(|hex| registry::unhex(hex).ok());
+        let npk = read("nullifier_public_key").and_then(|bytes| <[u8; 32]>::try_from(bytes).ok());
+        match (npk, read("viewing_public_key")) {
+            (Some(npk), Some(vpk)) => Ok((npk, vpk)),
+            _ => Err("the wallet did not give that account's receiving keys".to_owned()),
+        }
+    }
+
+    /// Makes a private account in the wallet, saves the wallet, and returns it.
+    pub fn new_private_account() -> Result<AccountId, String> {
+        let before = accounts().map(|held| held.private).unwrap_or_default();
+        call("create_account_private", json!([]), SEND)?;
+        let made = accounts()?
+            .private
+            .into_iter()
+            .find(|account| !before.contains(account))
+            .ok_or("the wallet did not make a private account")?;
+        // Unsaved, the account and whatever is paid to it would be lost when
+        // the wallet closes.
+        call("save", json!([]), SEND)?;
+        Ok(made)
     }
 
     /// Signs `change` with its signer, sends it, and returns the transaction hash.
@@ -453,20 +691,29 @@ mod wallet {
             }),
         }
     }
-
 }
 
 /// Stands in for the wallet in unit tests, where no module host is running.
 #[cfg(test)]
 mod wallet {
-    use super::{AccountId, Change};
+    use super::{AccountId, Change, Held};
 
-    pub fn accounts() -> Result<Vec<AccountId>, String> {
-        Err("no LEZ wallet is open; open LEZ Wallet first".to_owned())
+    const CLOSED: &str = "no LEZ wallet is open; open LEZ Wallet first";
+
+    pub fn accounts() -> Result<Held, String> {
+        Err(CLOSED.to_owned())
+    }
+
+    pub fn private_keys(_account: &AccountId) -> Result<([u8; 32], Vec<u8>), String> {
+        Err(CLOSED.to_owned())
+    }
+
+    pub fn new_private_account() -> Result<AccountId, String> {
+        Err(CLOSED.to_owned())
     }
 
     pub fn send(_program: &AccountId, _change: &Change) -> Result<String, String> {
-        Err("no LEZ wallet is open; open LEZ Wallet first".to_owned())
+        Err(CLOSED.to_owned())
     }
 }
 
@@ -503,6 +750,7 @@ mod tests {
         Names {
             sequencer: DEFAULT_SEQUENCER.to_owned(),
             program: None,
+            derived: HashMap::new(),
         }
     }
 
@@ -525,6 +773,51 @@ mod tests {
     }
 
     #[test]
+    fn a_change_to_a_bad_name_is_refused_before_any_network_call() {
+        let mut names = fresh();
+        names.program = Some([7; 32]);
+        for answer in [
+            names.register("jef.eth".into(), "x".into(), String::new()),
+            names.release("-jef".into()),
+            names.set_primary("x".into(), "not a name".into()),
+            names.receive_privately("j f".into(), "auto".into()),
+        ] {
+            let answer = parsed(&answer);
+            assert_eq!(answer["success"], false);
+            assert!(answer["error"].as_str().expect("an error").contains("1-32 characters"));
+        }
+    }
+
+    #[test]
+    fn a_name_is_derived_once_and_then_remembered() {
+        let mut names = fresh();
+        let first = names.derived("jef");
+        assert_eq!(first, registry::derive("jef"));
+        assert_eq!(names.derived.len(), 1);
+        assert_eq!(names.derived("jef"), first);
+        assert_eq!(names.derived.len(), 1);
+    }
+
+    #[test]
+    fn the_device_remembers_names_per_registry() {
+        let path = std::env::temp_dir().join(format!("logos-names-test-{}-{}.json", std::process::id(), now()));
+        let mut memory = Memory::load(path.clone());
+        assert!(memory.names(&[7; 32]).is_empty());
+        memory.remember(&[7; 32], "jef");
+        memory.remember(&[7; 32], "ada");
+        memory.remember(&[7; 32], "jef");
+        memory.remember(&[8; 32], "linus");
+        memory.save();
+
+        let reloaded = Memory::load(path.clone());
+        let names: Vec<String> = reloaded.names(&[7; 32]).into_iter().map(|(name, _)| name).collect();
+        assert_eq!(names, ["jef", "ada"]);
+        assert_eq!(reloaded.names(&[8; 32]).len(), 1);
+        assert!(reloaded.names(&[9; 32]).is_empty());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn bytes_travel_as_unpadded_url_safe_base64() {
         assert_eq!(base64url(b""), "");
         assert_eq!(base64url(b"f"), "Zg");
@@ -532,21 +825,6 @@ mod tests {
         assert_eq!(base64url(b"foo"), "Zm9v");
         assert_eq!(base64url(b"foob"), "Zm9vYg");
         assert_eq!(base64url(&[0xfb, 0xff, 0xfe]), "-__-");
-    }
-
-    #[test]
-    fn a_change_to_a_bad_name_is_refused_before_any_network_call() {
-        let mut names = fresh();
-        names.program = Some([7; 32]);
-        for answer in [
-            names.register("jef.eth".into(), "x".into()),
-            names.release("-jef".into()),
-            names.set_primary("x".into(), "not a name".into()),
-        ] {
-            let answer = parsed(&answer);
-            assert_eq!(answer["success"], false);
-            assert!(answer["error"].as_str().expect("an error").contains("1-32 characters"));
-        }
     }
 
     #[test]

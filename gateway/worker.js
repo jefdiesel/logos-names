@@ -3,6 +3,8 @@
 // Runs unchanged as a Cloudflare Worker (route `*.yourdomain/*`) or locally
 // through `serve.js` at `<name>.localhost`. The gateway holds no state: every
 // answer is read from the LEZ sequencer, so any copy of it serves the same names.
+// It derives each name's key and opens what the name holds on the visitor's
+// behalf, so it learns every name asked of it.
 //
 // Configuration (Worker vars or environment):
 //   LEZ_RPC_URL     sequencer JSON-RPC endpoint
@@ -11,16 +13,9 @@
 //                   On those, and on any workers.dev host, the name is the first
 //                   path segment: `<host>/<name>`.
 
-import {
-  isValidName,
-  listNames,
-  normalizeName,
-  resolveName,
-  resolvePage,
-} from "../resolver/names.js";
+import { isValidName, normalizeName, resolveName, resolvePage } from "../resolver/names.js";
 
 const RECORD_PATH = "/.well-known/logos-name.json";
-const LIST_PATH = "/.well-known/logos-names.json";
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body, null, 2) + "\n", {
@@ -77,17 +72,6 @@ export default {
       .map((host) => host.trim().toLowerCase())
       .filter(Boolean);
     const url = new URL(request.url);
-    // The list of names is served on any host, since it belongs to the registry, not a name.
-    if (url.pathname === LIST_PATH) {
-      try {
-        const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 50, 1), 100);
-        const before = url.searchParams.get("before");
-        return json(await listNames(rpcUrl, program, { limit, before }));
-      } catch (error) {
-        return json({ error: error.message }, 502);
-      }
-    }
-
     const { name, path, sharedOrigin } = target(url, rootHosts);
     if (!name) {
       const hint = sharedOrigin ? "Add /<name> to this address" : "Put a name in front of this domain";

@@ -8,8 +8,8 @@
 
 import { createInterface } from "node:readline";
 import {
+  deriveName,
   isValidName,
-  listNames,
   normalizeName,
   pageAddress,
   recordAddress,
@@ -37,23 +37,28 @@ const tools = [
     name: "resolve_name",
     description:
       "Look up a Logos name. Returns its owner, the public account it is an alias for, " +
-      "its private receiving keys, and its text entries (such as chat, inbox and agent).",
+      "its private receiving keys, and its text entries (such as chat, inbox and agent). " +
+      "Looking a name up reveals nothing to the chain, which never sees names. A name that " +
+      "points at a public account shows that account, and so its balance and history.",
     inputSchema: nameArgument,
     async run({ name: typed }) {
       const name = requireName(typed);
       const record = await resolveName(rpcUrl, program, name);
       if (!record) return { registered: false, name };
+      const { id } = await deriveName(name);
       return {
         registered: true,
         ...record,
-        recordAddress: await recordAddress(program, name),
-        pageAddress: await pageAddress(program, name),
+        recordAddress: await recordAddress(program, id),
+        pageAddress: await pageAddress(program, id),
       };
     },
   },
   {
     name: "get_page",
-    description: "Fetch the page published under a Logos name, as text.",
+    description:
+      "Fetch the page kept under a Logos name, as text. Only someone who knows the name can " +
+      "read its page.",
     inputSchema: nameArgument,
     async run({ name: typed }) {
       const name = requireName(typed);
@@ -72,27 +77,10 @@ const tools = [
     },
   },
   {
-    name: "list_names",
-    description:
-      "List registered Logos names, newest first, with their owners. Each name costs one " +
-      "read, so results are capped; pass the last name returned as `before` to continue.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        limit: { type: "integer", minimum: 1, maximum: 100, description: "Default 25." },
-        before: { type: "string", description: "Continue after this name." },
-      },
-    },
-    async run({ limit = 25, before = null }) {
-      const capped = Math.min(Math.max(Number(limit) || 25, 1), 100);
-      return listNames(rpcUrl, program, { limit: capped, before: before && requireName(before) });
-    },
-  },
-  {
     name: "reverse_lookup",
     description:
-      "Find the Logos name an account is shown as. Returns a name only when the name's " +
-      "own record points back at the account, so the result cannot be spoofed.",
+      "Find the Logos name an account has chosen to be shown as, if any. Returns a name only " +
+      "when the name's own record points back at the account, so the result cannot be spoofed.",
     inputSchema: {
       type: "object",
       properties: {

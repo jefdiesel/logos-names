@@ -5222,6 +5222,7 @@ dependencies = [
  "hex",
  "lee_core",
  "names_core",
+ "names_seal",
  "serde_json",
  "tokio",
  "wallet",
@@ -5241,6 +5242,19 @@ name = "names_methods"
 version = "0.1.0"
 dependencies = [
  "risc0-build",
+]
+
+[[package]]
+name = "names_seal"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "borsh",
+ "getrandom 0.3.4",
+ "hex",
+ "names_core",
+ "pbkdf2",
+ "sha2 0.11.0",
 ]
 
 [[package]]

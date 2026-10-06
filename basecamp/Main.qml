@@ -1,4 +1,4 @@
-// Logos Names for Basecamp: find, register and manage .lez names.
+// Logos Names for Basecamp: find, register and manage .LEZ names.
 //
 // A front end on the `names` module. The module reads the chain itself, so
 // browsing needs no wallet. Registering a name, changing it, transferring it
@@ -17,9 +17,7 @@ Item {
 
     // ── State ───────────────────────────────────────────────────────────
 
-    property var register: []          // [{name, owner}], newest first
-    property int totalNames: 0
-    property bool moreNames: false
+    property var myNames: []           // [{name, owner}]: names this device remembers that the wallet holds
     property var record: null          // the name on the plate
     property var page: null
     property string missing: ""        // a looked-up name that is not registered
@@ -39,8 +37,6 @@ Item {
     readonly property bool bridgeReady: typeof logos !== "undefined" && !!logos.callModule
     readonly property bool busy: pending !== null
     readonly property bool mine: record !== null && holds(record.owner, wallet)
-    /// The names this wallet holds, among those the register has loaded.
-    readonly property var myNames: register.filter(function(entry) { return root.holds(entry.owner, root.wallet) })
     readonly property string chatAddress: record !== null && record.texts && /^[0-9a-f]{64}$/.test(record.texts.chat || "") ? record.texts.chat : ""
 
     // ── Palette and type ────────────────────────────────────────────────
@@ -127,7 +123,7 @@ Item {
         var text = String(message).trim()
         if (text === "")
             return ""
-        if (!/^\S+\.lez\b/.test(text))
+        if (!/^\S+\.lez\b/i.test(text))
             text = text.charAt(0).toUpperCase() + text.substr(1)
         return /[.?!]$/.test(text) ? text : text + "."
     }
@@ -160,25 +156,28 @@ Item {
             say(error.message, true)
         }
         loadConfig()
-        loadRegister(false)
+        loadWallet(false)
     }
 
-    /// Loads the register from the newest name, or the next names when `more` is set.
-    function loadRegister(more) {
-        if (registry === "")
+    /// Reads the names this device remembers that the open wallet holds. The
+    /// chain keeps no list of names, so this is the module's own memory.
+    function loadMine() {
+        if (registry === "" || wallet.length === 0) {
+            myNames = []
             return
-        try {
-            var before = more && register.length > 0 ? register[register.length - 1].name : ""
-            var listed = ask("list", [40, before])
-            register = more ? register.concat(listed.names) : listed.names
-            totalNames = listed.total
-            moreNames = listed.more
-            // The list is only used to find the wallet's own names, so read on.
-            if (moreNames && register.length < 400)
-                loadRegister(true)
-        } catch (error) {
-            say(error.message, true)
         }
+        askLater("mine", [], function(value) {
+            myNames = value.names
+        }, function(message) {
+            console.log("names_ui: my names:", message)
+        })
+    }
+
+    function remembers(name) {
+        for (var i = 0; i < myNames.length; i++)
+            if (myNames[i].name === name)
+                return true
+        return false
     }
 
     /// Reads the wallet's accounts that can pay a fee. Without them the app
@@ -194,12 +193,14 @@ Item {
             if (fromIndex >= funded.length)
                 fromIndex = 0
             console.log("names_ui: wallet has", funded.length, "funded account(s)")
+            loadMine()
             if (announce)
                 say(funded.length > 0 ? "Wallet connected." : walletProblem, funded.length === 0)
         }, function(message) {
             wallet = []
             walletProblem = sentence(message)
             fromIndex = 0
+            myNames = []
             console.log("names_ui: no wallet:", message)
             if (announce)
                 say(walletProblem, true)
@@ -254,7 +255,7 @@ Item {
                 tool = ""
                 missing = String(call("names", "normalize", [name]))
                 if (missing === "")
-                    say("A name is 1 to 32 characters of a-z, 0-9 or a hyphen, such as jef.lez.", true)
+                    say("A name is 1 to 32 characters of a-z, 0-9 or a hyphen, such as jef.LEZ.", true)
                 return
             }
             missing = ""
@@ -262,6 +263,9 @@ Item {
             page = ask("page", [found.name])
             if (!mine && tool !== "pay")
                 tool = ""
+            // A name registered elsewhere joins "My names" once it is looked up.
+            if (mine && !remembers(found.name))
+                askLater("keep", [found.name], function() { root.loadMine() }, function() {})
         } catch (error) {
             say(error.message, true)
         }
@@ -301,7 +305,6 @@ Item {
         if (!settled && job.tries < 40)
             return
         pending = null
-        loadRegister(false)
         loadWallet(false)
         read(job.name)
         if (settled)
@@ -313,10 +316,10 @@ Item {
     function registerName() {
         var name = missing
         var owner = wallet[fromIndex].account
-        change("register", [name + ".lez", owner], name, function() {
+        change("register", [name, owner, "auto"], name, function() {
             var found = ask("resolve", [name])
             return found !== null && found.owner === owner
-        }, name + ".lez is yours.")
+        }, name + ".LEZ is yours.")
     }
 
     /// Opens the settings of a name picked from "My names".
@@ -344,7 +347,15 @@ Item {
         var account = accountField.text.trim()
         change("set_account", [name, account], name, function() {
             return ask("resolve", [name]).account === account
-        }, name + ".lez now pays to " + shorten(account) + ".")
+        }, name + ".LEZ now pays to " + shorten(account) + ".")
+    }
+
+    function receivePrivately() {
+        var name = record.name
+        change("receive_privately", [name, "auto"], name, function() {
+            var found = ask("resolve", [name])
+            return found.npk !== null && found.account === null
+        }, shown(name) + " now takes private payments only.")
     }
 
     function clearAddresses() {
@@ -352,7 +363,7 @@ Item {
         change("clear_addresses", [name], name, function() {
             var found = ask("resolve", [name])
             return found.account === null && found.npk === null
-        }, name + ".lez no longer takes payments.")
+        }, name + ".LEZ no longer takes payments.")
     }
 
     /// Sets one entry; an empty value removes it.
@@ -362,7 +373,7 @@ Item {
         change("set_text", [name, key, value], name, function() {
             var texts = ask("resolve", [name]).texts
             return value === "" ? texts[key] === undefined : texts[key] === value
-        }, value === "" ? "Removed " + key + " from " + name + ".lez." : "Saved " + key + " on " + name + ".lez.")
+        }, value === "" ? "Removed " + key + " from " + name + ".LEZ." : "Saved " + key + " on " + name + ".LEZ.")
     }
 
     /// Publishes the page; an empty body removes it. A body that opens with a
@@ -373,7 +384,7 @@ Item {
         change("set_page", [name, kind, body], name, function() {
             var published = ask("page", [name])
             return body === "" ? published === null : published !== null && published.text === body
-        }, body === "" ? "Removed the page of " + name + ".lez." : "Published the page of " + name + ".lez.")
+        }, body === "" ? "Removed the page of " + name + ".LEZ." : "Published the page of " + name + ".LEZ.")
     }
 
     function showAccountAsName() {
@@ -382,7 +393,7 @@ Item {
         change("set_primary", [account, name], name, function() {
             var shown = ask("reverse", [account])
             return shown !== null && shown.name === name
-        }, shorten(account) + " is now shown as " + name + ".lez.")
+        }, shorten(account) + " is now shown as " + name + ".LEZ.")
     }
 
     function transferName() {
@@ -390,14 +401,14 @@ Item {
         var newOwner = newOwnerField.text.trim()
         change("transfer", [name, newOwner], name, function() {
             return ask("resolve", [name]).owner === newOwner
-        }, name + ".lez now belongs to " + shorten(newOwner) + ".")
+        }, name + ".LEZ now belongs to " + shorten(newOwner) + ".")
     }
 
     function deleteName() {
         var name = record.name
         change("release", [name], name, function() {
             return ask("resolve", [name]) === null
-        }, "Deleted " + name + ".lez.")
+        }, "Deleted " + name + ".LEZ.")
     }
 
     // ── Paying and messaging ────────────────────────────────────────────
@@ -437,21 +448,21 @@ Item {
             // Ask again at the moment of paying, so a name changed since it was shown is not paid stale.
             var to = ask("recipient", [record.name])
             if (to === null)
-                throw new Error(record.display + " is no longer registered.")
+                throw new Error(shown(record.name) + " is no longer registered.")
             var from = String(call("lez_core", "account_id_from_base58", [wallet[fromIndex].account]))
             var reply
             if (usePrivateKeys) {
                 if (to.private === null)
-                    throw new Error(record.display + " does not take private payments.")
+                    throw new Error(shown(record.name) + " does not take private payments.")
                 reply = call("lez_core", "transfer_shielded", [from, JSON.stringify(to.private), amount])
             } else {
                 if (to.public_hex === null)
-                    throw new Error(record.display + " does not take public payments.")
+                    throw new Error(shown(record.name) + " does not take public payments.")
                 reply = call("lez_core", "transfer_public", [from, to.public_hex, amount])
             }
             if (reply && reply.success) {
                 tool = ""
-                say("Sent " + amountInput.text.trim() + " to " + record.display + ".", false)
+                say("Sent " + amountInput.text.trim() + " to " + shown(record.name) + ".", false)
             } else {
                 say("The wallet refused: " + (reply && reply.error ? reply.error : "no reason given") + ".", true)
             }
@@ -467,7 +478,7 @@ Item {
                 say("Chat could not start the conversation: " + reply.error, true)
                 return
             }
-            say("Conversation with " + record.display + " started. Opening Chat.", false)
+            say("Conversation with " + shown(record.name) + " started. Opening Chat.", false)
             if (logos.request)
                 logos.request("basecamp.apps.launch", { app: "chat_ui" }, function() {})
         } catch (error) {
@@ -484,12 +495,17 @@ Item {
         say(what + " copied.", false)
     }
 
+    /// A name as people read it: `jef.LEZ`.
+    function shown(name) {
+        return name + ".LEZ"
+    }
+
     function shorten(id) {
         return id.length > 16 ? id.substr(0, 8) + "…" + id.substr(id.length - 6) : id
     }
 
     function linkFor(name) {
-        return "basecamp://intent/names.open?p=" + Qt.btoa(JSON.stringify({ name: name + ".lez" })).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
+        return "basecamp://intent/names.open?p=" + Qt.btoa(JSON.stringify({ name: name + ".LEZ" })).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
     }
 
     /// Digits grouped in threes, so a balance can be read at a glance.
@@ -530,11 +546,10 @@ Item {
         if (!bridgeReady)
             return
         loadConfig()
-        loadRegister(false)
     }
 
-    // The wallet is read after the first frame, so the register is on screen
-    // before the app waits on another module.
+    // The wallet is read after the first frame, so the screen is up before
+    // the app waits on another module.
     Timer {
         interval: 150
         running: root.bridgeReady
@@ -744,7 +759,7 @@ Item {
         }
     }
 
-    /// The small heading over one of the register's two lists.
+    /// The small heading over the list of names.
     component ListHead: RowLayout {
         property string label: ""
         property string count: ""
@@ -949,7 +964,7 @@ Item {
                     }
                     Text {
                         visible: !!accountRow.modelData.name
-                        text: accountRow.modelData.name ? accountRow.modelData.name + ".lez" : ""
+                        text: accountRow.modelData.name ? accountRow.modelData.name + ".LEZ" : ""
                         color: root.dim
                         font.family: root.sans
                         font.pixelSize: 13
@@ -1010,7 +1025,7 @@ Item {
         anchors.fill: parent
         spacing: 0
 
-        // The register.
+        // Search, and the holder's own names.
         Rectangle {
             Layout.preferredWidth: 264
             Layout.fillHeight: true
@@ -1084,7 +1099,7 @@ Item {
                                 Text {
                                     Layout.fillWidth: true
                                     textFormat: Text.StyledText
-                                    text: myRow.modelData.name + "<font color=\"" + root.dim + "\">.lez</font>"
+                                    text: myRow.modelData.name + "<font color=\"" + root.dim + "\">.LEZ</font>"
                                     color: root.ink
                                     font.family: root.sans
                                     font.weight: Font.Medium
@@ -1100,11 +1115,11 @@ Item {
                     }
                     Hint {
                         visible: root.myNames.length === 0 && root.wallet.length > 0
-                        text: "None yet. Search for a name; if nobody holds it, you can register it."
+                        text: "None yet. Search for a .LEZ name; if nobody holds it, you can register it."
                     }
                     Hint {
                         visible: root.registry !== "" && root.wallet.length === 0
-                        text: "Open your wallet in the LEZ Wallet app to see the names you hold."
+                        text: "Open your wallet in the LEZ Wallet app to see the .LEZ names you hold."
                     }
                     Link {
                         visible: root.registry !== "" && root.wallet.length === 0
@@ -1152,7 +1167,7 @@ Item {
                     }
                     Hint {
                         font.pixelSize: 13
-                        text: "A registry is one program on the Logos Execution Zone. Everyone who uses the same program ID sees the same names."
+                        text: "A registry is one program on the Logos Execution Zone. Everyone who uses the same program ID resolves the same .LEZ names."
                     }
                     Field {
                         id: registryField
@@ -1199,7 +1214,7 @@ Item {
                     Layout.topMargin: 60
                     spacing: 10
                     Text {
-                        text: root.registry === "" ? "Choose a registry to begin" : "Find a .lez name"
+                        text: root.registry === "" ? "Choose a registry to begin" : "Find a .LEZ name"
                         color: root.ink
                         font.family: root.sans
                         font.weight: Font.DemiBold
@@ -1207,7 +1222,7 @@ Item {
                     }
                     Hint {
                         font.pixelSize: 14
-                        text: root.registry === "" ? "Open App settings and enter the registry's program ID." : "Search for a name to see who holds it, where it pays and how to reach them. If nobody holds it, you can register it."
+                        text: root.registry === "" ? "Open App settings and enter the registry's program ID." : "Search for a .LEZ name to see where it pays and how to reach its holder. If nobody holds it, you can register it. .LEZ names are private: nobody can browse them, only look up one they already know."
                     }
                 }
 
@@ -1220,7 +1235,7 @@ Item {
                     Text {
                         Layout.fillWidth: true
                         textFormat: Text.StyledText
-                        text: root.missing + "<font color=\"" + root.dim + "\">.lez</font>"
+                        text: root.missing + "<font color=\"" + root.dim + "\">.LEZ</font>"
                         color: root.ink
                         font.family: root.sans
                         font.weight: Font.DemiBold
@@ -1237,9 +1252,9 @@ Item {
                         visible: root.wallet.length > 0
                         title: "Register it to"
                         Accounts {}
-                        Hint { text: "The account you choose holds the name and pays the fee. Only it can change, transfer or delete the name." }
+                        Hint { text: "The account you choose holds the name and pays the fee. Only it can change, transfer or delete the name. The name is set up to be paid privately, to your wallet's private account." }
                         Action {
-                            label: "Register " + root.missing + ".lez"
+                            label: "Register " + root.missing + ".LEZ"
                             strong: true
                             changes: true
                             onPressed: root.registerName()
@@ -1281,7 +1296,7 @@ Item {
                             Text {
                                 Layout.fillWidth: true
                                 textFormat: Text.StyledText
-                                text: root.record !== null ? root.record.name + "<font color=\"" + root.dim + "\">.lez</font>" : ""
+                                text: root.record !== null ? root.record.name + "<font color=\"" + root.dim + "\">.LEZ</font>" : ""
                                 color: root.ink
                                 font.family: root.sans
                                 font.weight: Font.DemiBold
@@ -1326,7 +1341,7 @@ Item {
                     // Paying.
                     Panel {
                         visible: root.tool === "pay"
-                        title: root.record !== null ? "Send to " + root.record.display : ""
+                        title: root.record !== null ? "Send to " + root.shown(root.record.name) : ""
                         Accounts {}
                         RowLayout {
                             Layout.fillWidth: true
@@ -1338,28 +1353,53 @@ Item {
                                 numbersOnly: true
                             }
                             Action {
-                                label: "Send publicly"
-                                strong: true
-                                enabledNow: root.record !== null && root.record.account !== null
-                                onPressed: root.pay(false)
-                            }
-                            Action {
                                 label: "Send privately"
+                                strong: root.record !== null && root.record.npk !== null
                                 enabledNow: root.record !== null && root.record.npk !== null
                                 onPressed: root.pay(true)
+                            }
+                            Action {
+                                label: "Send publicly"
+                                strong: root.record !== null && root.record.npk === null
+                                enabledNow: root.record !== null && root.record.account !== null
+                                onPressed: root.pay(false)
                             }
                             Item { Layout.fillWidth: true }
                             Action { label: "Cancel"; onPressed: root.tool = "" }
                         }
-                        Hint { text: "A private payment hides the amount and where it went. It takes a few minutes to prepare." }
+                        Hint { text: "A private payment hides who received it. The amount and your account stay visible, because it is sent from a public account. It takes a few minutes to prepare." }
                     }
 
                     // The holder's settings for this name.
                     Panel {
                         visible: root.tool === "settings"
-                        title: root.record !== null ? "Settings for " + root.record.display : ""
+                        title: root.record !== null ? "Settings for " + root.shown(root.record.name) : ""
 
-                        Part { text: "Pays to" }
+                        Part { text: "Where it is paid" }
+                        Hint {
+                            text: root.record === null ? "" : root.record.npk !== null && root.record.account === null ? "Private payments only. Someone who looks the name up sees receiving keys that say nothing about your accounts, and each payment lands where only you can find it."
+                                : root.record.npk !== null ? "Private payments, and a public account. Anyone who looks the name up sees that account, its balance and its history."
+                                : root.record.account !== null ? "A public account only. Anyone who looks the name up sees that account, its balance and its history."
+                                : "Nowhere yet. Nobody can pay this name."
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Action {
+                                label: root.record !== null && root.record.npk !== null && root.record.account !== null ? "Make it private only" : "Receive privately"
+                                strong: true
+                                changes: true
+                                enabledNow: root.record !== null && !(root.record.npk !== null && root.record.account === null)
+                                onPressed: root.receivePrivately()
+                            }
+                            Action {
+                                label: "Stop taking payments"
+                                changes: true
+                                enabledNow: root.record !== null && (root.record.account !== null || root.record.npk !== null)
+                                onPressed: root.clearAddresses()
+                            }
+                            Item { Layout.fillWidth: true }
+                        }
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 8
@@ -1367,7 +1407,7 @@ Item {
                                 id: accountField
                                 Layout.fillWidth: true
                                 code: true
-                                hint: "Account ID that receives payments"
+                                hint: "Or a public account ID, visible to anyone who looks the name up"
                             }
                             Action {
                                 label: "Save"
@@ -1375,20 +1415,6 @@ Item {
                                 enabledNow: accountField.text.trim() !== "" && root.record !== null && accountField.text.trim() !== root.record.account
                                 onPressed: root.saveAccount()
                             }
-                        }
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 16
-                            Link {
-                                text: "Use the account that holds the name"
-                                onPressed: accountField.text = root.record.owner
-                            }
-                            Link {
-                                visible: root.record !== null && (root.record.account !== null || root.record.npk !== null)
-                                text: "Stop taking payments"
-                                onPressed: root.clearAddresses()
-                            }
-                            Item { Layout.fillWidth: true }
                         }
 
                         Part { text: "Entries" }
@@ -1474,9 +1500,9 @@ Item {
                         }
 
                         Part { text: "Your account's name" }
-                        Hint { text: root.record !== null ? "Apps can show " + root.shorten(root.record.owner) + " as " + root.record.display + " wherever the account appears." : "" }
+                        Hint { text: root.record !== null ? "Apps can then show " + root.shorten(root.record.owner) + " as " + root.shown(root.record.name) + ". This publishes the name on the chain for anyone to see, which nothing else here does." : "" }
                         Action {
-                            label: root.record !== null ? "Show my account as " + root.record.display : ""
+                            label: root.record !== null ? "Show my account as " + root.shown(root.record.name) : ""
                             changes: true
                             onPressed: root.showAccountAsName()
                         }
@@ -1503,13 +1529,13 @@ Item {
                         Hint { text: "The new holder starts clean: where the name pays, its entries and its page are cleared. After that only they can change it or give it back." }
 
                         Part { text: "Delete" }
-                        Hint { text: "Its record and page are cleared and it leaves the register. The name is then free for anyone to register, including someone else." }
+                        Hint { text: "Its record and page are emptied, and nothing of it stays behind. The name is then free for anyone to register, including someone else." }
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 8
                             Action {
                                 visible: !root.confirmingDelete
-                                label: root.record !== null ? "Delete " + root.record.display : ""
+                                label: root.record !== null ? "Delete " + root.shown(root.record.name) : ""
                                 grave: true
                                 onPressed: root.confirmingDelete = true
                             }
@@ -1556,6 +1582,10 @@ Item {
                             code: true
                             value: root.record !== null && root.record.account !== null ? root.shorten(root.record.account) : ""
                             full: root.record !== null && root.record.account !== null ? root.record.account : ""
+                        }
+                        Fact {
+                            label: "Paid privately"
+                            value: root.record !== null && root.record.npk !== null ? "Yes" : "Not set up"
                         }
                         Repeater {
                             model: root.textKeys()

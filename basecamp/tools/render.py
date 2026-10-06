@@ -36,7 +36,8 @@ BRIDGE = r"""
             }
             if (method === "get_config") return JSON.stringify({ registry: %(registry)s, sequencer: "http://127.0.0.1:3040" })
             if (method === "normalize") return String(args[0]).toLowerCase().replace(/\.lez$/, "")
-            if (method === "list") return ok({ total: names.length, names: args[1] === "" ? names : [], more: false })
+            if (method === "mine") return ok({ names: names.filter(function(entry) { return entry.owner === "%(alice)s" }) })
+            if (method === "keep") return ok(String(args[0]))
             if (method === "page") return ok(args[0] === "jef" ? { content_type: "text/html; charset=utf-8", bytes: 148, text: %(page)s } : null)
             if (method === "resolve") {
                 var name = String(args[0]).toLowerCase().replace(/\.lez$/, "")
@@ -44,9 +45,8 @@ BRIDGE = r"""
                     if (names[i].name !== name) continue
                     var rich = name === "jef"
                     return ok({ name: name, display: name + ".lez", owner: names[i].owner,
-                        account: names[i].owner, npk: rich ? "a1e38c92" : null, vpk: rich ? "4865" : null,
-                        texts: rich ? { chat: "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", agent: "https://agents.example/jef" } : {},
-                        previous: i + 1 < names.length ? names[i + 1].name : null, next: i > 0 ? names[i - 1].name : null })
+                        account: rich ? null : names[i].owner, npk: rich ? "a1e38c92" : null, vpk: rich ? "4865" : null,
+                        texts: rich ? { chat: "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", agent: "https://agents.example/jef" } : {} })
                 }
                 return ok(null)
             }

@@ -1,25 +1,39 @@
 //! Reads a Logos Names registry, following SPEC.md. `changes.rs` builds on it
 //! to change one.
 //!
-//! This is a second implementation of the layouts in `core/src/lib.rs`, kept
+//! This is a second implementation of what `core/` and `seal/` define, kept
 //! separate because a module build sees only its own directory and cannot take
-//! the LEZ crates as dependencies. The shared test vectors keep the two in step.
+//! the LEZ crates as dependencies. The shared test vectors keep them in step.
 
+use aes_gcm::{
+    aead::{Aead, KeyInit, Payload},
+    Aes256Gcm, Nonce,
+};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 pub const NAME_SUFFIX: &str = ".lez";
 const MAX_NAME_LEN: usize = 32;
 const PDA_PREFIX: &[u8] = b"/LEE/v0.2/AccountId/PDA/";
-const NAME_SEED_DOMAIN: &str = "logos-names/v1/name/";
-const PAGE_SEED_DOMAIN: &str = "logos-names/v1/page/";
-const DIRECTORY_SEED: &str = "logos-names/v1/directory";
-/// Listing costs one read per name, so a single call is capped.
-pub const MAX_LIST: u64 = 100;
+const DERIVATION_SALT: &[u8] = b"logos-names/v2";
+/// The most a Cloudflare Worker's Web Crypto allows, so a gateway can keep up.
+const DERIVATION_ROUNDS: u32 = 100_000;
+const ID_DOMAIN: &[u8] = b"logos-names/v2/id";
+const KEY_DOMAIN: &[u8] = b"logos-names/v2/key";
+const NAME_SEED_DOMAIN: &[u8] = b"logos-names/v2/name/";
+const PAGE_SEED_DOMAIN: &[u8] = b"logos-names/v2/page/";
+const RECORD_SEAL: &[u8] = b"logos-names/v2/record";
+const PAGE_SEAL: &[u8] = b"logos-names/v2/page";
+const NONCE_LEN: usize = 12;
+/// A sealed profile's plaintext is padded to a multiple of this, so its
+/// length says little about what is in it.
+const PROFILE_PADDING: usize = 256;
+/// ML-KEM-768 encapsulation key, as used for LEZ private accounts.
+pub const VPK_LEN: usize = 1184;
 
 pub type AccountId = [u8; 32];
 
-/// Turns what a person typed, such as `Jef.lez`, into the bare on-chain name.
+/// Turns what a person typed, such as `Jef.lez`, into the bare name.
 pub fn normalize_name(input: &str) -> String {
     let lowered = input.trim().to_ascii_lowercase();
     match lowered.strip_suffix(NAME_SUFFIX) {
@@ -40,6 +54,7 @@ pub fn is_valid_name(name: &str) -> bool {
 }
 
 /// Normalises typed input and returns the bare name, or why it is not a name.
+/// The chain never sees a name, so this check is the only one there is.
 pub fn parse_name(input: &str) -> Result<String, String> {
     let name = normalize_name(input);
     if is_valid_name(&name) {
@@ -69,23 +84,38 @@ fn sha256(parts: &[&[u8]]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-fn derived(program: &AccountId, seed_text: &str) -> AccountId {
+/// What a name turns into: the identifier the chain knows it by, and the key
+/// that opens and seals what it resolves to. The key never leaves the client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Derived {
+    pub id: [u8; 32],
+    pub key: [u8; 32],
+}
+
+/// Derives a name's identifier and key. Slow on purpose, so that scanning for
+/// names is expensive; callers that ask repeatedly should keep the result.
+pub fn derive(name: &str) -> Derived {
+    let mut master = [0_u8; 32];
+    pbkdf2::pbkdf2_hmac::<Sha256>(name.as_bytes(), DERIVATION_SALT, DERIVATION_ROUNDS, &mut master);
+    Derived {
+        id: sha256(&[ID_DOMAIN, &master]),
+        key: sha256(&[KEY_DOMAIN, &master]),
+    }
+}
+
+fn derived_address(program: &AccountId, domain: &[u8], id: &[u8; 32]) -> AccountId {
     let mut prefix = [0_u8; 32];
     prefix[..PDA_PREFIX.len()].copy_from_slice(PDA_PREFIX);
-    let seed = sha256(&[seed_text.as_bytes()]);
+    let seed = sha256(&[domain, id]);
     sha256(&[&prefix, program, &seed])
 }
 
-pub fn record_address(program: &AccountId, name: &str) -> AccountId {
-    derived(program, &format!("{NAME_SEED_DOMAIN}{name}"))
+pub fn record_address(program: &AccountId, id: &[u8; 32]) -> AccountId {
+    derived_address(program, NAME_SEED_DOMAIN, id)
 }
 
-pub fn page_address(program: &AccountId, name: &str) -> AccountId {
-    derived(program, &format!("{PAGE_SEED_DOMAIN}{name}"))
-}
-
-pub fn directory_address(program: &AccountId) -> AccountId {
-    derived(program, DIRECTORY_SEED)
+pub fn page_address(program: &AccountId, id: &[u8; 32]) -> AccountId {
+    derived_address(program, PAGE_SEED_DOMAIN, id)
 }
 
 /// Minimal borsh reader for the registry's layouts.
@@ -112,11 +142,6 @@ impl<'bytes> Reader<'bytes> {
         Ok(u32::from_le_bytes(bytes) as usize)
     }
 
-    fn u64(&mut self) -> Result<u64, String> {
-        let bytes: [u8; 8] = self.take(8)?.try_into().expect("eight bytes");
-        Ok(u64::from_le_bytes(bytes))
-    }
-
     fn account(&mut self) -> Result<AccountId, String> {
         Ok(self.take(32)?.try_into().expect("32 bytes"))
     }
@@ -135,24 +160,51 @@ impl<'bytes> Reader<'bytes> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NameRecord {
+/// Minimal borsh writer, the reader's counterpart.
+#[derive(Default)]
+pub struct Writer(pub Vec<u8>);
+
+impl Writer {
+    pub fn bytes(&mut self, bytes: &[u8]) {
+        self.0.extend((bytes.len() as u32).to_le_bytes());
+        self.0.extend(bytes);
+    }
+
+    pub fn string(&mut self, text: &str) {
+        self.bytes(text.as_bytes());
+    }
+
+    fn optional(&mut self, value: Option<&[u8; 32]>) {
+        match value {
+            None => self.0.push(0),
+            Some(value) => {
+                self.0.push(1);
+                self.0.extend(value);
+            }
+        }
+    }
+}
+
+/// What a name resolves to, as its holder sealed it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Profile {
     pub name: String,
-    pub owner: AccountId,
     pub account: Option<AccountId>,
     pub npk: Option<[u8; 32]>,
     pub vpk: Vec<u8>,
     pub texts: Vec<(String, String)>,
-    pub previous: Option<String>,
-    pub next: Option<String>,
 }
 
-impl NameRecord {
-    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+impl Profile {
+    /// The profile of a name with nothing set.
+    pub fn bare(name: &str) -> Self {
+        Self { name: name.to_owned(), ..Self::default() }
+    }
+
+    /// Decodes a profile from the start of `bytes`; padding after it is ignored.
+    fn decode(bytes: &[u8]) -> Result<Self, String> {
         let mut reader = Reader { bytes };
-        let _version = reader.u8()?;
         let name = reader.string()?;
-        let owner = reader.account()?;
         let account = if reader.is_some()? { Some(reader.account()?) } else { None };
         let npk = if reader.is_some()? { Some(reader.account()?) } else { None };
         let vpk = reader.byte_vec()?.to_vec();
@@ -161,70 +213,143 @@ impl NameRecord {
         for _ in 0..count {
             texts.push((reader.string()?, reader.string()?));
         }
-        let previous = if reader.is_some()? { Some(reader.string()?) } else { None };
-        let next = if reader.is_some()? { Some(reader.string()?) } else { None };
-        Ok(Self { name, owner, account, npk, vpk, texts, previous, next })
+        Ok(Self { name, account, npk, vpk, texts })
     }
 
-    /// The record in the JSON shape SPEC.md gives for HTTP.
-    pub fn to_json(&self) -> Value {
-        let texts: Map<String, Value> = self
-            .texts
-            .iter()
-            .map(|(key, value)| (key.clone(), Value::from(value.clone())))
-            .collect();
-        json!({
-            "name": self.name,
-            "display": format!("{}{NAME_SUFFIX}", self.name),
-            "owner": account_text(&self.owner),
-            "account": self.account.as_ref().map(account_text),
-            "npk": self.npk.as_ref().map(|npk| hex(npk)),
-            "vpk": (!self.vpk.is_empty()).then(|| hex(&self.vpk)),
-            "texts": texts,
-            "previous": self.previous,
-            "next": self.next,
-        })
+    /// The profile's borsh bytes, zero-padded to a multiple of [`PROFILE_PADDING`].
+    fn encode(&self) -> Vec<u8> {
+        let mut writer = Writer::default();
+        writer.string(&self.name);
+        writer.optional(self.account.as_ref());
+        writer.optional(self.npk.as_ref());
+        writer.bytes(&self.vpk);
+        writer.0.extend((self.texts.len() as u32).to_le_bytes());
+        for (key, value) in &self.texts {
+            writer.string(key);
+            writer.string(value);
+        }
+        let padded = writer.0.len().div_ceil(PROFILE_PADDING) * PROFILE_PADDING;
+        writer.0.resize(padded, 0);
+        writer.0
     }
 
-    /// Where to send a payment for this name: publicly, privately, or neither.
-    pub fn recipient_json(&self) -> Value {
-        let private = self.npk.as_ref().filter(|_| !self.vpk.is_empty()).map(|npk| {
-            json!({
-                "nullifier_public_key": hex(npk),
-                "viewing_public_key": hex(&self.vpk),
-            })
-        });
-        json!({
-            "name": self.name,
-            "display": format!("{}{NAME_SUFFIX}", self.name),
-            "public": self.account.as_ref().map(account_text),
-            "public_hex": self.account.as_ref().map(|account| hex(account)),
-            "private": private,
-        })
+    /// Seals the profile under the name's key.
+    pub fn seal(&self, key: &[u8; 32]) -> Result<Vec<u8>, String> {
+        seal(key, &self.encode(), RECORD_SEAL, fresh_nonce()?)
+    }
+
+    /// Opens a record's sealed bytes as the profile of `name`. Empty bytes,
+    /// bytes this key does not open, and a profile of another name all mean
+    /// the same thing: the name has nothing set.
+    pub fn open(key: &[u8; 32], sealed: &[u8], name: &str) -> Self {
+        open(key, sealed, RECORD_SEAL)
+            .and_then(|plaintext| Self::decode(&plaintext).ok())
+            .filter(|profile| profile.name == name)
+            .unwrap_or_else(|| Self::bare(name))
     }
 }
 
-/// Decodes a page into the JSON an app needs to show it. `text` is the body when
-/// it is valid UTF-8, and null otherwise.
-pub fn page_json(bytes: &[u8]) -> Result<Value, String> {
-    let mut reader = Reader { bytes };
-    let _version = reader.u8()?;
-    let content_type = reader.string()?;
-    let body = reader.byte_vec()?;
-    Ok(json!({
+/// Seals a page under the name's key.
+pub fn seal_page(key: &[u8; 32], content_type: &str, body: &[u8]) -> Result<Vec<u8>, String> {
+    let mut writer = Writer::default();
+    writer.string(content_type);
+    writer.bytes(body);
+    seal(key, &writer.0, PAGE_SEAL, fresh_nonce()?)
+}
+
+/// Opens a sealed page into the JSON an app needs to show it. `text` is the
+/// body when it is valid UTF-8, and null otherwise.
+pub fn open_page(key: &[u8; 32], sealed: &[u8]) -> Option<Value> {
+    let plaintext = open(key, sealed, PAGE_SEAL)?;
+    let mut reader = Reader { bytes: &plaintext };
+    let content_type = reader.string().ok()?;
+    let body = reader.byte_vec().ok()?;
+    Some(json!({
         "content_type": content_type,
         "bytes": body.len(),
         "text": std::str::from_utf8(body).ok(),
     }))
 }
 
-/// Decodes the directory, returning `(count, latest)`.
-pub fn decode_directory(bytes: &[u8]) -> Result<(u64, Option<String>), String> {
-    let mut reader = Reader { bytes };
-    let _version = reader.u8()?;
-    let count = reader.u64()?;
-    let latest = if reader.is_some()? { Some(reader.string()?) } else { None };
-    Ok((count, latest))
+fn fresh_nonce() -> Result<[u8; NONCE_LEN], String> {
+    let mut nonce = [0_u8; NONCE_LEN];
+    getrandom::getrandom(&mut nonce).map_err(|_| "this machine gave no random bytes".to_owned())?;
+    Ok(nonce)
+}
+
+/// `nonce ‖ AES-256-GCM(key, nonce, plaintext, associated data)`.
+fn seal(key: &[u8; 32], plaintext: &[u8], associated: &[u8], nonce: [u8; NONCE_LEN]) -> Result<Vec<u8>, String> {
+    let cipher = Aes256Gcm::new_from_slice(key).expect("a 32-byte key");
+    let sealed = cipher
+        .encrypt(Nonce::from_slice(&nonce), Payload { msg: plaintext, aad: associated })
+        .map_err(|_| "could not seal".to_owned())?;
+    Ok([nonce.as_slice(), &sealed].concat())
+}
+
+fn open(key: &[u8; 32], sealed: &[u8], associated: &[u8]) -> Option<Vec<u8>> {
+    if sealed.len() <= NONCE_LEN {
+        return None;
+    }
+    let (nonce, ciphertext) = sealed.split_at(NONCE_LEN);
+    Aes256Gcm::new_from_slice(key)
+        .expect("a 32-byte key")
+        .decrypt(Nonce::from_slice(nonce), Payload { msg: ciphertext, aad: associated })
+        .ok()
+}
+
+/// A registered name: who holds it, and its profile opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolved {
+    pub owner: AccountId,
+    pub profile: Profile,
+}
+
+impl Resolved {
+    /// Decodes the on-chain record `{version, owner, sealed}` and opens it.
+    fn decode(bytes: &[u8], key: &[u8; 32], name: &str) -> Result<Self, String> {
+        let mut reader = Reader { bytes };
+        let _version = reader.u8()?;
+        let owner = reader.account()?;
+        let sealed = reader.byte_vec()?;
+        Ok(Self { owner, profile: Profile::open(key, sealed, name) })
+    }
+
+    /// The name in the JSON shape SPEC.md gives.
+    pub fn to_json(&self) -> Value {
+        let profile = &self.profile;
+        let texts: Map<String, Value> = profile
+            .texts
+            .iter()
+            .map(|(key, value)| (key.clone(), Value::from(value.clone())))
+            .collect();
+        json!({
+            "name": profile.name,
+            "display": format!("{}{NAME_SUFFIX}", profile.name),
+            "owner": account_text(&self.owner),
+            "account": profile.account.as_ref().map(account_text),
+            "npk": profile.npk.as_ref().map(|npk| hex(npk)),
+            "vpk": (!profile.vpk.is_empty()).then(|| hex(&profile.vpk)),
+            "texts": texts,
+        })
+    }
+
+    /// Where to send a payment for this name: privately, publicly, or neither.
+    pub fn recipient_json(&self) -> Value {
+        let profile = &self.profile;
+        let private = profile.npk.as_ref().filter(|_| !profile.vpk.is_empty()).map(|npk| {
+            json!({
+                "nullifier_public_key": hex(npk),
+                "viewing_public_key": hex(&profile.vpk),
+            })
+        });
+        json!({
+            "name": profile.name,
+            "display": format!("{}{NAME_SUFFIX}", profile.name),
+            "public": profile.account.as_ref().map(account_text),
+            "public_hex": profile.account.as_ref().map(|account| hex(account)),
+            "private": private,
+        })
+    }
 }
 
 /// Decodes a reverse record, returning the claimed name.
@@ -324,35 +449,28 @@ impl Registry {
         }))
     }
 
-    /// The directory as `(count, latest)`; an unused registry has an empty one.
-    pub fn directory(&self) -> Result<(u64, Option<String>), String> {
-        let bytes = self.shard(&directory_address(&self.program))?;
-        if bytes.is_empty() {
-            Ok((0, None))
-        } else {
-            decode_directory(&bytes)
-        }
-    }
-
-    pub fn resolve(&self, name: &str) -> Result<Option<NameRecord>, String> {
-        let bytes = self.shard(&record_address(&self.program, name))?;
+    /// Resolves `name`, whose identifier and key the caller has derived.
+    pub fn resolve(&self, name: &str, derived: &Derived) -> Result<Option<Resolved>, String> {
+        let bytes = self.shard(&record_address(&self.program, &derived.id))?;
         if bytes.is_empty() {
             return Ok(None);
         }
-        NameRecord::decode(&bytes).map(Some)
+        Resolved::decode(&bytes, &derived.key, name).map(Some)
     }
 
-    /// The page published under `name`, or `None` when it has none.
-    pub fn page(&self, name: &str) -> Result<Option<Value>, String> {
-        let bytes = self.shard(&page_address(&self.program, name))?;
+    /// The page published under a name, or `None` when it has none.
+    pub fn page(&self, derived: &Derived) -> Result<Option<Value>, String> {
+        let bytes = self.shard(&page_address(&self.program, &derived.id))?;
         if bytes.is_empty() {
             return Ok(None);
         }
-        page_json(&bytes).map(Some)
+        let mut reader = Reader { bytes: &bytes };
+        let _version = reader.u8()?;
+        Ok(open_page(&derived.key, reader.byte_vec()?))
     }
 
     /// The name `account` is shown as. A reverse record is only a claim, so it
-    /// counts only when the forward record points back at the same account.
+    /// counts only when the name's own record points back at the same account.
     pub fn reverse(&self, account: &AccountId) -> Result<Option<String>, String> {
         let bytes = self.shard(account)?;
         if bytes.is_empty() {
@@ -367,36 +485,10 @@ impl Registry {
         if !is_valid_name(&claimed) {
             return Ok(None);
         }
-        let confirmed = self
-            .resolve(&claimed)?
-            .is_some_and(|record| record.owner == *account || record.account == Some(*account));
+        let confirmed = self.resolve(&claimed, &derive(&claimed))?.is_some_and(|resolved| {
+            resolved.owner == *account || resolved.profile.account == Some(*account)
+        });
         Ok(confirmed.then_some(claimed))
-    }
-
-    /// Names newest first, as SPEC.md's list response.
-    pub fn list(&self, limit: u64, before: Option<&str>) -> Result<Value, String> {
-        let (total, latest) = self.directory()?;
-
-        let mut next = match before {
-            None => latest,
-            Some(name) => self
-                .resolve(name)?
-                .ok_or_else(|| format!("{name} is not registered"))?
-                .previous,
-        };
-        let mut names = Vec::new();
-        while let Some(name) = next.take() {
-            if names.len() as u64 >= limit.clamp(1, MAX_LIST) {
-                next = Some(name);
-                break;
-            }
-            let record = self
-                .resolve(&name)?
-                .ok_or_else(|| format!("the name list is broken at {name}"))?;
-            names.push(json!({ "name": record.name, "owner": account_text(&record.owner) }));
-            next = record.previous;
-        }
-        Ok(json!({ "total": total, "names": names, "more": next.is_some() }))
     }
 }
 
@@ -406,22 +498,115 @@ mod tests {
 
     const PROGRAM: AccountId = [7; 32];
 
-    /// The vectors in SPEC.md, shared with the Rust core and the JavaScript resolver.
+    /// The profile sealed in SPEC.md's vector.
+    fn sample_profile() -> Profile {
+        Profile {
+            name: "jef".to_owned(),
+            account: Some([2; 32]),
+            npk: None,
+            vpk: Vec::new(),
+            texts: vec![("chat".to_owned(), "hi".to_owned())],
+        }
+    }
+
+    const NONCE: [u8; NONCE_LEN] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+    const SEALED_PROFILE: &str = "000102030405060708090a0b67bf760994a19946abc799235b95e48bfb804c3ca05471c9261f5099\
+e1b00570e6139ab5bbb5fac423627e0fd18c5299475a5c4ed914f1e506f23b66d4d2377de959bff4\
+e8d4ab02b63865f9a2453fef24302c211eb70eadebf5b38038d080e2b6f3b1fa17a777b940f17eb9\
+4a83f4ce719552c92108600800f3d020a7d8fee73e2792c907db62125ba636607ed94ea46b73f046\
+981a751be920449222629d2561194416c993b4bfdeeec20026656f11b64f1c2ac368d64e57d07054\
+ac0fcdac4a6e83b60ac363901963488c93c7762d19b34b6991b9abdbc5d293fca06b69cab31e7eaa\
+769142940f4813c73713dbd34b24386fb53937e2c9915323f35d39bf50e63d4289cb48a7c7aff0e5\
+404987b0";
+    const SEALED_PAGE: &str =
+        "000102030405060708090a0b6ebf76098aa1873386b5f74030f9e489f9822657c6ba930c224eb1f264767f7cf7b5a511";
+
+    /// The vectors in SPEC.md, shared with the Rust client and the JavaScript resolver.
     #[test]
-    fn addresses_match_the_specification() {
+    fn a_name_derives_the_identifier_and_key_the_specification_gives() {
+        let derived = derive("jef");
+        assert_eq!(hex(&derived.id), "86d7e719e7acabe344ef8a69782b72ed0c21087e73e400e7056ab0daf7e6c618");
+        assert_eq!(hex(&derived.key), "d19aa10c57273a3ff4f569cc3a9c35819b2a9bcac7ba8a48deb131269cb6e2e0");
         assert_eq!(account_text(&PROGRAM), "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx");
         assert_eq!(
-            account_text(&record_address(&PROGRAM, "jef")),
-            "28mUmKUyH1dJgmwdjVxS22P12iUHVotLcvk2nbrFw29Y"
+            account_text(&record_address(&PROGRAM, &derived.id)),
+            "6gsCMau9ajq4FcxDCJmqqtUWVnuCiJHtXoYbCzCZPGJJ"
         );
         assert_eq!(
-            account_text(&page_address(&PROGRAM, "jef")),
-            "6ckRpxviqmmhY6QkcJPVPWYSSy3eRZGzy1uUGStf1TnC"
+            account_text(&page_address(&PROGRAM, &derived.id)),
+            "338iYF6WmqnFryDjLWyKTYUhAgpT6o7C8qhHAd5pSf32"
         );
-        assert_eq!(
-            account_text(&directory_address(&PROGRAM)),
-            "9oQ7KANHqw4ok3goEHzgeK7WSxdKqKNXA7bS9HHpq97p"
-        );
+    }
+
+    #[test]
+    fn sealing_matches_the_specification_and_opens_again() {
+        let key = derive("jef").key;
+        let sealed = seal(&key, &sample_profile().encode(), RECORD_SEAL, NONCE).expect("seals");
+        assert_eq!(hex(&sealed), SEALED_PROFILE);
+        assert_eq!(Profile::open(&key, &sealed, "jef"), sample_profile());
+
+        let mut page = Writer::default();
+        page.string("text/plain");
+        page.bytes(b"hi");
+        assert_eq!(hex(&seal(&key, &page.0, PAGE_SEAL, NONCE).expect("seals")), SEALED_PAGE);
+        let opened = open_page(&key, &unhex(SEALED_PAGE).expect("hex")).expect("opens");
+        assert_eq!(opened["content_type"], "text/plain");
+        assert_eq!(opened["text"], "hi");
+        assert_eq!(opened["bytes"], 2);
+    }
+
+    #[test]
+    fn a_profile_is_padded_and_sealed_differently_each_time() {
+        let key = [9; 32];
+        assert_eq!(sample_profile().encode().len(), 256);
+        let with_keys = Profile { npk: Some([3; 32]), vpk: vec![4; VPK_LEN], ..sample_profile() };
+        assert_eq!(with_keys.encode().len() % 256, 0);
+        let first = with_keys.seal(&key).expect("seals");
+        let second = with_keys.seal(&key).expect("seals");
+        assert_ne!(first, second, "a fresh nonce every time");
+        assert_eq!(Profile::open(&key, &first, "jef"), with_keys);
+        assert_eq!(Profile::open(&key, &second, "jef"), with_keys);
+    }
+
+    #[test]
+    fn what_does_not_open_reads_as_a_name_with_nothing_set() {
+        let key = derive("jef").key;
+        let sealed = unhex(SEALED_PROFILE).expect("hex");
+        let bare = Profile::bare("jef");
+        assert_eq!(Profile::open(&key, &[], "jef"), bare, "nothing sealed");
+        assert_eq!(Profile::open(&[1; 32], &sealed, "jef"), bare, "another key");
+        let mut tampered = sealed.clone();
+        tampered[40] ^= 1;
+        assert_eq!(Profile::open(&key, &tampered, "jef"), bare, "tampered");
+        assert_eq!(Profile::open(&key, &sealed, "ada"), Profile::bare("ada"), "another name's profile");
+        // A page is sealed for pages only: it does not open as a profile.
+        assert_eq!(Profile::open(&key, &unhex(SEALED_PAGE).expect("hex"), "jef"), bare);
+    }
+
+    #[test]
+    fn a_record_decodes_and_reports_where_to_pay() {
+        let key = derive("jef").key;
+        let profile = Profile { npk: Some([3; 32]), vpk: vec![9, 9, 9, 9], ..sample_profile() };
+        let mut record = vec![2];
+        record.extend([1; 32]); // owner
+        let sealed = profile.seal(&key).expect("seals");
+        record.extend((sealed.len() as u32).to_le_bytes());
+        record.extend(&sealed);
+
+        let resolved = Resolved::decode(&record, &key, "jef").expect("decodes");
+        assert_eq!(resolved.owner, [1; 32]);
+        assert_eq!(resolved.profile, profile);
+
+        let recipient = resolved.recipient_json();
+        assert_eq!(recipient["display"], "jef.lez");
+        assert_eq!(recipient["public"], account_text(&[2; 32]));
+        assert_eq!(recipient["public_hex"], "02".repeat(32));
+        assert_eq!(recipient["private"]["nullifier_public_key"], "03".repeat(32));
+        assert_eq!(recipient["private"]["viewing_public_key"], "09090909");
+        assert_eq!(resolved.to_json()["texts"]["chat"], "hi");
+        assert_eq!(resolved.to_json()["owner"], account_text(&[1; 32]));
+
+        assert!(Resolved::decode(&record[..20], &key, "jef").is_err(), "truncated");
     }
 
     #[test]
@@ -432,67 +617,6 @@ mod tests {
         for bad in ["", ".lez", "jef.eth", "-jef", "jef-", "j f", &"a".repeat(33)] {
             assert!(parse_name(bad).is_err(), "{bad}");
         }
-    }
-
-    fn string(text: &str) -> Vec<u8> {
-        let mut bytes = (text.len() as u32).to_le_bytes().to_vec();
-        bytes.extend_from_slice(text.as_bytes());
-        bytes
-    }
-
-    fn sample_record() -> Vec<u8> {
-        let mut bytes = vec![1];
-        bytes.extend(string("jef"));
-        bytes.extend([1; 32]); // owner
-        bytes.push(1);
-        bytes.extend([2; 32]); // account
-        bytes.push(1);
-        bytes.extend([3; 32]); // npk
-        bytes.extend(4_u32.to_le_bytes());
-        bytes.extend([9, 9, 9, 9]); // vpk
-        bytes.extend(1_u32.to_le_bytes());
-        bytes.extend(string("chat"));
-        bytes.extend(string("hello"));
-        bytes.push(1);
-        bytes.extend(string("ada")); // previous
-        bytes.push(0); // next
-        bytes
-    }
-
-    #[test]
-    fn a_record_decodes_and_reports_where_to_pay() {
-        let record = NameRecord::decode(&sample_record()).expect("decodes");
-        assert_eq!(record.name, "jef");
-        assert_eq!(record.account, Some([2; 32]));
-        assert_eq!(record.texts, vec![("chat".to_owned(), "hello".to_owned())]);
-        assert_eq!(record.previous.as_deref(), Some("ada"));
-
-        let recipient = record.recipient_json();
-        assert_eq!(recipient["display"], "jef.lez");
-        assert_eq!(recipient["public"], account_text(&[2; 32]));
-        assert_eq!(recipient["public_hex"], "02".repeat(32));
-        assert_eq!(recipient["private"]["nullifier_public_key"], "03".repeat(32));
-        assert_eq!(recipient["private"]["viewing_public_key"], "09090909");
-        assert_eq!(record.to_json()["texts"]["chat"], "hello");
-    }
-
-    #[test]
-    fn truncated_data_is_refused_not_misread() {
-        let bytes = sample_record();
-        assert!(NameRecord::decode(&bytes[..bytes.len() - 2]).is_err());
-        assert!(NameRecord::decode(&[1, 9, 0, 0, 0]).is_err());
-    }
-
-    #[test]
-    fn a_page_decodes_with_its_text() {
-        let mut page = vec![1];
-        page.extend(string("text/html"));
-        page.extend(2_u32.to_le_bytes());
-        page.extend(b"hi");
-        let decoded = page_json(&page).expect("decodes");
-        assert_eq!(decoded["content_type"], "text/html");
-        assert_eq!(decoded["bytes"], 2);
-        assert_eq!(decoded["text"], "hi");
     }
 
     #[test]
@@ -511,18 +635,10 @@ mod tests {
         assert_eq!(unhex(&hex(&[0, 7, 255])), Ok(vec![0, 7, 255]));
         assert!(unhex("abc").is_err());
         assert!(unhex("zz").is_err());
-    }
 
-    #[test]
-    fn a_directory_and_a_reverse_record_decode() {
-        let mut directory = vec![1];
-        directory.extend(3_u64.to_le_bytes());
-        directory.push(1);
-        directory.extend(string("jef"));
-        assert_eq!(decode_directory(&directory), Ok((3, Some("jef".to_owned()))));
-
-        let mut primary = vec![1];
-        primary.extend(string("jef"));
+        let mut primary = vec![2];
+        primary.extend(3_u32.to_le_bytes());
+        primary.extend(b"jef");
         assert_eq!(decode_primary(&primary).as_deref(), Ok("jef"));
     }
 }

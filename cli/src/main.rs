@@ -2,6 +2,9 @@
 //!
 //! Signing and fee payment go through the LEZ wallet, so the wallet home
 //! (`LEE_WALLET_HOME_DIR`) must hold the key of the account that owns the name.
+//!
+//! The chain never sees a name: every command derives the name's identifier and
+//! key here, and what the name resolves to is sealed and opened on this side.
 
 use std::path::PathBuf;
 
@@ -12,8 +15,12 @@ use lee_core::{
     program::{AccountMeta, PlanInput},
 };
 use names_core::{
-    Directory, Effect, Instruction, NAME_SUFFIX, NameRecord, Page, PrimaryName,
-    directory_address, normalize_name, page_address, record_address, validate_name,
+    Effect, Instruction, NAME_SUFFIX, NameId, NameRecord, Page, PrimaryName, normalize_name,
+    page_address, record_address, validate_name,
+};
+use names_seal::{
+    Derived, PageContent, Profile, TextRecord, derive, open_page, open_profile, seal_page,
+    seal_profile, validate_page, validate_profile, validate_text_key,
 };
 use wallet::{
     AccountIdentity, WalletCore, program_facades::native_token_transfer::NativeTokenTransfer,
@@ -91,7 +98,8 @@ enum Command {
         #[arg(value_parser = parse_name)]
         name: String,
     },
-    /// Set the name an account is shown as; an empty name removes it.
+    /// Set the name an account is shown as; an empty name removes it. This
+    /// publishes the name on the chain in the clear.
     SetPrimary {
         #[arg(value_parser = parse_name_or_empty)]
         name: String,
@@ -120,13 +128,7 @@ enum Command {
     },
     /// Print the name an account is shown as, checked against the forward record.
     Reverse { account: AccountId },
-    /// List registered names, newest first.
-    List {
-        /// Stop after this many names; each one costs a read.
-        #[arg(long, default_value_t = 50)]
-        limit: usize,
-    },
-    /// Print the accounts that hold a name's record and page.
+    /// Print a name's identifier and the accounts that hold its record and page.
     Address {
         #[arg(value_parser = parse_name)]
         name: String,
@@ -162,8 +164,8 @@ impl Client {
         Ok(view.data.shard(self.program).to_vec())
     }
 
-    async fn record(&self, name: &str) -> Result<Option<NameRecord>> {
-        let bytes = self.shard(record_address(&self.program, name)).await?;
+    async fn record(&self, id: &NameId) -> Result<Option<NameRecord>> {
+        let bytes = self.shard(record_address(&self.program, id)).await?;
         if bytes.is_empty() {
             return Ok(None);
         }
@@ -172,93 +174,97 @@ impl Client {
         ))
     }
 
-    async fn directory(&self) -> Result<Directory> {
-        let bytes = self.shard(directory_address(&self.program)).await?;
-        if bytes.is_empty() {
-            return Ok(Directory::default());
-        }
-        borsh::from_slice(&bytes).context("the directory shard does not hold a directory")
-    }
-
-    /// Registers `name`, linking it after the directory's current latest name.
-    async fn register(&self, name: String, owner: AccountId) -> Result<()> {
-        let previous = self.directory().await?.latest;
-        let mut accounts = vec![
-            (record_address(&self.program, &name), false),
-            (directory_address(&self.program), false),
-        ];
-        if let Some(previous) = &previous {
-            accounts.push((record_address(&self.program, previous), false));
-        }
-        accounts.push((owner, true));
-        self.send(accounts, &Instruction::Register { name, previous })
-            .await
-    }
-
-    /// Hands `name` to `new_owner`, clearing what the current owner set on it.
-    async fn transfer(&self, name: String, new_owner: AccountId) -> Result<()> {
-        let owner = self.owner_of(&name).await?;
-        let accounts = vec![
-            (record_address(&self.program, &name), false),
-            (page_address(&self.program, &name), false),
-            (owner, true),
-        ];
-        self.send(accounts, &Instruction::Transfer { name, new_owner })
-            .await
-    }
-
-    /// Releases `name`, unlinking it from its neighbours in the list.
-    async fn release(&self, name: String) -> Result<()> {
+    /// The record of `name` and its opened profile. A record whose sealed bytes are
+    /// empty or do not open as this name's has nothing set: a blank profile.
+    async fn lookup(&self, name: &str) -> Result<(Derived, NameRecord, Profile)> {
+        let derived = derive(name);
         let record = self
-            .record(&name)
+            .record(&derived.id)
             .await?
             .ok_or_else(|| anyhow!("{name} is not registered"))?;
-        let mut accounts = vec![
-            (record_address(&self.program, &name), false),
-            (page_address(&self.program, &name), false),
-            (directory_address(&self.program), false),
-            (record.owner, true),
-        ];
-        for neighbour in [&record.previous, &record.next].into_iter().flatten() {
-            accounts.push((record_address(&self.program, neighbour), false));
-        }
+        let profile = open_profile(&derived.key, &record.sealed, name).unwrap_or_else(|| Profile {
+            name: name.to_owned(),
+            ..Profile::default()
+        });
+        Ok((derived, record, profile))
+    }
+
+    /// Registers `name` with a first profile that holds only the name.
+    async fn register(&self, name: &str, owner: AccountId) -> Result<()> {
+        let Derived { id, key } = derive(name);
+        let profile = Profile {
+            name: name.to_owned(),
+            ..Profile::default()
+        };
+        let sealed = seal_profile(&key, &profile);
         self.send(
-            accounts,
-            &Instruction::Release {
-                name,
-                previous: record.previous,
-                next: record.next,
-            },
+            vec![(record_address(&self.program, &id), false), (owner, true)],
+            &Instruction::Register { id, sealed },
         )
         .await
     }
 
-    /// Prints up to `limit` names, newest first, walking the on-chain list.
-    async fn list(&self, limit: usize) -> Result<()> {
-        let directory = self.directory().await?;
-        println!("{} names registered", directory.count);
-        let mut next = directory.latest;
-        for _ in 0..limit {
-            let Some(name) = next else { return Ok(()) };
-            let record = self
-                .record(&name)
-                .await?
-                .ok_or_else(|| anyhow!("the name list is broken at {name}"))?;
-            println!("{name}{NAME_SUFFIX}  {}", record.owner);
-            next = record.previous;
-        }
-        if next.is_some() {
-            println!("... more; raise --limit to see them");
-        }
-        Ok(())
+    /// Changes the profile of `name`: reads and opens it, applies `change`, then
+    /// seals the whole of it again and replaces the record's sealed bytes.
+    async fn edit(&self, name: &str, change: impl FnOnce(&mut Profile) -> Result<()>) -> Result<()> {
+        let (Derived { id, key }, record, mut profile) = self.lookup(name).await?;
+        change(&mut profile)?;
+        validate_profile(&profile).map_err(|reason| anyhow!(reason))?;
+        let sealed = seal_profile(&key, &profile);
+        self.send(
+            vec![
+                (record_address(&self.program, &id), false),
+                (record.owner, true),
+            ],
+            &Instruction::SetRecord { id, sealed },
+        )
+        .await
     }
 
-    async fn owner_of(&self, name: &str) -> Result<AccountId> {
-        Ok(self
-            .record(name)
-            .await?
-            .ok_or_else(|| anyhow!("{name} is not registered"))?
-            .owner)
+    /// The usual `[record, page, owner]` accounts of the name `id`.
+    fn page_accounts(&self, id: &NameId, owner: AccountId) -> Vec<(AccountId, bool)> {
+        vec![
+            (record_address(&self.program, id), false),
+            (page_address(&self.program, id), false),
+            (owner, true),
+        ]
+    }
+
+    /// Seals `page` as the page of `name`; `None` removes the page.
+    async fn set_page(&self, name: &str, page: Option<PageContent>) -> Result<()> {
+        let (Derived { id, key }, record, _) = self.lookup(name).await?;
+        let sealed = match page {
+            Some(page) => {
+                validate_page(&page).map_err(|reason| anyhow!(reason))?;
+                seal_page(&key, &page)
+            }
+            None => Vec::new(),
+        };
+        self.send(
+            self.page_accounts(&id, record.owner),
+            &Instruction::SetPage { id, sealed },
+        )
+        .await
+    }
+
+    /// Hands `name` to `new_owner`, clearing what the current owner set on it.
+    async fn transfer(&self, name: &str, new_owner: AccountId) -> Result<()> {
+        let (Derived { id, .. }, record, _) = self.lookup(name).await?;
+        self.send(
+            self.page_accounts(&id, record.owner),
+            &Instruction::Transfer { id, new_owner },
+        )
+        .await
+    }
+
+    /// Releases `name`, emptying its record and page.
+    async fn release(&self, name: &str) -> Result<()> {
+        let (Derived { id, .. }, record, _) = self.lookup(name).await?;
+        self.send(
+            self.page_accounts(&id, record.owner),
+            &Instruction::Release { id },
+        )
+        .await
     }
 
     /// Runs the program's own `plan` and `apply` against current chain state, returning
@@ -337,44 +343,12 @@ impl Client {
         Ok(())
     }
 
-    /// Sends an instruction over the usual `[record, owner]` accounts.
-    async fn update(&self, name: &str, owner: AccountId, instruction: &Instruction) -> Result<()> {
-        self.send(
-            vec![
-                (record_address(&self.program, name), false),
-                (owner, true),
-            ],
-            instruction,
-        )
-        .await
-    }
-
-    async fn set_page(&self, name: String, content_type: String, body: Vec<u8>) -> Result<()> {
-        let owner = self.owner_of(&name).await?;
-        let accounts = vec![
-            (record_address(&self.program, &name), false),
-            (page_address(&self.program, &name), false),
-            (owner, true),
-        ];
-        self.send(
-            accounts,
-            &Instruction::SetPage {
-                name,
-                content_type,
-                body,
-            },
-        )
-        .await
-    }
-
     /// Pays `amount` to the public account `name` points at.
     async fn pay(&self, name: &str, amount: u128, from: AccountId) -> Result<()> {
-        let record = self
-            .record(name)
-            .await?
-            .ok_or_else(|| anyhow!("{name} is not registered"))?;
-        let to = record
+        let (_, _, profile) = self.lookup(name).await?;
+        let to = profile
             .account
+            .map(AccountId::new)
             .ok_or_else(|| anyhow!("{name} has no public account set"))?;
         let before = self.wallet.get_account_balance(to).await?;
 
@@ -405,14 +379,11 @@ impl Client {
 
     /// Pays `amount` to the private receiving keys `name` publishes.
     async fn pay_private(&self, name: &str, amount: u128, from: AccountId) -> Result<()> {
-        let record = self
-            .record(name)
-            .await?
-            .ok_or_else(|| anyhow!("{name} is not registered"))?;
-        let npk = record
+        let (_, _, profile) = self.lookup(name).await?;
+        let npk = profile
             .npk
             .ok_or_else(|| anyhow!("{name} has no private keys set"))?;
-        let vpk = lee_core::encryption::ViewingPublicKey::from_bytes(record.vpk)
+        let vpk = lee_core::encryption::ViewingPublicKey::from_bytes(profile.vpk)
             .map_err(|error| anyhow!("{name} publishes an invalid viewing key: {error}"))?;
         let before = self.wallet.get_account_balance(from).await?;
 
@@ -448,37 +419,34 @@ impl Client {
     }
 
     async fn resolve(&self, name: &str) -> Result<serde_json::Value> {
-        let Some(record) = self.record(name).await? else {
-            bail!("{name} is not registered");
-        };
-        let page_bytes = self.shard(page_address(&self.program, name)).await?;
+        let (Derived { id, key }, record, profile) = self.lookup(name).await?;
+        let page_bytes = self.shard(page_address(&self.program, &id)).await?;
         let page = if page_bytes.is_empty() {
-            serde_json::Value::Null
+            None
         } else {
             let page: Page =
                 borsh::from_slice(&page_bytes).context("the page shard does not hold a page")?;
+            open_page(&key, &page.sealed)
+        };
+        let page = page.map_or(serde_json::Value::Null, |page| {
             serde_json::json!({
                 "content_type": page.content_type,
                 "bytes": page.body.len(),
             })
-        };
-        let texts: serde_json::Map<String, serde_json::Value> = record
+        });
+        let texts: serde_json::Map<String, serde_json::Value> = profile
             .texts
             .into_iter()
             .map(|text| (text.key, text.value.into()))
             .collect();
         Ok(serde_json::json!({
-            "name": record.name,
+            "name": name,
             "owner": record.owner.to_string(),
-            "account": record.account.map(|account| account.to_string()),
-            "npk": record.npk.map(hex::encode),
-            "vpk": (!record.vpk.is_empty()).then(|| hex::encode(&record.vpk)),
+            "account": profile.account.map(|account| AccountId::new(account).to_string()),
+            "npk": profile.npk.map(hex::encode),
+            "vpk": (!profile.vpk.is_empty()).then(|| hex::encode(&profile.vpk)),
             "texts": texts,
-            "previous": record.previous,
-            "next": record.next,
             "page": page,
-            "record_address": record_address(&self.program, name).to_string(),
-            "page_address": page_address(&self.program, name).to_string(),
         }))
     }
 
@@ -490,8 +458,15 @@ impl Client {
         }
         let primary: PrimaryName =
             borsh::from_slice(&bytes).context("the account's shard does not hold a primary name")?;
-        let confirmed = self.record(&primary.name).await?.is_some_and(|record| {
-            record.owner == account || record.account == Some(account)
+        // The claim is whatever the account wrote; only a valid name can be looked up.
+        if validate_name(&primary.name).is_err() {
+            return Ok(None);
+        }
+        let Derived { id, key } = derive(&primary.name);
+        let confirmed = self.record(&id).await?.is_some_and(|record| {
+            record.owner == account
+                || open_profile(&key, &record.sealed, &primary.name)
+                    .is_some_and(|profile| profile.account == Some(account.into_value()))
         });
         Ok(confirmed.then_some(primary.name))
     }
@@ -528,9 +503,10 @@ async fn main() -> Result<()> {
         .ok_or_else(|| anyhow!("pass --program or set LOGOS_NAMES_PROGRAM"))?;
 
     if let Command::Address { name } = &cli.command {
-        validate_name(name).map_err(|reason| anyhow!(reason))?;
-        println!("record {}", record_address(&program, name));
-        println!("page   {}", page_address(&program, name));
+        let Derived { id, .. } = derive(name);
+        println!("id     {}", hex::encode(id));
+        println!("record {}", record_address(&program, &id));
+        println!("page   {}", page_address(&program, &id));
         return Ok(());
     }
 
@@ -540,15 +516,13 @@ async fn main() -> Result<()> {
     };
 
     match cli.command {
-        Command::Register { name, owner } => {
-            validate_name(&name).map_err(|reason| anyhow!(reason))?;
-            client.register(name, owner).await
-        }
-        Command::List { limit } => client.list(limit).await,
+        Command::Register { name, owner } => client.register(&name, owner).await,
         Command::SetAccount { name, account } => {
-            let owner = client.owner_of(&name).await?;
             client
-                .update(&name.clone(), owner, &Instruction::SetAccount { name, account })
+                .edit(&name, |profile| {
+                    profile.account = Some(account.into_value());
+                    Ok(())
+                })
                 .await
         }
         Command::SetKeys {
@@ -556,36 +530,46 @@ async fn main() -> Result<()> {
             npk,
             vpk_file,
         } => {
-            let owner = client.owner_of(&name).await?;
             let npk = parse_hex::<32>(&npk, "npk")?;
             let vpk = hex::decode(std::fs::read_to_string(&vpk_file)?.trim())
                 .context("the vpk file is not valid hex")?;
             client
-                .update(
-                    &name.clone(),
-                    owner,
-                    &Instruction::SetPrivateKeys { name, npk, vpk },
-                )
+                .edit(&name, |profile| {
+                    profile.npk = Some(npk);
+                    profile.vpk = vpk;
+                    Ok(())
+                })
                 .await
         }
         Command::ClearAddresses { name } => {
-            let owner = client.owner_of(&name).await?;
             client
-                .update(&name.clone(), owner, &Instruction::ClearAddresses { name })
+                .edit(&name, |profile| {
+                    profile.account = None;
+                    profile.npk = None;
+                    profile.vpk = Vec::new();
+                    Ok(())
+                })
                 .await
         }
         Command::SetText { name, key, value } => {
-            let owner = client.owner_of(&name).await?;
+            validate_text_key(&key).map_err(|reason| anyhow!(reason))?;
             client
-                .update(
-                    &name.clone(),
-                    owner,
-                    &Instruction::SetText { name, key, value },
-                )
+                .edit(&name, |profile| {
+                    let existing = profile.texts.iter().position(|text| text.key == key);
+                    match (existing, value.is_empty()) {
+                        (Some(index), true) => {
+                            profile.texts.remove(index);
+                        }
+                        (Some(index), false) => profile.texts[index].value = value,
+                        (None, true) => bail!("{name} has no `{key}` entry to remove"),
+                        (None, false) => profile.texts.push(TextRecord { key, value }),
+                    }
+                    Ok(())
+                })
                 .await
         }
-        Command::Transfer { name, new_owner } => client.transfer(name, new_owner).await,
-        Command::Release { name } => client.release(name).await,
+        Command::Transfer { name, new_owner } => client.transfer(&name, new_owner).await,
+        Command::Release { name } => client.release(&name).await,
         Command::SetPage {
             name,
             file,
@@ -593,14 +577,18 @@ async fn main() -> Result<()> {
         } => {
             let body = std::fs::read(&file)
                 .with_context(|| format!("cannot read {}", file.display()))?;
-            client.set_page(name, content_type, body).await
-        }
-        Command::ClearPage { name } => {
             client
-                .set_page(name, "application/octet-stream".to_owned(), Vec::new())
+                .set_page(&name, Some(PageContent { content_type, body }))
                 .await
         }
+        Command::ClearPage { name } => client.set_page(&name, None).await,
         Command::SetPrimary { name, owner } => {
+            if !name.is_empty() {
+                eprintln!(
+                    "warning: this publishes {name}{NAME_SUFFIX} on the chain in the clear, as \
+                     the name of {owner}"
+                );
+            }
             client
                 .send(vec![(owner, true)], &Instruction::SetPrimary { name })
                 .await

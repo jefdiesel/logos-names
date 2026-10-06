@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["core", "methods", "methods/guest", "cli"]
+members = ["core", "seal", "methods", "methods/guest", "cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 names_core = { path = "core" }
+names_seal = { path = "seal" }
 
 # Pinned to the LEZ release that Logos testnet v0.3 runs.
 lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.3.0" }
