@@ -125,9 +125,18 @@ LEZ_RPC_URL=http://127.0.0.1:3040 NAMES_PROGRAM=<program id> node gateway/serve.
 - `http://jef.localhost:8787/.well-known/logos-name.json` returns the record as
   JSON, for apps and AI agents.
 
-`gateway/worker.js` is a standard Worker module: deploy it with a wildcard
-route (`*.yourdomain/*`) and the same two variables, and the same names resolve
-under that domain. A gateway is a convenience, not a trust anchor: it can alter
+`gateway/` is also a Cloudflare project. To deploy it:
+
+```sh
+cd gateway && npm install
+cf auth login
+NAMES_PROGRAM=<program id> ROOT_HOSTS=<worker>.<account>.workers.dev cf deploy
+```
+
+A host listed in `ROOT_HOSTS` serves names by path (`<host>/jef`), which is what
+a `workers.dev` address needs because it has no wildcard subdomains. Add a
+wildcard route (`*.yourdomain/*`) to serve `jef.yourdomain` instead. Pages served
+by path are sandboxed into their own origin, since they would otherwise share one. A gateway is a convenience, not a trust anchor: it can alter
 what it serves, and the local gateway is the path that trusts nobody.
 
 ## AI agents
