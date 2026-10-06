@@ -25,6 +25,7 @@ jobs:
         with:
           node-version: 22
       - run: node --test resolver/names.test.js
+      - run: node basecamp/logic.test.mjs
 
   guest:
     name: Reproducible guest build
