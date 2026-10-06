@@ -45,6 +45,7 @@ jobs:
           curl -L https://risczero.com/install | bash
           echo "$HOME/.risc0/bin" >> "$GITHUB_PATH"
           "$HOME/.risc0/bin/rzup" install cargo-risczero "$RISC0_VERSION"
+          "$HOME/.risc0/bin/rzup" install rust
       - name: Build the guest in Docker
         run: cargo risczero build --manifest-path methods/guest/Cargo.toml
       - name: Report the binary
