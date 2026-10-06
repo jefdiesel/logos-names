@@ -1,0 +1,21 @@
+[workspace]
+resolver = "3"
+members = ["core", "methods", "methods/guest", "cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+names_core = { path = "core" }
+
+# Pinned to the LEZ release that Logos testnet v0.3 runs.
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.3.0" }
+wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.3.0" }
+risc0-zkvm = { version = "3.0.5", default-features = false, features = ["std"] }
+borsh = "1.5.7"
+
+# Same keccak patch LEZ applies, so the guest matches what the zone builds.
+[patch.crates-io]
+keccak = { git = "https://github.com/logos-blockchain/sponges", rev = "3a56e99771beedf04946eab21a4a62adc2951377" }

@@ -1,0 +1,11 @@
+[package]
+name = "names_methods"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[build-dependencies]
+risc0-build = "3.0.5"
+
+[package.metadata.risc0]
+methods = ["guest"]

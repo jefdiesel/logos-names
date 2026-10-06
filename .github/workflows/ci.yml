@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  core:
+    name: Program logic tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked -p names_core
+
+  resolver:
+    name: Resolver tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test resolver/names.test.js
+
+  guest:
+    name: Reproducible guest build
+    runs-on: ubuntu-latest
+    env:
+      RISC0_VERSION: "3.0.5"
+      # Same builder image LEZ v0.3.0 uses for its own programs.
+      RISC0_DOCKER_CONTAINER_TAG: r0.1.91.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Install cargo-risczero
+        env:
+          # rzup looks releases up through the GitHub API; authenticate to avoid rate limits.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -L https://risczero.com/install | bash
+          echo "$HOME/.risc0/bin" >> "$GITHUB_PATH"
+          "$HOME/.risc0/bin/rzup" install cargo-risczero "$RISC0_VERSION"
+      - name: Build the guest in Docker
+        run: cargo risczero build --manifest-path methods/guest/Cargo.toml
+      - name: Report the binary
+        run: |
+          bin=$(find target -name logos_names.bin -path '*docker*' | head -1)
+          test -n "$bin"
+          ls -l "$bin"
+          sha256sum "$bin" | tee logos_names.bin.sha256
+          cp "$bin" logos_names.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: logos_names-guest
+          path: |
+            logos_names.bin
+            logos_names.bin.sha256
