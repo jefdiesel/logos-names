@@ -1,15 +1,34 @@
 {
   "name": "names_ui",
   "display_name": "Names",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "type": "ui_qml",
   "category": "identity",
   "description": "Look up, message and pay a .lez name",
   "view": "Main.qml",
   "icon": "src/icons/icon.png",
-  "dependencies": [],
-  "provides": [],
-  "uses": [{ "intent": "basecamp.apps.launch" }],
+  "dependencies": [
+    "names"
+  ],
+  "provides": [
+    {
+      "intent": "names.open",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "handoff": true,
+      "web": true
+    }
+  ],
+  "uses": [
+    {
+      "intent": "basecamp.apps.launch"
+    }
+  ],
   "nix": {
     "packages": {
       "build": [],

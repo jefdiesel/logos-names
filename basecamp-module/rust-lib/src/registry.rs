@@ -200,6 +200,20 @@ impl NameRecord {
     }
 }
 
+/// Decodes a page into the JSON an app needs to show it. `text` is the body when
+/// it is valid UTF-8, and null otherwise.
+pub fn page_json(bytes: &[u8]) -> Result<Value, String> {
+    let mut reader = Reader { bytes };
+    let _version = reader.u8()?;
+    let content_type = reader.string()?;
+    let body = reader.byte_vec()?;
+    Ok(json!({
+        "content_type": content_type,
+        "bytes": body.len(),
+        "text": std::str::from_utf8(body).ok(),
+    }))
+}
+
 /// Decodes the directory, returning `(count, latest)`.
 pub fn decode_directory(bytes: &[u8]) -> Result<(u64, Option<String>), String> {
     let mut reader = Reader { bytes };
@@ -265,6 +279,15 @@ impl Registry {
             return Ok(None);
         }
         NameRecord::decode(&bytes).map(Some)
+    }
+
+    /// The page published under `name`, or `None` when it has none.
+    pub fn page(&self, name: &str) -> Result<Option<Value>, String> {
+        let bytes = self.shard(&page_address(&self.program, name))?;
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        page_json(&bytes).map(Some)
     }
 
     /// The name `account` is shown as. A reverse record is only a claim, so it
@@ -392,6 +415,18 @@ mod tests {
         let bytes = sample_record();
         assert!(NameRecord::decode(&bytes[..bytes.len() - 2]).is_err());
         assert!(NameRecord::decode(&[1, 9, 0, 0, 0]).is_err());
+    }
+
+    #[test]
+    fn a_page_decodes_with_its_text() {
+        let mut page = vec![1];
+        page.extend(string("text/html"));
+        page.extend(2_u32.to_le_bytes());
+        page.extend(b"hi");
+        let decoded = page_json(&page).expect("decodes");
+        assert_eq!(decoded["content_type"], "text/html");
+        assert_eq!(decoded["bytes"], 2);
+        assert_eq!(decoded["text"], "hi");
     }
 
     #[test]
