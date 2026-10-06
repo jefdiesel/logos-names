@@ -36,7 +36,7 @@ BRIDGE = r"""
             }
             if (method === "get_config") return JSON.stringify({ registry: %(registry)s, sequencer: "http://127.0.0.1:3040" })
             if (method === "normalize") return String(args[0]).toLowerCase().replace(/\.lez$/, "")
-            if (method === "list") return ok({ total: 214, names: names, more: true })
+            if (method === "list") return ok({ total: names.length, names: args[1] === "" ? names : [], more: false })
             if (method === "page") return ok(args[0] === "jef" ? { content_type: "text/html; charset=utf-8", bytes: 148, text: %(page)s } : null)
             if (method === "resolve") {
                 var name = String(args[0]).toLowerCase().replace(/\.lez$/, "")
@@ -64,13 +64,10 @@ SCENARIOS = {
     "pay": 'root.show("jef"); root.openPay()',
     "register": 'root.show("satoshi")',
     "nowallet": 'root.show("satoshi")',
-    "edit": 'root.show("jef"); root.openEdit()',
-    "transfer": 'root.show("jef"); root.tool = "transfer"',
-    "delete": 'root.show("jef"); root.tool = "delete"',
-    "gear": 'root.manage("grace", "edit")',
-    "trash": 'root.manage("grace", "delete")',
-    "waiting": 'root.show("jef"); root.tool = "delete"; root.deleteName()',
-    "settings": 'root.show("jef"); root.settingsOpen = true',
+    "settings": 'root.manage("jef")',
+    "delete": 'root.manage("grace"); root.confirmingDelete = true',
+    "waiting": 'root.manage("grace"); root.deleteName()',
+    "register-settings": 'root.show("jef"); root.settingsOpen = true',
     "unset": "",
 }
 
@@ -88,7 +85,7 @@ def main():
             "alice": ALICE, "bob": BOB, "carol": CAROL, "page": json.dumps(PAGE),
             "wallet": "false" if scenario == "nowallet" else "true",
             "registry": "null" if scenario == "unset" else json.dumps("DbYLkKwd2b13bQhceVj351mpPw7QmRzEjRT2EfU56CKH"),
-            "scenario": SCENARIOS[scenario], "out": out, "height": 1240 if scenario == "edit" else 760,
+            "scenario": SCENARIOS[scenario], "out": out, "height": 1460 if scenario in ("settings", "delete") else 760,
         }
         with tempfile.NamedTemporaryFile("w", suffix=".qml", delete=False) as handle:
             handle.write(source.replace(marker, marker + bridge, 1))

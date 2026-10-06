@@ -1,4 +1,4 @@
-// Logos Names for Basecamp: the register of .lez names.
+// Logos Names for Basecamp: find, register and manage .lez names.
 //
 // A front end on the `names` module. The module reads the chain itself, so
 // browsing needs no wallet. Registering a name, changing it, transferring it
@@ -26,7 +26,8 @@ Item {
     property var wallet: []            // the wallet's funded public accounts: [{account, balance, name}]
     property string walletProblem: ""  // why the wallet cannot be used, if it cannot
     property int fromIndex: 0
-    property string tool: ""           // the open panel: "", "pay", "edit", "transfer" or "delete"
+    property string tool: ""           // the open panel: "", "pay" or "settings"
+    property bool confirmingDelete: false
     property var pending: null         // a change that was sent and is not confirmed yet
     property string registry: ""
     property string sequencer: ""
@@ -44,14 +45,18 @@ Item {
 
     // ── Palette and type ────────────────────────────────────────────────
 
-    readonly property color slate: "#15171C"
-    readonly property color panel: "#1C1F26"
-    readonly property color raised: "#242832"
-    readonly property color line: "#2B303B"
-    readonly property color ink: "#EEF0F4"
-    readonly property color dim: "#8A91A0"
-    readonly property color brass: "#D9B15A"
-    readonly property color alarm: "#F08C7E"
+    // Text is white on near-black, and even the secondary grey stays above
+    // 9:1 against the background, so nothing on screen reads as faint.
+    readonly property color slate: "#0F1115"
+    readonly property color panel: "#171A20"
+    readonly property color raised: "#2B303B"
+    readonly property color hover: "#20242D"
+    readonly property color line: "#434A59"
+    readonly property color ink: "#FFFFFF"
+    readonly property color dim: "#C3C9D4"
+    readonly property color faint: "#8D95A5"   // placeholders only
+    readonly property color brass: "#F0C562"
+    readonly property color alarm: "#FF9C8C"
     readonly property string sans: "Avenir Next"
     readonly property string mono: "Menlo"
 
@@ -168,6 +173,9 @@ Item {
             register = more ? register.concat(listed.names) : listed.names
             totalNames = listed.total
             moreNames = listed.more
+            // The list is only used to find the wallet's own names, so read on.
+            if (moreNames && register.length < 400)
+                loadRegister(true)
         } catch (error) {
             say(error.message, true)
         }
@@ -185,12 +193,14 @@ Item {
             walletProblem = funded.length > 0 ? "" : "None of the wallet's accounts holds funds to pay the fee."
             if (fromIndex >= funded.length)
                 fromIndex = 0
+            console.log("names_ui: wallet has", funded.length, "funded account(s)")
             if (announce)
                 say(funded.length > 0 ? "Wallet connected." : walletProblem, funded.length === 0)
         }, function(message) {
             wallet = []
             walletProblem = sentence(message)
             fromIndex = 0
+            console.log("names_ui: no wallet:", message)
             if (announce)
                 say(walletProblem, true)
         })
@@ -309,25 +319,24 @@ Item {
         }, name + ".lez is yours.")
     }
 
-    /// Opens one of the holder's panels for a name picked from "My names".
-    function manage(name, panel) {
-        say("", false)
+    /// Opens the settings of a name picked from "My names".
+    function manage(name) {
         show(name)
-        if (record === null || !mine)
-            return
-        if (panel === "edit")
-            openEdit()
-        else
-            tool = panel
+        if (record !== null && mine)
+            openSettings()
     }
 
-    function openEdit() {
+    /// Everything the holder can do with the name on the plate: where it
+    /// pays, its entries and page, transferring it, deleting it.
+    function openSettings() {
         say("", false)
         accountField.text = record.account !== null ? record.account : ""
         pageArea.text = page !== null && page.text !== null ? page.text : ""
         newKeyField.text = ""
         newValueField.text = ""
-        tool = "edit"
+        newOwnerField.text = ""
+        confirmingDelete = false
+        tool = "settings"
     }
 
     function saveAccount() {
@@ -532,6 +541,16 @@ Item {
         onTriggered: root.loadWallet(false)
     }
 
+    // A wallet opened after this screen is noticed without a click. Asking is
+    // quick while the wallet module runs; when it does not, each ask waits a
+    // few seconds inside the names module, so those are spaced well apart.
+    Timer {
+        interval: /not running/.test(root.walletProblem) ? 30000 : 6000
+        repeat: true
+        running: root.bridgeReady && root.registry !== "" && root.wallet.length === 0 && !root.busy
+        onTriggered: root.loadWallet(false)
+    }
+
     Timer {
         interval: 1500
         repeat: true
@@ -627,8 +646,8 @@ Item {
         radius: 6
         color: !live ? "transparent" : strong ? (actionArea.containsMouse ? Qt.lighter(fill, 1.08) : fill) : (actionArea.containsMouse ? root.raised : "transparent")
         border.width: strong && live ? 0 : 1
-        border.color: activeFocus ? root.brass : root.line
-        opacity: live ? 1 : 0.45
+        border.color: activeFocus ? root.brass : grave ? root.alarm : root.line
+        opacity: live ? 1 : 0.55
         activeFocusOnTab: live
         Keys.onReturnPressed: if (live) action.pressed()
         Keys.onSpacePressed: if (live) action.pressed()
@@ -636,9 +655,9 @@ Item {
             id: actionText
             anchors.centerIn: parent
             text: action.label
-            color: action.strong && action.live ? root.slate : root.ink
+            color: action.strong && action.live ? root.slate : action.grave ? root.alarm : root.ink
             font.family: root.sans
-            font.pixelSize: 13
+            font.pixelSize: 14
             font.weight: Font.DemiBold
         }
         MouseArea {
@@ -658,7 +677,7 @@ Item {
         property string kind: ""
         property bool boxed: false
         property bool grave: false
-        readonly property color tint: iconArea.containsMouse || activeFocus ? (grave ? root.alarm : root.brass) : (boxed ? root.ink : root.dim)
+        readonly property color tint: iconArea.containsMouse || activeFocus ? (grave ? root.alarm : root.brass) : root.ink
         signal pressed()
         implicitWidth: boxed ? 36 : 26
         implicitHeight: boxed ? 36 : 26
@@ -735,14 +754,14 @@ Item {
             text: parent.label
             color: root.ink
             font.family: root.sans
-            font.pixelSize: 12
-            font.weight: Font.DemiBold
+            font.pixelSize: 14
+            font.weight: Font.Bold
         }
         Text {
             text: parent.count
             color: root.dim
             font.family: root.sans
-            font.pixelSize: 12
+            font.pixelSize: 13
         }
     }
 
@@ -750,9 +769,10 @@ Item {
     component Link: Text {
         id: link
         signal pressed()
-        color: linkArea.containsMouse ? root.brass : root.dim
+        color: linkArea.containsMouse ? root.brass : root.ink
         font.family: root.sans
-        font.pixelSize: 12
+        font.pixelSize: 13
+        font.underline: true
         MouseArea {
             id: linkArea
             anchors.fill: parent
@@ -802,7 +822,7 @@ Item {
             verticalAlignment: Text.AlignVCenter
             visible: input.text === ""
             text: field.hint
-            color: root.dim
+            color: root.faint
             font.family: root.sans
             font.pixelSize: field.size
             elide: Text.ElideRight
@@ -844,7 +864,7 @@ Item {
             anchors.margins: 12
             visible: areaInput.text === ""
             text: area.hint
-            color: root.dim
+            color: root.faint
             font.family: root.sans
             font.pixelSize: 13
             wrapMode: Text.Wrap
@@ -881,18 +901,18 @@ Item {
         Layout.fillWidth: true
         color: root.dim
         font.family: root.sans
-        font.pixelSize: 12
+        font.pixelSize: 13
         lineHeight: 1.25
         wrapMode: Text.Wrap
     }
 
     /// The heading of one part of the edit panel.
     component Part: Text {
-        Layout.topMargin: 6
+        Layout.topMargin: 10
         color: root.ink
         font.family: root.sans
-        font.pixelSize: 13
-        font.weight: Font.DemiBold
+        font.pixelSize: 14
+        font.weight: Font.Bold
     }
 
     /// The wallet's funded accounts, one of which pays.
@@ -925,21 +945,21 @@ Item {
                         text: root.shorten(accountRow.modelData.account)
                         color: root.ink
                         font.family: root.mono
-                        font.pixelSize: 12
+                        font.pixelSize: 13
                     }
                     Text {
                         visible: !!accountRow.modelData.name
                         text: accountRow.modelData.name ? accountRow.modelData.name + ".lez" : ""
                         color: root.dim
                         font.family: root.sans
-                        font.pixelSize: 12
+                        font.pixelSize: 13
                     }
                     Item { Layout.fillWidth: true }
                     Text {
                         text: root.grouped(accountRow.modelData.balance)
                         color: root.dim
                         font.family: root.sans
-                        font.pixelSize: 12
+                        font.pixelSize: 13
                     }
                 }
                 MouseArea {
@@ -965,14 +985,14 @@ Item {
             text: fact.label
             color: root.dim
             font.family: root.sans
-            font.pixelSize: 13
+            font.pixelSize: 14
         }
         Text {
             Layout.fillWidth: true
             text: fact.value
             color: root.ink
             font.family: fact.code ? root.mono : root.sans
-            font.pixelSize: 13
+            font.pixelSize: 14
             wrapMode: Text.WrapAnywhere
         }
         Link {
@@ -1019,10 +1039,14 @@ Item {
 
                 // The names this wallet holds.
                 ColumnLayout {
-                    visible: root.registry !== ""
                     Layout.fillWidth: true
                     spacing: 6
+                    Hint {
+                        visible: root.registry === ""
+                        text: "No registry chosen. Open App settings."
+                    }
                     ListHead {
+                        visible: root.registry !== ""
                         label: "My names"
                         count: root.myNames.length > 0 ? root.myNames.length : ""
                     }
@@ -1030,7 +1054,7 @@ Item {
                         id: myList
                         visible: root.myNames.length > 0
                         Layout.fillWidth: true
-                        Layout.preferredHeight: Math.min(root.myNames.length, 5) * 38
+                        Layout.preferredHeight: Math.min(root.myNames.length, 12) * 38
                         clip: true
                         spacing: 2
                         model: root.myNames
@@ -1041,7 +1065,7 @@ Item {
                             width: myList.width
                             height: 36
                             radius: 6
-                            color: current ? root.raised : myRowArea.containsMouse ? "#20232B" : "transparent"
+                            color: current ? root.raised : myRowArea.containsMouse ? root.hover : "transparent"
                             MouseArea {
                                 id: myRowArea
                                 anchors.fill: parent
@@ -1069,99 +1093,30 @@ Item {
                                 }
                                 IconButton {
                                     kind: "gear"
-                                    onPressed: root.manage(myRow.modelData.name, "edit")
-                                }
-                                IconButton {
-                                    kind: "trash"
-                                    grave: true
-                                    onPressed: root.manage(myRow.modelData.name, "delete")
+                                    onPressed: root.manage(myRow.modelData.name)
                                 }
                             }
                         }
                     }
                     Hint {
                         visible: root.myNames.length === 0 && root.wallet.length > 0
-                        text: "None yet. Search for a name nobody holds to register it."
+                        text: "None yet. Search for a name; if nobody holds it, you can register it."
                     }
                     Hint {
-                        visible: root.wallet.length === 0
-                        text: "Connect a wallet to see the names you hold."
+                        visible: root.registry !== "" && root.wallet.length === 0
+                        text: "Open your wallet in the LEZ Wallet app to see the names you hold."
                     }
                     Link {
-                        visible: root.wallet.length === 0
+                        visible: root.registry !== "" && root.wallet.length === 0
                         text: "Connect wallet"
                         onPressed: root.loadWallet(true)
                     }
                 }
 
-                Rectangle { Layout.fillWidth: true; height: 1; color: root.line }
-
-                ListHead {
-                    label: root.registry === "" ? "No register chosen" : "All names"
-                    count: root.registry === "" ? "" : root.totalNames
-                }
-
-                ListView {
-                    id: registerList
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    clip: true
-                    spacing: 2
-                    model: root.register
-                    delegate: Rectangle {
-                        id: row
-                        required property var modelData
-                        readonly property bool current: root.record !== null && root.record.name === modelData.name
-                        width: registerList.width
-                        height: 40
-                        radius: 6
-                        color: current ? root.raised : rowArea.containsMouse ? "#20232B" : "transparent"
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 8
-                            anchors.rightMargin: 10
-                            spacing: 10
-                            Seal {
-                                Layout.preferredWidth: 24
-                                Layout.preferredHeight: 24
-                                owner: row.modelData.owner
-                            }
-                            Text {
-                                Layout.fillWidth: true
-                                textFormat: Text.StyledText
-                                text: row.modelData.name + "<font color=\"" + root.dim + "\">.lez</font>"
-                                color: root.ink
-                                font.family: root.sans
-                                font.weight: Font.Medium
-                                font.pixelSize: 15
-                                elide: Text.ElideRight
-                            }
-                        }
-                        MouseArea {
-                            id: rowArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                root.say("", false)
-                                root.show(row.modelData.name)
-                            }
-                        }
-                    }
-                    footer: Item {
-                        width: registerList.width
-                        height: root.moreNames ? 44 : 0
-                        visible: root.moreNames
-                        Action {
-                            anchors.centerIn: parent
-                            label: "Show older names"
-                            onPressed: root.loadRegister(true)
-                        }
-                    }
-                }
+                Item { Layout.fillHeight: true }
 
                 Link {
-                    text: root.settingsOpen ? "Close settings" : "Settings"
+                    text: root.settingsOpen ? "Close app settings" : "App settings"
                     onPressed: root.settingsOpen = !root.settingsOpen
                 }
             }
@@ -1189,7 +1144,7 @@ Item {
                     Layout.fillWidth: true
                     spacing: 10
                     Text {
-                        text: "Which register"
+                        text: "Which registry"
                         color: root.ink
                         font.family: root.sans
                         font.weight: Font.DemiBold
@@ -1197,14 +1152,14 @@ Item {
                     }
                     Hint {
                         font.pixelSize: 13
-                        text: "A register is one program on the Logos Execution Zone. Everyone who uses the same program ID sees the same names."
+                        text: "A registry is one program on the Logos Execution Zone. Everyone who uses the same program ID sees the same names."
                     }
                     Field {
                         id: registryField
                         Layout.fillWidth: true
                         size: 13
                         text: root.registry
-                        hint: "Program ID of the register"
+                        hint: "Program ID of the registry"
                         onEdited: root.saveConfig(root.sequencer, registryField.text.trim())
                     }
                     Field {
@@ -1244,7 +1199,7 @@ Item {
                     Layout.topMargin: 60
                     spacing: 10
                     Text {
-                        text: root.registry === "" ? "Choose a register to begin" : "The register of .lez names"
+                        text: root.registry === "" ? "Choose a registry to begin" : "Find a .lez name"
                         color: root.ink
                         font.family: root.sans
                         font.weight: Font.DemiBold
@@ -1252,7 +1207,7 @@ Item {
                     }
                     Hint {
                         font.pixelSize: 14
-                        text: root.registry === "" ? "Open Settings and enter the register's program ID." : "Pick a name on the left to see who holds it, where it pays and how to reach them. Search for a name nobody holds and you can register it."
+                        text: root.registry === "" ? "Open App settings and enter the registry's program ID." : "Search for a name to see who holds it, where it pays and how to reach them. If nobody holds it, you can register it."
                     }
                 }
 
@@ -1363,25 +1318,8 @@ Item {
                         Item { Layout.fillWidth: true }
                         Action {
                             visible: root.mine
-                            label: "Edit"
-                            onPressed: root.openEdit()
-                        }
-                        Action {
-                            visible: root.mine
-                            label: "Transfer"
-                            onPressed: {
-                                root.say("", false)
-                                newOwnerField.text = ""
-                                root.tool = "transfer"
-                            }
-                        }
-                        Action {
-                            visible: root.mine
-                            label: "Delete"
-                            onPressed: {
-                                root.say("", false)
-                                root.tool = "delete"
-                            }
+                            label: "Settings"
+                            onPressed: root.openSettings()
                         }
                     }
 
@@ -1416,10 +1354,10 @@ Item {
                         Hint { text: "A private payment hides the amount and where it went. It takes a few minutes to prepare." }
                     }
 
-                    // Editing.
+                    // The holder's settings for this name.
                     Panel {
-                        visible: root.tool === "edit"
-                        title: root.record !== null ? "Edit " + root.record.display : ""
+                        visible: root.tool === "settings"
+                        title: root.record !== null ? "Settings for " + root.record.display : ""
 
                         Part { text: "Pays to" }
                         RowLayout {
@@ -1537,60 +1475,67 @@ Item {
 
                         Part { text: "Your account's name" }
                         Hint { text: root.record !== null ? "Apps can show " + root.shorten(root.record.owner) + " as " + root.record.display + " wherever the account appears." : "" }
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 8
-                            Action {
-                                label: root.record !== null ? "Show my account as " + root.record.display : ""
-                                changes: true
-                                onPressed: root.showAccountAsName()
-                            }
-                            Item { Layout.fillWidth: true }
-                            Action { label: "Done"; onPressed: root.tool = "" }
+                        Action {
+                            label: root.record !== null ? "Show my account as " + root.record.display : ""
+                            changes: true
+                            onPressed: root.showAccountAsName()
                         }
-                    }
 
-                    // Transferring.
-                    Panel {
-                        visible: root.tool === "transfer"
-                        title: root.record !== null ? "Transfer " + root.record.display : ""
-                        Field {
-                            id: newOwnerField
-                            Layout.fillWidth: true
-                            code: true
-                            hint: "Account ID of the new holder"
-                        }
-                        Hint { text: "The new holder starts clean: where the name pays, its entries and its page are cleared. Once it is transferred, only they can change it or give it back." }
+                        Rectangle { Layout.fillWidth: true; Layout.topMargin: 8; height: 1; color: root.line }
+
+                        Part { text: "Transfer to another wallet" }
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 8
+                            Field {
+                                id: newOwnerField
+                                Layout.fillWidth: true
+                                code: true
+                                hint: "Account ID of the new holder"
+                            }
                             Action {
-                                label: root.record !== null ? "Transfer " + root.record.display : ""
-                                strong: true
+                                label: "Transfer"
                                 changes: true
                                 enabledNow: newOwnerField.text.trim() !== ""
                                 onPressed: root.transferName()
                             }
-                            Action { label: "Cancel"; onPressed: root.tool = "" }
                         }
-                    }
+                        Hint { text: "The new holder starts clean: where the name pays, its entries and its page are cleared. After that only they can change it or give it back." }
 
-                    // Deleting.
-                    Panel {
-                        visible: root.tool === "delete"
-                        title: root.record !== null ? "Delete " + root.record.display + "?" : ""
-                        Hint { text: "Its record and page are cleared and it leaves the register. The name is then free, and anyone can register it, including someone else." }
+                        Part { text: "Delete" }
+                        Hint { text: "Its record and page are cleared and it leaves the register. The name is then free for anyone to register, including someone else." }
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 8
                             Action {
+                                visible: !root.confirmingDelete
                                 label: root.record !== null ? "Delete " + root.record.display : ""
+                                grave: true
+                                onPressed: root.confirmingDelete = true
+                            }
+                            Text {
+                                visible: root.confirmingDelete
+                                text: "Delete it for good?"
+                                color: root.alarm
+                                font.family: root.sans
+                                font.pixelSize: 14
+                                font.weight: Font.DemiBold
+                            }
+                            Action {
+                                visible: root.confirmingDelete
+                                label: "Yes, delete it"
                                 strong: true
                                 grave: true
                                 changes: true
                                 onPressed: root.deleteName()
                             }
-                            Action { label: "Keep it"; onPressed: root.tool = "" }
+                            Action {
+                                visible: root.confirmingDelete
+                                label: "Keep it"
+                                onPressed: root.confirmingDelete = false
+                            }
+                            Item { Layout.fillWidth: true }
+                            Action { label: "Done"; onPressed: root.tool = "" }
                         }
                     }
 
