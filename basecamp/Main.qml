@@ -38,6 +38,8 @@ Item {
     readonly property bool bridgeReady: typeof logos !== "undefined" && !!logos.callModule
     readonly property bool busy: pending !== null
     readonly property bool mine: record !== null && holds(record.owner, wallet)
+    /// The names this wallet holds, among those the register has loaded.
+    readonly property var myNames: register.filter(function(entry) { return root.holds(entry.owner, root.wallet) })
     readonly property string chatAddress: record !== null && record.texts && /^[0-9a-f]{64}$/.test(record.texts.chat || "") ? record.texts.chat : ""
 
     // ── Palette and type ────────────────────────────────────────────────
@@ -305,6 +307,18 @@ Item {
             var found = ask("resolve", [name])
             return found !== null && found.owner === owner
         }, name + ".lez is yours.")
+    }
+
+    /// Opens one of the holder's panels for a name picked from "My names".
+    function manage(name, panel) {
+        say("", false)
+        show(name)
+        if (record === null || !mine)
+            return
+        if (panel === "edit")
+            openEdit()
+        else
+            tool = panel
     }
 
     function openEdit() {
@@ -637,6 +651,101 @@ Item {
         }
     }
 
+    /// A small button that is only a drawing: "search", "gear" or "trash".
+    /// `boxed` gives it the outline of a field, to sit beside one.
+    component IconButton: Rectangle {
+        id: iconButton
+        property string kind: ""
+        property bool boxed: false
+        property bool grave: false
+        readonly property color tint: iconArea.containsMouse || activeFocus ? (grave ? root.alarm : root.brass) : (boxed ? root.ink : root.dim)
+        signal pressed()
+        implicitWidth: boxed ? 36 : 26
+        implicitHeight: boxed ? 36 : 26
+        radius: 6
+        color: iconArea.containsMouse ? root.raised : boxed ? root.slate : "transparent"
+        border.width: boxed || activeFocus ? 1 : 0
+        border.color: activeFocus ? root.brass : root.line
+        activeFocusOnTab: true
+        Keys.onReturnPressed: iconButton.pressed()
+        Keys.onSpacePressed: iconButton.pressed()
+        onTintChanged: glyph.requestPaint()
+        Canvas {
+            id: glyph
+            anchors.centerIn: parent
+            width: 16
+            height: 16
+            onPaint: {
+                var ctx = getContext("2d")
+                ctx.reset()
+                ctx.strokeStyle = iconButton.tint
+                ctx.lineCap = "round"
+                ctx.lineJoin = "round"
+                ctx.lineWidth = 1.5
+                ctx.beginPath()
+                if (iconButton.kind === "search") {
+                    ctx.arc(6.75, 6.75, 4.5, 0, Math.PI * 2)
+                    ctx.moveTo(10.2, 10.2)
+                    ctx.lineTo(14.2, 14.2)
+                } else if (iconButton.kind === "gear") {
+                    for (var tooth = 0; tooth < 8; tooth++) {
+                        var angle = tooth * Math.PI / 4
+                        ctx.moveTo(8 + Math.cos(angle) * 5.2, 8 + Math.sin(angle) * 5.2)
+                        ctx.lineTo(8 + Math.cos(angle) * 7, 8 + Math.sin(angle) * 7)
+                    }
+                    ctx.moveTo(12.6, 8)
+                    ctx.arc(8, 8, 4.6, 0, Math.PI * 2)
+                    ctx.moveTo(9.8, 8)
+                    ctx.arc(8, 8, 1.8, 0, Math.PI * 2)
+                } else if (iconButton.kind === "trash") {
+                    ctx.moveTo(2.5, 4.5)
+                    ctx.lineTo(13.5, 4.5)
+                    ctx.moveTo(6, 4.5)
+                    ctx.lineTo(6, 2.5)
+                    ctx.lineTo(10, 2.5)
+                    ctx.lineTo(10, 4.5)
+                    ctx.moveTo(4, 4.5)
+                    ctx.lineTo(4.8, 14)
+                    ctx.lineTo(11.2, 14)
+                    ctx.lineTo(12, 4.5)
+                    ctx.moveTo(6.8, 7.2)
+                    ctx.lineTo(6.9, 11.3)
+                    ctx.moveTo(9.2, 7.2)
+                    ctx.lineTo(9.1, 11.3)
+                }
+                ctx.stroke()
+            }
+        }
+        MouseArea {
+            id: iconArea
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: iconButton.pressed()
+        }
+    }
+
+    /// The small heading over one of the register's two lists.
+    component ListHead: RowLayout {
+        property string label: ""
+        property string count: ""
+        Layout.fillWidth: true
+        Text {
+            Layout.fillWidth: true
+            text: parent.label
+            color: root.ink
+            font.family: root.sans
+            font.pixelSize: 12
+            font.weight: Font.DemiBold
+        }
+        Text {
+            text: parent.count
+            color: root.dim
+            font.family: root.sans
+            font.pixelSize: 12
+        }
+    }
+
     /// A quiet text button, for the small things beside the main actions.
     component Link: Text {
         id: link
@@ -892,18 +1001,104 @@ Item {
                 anchors.margins: 18
                 spacing: 14
 
-                Field {
-                    id: searchField
+                RowLayout {
                     Layout.fillWidth: true
-                    hint: "Find or register a name"
-                    onAccepted: root.find(searchField.text)
+                    spacing: 8
+                    Field {
+                        id: searchField
+                        Layout.fillWidth: true
+                        hint: "Find or register"
+                        onAccepted: root.find(searchField.text)
+                    }
+                    IconButton {
+                        kind: "search"
+                        boxed: true
+                        onPressed: root.find(searchField.text)
+                    }
                 }
 
-                Text {
-                    text: root.registry === "" ? "No register chosen" : root.totalNames === 1 ? "1 name" : root.totalNames + " names"
-                    color: root.dim
-                    font.family: root.sans
-                    font.pixelSize: 12
+                // The names this wallet holds.
+                ColumnLayout {
+                    visible: root.registry !== ""
+                    Layout.fillWidth: true
+                    spacing: 6
+                    ListHead {
+                        label: "My names"
+                        count: root.myNames.length > 0 ? root.myNames.length : ""
+                    }
+                    ListView {
+                        id: myList
+                        visible: root.myNames.length > 0
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: Math.min(root.myNames.length, 5) * 38
+                        clip: true
+                        spacing: 2
+                        model: root.myNames
+                        delegate: Rectangle {
+                            id: myRow
+                            required property var modelData
+                            readonly property bool current: root.record !== null && root.record.name === modelData.name
+                            width: myList.width
+                            height: 36
+                            radius: 6
+                            color: current ? root.raised : myRowArea.containsMouse ? "#20232B" : "transparent"
+                            MouseArea {
+                                id: myRowArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    root.say("", false)
+                                    root.show(myRow.modelData.name)
+                                }
+                            }
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 8
+                                anchors.rightMargin: 4
+                                spacing: 4
+                                Text {
+                                    Layout.fillWidth: true
+                                    textFormat: Text.StyledText
+                                    text: myRow.modelData.name + "<font color=\"" + root.dim + "\">.lez</font>"
+                                    color: root.ink
+                                    font.family: root.sans
+                                    font.weight: Font.Medium
+                                    font.pixelSize: 15
+                                    elide: Text.ElideRight
+                                }
+                                IconButton {
+                                    kind: "gear"
+                                    onPressed: root.manage(myRow.modelData.name, "edit")
+                                }
+                                IconButton {
+                                    kind: "trash"
+                                    grave: true
+                                    onPressed: root.manage(myRow.modelData.name, "delete")
+                                }
+                            }
+                        }
+                    }
+                    Hint {
+                        visible: root.myNames.length === 0 && root.wallet.length > 0
+                        text: "None yet. Search for a name nobody holds to register it."
+                    }
+                    Hint {
+                        visible: root.wallet.length === 0
+                        text: "Connect a wallet to see the names you hold."
+                    }
+                    Link {
+                        visible: root.wallet.length === 0
+                        text: "Connect wallet"
+                        onPressed: root.loadWallet(true)
+                    }
+                }
+
+                Rectangle { Layout.fillWidth: true; height: 1; color: root.line }
+
+                ListHead {
+                    label: root.registry === "" ? "No register chosen" : "All names"
+                    count: root.registry === "" ? "" : root.totalNames
                 }
 
                 ListView {
@@ -941,13 +1136,6 @@ Item {
                                 font.pixelSize: 15
                                 elide: Text.ElideRight
                             }
-                            Text {
-                                visible: root.holds(row.modelData.owner, root.wallet)
-                                text: "Yours"
-                                color: root.brass
-                                font.family: root.sans
-                                font.pixelSize: 11
-                            }
                         }
                         MouseArea {
                             id: rowArea
@@ -972,19 +1160,9 @@ Item {
                     }
                 }
 
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 16
-                    Link {
-                        text: root.settingsOpen ? "Close settings" : "Settings"
-                        onPressed: root.settingsOpen = !root.settingsOpen
-                    }
-                    Item { Layout.fillWidth: true }
-                    Link {
-                        visible: root.registry !== "" && root.wallet.length === 0
-                        text: "Connect wallet"
-                        onPressed: root.loadWallet(true)
-                    }
+                Link {
+                    text: root.settingsOpen ? "Close settings" : "Settings"
+                    onPressed: root.settingsOpen = !root.settingsOpen
                 }
             }
         }
@@ -1074,7 +1252,7 @@ Item {
                     }
                     Hint {
                         font.pixelSize: 14
-                        text: root.registry === "" ? "Open Settings and enter the register's program ID." : "Pick a name on the left to see who holds it, where it pays and how to reach them. Type a name nobody holds and you can register it."
+                        text: root.registry === "" ? "Open Settings and enter the register's program ID." : "Pick a name on the left to see who holds it, where it pays and how to reach them. Search for a name nobody holds and you can register it."
                     }
                 }
 

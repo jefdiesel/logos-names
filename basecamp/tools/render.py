@@ -67,6 +67,8 @@ SCENARIOS = {
     "edit": 'root.show("jef"); root.openEdit()',
     "transfer": 'root.show("jef"); root.tool = "transfer"',
     "delete": 'root.show("jef"); root.tool = "delete"',
+    "gear": 'root.manage("grace", "edit")',
+    "trash": 'root.manage("grace", "delete")',
     "waiting": 'root.show("jef"); root.tool = "delete"; root.deleteName()',
     "settings": 'root.show("jef"); root.settingsOpen = true',
     "unset": "",
