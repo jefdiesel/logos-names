@@ -130,11 +130,11 @@ LEZ_RPC_URL=http://127.0.0.1:3040 NAMES_PROGRAM=<program id> node gateway/serve.
 ```sh
 cd gateway && npm install
 cf auth login
-NAMES_PROGRAM=<program id> ROOT_HOSTS=<worker>.<account>.workers.dev cf deploy
+NAMES_PROGRAM=<program id> cf deploy
 ```
 
-A host listed in `ROOT_HOSTS` serves names by path (`<host>/jef`), which is what
-a `workers.dev` address needs because it has no wildcard subdomains. Add a
+A `workers.dev` address has no wildcard subdomains, so it serves names by path
+(`<host>/jef`); so does any host listed in `ROOT_HOSTS`. Add a
 wildcard route (`*.yourdomain/*`) to serve `jef.yourdomain` instead. Pages served
 by path are sandboxed into their own origin, since they would otherwise share one. A gateway is a convenience, not a trust anchor: it can alter
 what it serves, and the local gateway is the path that trusts nobody.

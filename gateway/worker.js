@@ -7,9 +7,9 @@
 // Configuration (Worker vars or environment):
 //   LEZ_RPC_URL     sequencer JSON-RPC endpoint
 //   NAMES_PROGRAM   account ID of the deployed registry program
-//   ROOT_HOSTS      optional, comma-separated hosts that are the gateway itself
-//                   (e.g. a workers.dev host with no wildcard). On those the name
-//                   is the first path segment: `<host>/<name>`.
+//   ROOT_HOSTS      optional, comma-separated hosts that are the gateway itself.
+//                   On those, and on any workers.dev host, the name is the first
+//                   path segment: `<host>/<name>`.
 
 import { isValidName, resolveName, resolvePage } from "../resolver/names.js";
 
@@ -46,7 +46,10 @@ function nameFromHost(hostname) {
  * On a root host the name is the first path segment; elsewhere it is the subdomain.
  */
 function target(url, rootHosts) {
-  if (!rootHosts.includes(url.hostname.toLowerCase())) {
+  const host = url.hostname.toLowerCase();
+  // workers.dev hosts have no wildcard subdomains, so they are always path-addressed.
+  const isRootHost = rootHosts.includes(host) || host.endsWith(".workers.dev");
+  if (!isRootHost) {
     return { name: nameFromHost(url.hostname), path: url.pathname, sharedOrigin: false };
   }
   const [, first = "", ...rest] = url.pathname.split("/");
