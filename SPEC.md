@@ -210,20 +210,47 @@ it serves; a client that needs certainty reads the chain itself.
 `mcp/server.js` exposes `resolve_name`, `get_page`, `list_names` and
 `reverse_lookup` as read-only tools.
 
-### 9.4 Basecamp module (proposed)
+### 9.4 Logos module (reads implemented, changes proposed)
 
-A Basecamp core module named `names`, so that any Basecamp app, including a
-wallet, resolves a name with one call and no knowledge of this document:
+A Logos core module named `names`, so that any Basecamp app or module,
+including a wallet, resolves a name with one call and no knowledge of this
+document. It is in `basecamp-module/` and reads the chain itself, so it does not
+need a wallet to be open.
 
-| Method | Returns |
+```
+module names {
+  method recipient(name: tstr) -> tstr
+  method resolve(name: tstr) -> tstr
+  method reverse(account: tstr) -> tstr
+  method list(limit: uint, before: tstr) -> tstr
+  method normalize(input: tstr) -> tstr
+  method get_config() -> tstr
+  method set_registry(program_id: tstr) -> bool
+  method set_sequencer(url: tstr) -> bool
+}
+```
+
+`recipient`, `resolve`, `reverse` and `list` answer with JSON text in the
+envelope Logos modules use:
+
+```json
+{ "success": true,  "value": <answer>, "error": null }
+{ "success": false, "value": null,     "error": "why" }
+```
+
+| Method | `value` |
 |---|---|
-| `resolve(name)` | The record as JSON, or `null` |
-| `recipient(name)` | `{"public": <account or null>, "private": {"npk", "vpk"} or null}` |
-| `reverse(account)` | The confirmed name, or `null` |
-| `list(limit, before)` | As the HTTP list |
-| `register(name, owner)`, `set_text(name, key, value)`, and the other changes | The transaction result, after reading the change back |
+| `recipient("jef.lez")` | `{"name", "display", "public", "public_hex", "private"}`, or `null` if unregistered. `public` is a base58 account ID or `null`; `private` is `{"nullifier_public_key", "viewing_public_key"}` in hex, or `null`. |
+| `resolve("jef.lez")` | The record as in 9.2, plus `display`; or `null`. |
+| `reverse(account)` | `{"name", "display"}` for the confirmed name, or `null`. |
+| `list(limit, before)` | As the HTTP list. At most 100 per call; `before` is `""` to start from the newest. |
 
-A wallet's send field would call `recipient` when the input ends in `.lez`.
+A wallet's send field calls `recipient` when the input ends in `.lez`, then
+sends to `public_hex` or to the `private` keys, which are in the form the LEZ
+wallet module's `transfer_public` and `transfer_shielded` take.
+
+Proposed, not built: `register`, `set_text` and the other changes, which need
+the wallet module to sign.
 
 ## 10. Versioning
 

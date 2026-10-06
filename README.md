@@ -33,6 +33,8 @@ does not support LEZ v0.3 yet (`logos-co/spel#291`).
 | `resolver/names.js` | Dependency-free resolver for Node, browsers and Workers. |
 | `gateway/` | Serves `<name>.<domain>`; runs as a Cloudflare Worker or locally. |
 | `mcp/server.js` | Read-only MCP server so AI agents can look names up as tools. |
+| `basecamp-module/` | `names`, a Logos core module: the lookup API for every Basecamp app. |
+| `basecamp/` | A Basecamp app for looking up, paying and messaging a name. |
 | `reference/` | The earlier SPEL (LEZ v0.2.4) draft, kept for when SPEL supports v0.3. |
 
 ## Where a name lives
@@ -154,6 +156,24 @@ A `workers.dev` address has no wildcard subdomains, so it serves names by path
 wildcard route (`*.yourdomain/*`) to serve `jef.yourdomain` instead. Pages served
 by path are sandboxed into their own origin, since they would otherwise share one. A gateway is a convenience, not a trust anchor: it can alter
 what it serves, and the local gateway is the path that trusts nobody.
+
+## Logos apps
+
+`basecamp-module/` builds `names`, a Logos core module any Basecamp app can
+call: `recipient("jef.lez")` returns where to send, publicly or privately. Its
+interface is in [SPEC.md](SPEC.md#94-logos-module-reads-implemented-changes-proposed).
+
+```sh
+cd basecamp-module
+nix build '.#lgx-portable'                        # result/*.lgx
+logosctl package install -y result/*.lgx && logosctl module load names
+logosctl call names set_registry str:<program id>
+logosctl call names recipient jef.lez
+```
+
+Tested in `logosctl` 0.3.1 against a local chain. `basecamp/` is a Basecamp app
+(`nix build '.#lgx-portable'` there too) that has been built but not yet run
+inside Basecamp.
 
 ## AI agents
 
