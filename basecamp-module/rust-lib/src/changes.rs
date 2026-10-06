@@ -7,8 +7,9 @@
 //! explanation: LEZ includes failed transactions in blocks without saying why.
 
 use crate::registry::{
-    account_text, is_valid_name, page_address, record_address, seal_page, AccountId, Derived,
-    Profile, Registry, Resolved, Writer, NAME_SUFFIX, VPK_LEN,
+    account_text, is_valid_name, page_address, record_address, seal_page, settings_address,
+    AccountId, Derived, Profile, Registry, Resolved, Settings, Writer, GRACE_MS, NAME_SUFFIX, TERMS,
+    VPK_LEN,
 };
 
 const MAX_TEXT_RECORDS: usize = 16;
@@ -26,6 +27,10 @@ pub struct Change {
     pub instruction: Vec<u8>,
     /// The accounts the instruction runs over, in the order the program expects.
     pub accounts: Vec<AccountId>,
+    /// How many accounts at the end of `accounts` are used for their native
+    /// token balance rather than for the registry's data: the payer and, when
+    /// a fee is due, the treasury.
+    pub balances: usize,
     /// The one account that signs and pays. It is always among `accounts`.
     pub signer: AccountId,
 }
@@ -37,38 +42,57 @@ fn on_name(index: u8, id: &[u8; 32]) -> Writer {
     writer
 }
 
-pub fn encode_register(id: &[u8; 32], sealed: &[u8]) -> Vec<u8> {
+pub fn encode_register(id: &[u8; 32], sealed: &[u8], term: u8, fee: u128, now: u64) -> Vec<u8> {
     let mut writer = on_name(0, id);
     writer.bytes(sealed);
+    writer.0.push(term);
+    writer.0.extend(fee.to_le_bytes());
+    writer.0.extend(now.to_le_bytes());
+    writer.0
+}
+
+pub fn encode_renew(id: &[u8; 32], term: u8, fee: u128, now: u64) -> Vec<u8> {
+    let mut writer = on_name(1, id);
+    writer.0.push(term);
+    writer.0.extend(fee.to_le_bytes());
+    writer.0.extend(now.to_le_bytes());
     writer.0
 }
 
 pub fn encode_set_record(id: &[u8; 32], sealed: &[u8]) -> Vec<u8> {
-    let mut writer = on_name(1, id);
-    writer.bytes(sealed);
-    writer.0
-}
-
-pub fn encode_set_page(id: &[u8; 32], sealed: &[u8]) -> Vec<u8> {
     let mut writer = on_name(2, id);
     writer.bytes(sealed);
     writer.0
 }
 
-pub fn encode_transfer(id: &[u8; 32], new_owner: &AccountId) -> Vec<u8> {
+pub fn encode_set_page(id: &[u8; 32], sealed: &[u8]) -> Vec<u8> {
     let mut writer = on_name(3, id);
+    writer.bytes(sealed);
+    writer.0
+}
+
+pub fn encode_transfer(id: &[u8; 32], new_owner: &AccountId) -> Vec<u8> {
+    let mut writer = on_name(4, id);
     writer.0.extend(new_owner);
     writer.0
 }
 
 pub fn encode_release(id: &[u8; 32]) -> Vec<u8> {
-    on_name(4, id).0
+    on_name(5, id).0
 }
 
 pub fn encode_set_primary(name: &str) -> Vec<u8> {
-    let mut writer = Writer(vec![5]);
+    let mut writer = Writer(vec![6]);
     writer.string(name);
     writer.0
+}
+
+/// The term a caller chose, checked: 0, 1 or 2.
+pub fn parse_term(term: u64) -> Result<usize, String> {
+    usize::try_from(term)
+        .ok()
+        .filter(|term| *term < TERMS.len())
+        .ok_or_else(|| "the term is 0 (30 days), 1 (1 year) or 2 (5 years)".to_owned())
 }
 
 fn is_valid_text_key(key: &str) -> bool {
@@ -90,6 +114,16 @@ impl Registry {
             .ok_or_else(|| format!("{} is not registered", display(name)))
     }
 
+    /// The accounts a paid instruction ends with, and the fee: the payer's
+    /// balance, then the treasury's if anything is owed.
+    fn payment(&self, payer: &AccountId, term: usize) -> Result<(u128, Vec<AccountId>), String> {
+        let settings = self.settings()?;
+        let (fee, treasury) = Settings::fee(settings.as_ref(), payer, term);
+        let mut balances = vec![*payer];
+        balances.extend(treasury);
+        Ok((fee, balances))
+    }
+
     /// Replaces the name's profile with what `edit` makes of the current one.
     fn edit_profile(
         &self,
@@ -103,6 +137,7 @@ impl Registry {
         Ok(Change {
             instruction: encode_set_record(&derived.id, &profile.seal(&derived.key)?),
             accounts: vec![record_address(&self.program, &derived.id), resolved.owner],
+            balances: 0,
             signer: resolved.owner,
         })
     }
@@ -117,17 +152,19 @@ impl Registry {
                 page_address(&self.program, &derived.id),
                 owner,
             ],
+            balances: 0,
             signer: owner,
         })
     }
 
-    /// Registers `name` to `owner`. Its first profile holds the name and, when
-    /// `private_keys` are given, where it can be paid privately.
+    /// Registers `name` to `owner` for `term`. Its first profile holds the
+    /// name and, when `private_keys` are given, where it can be paid privately.
     pub fn register(
         &self,
         name: &str,
         derived: &Derived,
         owner: &AccountId,
+        term: usize,
         private_keys: Option<([u8; 32], Vec<u8>)>,
     ) -> Result<Change, String> {
         if self.resolve(name, derived)?.is_some() {
@@ -138,10 +175,35 @@ impl Registry {
             profile.npk = Some(npk);
             profile.vpk = vpk;
         }
+        let (fee, balances) = self.payment(owner, term)?;
+        let mut accounts = vec![
+            record_address(&self.program, &derived.id),
+            page_address(&self.program, &derived.id),
+            settings_address(&self.program),
+        ];
+        accounts.extend(&balances);
         Ok(Change {
-            instruction: encode_register(&derived.id, &profile.seal(&derived.key)?),
-            accounts: vec![record_address(&self.program, &derived.id), *owner],
+            instruction: encode_register(&derived.id, &profile.seal(&derived.key)?, term as u8, fee, self.now()?),
+            accounts,
+            balances: balances.len(),
             signer: *owner,
+        })
+    }
+
+    /// Extends `name` by `term`, paid by `payer`, who need not be its holder.
+    pub fn renew(&self, name: &str, derived: &Derived, payer: &AccountId, term: usize) -> Result<Change, String> {
+        let now = self.now()?;
+        self.record(name, derived)?
+            .filter(|record| now < record.expires.saturating_add(GRACE_MS))
+            .ok_or_else(|| format!("{} is not registered", display(name)))?;
+        let (fee, balances) = self.payment(payer, term)?;
+        let mut accounts = vec![record_address(&self.program, &derived.id), settings_address(&self.program)];
+        accounts.extend(&balances);
+        Ok(Change {
+            instruction: encode_renew(&derived.id, term as u8, fee, now),
+            accounts,
+            balances: balances.len(),
+            signer: *payer,
         })
     }
 
@@ -264,6 +326,7 @@ impl Registry {
         Ok(Change {
             instruction: encode_set_primary(name),
             accounts: vec![*account],
+            balances: 0,
             signer: *account,
         })
     }
@@ -279,16 +342,30 @@ mod tests {
     fn instructions_encode_as_the_specification_says() {
         let id: [u8; 32] = core::array::from_fn(|index| index as u8);
         let id_hex = hex(&id);
-        assert_eq!(hex(&encode_register(&id, &[0xEE, 0xFF])), format!("00{id_hex}02000000eeff"));
-        assert_eq!(hex(&encode_set_record(&id, &[0xEE])), format!("01{id_hex}01000000ee"));
-        assert_eq!(hex(&encode_set_page(&id, &[])), format!("02{id_hex}00000000"));
+        assert_eq!(
+            hex(&encode_register(&id, &[0xEE, 0xFF], 1, 100_000, 1_700_000_000_000)),
+            format!("00{id_hex}02000000eeff01a08601000000000000000000000000000068e5cf8b010000")
+        );
+        assert_eq!(
+            hex(&encode_renew(&id, 2, 0, 1_700_000_000_000)),
+            format!("01{id_hex}02{}0068e5cf8b010000", "00".repeat(16))
+        );
+        assert_eq!(hex(&encode_set_record(&id, &[0xEE])), format!("02{id_hex}01000000ee"));
+        assert_eq!(hex(&encode_set_page(&id, &[])), format!("03{id_hex}00000000"));
         assert_eq!(
             hex(&encode_transfer(&id, &[2; 32])),
-            format!("03{id_hex}{}", "02".repeat(32))
+            format!("04{id_hex}{}", "02".repeat(32))
         );
-        assert_eq!(hex(&encode_release(&id)), format!("04{id_hex}"));
-        assert_eq!(hex(&encode_set_primary("jef")), "05030000006a6566");
-        assert_eq!(hex(&encode_set_primary("")), "0500000000");
+        assert_eq!(hex(&encode_release(&id)), format!("05{id_hex}"));
+        assert_eq!(hex(&encode_set_primary("jef")), "06030000006a6566");
+        assert_eq!(hex(&encode_set_primary("")), "0600000000");
+    }
+
+    #[test]
+    fn a_term_is_one_of_three() {
+        assert_eq!(parse_term(0), Ok(0));
+        assert_eq!(parse_term(2), Ok(2));
+        assert!(parse_term(3).is_err());
     }
 
     #[test]

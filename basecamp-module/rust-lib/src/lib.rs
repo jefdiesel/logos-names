@@ -40,8 +40,10 @@ pub trait NamesModule: Send + 'static {
     /// A null value means the name is not registered.
     fn recipient(&mut self, name: String) -> String;
 
-    /// Everything `name` resolves to: owner, account, keys and text entries.
-    /// A null value means it is not registered.
+    /// Everything `name` resolves to: owner, expiry, account, keys and text
+    /// entries. `expires` is in milliseconds and `lapsed` is true once it has
+    /// passed. A null value means it is not registered, which includes a name
+    /// that lapsed more than 30 days ago.
     fn resolve(&mut self, name: String) -> String;
 
     /// The page published under `name`: `{content_type, bytes, text}`, where
@@ -65,7 +67,7 @@ pub trait NamesModule: Send + 'static {
     fn wallet(&mut self) -> String;
 
     /// The names this device remembers that the open wallet holds:
-    /// `{names: [{name, display, owner}]}`. The chain keeps no list of names,
+    /// `{names: [{name, display, owner, expires, lapsed}]}`. The chain keeps no list of names,
     /// so this is the device's own memory: every name registered from here,
     /// and every name passed to `keep`.
     fn mine(&mut self) -> String;
@@ -81,11 +83,23 @@ pub trait NamesModule: Send + 'static {
     // shows; it normally takes one block. Send one change per account at a
     // time.
 
-    /// Registers `name` to `owner` (base58), an account in the open wallet.
+    /// What registering or renewing a name costs: `{treasury, terms: [{term,
+    /// label, days, fee}]}`. `term` is the number to pass to `register` and
+    /// `renew`; `fee` is decimal text in the native token's base units, and 0
+    /// while the registry has no settings.
+    fn prices(&mut self) -> String;
+
+    /// Registers `name` to `owner` (base58), an account in the open wallet,
+    /// for `term`: 0 for 30 days, 1 for a year, 2 for five years. The fee for
+    /// the term is paid from `owner` to the registry's treasury.
     /// `private_account` makes the name payable privately from the start: one
     /// of the wallet's private accounts (base58), `auto` for its first one
     /// (made if it has none), or empty to set nothing.
-    fn register(&mut self, name: String, owner: String, private_account: String) -> String;
+    fn register(&mut self, name: String, owner: String, private_account: String, term: u64) -> String;
+
+    /// Extends `name` by `term`, paid by `payer` (base58), any account in the
+    /// open wallet. A lapsed name can be renewed for 30 days after it expires.
+    fn renew(&mut self, name: String, payer: String, term: u64) -> String;
 
     /// Makes `name` payable privately and only privately: publishes the
     /// receiving keys of `private_account` (as for `register`, `auto` allowed)
@@ -420,8 +434,8 @@ impl NamesModule for Names {
     }
 
     fn page(&mut self, name: String) -> String {
-        self.about(&name, |registry, _name, derived| {
-            Ok(registry.page(derived)?.unwrap_or(Value::Null))
+        self.about(&name, |registry, name, derived| {
+            Ok(registry.page(name, derived)?.unwrap_or(Value::Null))
         })
     }
 
@@ -471,6 +485,8 @@ impl NamesModule for Names {
                                 "name": name,
                                 "display": format!("{name}{}", registry::NAME_SUFFIX),
                                 "owner": registry::account_text(&resolved.owner),
+                                "expires": resolved.expires,
+                                "lapsed": resolved.lapsed(registry::local_now()),
                             }));
                         }
                         // A name another wallet holds is kept: it may be this
@@ -500,14 +516,33 @@ impl NamesModule for Names {
         })())
     }
 
-    fn register(&mut self, name: String, owner: String, private_account: String) -> String {
+    fn prices(&mut self) -> String {
+        reply((|| {
+            let settings = self.registry()?.settings()?;
+            let terms: Vec<Value> = registry::TERMS
+                .iter()
+                .enumerate()
+                .map(|(term, (_, label, days))| {
+                    let fee = settings.as_ref().map_or(0, |settings| settings.prices[term]);
+                    json!({ "term": term, "label": label, "days": days, "fee": fee.to_string() })
+                })
+                .collect();
+            Ok(json!({
+                "treasury": settings.as_ref().map(|settings| registry::account_text(&settings.treasury)),
+                "terms": terms,
+            }))
+        })())
+    }
+
+    fn register(&mut self, name: String, owner: String, private_account: String, term: u64) -> String {
         let sent = self.change_name(&name, |registry, name, derived| {
+            let term = changes::parse_term(term)?;
             let keys = if private_account.trim().is_empty() {
                 None
             } else {
                 Some(private_keys(&private_account)?)
             };
-            registry.register(name, derived, &registry::parse_account(&owner)?, keys)
+            registry.register(name, derived, &registry::parse_account(&owner)?, term, keys)
         });
         // Remembered as soon as it is sent: `mine` shows it once it is on the
         // chain, and forgets it if it never gets there.
@@ -515,6 +550,12 @@ impl NamesModule for Names {
             let _ = self.keep(name);
         }
         sent
+    }
+
+    fn renew(&mut self, name: String, payer: String, term: u64) -> String {
+        self.change_name(&name, |registry, name, derived| {
+            registry.renew(name, derived, &registry::parse_account(&payer)?, changes::parse_term(term)?)
+        })
     }
 
     fn receive_privately(&mut self, name: String, private_account: String) -> String {
@@ -637,6 +678,8 @@ mod wallet {
     use std::time::Duration;
 
     const MODULE: &str = "lez_core";
+    /// The native token program's ID, which is all zeros.
+    const NATIVE_TOKEN: &str = "0000000000000000000000000000000000000000000000000000000000000000";
     /// What `accounts` answers when the wallet module runs with no wallet open.
     pub const CLOSED: &str = "no LEZ wallet is open; open LEZ Wallet first";
     /// Asking for the accounts is also how a missing wallet is noticed, and
@@ -723,8 +766,12 @@ mod wallet {
         let program = registry::hex(program);
         let accounts: Vec<String> = change.accounts.iter().map(|account| registry::hex(account)).collect();
         let signs: Vec<bool> = change.accounts.iter().map(|account| *account == change.signer).collect();
-        // Every account is used with the registry's own shard selected.
-        let shards = vec![program.clone(); accounts.len()];
+        // Accounts are used with the registry's own shard selected, except the
+        // last `balances`, which are used for their native token balance.
+        let registry_rows = accounts.len() - change.balances;
+        let shards: Vec<String> = (0..accounts.len())
+            .map(|row| if row < registry_rows { program.clone() } else { NATIVE_TOKEN.to_owned() })
+            .collect();
         let sent = call(
             "send_generic_public_transaction",
             json!([
@@ -836,7 +883,8 @@ mod tests {
         let mut names = fresh();
         names.program = Some([7; 32]);
         for answer in [
-            names.register("jef.eth".into(), "x".into(), String::new()),
+            names.register("jef.eth".into(), "x".into(), String::new(), 1),
+            names.renew("jef.eth".into(), "x".into(), 1),
             names.release("-jef".into()),
             names.set_primary("x".into(), "not a name".into()),
             names.receive_privately("j f".into(), "auto".into()),

@@ -32,6 +32,8 @@ Item {
     property string walletConfig: ""   // the wallet files the names module opens by itself
     property string walletStorage: ""
     property bool wokeWallet: false
+    property var terms: []             // [{term, label, days, fee}]: how long a name can be held, and the price
+    property int termIndex: 1
     property string notice: ""
     property bool noticeIsError: false
     property bool settingsOpen: false
@@ -161,7 +163,29 @@ Item {
             say(error.message, true)
         }
         loadConfig()
+        loadPrices()
         loadWallet(false)
+    }
+
+    /// Reads what each term costs. Until it is known, registering waits.
+    function loadPrices() {
+        if (registry === "")
+            return
+        askLater("prices", [], function(value) {
+            terms = value.terms
+        }, function(message) {
+            console.log("names_ui: prices:", message)
+        })
+    }
+
+    /// A fee as people read it.
+    function priced(fee) {
+        return fee === "0" ? "Free" : grouped(fee)
+    }
+
+    /// A time in milliseconds as a date.
+    function dated(milliseconds) {
+        return Qt.formatDate(new Date(milliseconds), "d MMMM yyyy")
     }
 
     /// Names the wallet the names module should open by itself.
@@ -342,7 +366,7 @@ Item {
     function registerName() {
         var name = missing
         var owner = wallet[fromIndex].account
-        change("register", [name, owner, "auto"], name, function() {
+        change("register", [name, owner, "auto", termIndex], name, function() {
             var found = ask("resolve", [name])
             return found !== null && found.owner === owner
         }, name + ".LEZ is yours.")
@@ -357,6 +381,14 @@ Item {
 
     /// Everything the holder can do with the name on the plate: where it
     /// pays, its entries and page, transferring it, deleting it.
+    function renewName() {
+        var name = record.name
+        var until = record.expires
+        change("renew", [name, record.owner, termIndex], name, function() {
+            return ask("resolve", [name]).expires > until
+        }, shown(name) + " is renewed.")
+    }
+
     function openSettings() {
         say("", false)
         accountField.text = record.account !== null ? record.account : ""
@@ -572,6 +604,7 @@ Item {
         if (!bridgeReady)
             return
         loadConfig()
+        loadPrices()
     }
 
     // The wallet is read after the first frame, so the screen is up before
@@ -970,6 +1003,53 @@ Item {
         }
     }
 
+    /// The terms a name can be held for, each with its price; one is chosen.
+    component Terms: RowLayout {
+        Layout.fillWidth: true
+        spacing: 8
+        Repeater {
+            model: root.terms
+            Rectangle {
+                id: term
+                required property var modelData
+                required property int index
+                readonly property bool chosen: root.termIndex === index
+                Layout.fillWidth: true
+                implicitHeight: 54
+                radius: 6
+                color: chosen ? root.raised : termArea.containsMouse ? root.hover : "transparent"
+                border.width: 1
+                border.color: chosen ? root.brass : root.line
+                Column {
+                    anchors.centerIn: parent
+                    spacing: 2
+                    Text {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        text: term.modelData.label
+                        color: root.ink
+                        font.family: root.sans
+                        font.pixelSize: 14
+                        font.weight: Font.DemiBold
+                    }
+                    Text {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        text: root.priced(term.modelData.fee)
+                        color: root.dim
+                        font.family: root.sans
+                        font.pixelSize: 13
+                    }
+                }
+                MouseArea {
+                    id: termArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.termIndex = term.index
+                }
+            }
+        }
+    }
+
     /// A line of explanation under a control.
     component Hint: Text {
         Layout.fillWidth: true
@@ -1161,6 +1241,13 @@ Item {
                                     size: 15
                                     weight: Font.Medium
                                 }
+                                Text {
+                                    visible: !!myRow.modelData.lapsed
+                                    text: "Lapsed"
+                                    color: root.alarm
+                                    font.family: root.sans
+                                    font.pixelSize: 12
+                                }
                                 IconButton {
                                     kind: "gear"
                                     onPressed: root.manage(myRow.modelData.name)
@@ -1323,11 +1410,15 @@ Item {
                         visible: root.wallet.length > 0
                         title: "Register it to"
                         Accounts {}
-                        Hint { text: "The account you choose holds the name and pays the fee. Only it can change, transfer or delete the name. The name is set up to be paid privately, to your wallet's private account." }
+                        Hint { text: "The account you choose holds the name and pays for it. Only it can change, transfer or delete the name. The name is set up to be paid privately, to your wallet's private account." }
+                        Part { text: "For how long" }
+                        Terms {}
+                        Hint { text: "The price goes to the registry's treasury; the network's own fee is extra. You can renew at any time, and for 30 days after it runs out." }
                         Action {
                             label: "Register " + root.missing + ".LEZ"
                             strong: true
                             changes: true
+                            enabledNow: root.terms.length > 0
                             onPressed: root.registerName()
                         }
                     }
@@ -1434,6 +1525,11 @@ Item {
                             Item { Layout.fillWidth: true }
                             Action { label: "Cancel"; onPressed: root.tool = "" }
                         }
+                        Hint {
+                            visible: root.record !== null && root.record.lapsed
+                            color: root.alarm
+                            text: root.record !== null && root.record.lapsed ? root.shown(root.record.name) + " lapsed on " + root.dated(root.record.expires) + ". Its holder can still renew it, but check with them before you pay." : ""
+                        }
                         Hint { text: "A private payment hides who received it. The amount and your account stay visible, because it is sent from a public account. It takes a few minutes to prepare." }
                     }
 
@@ -1441,6 +1537,22 @@ Item {
                     Panel {
                         visible: root.tool === "settings"
                         title: root.record !== null ? "Settings for " + root.shown(root.record.name) : ""
+
+                        Part { text: "Renew" }
+                        Hint { text: root.record === null ? "" : root.record.lapsed ? "It lapsed on " + root.dated(root.record.expires) + ". Renew it by " + root.dated(root.record.expires + 2592000000) + " or anyone can register it." : "Yours until " + root.dated(root.record.expires) + ". Renewing adds to that." }
+                        Terms {}
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Action {
+                                label: root.terms.length > root.termIndex ? "Renew for " + root.terms[root.termIndex].label : "Renew"
+                                strong: root.record !== null && root.record.lapsed
+                                changes: true
+                                enabledNow: root.terms.length > 0
+                                onPressed: root.renewName()
+                            }
+                            Item { Layout.fillWidth: true }
+                        }
 
                         Part { text: "Where it is paid" }
                         Hint {
@@ -1649,6 +1761,10 @@ Item {
                             code: true
                             value: root.record !== null && root.record.account !== null ? root.shorten(root.record.account) : ""
                             full: root.record !== null && root.record.account !== null ? root.record.account : ""
+                        }
+                        Fact {
+                            label: "Held until"
+                            value: root.record === null ? "" : root.dated(root.record.expires) + (root.record.lapsed ? ". It has lapsed and can be renewed until " + root.dated(root.record.expires + 2592000000) : "")
                         }
                         Fact {
                             label: "Paid privately"

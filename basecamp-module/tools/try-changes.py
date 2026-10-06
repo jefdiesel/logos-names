@@ -68,12 +68,21 @@ def check(label, ok):
     print("%s %s" % ("ok  " if ok else "FAIL", label))
 
 
+YEAR, MONTH = 31_536_000_000, 2_592_000_000
 print("trying", NAME + ".lez")
-change("register, paid privately", "register", [NAME + ".lez", A, "auto"],
+prices = call("prices")
+check("the registry says what each term costs", [term["days"] for term in prices["terms"]] == [30, 365, 1825])
+started = int(time.time() * 1000)
+change("register for a year, paid privately", "register", [NAME + ".lez", A, "auto", 1],
        lambda: (record() or {}).get("owner") == A)
+check("it is held for a year from now", abs(record()["expires"] - (started + YEAR)) < 300_000 and not record()["lapsed"])
+until = record()["expires"]
+change("renew for 30 days", "renew", [NAME, A, 0], lambda: record()["expires"] > until)
+check("renewing added exactly 30 days", record()["expires"] == until + MONTH)
+refused("a term that does not exist", "renew", [NAME, A, 7], "term")
 check("it takes private payments from the start", record()["npk"] is not None and record()["account"] is None)
 check("this device lists it among the wallet's names", NAME in mine())
-refused("register a taken name", "register", [NAME, B, ""], "already registered")
+refused("register a taken name", "register", [NAME, B, "", 1], "already registered")
 change("add a public account", "set_account", [NAME, B], lambda: record()["account"] == B)
 check("the private keys are still there", record()["npk"] is not None)
 change("go back to private only", "receive_privately", [NAME, "auto"],
@@ -102,9 +111,10 @@ change("the new holder edits it", "set_text", [NAME, "chat", "ab" * 32], lambda:
 change("delete", "release", [NAME], lambda: record() is None)
 check("it is no longer among the wallet's names", NAME not in mine())
 refused("delete a name nobody holds", "release", [NAME], "not registered")
-change("register it again, to B, with nothing set", "register", [NAME, B, ""],
+change("register it again, to B, with nothing set", "register", [NAME, B, "", 0],
        lambda: (record() or {}).get("owner") == B)
 check("nothing of the first registration came back", record()["npk"] is None and record()["texts"] == {})
+check("and it is held for 30 days", abs(record()["expires"] - (int(time.time() * 1000) + MONTH)) < 300_000)
 change("delete it again", "release", [NAME], lambda: record() is None)
 change("withdraw A's published name", "set_primary", [A, ""], lambda: call("reverse", A) is None)
 

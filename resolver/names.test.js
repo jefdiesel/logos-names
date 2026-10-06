@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import {
+  GRACE_MS,
   base58Decode,
   base58Encode,
   decodeNameRecord,
@@ -30,6 +31,8 @@ const ACCOUNT = base58Encode(new Uint8Array(32).fill(2));
 const STRANGER = base58Encode(new Uint8Array(32).fill(3));
 const NONCE = Uint8Array.from({ length: 12 }, (_, index) => index);
 const COUNTING_ID = Uint8Array.from({ length: 32 }, (_, index) => index);
+// When the fixtures' names expire: far ahead of the real clock, for the tests that do not pass `now`.
+const EXPIRES = Date.UTC(2100, 0, 1);
 
 const toHex = (bytes) => Buffer.from(bytes).toString("hex");
 
@@ -157,17 +160,26 @@ function borsh(...parts) {
   return Uint8Array.from(chunks.flatMap((chunk) => [...chunk]));
 }
 
-/** A `NameRecord` shard: the owner goes in raw, the sealed bytes length-prefixed. */
-function recordShard(owner, sealed) {
-  return Uint8Array.from([2, ...base58Decode(owner), ...borsh(sealed)]);
+/** A `NameRecord` shard: the owner goes in raw, then the expiry, then the sealed bytes length-prefixed. */
+function recordShard(owner, sealed, expires = EXPIRES) {
+  const expiry = new Uint8Array(8);
+  new DataView(expiry.buffer).setBigUint64(0, BigInt(expires), true);
+  return Uint8Array.from([2, ...base58Decode(owner), ...expiry, ...borsh(sealed)]);
 }
 
 test("the on-chain layouts decode, and truncated data is refused", () => {
   const sealed = Uint8Array.of(0xee, 0xff);
-  assert.deepEqual(decodeNameRecord(recordShard(OWNER, sealed)), { version: 2, owner: OWNER, sealed });
+  assert.deepEqual(decodeNameRecord(recordShard(OWNER, sealed)), {
+    version: 2,
+    owner: OWNER,
+    expires: EXPIRES,
+    sealed,
+  });
+  assert.equal(decodeNameRecord(recordShard(OWNER, sealed, 0x0102030405)).expires, 0x0102030405);
   assert.deepEqual(decodePage(borsh(2, sealed)), { version: 2, sealed });
   assert.deepEqual(decodePrimaryName(borsh(2, "jef")), { version: 2, name: "jef" });
   assert.throws(() => decodeNameRecord(Uint8Array.of(2, 9, 0, 0, 0)), /truncated/);
+  assert.throws(() => decodeNameRecord(recordShard(OWNER, sealed).subarray(0, 40)), /truncated/);
 });
 
 /**
@@ -195,18 +207,21 @@ afterEach(() => {
 
 const JEF_RECORD = await recordAddress(PROGRAM, jef.id);
 const JEF_PAGE = await pageAddress(PROGRAM, jef.id);
-const NOTHING_SET = { name: "jef", owner: OWNER, account: null, npk: null, vpk: null, texts: {} };
+const RESOLVED = {
+  name: "jef",
+  owner: OWNER,
+  expires: EXPIRES,
+  lapsed: false,
+  account: ACCOUNT,
+  npk: null,
+  vpk: null,
+  texts: { chat: "hi" },
+};
+const NOTHING_SET = { ...RESOLVED, account: null, texts: {} };
 
 test("a name resolves with one read of its record account", async () => {
   const asked = stubSequencer({ [JEF_RECORD]: recordShard(OWNER, Buffer.from(SEALED_PROFILE, "hex")) });
-  assert.deepEqual(await resolveName(RPC_URL, PROGRAM, "jef"), {
-    name: "jef",
-    owner: OWNER,
-    account: ACCOUNT,
-    npk: null,
-    vpk: null,
-    texts: { chat: "hi" },
-  });
+  assert.deepEqual(await resolveName(RPC_URL, PROGRAM, "jef"), RESOLVED);
   assert.deepEqual(asked, [JEF_RECORD]);
 });
 
@@ -232,16 +247,87 @@ test("a record with nothing readable in it is a registered name with nothing set
 });
 
 test("a page resolves, and a missing or unreadable one is null", async () => {
-  const asked = stubSequencer({ [JEF_PAGE]: borsh(2, Buffer.from(SEALED_PAGE, "hex")) });
+  const record = recordShard(OWNER, Buffer.from(SEALED_PROFILE, "hex"));
+  const page = borsh(2, Buffer.from(SEALED_PAGE, "hex"));
+  const asked = stubSequencer({ [JEF_RECORD]: record, [JEF_PAGE]: page });
   assert.deepEqual(await resolvePage(RPC_URL, PROGRAM, "jef"), PAGE);
-  assert.deepEqual(asked, [JEF_PAGE]);
+  assert.deepEqual(asked, [JEF_RECORD, JEF_PAGE]);
 
-  stubSequencer({});
+  stubSequencer({ [JEF_RECORD]: record });
   assert.equal(await resolvePage(RPC_URL, PROGRAM, "jef"), null);
-  stubSequencer({ [JEF_PAGE]: borsh(2, new Uint8Array(0)) });
+  stubSequencer({ [JEF_RECORD]: record, [JEF_PAGE]: borsh(2, new Uint8Array(0)) });
   assert.equal(await resolvePage(RPC_URL, PROGRAM, "jef"), null);
-  stubSequencer({ [JEF_PAGE]: borsh(2, Buffer.from(SEALED_PROFILE, "hex")) });
+  stubSequencer({ [JEF_RECORD]: record, [JEF_PAGE]: borsh(2, Buffer.from(SEALED_PROFILE, "hex")) });
   assert.equal(await resolvePage(RPC_URL, PROGRAM, "jef"), null);
+
+  // A page is only served for a registered name, and is not read for any other.
+  const askedUnregistered = stubSequencer({ [JEF_PAGE]: page });
+  assert.equal(await resolvePage(RPC_URL, PROGRAM, "jef"), null);
+  assert.deepEqual(askedUnregistered, [JEF_RECORD]);
+});
+
+/** A sequencer holding `jef` with a profile, a page and reverse records, expiring at `EXPIRES`. */
+function stubHeldName() {
+  const claim = borsh(2, "jef");
+  return stubSequencer({
+    [JEF_RECORD]: recordShard(OWNER, Buffer.from(SEALED_PROFILE, "hex")),
+    [JEF_PAGE]: borsh(2, Buffer.from(SEALED_PAGE, "hex")),
+    [OWNER]: claim,
+    [ACCOUNT]: claim,
+  });
+}
+
+test("a name is active until the moment it expires", async () => {
+  stubHeldName();
+  for (const now of [0, EXPIRES - 1]) {
+    assert.deepEqual(await resolveName(RPC_URL, PROGRAM, "jef", now), RESOLVED, `now ${now}`);
+    assert.deepEqual(await resolvePage(RPC_URL, PROGRAM, "jef", now), PAGE);
+    assert.equal(await reverseLookup(RPC_URL, PROGRAM, ACCOUNT, now), "jef");
+  }
+});
+
+test("a name in its grace period still resolves, flagged as lapsed", async () => {
+  stubHeldName();
+  for (const now of [EXPIRES, EXPIRES + GRACE_MS - 1]) {
+    const resolved = await resolveName(RPC_URL, PROGRAM, "jef", now);
+    assert.deepEqual(resolved, { ...RESOLVED, lapsed: true }, `now ${now}`);
+    assert.deepEqual(await resolvePage(RPC_URL, PROGRAM, "jef", now), PAGE);
+    assert.equal(await reverseLookup(RPC_URL, PROGRAM, OWNER, now), "jef");
+  }
+
+  // Nothing set is flagged the same way.
+  stubSequencer({ [JEF_RECORD]: recordShard(OWNER, new Uint8Array(0)) });
+  assert.deepEqual(await resolveName(RPC_URL, PROGRAM, "jef", EXPIRES), { ...NOTHING_SET, lapsed: true });
+});
+
+test("a name past its grace period is unregistered, whatever its record still holds", async () => {
+  assert.equal(GRACE_MS, 30 * 24 * 60 * 60 * 1000);
+  for (const now of [EXPIRES + GRACE_MS, EXPIRES + GRACE_MS + 1, Number.MAX_SAFE_INTEGER]) {
+    const asked = stubHeldName();
+    assert.equal(await resolveName(RPC_URL, PROGRAM, "jef", now), null, `now ${now}`);
+    assert.equal(await resolvePage(RPC_URL, PROGRAM, "jef", now), null);
+    assert.equal(await reverseLookup(RPC_URL, PROGRAM, OWNER, now), null);
+    assert.equal(await reverseLookup(RPC_URL, PROGRAM, ACCOUNT, now), null);
+    // The page of such a name is not even read.
+    assert.ok(!asked.includes(JEF_PAGE));
+  }
+});
+
+test("without a time given, the reader's own clock decides", async () => {
+  const sealed = Buffer.from(SEALED_PROFILE, "hex");
+  const accounts = { [JEF_PAGE]: borsh(2, Buffer.from(SEALED_PAGE, "hex")), [OWNER]: borsh(2, "jef") };
+
+  const inGrace = Date.now() - 60_000;
+  stubSequencer({ ...accounts, [JEF_RECORD]: recordShard(OWNER, sealed, inGrace) });
+  const resolved = await resolveName(RPC_URL, PROGRAM, "jef");
+  assert.deepEqual(resolved, { ...RESOLVED, expires: inGrace, lapsed: true });
+  assert.deepEqual(await resolvePage(RPC_URL, PROGRAM, "jef"), PAGE);
+  assert.equal(await reverseLookup(RPC_URL, PROGRAM, OWNER), "jef");
+
+  stubSequencer({ ...accounts, [JEF_RECORD]: recordShard(OWNER, sealed, inGrace - GRACE_MS) });
+  assert.equal(await resolveName(RPC_URL, PROGRAM, "jef"), null);
+  assert.equal(await resolvePage(RPC_URL, PROGRAM, "jef"), null);
+  assert.equal(await reverseLookup(RPC_URL, PROGRAM, OWNER), null);
 });
 
 test("a reverse record counts only when the name points back", async () => {

@@ -1,5 +1,6 @@
 // Draws the Names app icon and saves it as icon.png in the directory it is run
 // from. Run with Qt's `qml` tool and QT_QPA_PLATFORM=offscreen, from src/icons.
+// Logos packages require the icon to be a PNG of exactly 256 by 256.
 //
 // The mark is the app's seal reduced to its idea: rings with a gap in each, so
 // none of them can be read all the way round, and the dot of ".LEZ" at the
@@ -9,8 +10,8 @@ import QtQuick
 
 Item {
     id: root
-    width: 512
-    height: 512
+    width: 256
+    height: 256
 
     Canvas {
         anchors.fill: parent

@@ -22,6 +22,20 @@ const ID_DOMAIN: &[u8] = b"logos-names/v2/id";
 const KEY_DOMAIN: &[u8] = b"logos-names/v2/key";
 const NAME_SEED_DOMAIN: &[u8] = b"logos-names/v2/name/";
 const PAGE_SEED_DOMAIN: &[u8] = b"logos-names/v2/page/";
+const SETTINGS_SEED: &[u8] = b"logos-names/v2/config";
+/// After a name expires, only its holder can renew it for this long. Past
+/// that it reads as unregistered and anyone may register it.
+pub const GRACE_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+/// How long each term holds a name, in milliseconds, with its label.
+pub const TERMS: [(u64, &str, u64); 3] = [
+    (30 * 24 * 60 * 60 * 1000, "30 days", 30),
+    (365 * 24 * 60 * 60 * 1000, "1 year", 365),
+    (5 * 365 * 24 * 60 * 60 * 1000, "5 years", 5 * 365),
+];
+/// The account the chain keeps its clock on, and the program whose shard on
+/// it holds the time: `{block_id: u64, timestamp: u64}`, in milliseconds.
+const CLOCK_ACCOUNT: &AccountId = b"/LEZ/ClockProgramAccount/0000001";
+const BUILTIN_PROGRAM_PREFIX: &[u8] = b"/LEE-BuiltinProgram/v1/AccountId";
 const RECORD_SEAL: &[u8] = b"logos-names/v2/record";
 const PAGE_SEAL: &[u8] = b"logos-names/v2/page";
 const NONCE_LEN: usize = 12;
@@ -118,6 +132,58 @@ pub fn page_address(program: &AccountId, id: &[u8; 32]) -> AccountId {
     derived_address(program, PAGE_SEED_DOMAIN, id)
 }
 
+/// The account holding the registry's settings: who is paid, and how much.
+pub fn settings_address(program: &AccountId) -> AccountId {
+    let mut prefix = [0_u8; 32];
+    prefix[..PDA_PREFIX.len()].copy_from_slice(PDA_PREFIX);
+    sha256(&[&prefix, program, &sha256(&[SETTINGS_SEED])])
+}
+
+/// The ID of the chain's built-in clock program.
+fn clock_program() -> AccountId {
+    sha256(&[BUILTIN_PROGRAM_PREFIX, b"clock"])
+}
+
+/// This machine's clock, in milliseconds since the Unix epoch.
+pub fn local_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// What registering and renewing cost, and who is paid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Settings {
+    pub admin: AccountId,
+    pub treasury: AccountId,
+    pub prices: [u128; 3],
+}
+
+impl Settings {
+    fn decode(bytes: &[u8]) -> Result<Self, String> {
+        let mut reader = Reader { bytes };
+        let _version = reader.u8()?;
+        let admin = reader.account()?;
+        let treasury = reader.account()?;
+        let mut prices = [0_u128; 3];
+        for price in &mut prices {
+            *price = u128::from_le_bytes(reader.take(16)?.try_into().expect("16 bytes"));
+        }
+        Ok(Self { admin, treasury, prices })
+    }
+
+    /// What `payer` owes for `term`, and whom it is paid to. Nothing is owed
+    /// by the treasury itself, which would only be paying itself.
+    pub fn fee(settings: Option<&Self>, payer: &AccountId, term: usize) -> (u128, Option<AccountId>) {
+        match settings {
+            Some(settings) if settings.treasury != *payer && settings.prices[term] > 0 => {
+                (settings.prices[term], Some(settings.treasury))
+            }
+            _ => (0, None),
+        }
+    }
+}
+
 /// Minimal borsh reader for the registry's layouts.
 struct Reader<'bytes> {
     bytes: &'bytes [u8],
@@ -135,6 +201,11 @@ impl<'bytes> Reader<'bytes> {
 
     fn u8(&mut self) -> Result<u8, String> {
         Ok(self.take(1)?[0])
+    }
+
+    fn u64(&mut self) -> Result<u64, String> {
+        let bytes: [u8; 8] = self.take(8)?.try_into().expect("eight bytes");
+        Ok(u64::from_le_bytes(bytes))
     }
 
     fn u32(&mut self) -> Result<usize, String> {
@@ -297,21 +368,34 @@ fn open(key: &[u8; 32], sealed: &[u8], associated: &[u8]) -> Option<Vec<u8>> {
         .ok()
 }
 
-/// A registered name: who holds it, and its profile opened.
+/// A registered name: who holds it, until when, and its profile opened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
     pub owner: AccountId,
+    /// When the name lapses, in milliseconds since the Unix epoch.
+    pub expires: u64,
     pub profile: Profile,
 }
 
 impl Resolved {
-    /// Decodes the on-chain record `{version, owner, sealed}` and opens it.
+    /// Decodes the on-chain record `{version, owner, expires, sealed}` and opens it.
     fn decode(bytes: &[u8], key: &[u8; 32], name: &str) -> Result<Self, String> {
         let mut reader = Reader { bytes };
         let _version = reader.u8()?;
         let owner = reader.account()?;
+        let expires = reader.u64()?;
         let sealed = reader.byte_vec()?;
-        Ok(Self { owner, profile: Profile::open(key, sealed, name) })
+        Ok(Self { owner, expires, profile: Profile::open(key, sealed, name) })
+    }
+
+    /// Whether the name has expired and is in its grace period.
+    pub fn lapsed(&self, now: u64) -> bool {
+        self.expires <= now
+    }
+
+    /// Whether the name is past its grace period, and so counts as unregistered.
+    pub fn gone(&self, now: u64) -> bool {
+        now >= self.expires.saturating_add(GRACE_MS)
     }
 
     /// The name in the JSON shape SPEC.md gives.
@@ -326,6 +410,8 @@ impl Resolved {
             "name": profile.name,
             "display": format!("{}{NAME_SUFFIX}", profile.name),
             "owner": account_text(&self.owner),
+            "expires": self.expires,
+            "lapsed": self.lapsed(local_now()),
             "account": profile.account.as_ref().map(account_text),
             "npk": profile.npk.as_ref().map(|npk| hex(npk)),
             "vpk": (!profile.vpk.is_empty()).then(|| hex(&profile.vpk)),
@@ -348,6 +434,7 @@ impl Resolved {
             "public": profile.account.as_ref().map(account_text),
             "public_hex": profile.account.as_ref().map(|account| hex(account)),
             "private": private,
+            "lapsed": self.lapsed(local_now()),
         })
     }
 }
@@ -449,8 +536,14 @@ impl Registry {
         }))
     }
 
-    /// Resolves `name`, whose identifier and key the caller has derived.
+    /// Resolves `name`, whose identifier and key the caller has derived. A
+    /// name past its grace period is not registered, whatever its record holds.
     pub fn resolve(&self, name: &str, derived: &Derived) -> Result<Option<Resolved>, String> {
+        Ok(self.record(name, derived)?.filter(|resolved| !resolved.gone(local_now())))
+    }
+
+    /// The record of `name` exactly as the chain holds it, lapsed or not.
+    pub fn record(&self, name: &str, derived: &Derived) -> Result<Option<Resolved>, String> {
         let bytes = self.shard(&record_address(&self.program, &derived.id))?;
         if bytes.is_empty() {
             return Ok(None);
@@ -458,8 +551,34 @@ impl Registry {
         Resolved::decode(&bytes, &derived.key, name).map(Some)
     }
 
-    /// The page published under a name, or `None` when it has none.
-    pub fn page(&self, derived: &Derived) -> Result<Option<Value>, String> {
+    /// The registry's settings, or `None` while it has none and charges nothing.
+    pub fn settings(&self) -> Result<Option<Settings>, String> {
+        let bytes = self.shard(&settings_address(&self.program))?;
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        Settings::decode(&bytes).map(Some)
+    }
+
+    /// The time to claim in a transaction: the chain's own clock, which the
+    /// next block can never be behind. This machine's clock is not a
+    /// substitute: a transaction that claims a time ahead of the chain's is
+    /// rejected and still charged the whole fee ceiling.
+    pub fn now(&self) -> Result<u64, String> {
+        shard_bytes(&self.shards(CLOCK_ACCOUNT)?, &clock_program())?
+            .get(8..16)
+            .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+            .map(u64::from_le_bytes)
+            .filter(|timestamp| *timestamp > 0)
+            .ok_or_else(|| "could not read the chain's clock, so nothing was sent".to_owned())
+    }
+
+    /// The page published under a name, or `None` when it has none or the
+    /// name is no longer registered.
+    pub fn page(&self, name: &str, derived: &Derived) -> Result<Option<Value>, String> {
+        if self.resolve(name, derived)?.is_none() {
+            return Ok(None);
+        }
         let bytes = self.shard(&page_address(&self.program, &derived.id))?;
         if bytes.is_empty() {
             return Ok(None);
@@ -589,13 +708,19 @@ ac0fcdac4a6e83b60ac363901963488c93c7762d19b34b6991b9abdbc5d293fca06b69cab31e7eaa
         let profile = Profile { npk: Some([3; 32]), vpk: vec![9, 9, 9, 9], ..sample_profile() };
         let mut record = vec![2];
         record.extend([1; 32]); // owner
+        record.extend(4_102_444_800_000_u64.to_le_bytes()); // expires at the start of 2100
         let sealed = profile.seal(&key).expect("seals");
         record.extend((sealed.len() as u32).to_le_bytes());
         record.extend(&sealed);
 
         let resolved = Resolved::decode(&record, &key, "jef").expect("decodes");
         assert_eq!(resolved.owner, [1; 32]);
+        assert_eq!(resolved.expires, 4_102_444_800_000);
         assert_eq!(resolved.profile, profile);
+        assert!(!resolved.lapsed(4_102_444_799_999) && resolved.lapsed(4_102_444_800_000));
+        assert!(!resolved.gone(4_102_444_800_000 + GRACE_MS - 1) && resolved.gone(4_102_444_800_000 + GRACE_MS));
+        assert_eq!(resolved.to_json()["expires"], 4_102_444_800_000_u64);
+        assert_eq!(resolved.to_json()["lapsed"], false);
 
         let recipient = resolved.recipient_json();
         assert_eq!(recipient["display"], "jef.lez");
@@ -607,6 +732,27 @@ ac0fcdac4a6e83b60ac363901963488c93c7762d19b34b6991b9abdbc5d293fca06b69cab31e7eaa
         assert_eq!(resolved.to_json()["owner"], account_text(&[1; 32]));
 
         assert!(Resolved::decode(&record[..20], &key, "jef").is_err(), "truncated");
+    }
+
+    #[test]
+    fn settings_decode_and_say_what_is_owed() {
+        let mut bytes = vec![2];
+        bytes.extend([1; 32]); // admin
+        bytes.extend([2; 32]); // treasury
+        for price in [10_000_u128, 100_000, 400_000] {
+            bytes.extend(price.to_le_bytes());
+        }
+        let settings = Settings::decode(&bytes).expect("decodes");
+        assert_eq!(settings.admin, [1; 32]);
+        assert_eq!(settings.prices, [10_000, 100_000, 400_000]);
+        assert_eq!(Settings::fee(Some(&settings), &[9; 32], 1), (100_000, Some([2; 32])));
+        assert_eq!(Settings::fee(Some(&settings), &[2; 32], 1), (0, None), "the treasury pays nothing");
+        assert_eq!(Settings::fee(None, &[9; 32], 2), (0, None), "an unconfigured registry is free");
+        assert_eq!(TERMS[1].0, 31_536_000_000);
+        // The clock's address as the chain itself reports it.
+        assert_eq!(account_text(&clock_program()), "2hwaRW8sMnyKLLRbDRw8k68tiv9bnfq98oxcdtcp157Z");
+        assert_eq!(account_text(CLOCK_ACCOUNT), bs58::encode(b"/LEZ/ClockProgramAccount/0000001").into_string());
+        assert_eq!(GRACE_MS, 2_592_000_000);
     }
 
     #[test]

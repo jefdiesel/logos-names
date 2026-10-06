@@ -5219,6 +5219,7 @@ dependencies = [
  "anyhow",
  "borsh",
  "clap",
+ "clock_core",
  "hex",
  "lee_core",
  "names_core",

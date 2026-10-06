@@ -36,8 +36,13 @@ BRIDGE = r"""
             }
             if (method === "get_config") return JSON.stringify({ registry: %(registry)s, sequencer: "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json" })
             if (method === "normalize") return String(args[0]).toLowerCase().replace(/\.lez$/, "")
-            if (method === "mine") return ok({ names: names.filter(function(entry) { return entry.owner === "%(alice)s" }) })
+            if (method === "mine") return ok({ names: names.filter(function(entry) { return entry.owner === "%(alice)s" }).map(function(entry) {
+                return { name: entry.name, owner: entry.owner, expires: 1822855071000, lapsed: entry.name === "grace" } }) })
             if (method === "keep") return ok(String(args[0]))
+            if (method === "prices") return ok({ treasury: "%(bob)s", terms: [
+                { term: 0, label: "30 days", days: 30, fee: "10000" },
+                { term: 1, label: "1 year", days: 365, fee: "100000" },
+                { term: 2, label: "5 years", days: 1825, fee: "400000" }] })
             if (method === "page") return ok(args[0] === "jef" ? { content_type: "text/html; charset=utf-8", bytes: 148, text: %(page)s } : null)
             if (method === "resolve") {
                 var name = String(args[0]).toLowerCase().replace(/\.lez$/, "")
@@ -45,6 +50,7 @@ BRIDGE = r"""
                     if (names[i].name !== name) continue
                     var rich = name === "jef"
                     return ok({ name: name, display: name + ".lez", owner: names[i].owner,
+                        expires: name === "grace" ? 1790000000000 : 1822855071000, lapsed: name === "grace",
                         account: rich ? null : names[i].owner, npk: rich ? "a1e38c92" : null, vpk: rich ? "4865" : null,
                         texts: rich ? { chat: "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", agent: "https://agents.example/jef" } : {} })
                 }
@@ -66,6 +72,7 @@ SCENARIOS = {
     "nowallet": 'root.show("satoshi")',
     "settings": 'root.manage("jef")',
     "delete": 'root.manage("grace"); root.confirmingDelete = true',
+    "lapsed": 'root.manage("grace")',
     "waiting": 'root.manage("grace"); root.deleteName()',
     "register-settings": 'root.show("jef"); root.settingsOpen = true',
     "unset": "",
@@ -85,7 +92,7 @@ def main():
             "alice": ALICE, "bob": BOB, "carol": CAROL, "page": json.dumps(PAGE),
             "wallet": "false" if scenario == "nowallet" else "true",
             "registry": "null" if scenario == "unset" else json.dumps("DbYLkKwd2b13bQhceVj351mpPw7QmRzEjRT2EfU56CKH"),
-            "scenario": SCENARIOS[scenario], "out": out, "height": 1460 if scenario in ("settings", "delete") else 760,
+            "scenario": SCENARIOS[scenario], "out": out, "height": 1640 if scenario in ("settings", "delete") else 760,
         }
         with tempfile.NamedTemporaryFile("w", suffix=".qml", delete=False) as handle:
             handle.write(source.replace(marker, marker + bridge, 1))

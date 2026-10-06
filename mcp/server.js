@@ -38,6 +38,9 @@ const tools = [
     description:
       "Look up a Logos name. Returns its owner, the public account it is an alias for, " +
       "its private receiving keys, and its text entries (such as chat, inbox and agent). " +
+      "Names expire: `expires` is when, in milliseconds since the Unix epoch, and `lapsed` is " +
+      "true once that has passed and the name is in its 30-day grace period, after which it " +
+      "is no longer registered. Do not pay a lapsed name without the user knowing it has lapsed. " +
       "Looking a name up reveals nothing to the chain, which never sees names. A name that " +
       "points at a public account shows that account, and so its balance and history.",
     inputSchema: nameArgument,

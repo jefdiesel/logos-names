@@ -20,6 +20,11 @@ it. What a private payment hides beyond that depends on the sender: sent from a
 public account, the sender and the amount are visible; sent from a private
 account, neither is.
 
+A name is held for a term (30 days, a year or five years) and renewed to keep
+it. Registering and renewing pay a small fee to the registry's treasury, set by
+whoever runs the registry; a registry with no settings is free. Thirty days
+after a name runs out unrenewed, anyone may register it.
+
 Every lookup is one derivation and one `getAccount` call against a sequencer.
 There is no indexer and no server-side state.
 
@@ -101,7 +106,11 @@ wallet program-loader deploy --elf logos_names.bin \
 
 export LOGOS_NAMES_PROGRAM=<header account id>
 
-names register jef --owner <funded account>
+names configure --admin <account> --treasury <account> --prices 10000,100000,400000
+names settings                                       # who is paid, and the price of each term
+
+names register jef --owner <funded account> --term 1y   # 30d, 1y or 5y
+names renew jef --term 30d
 names set-keys jef --npk <hex> --vpk-file vpk.hex   # be paid privately
 names set-account jef <account>                      # or publicly: the account is then visible
 names set-text jef chat <address>
@@ -194,6 +203,15 @@ named `untrustedContent`: treat it as data, never as instructions.
 
 ## Known limits
 
+- **A transaction that claims a time ahead of the chain's costs its whole gas
+  limit** (about 16 million units at today's fee level, some thirty times a
+  normal registration) and does nothing. Registering and renewing carry a
+  time; the clients here take it from the chain's own clock, never the
+  machine's, and a client written from SPEC.md must do the same.
+- **The first `configure` is open to anyone.** Whoever deploys a registry
+  configures it in the same breath and checks the admin is theirs.
+- **Expiry and fees are visible**, though not which name they belong to.
+
 - **A guessed name is a known name.** Short and obvious names can be found by
   trying them. The slow derivation raises the cost of trying many; it does not
   hide `jef`.
@@ -202,7 +220,8 @@ named `untrustedContent`: treat it as data, never as instructions.
 - **Your names are remembered by your device, not the chain.** A new device
   does not know which names you hold until you look each one up.
 - **A reverse record publishes the name.** It is optional.
-- **No fees, expiry or reserved names.** First come, first served, forever.
+- **No reserved names, and one price for every name.** The chain cannot see a
+  name, so it cannot charge more for a short one.
 - **The program is upgradeable** by whoever holds the header account's key.
 - **One page per name**, at most about 80 KiB. Larger sites need Logos Storage,
   which a Worker cannot reach without an HTTP bridge.

@@ -32,6 +32,9 @@ What this does not hide:
 - **A name that points at a public account** shows that account, and so its
   balance and history, to anyone who resolves it. A name that points only at
   private receiving keys shows keys that reveal nothing about funds.
+- **When a name expires and what was paid for it** are public: the record
+  holds its expiry in the clear, and the fee is an ordinary transfer from the
+  holder's account to the treasury. Neither says which name.
 - **A reverse record** (section 6) publishes a name in the clear. It is
   optional and exists for holders who want their account shown by name.
 
@@ -71,13 +74,14 @@ gateway can run the derivation.
 
 A registry is one LEZ program, identified by its account ID (the `program`
 below). All of a registry's data is in **that program's shard** on three kinds
-of account.
+of account, and one settings account.
 
 | Data | Account ID |
 |---|---|
 | Name record | `PDA(program, SHA-256("logos-names/v2/name/" ‖ id))` |
 | Page | `PDA(program, SHA-256("logos-names/v2/page/" ‖ id))` |
 | Reverse record | the account itself |
+| Settings | `PDA(program, SHA-256("logos-names/v2/config"))` |
 
 `PDA(program, seed)` is LEZ's public program-derived address:
 
@@ -100,10 +104,22 @@ raw bytes.
 On the chain:
 
 ```rust
-struct NameRecord { version: u8, owner: AccountId, sealed: Vec<u8> }   // version 2; sealed at most 12,288 bytes
+struct NameRecord { version: u8, owner: AccountId, expires: u64, sealed: Vec<u8> }   // version 2; sealed at most 12,288 bytes
 struct Page       { version: u8, sealed: Vec<u8> }                     // sealed at most 81,920 bytes
 struct PrimaryName { version: u8, name: String }                       // the reverse record, in the clear
+struct Settings   { version: u8, admin: AccountId, treasury: AccountId, prices: [u128; 3] }
 ```
+
+`expires` is a time in milliseconds since the Unix epoch, as LEZ block
+timestamps are. `prices` are in the native token's base units, one per term:
+
+| Term | Index | Length |
+|---|---|---|
+| 30 days | 0 | 2,592,000,000 ms |
+| 1 year | 1 | 31,536,000,000 ms |
+| 5 years | 2 | 157,680,000,000 ms |
+
+A registry whose settings account is empty charges nothing.
 
 `sealed` is:
 
@@ -155,6 +171,16 @@ transactions contain is identifiers and sealed bytes.
 the record account, read the registry's shard on it, decode `NameRecord`, open
 `sealed`. One derivation and one account read.
 
+**Expiry.** A name is held for a term and then lapses. With `now` the reader's
+own clock in milliseconds and a grace period of 30 days (2,592,000,000 ms):
+
+- `now < expires`: the name is active.
+- `expires <= now < expires + grace`: the name is in grace. It can still be
+  renewed, nobody else can register it, and it still resolves. A client
+  SHOULD tell a payer that the name has lapsed.
+- `now >= expires + grace`: a reader treats the name as unregistered, whatever
+  the record still holds. Anyone may register it, which empties what was there.
+
 **Paying a name.**
 
 - Private: send a shielded transfer to the key pair (`npk`, `vpk`) with a fresh
@@ -198,19 +224,43 @@ byte). `id` is 32 raw bytes.
 
 | # | Instruction | Fields | Accounts, in order |
 |---|---|---|---|
-| 0 | `Register` | `id, sealed: Vec<u8>` | record, owner |
-| 1 | `SetRecord` | `id, sealed: Vec<u8>` | record, owner |
-| 2 | `SetPage` | `id, sealed: Vec<u8>` | record, page, owner |
-| 3 | `Transfer` | `id, new_owner: AccountId` | record, page, owner |
-| 4 | `Release` | `id` | record, page, owner |
-| 5 | `SetPrimary` | `name: String` | owner |
+| 0 | `Register` | `id, sealed: Vec<u8>, term: u8, fee: u128, now: u64` | record, page, settings, payer, then treasury if `fee` is not 0 |
+| 1 | `Renew` | `id, term: u8, fee: u128, now: u64` | record, settings, payer, then treasury if `fee` is not 0 |
+| 2 | `SetRecord` | `id, sealed: Vec<u8>` | record, owner |
+| 3 | `SetPage` | `id, sealed: Vec<u8>` | record, page, owner |
+| 4 | `Transfer` | `id, new_owner: AccountId` | record, page, owner |
+| 5 | `Release` | `id` | record, page, owner |
+| 6 | `SetPrimary` | `name: String` | owner |
+| 7 | `Configure` | `admin: AccountId, treasury: AccountId, prices: [u128; 3]` | settings, admin |
 
 Rules:
 
-- Every account is passed with the registry's own shard selected, and `owner`
-  must sign.
-- `Register` succeeds only if the name is unregistered. Its `sealed` is the
-  name's first profile and may be empty.
+- Every account is passed with the registry's own shard selected, except
+  `payer` and `treasury`, which are passed with the native token's shard
+  selected (the all-zero program ID). `owner`, `payer` and `admin` must sign.
+- **Time.** `now` is the sender's claim of the current time in milliseconds. The
+  program makes the transaction valid only in a block whose timestamp is at
+  least `now`, so `now` is never in the future, and uses it as the time. A
+  client takes `now` from the chain's clock: the timestamp, in the last 8 of 16
+  bytes, of the clock program's shard on the account whose ID is the ASCII
+  bytes `/LEZ/ClockProgramAccount/0000001`. It does not use its own clock: a
+  transaction whose `now` is ahead of the chain is rejected and is still
+  charged its whole gas limit.
+- **Fees.** `fee` must equal the settings' price for `term`, and `treasury` must
+  be the settings' treasury; the program then moves `fee` from `payer` to
+  `treasury` with a native token transfer in the same transaction. When the
+  settings account is empty, the price for the term is 0, or `payer` is the
+  treasury itself, `fee` is 0 and no treasury account is passed. A client reads
+  the settings account first.
+- `Register` succeeds if the name is unregistered, or if its record's
+  `expires + grace <= now`. The payer becomes the owner, `expires` becomes
+  `now` plus the term, and any page left by a lapsed holder is emptied. Its
+  `sealed` is the name's first profile and may be empty.
+- `Renew` succeeds while `now < expires + grace`, for any payer. `expires`
+  becomes the later of `expires` and `now`, plus the term.
+- `Configure` sets the settings. While the settings account is empty anyone may
+  send it, so whoever deploys a registry configures it at once and checks that
+  the admin is theirs; afterwards only the settings' `admin` may.
 - Every other instruction on a name succeeds only if the signer is the record's
   `owner`.
 - A profile is changed by reading it, opening it, changing it, sealing it again
@@ -219,6 +269,9 @@ Rules:
   name removes the reverse record; with a name, it publishes that name.
 - `Transfer` sets the new owner and empties the profile and the page, so a
   transferred name never keeps routing payments or messages to its last holder.
+  The expiry is kept.
+- A holder may still change a lapsed name until someone else registers it;
+  readers ignore it once it is past grace.
 - `Release` empties the record and the page. The name is then unregistered and
   anyone may register it.
 - A reverse record is not touched by `Transfer` or `Release`. It stops counting
@@ -235,7 +288,8 @@ The registry emits LEZ program events. The selector is the first 8 bytes of
 
 | Event | Selector (hex) | Data |
 |---|---|---|
-| `logos_names::Registered` | `e87848390f741b1a` | `id, owner: AccountId` |
+| `logos_names::Registered` | `e87848390f741b1a` | `id, owner: AccountId, expires: u64` |
+| `logos_names::Renewed` | `c0a35e0e73dbcc59` | `id, expires: u64` (`now` plus the term: the earliest the new expiry can be) |
 | `logos_names::Transferred` | `b78a6f5ae756bf67` | `id, from: AccountId, to: AccountId` |
 | `logos_names::Released` | `3d2e60d8d0ed2a9a` | `id, owner: AccountId` |
 
@@ -284,16 +338,19 @@ The page `{ content_type: "text/plain", body: "hi" }`, same nonce:
 64767f7cf7b5a511
 ```
 
-Instructions, with `id` = `00 01 02 … 1f`:
+Instructions, with `id` = `00 01 02 … 1f`. `term` is one byte, `fee` 16 bytes
+and `now` 8 bytes, little-endian:
 
 | Instruction | Encoding |
 |---|---|
-| `Register { id, sealed: [ee, ff] }` | `00` ‖ id ‖ `02000000eeff` |
-| `SetRecord { id, sealed: [ee] }` | `01` ‖ id ‖ `01000000ee` |
-| `SetPage { id, sealed: [] }` | `02` ‖ id ‖ `00000000` |
-| `Transfer { id, new_owner: 32 bytes of 0x02 }` | `03` ‖ id ‖ `02` 32 times |
-| `Release { id }` | `04` ‖ id |
-| `SetPrimary { name: "jef" }` | `05030000006a6566` |
+| `Register { id, sealed: [ee, ff], term: 1, fee: 100000, now: 1700000000000 }` | `00` ‖ id ‖ `02000000eeff` ‖ `01` ‖ `a0860100000000000000000000000000` ‖ `0068e5cf8b010000` |
+| `Renew { id, term: 2, fee: 0, now: 1700000000000 }` | `01` ‖ id ‖ `02` ‖ `00` 16 times ‖ `0068e5cf8b010000` |
+| `SetRecord { id, sealed: [ee] }` | `02` ‖ id ‖ `01000000ee` |
+| `SetPage { id, sealed: [] }` | `03` ‖ id ‖ `00000000` |
+| `Transfer { id, new_owner: 32 bytes of 0x02 }` | `04` ‖ id ‖ `02` 32 times |
+| `Release { id }` | `05` ‖ id |
+| `SetPrimary { name: "jef" }` | `06030000006a6566` |
+| `Configure { admin: 32 × 0x01, treasury: 32 × 0x02, prices: [1, 2, 3] }` | `07` ‖ `01` 32 times ‖ `02` 32 times ‖ three 16-byte little-endian numbers |
 
 ## 11. Canonical registries
 
@@ -321,7 +378,8 @@ that most clients do not have to.
   `Profile`, `seal_profile`, `open_profile`, `seal_page` and `open_page`.
 - JavaScript: `resolver/names.js`, with no dependencies, using Web Crypto.
   `normalizeName`, `deriveName`, `resolveName`, `resolvePage`, `reverseLookup`
-  and the decoders.
+  and the decoders. The three resolvers take the current time as an optional
+  last argument.
 
 ### 12.2 HTTP (by the gateway)
 
@@ -330,8 +388,10 @@ that most clients do not have to.
 | `GET https://<name>.<gateway>/` or `GET https://<gateway>/<name>` | The name's page, with its content type |
 | `GET …/.well-known/logos-name.json` for a name | The resolved name as JSON, or 404 `{"error": "not registered"}` |
 
-The JSON has `name`, `owner`, and the fields of `Profile`: account IDs in
-base58, `npk` and `vpk` in hex or `null`, and `texts` as an object. A gateway
+The JSON has `name`, `owner`, `expires` (milliseconds), `lapsed` (true in the
+grace period) and the fields of `Profile`: account IDs in base58, `npk` and
+`vpk` in hex or `null`, and `texts` as an object. A name past its grace period
+is not registered. A gateway
 learns every name asked of it and can alter what it serves; a client that needs
 privacy or certainty reads the chain itself.
 
@@ -358,7 +418,9 @@ module names {
   method wallet() -> tstr
   method mine() -> tstr
   method keep(name: tstr) -> tstr
-  method register(name: tstr, owner: tstr, private_account: tstr) -> tstr
+  method prices() -> tstr
+  method register(name: tstr, owner: tstr, private_account: tstr, term: uint) -> tstr
+  method renew(name: tstr, payer: tstr, term: uint) -> tstr
   method receive_privately(name: tstr, private_account: tstr) -> tstr
   method set_account(name: tstr, account: tstr) -> tstr
   method set_private_keys(name: tstr, nullifier_public_key: tstr, viewing_public_key: tstr) -> tstr
@@ -389,7 +451,8 @@ with JSON text in the envelope Logos modules use:
 | Method | `value` |
 |---|---|
 | `recipient("jef.lez")` | `{"name", "display", "public", "public_hex", "private"}`, or `null` if unregistered. `public` is a base58 account ID or `null`; `private` is `{"nullifier_public_key", "viewing_public_key"}` in hex, or `null`. |
-| `resolve("jef.lez")` | `{"name", "display", "owner", "account", "npk", "vpk", "texts"}`, or `null`. |
+| `resolve("jef.lez")` | `{"name", "display", "owner", "expires", "lapsed", "account", "npk", "vpk", "texts"}`, or `null`. `expires` is in milliseconds; `lapsed` is true in the grace period. A name past grace is `null`. |
+| `prices()` | `{"treasury", "terms": [{"term", "label", "days", "fee"}]}`: what registering or renewing costs for each term, `fee` as decimal text. |
 | `page("jef.lez")` | `{"content_type", "bytes", "text"}`, or `null`. `text` is the body if it is UTF-8. |
 | `reverse(account)` | `{"name", "display"}` for the confirmed name, or `null`. |
 
@@ -412,7 +475,7 @@ everything else.
 | Method | `value` |
 |---|---|
 | `wallet()` | `{"accounts": [{"account", "balance", "funded", "name"}], "private_accounts": [account]}`: the open wallet's public accounts, funded ones first, and its private accounts. `balance` is decimal text; `name` is the account's confirmed name or `null`. |
-| `mine()` | `{"names": [{"name", "owner"}]}`: the names this device remembers that the open wallet holds. |
+| `mine()` | `{"names": [{"name", "display", "owner", "expires", "lapsed"}]}`: the names this device remembers that the open wallet holds. |
 | `keep("jef.lez")` | `true`: remember the name on this device, for `mine`. |
 | every change | `{"name", "signer", "tx"}`: the transaction was sent. |
 
@@ -421,7 +484,9 @@ it registers and each name passed to `keep`, and `mine` returns those the open
 wallet still holds. A name registered elsewhere appears once it is looked up
 and kept.
 
-`private_account` is one of the wallet's private accounts in base58, or `auto`
+`term` is 0, 1 or 2 (30 days, 1 year, 5 years); the module reads the fee from
+the settings and the time from the chain. `renew` may be paid by any account in
+the wallet. `private_account` is one of the wallet's private accounts in base58, or `auto`
 for its first one, which is made if the wallet has none. `register` seals a
 first profile holding the name and, unless `private_account` is empty, that
 account's receiving keys. `receive_privately` puts those keys in the profile

@@ -13,6 +13,7 @@ names_core.workspace = true
 names_seal.workspace = true
 lee_core.workspace = true
 wallet.workspace = true
+clock_core.workspace = true
 
 anyhow = "1.0.98"
 borsh.workspace = true

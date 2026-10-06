@@ -1,7 +1,7 @@
 {
   "name": "names_ui",
   "display_name": "Names",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "type": "ui_qml",
   "category": "identity",
   "description": "Find, register and manage private .LEZ names",

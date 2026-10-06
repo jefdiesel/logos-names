@@ -20,6 +20,9 @@ const TAG_LENGTH = 16;
 const PROFILE_BLOCK = 256;
 const NAME_PATTERN = /^(?!-)[a-z0-9-]{1,32}(?<!-)$/;
 
+/** How long an expired name still resolves, in milliseconds: 30 days. */
+export const GRACE_MS = 2_592_000_000;
+
 function pad32(text) {
   const bytes = new Uint8Array(32);
   bytes.set(utf8.encode(text));
@@ -198,6 +201,11 @@ class Reader {
     const [a, b, c, d] = this.take(4);
     return (a | (b << 8) | (c << 16) | (d << 24)) >>> 0;
   }
+  u64() {
+    const low = this.u32();
+    const high = this.u32();
+    return high * 2 ** 32 + low;
+  }
   byteVec() {
     return this.take(this.u32());
   }
@@ -226,6 +234,7 @@ export function decodeNameRecord(bytes) {
   return {
     version: reader.u8(),
     owner: base58Encode(reader.take(32)),
+    expires: reader.u64(),
     sealed: reader.byteVec(),
   };
 }
@@ -308,42 +317,60 @@ async function openAs(key, sealed, kind, decode) {
   }
 }
 
-/**
- * What `name` resolves to, or null when it is not registered. A record whose
- * sealed profile is empty, does not open with the name's key or names another
- * name is a registered name with nothing set.
- */
-export async function resolveName(rpcUrl, program, name) {
-  const { id, key } = await deriveName(name);
+/** The record of the name `id`, or null when it is not registered or is past grace at `now`. */
+async function readRecord(rpcUrl, program, id, now) {
   const bytes = await readShard(rpcUrl, program, await recordAddress(program, id));
   if (bytes.length === 0) return null;
-  const { owner, sealed } = decodeNameRecord(bytes);
-  const profile = await openAs(key, sealed, "record", decodeProfile);
-  if (profile === null || profile.name !== name) {
-    return { name, owner, account: null, npk: null, vpk: null, texts: {} };
-  }
-  const { account, npk, vpk, texts } = profile;
-  return { name, owner, account, npk, vpk, texts };
+  const record = decodeNameRecord(bytes);
+  return now >= record.expires + GRACE_MS ? null : record;
 }
 
-/** The page for `name`, or null when it has none or it does not open with the name's key. */
-export async function resolvePage(rpcUrl, program, name) {
+/**
+ * What `name` resolves to at the time `now`, or null when it is not registered
+ * or is past its grace period. `expires` is in milliseconds since the Unix
+ * epoch; `lapsed` is true for a name that has expired and is in its grace
+ * period, which still resolves. A record whose sealed profile is empty, does
+ * not open with the name's key or names another name is a registered name with
+ * nothing set.
+ */
+export async function resolveName(rpcUrl, program, name, now = Date.now()) {
   const { id, key } = await deriveName(name);
+  const record = await readRecord(rpcUrl, program, id, now);
+  if (record === null) return null;
+  const { owner, expires, sealed } = record;
+  const held = { name, owner, expires, lapsed: expires <= now };
+  const profile = await openAs(key, sealed, "record", decodeProfile);
+  if (profile === null || profile.name !== name) {
+    return { ...held, account: null, npk: null, vpk: null, texts: {} };
+  }
+  const { account, npk, vpk, texts } = profile;
+  return { ...held, account, npk, vpk, texts };
+}
+
+/**
+ * The page for `name` at the time `now`, or null when the name is not
+ * registered or is past its grace period, has no page, or the page does not
+ * open with the name's key.
+ */
+export async function resolvePage(rpcUrl, program, name, now = Date.now()) {
+  const { id, key } = await deriveName(name);
+  if ((await readRecord(rpcUrl, program, id, now)) === null) return null;
   const bytes = await readShard(rpcUrl, program, await pageAddress(program, id));
   if (bytes.length === 0) return null;
   return openAs(key, decodePage(bytes).sealed, "page", decodePageContent);
 }
 
 /**
- * The name `accountId` is shown as, or null. A reverse record is only a claim,
- * so it counts only when the forward record points back at the same account.
+ * The name `accountId` is shown as at the time `now`, or null. A reverse record
+ * is only a claim, so it counts only when the forward record points back at the
+ * same account.
  */
-export async function reverseLookup(rpcUrl, program, accountId) {
+export async function reverseLookup(rpcUrl, program, accountId, now = Date.now()) {
   const bytes = await readShard(rpcUrl, program, accountId);
   if (bytes.length === 0) return null;
   const { name } = decodePrimaryName(bytes);
   if (!isValidName(name)) return null;
-  const record = await resolveName(rpcUrl, program, name);
+  const record = await resolveName(rpcUrl, program, name, now);
   const confirmed = record && (record.owner === accountId || record.account === accountId);
   return confirmed ? name : null;
 }
