@@ -12,6 +12,9 @@ Every lookup is one or two `getAccount` calls against a sequencer. There is no
 indexer and no server-side state: the accounts that hold a name are derived
 from the name itself, so any app, gateway or agent can compute them offline.
 
+[SPEC.md](SPEC.md) is the specification: everything a wallet, app or indexer
+needs to resolve and change names without using this repository's code.
+
 ## Status
 
 Working end to end on a local LEZ v0.3.0 chain: deploy, register, update,

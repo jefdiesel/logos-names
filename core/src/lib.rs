@@ -976,6 +976,19 @@ mod tests {
         );
     }
 
+    /// The selectors published in SPEC.md; indexers filter on these exact bytes.
+    #[test]
+    fn event_selectors_match_the_specification() {
+        assert_eq!(
+            event_selector(Registered::SELECTOR_NAME),
+            [0xe8, 0x78, 0x48, 0x39, 0x0f, 0x74, 0x1b, 0x1a]
+        );
+        assert_eq!(
+            event_selector(Transferred::SELECTOR_NAME),
+            [0xb7, 0x8a, 0x6f, 0x5a, 0xe7, 0x56, 0xbf, 0x67]
+        );
+    }
+
     #[test]
     fn other_instructions_emit_no_events() {
         let events = run_plan_events(
