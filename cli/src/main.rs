@@ -76,7 +76,8 @@ enum Command {
         #[arg(long)]
         owner: AccountId,
     },
-    /// Send native tokens to the public account a name points at.
+    /// Send native tokens to a name: to its public account, or with `--private`
+    /// to its private receiving keys.
     Pay {
         name: String,
         /// Amount in base units.
@@ -84,6 +85,10 @@ enum Command {
         /// Public account to pay from; the wallet must hold its key.
         #[arg(long)]
         from: AccountId,
+        /// Pay the name's private keys with a shielded transfer. The amount and
+        /// recipient stay off the public record; generating the proof takes a while.
+        #[arg(long)]
+        private: bool,
     },
     /// Print everything a name resolves to, as JSON.
     Resolve { name: String },
@@ -268,6 +273,50 @@ impl Client {
         Ok(())
     }
 
+    /// Pays `amount` to the private receiving keys `name` publishes.
+    async fn pay_private(&self, name: &str, amount: u128, from: AccountId) -> Result<()> {
+        let record = self
+            .record(name)
+            .await?
+            .ok_or_else(|| anyhow!("{name} is not registered"))?;
+        let npk = record
+            .npk
+            .ok_or_else(|| anyhow!("{name} has no private keys set"))?;
+        let vpk = lee_core::encryption::ViewingPublicKey::from_bytes(record.vpk)
+            .map_err(|error| anyhow!("{name} publishes an invalid viewing key: {error}"))?;
+        let before = self.wallet.get_account_balance(from).await?;
+
+        println!("paying {amount} privately to {name}; generating the proof");
+        let (hash, _) = NativeTokenTransfer(&self.wallet)
+            .send_shielded_transfer_to_outer_account(
+                AccountIdentity::Public(from),
+                lee_core::NullifierPublicKey(npk),
+                vpk,
+                // Each payment lands on a fresh private account only the recipient can link.
+                wallet::cli::identifier_or_random(None),
+                amount,
+            )
+            .await
+            .context("the sequencer did not accept the transfer")?;
+        self.wallet.store_persistent_data()?;
+        println!("submitted {hash}");
+        let (_, block) = self
+            .wallet
+            .poll_transaction(hash)
+            .await
+            .context("the transfer was not included in a block")?;
+
+        // The recipient's balance is private, so the sender's debit is all that can be
+        // checked here. It is a weak check: a fee alone can exceed a small amount.
+        let debited = before.saturating_sub(self.wallet.get_account_balance(from).await?);
+        if debited < amount {
+            bail!("transfer {hash} was included in block {block} but {from} was not debited");
+        }
+        println!("included in block {block}; {from} was debited {debited} (amount plus fee)");
+        println!("the recipient sees it after syncing their private accounts");
+        Ok(())
+    }
+
     async fn resolve(&self, name: &str) -> Result<serde_json::Value> {
         let Some(record) = self.record(name).await? else {
             bail!("{name} is not registered");
@@ -433,7 +482,18 @@ async fn main() -> Result<()> {
                 .send(vec![(owner, true)], &Instruction::SetPrimary { name })
                 .await
         }
-        Command::Pay { name, amount, from } => client.pay(&name, amount, from).await,
+        Command::Pay {
+            name,
+            amount,
+            from,
+            private,
+        } => {
+            if private {
+                client.pay_private(&name, amount, from).await
+            } else {
+                client.pay(&name, amount, from).await
+            }
+        }
         Command::Resolve { name } => {
             println!("{}", serde_json::to_string_pretty(&client.resolve(&name).await?)?);
             Ok(())
