@@ -7,6 +7,9 @@
 // Configuration (Worker vars or environment):
 //   LEZ_RPC_URL     sequencer JSON-RPC endpoint
 //   NAMES_PROGRAM   account ID of the deployed registry program
+//   ROOT_HOSTS      optional, comma-separated hosts that are the gateway itself
+//                   (e.g. a workers.dev host with no wildcard). On those the name
+//                   is the first path segment: `<host>/<name>`.
 
 import { isValidName, resolveName, resolvePage } from "../resolver/names.js";
 
@@ -38,32 +41,53 @@ function nameFromHost(hostname) {
   return labels.length >= 2 && isValidName(labels[0]) ? labels[0] : null;
 }
 
+/**
+ * Works out which name a request addresses and the path within that name.
+ * On a root host the name is the first path segment; elsewhere it is the subdomain.
+ */
+function target(url, rootHosts) {
+  if (!rootHosts.includes(url.hostname.toLowerCase())) {
+    return { name: nameFromHost(url.hostname), path: url.pathname, sharedOrigin: false };
+  }
+  const [, first = "", ...rest] = url.pathname.split("/");
+  const name = isValidName(first) ? first : null;
+  return { name, path: "/" + rest.join("/"), sharedOrigin: true };
+}
+
 export default {
   async fetch(request, env) {
     const { LEZ_RPC_URL: rpcUrl, NAMES_PROGRAM: program } = env;
     if (!rpcUrl || !program) return text("gateway is missing LEZ_RPC_URL or NAMES_PROGRAM", 500);
     if (request.method !== "GET" && request.method !== "HEAD") return text("method not allowed", 405);
 
-    const url = new URL(request.url);
-    const name = nameFromHost(url.hostname);
-    if (!name) return text("Logos Names gateway. Put a name in front of this domain to visit it.", 404);
+    const rootHosts = (env.ROOT_HOSTS ?? "")
+      .split(",")
+      .map((host) => host.trim().toLowerCase())
+      .filter(Boolean);
+    const { name, path, sharedOrigin } = target(new URL(request.url), rootHosts);
+    if (!name) {
+      const hint = sharedOrigin ? "Add /<name> to this address" : "Put a name in front of this domain";
+      return text(`Logos Names gateway. ${hint} to visit a name.`, 404);
+    }
 
     try {
-      if (url.pathname === RECORD_PATH) {
+      if (path === RECORD_PATH) {
         const record = await resolveName(rpcUrl, program, name);
         return record ? json(record) : json({ error: "not registered", name }, 404);
       }
-      if (url.pathname !== "/") return text("not found", 404);
+      if (path !== "/") return text("not found", 404);
 
       const page = await resolvePage(rpcUrl, program, name);
       if (page) {
-        return new Response(page.body, {
-          headers: {
-            "Content-Type": page.contentType,
-            "X-Content-Type-Options": "nosniff",
-            "Cache-Control": "no-store",
-          },
-        });
+        const headers = {
+          "Content-Type": page.contentType,
+          "X-Content-Type-Options": "nosniff",
+          "Cache-Control": "no-store",
+        };
+        // Path-addressed names share one origin, so sandbox each page into its own
+        // opaque origin; otherwise one name's script could read another's storage.
+        if (sharedOrigin) headers["Content-Security-Policy"] = "sandbox allow-scripts allow-forms";
+        return new Response(page.body, { headers });
       }
       const record = await resolveName(rpcUrl, program, name);
       return record

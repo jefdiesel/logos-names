@@ -7,7 +7,11 @@ import { createServer } from "node:http";
 import worker from "./worker.js";
 
 const port = Number(process.env.PORT ?? 8787);
-const env = { LEZ_RPC_URL: process.env.LEZ_RPC_URL, NAMES_PROGRAM: process.env.NAMES_PROGRAM };
+const env = {
+  LEZ_RPC_URL: process.env.LEZ_RPC_URL,
+  NAMES_PROGRAM: process.env.NAMES_PROGRAM,
+  ROOT_HOSTS: process.env.ROOT_HOSTS,
+};
 
 createServer(async (incoming, outgoing) => {
   const request = new Request(`http://${incoming.headers.host}${incoming.url}`, {
