@@ -71,16 +71,23 @@ struct NameRecord {
     npk: Option<[u8; 32]>,       // nullifier public key, for private payments
     vpk: Vec<u8>,                // viewing public key: empty, or 1184 bytes
     texts: Vec<TextRecord>,      // at most 16
-    previous: Option<String>,    // the name registered before this one
+    previous: Option<String>,    // the next older name in the list
+    next: Option<String>,        // the next newer name in the list
 }
 struct TextRecord { key: String, value: String }   // key 1-32 bytes, value at most 512
 
 struct Page { version: u8, content_type: String, body: Vec<u8> }   // body at most 81,920 bytes
-struct Directory { version: u8, count: u64, latest: Option<String> }
+struct Directory { version: u8, count: u64, latest: Option<String> }   // count of names now registered
 struct PrimaryName { version: u8, name: String }    // the reverse record
 ```
 
 A text key is 1 to 32 bytes of `a-z`, `0-9`, `-`, `_` and `.`.
+
+The registry holds only what is true now. Registered names form a two-way list
+through `previous` and `next`, newest first from the directory's `latest`. A
+name that is released is cut out of the list and its record and page are
+emptied, so the registry's accounts keep no trace of it or of who held it. The
+chain itself still holds every past transaction and event, as any chain does.
 
 ## 4. Resolving
 
@@ -103,8 +110,8 @@ MUST then resolve that name forward and accept it only if `record.owner` or
 `record.account` equals the account. Otherwise the account has no name.
 
 **Listing.** Read the directory; `latest` is the newest name and `count` the
-total. Each record's `previous` is the next older name. Walk until `previous`
-is `None`. One account read per name.
+number now registered. Each record's `previous` is the next older name. Walk
+until `previous` is `None`. One account read per name.
 
 ## 5. Text entries
 
@@ -124,14 +131,15 @@ Instructions are a borsh enum, in this order (the variant index is the first byt
 
 | # | Instruction | Fields | Accounts, in order |
 |---|---|---|---|
-| 0 | `Register` | `name: String, previous: Option<String>` | record, directory, owner |
+| 0 | `Register` | `name: String, previous: Option<String>` | record, directory, previous name's record if `previous` is given, owner |
 | 1 | `SetAccount` | `name: String, account: AccountId` | record, owner |
 | 2 | `SetPrivateKeys` | `name: String, npk: [u8; 32], vpk: Vec<u8>` | record, owner |
 | 3 | `ClearAddresses` | `name: String` | record, owner |
 | 4 | `SetText` | `name: String, key: String, value: String` | record, owner |
-| 5 | `Transfer` | `name: String, new_owner: AccountId` | record, owner |
+| 5 | `Transfer` | `name: String, new_owner: AccountId` | record, page, owner |
 | 6 | `SetPage` | `name: String, content_type: String, body: Vec<u8>` | record, page, owner |
 | 7 | `SetPrimary` | `name: String` | owner |
+| 8 | `Release` | `name: String, previous: Option<String>, next: Option<String>` | record, page, directory, owner, previous name's record if any, next name's record if any |
 
 Rules:
 
@@ -139,16 +147,38 @@ Rules:
   must sign.
 - `Register` succeeds only if the name is unregistered and `previous` equals the
   directory's current `latest`. A client reads the directory immediately before
-  registering, and retries with the new `latest` if it is refused.
+  registering, and retries with the new `latest` if it is refused. It sets the
+  new record's `previous` and the previous record's `next`.
 - Every other instruction on a name succeeds only if the signer is
   `record.owner`.
 - `SetText` with an empty value removes the key. `SetPage` with an empty body
   removes the page. `SetPrimary` with an empty name removes the reverse record.
-- `Transfer` sets the new owner and clears `account`, `npk` and `vpk`, so a
-  transferred name never keeps routing payments to its previous owner. Text
-  entries and the page are kept.
+- `Transfer` sets the new owner and clears everything the last owner set:
+  `account`, `npk`, `vpk`, the text entries and the page. A transferred name
+  never keeps routing payments or messages to its previous owner.
+- `Release` gives the name up. `previous` and `next` must equal the record's
+  own. The record and page are emptied, the neighbours are linked to each
+  other, the directory's `count` drops by one, and `latest` becomes `previous`
+  if the released name was the newest. The name is then unregistered and anyone
+  may register it.
+- A reverse record is not touched by `Transfer` or `Release`. It stops counting
+  on its own, because the forward check in section 4 no longer passes.
+- A client sends one change per signing account at a time, and waits for it to
+  show before sending the next.
 - LEZ includes failed transactions in blocks. A client MUST confirm a change by
   reading the account back, not by the transaction's inclusion.
+
+### Test vectors
+
+Instructions, in hex:
+
+| Instruction | Encoding |
+|---|---|
+| `Register { name: "jef", previous: None }` | `00030000006a656600` |
+| `Register { name: "ada", previous: Some("jef") }` | `000300000061646101030000006a6566` |
+| `SetText { name: "jef", key: "chat", value: "hi" }` | `04030000006a65660400000063686174020000006869` |
+| `Transfer { name: "jef", new_owner: 32 bytes of 0x02 }` | `05030000006a6566` then `02` 32 times |
+| `Release { name: "ada", previous: Some("jef"), next: None }` | `080300000061646101030000006a656600` |
 
 ## 7. Events
 
@@ -159,9 +189,10 @@ The registry emits LEZ program events. The selector is the first 8 bytes of
 |---|---|---|
 | `logos_names::Registered` | `e87848390f741b1a` | `name: String, owner: AccountId` |
 | `logos_names::Transferred` | `b78a6f5ae756bf67` | `name: String, from: AccountId, to: AccountId` |
+| `logos_names::Released` | `3d2e60d8d0ed2a9a` | `name: String, owner: AccountId` |
 
 Events are emitted before the registry has checked the record, so an event can
-exist for a registration or transfer that was refused. An indexer MUST treat
+exist for a registration, transfer or release that was refused. An indexer MUST treat
 events as hints and confirm each against the record. With that check, events
 give an indexer what the on-chain list cannot do cheaply: names by owner,
 search, and history.
@@ -210,38 +241,54 @@ it serves; a client that needs certainty reads the chain itself.
 `mcp/server.js` exposes `resolve_name`, `get_page`, `list_names` and
 `reverse_lookup` as read-only tools.
 
-### 9.4 Logos module (reads implemented, changes proposed)
+### 9.4 Logos module (implemented)
 
 A Logos core module named `names`, so that any Basecamp app or module,
-including a wallet, resolves a name with one call and no knowledge of this
-document. It is in `basecamp-module/` and reads the chain itself, so it does not
-need a wallet to be open.
+including a wallet, resolves and manages names with one call and no knowledge of
+this document. It is in `basecamp-module/`. It reads the chain itself, so
+reading needs no wallet.
 
 ```
 module names {
   method recipient(name: tstr) -> tstr
   method resolve(name: tstr) -> tstr
+  method page(name: tstr) -> tstr
   method reverse(account: tstr) -> tstr
   method list(limit: uint, before: tstr) -> tstr
   method normalize(input: tstr) -> tstr
+
+  method wallet() -> tstr
+  method register(name: tstr, owner: tstr) -> tstr
+  method set_account(name: tstr, account: tstr) -> tstr
+  method set_private_keys(name: tstr, nullifier_public_key: tstr, viewing_public_key: tstr) -> tstr
+  method clear_addresses(name: tstr) -> tstr
+  method set_text(name: tstr, key: tstr, value: tstr) -> tstr
+  method set_page(name: tstr, content_type: tstr, body: tstr) -> tstr
+  method transfer(name: tstr, new_owner: tstr) -> tstr
+  method release(name: tstr) -> tstr
+  method set_primary(account: tstr, name: tstr) -> tstr
+
   method get_config() -> tstr
   method set_registry(program_id: tstr) -> bool
   method set_sequencer(url: tstr) -> bool
 }
 ```
 
-`recipient`, `resolve`, `reverse` and `list` answer with JSON text in the
-envelope Logos modules use:
+Every method except `normalize` and the three configuration methods answers
+with JSON text in the envelope Logos modules use:
 
 ```json
 { "success": true,  "value": <answer>, "error": null }
 { "success": false, "value": null,     "error": "why" }
 ```
 
+**Reading.**
+
 | Method | `value` |
 |---|---|
 | `recipient("jef.lez")` | `{"name", "display", "public", "public_hex", "private"}`, or `null` if unregistered. `public` is a base58 account ID or `null`; `private` is `{"nullifier_public_key", "viewing_public_key"}` in hex, or `null`. |
 | `resolve("jef.lez")` | The record as in 9.2, plus `display`; or `null`. |
+| `page("jef.lez")` | `{"content_type", "bytes", "text"}`, or `null`. `text` is the body if it is UTF-8. |
 | `reverse(account)` | `{"name", "display"}` for the confirmed name, or `null`. |
 | `list(limit, before)` | As the HTTP list. At most 100 per call; `before` is `""` to start from the newest. |
 
@@ -249,8 +296,23 @@ A wallet's send field calls `recipient` when the input ends in `.lez`, then
 sends to `public_hex` or to the `private` keys, which are in the form the LEZ
 wallet module's `transfer_public` and `transfer_shielded` take.
 
-Proposed, not built: `register`, `set_text` and the other changes, which need
-the wallet module to sign.
+**Changing.** The module holds no keys. It builds the instruction, checks it
+against the chain, and asks the LEZ wallet module (`lez_core`) to sign and send
+it with `send_generic_public_transaction`. The wallet must be open and must
+hold the account that signs, which also pays the fee: the `owner` passed to
+`register`, the `account` passed to `set_primary`, and the name's owner for
+everything else.
+
+| Method | `value` |
+|---|---|
+| `wallet()` | `{"accounts": [{"account", "balance", "funded", "name"}]}`: the open wallet's public accounts, funded ones first. `balance` is decimal text; `name` is the account's confirmed name or `null`. |
+| every change | `{"name", "signer", "tx"}`: the transaction was sent. |
+
+A change that the chain would refuse is answered with an error and nothing is
+sent: the name is taken, the wallet does not hold the owner, the account has no
+funds, a key or value is out of range. A change that is sent can still be
+refused, so the caller confirms it by calling `resolve` (or `page`, or
+`reverse`) until it shows, which takes one block.
 
 ## 10. Versioning
 

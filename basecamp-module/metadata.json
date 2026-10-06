@@ -1,11 +1,11 @@
 {
   "name": "names",
   "display_name": "Names",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "core",
   "interface": "cdylib",
   "category": "identity",
-  "description": "Resolve .lez names to wallets, records and pages for any Logos app",
+  "description": "Resolve, register and manage .lez names for any Logos app",
   "main": "names_plugin",
   "dependencies": [],
 

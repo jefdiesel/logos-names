@@ -63,6 +63,7 @@ test("a name record decodes", () => {
       Uint8Array.of(0, 0, 0, 0), // empty vpk
       Uint8Array.of(1, 0, 0, 0), "chat", "hello", // one text entry
       1, "ada", // previous: Some("ada")
+      0, // next: None
     ),
   );
   assert.deepEqual(record, {
@@ -74,6 +75,7 @@ test("a name record decodes", () => {
     vpk: null,
     texts: { chat: "hello" },
     previous: "ada",
+    next: null,
   });
 });
 

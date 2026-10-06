@@ -1,8 +1,10 @@
 // Logos Names for Basecamp: the register of .lez names.
 //
-// A front end on the `names` module, which reads the chain itself, so browsing
-// needs no wallet. Paying goes through `lez_core` (the LEZ wallet) and messaging
-// through `chat_module`; each is called only when its button is pressed.
+// A front end on the `names` module. The module reads the chain itself, so
+// browsing needs no wallet. Registering a name, changing it, transferring it
+// and deleting it are signed by the LEZ wallet (`lez_core`), which the module
+// asks on this screen's behalf. Paying goes to `lez_core` directly and
+// messaging through `chat_module`.
 //
 // Controls are drawn here rather than taken from Qt Quick Controls so the app
 // looks the same whatever style its host applies.
@@ -21,17 +23,21 @@ Item {
     property var record: null          // the name on the plate
     property var page: null
     property string missing: ""        // a looked-up name that is not registered
-    property var accounts: []          // the wallet's public accounts
+    property var wallet: []            // the wallet's funded public accounts: [{account, balance, name}]
+    property string walletProblem: ""  // why the wallet cannot be used, if it cannot
     property int fromIndex: 0
+    property string tool: ""           // the open panel: "", "pay", "edit", "transfer" or "delete"
+    property var pending: null         // a change that was sent and is not confirmed yet
     property string registry: ""
     property string sequencer: ""
     property string notice: ""
     property bool noticeIsError: false
     property bool settingsOpen: false
-    property bool paying: false
     property string lastReply: ""
 
     readonly property bool bridgeReady: typeof logos !== "undefined" && !!logos.callModule
+    readonly property bool busy: pending !== null
+    readonly property bool mine: record !== null && holds(record.owner, wallet)
     readonly property string chatAddress: record !== null && record.texts && /^[0-9a-f]{64}$/.test(record.texts.chat || "") ? record.texts.chat : ""
 
     // ── Palette and type ────────────────────────────────────────────────
@@ -44,7 +50,6 @@ Item {
     readonly property color dim: "#8A91A0"
     readonly property color brass: "#D9B15A"
     readonly property color alarm: "#F08C7E"
-    readonly property string serif: "Charter"
     readonly property string sans: "Avenir Next"
     readonly property string mono: "Menlo"
 
@@ -67,7 +72,7 @@ Item {
         return reply
     }
 
-    /// Asks the names module a question, returning its value or throwing its error.
+    /// Asks the names module, returning its value or throwing its error.
     function ask(method, args) {
         var reply = call("names", method, args)
         if (!reply || reply.success === undefined)
@@ -77,12 +82,23 @@ Item {
         return reply.value
     }
 
+    /// A message as a sentence. One that opens with a name keeps the name's
+    /// lower case.
+    function sentence(message) {
+        var text = String(message).trim()
+        if (text === "")
+            return ""
+        if (!/^\S+\.lez\b/.test(text))
+            text = text.charAt(0).toUpperCase() + text.substr(1)
+        return /[.?!]$/.test(text) ? text : text + "."
+    }
+
     function say(message, isError) {
-        notice = message
+        notice = sentence(message)
         noticeIsError = !!isError
     }
 
-    // ── Actions ─────────────────────────────────────────────────────────
+    // ── Reading ─────────────────────────────────────────────────────────
 
     function loadConfig() {
         try {
@@ -123,6 +139,31 @@ Item {
         }
     }
 
+    /// Reads the wallet's accounts that can pay a fee. Without them the app
+    /// still browses; `walletProblem` says what is missing.
+    function loadWallet() {
+        if (registry === "")
+            return false
+        try {
+            var funded = ask("wallet", []).accounts.filter(function(account) { return account.funded })
+            wallet = funded
+            walletProblem = funded.length > 0 ? "" : "None of the wallet's accounts holds funds to pay the fee."
+        } catch (error) {
+            wallet = []
+            walletProblem = sentence(error.message)
+        }
+        if (fromIndex >= wallet.length)
+            fromIndex = 0
+        return wallet.length > 0
+    }
+
+    function holds(account, accounts) {
+        for (var i = 0; i < accounts.length; i++)
+            if (accounts[i].account === account)
+                return true
+        return false
+    }
+
     /// Shows what was typed: a name, or the name an account ID goes by.
     function find(typed) {
         var text = String(typed).trim()
@@ -148,54 +189,162 @@ Item {
         }
     }
 
+    /// Puts a name on the plate, with every panel closed.
     function show(name) {
-        paying = false
+        tool = ""
+        read(name)
+    }
+
+    /// Reads a name again without closing the panel the holder is working in.
+    function read(name) {
         try {
             var found = ask("resolve", [name])
             if (found === null) {
                 record = null
                 page = null
-                missing = String(call("names", "normalize", [name])) || name
+                tool = ""
+                missing = String(call("names", "normalize", [name]))
+                if (missing === "")
+                    say("A name is 1 to 32 characters of a-z, 0-9 or a hyphen, such as jef.lez.", true)
                 return
             }
             missing = ""
             record = found
             page = ask("page", [found.name])
+            if (!mine && tool !== "pay")
+                tool = ""
         } catch (error) {
             say(error.message, true)
         }
     }
 
-    function loadAccounts() {
+    // ── Changing ────────────────────────────────────────────────────────
+
+    /// Sends one change through the names module, then watches the chain until
+    /// `settled()` says it shows. Sending is not success: a change can still be
+    /// refused, so nothing is reported as done before it is read back.
+    function change(method, args, name, settled, done) {
+        if (busy)
+            return
         try {
-            var listed = call("lez_core", "list_accounts", [])
-            var out = []
-            for (var i = 0; listed && i < listed.length; i++) {
-                if (!listed[i].is_public)
-                    continue
-                var id = listed[i].account_id
-                out.push({
-                    hex: id,
-                    shown: String(call("lez_core", "account_id_to_base58", [id])),
-                    balance: String(call("lez_core", "get_balance", [id, true]))
-                })
-            }
-            accounts = out
-            fromIndex = 0
-            return out.length > 0
+            ask(method, args)
         } catch (error) {
-            accounts = []
-            return false
+            say(error.message, true)
+            return
         }
+        pending = { name: name, settled: settled, done: done, tries: 0 }
+        say("Sent. Waiting for it to be confirmed.", false)
     }
 
+    function checkPending() {
+        var job = pending
+        var settled = false
+        try {
+            settled = job.settled()
+        } catch (error) {
+            // A failed read is not an answer; the next tick asks again.
+        }
+        job.tries += 1
+        if (!settled && job.tries < 40)
+            return
+        pending = null
+        loadRegister(false)
+        loadWallet()
+        read(job.name)
+        if (settled)
+            say(job.done, false)
+        else
+            say("That was sent but has not taken effect, so it may have been refused. Check the name and try again.", true)
+    }
+
+    function registerName() {
+        var name = missing
+        var owner = wallet[fromIndex].account
+        change("register", [name + ".lez", owner], name, function() {
+            var found = ask("resolve", [name])
+            return found !== null && found.owner === owner
+        }, name + ".lez is yours.")
+    }
+
+    function openEdit() {
+        say("", false)
+        accountField.text = record.account !== null ? record.account : ""
+        pageArea.text = page !== null && page.text !== null ? page.text : ""
+        newKeyField.text = ""
+        newValueField.text = ""
+        tool = "edit"
+    }
+
+    function saveAccount() {
+        var name = record.name
+        var account = accountField.text.trim()
+        change("set_account", [name, account], name, function() {
+            return ask("resolve", [name]).account === account
+        }, name + ".lez now pays to " + shorten(account) + ".")
+    }
+
+    function clearAddresses() {
+        var name = record.name
+        change("clear_addresses", [name], name, function() {
+            var found = ask("resolve", [name])
+            return found.account === null && found.npk === null
+        }, name + ".lez no longer takes payments.")
+    }
+
+    /// Sets one entry; an empty value removes it.
+    function saveText(key, value) {
+        var name = record.name
+        key = key.trim()
+        change("set_text", [name, key, value], name, function() {
+            var texts = ask("resolve", [name]).texts
+            return value === "" ? texts[key] === undefined : texts[key] === value
+        }, value === "" ? "Removed " + key + " from " + name + ".lez." : "Saved " + key + " on " + name + ".lez.")
+    }
+
+    /// Publishes the page; an empty body removes it. A body that opens with a
+    /// tag is published as HTML, anything else as plain text.
+    function savePage(body) {
+        var name = record.name
+        var kind = /^\s*</.test(body) ? "text/html; charset=utf-8" : "text/plain; charset=utf-8"
+        change("set_page", [name, kind, body], name, function() {
+            var published = ask("page", [name])
+            return body === "" ? published === null : published !== null && published.text === body
+        }, body === "" ? "Removed the page of " + name + ".lez." : "Published the page of " + name + ".lez.")
+    }
+
+    function showAccountAsName() {
+        var name = record.name
+        var account = record.owner
+        change("set_primary", [account, name], name, function() {
+            var shown = ask("reverse", [account])
+            return shown !== null && shown.name === name
+        }, shorten(account) + " is now shown as " + name + ".lez.")
+    }
+
+    function transferName() {
+        var name = record.name
+        var newOwner = newOwnerField.text.trim()
+        change("transfer", [name, newOwner], name, function() {
+            return ask("resolve", [name]).owner === newOwner
+        }, name + ".lez now belongs to " + shorten(newOwner) + ".")
+    }
+
+    function deleteName() {
+        var name = record.name
+        change("release", [name], name, function() {
+            return ask("resolve", [name]) === null
+        }, "Deleted " + name + ".lez.")
+    }
+
+    // ── Paying and messaging ────────────────────────────────────────────
+
     function openPay() {
-        if (!loadAccounts()) {
-            say("Paying from here needs the LEZ Wallet app, installed and with a wallet open.", true)
+        if (!loadWallet()) {
+            say(walletProblem, true)
             return
         }
         say("", false)
-        paying = true
+        tool = "pay"
     }
 
     /// A whole amount as the 16-byte little-endian hex the wallet expects, or "".
@@ -225,7 +374,7 @@ Item {
             var to = ask("recipient", [record.name])
             if (to === null)
                 throw new Error(record.display + " is no longer registered.")
-            var from = accounts[fromIndex].hex
+            var from = String(call("lez_core", "account_id_from_base58", [wallet[fromIndex].account]))
             var reply
             if (usePrivateKeys) {
                 if (to.private === null)
@@ -237,7 +386,7 @@ Item {
                 reply = call("lez_core", "transfer_public", [from, to.public_hex, amount])
             }
             if (reply && reply.success) {
-                paying = false
+                tool = ""
                 say("Sent " + amountInput.text.trim() + " to " + record.display + ".", false)
             } else {
                 say("The wallet refused: " + (reply && reply.error ? reply.error : "no reason given") + ".", true)
@@ -261,6 +410,8 @@ Item {
             say(error.message, true)
         }
     }
+
+    // ── Small helpers ───────────────────────────────────────────────────
 
     function copy(text, what) {
         clipboard.text = text
@@ -316,6 +467,21 @@ Item {
             return
         loadConfig()
         loadRegister(false)
+    }
+
+    // The wallet is read after the first frame, so the register is on screen
+    // before the app waits on another module.
+    Timer {
+        interval: 150
+        running: root.bridgeReady
+        onTriggered: root.loadWallet()
+    }
+
+    Timer {
+        interval: 1500
+        repeat: true
+        running: root.busy
+        onTriggered: root.checkPending()
     }
 
     // `names.open` puts a name on screen for another app, or for a
@@ -382,32 +548,40 @@ Item {
             visible: seal.letter !== "" && seal.width >= 60
             text: seal.letter.toUpperCase()
             color: root.ink
-            font.family: root.serif
+            font.family: root.sans
+            font.weight: Font.Medium
             font.pixelSize: seal.width * 0.22
         }
     }
 
+    /// A button. `changes` marks one that sends a change to the chain: it rests
+    /// while another change is waiting to be confirmed. `grave` is for the one
+    /// that cannot be undone.
     component Action: Rectangle {
         id: action
         property string label: ""
         property bool strong: false
+        property bool grave: false
+        property bool changes: false
         property bool enabledNow: true
+        readonly property bool live: enabledNow && !(changes && root.busy)
+        readonly property color fill: grave ? root.alarm : root.brass
         signal pressed()
         implicitWidth: actionText.implicitWidth + 28
         implicitHeight: 34
         radius: 6
-        color: !enabledNow ? "transparent" : strong ? (actionArea.containsMouse ? Qt.lighter(root.brass, 1.08) : root.brass) : (actionArea.containsMouse ? root.raised : "transparent")
-        border.width: strong && enabledNow ? 0 : 1
+        color: !live ? "transparent" : strong ? (actionArea.containsMouse ? Qt.lighter(fill, 1.08) : fill) : (actionArea.containsMouse ? root.raised : "transparent")
+        border.width: strong && live ? 0 : 1
         border.color: activeFocus ? root.brass : root.line
-        opacity: enabledNow ? 1 : 0.45
-        activeFocusOnTab: enabledNow
-        Keys.onReturnPressed: if (enabledNow) action.pressed()
-        Keys.onSpacePressed: if (enabledNow) action.pressed()
+        opacity: live ? 1 : 0.45
+        activeFocusOnTab: live
+        Keys.onReturnPressed: if (live) action.pressed()
+        Keys.onSpacePressed: if (live) action.pressed()
         Text {
             id: actionText
             anchors.centerIn: parent
             text: action.label
-            color: action.strong && action.enabledNow ? root.slate : root.ink
+            color: action.strong && action.live ? root.slate : root.ink
             font.family: root.sans
             font.pixelSize: 13
             font.weight: Font.DemiBold
@@ -416,9 +590,26 @@ Item {
             id: actionArea
             anchors.fill: parent
             hoverEnabled: true
-            enabled: action.enabledNow
+            enabled: action.live
             cursorShape: Qt.PointingHandCursor
             onClicked: action.pressed()
+        }
+    }
+
+    /// A quiet text button, for the small things beside the main actions.
+    component Link: Text {
+        id: link
+        signal pressed()
+        color: linkArea.containsMouse ? root.brass : root.dim
+        font.family: root.sans
+        font.pixelSize: 12
+        MouseArea {
+            id: linkArea
+            anchors.fill: parent
+            anchors.margins: -6
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: link.pressed()
         }
     }
 
@@ -427,6 +618,7 @@ Item {
         property alias text: input.text
         property string hint: ""
         property bool numbersOnly: false
+        property bool code: false
         property int size: 14
         signal accepted()
         signal edited()
@@ -444,13 +636,15 @@ Item {
             color: root.ink
             selectionColor: root.brass
             selectedTextColor: root.slate
-            font.family: root.sans
-            font.pixelSize: field.size
+            font.family: field.code ? root.mono : root.sans
+            font.pixelSize: field.code ? field.size - 1 : field.size
             clip: true
             selectByMouse: true
             validator: field.numbersOnly ? digits : null
             onAccepted: field.accepted()
             onEditingFinished: field.edited()
+            // A long value set from outside shows its start, not its end.
+            onTextChanged: if (!activeFocus) cursorPosition = 0
         }
         RegularExpressionValidator { id: digits; regularExpression: /[0-9]{0,15}/ }
         Text {
@@ -462,6 +656,148 @@ Item {
             font.family: root.sans
             font.pixelSize: field.size
             elide: Text.ElideRight
+        }
+    }
+
+    /// A field for many lines, for writing a page.
+    component Area: Rectangle {
+        id: area
+        property alias text: areaInput.text
+        property string hint: ""
+        implicitHeight: 150
+        radius: 6
+        color: root.slate
+        border.width: 1
+        border.color: areaInput.activeFocus ? root.brass : root.line
+        Flickable {
+            id: areaFlick
+            anchors.fill: parent
+            anchors.margins: 12
+            contentHeight: areaInput.height
+            clip: true
+            TextEdit {
+                id: areaInput
+                width: areaFlick.width
+                height: Math.max(areaFlick.height, implicitHeight)
+                color: root.ink
+                selectionColor: root.brass
+                selectedTextColor: root.slate
+                font.family: root.mono
+                font.pixelSize: 12
+                wrapMode: TextEdit.Wrap
+                textFormat: TextEdit.PlainText
+                selectByMouse: true
+            }
+        }
+        Text {
+            anchors.fill: parent
+            anchors.margins: 12
+            visible: areaInput.text === ""
+            text: area.hint
+            color: root.dim
+            font.family: root.sans
+            font.pixelSize: 13
+            wrapMode: Text.Wrap
+        }
+    }
+
+    /// The box one task is done in: paying, editing, transferring, deleting.
+    component Panel: Rectangle {
+        default property alias content: panelColumn.data
+        property string title: ""
+        Layout.fillWidth: true
+        implicitHeight: panelColumn.implicitHeight + 36
+        radius: 8
+        color: root.panel
+        border.width: 1
+        border.color: root.line
+        ColumnLayout {
+            id: panelColumn
+            anchors.fill: parent
+            anchors.margins: 18
+            spacing: 12
+            Text {
+                text: parent.parent.title
+                color: root.ink
+                font.family: root.sans
+                font.pixelSize: 15
+                font.weight: Font.DemiBold
+            }
+        }
+    }
+
+    /// A line of explanation under a control.
+    component Hint: Text {
+        Layout.fillWidth: true
+        color: root.dim
+        font.family: root.sans
+        font.pixelSize: 12
+        lineHeight: 1.25
+        wrapMode: Text.Wrap
+    }
+
+    /// The heading of one part of the edit panel.
+    component Part: Text {
+        Layout.topMargin: 6
+        color: root.ink
+        font.family: root.sans
+        font.pixelSize: 13
+        font.weight: Font.DemiBold
+    }
+
+    /// The wallet's funded accounts, one of which pays.
+    component Accounts: ColumnLayout {
+        Layout.fillWidth: true
+        spacing: 6
+        Repeater {
+            model: root.wallet
+            Rectangle {
+                id: accountRow
+                required property var modelData
+                required property int index
+                Layout.fillWidth: true
+                height: 36
+                radius: 6
+                color: root.fromIndex === index ? root.raised : "transparent"
+                border.width: 1
+                border.color: root.fromIndex === index ? root.brass : root.line
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 10
+                    anchors.rightMargin: 12
+                    spacing: 10
+                    Seal {
+                        Layout.preferredWidth: 20
+                        Layout.preferredHeight: 20
+                        owner: accountRow.modelData.account
+                    }
+                    Text {
+                        text: root.shorten(accountRow.modelData.account)
+                        color: root.ink
+                        font.family: root.mono
+                        font.pixelSize: 12
+                    }
+                    Text {
+                        visible: !!accountRow.modelData.name
+                        text: accountRow.modelData.name ? accountRow.modelData.name + ".lez" : ""
+                        color: root.dim
+                        font.family: root.sans
+                        font.pixelSize: 12
+                    }
+                    Item { Layout.fillWidth: true }
+                    Text {
+                        text: root.grouped(accountRow.modelData.balance)
+                        color: root.dim
+                        font.family: root.sans
+                        font.pixelSize: 12
+                    }
+                }
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.fromIndex = accountRow.index
+                }
+            }
         }
     }
 
@@ -489,20 +825,10 @@ Item {
             font.pixelSize: 13
             wrapMode: Text.WrapAnywhere
         }
-        Text {
+        Link {
             visible: fact.full !== ""
             text: "Copy"
-            color: copyArea.containsMouse ? root.brass : root.dim
-            font.family: root.sans
-            font.pixelSize: 12
-            MouseArea {
-                id: copyArea
-                anchors.fill: parent
-                anchors.margins: -6
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.copy(fact.full, fact.label)
-            }
+            onPressed: root.copy(fact.full, fact.label)
         }
     }
 
@@ -528,7 +854,7 @@ Item {
                 Field {
                     id: searchField
                     Layout.fillWidth: true
-                    hint: "Find a name or account"
+                    hint: "Find or register a name"
                     onAccepted: root.find(searchField.text)
                 }
 
@@ -557,7 +883,7 @@ Item {
                         RowLayout {
                             anchors.fill: parent
                             anchors.leftMargin: 8
-                            anchors.rightMargin: 8
+                            anchors.rightMargin: 10
                             spacing: 10
                             Seal {
                                 Layout.preferredWidth: 24
@@ -569,9 +895,17 @@ Item {
                                 textFormat: Text.StyledText
                                 text: row.modelData.name + "<font color=\"" + root.dim + "\">.lez</font>"
                                 color: root.ink
-                                font.family: root.serif
-                                font.pixelSize: 16
+                                font.family: root.sans
+                                font.weight: Font.Medium
+                                font.pixelSize: 15
                                 elide: Text.ElideRight
+                            }
+                            Text {
+                                visible: root.holds(row.modelData.owner, root.wallet)
+                                text: "Yours"
+                                color: root.brass
+                                font.family: root.sans
+                                font.pixelSize: 11
                             }
                         }
                         MouseArea {
@@ -597,19 +931,9 @@ Item {
                     }
                 }
 
-                Text {
+                Link {
                     text: root.settingsOpen ? "Close settings" : "Settings"
-                    color: settingsArea.containsMouse ? root.brass : root.dim
-                    font.family: root.sans
-                    font.pixelSize: 12
-                    MouseArea {
-                        id: settingsArea
-                        anchors.fill: parent
-                        anchors.margins: -6
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.settingsOpen = !root.settingsOpen
-                    }
+                    onPressed: root.settingsOpen = !root.settingsOpen
                 }
             }
         }
@@ -638,16 +962,13 @@ Item {
                     Text {
                         text: "Which register"
                         color: root.ink
-                        font.family: root.serif
-                        font.pixelSize: 22
-                    }
-                    Text {
-                        Layout.fillWidth: true
-                        text: "A register is one program on the Logos Execution Zone. Everyone who uses the same program ID sees the same names."
-                        color: root.dim
                         font.family: root.sans
+                        font.weight: Font.DemiBold
+                        font.pixelSize: 20
+                    }
+                    Hint {
                         font.pixelSize: 13
-                        wrapMode: Text.Wrap
+                        text: "A register is one program on the Logos Execution Zone. Everyone who uses the same program ID sees the same names."
                     }
                     Field {
                         id: registryField
@@ -696,16 +1017,13 @@ Item {
                     Text {
                         text: root.registry === "" ? "Choose a register to begin" : "The register of .lez names"
                         color: root.ink
-                        font.family: root.serif
-                        font.pixelSize: 30
-                    }
-                    Text {
-                        Layout.fillWidth: true
-                        text: root.registry === "" ? "Open Settings and enter the register's program ID." : "Pick a name on the left, or type one to see who holds it, where it pays and how to reach them."
-                        color: root.dim
                         font.family: root.sans
+                        font.weight: Font.DemiBold
+                        font.pixelSize: 28
+                    }
+                    Hint {
                         font.pixelSize: 14
-                        wrapMode: Text.Wrap
+                        text: root.registry === "" ? "Open Settings and enter the register's program ID." : "Pick a name on the left to see who holds it, where it pays and how to reach them. Type a name nobody holds and you can register it."
                     }
                 }
 
@@ -714,13 +1032,16 @@ Item {
                     visible: root.missing !== ""
                     Layout.fillWidth: true
                     Layout.topMargin: 24
-                    spacing: 12
+                    spacing: 14
                     Text {
+                        Layout.fillWidth: true
                         textFormat: Text.StyledText
                         text: root.missing + "<font color=\"" + root.dim + "\">.lez</font>"
-                        color: root.dim
-                        font.family: root.serif
-                        font.pixelSize: 46
+                        color: root.ink
+                        font.family: root.sans
+                        font.weight: Font.DemiBold
+                        font.pixelSize: 44
+                        elide: Text.ElideRight
                     }
                     Text {
                         text: "Nobody holds this name."
@@ -728,17 +1049,30 @@ Item {
                         font.family: root.sans
                         font.pixelSize: 15
                     }
-                    Text {
-                        Layout.fillWidth: true
-                        text: "Names go to whoever registers them first. Claiming from this screen is not built yet; from a terminal it is one command."
-                        color: root.dim
-                        font.family: root.sans
-                        font.pixelSize: 13
-                        wrapMode: Text.Wrap
+                    Panel {
+                        visible: root.wallet.length > 0
+                        title: "Register it to"
+                        Accounts {}
+                        Hint { text: "The account you choose holds the name and pays the fee. Only it can change, transfer or delete the name." }
+                        Action {
+                            label: "Register " + root.missing + ".lez"
+                            strong: true
+                            changes: true
+                            onPressed: root.registerName()
+                        }
                     }
-                    Action {
-                        label: "Copy the command"
-                        onPressed: root.copy("names register " + root.missing + ".lez --owner <your account>", "Command")
+                    ColumnLayout {
+                        visible: root.wallet.length === 0
+                        Layout.fillWidth: true
+                        spacing: 12
+                        Hint {
+                            font.pixelSize: 13
+                            text: "Registering it takes an account that can pay the fee. " + root.walletProblem
+                        }
+                        Action {
+                            label: "Check the wallet again"
+                            onPressed: root.loadWallet()
+                        }
                     }
                 }
 
@@ -765,8 +1099,9 @@ Item {
                                 textFormat: Text.StyledText
                                 text: root.record !== null ? root.record.name + "<font color=\"" + root.dim + "\">.lez</font>" : ""
                                 color: root.ink
-                                font.family: root.serif
-                                font.pixelSize: 46
+                                font.family: root.sans
+                                font.weight: Font.DemiBold
+                                font.pixelSize: 44
                                 elide: Text.ElideRight
                             }
                             Text {
@@ -779,6 +1114,7 @@ Item {
                     }
 
                     RowLayout {
+                        Layout.fillWidth: true
                         spacing: 8
                         Action {
                             label: "Send"
@@ -795,83 +1131,237 @@ Item {
                             label: "Copy link"
                             onPressed: root.copy(root.linkFor(root.record.name), "Link")
                         }
+                        Item { Layout.fillWidth: true }
+                        Action {
+                            visible: root.mine
+                            label: "Edit"
+                            onPressed: root.openEdit()
+                        }
+                        Action {
+                            visible: root.mine
+                            label: "Transfer"
+                            onPressed: {
+                                root.say("", false)
+                                newOwnerField.text = ""
+                                root.tool = "transfer"
+                            }
+                        }
+                        Action {
+                            visible: root.mine
+                            label: "Delete"
+                            onPressed: {
+                                root.say("", false)
+                                root.tool = "delete"
+                            }
+                        }
                     }
 
                     // Paying.
-                    Rectangle {
-                        visible: root.paying
-                        Layout.fillWidth: true
-                        implicitHeight: payColumn.implicitHeight + 32
-                        radius: 8
-                        color: root.panel
-                        border.width: 1
-                        border.color: root.line
-                        ColumnLayout {
-                            id: payColumn
-                            anchors.fill: parent
-                            anchors.margins: 16
-                            spacing: 12
-                            Text {
-                                text: root.record !== null ? "Send to " + root.record.display : ""
-                                color: root.ink
-                                font.family: root.sans
-                                font.pixelSize: 15
-                                font.weight: Font.DemiBold
+                    Panel {
+                        visible: root.tool === "pay"
+                        title: root.record !== null ? "Send to " + root.record.display : ""
+                        Accounts {}
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Field {
+                                id: amountInput
+                                Layout.preferredWidth: 160
+                                hint: "Amount"
+                                numbersOnly: true
                             }
-                            Repeater {
-                                model: root.accounts
-                                Rectangle {
-                                    id: accountRow
-                                    required property var modelData
-                                    required property int index
-                                    Layout.fillWidth: true
-                                    height: 34
-                                    radius: 6
-                                    color: root.fromIndex === index ? root.raised : "transparent"
-                                    border.width: 1
-                                    border.color: root.fromIndex === index ? root.brass : root.line
-                                    RowLayout {
-                                        anchors.fill: parent
-                                        anchors.leftMargin: 12
-                                        anchors.rightMargin: 12
-                                        Text { text: root.shorten(accountRow.modelData.shown); color: root.ink; font.family: root.mono; font.pixelSize: 12 }
-                                        Item { Layout.fillWidth: true }
-                                        Text { text: root.grouped(accountRow.modelData.balance); color: root.dim; font.family: root.sans; font.pixelSize: 12 }
-                                    }
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.fromIndex = accountRow.index }
-                                }
+                            Action {
+                                label: "Send publicly"
+                                strong: true
+                                enabledNow: root.record !== null && root.record.account !== null
+                                onPressed: root.pay(false)
                             }
+                            Action {
+                                label: "Send privately"
+                                enabledNow: root.record !== null && root.record.npk !== null
+                                onPressed: root.pay(true)
+                            }
+                            Item { Layout.fillWidth: true }
+                            Action { label: "Cancel"; onPressed: root.tool = "" }
+                        }
+                        Hint { text: "A private payment hides the amount and where it went. It takes a few minutes to prepare." }
+                    }
+
+                    // Editing.
+                    Panel {
+                        visible: root.tool === "edit"
+                        title: root.record !== null ? "Edit " + root.record.display : ""
+
+                        Part { text: "Pays to" }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Field {
+                                id: accountField
+                                Layout.fillWidth: true
+                                code: true
+                                hint: "Account ID that receives payments"
+                            }
+                            Action {
+                                label: "Save"
+                                changes: true
+                                enabledNow: accountField.text.trim() !== "" && root.record !== null && accountField.text.trim() !== root.record.account
+                                onPressed: root.saveAccount()
+                            }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 16
+                            Link {
+                                text: "Use the account that holds the name"
+                                onPressed: accountField.text = root.record.owner
+                            }
+                            Link {
+                                visible: root.record !== null && (root.record.account !== null || root.record.npk !== null)
+                                text: "Stop taking payments"
+                                onPressed: root.clearAddresses()
+                            }
+                            Item { Layout.fillWidth: true }
+                        }
+
+                        Part { text: "Entries" }
+                        Repeater {
+                            model: root.textKeys()
                             RowLayout {
+                                id: entry
+                                required property string modelData
                                 Layout.fillWidth: true
                                 spacing: 8
+                                Text {
+                                    Layout.preferredWidth: 96
+                                    text: entry.modelData
+                                    color: root.dim
+                                    font.family: root.sans
+                                    font.pixelSize: 13
+                                    elide: Text.ElideRight
+                                }
                                 Field {
-                                    id: amountInput
-                                    Layout.preferredWidth: 160
-                                    hint: "Amount"
-                                    numbersOnly: true
+                                    id: entryValue
+                                    Layout.fillWidth: true
+                                    size: 13
+                                    text: root.record !== null && root.record.texts[entry.modelData] !== undefined ? root.record.texts[entry.modelData] : ""
                                 }
                                 Action {
-                                    label: "Send publicly"
-                                    strong: true
-                                    enabledNow: root.record !== null && root.record.account !== null
-                                    onPressed: root.pay(false)
+                                    label: "Save"
+                                    changes: true
+                                    enabledNow: entryValue.text !== "" && root.record !== null && entryValue.text !== root.record.texts[entry.modelData]
+                                    onPressed: root.saveText(entry.modelData, entryValue.text)
                                 }
                                 Action {
-                                    label: "Send privately"
-                                    enabledNow: root.record !== null && root.record.npk !== null
-                                    onPressed: root.pay(true)
+                                    label: "Remove"
+                                    changes: true
+                                    onPressed: root.saveText(entry.modelData, "")
                                 }
-                                Item { Layout.fillWidth: true }
-                                Action { label: "Cancel"; onPressed: root.paying = false }
                             }
-                            Text {
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Field {
+                                id: newKeyField
+                                Layout.preferredWidth: 96
+                                size: 13
+                                hint: "chat"
+                            }
+                            Field {
+                                id: newValueField
                                 Layout.fillWidth: true
-                                text: "A private payment hides the amount and where it went. It takes a few minutes to prepare."
-                                color: root.dim
-                                font.family: root.sans
-                                font.pixelSize: 12
-                                wrapMode: Text.Wrap
+                                size: 13
+                                hint: "Value"
                             }
+                            Action {
+                                label: "Add"
+                                changes: true
+                                enabledNow: newKeyField.text.trim() !== "" && newValueField.text !== ""
+                                onPressed: root.saveText(newKeyField.text, newValueField.text)
+                            }
+                        }
+                        Hint { text: "Other apps read these. chat is your Logos Chat address, inbox a Logos Delivery topic, agent where your AI agent answers, cid a file in Logos Storage." }
+
+                        Part { text: "Page" }
+                        Area {
+                            id: pageArea
+                            Layout.fillWidth: true
+                            hint: "Write plain text or HTML. Anyone can read it at this name."
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Action {
+                                label: "Publish page"
+                                changes: true
+                                enabledNow: pageArea.text !== "" && (root.page === null || pageArea.text !== root.page.text)
+                                onPressed: root.savePage(pageArea.text)
+                            }
+                            Action {
+                                label: "Remove page"
+                                changes: true
+                                enabledNow: root.page !== null
+                                onPressed: root.savePage("")
+                            }
+                        }
+
+                        Part { text: "Your account's name" }
+                        Hint { text: root.record !== null ? "Apps can show " + root.shorten(root.record.owner) + " as " + root.record.display + " wherever the account appears." : "" }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Action {
+                                label: root.record !== null ? "Show my account as " + root.record.display : ""
+                                changes: true
+                                onPressed: root.showAccountAsName()
+                            }
+                            Item { Layout.fillWidth: true }
+                            Action { label: "Done"; onPressed: root.tool = "" }
+                        }
+                    }
+
+                    // Transferring.
+                    Panel {
+                        visible: root.tool === "transfer"
+                        title: root.record !== null ? "Transfer " + root.record.display : ""
+                        Field {
+                            id: newOwnerField
+                            Layout.fillWidth: true
+                            code: true
+                            hint: "Account ID of the new holder"
+                        }
+                        Hint { text: "The new holder starts clean: where the name pays, its entries and its page are cleared. Once it is transferred, only they can change it or give it back." }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Action {
+                                label: root.record !== null ? "Transfer " + root.record.display : ""
+                                strong: true
+                                changes: true
+                                enabledNow: newOwnerField.text.trim() !== ""
+                                onPressed: root.transferName()
+                            }
+                            Action { label: "Cancel"; onPressed: root.tool = "" }
+                        }
+                    }
+
+                    // Deleting.
+                    Panel {
+                        visible: root.tool === "delete"
+                        title: root.record !== null ? "Delete " + root.record.display + "?" : ""
+                        Hint { text: "Its record and page are cleared and it leaves the register. The name is then free, and anyone can register it, including someone else." }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Action {
+                                label: root.record !== null ? "Delete " + root.record.display : ""
+                                strong: true
+                                grave: true
+                                changes: true
+                                onPressed: root.deleteName()
+                            }
+                            Action { label: "Keep it"; onPressed: root.tool = "" }
                         }
                     }
 
@@ -882,8 +1372,8 @@ Item {
                         spacing: 10
                         Fact {
                             label: "Held by"
-                            code: true
-                            value: root.record !== null ? root.shorten(root.record.owner) : ""
+                            code: !root.mine
+                            value: root.record === null ? "" : root.mine ? "Your account " + root.shorten(root.record.owner) : root.shorten(root.record.owner)
                             full: root.record !== null ? root.record.owner : ""
                         }
                         Fact {
@@ -898,14 +1388,9 @@ Item {
                             Fact {
                                 required property string modelData
                                 label: modelData
-                                value: root.record !== null ? root.record.texts[modelData] : ""
+                                value: root.record !== null && root.record.texts[modelData] !== undefined ? root.record.texts[modelData] : ""
                                 full: value
                             }
-                        }
-                        Fact {
-                            visible: root.record !== null && root.record.previous !== null
-                            label: "Registered after"
-                            value: root.record !== null && root.record.previous !== null ? root.record.previous + ".lez" : ""
                         }
                     }
 
@@ -928,9 +1413,9 @@ Item {
                             textFormat: Text.PlainText
                             text: root.pageWords() !== "" ? root.pageWords() : "The page holds no readable text."
                             color: root.ink
-                            font.family: root.serif
-                            font.pixelSize: 16
-                            lineHeight: 1.35
+                            font.family: root.sans
+                            font.pixelSize: 15
+                            lineHeight: 1.4
                             wrapMode: Text.Wrap
                         }
                     }

@@ -13,8 +13,12 @@
 //! - the directory, on a fixed derived account ([`directory_address`]).
 //!
 //! Names form a linked list: the directory holds the newest name and every
-//! record holds the name registered before it, so all names can be listed by
-//! walking back from the directory with no indexer.
+//! record holds the names registered just before and just after it, so all
+//! names can be listed by walking back from the directory with no indexer, and
+//! a released name can be unlinked without leaving a gap.
+//!
+//! The registry keeps no history. Releasing a name clears its record and page
+//! and unlinks it; transferring a name clears everything its last owner set.
 //!
 //! `plan` never sees account data, so every ownership check is carried by an
 //! effect and enforced in `apply`, where the shard's current data is visible.
@@ -66,15 +70,17 @@ pub struct NameRecord {
     /// Viewing public key for private transfers; empty when unset.
     pub vpk: Vec<u8>,
     pub texts: Vec<TextRecord>,
-    /// The name registered just before this one; `None` for the first name.
+    /// The name before this one in the list; `None` for the oldest name.
     pub previous: Option<String>,
+    /// The name after this one in the list; `None` for the newest name.
+    pub next: Option<String>,
 }
 
 /// The head of the list of all names.
 #[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Directory {
     pub version: u8,
-    /// How many names have been registered.
+    /// How many names are registered now.
     pub count: u64,
     /// The most recently registered name.
     pub latest: Option<String>,
@@ -104,7 +110,8 @@ pub enum Instruction {
     /// Claim an unregistered name for the signer. `previous` must be the
     /// directory's current latest name, which links the new name into the list;
     /// the registration is refused if another name got in first.
-    /// Accounts: `[record, directory, owner]`.
+    /// Accounts: `[record, directory, owner]` for the first name, otherwise
+    /// `[record, directory, previous name's record, owner]`.
     Register {
         name: String,
         previous: Option<String>,
@@ -125,8 +132,10 @@ pub enum Instruction {
         key: String,
         value: String,
     },
-    /// Hand the name to a new owner. Addresses are cleared so the name never
-    /// keeps routing funds to the previous owner; texts and the page stay.
+    /// Hand the name to a new owner. Everything the last owner set is cleared:
+    /// addresses, text entries and the page. The new owner starts clean, and
+    /// the name never keeps routing payments or messages to the old one.
+    /// Accounts: `[record, page, owner]`.
     Transfer { name: String, new_owner: AccountId },
     /// Write the name's page; an empty body removes it.
     /// Accounts: `[record, page, owner]`.
@@ -138,6 +147,16 @@ pub enum Instruction {
     /// Set the signer's reverse record; an empty name removes it.
     /// Accounts: `[owner]`.
     SetPrimary { name: String },
+    /// Give the name up. Its record and page are cleared and it is unlinked
+    /// from the list, so nothing of it remains and anyone may register it
+    /// again. `previous` and `next` must be the record's own neighbours.
+    /// Accounts: `[record, page, directory, owner]`, then the previous name's
+    /// record if there is one, then the next name's record if there is one.
+    Release {
+        name: String,
+        previous: Option<String>,
+        next: Option<String>,
+    },
 }
 
 /// A change to an existing record, applied once ownership is confirmed.
@@ -162,6 +181,29 @@ pub enum Effect {
     Advance {
         expected_latest: Option<String>,
         name: String,
+    },
+    /// On a neighbouring record: point its forward or backward link at `value`,
+    /// refused unless that link is `expected`.
+    Relink {
+        name: String,
+        forward: bool,
+        expected: Option<String>,
+        value: Option<String>,
+    },
+    /// On the record: clear it, refused unless `signer` owns `name` and its
+    /// neighbours are `previous` and `next`.
+    Remove {
+        name: String,
+        signer: AccountId,
+        previous: Option<String>,
+        next: Option<String>,
+    },
+    /// On the directory: count one name fewer, and step `latest` back to
+    /// `previous` if the released name was the newest.
+    Retire {
+        name: String,
+        previous: Option<String>,
+        next: Option<String>,
     },
     /// On the record: refused unless `signer` owns `name`.
     Update {
@@ -194,8 +236,19 @@ pub struct Transferred {
     pub to: AccountId,
 }
 
+/// Emitted when a name is released. A hint, like [`Registered`].
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct Released {
+    pub name: String,
+    pub owner: AccountId,
+}
+
 impl Registered {
     pub const SELECTOR_NAME: &str = "logos_names::Registered";
+}
+
+impl Released {
+    pub const SELECTOR_NAME: &str = "logos_names::Released";
 }
 
 impl Transferred {
@@ -314,6 +367,22 @@ fn require_address(account: &AccountMeta, expected: AccountId, what: &str) {
     );
 }
 
+fn require_directory(directory: &AccountMeta, program: &AccountId) {
+    assert!(
+        directory.account_id == directory_address(program),
+        "the directory account is not this registry's directory"
+    );
+}
+
+/// A page with nothing in it, which clears a page account when written.
+fn no_page() -> Page {
+    Page {
+        version: VERSION,
+        content_type: String::new(),
+        body: Vec::new(),
+    }
+}
+
 /// Plans an update to an existing record from the usual `[record, owner]` accounts.
 fn plan_update(plan: &mut Plan, input: &PlanInput, name: String, change: Change) {
     let [record, owner] = accounts::<2>(input);
@@ -341,13 +410,36 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
     match instruction {
         Instruction::Register { name, previous } => {
             checked(validate_name(&name));
-            let [record, directory, owner] = accounts::<3>(input);
+            let (record, directory, previous_record, owner) =
+                match (&previous, input.accounts.as_slice()) {
+                    (None, [record, directory, owner]) => (record, directory, None, owner),
+                    (Some(_), [record, directory, previous_record, owner]) => {
+                        (record, directory, Some(previous_record), owner)
+                    }
+                    _ => panic!(
+                        "register takes [record, directory, owner], with the previous name's \
+                         record before the owner when there is one"
+                    ),
+                };
             require_address(record, record_address(&program, &name), "record");
-            assert!(
-                directory.account_id == directory_address(&program),
-                "the directory account is not this registry's directory"
-            );
+            require_directory(directory, &program);
             require_signer(owner);
+            if let (Some(previous_name), Some(previous_record)) = (&previous, previous_record) {
+                require_address(
+                    previous_record,
+                    record_address(&program, previous_name),
+                    "previous record",
+                );
+                plan.effect(
+                    previous_record,
+                    &Effect::Relink {
+                        name: previous_name.clone(),
+                        forward: true,
+                        expected: None,
+                        value: Some(name.clone()),
+                    },
+                );
+            }
             plan.event(event(
                 Registered::SELECTOR_NAME,
                 &Registered {
@@ -390,7 +482,10 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             plan_update(&mut plan, input, name, Change::SetText { key, value });
         }
         Instruction::Transfer { name, new_owner } => {
-            let [_, owner] = accounts::<2>(input);
+            let [record, page, owner] = accounts::<3>(input);
+            require_address(record, record_address(&program, &name), "record");
+            require_address(page, page_address(&program, &name), "page");
+            require_signer(owner);
             plan.event(event(
                 Transferred::SELECTOR_NAME,
                 &Transferred {
@@ -399,7 +494,15 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
                     to: new_owner,
                 },
             ));
-            plan_update(&mut plan, input, name, Change::Transfer(new_owner));
+            plan.effect(
+                record,
+                &Effect::Update {
+                    name,
+                    signer: owner.account_id,
+                    change: Change::Transfer(new_owner),
+                },
+            );
+            plan.effect(page, &Effect::WritePage(no_page()));
         }
         Instruction::SetPage {
             name,
@@ -442,6 +545,87 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             require_signer(owner);
             plan.effect(owner, &Effect::WritePrimary { name });
         }
+        Instruction::Release {
+            name,
+            previous,
+            next,
+        } => {
+            let neighbours = usize::from(previous.is_some()) + usize::from(next.is_some());
+            let (fixed, rest) = input
+                .accounts
+                .split_at_checked(4)
+                .filter(|(_, rest)| rest.len() == neighbours)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "release takes [record, page, directory, owner], then the previous \
+                         and next names' records when there are any"
+                    )
+                });
+            let [record, page, directory, owner] = fixed else {
+                unreachable!("split_at_checked(4) yields four accounts")
+            };
+            require_address(record, record_address(&program, &name), "record");
+            require_address(page, page_address(&program, &name), "page");
+            require_directory(directory, &program);
+            require_signer(owner);
+            plan.event(event(
+                Released::SELECTOR_NAME,
+                &Released {
+                    name: name.clone(),
+                    owner: owner.account_id,
+                },
+            ));
+
+            let mut rest = rest.iter();
+            if let Some(previous_name) = &previous {
+                let neighbour = rest.next().expect("counted above");
+                require_address(
+                    neighbour,
+                    record_address(&program, previous_name),
+                    "previous record",
+                );
+                plan.effect(
+                    neighbour,
+                    &Effect::Relink {
+                        name: previous_name.clone(),
+                        forward: true,
+                        expected: Some(name.clone()),
+                        value: next.clone(),
+                    },
+                );
+            }
+            if let Some(next_name) = &next {
+                let neighbour = rest.next().expect("counted above");
+                require_address(neighbour, record_address(&program, next_name), "next record");
+                plan.effect(
+                    neighbour,
+                    &Effect::Relink {
+                        name: next_name.clone(),
+                        forward: false,
+                        expected: Some(name.clone()),
+                        value: previous.clone(),
+                    },
+                );
+            }
+            plan.effect(page, &Effect::WritePage(no_page()));
+            plan.effect(
+                directory,
+                &Effect::Retire {
+                    name: name.clone(),
+                    previous: previous.clone(),
+                    next: next.clone(),
+                },
+            );
+            plan.effect(
+                record,
+                &Effect::Remove {
+                    name,
+                    signer: owner.account_id,
+                    previous,
+                    next,
+                },
+            );
+        }
     }
     plan
 }
@@ -478,6 +662,7 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
                 vpk: Vec::new(),
                 texts: Vec::new(),
                 previous,
+                next: None,
             }))
         }
         Effect::Advance {
@@ -531,9 +716,67 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
                     record.account = None;
                     record.npk = None;
                     record.vpk = Vec::new();
+                    record.texts = Vec::new();
                 }
             }
             Some(to_bytes(&record))
+        }
+        Effect::Relink {
+            name,
+            forward,
+            expected,
+            value,
+        } => {
+            assert!(!pre_data.is_empty(), "a neighbouring name is not registered");
+            let mut record: NameRecord =
+                borsh::from_slice(pre_data).expect("a record shard holds a valid record");
+            assert!(record.name == name, "record does not match the name");
+            let link = if forward {
+                &mut record.next
+            } else {
+                &mut record.previous
+            };
+            assert!(
+                *link == expected,
+                "the list of names has changed; read it again and retry"
+            );
+            *link = value;
+            Some(to_bytes(&record))
+        }
+        Effect::Remove {
+            name,
+            signer,
+            previous,
+            next,
+        } => {
+            let record = load_owned(pre_data, &name, &signer);
+            assert!(
+                record.previous == previous && record.next == next,
+                "the list of names has changed; read it again and retry"
+            );
+            Some(Vec::new())
+        }
+        Effect::Retire {
+            name,
+            previous,
+            next,
+        } => {
+            assert!(!pre_data.is_empty(), "the directory is empty");
+            let directory: Directory =
+                borsh::from_slice(pre_data).expect("the directory shard holds a valid directory");
+            let was_latest = directory.latest.as_deref() == Some(name.as_str());
+            assert!(
+                was_latest == next.is_none(),
+                "the list of names has changed; read it again and retry"
+            );
+            Some(to_bytes(&Directory {
+                version: VERSION,
+                count: directory
+                    .count
+                    .checked_sub(1)
+                    .expect("the directory counts the released name"),
+                latest: if was_latest { previous } else { directory.latest },
+            }))
         }
         Effect::RequireOwner { name, signer } => {
             load_owned(pre_data, &name, &signer);
@@ -619,20 +862,116 @@ mod tests {
         ]
     }
 
-    /// Plans a registration, returning its `(record, directory)` effects.
-    fn register_effects(name: &str, owner: AccountId, previous: Option<&str>) -> (Effect, Effect) {
-        let effects = run_plan(
-            register_accounts(name, owner),
+    /// The effect a plan put on `account`.
+    fn effect_on(effects: &[(AccountId, Effect)], account: AccountId) -> Effect {
+        let mut found = effects.iter().filter(|(id, _)| *id == account);
+        let (_, effect) = found.next().expect("an effect on the account");
+        assert!(found.next().is_none(), "one effect per account");
+        effect.clone()
+    }
+
+    /// Plans a registration after `previous`, returning the effects on every account.
+    fn plan_register(name: &str, owner: AccountId, previous: Option<&str>) -> Vec<(AccountId, Effect)> {
+        let mut accounts = vec![
+            meta(record_address(&PROGRAM, name), false),
+            meta(directory_address(&PROGRAM), false),
+        ];
+        if let Some(previous) = previous {
+            accounts.push(meta(record_address(&PROGRAM, previous), false));
+        }
+        accounts.push(meta(owner, true));
+        run_plan(
+            accounts,
             Instruction::Register {
                 name: name.into(),
                 previous: previous.map(Into::into),
             },
-        );
-        let [(record_id, record), (directory_id, directory)] =
-            <[_; 2]>::try_from(effects).expect("two effects");
-        assert_eq!(record_id, record_address(&PROGRAM, name));
-        assert_eq!(directory_id, directory_address(&PROGRAM));
-        (record, directory)
+        )
+    }
+
+    /// Plans a registration, returning its `(record, directory)` effects.
+    fn register_effects(name: &str, owner: AccountId, previous: Option<&str>) -> (Effect, Effect) {
+        let effects = plan_register(name, owner, previous);
+        assert_eq!(effects.len(), 2 + usize::from(previous.is_some()));
+        (
+            effect_on(&effects, record_address(&PROGRAM, name)),
+            effect_on(&effects, directory_address(&PROGRAM)),
+        )
+    }
+
+    /// A small registry held in memory, for tests that follow names through several steps.
+    #[derive(Default)]
+    struct Chain {
+        shards: std::collections::BTreeMap<AccountId, Vec<u8>>,
+    }
+
+    impl Chain {
+        fn shard(&self, account: AccountId) -> Vec<u8> {
+            self.shards.get(&account).cloned().unwrap_or_default()
+        }
+
+        /// Applies every effect of a plan, or none of them if any is refused.
+        fn commit(&mut self, effects: Vec<(AccountId, Effect)>) {
+            let mut next = self.shards.clone();
+            for (account, effect) in effects {
+                if let Some(data) = apply(effect, &self.shard(account)) {
+                    next.insert(account, data);
+                }
+            }
+            self.shards = next;
+        }
+
+        fn record(&self, name: &str) -> Option<NameRecord> {
+            let bytes = self.shard(record_address(&PROGRAM, name));
+            (!bytes.is_empty()).then(|| decode(&bytes))
+        }
+
+        fn directory(&self) -> Directory {
+            let bytes = self.shard(directory_address(&PROGRAM));
+            if bytes.is_empty() {
+                Directory::default()
+            } else {
+                borsh::from_slice(&bytes).expect("a directory decodes")
+            }
+        }
+
+        fn register(&mut self, name: &str, owner: AccountId) {
+            let latest = self.directory().latest;
+            self.commit(plan_register(name, owner, latest.as_deref()));
+        }
+
+        /// Plans a release using the neighbours a client would read from the record.
+        fn plan_release(&self, name: &str, signer: AccountId) -> Vec<(AccountId, Effect)> {
+            let record = self.record(name).expect("the name is registered");
+            let mut accounts = vec![
+                meta(record_address(&PROGRAM, name), false),
+                meta(page_address(&PROGRAM, name), false),
+                meta(directory_address(&PROGRAM), false),
+                meta(signer, true),
+            ];
+            for neighbour in [&record.previous, &record.next].into_iter().flatten() {
+                accounts.push(meta(record_address(&PROGRAM, neighbour), false));
+            }
+            run_plan(
+                accounts,
+                Instruction::Release {
+                    name: name.into(),
+                    previous: record.previous,
+                    next: record.next,
+                },
+            )
+        }
+
+        /// Every name, newest first, as a client lists them.
+        fn names(&self) -> Vec<String> {
+            let mut names = Vec::new();
+            let mut next = self.directory().latest;
+            while let Some(name) = next {
+                next = self.record(&name).expect("the list is unbroken").previous;
+                names.push(name);
+            }
+            names
+        }
     }
 
     fn registered(name: &str, owner: AccountId) -> Vec<u8> {
@@ -851,8 +1190,16 @@ mod tests {
         }
     }
 
+    fn transfer_accounts(name: &str, signer: AccountId) -> Vec<AccountMeta> {
+        vec![
+            meta(record_address(&PROGRAM, name), false),
+            meta(page_address(&PROGRAM, name), false),
+            meta(signer, true),
+        ]
+    }
+
     #[test]
-    fn transferring_changes_the_owner_and_clears_addresses() {
+    fn transferring_hands_over_a_clean_name() {
         let record = registered("jef", ALICE);
         let record = execute(
             "jef",
@@ -863,23 +1210,135 @@ mod tests {
             },
             &record,
         );
-        let record = set_text(&record, "chat", "kept");
-        let moved = execute(
-            "jef",
-            ALICE,
+        let record = set_text(&record, "chat", "the old owner's address");
+        let effects = run_plan(
+            transfer_accounts("jef", ALICE),
             Instruction::Transfer {
                 name: "jef".into(),
                 new_owner: BOB,
             },
-            &record,
         );
+        let moved = apply(effect_on(&effects, record_address(&PROGRAM, "jef")), &record)
+            .expect("the record is rewritten");
         let decoded = decode(&moved);
         assert_eq!(decoded.owner, BOB);
         assert_eq!(decoded.account, None);
-        assert_eq!(decoded.texts.len(), 1);
+        assert!(decoded.texts.is_empty(), "the old owner's entries must not carry over");
+        assert_eq!(
+            apply(effect_on(&effects, page_address(&PROGRAM, "jef")), b"the old owner's page"),
+            Some(Vec::new()),
+            "the old owner's page must not carry over"
+        );
 
         // The new owner can now act; the previous owner cannot.
         execute("jef", BOB, Instruction::ClearAddresses { name: "jef".into() }, &moved);
+    }
+
+    #[test]
+    #[should_panic(expected = "signer does not own this name")]
+    fn only_the_owner_can_transfer_a_name() {
+        let record = registered("jef", ALICE);
+        let effects = run_plan(
+            transfer_accounts("jef", BOB),
+            Instruction::Transfer {
+                name: "jef".into(),
+                new_owner: BOB,
+            },
+        );
+        let _ = apply(effect_on(&effects, record_address(&PROGRAM, "jef")), &record);
+    }
+
+    #[test]
+    fn registering_links_both_ways() {
+        let mut chain = Chain::default();
+        for name in ["jef", "ada", "grace"] {
+            chain.register(name, ALICE);
+        }
+        assert_eq!(chain.names(), ["grace", "ada", "jef"]);
+        let ada = chain.record("ada").expect("registered");
+        assert_eq!((ada.previous.as_deref(), ada.next.as_deref()), (Some("jef"), Some("grace")));
+        assert_eq!(chain.record("jef").expect("registered").next.as_deref(), Some("ada"));
+        assert_eq!(chain.record("grace").expect("registered").next, None);
+        assert_eq!(chain.directory().count, 3);
+    }
+
+    #[test]
+    fn releasing_leaves_no_trace_wherever_the_name_sits() {
+        for (released, remaining) in [
+            ("ada", vec!["grace", "jef"]),   // in the middle
+            ("grace", vec!["ada", "jef"]),   // the newest
+            ("jef", vec!["grace", "ada"]),   // the oldest
+        ] {
+            let mut chain = Chain::default();
+            for name in ["jef", "ada", "grace"] {
+                chain.register(name, ALICE);
+            }
+            chain.shards.insert(page_address(&PROGRAM, released), b"a page".to_vec());
+
+            chain.commit(chain.plan_release(released, ALICE));
+
+            assert_eq!(chain.record(released), None, "{released}: the record is gone");
+            assert!(chain.shard(page_address(&PROGRAM, released)).is_empty(), "{released}: the page is gone");
+            assert_eq!(chain.names(), remaining, "{released}: the list closes up");
+            assert_eq!(chain.directory().count, 2);
+            for name in &remaining {
+                let record = chain.record(name).expect("still registered");
+                assert_ne!(record.previous.as_deref(), Some(released));
+                assert_ne!(record.next.as_deref(), Some(released));
+            }
+            // Nothing remembers the name, so it can be registered afresh.
+            chain.register(released, BOB);
+            assert_eq!(chain.record(released).expect("registered again").owner, BOB);
+            assert_eq!(chain.names()[0], released);
+        }
+    }
+
+    #[test]
+    fn releasing_the_only_name_empties_the_registry() {
+        let mut chain = Chain::default();
+        chain.register("jef", ALICE);
+        chain.commit(chain.plan_release("jef", ALICE));
+        assert_eq!(chain.directory().count, 0);
+        assert_eq!(chain.directory().latest, None);
+        assert!(chain.names().is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "signer does not own this name")]
+    fn only_the_owner_can_release_a_name() {
+        let mut chain = Chain::default();
+        chain.register("jef", ALICE);
+        chain.commit(chain.plan_release("jef", BOB));
+    }
+
+    #[test]
+    #[should_panic(expected = "the list of names has changed")]
+    fn a_release_built_on_stale_neighbours_is_refused() {
+        let mut chain = Chain::default();
+        chain.register("jef", ALICE);
+        chain.register("ada", ALICE);
+        let stale = chain.plan_release("ada", ALICE);
+        // Someone registers after `ada` before the release lands.
+        chain.register("grace", BOB);
+        chain.commit(stale);
+    }
+
+    #[test]
+    #[should_panic(expected = "release takes")]
+    fn a_release_must_bring_its_neighbours() {
+        run_plan(
+            vec![
+                meta(record_address(&PROGRAM, "ada"), false),
+                meta(page_address(&PROGRAM, "ada"), false),
+                meta(directory_address(&PROGRAM), false),
+                meta(ALICE, true),
+            ],
+            Instruction::Release {
+                name: "ada".into(),
+                previous: Some("jef".into()),
+                next: None,
+            },
+        );
     }
 
     fn decode_directory(bytes: &[u8]) -> Directory {
@@ -957,7 +1416,7 @@ mod tests {
         );
 
         let events = run_plan_events(
-            record_accounts("jef", ALICE),
+            transfer_accounts("jef", ALICE),
             Instruction::Transfer {
                 name: "jef".into(),
                 new_owner: BOB,
@@ -986,6 +1445,43 @@ mod tests {
         assert_eq!(
             event_selector(Transferred::SELECTOR_NAME),
             [0xb7, 0x8a, 0x6f, 0x5a, 0xe7, 0x56, 0xbf, 0x67]
+        );
+        assert_eq!(
+            event_selector(Released::SELECTOR_NAME),
+            [0x3d, 0x2e, 0x60, 0xd8, 0xd0, 0xed, 0x2a, 0x9a]
+        );
+    }
+
+    /// Instruction bytes other implementations must produce exactly; the names
+    /// module checks the same vectors.
+    #[test]
+    fn instructions_encode_as_the_specification_says() {
+        let hex = |instruction: &Instruction| -> String {
+            borsh::to_vec(instruction)
+                .expect("serializes")
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        };
+        assert_eq!(
+            hex(&Instruction::Register { name: "jef".into(), previous: None }),
+            "00030000006a656600"
+        );
+        assert_eq!(
+            hex(&Instruction::Register { name: "ada".into(), previous: Some("jef".into()) }),
+            "000300000061646101030000006a6566"
+        );
+        assert_eq!(
+            hex(&Instruction::SetText { name: "jef".into(), key: "chat".into(), value: "hi".into() }),
+            "04030000006a656604000000636861740200000068" .to_owned() + "69"
+        );
+        assert_eq!(
+            hex(&Instruction::Transfer { name: "jef".into(), new_owner: BOB }),
+            format!("05030000006a6566{}", "02".repeat(32))
+        );
+        assert_eq!(
+            hex(&Instruction::Release { name: "ada".into(), previous: Some("jef".into()), next: None }),
+            "080300000061646101030000006a656600"
         );
     }
 

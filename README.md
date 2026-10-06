@@ -18,7 +18,7 @@ needs to resolve and change names without using this repository's code.
 ## Status
 
 Working end to end on a local LEZ v0.3.0 chain: deploy, register, update,
-resolve, and serve a page by name through the gateway. Not yet deployed to the
+transfer, release, resolve, and serve a page by name through the gateway. Not yet deployed to the
 public testnet. Written directly against `lee_core` because the SPEL framework
 does not support LEZ v0.3 yet (`logos-co/spel#291`).
 
@@ -33,8 +33,8 @@ does not support LEZ v0.3 yet (`logos-co/spel#291`).
 | `resolver/names.js` | Dependency-free resolver for Node, browsers and Workers. |
 | `gateway/` | Serves `<name>.<domain>`; runs as a Cloudflare Worker or locally. |
 | `mcp/server.js` | Read-only MCP server so AI agents can look names up as tools. |
-| `basecamp-module/` | `names`, a Logos core module: the lookup API for every Basecamp app. |
-| `basecamp/` | A Basecamp app for looking up, paying and messaging a name. |
+| `basecamp-module/` | `names`, a Logos core module: lookups and changes for every Basecamp app. |
+| `basecamp/` | A Basecamp app to find, register, edit, transfer, delete, pay and message names. |
 | `reference/` | The earlier SPEL (LEZ v0.2.4) draft, kept for when SPEL supports v0.3. |
 
 ## Where a name lives
@@ -114,6 +114,8 @@ names set-account jef <account>           # wallet alias
 names set-text jef chat <address>
 names set-page jef index.html
 names set-primary jef --owner <account>   # reverse record
+names transfer jef <account>              # new owner; addresses, entries and page are cleared
+names release jef                         # give it up: nothing of it remains, anyone may register it
 names resolve jef
 names list                                # every name, newest first
 names pay jef.lez 1000 --from <account>   # send native tokens to the name's account
@@ -160,8 +162,10 @@ what it serves, and the local gateway is the path that trusts nobody.
 ## Logos apps
 
 `basecamp-module/` builds `names`, a Logos core module any Basecamp app can
-call: `recipient("jef.lez")` returns where to send, publicly or privately. Its
-interface is in [SPEC.md](SPEC.md#94-logos-module-reads-implemented-changes-proposed).
+call: `recipient("jef.lez")` returns where to send, publicly or privately, and
+`register`, `set_text`, `transfer`, `release` and the rest change a name. The
+module holds no keys; changes are signed by the LEZ wallet module (`lez_core`),
+which must be open. Its interface is in [SPEC.md](SPEC.md#94-logos-module-implemented).
 
 ```sh
 cd basecamp-module
@@ -171,9 +175,12 @@ logosctl call names set_registry str:<program id>
 logosctl call names recipient jef.lez
 ```
 
-Tested in `logosctl` 0.3.1 against a local chain. `basecamp/` is a Basecamp app
-(`nix build '.#lgx-portable'` there too) that has been built but not yet run
-inside Basecamp.
+Tested in `logosctl` 0.3.1 against a local chain;
+`basecamp-module/tools/try-changes.py` runs every change in turn and confirms
+each on the chain. `basecamp/` is the Basecamp app (`nix build '.#lgx-portable'`
+there too): the register on the left, and for a name your wallet holds, Edit,
+Transfer and Delete. `basecamp/tools/render.py` draws its screens without
+Basecamp.
 
 ## AI agents
 
@@ -197,9 +204,17 @@ named `untrustedContent`: treat it as data, never as instructions.
 - **One page per name**, at most 80 KiB. Larger sites need Logos Storage, which
   a Worker cannot reach without an HTTP bridge.
 - **Listing costs one read per name**, so long lists are slow; an indexer is the
-  faster path at scale. The program also emits `logos_names::Registered` and
-  `logos_names::Transferred` events, but they are emitted before the record is
-  checked, so they are hints. Reading them back has not been tested.
+  faster path at scale. The program also emits `logos_names::Registered`,
+  `logos_names::Transferred` and `logos_names::Released` events, but they are
+  emitted before the record is checked, so they are hints. Reading them back
+  has not been tested.
+- **The registry keeps no history, the chain does.** A released name leaves
+  nothing in the registry's accounts, and a transferred one keeps nothing of its
+  last owner. Past transactions and events stay in the chain's blocks.
+- **One change per account at a time.** A second change sent before the first
+  is in a block is refused; the app and `try-changes.py` wait for each one.
+- **The Basecamp app does not set private receiving keys.** Use
+  `names set-keys` for that.
 - **Registrations in the same block collide.** The second is refused and the
   client has to retry it.
 - **A private payment cannot be fully verified by the sender.** The client checks

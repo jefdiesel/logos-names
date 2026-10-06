@@ -1,4 +1,5 @@
-//! Read-only client for a Logos Names registry, following SPEC.md.
+//! Reads a Logos Names registry, following SPEC.md. `changes.rs` builds on it
+//! to change one.
 //!
 //! This is a second implementation of the layouts in `core/src/lib.rs`, kept
 //! separate because a module build sees only its own directory and cannot take
@@ -143,6 +144,7 @@ pub struct NameRecord {
     pub vpk: Vec<u8>,
     pub texts: Vec<(String, String)>,
     pub previous: Option<String>,
+    pub next: Option<String>,
 }
 
 impl NameRecord {
@@ -160,7 +162,8 @@ impl NameRecord {
             texts.push((reader.string()?, reader.string()?));
         }
         let previous = if reader.is_some()? { Some(reader.string()?) } else { None };
-        Ok(Self { name, owner, account, npk, vpk, texts, previous })
+        let next = if reader.is_some()? { Some(reader.string()?) } else { None };
+        Ok(Self { name, owner, account, npk, vpk, texts, previous, next })
     }
 
     /// The record in the JSON shape SPEC.md gives for HTTP.
@@ -179,6 +182,7 @@ impl NameRecord {
             "vpk": (!self.vpk.is_empty()).then(|| hex(&self.vpk)),
             "texts": texts,
             "previous": self.previous,
+            "next": self.next,
         })
     }
 
@@ -234,6 +238,38 @@ pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// The program that holds every account's balance, as 16 little-endian bytes.
+const SYSTEM_PROGRAM: AccountId = [0; 32];
+
+/// One program's shard out of an account's shards; empty when it has none.
+fn shard_bytes(shards: &Map<String, Value>, program: &AccountId) -> Result<Vec<u8>, String> {
+    match shards.get(&account_text(program)).and_then(Value::as_array) {
+        None => Ok(Vec::new()),
+        Some(values) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_u64()
+                    .and_then(|byte| u8::try_from(byte).ok())
+                    .ok_or_else(|| "the sequencer sent malformed account data".to_owned())
+            })
+            .collect(),
+    }
+}
+
+/// Reads hex, with or without a `0x` prefix.
+pub fn unhex(text: &str) -> Result<Vec<u8>, String> {
+    let text = text.trim();
+    let digits = text.strip_prefix("0x").unwrap_or(text);
+    if digits.len() % 2 != 0 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("not hexadecimal".to_owned());
+    }
+    (0..digits.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&digits[at..at + 2], 16).map_err(|_| "not hexadecimal".to_owned()))
+        .collect()
+}
+
 /// A registry on one network: where to read it and which program it is.
 #[derive(Debug, Clone)]
 pub struct Registry {
@@ -242,9 +278,9 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// The registry's shard on `account`; empty when the account holds none.
-    fn shard(&self, account: &AccountId) -> Result<Vec<u8>, String> {
-        let reply: Value = ureq::post(&self.sequencer)
+    /// Every program's shard on `account`, keyed by program ID in base58.
+    fn shards(&self, account: &AccountId) -> Result<Map<String, Value>, String> {
+        let mut reply: Value = ureq::post(&self.sequencer)
             .timeout(std::time::Duration::from_secs(15))
             .send_json(json!({
                 "jsonrpc": "2.0",
@@ -258,18 +294,43 @@ impl Registry {
         if let Some(error) = reply.get("error") {
             return Err(format!("the sequencer refused the read: {error}"));
         }
-        let shard = &reply["result"]["data"]["shards"][account_text(&self.program)];
-        match shard.as_array() {
-            None => Ok(Vec::new()),
-            Some(values) => values
-                .iter()
-                .map(|value| {
-                    value
-                        .as_u64()
-                        .and_then(|byte| u8::try_from(byte).ok())
-                        .ok_or_else(|| "the sequencer sent malformed account data".to_owned())
-                })
-                .collect(),
+        match reply["result"]["data"]["shards"].take() {
+            Value::Object(shards) => Ok(shards),
+            _ => Ok(Map::new()),
+        }
+    }
+
+    /// The registry's shard on `account`; empty when the account holds none.
+    fn shard(&self, account: &AccountId) -> Result<Vec<u8>, String> {
+        shard_bytes(&self.shards(account)?, &self.program)
+    }
+
+    /// What a wallet shows for one of its accounts: its balance, and the name
+    /// it is shown as if it has a confirmed one. The balance is text because it
+    /// is a 128-bit number.
+    pub fn account_summary(&self, account: &AccountId) -> Result<Value, String> {
+        let shards = self.shards(account)?;
+        let balance = match <[u8; 16]>::try_from(shard_bytes(&shards, &SYSTEM_PROGRAM)?) {
+            Ok(bytes) => u128::from_le_bytes(bytes),
+            Err(_) => 0,
+        };
+        let claimed = shard_bytes(&shards, &self.program)?;
+        let name = if claimed.is_empty() { None } else { self.confirmed(account, &claimed)? };
+        Ok(json!({
+            "account": account_text(account),
+            "balance": balance.to_string(),
+            "funded": balance > 0,
+            "name": name,
+        }))
+    }
+
+    /// The directory as `(count, latest)`; an unused registry has an empty one.
+    pub fn directory(&self) -> Result<(u64, Option<String>), String> {
+        let bytes = self.shard(&directory_address(&self.program))?;
+        if bytes.is_empty() {
+            Ok((0, None))
+        } else {
+            decode_directory(&bytes)
         }
     }
 
@@ -297,7 +358,12 @@ impl Registry {
         if bytes.is_empty() {
             return Ok(None);
         }
-        let claimed = decode_primary(&bytes)?;
+        self.confirmed(account, &bytes)
+    }
+
+    /// The name claimed in `reverse_record`, if its own record agrees.
+    fn confirmed(&self, account: &AccountId, reverse_record: &[u8]) -> Result<Option<String>, String> {
+        let claimed = decode_primary(reverse_record)?;
         if !is_valid_name(&claimed) {
             return Ok(None);
         }
@@ -309,8 +375,7 @@ impl Registry {
 
     /// Names newest first, as SPEC.md's list response.
     pub fn list(&self, limit: u64, before: Option<&str>) -> Result<Value, String> {
-        let bytes = self.shard(&directory_address(&self.program))?;
-        let (total, latest) = if bytes.is_empty() { (0, None) } else { decode_directory(&bytes)? };
+        let (total, latest) = self.directory()?;
 
         let mut next = match before {
             None => latest,
@@ -389,7 +454,8 @@ mod tests {
         bytes.extend(string("chat"));
         bytes.extend(string("hello"));
         bytes.push(1);
-        bytes.extend(string("ada"));
+        bytes.extend(string("ada")); // previous
+        bytes.push(0); // next
         bytes
     }
 
@@ -427,6 +493,24 @@ mod tests {
         assert_eq!(decoded["content_type"], "text/html");
         assert_eq!(decoded["bytes"], 2);
         assert_eq!(decoded["text"], "hi");
+    }
+
+    #[test]
+    fn shards_are_picked_by_program_and_hex_reads_back() {
+        let mut balance = vec![5];
+        balance.resize(16, 0);
+        let mut shards = Map::new();
+        shards.insert(account_text(&SYSTEM_PROGRAM), json!(balance));
+        shards.insert(account_text(&PROGRAM), json!([1, 2, 3]));
+        assert_eq!(account_text(&SYSTEM_PROGRAM), "1".repeat(32));
+        assert_eq!(shard_bytes(&shards, &PROGRAM), Ok(vec![1, 2, 3]));
+        assert_eq!(shard_bytes(&shards, &[9; 32]), Ok(Vec::new()));
+        assert_eq!(shard_bytes(&shards, &SYSTEM_PROGRAM).map(|bytes| bytes.len()), Ok(16));
+
+        assert_eq!(unhex("0x0aFF"), Ok(vec![10, 255]));
+        assert_eq!(unhex(&hex(&[0, 7, 255])), Ok(vec![0, 7, 255]));
+        assert!(unhex("abc").is_err());
+        assert!(unhex("zz").is_err());
     }
 
     #[test]

@@ -159,6 +159,7 @@ export function decodeNameRecord(bytes) {
     record.texts[key] = reader.string();
   }
   record.previous = reader.option(() => reader.string());
+  record.next = reader.option(() => reader.string());
   return record;
 }
 

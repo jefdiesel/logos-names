@@ -68,7 +68,12 @@ enum Command {
         key: String,
         value: String,
     },
-    /// Hand the name to another account.
+    /// Give a name up: its record and page are cleared and anyone may register it again.
+    Release {
+        #[arg(value_parser = parse_name)]
+        name: String,
+    },
+    /// Hand the name to another account. Its addresses, text entries and page are cleared.
     Transfer {
         #[arg(value_parser = parse_name)]
         name: String,
@@ -178,13 +183,52 @@ impl Client {
     /// Registers `name`, linking it after the directory's current latest name.
     async fn register(&self, name: String, owner: AccountId) -> Result<()> {
         let previous = self.directory().await?.latest;
+        let mut accounts = vec![
+            (record_address(&self.program, &name), false),
+            (directory_address(&self.program), false),
+        ];
+        if let Some(previous) = &previous {
+            accounts.push((record_address(&self.program, previous), false));
+        }
+        accounts.push((owner, true));
+        self.send(accounts, &Instruction::Register { name, previous })
+            .await
+    }
+
+    /// Hands `name` to `new_owner`, clearing what the current owner set on it.
+    async fn transfer(&self, name: String, new_owner: AccountId) -> Result<()> {
+        let owner = self.owner_of(&name).await?;
+        let accounts = vec![
+            (record_address(&self.program, &name), false),
+            (page_address(&self.program, &name), false),
+            (owner, true),
+        ];
+        self.send(accounts, &Instruction::Transfer { name, new_owner })
+            .await
+    }
+
+    /// Releases `name`, unlinking it from its neighbours in the list.
+    async fn release(&self, name: String) -> Result<()> {
+        let record = self
+            .record(&name)
+            .await?
+            .ok_or_else(|| anyhow!("{name} is not registered"))?;
+        let mut accounts = vec![
+            (record_address(&self.program, &name), false),
+            (page_address(&self.program, &name), false),
+            (directory_address(&self.program), false),
+            (record.owner, true),
+        ];
+        for neighbour in [&record.previous, &record.next].into_iter().flatten() {
+            accounts.push((record_address(&self.program, neighbour), false));
+        }
         self.send(
-            vec![
-                (record_address(&self.program, &name), false),
-                (directory_address(&self.program), false),
-                (owner, true),
-            ],
-            &Instruction::Register { name, previous },
+            accounts,
+            &Instruction::Release {
+                name,
+                previous: record.previous,
+                next: record.next,
+            },
         )
         .await
     }
@@ -431,6 +475,7 @@ impl Client {
             "vpk": (!record.vpk.is_empty()).then(|| hex::encode(&record.vpk)),
             "texts": texts,
             "previous": record.previous,
+            "next": record.next,
             "page": page,
             "record_address": record_address(&self.program, name).to_string(),
             "page_address": page_address(&self.program, name).to_string(),
@@ -539,16 +584,8 @@ async fn main() -> Result<()> {
                 )
                 .await
         }
-        Command::Transfer { name, new_owner } => {
-            let owner = client.owner_of(&name).await?;
-            client
-                .update(
-                    &name.clone(),
-                    owner,
-                    &Instruction::Transfer { name, new_owner },
-                )
-                .await
-        }
+        Command::Transfer { name, new_owner } => client.transfer(name, new_owner).await,
+        Command::Release { name } => client.release(name).await,
         Command::SetPage {
             name,
             file,
