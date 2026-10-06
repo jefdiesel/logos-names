@@ -102,7 +102,8 @@ a funded account:
 ```sh
 export LEE_WALLET_HOME_DIR=/path/to/wallet-home
 
-# Deploy: one header account plus one segment account per 96 KiB of guest binary.
+# Deploy: one header account plus several segment accounts (five for the current
+# CI build). Pass the wrong number and the loader says how many it needs.
 wallet program-loader deploy --elf logos_names.bin \
   --header Public/<new account> --segments Public/<new account> ... \
   --payer Public/<funded account>
