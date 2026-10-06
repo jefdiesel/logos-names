@@ -55,13 +55,9 @@ Item {
 
     // ── The Logos bridge ────────────────────────────────────────────────
 
-    /// Calls a module and returns its reply parsed as far as it will go. Modules
-    /// answer with JSON text, sometimes wrapped in a JSON string.
-    function call(module, method, args) {
-        if (!bridgeReady)
-            throw new Error("This screen needs to run inside Basecamp.")
-        var reply = logos.callModule(module, method, args)
-        lastReply = module + "." + method + " → " + String(reply).substr(0, 400)
+    /// A module's reply parsed as far as it will go. Modules answer with JSON
+    /// text, sometimes wrapped in a JSON string.
+    function parsed(reply) {
         for (var depth = 0; depth < 2 && typeof reply === "string"; depth++) {
             try {
                 reply = JSON.parse(reply)
@@ -72,6 +68,16 @@ Item {
         return reply
     }
 
+    /// Calls a module and waits for its reply. For quick reads only: the
+    /// screen stands still until the module answers.
+    function call(module, method, args) {
+        if (!bridgeReady)
+            throw new Error("This screen needs to run inside Basecamp.")
+        var reply = logos.callModule(module, method, args)
+        lastReply = module + "." + method + " → " + String(reply).substr(0, 400)
+        return parsed(reply)
+    }
+
     /// Asks the names module, returning its value or throwing its error.
     function ask(method, args) {
         var reply = call("names", method, args)
@@ -80,6 +86,32 @@ Item {
         if (!reply.success)
             throw new Error(reply.error)
         return reply.value
+    }
+
+    /// Asks the names module without holding the screen still, for anything
+    /// that waits on the wallet. Exactly one of `done(value)` and
+    /// `failed(message)` runs, later.
+    function askLater(method, args, done, failed) {
+        function settle(reply) {
+            lastReply = "names." + method + " → " + String(reply).substr(0, 400)
+            reply = parsed(reply)
+            if (!reply || reply.success === undefined)
+                failed("The names module did not answer. Is it installed?")
+            else if (!reply.success)
+                failed(reply.error)
+            else
+                done(reply.value)
+        }
+        if (bridgeReady && logos.callModuleAsync)
+            logos.callModuleAsync("names", method, args, settle, 30000)
+        else
+            Qt.callLater(function() {
+                try {
+                    settle(logos.callModule("names", method, args))
+                } catch (error) {
+                    failed(error.message)
+                }
+            })
     }
 
     /// A message as a sentence. One that opens with a name keeps the name's
@@ -140,21 +172,26 @@ Item {
     }
 
     /// Reads the wallet's accounts that can pay a fee. Without them the app
-    /// still browses; `walletProblem` says what is missing.
-    function loadWallet() {
+    /// still browses; `walletProblem` says what is missing. `announce` shows
+    /// the outcome, for when a person asked.
+    function loadWallet(announce) {
         if (registry === "")
-            return false
-        try {
-            var funded = ask("wallet", []).accounts.filter(function(account) { return account.funded })
+            return
+        askLater("wallet", [], function(value) {
+            var funded = value.accounts.filter(function(account) { return account.funded })
             wallet = funded
             walletProblem = funded.length > 0 ? "" : "None of the wallet's accounts holds funds to pay the fee."
-        } catch (error) {
+            if (fromIndex >= funded.length)
+                fromIndex = 0
+            if (announce)
+                say(funded.length > 0 ? "Wallet connected." : walletProblem, funded.length === 0)
+        }, function(message) {
             wallet = []
-            walletProblem = sentence(error.message)
-        }
-        if (fromIndex >= wallet.length)
+            walletProblem = sentence(message)
             fromIndex = 0
-        return wallet.length > 0
+            if (announce)
+                say(walletProblem, true)
+        })
     }
 
     function holds(account, accounts) {
@@ -226,18 +263,22 @@ Item {
     function change(method, args, name, settled, done) {
         if (busy)
             return
-        try {
-            ask(method, args)
-        } catch (error) {
-            say(error.message, true)
-            return
-        }
-        pending = { name: name, settled: settled, done: done, tries: 0 }
-        say("Sent. Waiting for it to be confirmed.", false)
+        var job = { name: name, settled: settled, done: done, sent: false, tries: 0 }
+        pending = job
+        say("Asking the wallet to sign.", false)
+        askLater(method, args, function() {
+            job.sent = true
+            say("Sent. Waiting for it to be confirmed.", false)
+        }, function(message) {
+            pending = null
+            say(message, true)
+        })
     }
 
     function checkPending() {
         var job = pending
+        if (!job.sent)
+            return
         var settled = false
         try {
             settled = job.settled()
@@ -249,7 +290,7 @@ Item {
             return
         pending = null
         loadRegister(false)
-        loadWallet()
+        loadWallet(false)
         read(job.name)
         if (settled)
             say(job.done, false)
@@ -339,8 +380,8 @@ Item {
     // ── Paying and messaging ────────────────────────────────────────────
 
     function openPay() {
-        if (!loadWallet()) {
-            say(walletProblem, true)
+        if (wallet.length === 0) {
+            loadWallet(true)
             return
         }
         say("", false)
@@ -474,7 +515,7 @@ Item {
     Timer {
         interval: 150
         running: root.bridgeReady
-        onTriggered: root.loadWallet()
+        onTriggered: root.loadWallet(false)
     }
 
     Timer {
@@ -931,9 +972,19 @@ Item {
                     }
                 }
 
-                Link {
-                    text: root.settingsOpen ? "Close settings" : "Settings"
-                    onPressed: root.settingsOpen = !root.settingsOpen
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 16
+                    Link {
+                        text: root.settingsOpen ? "Close settings" : "Settings"
+                        onPressed: root.settingsOpen = !root.settingsOpen
+                    }
+                    Item { Layout.fillWidth: true }
+                    Link {
+                        visible: root.registry !== "" && root.wallet.length === 0
+                        text: "Connect wallet"
+                        onPressed: root.loadWallet(true)
+                    }
                 }
             }
         }
@@ -1071,7 +1122,7 @@ Item {
                         }
                         Action {
                             label: "Check the wallet again"
-                            onPressed: root.loadWallet()
+                            onPressed: root.loadWallet(true)
                         }
                     }
                 }

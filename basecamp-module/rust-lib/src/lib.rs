@@ -390,15 +390,17 @@ mod wallet {
     use std::time::Duration;
 
     const MODULE: &str = "lez_core";
-    const TIMEOUT: Duration = Duration::from_secs(8);
+    /// Asking for the accounts is also how a missing wallet is noticed, and
+    /// the caller waits for the answer, so it gives up quickly.
+    const LOOK: Duration = Duration::from_secs(3);
+    const SEND: Duration = Duration::from_secs(15);
 
-    fn call(method: &str, arguments: Value) -> Result<Value, String> {
-        let wallet = LogosModuleSDK::new().plugin(MODULE);
-        // The first call after this module loads can time out while the host
-        // is still connecting the two modules, so a failure is tried once more.
-        let answer = wallet
-            .call_json_with_timeout(method, &arguments, TIMEOUT)
-            .or_else(|_| wallet.call_json_with_timeout(method, &arguments, TIMEOUT))
+    /// One call to the wallet. It is never repeated here: a send that timed
+    /// out may still have gone through.
+    fn call(method: &str, arguments: Value, patience: Duration) -> Result<Value, String> {
+        let answer = LogosModuleSDK::new()
+            .plugin(MODULE)
+            .call_json_with_timeout(method, &arguments, patience)
             .map_err(|_| "the LEZ wallet is not running; install LEZ Wallet and open it".to_owned())?;
         // Some of the wallet's methods answer with JSON as text.
         Ok(match answer.as_str().map(serde_json::from_str::<Value>) {
@@ -409,7 +411,7 @@ mod wallet {
 
     /// The wallet's public accounts, in its own order.
     pub fn accounts() -> Result<Vec<AccountId>, String> {
-        let listed = call("list_accounts", json!([]))?;
+        let listed = call("list_accounts", json!([]), LOOK)?;
         let accounts: Vec<AccountId> = listed
             .as_array()
             .map(Vec::as_slice)
@@ -441,6 +443,7 @@ mod wallet {
                 registry::hex(&change.signer),
                 shards,
             ]),
+            SEND,
         )?;
         match sent["tx_hash"].as_str() {
             Some(tx) if sent["success"] == true => Ok(tx.to_owned()),

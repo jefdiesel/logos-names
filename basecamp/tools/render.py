@@ -18,6 +18,10 @@ BRIDGE = r"""
     width: 1180; height: %(height)s
     property var logos: QtObject {
         function ok(value) { return JSON.stringify({ success: true, value: value, error: null }) }
+        function callModuleAsync(module, method, args, callback, timeout) {
+            var reply = callModule(module, method, args)
+            Qt.callLater(function() { callback(reply) })
+        }
         function callModule(module, method, args) {
             var names = %(names)s
             if (module === "lez_core")
