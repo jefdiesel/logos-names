@@ -10,6 +10,7 @@ import { createInterface } from "node:readline";
 import {
   isValidName,
   listNames,
+  normalizeName,
   pageAddress,
   recordAddress,
   resolveName,
@@ -26,7 +27,7 @@ const MAX_PAGE_CHARS = 20_000;
 const nameArgument = {
   type: "object",
   properties: {
-    name: { type: "string", description: "A Logos name: 1-32 chars of a-z, 0-9 or '-'." },
+    name: { type: "string", description: "A Logos name such as `jef.lez` or `jef`." },
   },
   required: ["name"],
 };
@@ -38,8 +39,9 @@ const tools = [
       "Look up a Logos name. Returns its owner, the public account it is an alias for, " +
       "its private receiving keys, and its text entries (such as chat, inbox and agent).",
     inputSchema: nameArgument,
-    async run({ name }) {
-      const record = await resolveName(rpcUrl, program, requireName(name));
+    async run({ name: typed }) {
+      const name = requireName(typed);
+      const record = await resolveName(rpcUrl, program, name);
       if (!record) return { registered: false, name };
       return {
         registered: true,
@@ -53,8 +55,9 @@ const tools = [
     name: "get_page",
     description: "Fetch the page published under a Logos name, as text.",
     inputSchema: nameArgument,
-    async run({ name }) {
-      const page = await resolvePage(rpcUrl, program, requireName(name));
+    async run({ name: typed }) {
+      const name = requireName(typed);
+      const page = await resolvePage(rpcUrl, program, name);
       if (!page) return { hasPage: false, name };
       const text = new TextDecoder().decode(page.body);
       return {
@@ -104,9 +107,11 @@ const tools = [
   },
 ];
 
-function requireName(name) {
+/** Accepts a name as people write it (`jef.lez`) and returns the bare on-chain name. */
+function requireName(input) {
+  const name = normalizeName(input ?? "");
   if (!isValidName(name)) {
-    throw new Error("invalid name: use 1-32 chars of a-z, 0-9 or '-', not starting or ending with '-'");
+    throw new Error("invalid name: use 1-32 chars of a-z, 0-9 or '-', optionally ending in .lez");
   }
   return name;
 }

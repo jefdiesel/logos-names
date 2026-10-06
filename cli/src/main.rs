@@ -12,8 +12,8 @@ use lee_core::{
     program::{AccountMeta, PlanInput},
 };
 use names_core::{
-    Directory, Effect, Instruction, NameRecord, Page, PrimaryName, directory_address,
-    page_address, record_address, validate_name,
+    Directory, Effect, Instruction, NAME_SUFFIX, NameRecord, Page, PrimaryName,
+    directory_address, normalize_name, page_address, record_address, validate_name,
 };
 use wallet::{
     AccountIdentity, WalletCore, program_facades::native_token_transfer::NativeTokenTransfer,
@@ -34,15 +34,20 @@ struct Cli {
 enum Command {
     /// Claim an unregistered name.
     Register {
+        #[arg(value_parser = parse_name)]
         name: String,
         /// Public account that will own the name; the wallet must hold its key.
         #[arg(long)]
         owner: AccountId,
     },
     /// Point the name at a public account.
-    SetAccount { name: String, account: AccountId },
+    SetAccount {
+        #[arg(value_parser = parse_name)]
+        name: String,
+        account: AccountId },
     /// Publish the keys needed for private transfers to this name.
     SetKeys {
+        #[arg(value_parser = parse_name)]
         name: String,
         /// Nullifier public key, 32 bytes hex.
         #[arg(long)]
@@ -52,26 +57,38 @@ enum Command {
         vpk_file: PathBuf,
     },
     /// Remove the public account and private keys from the name.
-    ClearAddresses { name: String },
+    ClearAddresses {
+        #[arg(value_parser = parse_name)]
+        name: String,
+    },
     /// Set a text entry such as `chat`, `inbox` or `agent`; an empty value removes it.
     SetText {
+        #[arg(value_parser = parse_name)]
         name: String,
         key: String,
         value: String,
     },
     /// Hand the name to another account.
-    Transfer { name: String, new_owner: AccountId },
+    Transfer {
+        #[arg(value_parser = parse_name)]
+        name: String,
+        new_owner: AccountId },
     /// Publish a file as the name's page.
     SetPage {
+        #[arg(value_parser = parse_name)]
         name: String,
         file: PathBuf,
         #[arg(long, default_value = "text/html; charset=utf-8")]
         content_type: String,
     },
     /// Remove the name's page.
-    ClearPage { name: String },
+    ClearPage {
+        #[arg(value_parser = parse_name)]
+        name: String,
+    },
     /// Set the name an account is shown as; an empty name removes it.
     SetPrimary {
+        #[arg(value_parser = parse_name_or_empty)]
         name: String,
         #[arg(long)]
         owner: AccountId,
@@ -79,6 +96,7 @@ enum Command {
     /// Send native tokens to a name: to its public account, or with `--private`
     /// to its private receiving keys.
     Pay {
+        #[arg(value_parser = parse_name)]
         name: String,
         /// Amount in base units.
         amount: u128,
@@ -91,7 +109,10 @@ enum Command {
         private: bool,
     },
     /// Print everything a name resolves to, as JSON.
-    Resolve { name: String },
+    Resolve {
+        #[arg(value_parser = parse_name)]
+        name: String,
+    },
     /// Print the name an account is shown as, checked against the forward record.
     Reverse { account: AccountId },
     /// List registered names, newest first.
@@ -101,7 +122,24 @@ enum Command {
         limit: usize,
     },
     /// Print the accounts that hold a name's record and page.
-    Address { name: String },
+    Address {
+        #[arg(value_parser = parse_name)]
+        name: String,
+    },
+}
+
+/// Accepts a name as people write it (`jef.lez`, any case) and returns the bare name.
+fn parse_name(input: &str) -> Result<String, String> {
+    let name = normalize_name(input);
+    validate_name(&name).map(|()| name).map_err(str::to_owned)
+}
+
+fn parse_name_or_empty(input: &str) -> Result<String, String> {
+    if input.trim().is_empty() {
+        Ok(String::new())
+    } else {
+        parse_name(input)
+    }
 }
 
 struct Client {
@@ -162,7 +200,7 @@ impl Client {
                 .record(&name)
                 .await?
                 .ok_or_else(|| anyhow!("the name list is broken at {name}"))?;
-            println!("{name}  {}", record.owner);
+            println!("{name}{NAME_SUFFIX}  {}", record.owner);
             next = record.previous;
         }
         if next.is_some() {
@@ -296,7 +334,7 @@ impl Client {
             .ok_or_else(|| anyhow!("{name} has no public account set"))?;
         let before = self.wallet.get_account_balance(to).await?;
 
-        println!("paying {amount} to {name} ({to})");
+        println!("paying {amount} to {name}{NAME_SUFFIX} ({to})");
         let hash = NativeTokenTransfer(&self.wallet)
             .send_public_transfer(
                 AccountIdentity::Public(from),
@@ -334,7 +372,7 @@ impl Client {
             .map_err(|error| anyhow!("{name} publishes an invalid viewing key: {error}"))?;
         let before = self.wallet.get_account_balance(from).await?;
 
-        println!("paying {amount} privately to {name}; generating the proof");
+        println!("paying {amount} privately to {name}{NAME_SUFFIX}; generating the proof");
         let (hash, _) = NativeTokenTransfer(&self.wallet)
             .send_shielded_transfer_to_outer_account(
                 AccountIdentity::Public(from),
@@ -548,7 +586,7 @@ async fn main() -> Result<()> {
         }
         Command::Reverse { account } => {
             match client.reverse(account).await? {
-                Some(name) => println!("{name}"),
+                Some(name) => println!("{name}{NAME_SUFFIX}"),
                 None => println!("(no confirmed primary name)"),
             }
             Ok(())

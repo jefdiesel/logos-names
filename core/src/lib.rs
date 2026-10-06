@@ -28,6 +28,9 @@ use lee_core::{
 /// Record layout version written by this program.
 pub const VERSION: u8 = 1;
 pub const MAX_NAME_LEN: usize = 32;
+/// How names are written for people: `jef.lez`. The suffix is a display
+/// convention only; the chain stores and derives everything from the bare name.
+pub const NAME_SUFFIX: &str = ".lez";
 pub const MAX_TEXT_RECORDS: usize = 16;
 pub const MAX_TEXT_KEY_LEN: usize = 32;
 pub const MAX_TEXT_VALUE_LEN: usize = 512;
@@ -266,6 +269,16 @@ pub fn validate_name(name: &str) -> Result<(), &'static str> {
         return Err("name must be 1-32 chars of a-z, 0-9 or '-', not starting or ending with '-'");
     }
     Ok(())
+}
+
+/// Turns what a person typed, such as `Jef.lez`, into the bare on-chain name
+/// `jef`. The result still has to pass [`validate_name`].
+#[must_use]
+pub fn normalize_name(input: &str) -> String {
+    let lowered = input.trim().to_ascii_lowercase();
+    lowered
+        .strip_suffix(NAME_SUFFIX)
+        .map_or(lowered.clone(), str::to_owned)
 }
 
 /// # Errors
@@ -639,6 +652,17 @@ mod tests {
         for bad in ["", "Jef", "jef.eth", "-jef", "jef-", "j f", "jéf", &"a".repeat(33)] {
             assert!(validate_name(bad).is_err(), "{bad} should be invalid");
         }
+    }
+
+    #[test]
+    fn typed_names_are_normalised_to_the_bare_name() {
+        for typed in ["jef", "jef.lez", "Jef.LEZ", "  jef.lez  "] {
+            assert_eq!(normalize_name(typed), "jef", "{typed}");
+        }
+        // Only one suffix is stripped, and other dots are left for validation to refuse.
+        assert_eq!(normalize_name("jef.lez.lez"), "jef.lez");
+        assert!(validate_name(&normalize_name("jef.eth")).is_err());
+        assert!(validate_name(&normalize_name(".lez")).is_err());
     }
 
     #[test]

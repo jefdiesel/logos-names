@@ -10,6 +10,7 @@ import {
   decodePrimaryName,
   directoryAddress,
   isValidName,
+  normalizeName,
   pageAddress,
   recordAddress,
 } from "./names.js";
@@ -88,4 +89,11 @@ test("a directory decodes", () => {
   const count = Uint8Array.of(3, 0, 0, 0, 0, 0, 0, 0);
   assert.deepEqual(decodeDirectory(borsh(1, count, 1, "jef")), { version: 1, count: 3, latest: "jef" });
   assert.deepEqual(decodeDirectory(borsh(1, count, 0)), { version: 1, count: 3, latest: null });
+});
+
+test("typed names are normalised to the bare name", () => {
+  for (const typed of ["jef", "jef.lez", "Jef.LEZ", "  jef.lez  "]) assert.equal(normalizeName(typed), "jef");
+  assert.equal(normalizeName("jef.lez.lez"), "jef.lez");
+  assert.ok(!isValidName(normalizeName("jef.eth")));
+  assert.ok(!isValidName(normalizeName(".lez")));
 });

@@ -11,7 +11,13 @@
 //                   On those, and on any workers.dev host, the name is the first
 //                   path segment: `<host>/<name>`.
 
-import { isValidName, listNames, resolveName, resolvePage } from "../resolver/names.js";
+import {
+  isValidName,
+  listNames,
+  normalizeName,
+  resolveName,
+  resolvePage,
+} from "../resolver/names.js";
 
 const RECORD_PATH = "/.well-known/logos-name.json";
 const LIST_PATH = "/.well-known/logos-names.json";
@@ -54,7 +60,9 @@ function target(url, rootHosts) {
     return { name: nameFromHost(url.hostname), path: url.pathname, sharedOrigin: false };
   }
   const [, first = "", ...rest] = url.pathname.split("/");
-  const name = isValidName(first) ? first : null;
+  // Accept the written form too: `<host>/jef.lez`.
+  const bare = normalizeName(first);
+  const name = isValidName(bare) ? bare : null;
   return { name, path: "/" + rest.join("/"), sharedOrigin: true };
 }
 

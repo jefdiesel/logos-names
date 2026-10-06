@@ -47,6 +47,9 @@ All data sits in this program's shard on three kinds of account:
 `SHA-256(pad32("/LEE/v0.2/AccountId/PDA/") || program || seed)`.
 
 Names are 1-32 characters of `a-z`, `0-9` and `-`, not starting or ending with `-`.
+People write them with a `.lez` suffix, as in `jef.lez`, the way Ethereum names
+end in `.eth`. The suffix is a display convention: clients strip it (and lower
+the case) before looking a name up, and the chain only ever sees `jef`.
 Records are borsh-encoded; see `core/src/lib.rs` for the layouts and
 `resolver/names.js` for a decoder.
 
@@ -108,7 +111,7 @@ names set-page jef index.html
 names set-primary jef --owner <account>   # reverse record
 names resolve jef
 names list                                # every name, newest first
-names pay jef 1000 --from <account>       # send native tokens to the name's account
+names pay jef.lez 1000 --from <account>   # send native tokens to the name's account
 names set-keys jef --npk <hex> --vpk-file vpk.hex
 names pay jef 1000 --from <account> --private   # shielded transfer to the name's keys
 ```

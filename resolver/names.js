@@ -71,6 +71,15 @@ function accountIdBytes(accountId) {
   return bytes;
 }
 
+/** How names are written for people: `jef.lez`. The chain only knows the bare name. */
+export const NAME_SUFFIX = ".lez";
+
+/** Turns what a person typed, such as `Jef.lez`, into the bare on-chain name `jef`. */
+export function normalizeName(input) {
+  const lowered = String(input).trim().toLowerCase();
+  return lowered.endsWith(NAME_SUFFIX) ? lowered.slice(0, -NAME_SUFFIX.length) : lowered;
+}
+
 export function isValidName(name) {
   return typeof name === "string" && NAME_PATTERN.test(name);
 }
