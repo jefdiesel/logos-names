@@ -212,6 +212,17 @@ Item {
         return Qt.formatDate(new Date(milliseconds), "d MMMM yyyy")
     }
 
+    /// Brings the wallet module up: opening the LEZ Wallet app is what starts
+    /// it, and the names module opens the named wallet from there.
+    function connectWallet() {
+        if (/not running/.test(walletProblem) && logos.request) {
+            say("Starting the LEZ wallet.", false)
+            logos.request("basecamp.apps.launch", { app: "lez_wallet_ui" }, function() { root.loadWallet(true) })
+            return
+        }
+        loadWallet(true)
+    }
+
     /// Names the wallet the names module should open by itself.
     function saveWalletFiles(configPath, storagePath) {
         try {
@@ -1276,12 +1287,12 @@ Item {
                     }
                     Hint {
                         visible: root.registry !== "" && root.wallet.length === 0
-                        text: "Open your wallet in the LEZ Wallet app to see the .LEZ names you hold."
+                        text: /not running/.test(root.walletProblem) ? "The LEZ wallet is not running. Opening the LEZ Wallet app starts it; the names you hold appear here after that." : "Open your wallet in the LEZ Wallet app to see the .LEZ names you hold."
                     }
                     Link {
                         visible: root.registry !== "" && root.wallet.length === 0
-                        text: "Connect wallet"
-                        onPressed: root.loadWallet(true)
+                        text: /not running/.test(root.walletProblem) ? "Open LEZ Wallet" : "Connect wallet"
+                        onPressed: root.connectWallet()
                     }
                 }
 
@@ -1446,8 +1457,8 @@ Item {
                             text: "Registering it takes an account that can pay the fee. " + root.walletProblem
                         }
                         Action {
-                            label: "Check the wallet again"
-                            onPressed: root.loadWallet(true)
+                            label: /not running/.test(root.walletProblem) ? "Open LEZ Wallet" : "Check the wallet again"
+                            onPressed: root.connectWallet()
                         }
                     }
                 }
