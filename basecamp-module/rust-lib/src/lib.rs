@@ -457,10 +457,19 @@ impl NamesModule for Names {
         reply((|| {
             let registry = self.registry()?;
             let held = self.held()?;
-            let mut accounts = Vec::new();
-            for account in held.public.iter().take(MAX_WALLET_ACCOUNTS) {
-                accounts.push(registry.account_summary(account)?);
-            }
+            // Each summary is a read over the network; they are read together.
+            let mut accounts = std::thread::scope(|scope| {
+                let readers: Vec<_> = held
+                    .public
+                    .iter()
+                    .take(MAX_WALLET_ACCOUNTS)
+                    .map(|account| scope.spawn(|| registry.account_summary(account)))
+                    .collect();
+                readers
+                    .into_iter()
+                    .map(|reader| reader.join().unwrap_or_else(|_| Err("a read failed".to_owned())))
+                    .collect::<Result<Vec<Value>, String>>()
+            })?;
             // A stable sort: funded accounts first, each group in wallet order.
             accounts.sort_by_key(|account| account["funded"] != true);
             let private: Vec<String> = held.private.iter().map(registry::account_text).collect();
@@ -474,11 +483,25 @@ impl NamesModule for Names {
             let held = self.held()?.public;
             let mut memory = memory()?;
             let remembered = memory.names(&registry.program);
+            // Deriving is done one name at a time (it is CPU work and cached);
+            // the reads that follow go out together.
+            let derived: Vec<Derived> = remembered.iter().map(|(name, _)| self.derived(name)).collect();
+            let reader = &registry;
+            let resolved = std::thread::scope(|scope| {
+                let readers: Vec<_> = remembered
+                    .iter()
+                    .zip(&derived)
+                    .map(|((name, _), derived)| scope.spawn(move || reader.resolve(name, derived)))
+                    .collect();
+                readers
+                    .into_iter()
+                    .map(|reader| reader.join().unwrap_or_else(|_| Err("a read failed".to_owned())))
+                    .collect::<Result<Vec<_>, String>>()
+            })?;
             let mut names = Vec::new();
             let mut kept = Vec::new();
-            for (name, added) in remembered.iter().cloned() {
-                let derived = self.derived(&name);
-                match registry.resolve(&name, &derived)? {
+            for ((name, added), found) in remembered.iter().cloned().zip(resolved) {
+                match found {
                     Some(resolved) => {
                         if held.contains(&resolved.owner) {
                             names.push(json!({

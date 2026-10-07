@@ -37,6 +37,7 @@ Item {
     property string notice: ""
     property bool noticeIsError: false
     property bool settingsOpen: false
+    property bool configKnown: false   // the names module has answered once
     property string lastReply: ""
 
     readonly property bool bridgeReady: typeof logos !== "undefined" && !!logos.callModule
@@ -54,8 +55,8 @@ Item {
     readonly property color hover: "#20242D"
     readonly property color line: "#434A59"
     readonly property color ink: "#FFFFFF"
-    readonly property color dim: "#C3C9D4"
-    readonly property color faint: "#8D95A5"   // placeholders only
+    readonly property color dim: "#DCE1EA"
+    readonly property color faint: "#9AA3B3"   // placeholders only
     readonly property color brass: "#F0C562"
     readonly property color alarm: "#FF9C8C"
     readonly property string sans: "Avenir Next"
@@ -140,17 +141,42 @@ Item {
 
     // ── Reading ─────────────────────────────────────────────────────────
 
+    /// Reads the module's settings. At start-up the module may not be running
+    /// yet, so this asks again until it answers; only then can "no registry"
+    /// mean anything.
     function loadConfig() {
-        try {
-            var config = call("names", "get_config", [])
-            registry = config && config.registry ? config.registry : ""
-            sequencer = config && config.sequencer ? config.sequencer : ""
-            walletConfig = config && config.wallet_config ? config.wallet_config : ""
-            walletStorage = config && config.wallet_storage ? config.wallet_storage : ""
+        function take(config) {
+            if (!config || typeof config !== "object" || !("sequencer" in config))
+                return false
+            registry = config.registry ? config.registry : ""
+            sequencer = config.sequencer ? config.sequencer : ""
+            walletConfig = config.wallet_config ? config.wallet_config : ""
+            walletStorage = config.wallet_storage ? config.wallet_storage : ""
+            configKnown = true
             settingsOpen = registry === ""
-        } catch (error) {
-            say(error.message, true)
+            loadPrices()
+            loadWallet(false)
+            return true
         }
+        if (bridgeReady && logos.callModuleAsync) {
+            logos.callModuleAsync("names", "get_config", [], function(reply) {
+                if (!take(parsed(reply)))
+                    configRetry.start()
+            }, 20000)
+            return
+        }
+        try {
+            if (!take(call("names", "get_config", [])))
+                configRetry.start()
+        } catch (error) {
+            configRetry.start()
+        }
+    }
+
+    Timer {
+        id: configRetry
+        interval: 2000
+        onTriggered: root.loadConfig()
     }
 
     function saveConfig(newSequencer, newRegistry) {
@@ -163,8 +189,6 @@ Item {
             say(error.message, true)
         }
         loadConfig()
-        loadPrices()
-        loadWallet(false)
     }
 
     /// Reads what each term costs. Until it is known, registering waits.
@@ -604,15 +628,6 @@ Item {
         if (!bridgeReady)
             return
         loadConfig()
-        loadPrices()
-    }
-
-    // The wallet is read after the first frame, so the screen is up before
-    // the app waits on another module.
-    Timer {
-        interval: 150
-        running: root.bridgeReady
-        onTriggered: root.loadWallet(false)
     }
 
     // A wallet opened after this screen is noticed without a click. Asking is
@@ -716,7 +731,7 @@ Item {
         readonly property color fill: grave ? root.alarm : root.brass
         signal pressed()
         implicitWidth: actionText.implicitWidth + 28
-        implicitHeight: 34
+        implicitHeight: 38
         radius: 6
         color: !live ? "transparent" : strong ? (actionArea.containsMouse ? Qt.lighter(fill, 1.08) : fill) : (actionArea.containsMouse ? root.raised : "transparent")
         border.width: strong && live ? 0 : 1
@@ -731,7 +746,7 @@ Item {
             text: action.label
             color: action.strong && action.live ? root.slate : action.grave ? root.alarm : root.ink
             font.family: root.sans
-            font.pixelSize: 14
+            font.pixelSize: 16
             font.weight: Font.DemiBold
         }
         MouseArea {
@@ -828,14 +843,14 @@ Item {
             text: parent.label
             color: root.ink
             font.family: root.sans
-            font.pixelSize: 14
+            font.pixelSize: 16
             font.weight: Font.Bold
         }
         Text {
             text: parent.count
             color: root.dim
             font.family: root.sans
-            font.pixelSize: 13
+            font.pixelSize: 15
         }
     }
 
@@ -878,7 +893,7 @@ Item {
         signal pressed()
         color: linkArea.containsMouse ? root.brass : root.ink
         font.family: root.sans
-        font.pixelSize: 13
+        font.pixelSize: 15
         font.underline: true
         MouseArea {
             id: linkArea
@@ -896,7 +911,7 @@ Item {
         property string hint: ""
         property bool numbersOnly: false
         property bool code: false
-        property int size: 14
+        property int size: 16
         signal accepted()
         signal edited()
         implicitHeight: size + 22
@@ -960,7 +975,7 @@ Item {
                 selectionColor: root.brass
                 selectedTextColor: root.slate
                 font.family: root.mono
-                font.pixelSize: 12
+                font.pixelSize: 14
                 wrapMode: TextEdit.Wrap
                 textFormat: TextEdit.PlainText
                 selectByMouse: true
@@ -973,7 +988,7 @@ Item {
             text: area.hint
             color: root.faint
             font.family: root.sans
-            font.pixelSize: 13
+            font.pixelSize: 15
             wrapMode: Text.Wrap
         }
     }
@@ -997,7 +1012,7 @@ Item {
                 text: parent.parent.title
                 color: root.ink
                 font.family: root.sans
-                font.pixelSize: 15
+                font.pixelSize: 17
                 font.weight: Font.DemiBold
             }
         }
@@ -1015,7 +1030,7 @@ Item {
                 required property int index
                 readonly property bool chosen: root.termIndex === index
                 Layout.fillWidth: true
-                implicitHeight: 54
+                implicitHeight: 60
                 radius: 6
                 color: chosen ? root.raised : termArea.containsMouse ? root.hover : "transparent"
                 border.width: 1
@@ -1028,7 +1043,7 @@ Item {
                         text: term.modelData.label
                         color: root.ink
                         font.family: root.sans
-                        font.pixelSize: 14
+                        font.pixelSize: 16
                         font.weight: Font.DemiBold
                     }
                     Text {
@@ -1036,7 +1051,7 @@ Item {
                         text: root.priced(term.modelData.fee)
                         color: root.dim
                         font.family: root.sans
-                        font.pixelSize: 13
+                        font.pixelSize: 15
                     }
                 }
                 MouseArea {
@@ -1055,7 +1070,7 @@ Item {
         Layout.fillWidth: true
         color: root.dim
         font.family: root.sans
-        font.pixelSize: 13
+        font.pixelSize: 15
         lineHeight: 1.25
         wrapMode: Text.Wrap
     }
@@ -1065,7 +1080,7 @@ Item {
         Layout.topMargin: 10
         color: root.ink
         font.family: root.sans
-        font.pixelSize: 14
+        font.pixelSize: 16
         font.weight: Font.Bold
     }
 
@@ -1099,21 +1114,21 @@ Item {
                         text: root.shorten(accountRow.modelData.account)
                         color: root.ink
                         font.family: root.mono
-                        font.pixelSize: 13
+                        font.pixelSize: 15
                     }
                     Text {
                         visible: !!accountRow.modelData.name
                         text: accountRow.modelData.name ? accountRow.modelData.name + ".LEZ" : ""
                         color: root.dim
                         font.family: root.sans
-                        font.pixelSize: 13
+                        font.pixelSize: 15
                     }
                     Item { Layout.fillWidth: true }
                     Text {
                         text: root.grouped(accountRow.modelData.balance)
                         color: root.dim
                         font.family: root.sans
-                        font.pixelSize: 13
+                        font.pixelSize: 15
                     }
                 }
                 MouseArea {
@@ -1139,14 +1154,14 @@ Item {
             text: fact.label
             color: root.dim
             font.family: root.sans
-            font.pixelSize: 14
+            font.pixelSize: 16
         }
         Text {
             Layout.fillWidth: true
             text: fact.value
             color: root.ink
             font.family: fact.code ? root.mono : root.sans
-            font.pixelSize: 14
+            font.pixelSize: 16
             wrapMode: Text.WrapAnywhere
         }
         Link {
@@ -1166,7 +1181,7 @@ Item {
 
         // Search, and the holder's own names.
         Rectangle {
-            Layout.preferredWidth: 264
+            Layout.preferredWidth: 292
             Layout.fillHeight: true
             color: root.panel
 
@@ -1196,7 +1211,7 @@ Item {
                     Layout.fillWidth: true
                     spacing: 6
                     Hint {
-                        visible: root.registry === ""
+                        visible: root.configKnown && root.registry === ""
                         text: "No registry chosen. Open App settings."
                     }
                     ListHead {
@@ -1208,7 +1223,7 @@ Item {
                         id: myList
                         visible: root.myNames.length > 0
                         Layout.fillWidth: true
-                        Layout.preferredHeight: Math.min(root.myNames.length, 12) * 38
+                        Layout.preferredHeight: Math.min(root.myNames.length, 12) * 42
                         clip: true
                         spacing: 2
                         model: root.myNames
@@ -1217,7 +1232,7 @@ Item {
                             required property var modelData
                             readonly property bool current: root.record !== null && root.record.name === modelData.name
                             width: myList.width
-                            height: 36
+                            height: 40
                             radius: 6
                             color: current ? root.raised : myRowArea.containsMouse ? root.hover : "transparent"
                             MouseArea {
@@ -1238,7 +1253,7 @@ Item {
                                 NameLabel {
                                     Layout.fillWidth: true
                                     name: myRow.modelData.name
-                                    size: 15
+                                    size: 17
                                     weight: Font.Medium
                                 }
                                 Text {
@@ -1246,7 +1261,7 @@ Item {
                                     text: "Lapsed"
                                     color: root.alarm
                                     font.family: root.sans
-                                    font.pixelSize: 12
+                                    font.pixelSize: 14
                                 }
                                 IconButton {
                                     kind: "gear"
@@ -1305,16 +1320,16 @@ Item {
                         color: root.ink
                         font.family: root.sans
                         font.weight: Font.DemiBold
-                        font.pixelSize: 20
+                        font.pixelSize: 24
                     }
                     Hint {
-                        font.pixelSize: 13
+                        font.pixelSize: 15
                         text: "A registry is one program on the Logos Execution Zone. Everyone who uses the same program ID resolves the same .LEZ names."
                     }
                     Field {
                         id: registryField
                         Layout.fillWidth: true
-                        size: 13
+                        size: 15
                         text: root.registry
                         hint: "Program ID of the registry"
                         onEdited: root.saveConfig(root.sequencer, registryField.text.trim())
@@ -1322,7 +1337,7 @@ Item {
                     Field {
                         id: sequencerField
                         Layout.fillWidth: true
-                        size: 13
+                        size: 15
                         text: root.sequencer
                         hint: "https://testnet.lez.logos.co"
                         onEdited: root.saveConfig(sequencerField.text.trim(), root.registry)
@@ -1332,14 +1347,14 @@ Item {
                     Field {
                         id: walletConfigField
                         Layout.fillWidth: true
-                        size: 13
+                        size: 15
                         text: root.walletConfig
                         hint: "Path of the wallet's config file"
                     }
                     Field {
                         id: walletStorageField
                         Layout.fillWidth: true
-                        size: 13
+                        size: 15
                         text: root.walletStorage
                         hint: "Path of the wallet's storage file"
                     }
@@ -1365,7 +1380,7 @@ Item {
                     text: root.notice
                     color: root.noticeIsError ? root.alarm : root.brass
                     font.family: root.sans
-                    font.pixelSize: 13
+                    font.pixelSize: 15
                     wrapMode: Text.Wrap
                 }
 
@@ -1376,15 +1391,15 @@ Item {
                     Layout.topMargin: 60
                     spacing: 10
                     Text {
-                        text: root.registry === "" ? "Choose a registry to begin" : "Find a .LEZ name"
+                        text: !root.configKnown ? "Starting" : root.registry === "" ? "Choose a registry to begin" : "Find a .LEZ name"
                         color: root.ink
                         font.family: root.sans
                         font.weight: Font.DemiBold
-                        font.pixelSize: 28
+                        font.pixelSize: 32
                     }
                     Hint {
-                        font.pixelSize: 14
-                        text: root.registry === "" ? "Open App settings and enter the registry's program ID." : "Search for a .LEZ name to see where it pays and how to reach its holder. If nobody holds it, you can register it. .LEZ names are private: nobody can browse them, only look up one they already know."
+                        font.pixelSize: 16
+                        text: !root.configKnown ? "Waiting for the names module to answer." : root.registry === "" ? "Open App settings and enter the registry's program ID." : "Search for a .LEZ name to see where it pays and how to reach its holder. If nobody holds it, you can register it. .LEZ names are private: nobody can browse them, only look up one they already know."
                     }
                 }
 
@@ -1397,14 +1412,14 @@ Item {
                     NameLabel {
                         Layout.fillWidth: true
                         name: root.missing
-                        size: 44
+                        size: 48
                         weight: Font.DemiBold
                     }
                     Text {
                         text: "Nobody holds this name."
                         color: root.ink
                         font.family: root.sans
-                        font.pixelSize: 15
+                        font.pixelSize: 17
                     }
                     Panel {
                         visible: root.wallet.length > 0
@@ -1427,7 +1442,7 @@ Item {
                         Layout.fillWidth: true
                         spacing: 12
                         Hint {
-                            font.pixelSize: 13
+                            font.pixelSize: 15
                             text: "Registering it takes an account that can pay the fee. " + root.walletProblem
                         }
                         Action {
@@ -1458,14 +1473,14 @@ Item {
                             NameLabel {
                                 Layout.fillWidth: true
                                 name: root.record !== null ? root.record.name : ""
-                                size: 44
+                                size: 48
                                 weight: Font.DemiBold
                             }
                             Text {
                                 text: root.record === null ? "" : root.record.npk !== null && root.record.account !== null ? "Takes public and private payments" : root.record.npk !== null ? "Takes private payments" : root.record.account !== null ? "Takes public payments" : "Does not take payments yet"
                                 color: root.dim
                                 font.family: root.sans
-                                font.pixelSize: 14
+                                font.pixelSize: 16
                             }
                         }
                     }
@@ -1609,13 +1624,13 @@ Item {
                                     text: entry.modelData
                                     color: root.dim
                                     font.family: root.sans
-                                    font.pixelSize: 13
+                                    font.pixelSize: 15
                                     elide: Text.ElideRight
                                 }
                                 Field {
                                     id: entryValue
                                     Layout.fillWidth: true
-                                    size: 13
+                                    size: 17
                                     text: root.record !== null && root.record.texts[entry.modelData] !== undefined ? root.record.texts[entry.modelData] : ""
                                 }
                                 Action {
@@ -1637,13 +1652,13 @@ Item {
                             Field {
                                 id: newKeyField
                                 Layout.preferredWidth: 96
-                                size: 13
+                                size: 15
                                 hint: "chat"
                             }
                             Field {
                                 id: newValueField
                                 Layout.fillWidth: true
-                                size: 13
+                                size: 15
                                 hint: "Value"
                             }
                             Action {
@@ -1723,7 +1738,7 @@ Item {
                                 text: "Delete it for good?"
                                 color: root.alarm
                                 font.family: root.sans
-                                font.pixelSize: 14
+                                font.pixelSize: 16
                                 font.weight: Font.DemiBold
                             }
                             Action {
@@ -1791,7 +1806,7 @@ Item {
                             text: root.record !== null ? "On " + root.record.name + "'s page" : ""
                             color: root.dim
                             font.family: root.sans
-                            font.pixelSize: 13
+                            font.pixelSize: 15
                         }
                         Text {
                             Layout.fillWidth: true
@@ -1801,7 +1816,7 @@ Item {
                             text: root.pageWords() !== "" ? root.pageWords() : "The page holds no readable text."
                             color: root.ink
                             font.family: root.sans
-                            font.pixelSize: 15
+                            font.pixelSize: 17
                             lineHeight: 1.4
                             wrapMode: Text.Wrap
                         }
