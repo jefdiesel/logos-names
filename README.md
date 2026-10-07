@@ -34,9 +34,10 @@ including exactly what is and is not private.
 
 ## Status
 
-Working end to end on a local LEZ v0.3.0 chain: deploy, register, update,
-transfer, release, resolve, and serve a page by name through the gateway. Not
-yet deployed to the public testnet. Written directly against `lee_core` because
+Deployed on the public LEZ testnet as program
+`DugXYzVqYsXJumqsjaGtoZeJ742WmdRHGpByi8pNJm2z` (2026-10-07), with `jef.lez` and
+`logos.lez` registered. Everything below also runs against a local LEZ v0.3.0
+chain. Written directly against `lee_core` because
 the SPEL framework does not support LEZ v0.3 yet (`logos-co/spel#291`).
 
 ## Layout

@@ -359,7 +359,7 @@ registry, as they agree on one token contract.
 
 | Network | Registry program ID |
 |---|---|
-| Logos testnet v0.3 (LEZ) | not deployed yet |
+| Logos testnet v0.3 (LEZ) | `DugXYzVqYsXJumqsjaGtoZeJ742WmdRHGpByi8pNJm2z` (deployed 2026-10-07, CI build `542ae051…11c1`) |
 
 The deployed program is the reproducible build produced by this repository's
 CI; its SHA-256 is recorded with each release. The program is upgradeable by
