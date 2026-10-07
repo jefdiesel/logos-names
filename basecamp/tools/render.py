@@ -31,7 +31,8 @@ BRIDGE = r"""
                     return ok({ accounts: [
                         { account: "%(alice)s", balance: "19999899314697", funded: true, name: "jef" },
                         { account: "%(bob)s", balance: "9999975450630", funded: true, name: null },
-                        { account: "%(carol)s", balance: "0", funded: false, name: null }] })
+                        { account: "%(carol)s", balance: "0", funded: false, name: null }],
+                        private_accounts: [{ account: "%(carol)s", balance: "2999000", funded: true }] })
                 return JSON.stringify({ success: false, value: null, error: "the LEZ wallet is not running; install LEZ Wallet and open it" })
             }
             if (method === "get_config") return JSON.stringify({ registry: %(registry)s, sequencer: "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json" })

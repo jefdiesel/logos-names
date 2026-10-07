@@ -474,7 +474,7 @@ everything else.
 
 | Method | `value` |
 |---|---|
-| `wallet()` | `{"accounts": [{"account", "balance", "funded", "name"}], "private_accounts": [account]}`: the open wallet's public accounts, funded ones first, and its private accounts. `balance` is decimal text; `name` is the account's confirmed name or `null`. |
+| `wallet()` | `{"accounts": [{"account", "balance", "funded", "name"}], "private_accounts": [{"account", "balance", "funded"}]}`: the open wallet's public accounts and its private accounts, funded ones first. `balance` is decimal text; `name` is the account's confirmed name or `null`. |
 | `mine()` | `{"names": [{"name", "display", "owner", "expires", "lapsed"}]}`: the names this device remembers that the open wallet holds. |
 | `keep("jef.lez")` | `true`: remember the name on this device, for `mine`. |
 | every change | `{"name", "signer", "tx"}`: the transaction was sent. |

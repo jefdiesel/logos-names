@@ -472,7 +472,17 @@ impl NamesModule for Names {
             })?;
             // A stable sort: funded accounts first, each group in wallet order.
             accounts.sort_by_key(|account| account["funded"] != true);
-            let private: Vec<String> = held.private.iter().map(registry::account_text).collect();
+            // A private account's balance is known only to the wallet.
+            let mut private = Vec::new();
+            for account in held.private.iter().take(MAX_WALLET_ACCOUNTS) {
+                let balance = wallet::private_balance(account).unwrap_or(0);
+                private.push(json!({
+                    "account": registry::account_text(account),
+                    "balance": balance.to_string(),
+                    "funded": balance > 0,
+                }));
+            }
+            private.sort_by_key(|account| account["funded"] != true);
             Ok(json!({ "accounts": accounts, "private_accounts": private }))
         })())
     }
@@ -769,6 +779,16 @@ mod wallet {
         }
     }
 
+    /// What the wallet holds on one of its private accounts.
+    pub fn private_balance(account: &AccountId) -> Result<u128, String> {
+        let answer = call("get_balance", json!([registry::hex(account), false]), LOOK)?;
+        answer
+            .as_str()
+            .and_then(|text| text.parse().ok())
+            .or_else(|| answer.as_u64().map(u128::from))
+            .ok_or_else(|| "the wallet did not give that account's balance".to_owned())
+    }
+
     /// Makes a private account in the wallet, saves the wallet, and returns it.
     pub fn new_private_account() -> Result<AccountId, String> {
         let before = accounts().map(|held| held.private).unwrap_or_default();
@@ -837,6 +857,10 @@ mod wallet {
     }
 
     pub fn new_private_account() -> Result<AccountId, String> {
+        Err(CLOSED.to_owned())
+    }
+
+    pub fn private_balance(_account: &AccountId) -> Result<u128, String> {
         Err(CLOSED.to_owned())
     }
 

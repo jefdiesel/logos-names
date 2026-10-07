@@ -22,6 +22,9 @@ Item {
     property var page: null
     property string missing: ""        // a looked-up name that is not registered
     property var wallet: []            // the wallet's funded public accounts: [{account, balance, name}]
+    property var privateWallet: []     // its funded private accounts: [{account, balance}]
+    property int senderIndex: 0        // which of senders() pays
+    property bool sending: false       // a payment is being prepared or sent
     property string walletProblem: ""  // why the wallet cannot be used, if it cannot
     property int fromIndex: 0
     property string tool: ""           // the open panel: "", "pay" or "settings"
@@ -268,6 +271,9 @@ Item {
         askLater("wallet", [], function(value) {
             var funded = value.accounts.filter(function(account) { return account.funded })
             wallet = funded
+            privateWallet = (value.private_accounts || []).filter(function(account) { return account.funded })
+            if (senderIndex >= funded.length + privateWallet.length)
+                senderIndex = 0
             walletProblem = funded.length > 0 ? "" : "None of the wallet's accounts holds funds to pay the fee."
             if (fromIndex >= funded.length)
                 fromIndex = 0
@@ -277,6 +283,7 @@ Item {
                 say(funded.length > 0 ? "Wallet connected." : walletProblem, funded.length === 0)
         }, function(message) {
             wallet = []
+            privateWallet = []
             walletProblem = sentence(message)
             fromIndex = 0
             myNames = []
@@ -531,10 +538,47 @@ Item {
         return hex
     }
 
+    /// Who can pay: the wallet's funded public accounts, then its private ones.
+    function senders() {
+        var all = []
+        for (var i = 0; i < wallet.length; i++)
+            all.push({ account: wallet[i].account, balance: wallet[i].balance, name: wallet[i].name, isPrivate: false })
+        for (var j = 0; j < privateWallet.length; j++)
+            all.push({ account: privateWallet[j].account, balance: privateWallet[j].balance, name: null, isPrivate: true })
+        return all
+    }
+
+    function sender() {
+        var all = senders()
+        return senderIndex < all.length ? all[senderIndex] : null
+    }
+
+    /// What a payment from the chosen account would hide.
+    function payHidden(usePrivateKeys) {
+        var from = sender()
+        if (from === null)
+            return ""
+        if (from.isPrivate && usePrivateKeys)
+            return "Nothing about this payment is visible: not who sent it, who received it, or how much."
+        if (from.isPrivate)
+            return "The sender stays hidden. The amount and the receiving account are visible, because the name is paid at a public account."
+        if (usePrivateKeys)
+            return "The receiver stays hidden. The amount and your account are visible, because it leaves a public account."
+        return "Everything about this payment is visible: your account, the receiving account and the amount."
+    }
+
+    /// Pays the name from the chosen account. A payment that hides anything
+    /// is proved on this machine first, which takes minutes, so the wallet is
+    /// asked without holding the screen still.
     function pay(usePrivateKeys) {
         var amount = amountHex(amountInput.text)
         if (amount === "") {
             say("Enter a whole amount.", true)
+            return
+        }
+        var from = sender()
+        if (from === null) {
+            say("Choose an account to pay from.", true)
             return
         }
         try {
@@ -542,24 +586,36 @@ Item {
             var to = ask("recipient", [record.name])
             if (to === null)
                 throw new Error(shown(record.name) + " is no longer registered.")
-            var from = String(call("lez_core", "account_id_from_base58", [wallet[fromIndex].account]))
-            var reply
-            if (usePrivateKeys) {
-                if (to.private === null)
-                    throw new Error(shown(record.name) + " does not take private payments.")
-                reply = call("lez_core", "transfer_shielded", [from, JSON.stringify(to.private), amount])
-            } else {
-                if (to.public_hex === null)
-                    throw new Error(shown(record.name) + " does not take public payments.")
-                reply = call("lez_core", "transfer_public", [from, to.public_hex, amount])
+            if (usePrivateKeys && to.private === null)
+                throw new Error(shown(record.name) + " does not take private payments.")
+            if (!usePrivateKeys && to.public_hex === null)
+                throw new Error(shown(record.name) + " does not take public payments.")
+            var fromHex = String(call("lez_core", "account_id_from_base58", [from.account]))
+            var method = from.isPrivate ? (usePrivateKeys ? "transfer_private" : "transfer_deshielded")
+                                        : (usePrivateKeys ? "transfer_shielded" : "transfer_public")
+            var args = [fromHex, usePrivateKeys ? JSON.stringify(to.private) : to.public_hex, amount]
+            var slow = from.isPrivate || usePrivateKeys
+            sending = true
+            say(slow ? "Preparing the payment. Proving it takes a few minutes; you can keep using the app." : "Sending.", false)
+            var amountText = amountInput.text.trim()
+            var display = shown(record.name)
+            function settle(reply) {
+                sending = false
+                reply = parsed(reply)
+                if (reply && reply.success) {
+                    tool = ""
+                    say("Sent " + amountText + " to " + display + ".", false)
+                    loadWallet(false)
+                } else {
+                    say("The wallet refused: " + (reply && reply.error ? reply.error : "no reason given") + ".", true)
+                }
             }
-            if (reply && reply.success) {
-                tool = ""
-                say("Sent " + amountInput.text.trim() + " to " + shown(record.name) + ".", false)
-            } else {
-                say("The wallet refused: " + (reply && reply.error ? reply.error : "no reason given") + ".", true)
-            }
+            if (logos.callModuleAsync)
+                logos.callModuleAsync("lez_core", method, args, settle, 20 * 60 * 1000)
+            else
+                settle(logos.callModule("lez_core", method, args))
         } catch (error) {
+            sending = false
             say(error.message, true)
         }
     }
@@ -1095,12 +1151,17 @@ Item {
         font.weight: Font.Bold
     }
 
-    /// The wallet's funded accounts, one of which pays.
+    /// The wallet's funded accounts, one of which pays. With `withPrivate`
+    /// the private accounts follow the public ones and the choice is the
+    /// payment's sender rather than a name's holder.
     component Accounts: ColumnLayout {
+        id: accountsList
+        property bool withPrivate: false
+        readonly property int chosen: withPrivate ? root.senderIndex : root.fromIndex
         Layout.fillWidth: true
         spacing: 6
         Repeater {
-            model: root.wallet
+            model: accountsList.withPrivate ? root.senders() : root.wallet
             Rectangle {
                 id: accountRow
                 required property var modelData
@@ -1108,9 +1169,9 @@ Item {
                 Layout.fillWidth: true
                 height: 36
                 radius: 6
-                color: root.fromIndex === index ? root.raised : "transparent"
+                color: accountsList.chosen === index ? root.raised : "transparent"
                 border.width: 1
-                border.color: root.fromIndex === index ? root.brass : root.line
+                border.color: accountsList.chosen === index ? root.brass : root.line
                 RowLayout {
                     anchors.fill: parent
                     anchors.leftMargin: 10
@@ -1126,6 +1187,13 @@ Item {
                         color: root.ink
                         font.family: root.mono
                         font.pixelSize: 15
+                    }
+                    Text {
+                        visible: !!accountRow.modelData.isPrivate
+                        text: "Private"
+                        color: root.brass
+                        font.family: root.sans
+                        font.pixelSize: 14
                     }
                     Text {
                         visible: !!accountRow.modelData.name
@@ -1145,7 +1213,12 @@ Item {
                 MouseArea {
                     anchors.fill: parent
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: root.fromIndex = accountRow.index
+                    onClicked: {
+                        if (accountsList.withPrivate)
+                            root.senderIndex = accountRow.index
+                        else
+                            root.fromIndex = accountRow.index
+                    }
                 }
             }
         }
@@ -1526,7 +1599,7 @@ Item {
                     Panel {
                         visible: root.tool === "pay"
                         title: root.record !== null ? "Send to " + root.shown(root.record.name) : ""
-                        Accounts {}
+                        Accounts { withPrivate: true }
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 8
@@ -1537,15 +1610,15 @@ Item {
                                 numbersOnly: true
                             }
                             Action {
-                                label: "Send privately"
+                                label: root.sending ? "Preparing" : "Send privately"
                                 strong: root.record !== null && root.record.npk !== null
-                                enabledNow: root.record !== null && root.record.npk !== null
+                                enabledNow: !root.sending && root.record !== null && root.record.npk !== null
                                 onPressed: root.pay(true)
                             }
                             Action {
                                 label: "Send publicly"
                                 strong: root.record !== null && root.record.npk === null
-                                enabledNow: root.record !== null && root.record.account !== null
+                                enabledNow: !root.sending && root.record !== null && root.record.account !== null
                                 onPressed: root.pay(false)
                             }
                             Item { Layout.fillWidth: true }
@@ -1556,7 +1629,7 @@ Item {
                             color: root.alarm
                             text: root.record !== null && root.record.lapsed ? root.shown(root.record.name) + " lapsed on " + root.dated(root.record.expires) + ". Its holder can still renew it, but check with them before you pay." : ""
                         }
-                        Hint { text: "A private payment hides who received it. The amount and your account stay visible, because it is sent from a public account. It takes a few minutes to prepare." }
+                        Hint { text: root.record === null ? "" : (root.record.npk !== null ? root.payHidden(true) : root.payHidden(false)) + " A payment that hides anything is proved on this machine first and takes a few minutes." }
                     }
 
                     // The holder's settings for this name.
