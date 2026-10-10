@@ -29,7 +29,7 @@ use names_seal::{
 use wallet::{
     AccountIdentity, WalletCore,
     config::{SequencerConnectionData, WalletConfigOverrides},
-    helperfunctions::{fetch_config_path, fetch_persistent_storage_path, fetch_statistics_path},
+    helperfunctions::{fetch_config_path, fetch_persistent_storage_path},
     program_facades::native_token_transfer::NativeTokenTransfer,
 };
 
@@ -744,24 +744,17 @@ async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>)
 
     let Args { continuous_run, command } =
         Args::parse_from(std::iter::once("names wallet".to_owned()).chain(args));
+    write_default_wallet_files()?;
     let config_path = fetch_config_path()?;
     let storage_path = fetch_persistent_storage_path()?;
-    let statistics_path = fetch_statistics_path()?;
 
     if let Some(command) = command {
         let mut wallet = if storage_path.exists() {
-            WalletCore::new_update_chain(config_path, storage_path, statistics_path, overrides)
-                .await?
+            WalletCore::new_update_chain(config_path, storage_path, overrides)?
         } else {
             // The wallet does not encrypt its storage yet, so there is no password to ask for.
-            let (wallet, mnemonic) = WalletCore::new_init_storage(
-                config_path,
-                storage_path,
-                statistics_path,
-                overrides,
-                "",
-            )
-            .await?;
+            let (wallet, mnemonic) =
+                WalletCore::new_init_storage(config_path, storage_path, overrides, "")?;
             println!("Created a new wallet. Write down its recovery phrase and keep it safe;");
             println!("it is the only way to get the wallet back:");
             println!();
@@ -772,9 +765,7 @@ async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>)
         };
         execute_subcommand(&mut wallet, command).await?;
     } else if continuous_run {
-        let mut wallet =
-            WalletCore::new_update_chain(config_path, storage_path, statistics_path, overrides)
-                .await?;
+        let mut wallet = WalletCore::new_update_chain(config_path, storage_path, overrides)?;
         execute_continuous_run(&mut wallet).await?;
     } else {
         let mut help = Args::command().name("names wallet");
@@ -783,23 +774,29 @@ async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>)
     Ok(())
 }
 
-/// Writes the wallet's default config (the public testnet) and an empty statistics
-/// file if they are missing. The wallet would make them itself, but announces it on
-/// stdout, which would spoil the JSON that lookups print there.
+/// Writes the wallet's default config if it is missing. The wallet would make it
+/// itself, but announces it on stdout, which would spoil the JSON that lookups print
+/// there. A config from LEZ v0.3.0, which listed `sequencers` where v0.3.1 has one
+/// `sequencer`, is rewritten in the new form, keeping its first sequencer.
 fn write_default_wallet_files() -> Result<()> {
     let config_path = fetch_config_path()?;
     if let Some(home) = config_path.parent() {
         std::fs::create_dir_all(home)
             .with_context(|| format!("failed to create the wallet home {}", home.display()))?;
     }
-    if !config_path.exists() {
-        let config = serde_json::to_vec_pretty(&wallet::config::WalletConfig::default())?;
-        std::fs::write(&config_path, config)?;
+    let mut config = serde_json::to_value(wallet::config::WalletConfig::default())?;
+    if config_path.exists() {
+        let existing: serde_json::Value = serde_json::from_slice(&std::fs::read(&config_path)?)
+            .with_context(|| format!("{} is not JSON", config_path.display()))?;
+        let Some(old) = existing.get("sequencers").and_then(|list| list.get(0)) else {
+            return Ok(());
+        };
+        config["sequencer"] = old.clone();
+        if let Some(gas_limit) = existing.get("gas_limit") {
+            config["gas_limit"] = gas_limit.clone();
+        }
     }
-    let statistics_path = fetch_statistics_path()?;
-    if !statistics_path.exists() {
-        std::fs::write(&statistics_path, "{}")?;
-    }
+    std::fs::write(&config_path, serde_json::to_vec_pretty(&config)?)?;
     Ok(())
 }
 
@@ -809,22 +806,9 @@ async fn open_wallet(overrides: Option<WalletConfigOverrides>) -> Result<WalletC
     write_default_wallet_files()?;
     let storage_path = fetch_persistent_storage_path()?;
     if storage_path.exists() {
-        return WalletCore::new_update_chain(
-            fetch_config_path()?,
-            storage_path,
-            fetch_statistics_path()?,
-            overrides,
-        )
-        .await;
+        return WalletCore::new_update_chain(fetch_config_path()?, storage_path, overrides);
     }
-    let (wallet, _) = WalletCore::new_init_storage(
-        fetch_config_path()?,
-        storage_path,
-        fetch_statistics_path()?,
-        overrides,
-        "",
-    )
-    .await?;
+    let (wallet, _) = WalletCore::new_init_storage(fetch_config_path()?, storage_path, overrides, "")?;
     Ok(wallet)
 }
 
@@ -838,7 +822,7 @@ fn sequencer_overrides(cli: &Cli) -> Result<Option<WalletConfigOverrides>> {
     };
     let sequencer_addr = rpc.parse().map_err(|_| anyhow!("{rpc} is not a URL"))?;
     Ok(Some(WalletConfigOverrides {
-        sequencers: Some(vec![SequencerConnectionData { sequencer_addr, basic_auth: None }]),
+        sequencer: Some(SequencerConnectionData { sequencer_addr, basic_auth: None }),
         ..Default::default()
     }))
 }
