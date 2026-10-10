@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>/Users/jef</string>
+		<key>PATH</key>
+		<string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>RISC0_SERVER_PATH</key>
+		<string>/Users/jef/lez-chain/bin/r0vm</string>
+	</dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>local.lez-chain</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/jef/lez-chain/bin/sequencer_service</string>
+		<string>/Users/jef/lez-chain/config.json</string>
+		<string>--port</string>
+		<string>3040</string>
+		<string>--listen-address</string>
+		<string>127.0.0.1</string>
+		<string>--home</string>
+		<string>/Users/jef/lez-chain/home</string>
+		<string>--metrics-address</string>
+		<string>127.0.0.1:9140</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/jef/Library/Logs/local.lez-chain.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/jef/Library/Logs/local.lez-chain.log</string>
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+	<key>WorkingDirectory</key>
+	<string>/Users/jef/lez-chain</string>
+</dict>
+</plist>
