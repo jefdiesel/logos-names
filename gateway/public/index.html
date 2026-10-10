@@ -44,8 +44,9 @@
   <h1>Logos Names</h1>
   <p class="lede">Names like <code>jef.lez</code> for the Logos Execution Zone. Pay a name instead
   of a 32-byte account. The chain never sees the name, so nobody can list or browse them.</p>
-  <p class="note">This runs on the <strong>Logos Names test chain</strong>, a LEZ v0.3 chain kept
-  running for this registry while the public LEZ testnet is halted. Its tokens come free from the
+  <p class="note">This runs on the <strong>Logos Names test chain</strong>, a LEZ chain kept
+  running for this registry while the public LEZ testnet is halted, and anchored to the Logos
+  Blockchain: every block is posted there. Its tokens come free from the
   faucet below and are worth nothing. Names here won't carry over to the public testnet or to
   testnet v0.4.</p>
 
@@ -93,11 +94,11 @@ names pay jef.lez 1000 --from &lt;account&gt; --private   <span class="c"># shie
   <code>names wallet help</code> lists the wallet's own commands. The wallet lives in
   <code>~/.lee/wallet</code>; set <code>LEE_WALLET_HOME_DIR</code> to use another one.</p>
   <p>Apps and agents can read any name as JSON at <code>/&lt;name&gt;/.well-known/logos-name.json</code>
-  on this gateway. The chain's JSON-RPC is at <code>/rpc</code>, and any LEZ v0.3 wallet can use
+  on this gateway. The chain's JSON-RPC is at <code>/rpc</code>, and any LEZ v0.3.1 wallet can use
   it: <code>names</code> does by default; to use a different chain, pass <code>--rpc</code> and
   <code>--program</code>.</p>
 
-  <footer>Logos Names runs on its own LEZ v0.3 test chain. This gateway can see which names you
+  <footer>Logos Names runs on its own LEZ test chain. This gateway can see which names you
   look up, and it passes on the transactions you send.</footer>
 </main>
 </body>

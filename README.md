@@ -50,7 +50,7 @@ binaries and deploys them with the gateway.
 ## Status
 
 The CLI and gateway use the **Logos Names test chain** ([chain/](chain/README.md)),
-a standalone LEZ v0.3.0 chain run for this registry, as program
+a LEZ chain run for this registry and anchored to the Logos Blockchain, as program
 `CsiBzfERqtLz9dYV9dPWzFPMbaUcUagYeCmvvJVmCGcF` (2026-10-10). It exists because
 the public LEZ testnet halted at block 13,982 on 2026-10-07, where the registry is
 deployed as `DugXYzVqYsXJumqsjaGtoZeJ742WmdRHGpByi8pNJm2z` with `jef.lez` and
