@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Logos Names</title>
+<meta name="description" content="Private names for the Logos Execution Zone: jef.lez instead of a 32-byte account. Install the names command line.">
+<style>
+  :root {
+    --bg: #fbfaf7; --fg: #16150f; --muted: #55524a; --line: #dedad0;
+    --code-bg: #efece4; --accent: #2f5d50;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #131311; --fg: #f1efe8; --muted: #b3afa4; --line: #33322d;
+            --code-bg: #1f1e1b; --accent: #8cc2b0; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 17px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 46rem; margin: 0 auto; padding: 3rem 1rem 4rem; }
+  h1 { font-size: 2.2rem; line-height: 1.15; margin: 0 0 .5rem; letter-spacing: -.01em; }
+  h2 { font-size: 1.25rem; margin: 2.5rem 0 .5rem; }
+  p, li { color: var(--fg); }
+  .lede { font-size: 1.15rem; color: var(--muted); margin-top: 0; }
+  a { color: var(--accent); }
+  code, pre { font: 14.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  code { background: var(--code-bg); padding: .1em .35em; border-radius: 4px; }
+  pre { background: var(--code-bg); padding: .9rem 1rem; border-radius: 8px;
+        overflow-x: auto; margin: .5rem 0 1rem; }
+  pre code { background: none; padding: 0; }
+  .c { color: var(--muted); }
+  .note { border-left: 3px solid var(--accent); padding: .25rem 0 .25rem 1rem; color: var(--muted); }
+  form { display: flex; gap: .5rem; margin: 1.5rem 0 0; flex-wrap: wrap; }
+  input { flex: 1 1 14rem; font: inherit; padding: .55rem .75rem; border: 1px solid var(--line);
+          border-radius: 8px; background: var(--bg); color: var(--fg); }
+  button { font: inherit; font-weight: 600; padding: .55rem 1.1rem; border: 0; border-radius: 8px;
+           background: var(--accent); color: var(--bg); cursor: pointer; }
+  footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line);
+           color: var(--muted); font-size: .9rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Logos Names</h1>
+  <p class="lede">Names like <code>jef.lez</code> for the Logos Execution Zone. Pay a name instead
+  of a 32-byte account. The chain never sees the name, so nobody can list or browse them.</p>
+
+  <form onsubmit="event.preventDefault(); const n = this.n.value.trim(); if (n) location.href = '/' + encodeURIComponent(n);">
+    <input name="n" placeholder="Look up a name, such as jef.lez" aria-label="Name" autocapitalize="off" spellcheck="false">
+    <button>Look up</button>
+  </form>
+
+  <h2>Install the command line</h2>
+  <p>One binary for macOS (Apple silicon) and Linux (x86_64), with the LEZ wallet built in.
+  It needs nothing else and doesn't need Basecamp.</p>
+<pre><code>curl -fsSL https://logos-names.wrapit.workers.dev/install.sh | sh</code></pre>
+  <p>It installs to <code>~/.local/bin/names</code> and checks the download's SHA-256.</p>
+
+  <h2>Look names up</h2>
+  <p>No wallet or setup needed:</p>
+<pre><code>names resolve jef.lez        <span class="c"># what the name points to, as JSON</span>
+names reverse &lt;account&gt;      <span class="c"># the name an account goes by</span>
+names settings               <span class="c"># the registry's prices</span></code></pre>
+
+  <h2>Get a name</h2>
+  <p>1. Make a wallet and an account. Write down the recovery phrase it prints.</p>
+<pre><code>names wallet account new public</code></pre>
+  <p>2. Fund the account. LEZ testnet tokens come from the Logos Blockchain through a channel
+  deposit to your account ID, or from anyone who already holds some. The sequencer only accepts
+  a transaction if the payer could cover its maximum fee, so keep about 20,000,000 in the account.
+  Check the balance with:</p>
+<pre><code>names wallet account get --account-id Public/&lt;account&gt;</code></pre>
+  <p>3. Register, then point the name somewhere:</p>
+<pre><code>names register myname --owner &lt;account&gt; --term 1y   <span class="c"># 30d, 1y or 5y</span>
+names receive-privately myname                     <span class="c"># payments to myname.lez stay private</span>
+names set-text myname chat &lt;address&gt;               <span class="c"># optional text entries</span>
+names set-page myname index.html                   <span class="c"># optional page at /myname</span></code></pre>
+
+  <h2>Pay a name</h2>
+<pre><code>names pay jef.lez 1000 --from &lt;account&gt;             <span class="c"># to its public account</span>
+names pay jef.lez 1000 --from &lt;account&gt; --private   <span class="c"># shielded; the proof takes minutes</span></code></pre>
+  <p>Payments sent with <code>--private</code> land on a fresh private account. The recipient
+  finds them with <code>names wallet account sync-private</code>.</p>
+
+  <h2>More</h2>
+  <p><code>names --help</code> lists every command: renew, transfer, release, clear-page and more.
+  <code>names wallet help</code> lists the wallet's own commands. The wallet lives in
+  <code>~/.lee/wallet</code>; set <code>LEE_WALLET_HOME_DIR</code> to use another one.</p>
+  <p>Apps and agents can read any name as JSON at <code>/&lt;name&gt;/.well-known/logos-name.json</code>
+  on this gateway.</p>
+
+  <p class="note">Logos testnet v0.3 is experimental, and names registered on it will need to move
+  when testnet v0.4 arrives. While the testnet's sequencer is stalled, lookups still work
+  but changes wait until it produces blocks again.</p>
+
+  <footer>Logos Names runs on the Logos Execution Zone testnet. This gateway only reads the chain;
+  it can see which names you look up.</footer>
+</main>
+</body>
+</html>

@@ -2,3 +2,4 @@ node_modules/
 dist/
 .cloudflare/
 .wrangler/
+public/dl/

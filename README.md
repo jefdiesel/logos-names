@@ -32,6 +32,20 @@ There is no indexer and no server-side state.
 needs to resolve and change names without using this repository's code,
 including exactly what is and is not private.
 
+## Install the command line
+
+```sh
+curl -fsSL https://logos-names.wrapit.workers.dev/install.sh | sh
+```
+
+One binary (macOS on Apple silicon, Linux x86_64) that needs neither Basecamp nor
+a separate LEZ install: `names wallet …` is the LEZ wallet's own command line,
+built in, and the testnet registry is the default. Lookups work with no setup;
+`names wallet account new public` makes a wallet, and `names receive-privately
+<name>` gives a name private receiving keys from it. The guide is the gateway's
+front page (`gateway/public/index.html`). `scripts/publish-cli.sh` builds both
+binaries and deploys them with the gateway.
+
 ## Status
 
 Deployed on the public LEZ testnet as program

@@ -1,7 +1,9 @@
 //! `names`: command-line client for the Logos Names registry.
 //!
 //! Signing and fee payment go through the LEZ wallet, so the wallet home
-//! (`LEE_WALLET_HOME_DIR`) must hold the key of the account that owns the name.
+//! (`LEE_WALLET_HOME_DIR`, default `~/.lee/wallet`) must hold the key of the
+//! account that owns the name. `names wallet` is that wallet's own command line,
+//! built in, so nothing else needs installing.
 //!
 //! The chain never sees a name: every command derives the name's identifier and
 //! key here, and what the name resolves to is sealed and opened on this side.
@@ -25,13 +27,19 @@ use names_seal::{
     seal_profile, validate_page, validate_profile, validate_text_key,
 };
 use wallet::{
-    AccountIdentity, WalletCore, program_facades::native_token_transfer::NativeTokenTransfer,
+    AccountIdentity, WalletCore,
+    helperfunctions::{fetch_config_path, fetch_persistent_storage_path, fetch_statistics_path},
+    program_facades::native_token_transfer::NativeTokenTransfer,
 };
 
+/// The registry deployed on the public LEZ testnet (v0.3), used unless
+/// `--program` or `LOGOS_NAMES_PROGRAM` names another.
+const TESTNET_PROGRAM: &str = "DugXYzVqYsXJumqsjaGtoZeJ742WmdRHGpByi8pNJm2z";
+
 #[derive(Parser)]
-#[command(name = "names", about = "Register and resolve Logos names")]
+#[command(name = "names", version, about = "Register and resolve Logos names")]
 struct Cli {
-    /// Account ID of the deployed registry program.
+    /// Account ID of the deployed registry program. Defaults to the testnet registry.
     #[arg(long, env = "LOGOS_NAMES_PROGRAM", global = true)]
     program: Option<AccountId>,
 
@@ -98,6 +106,12 @@ enum Command {
         /// File holding the hex-encoded viewing public key (1184 bytes).
         #[arg(long)]
         vpk_file: PathBuf,
+    },
+    /// Make a new private account in the wallet and publish its receiving keys on
+    /// the name, so payments to the name stay private.
+    ReceivePrivately {
+        #[arg(value_parser = parse_name)]
+        name: String,
     },
     /// Remove the public account and private keys from the name.
     ClearAddresses {
@@ -168,6 +182,13 @@ enum Command {
     Address {
         #[arg(value_parser = parse_name)]
         name: String,
+    },
+    /// The LEZ wallet's own commands: make accounts, check balances, sync private
+    /// accounts and more. Run `names wallet help` for the list.
+    #[command(disable_help_flag = true)]
+    Wallet {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 }
 
@@ -700,12 +721,99 @@ fn parse_hex<const N: usize>(text: &str, what: &str) -> Result<[u8; N]> {
         .map_err(|_| anyhow!("{what} must be {N} bytes"))
 }
 
+/// Runs the LEZ wallet's command line with `args`, as its own `wallet` binary would.
+async fn run_wallet(args: Vec<String>) -> Result<()> {
+    use clap::{CommandFactory as _, Parser as _};
+    use wallet::cli::{Args, execute_continuous_run, execute_subcommand};
+
+    let Args { continuous_run, command } =
+        Args::parse_from(std::iter::once("names wallet".to_owned()).chain(args));
+    let config_path = fetch_config_path()?;
+    let storage_path = fetch_persistent_storage_path()?;
+    let statistics_path = fetch_statistics_path()?;
+
+    if let Some(command) = command {
+        let mut wallet = if storage_path.exists() {
+            WalletCore::new_update_chain(config_path, storage_path, statistics_path, None).await?
+        } else {
+            // The wallet does not encrypt its storage yet, so there is no password to ask for.
+            let (wallet, mnemonic) = WalletCore::new_init_storage(
+                config_path,
+                storage_path,
+                statistics_path,
+                None,
+                "",
+            )
+            .await?;
+            println!("Created a new wallet. Write down its recovery phrase and keep it safe;");
+            println!("it is the only way to get the wallet back:");
+            println!();
+            println!("  {mnemonic}");
+            println!();
+            wallet.store_persistent_data()?;
+            wallet
+        };
+        execute_subcommand(&mut wallet, command).await?;
+    } else if continuous_run {
+        let mut wallet =
+            WalletCore::new_update_chain(config_path, storage_path, statistics_path, None).await?;
+        execute_continuous_run(&mut wallet).await?;
+    } else {
+        let mut help = Args::command().name("names wallet");
+        println!("{}", help.render_long_help());
+    }
+    Ok(())
+}
+
+/// Writes the wallet's default config (the public testnet) and an empty statistics
+/// file if they are missing. The wallet would make them itself, but announces it on
+/// stdout, which would spoil the JSON that lookups print there.
+fn write_default_wallet_files() -> Result<()> {
+    let config_path = fetch_config_path()?;
+    if let Some(home) = config_path.parent() {
+        std::fs::create_dir_all(home)
+            .with_context(|| format!("failed to create the wallet home {}", home.display()))?;
+    }
+    if !config_path.exists() {
+        let config = serde_json::to_vec_pretty(&wallet::config::WalletConfig::default())?;
+        std::fs::write(&config_path, config)?;
+    }
+    let statistics_path = fetch_statistics_path()?;
+    if !statistics_path.exists() {
+        std::fs::write(&statistics_path, "{}")?;
+    }
+    Ok(())
+}
+
+/// Opens the wallet at the wallet home. Without one, opens an empty wallet that is
+/// not saved, so lookups need no setup; anything that signs then fails for want of a key.
+async fn open_wallet() -> Result<WalletCore> {
+    write_default_wallet_files()?;
+    let storage_path = fetch_persistent_storage_path()?;
+    if storage_path.exists() {
+        return WalletCore::from_env().await;
+    }
+    let (wallet, _) = WalletCore::new_init_storage(
+        fetch_config_path()?,
+        storage_path,
+        fetch_statistics_path()?,
+        None,
+        "",
+    )
+    .await?;
+    Ok(wallet)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let program = cli
-        .program
-        .ok_or_else(|| anyhow!("pass --program or set LOGOS_NAMES_PROGRAM"))?;
+    if let Command::Wallet { args } = cli.command {
+        return run_wallet(args).await;
+    }
+    let program = match cli.program {
+        Some(program) => program,
+        None => TESTNET_PROGRAM.parse().map_err(|_| anyhow!("bad built-in program ID"))?,
+    };
 
     if let Command::Address { name } = &cli.command {
         let Derived { id, .. } = derive(name);
@@ -715,8 +823,8 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let client = Client {
-        wallet: WalletCore::from_env().await?,
+    let mut client = Client {
+        wallet: open_wallet().await?,
         program,
     };
 
@@ -776,6 +884,31 @@ async fn main() -> Result<()> {
                     Ok(())
                 })
                 .await
+        }
+        Command::ReceivePrivately { name } => {
+            if !fetch_persistent_storage_path()?.exists() {
+                bail!("there is no wallet yet; make one with `names wallet account new public`");
+            }
+            let (account, _) = client.wallet.create_new_account_private(None);
+            let keys = &client
+                .wallet
+                .storage()
+                .key_chain()
+                .private_account(account)
+                .context("the new private account is missing from the wallet")?
+                .key_chain;
+            let (npk, vpk) = (keys.nullifier_public_key.0, keys.viewing_public_key.to_bytes().to_vec());
+            client.wallet.store_persistent_data()?;
+            println!("made private account Private/{account} to receive payments to {name}{NAME_SUFFIX}");
+            client
+                .edit(&name, |profile| {
+                    profile.npk = Some(npk);
+                    profile.vpk = vpk;
+                    Ok(())
+                })
+                .await?;
+            println!("payments arrive privately; see them with `names wallet account sync-private`");
+            Ok(())
         }
         Command::ClearAddresses { name } => {
             client
@@ -852,6 +985,8 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Address { .. } => unreachable!("handled before the wallet is opened"),
+        Command::Address { .. } | Command::Wallet { .. } => {
+            unreachable!("handled before the wallet is opened")
+        }
     }
 }
