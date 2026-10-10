@@ -12,10 +12,66 @@
 //   ROOT_HOSTS      optional, comma-separated hosts that are the gateway itself.
 //                   On those, and on any workers.dev host, the name is the first
 //                   path segment: `<host>/<name>`.
+//   FAUCET_URL      optional, the chain's faucet. When set, root hosts also
+//                   forward `/faucet` to it and `/rpc` to LEZ_RPC_URL, so clients
+//                   reach the chain through the gateway's address.
 
 import { isValidName, normalizeName, resolveName, resolvePage } from "../resolver/names.js";
 
 const RECORD_PATH = "/.well-known/logos-name.json";
+
+// What `/rpc` passes on: reads, and sending transactions. Anything else the
+// sequencer offers, such as operator methods, stays private.
+const RPC_METHODS = new Set([
+  "checkHealth", "getAccount", "getAccountAtBlock", "getAccountBalance", "getAccountsNonces",
+  "getAccountSummary", "getAccountView", "getAccountViewAtBlock", "getBlock", "getBlockByHash",
+  "getBlockById", "getBlockRange", "getBlocks", "getChannelId", "getEvents", "getFeeState",
+  "getLastBlockId", "getLastFinalizedBlockId", "getProgramIds", "getProofsAndRoot", "getSchema",
+  "getStatus", "getTransaction", "getTransactionsByAccount", "sendTransaction",
+]);
+const MAX_RPC_BYTES = 2 * 1024 * 1024;
+
+/** Forwards a JSON-RPC request (or batch) to the sequencer if every method is allowed. */
+async function proxyRpc(request, rpcUrl) {
+  if (request.method !== "POST") return text("POST a JSON-RPC request here", 405);
+  const body = await request.text();
+  if (body.length > MAX_RPC_BYTES) return text("request too large", 413);
+  let calls;
+  try {
+    calls = [JSON.parse(body)].flat();
+  } catch {
+    return json({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }, 400);
+  }
+  if (!calls.length || !calls.every((call) => RPC_METHODS.has(call?.method))) {
+    return json({ jsonrpc: "2.0", id: null, error: { code: -32601, message: "Method not allowed" } }, 403);
+  }
+  const response = await fetch(rpcUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+  });
+  return new Response(response.body, {
+    status: response.status,
+    headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+  });
+}
+
+/** Forwards a faucet request, telling the faucet who is asking so it can limit them. */
+async function proxyFaucet(request, faucetUrl) {
+  if (request.method !== "GET" && request.method !== "POST") return text("method not allowed", 405);
+  const response = await fetch(faucetUrl, {
+    method: request.method,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Client-IP": request.headers.get("CF-Connecting-IP") ?? "unknown",
+    },
+    body: request.method === "POST" ? (await request.text()).slice(0, 4096) : undefined,
+  });
+  return new Response(response.body, {
+    status: response.status,
+    headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+  });
+}
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body, null, 2) + "\n", {
@@ -65,7 +121,6 @@ export default {
   async fetch(request, env) {
     const { LEZ_RPC_URL: rpcUrl, NAMES_PROGRAM: program } = env;
     if (!rpcUrl || !program) return text("gateway is missing LEZ_RPC_URL or NAMES_PROGRAM", 500);
-    if (request.method !== "GET" && request.method !== "HEAD") return text("method not allowed", 405);
 
     const rootHosts = (env.ROOT_HOSTS ?? "")
       .split(",")
@@ -73,6 +128,15 @@ export default {
       .filter(Boolean);
     const url = new URL(request.url);
     const { name, path, sharedOrigin } = target(url, rootHosts);
+    if (sharedOrigin && env.FAUCET_URL) {
+      try {
+        if (url.pathname === "/rpc") return await proxyRpc(request, rpcUrl);
+        if (url.pathname === "/faucet") return await proxyFaucet(request, env.FAUCET_URL);
+      } catch (error) {
+        return text(`could not reach the chain: ${error.message}`, 502);
+      }
+    }
+    if (request.method !== "GET" && request.method !== "HEAD") return text("method not allowed", 405);
     if (!name) {
       const hint = sharedOrigin ? "Add /<name> to this address" : "Put a name in front of this domain";
       return text(`Logos Names gateway. ${hint} to visit a name.`, 404);

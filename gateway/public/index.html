@@ -44,6 +44,10 @@
   <h1>Logos Names</h1>
   <p class="lede">Names like <code>jef.lez</code> for the Logos Execution Zone. Pay a name instead
   of a 32-byte account. The chain never sees the name, so nobody can list or browse them.</p>
+  <p class="note">This runs on the <strong>Logos Names test chain</strong>, a LEZ v0.3 chain kept
+  running for this registry while the public LEZ testnet is halted. Its tokens come free from the
+  faucet below and are worth nothing. Names here won't carry over to the public testnet or to
+  testnet v0.4.</p>
 
   <form onsubmit="event.preventDefault(); const n = this.n.value.trim(); if (n) location.href = '/' + encodeURIComponent(n);">
     <input name="n" placeholder="Look up a name, such as jef.lez" aria-label="Name" autocapitalize="off" spellcheck="false">
@@ -65,11 +69,10 @@ names settings               <span class="c"># the registry's prices</span></cod
   <h2>Get a name</h2>
   <p>1. Make a wallet and an account. Write down the recovery phrase it prints.</p>
 <pre><code>names wallet account new public</code></pre>
-  <p>2. Fund the account. LEZ testnet tokens come from the Logos Blockchain through a channel
-  deposit to your account ID, or from anyone who already holds some. The sequencer only accepts
-  a transaction if the payer could cover its maximum fee, so keep about 20,000,000 in the account.
-  Check the balance with:</p>
-<pre><code>names wallet account get --account-id Public/&lt;account&gt;</code></pre>
+  <p>2. Fund it from the faucet: 50,000,000 test tokens, once a day per account. That covers
+  many registrations and changes.</p>
+<pre><code>names faucet Public/&lt;account&gt;
+names wallet account get --account-id Public/&lt;account&gt;   <span class="c"># check the balance</span></code></pre>
   <p>3. Register, then point the name somewhere:</p>
 <pre><code>names register myname --owner &lt;account&gt; --term 1y   <span class="c"># 30d, 1y or 5y</span>
 names receive-privately myname                     <span class="c"># payments to myname.lez stay private</span>
@@ -80,21 +83,22 @@ names set-page myname index.html                   <span class="c"># optional pa
 <pre><code>names pay jef.lez 1000 --from &lt;account&gt;             <span class="c"># to its public account</span>
 names pay jef.lez 1000 --from &lt;account&gt; --private   <span class="c"># shielded; the proof takes minutes</span></code></pre>
   <p>Payments sent with <code>--private</code> land on a fresh private account. The recipient
-  finds them with <code>names wallet account sync-private</code>.</p>
+  finds them with <code>names wallet account sync-private</code>. Sending one needs RISC Zero's
+  prover (<code>r0vm</code>, 3.0.5), which comes with
+  <code>curl -L https://risczero.com/install | bash &amp;&amp; rzup install cargo-risczero 3.0.5</code>;
+  nothing else does.</p>
 
   <h2>More</h2>
   <p><code>names --help</code> lists every command: renew, transfer, release, clear-page and more.
   <code>names wallet help</code> lists the wallet's own commands. The wallet lives in
   <code>~/.lee/wallet</code>; set <code>LEE_WALLET_HOME_DIR</code> to use another one.</p>
   <p>Apps and agents can read any name as JSON at <code>/&lt;name&gt;/.well-known/logos-name.json</code>
-  on this gateway.</p>
+  on this gateway. The chain's JSON-RPC is at <code>/rpc</code>, and any LEZ v0.3 wallet can use
+  it: <code>names</code> does by default; to use a different chain, pass <code>--rpc</code> and
+  <code>--program</code>.</p>
 
-  <p class="note">Logos testnet v0.3 is experimental, and names registered on it will need to move
-  when testnet v0.4 arrives. While the testnet's sequencer is stalled, lookups still work
-  but changes wait until it produces blocks again.</p>
-
-  <footer>Logos Names runs on the Logos Execution Zone testnet. This gateway only reads the chain;
-  it can see which names you look up.</footer>
+  <footer>Logos Names runs on its own LEZ v0.3 test chain. This gateway can see which names you
+  look up, and it passes on the transactions you send.</footer>
 </main>
 </body>
 </html>

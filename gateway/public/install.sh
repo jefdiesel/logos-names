@@ -58,7 +58,8 @@ cat <<'EOF'
 Try it:
   names resolve jef.lez                    look a name up (no setup needed)
   names wallet account new public          make a wallet and an account
-  names register <name> --owner <account>  claim a name (the account needs funds)
+  names faucet Public/<account>            free test tokens for it
+  names register <name> --owner <account>  claim a name
 
 Guide: https://logos-names.wrapit.workers.dev/
 EOF

@@ -37,4 +37,8 @@ done
 
 echo "== deploy gateway"
 cd gateway
-NAMES_PROGRAM=${NAMES_PROGRAM:-DugXYzVqYsXJumqsjaGtoZeJ742WmdRHGpByi8pNJm2z} npx cf deploy
+# The Names test chain (chain/): its sequencer and faucet, reached through a tunnel.
+CHAIN_ORIGIN=${CHAIN_ORIGIN:?set CHAIN_ORIGIN to the test chain's tunnel address}
+NAMES_PROGRAM=${NAMES_PROGRAM:-CsiBzfERqtLz9dYV9dPWzFPMbaUcUagYeCmvvJVmCGcF} \
+  LEZ_RPC_URL=${LEZ_RPC_URL:-$CHAIN_ORIGIN} FAUCET_URL=${FAUCET_URL:-$CHAIN_ORIGIN/faucet} \
+  npx cf deploy

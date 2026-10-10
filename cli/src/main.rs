@@ -28,20 +28,31 @@ use names_seal::{
 };
 use wallet::{
     AccountIdentity, WalletCore,
+    config::{SequencerConnectionData, WalletConfigOverrides},
     helperfunctions::{fetch_config_path, fetch_persistent_storage_path, fetch_statistics_path},
     program_facades::native_token_transfer::NativeTokenTransfer,
 };
 
-/// The registry deployed on the public LEZ testnet (v0.3), used unless
-/// `--program` or `LOGOS_NAMES_PROGRAM` names another.
-const TESTNET_PROGRAM: &str = "DugXYzVqYsXJumqsjaGtoZeJ742WmdRHGpByi8pNJm2z";
+/// The registry on the Logos Names test chain, a LEZ v0.3 chain run for this
+/// registry while the public LEZ testnet is halted. Used unless `--program` or
+/// `LOGOS_NAMES_PROGRAM` names another.
+const DEFAULT_PROGRAM: &str = "CsiBzfERqtLz9dYV9dPWzFPMbaUcUagYeCmvvJVmCGcF";
+/// The test chain's sequencer, reached through the gateway.
+const DEFAULT_RPC: &str = "https://logos-names.wrapit.workers.dev/rpc";
+/// The test chain's faucet, reached through the gateway.
+const FAUCET_URL: &str = "https://logos-names.wrapit.workers.dev/faucet";
 
 #[derive(Parser)]
 #[command(name = "names", version, about = "Register and resolve Logos names")]
 struct Cli {
-    /// Account ID of the deployed registry program. Defaults to the testnet registry.
+    /// Account ID of the deployed registry program. Defaults to the Names test chain's.
     #[arg(long, env = "LOGOS_NAMES_PROGRAM", global = true)]
     program: Option<AccountId>,
+
+    /// Sequencer to use. Defaults to the Names test chain's, unless `--program` is
+    /// given, in which case the wallet's own config decides.
+    #[arg(long, env = "LOGOS_NAMES_RPC", global = true)]
+    rpc: Option<String>,
 
     #[command(subcommand)]
     command: Command,
@@ -182,6 +193,11 @@ enum Command {
     Address {
         #[arg(value_parser = parse_name)]
         name: String,
+    },
+    /// Fund a public account on the Names test chain, once a day per account.
+    Faucet {
+        /// The account to fund, such as `Public/<id>` from `names wallet account new public`.
+        account: String,
     },
     /// The LEZ wallet's own commands: make accounts, check balances, sync private
     /// accounts and more. Run `names wallet help` for the list.
@@ -722,7 +738,7 @@ fn parse_hex<const N: usize>(text: &str, what: &str) -> Result<[u8; N]> {
 }
 
 /// Runs the LEZ wallet's command line with `args`, as its own `wallet` binary would.
-async fn run_wallet(args: Vec<String>) -> Result<()> {
+async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>) -> Result<()> {
     use clap::{CommandFactory as _, Parser as _};
     use wallet::cli::{Args, execute_continuous_run, execute_subcommand};
 
@@ -734,14 +750,15 @@ async fn run_wallet(args: Vec<String>) -> Result<()> {
 
     if let Some(command) = command {
         let mut wallet = if storage_path.exists() {
-            WalletCore::new_update_chain(config_path, storage_path, statistics_path, None).await?
+            WalletCore::new_update_chain(config_path, storage_path, statistics_path, overrides)
+                .await?
         } else {
             // The wallet does not encrypt its storage yet, so there is no password to ask for.
             let (wallet, mnemonic) = WalletCore::new_init_storage(
                 config_path,
                 storage_path,
                 statistics_path,
-                None,
+                overrides,
                 "",
             )
             .await?;
@@ -756,7 +773,8 @@ async fn run_wallet(args: Vec<String>) -> Result<()> {
         execute_subcommand(&mut wallet, command).await?;
     } else if continuous_run {
         let mut wallet =
-            WalletCore::new_update_chain(config_path, storage_path, statistics_path, None).await?;
+            WalletCore::new_update_chain(config_path, storage_path, statistics_path, overrides)
+                .await?;
         execute_continuous_run(&mut wallet).await?;
     } else {
         let mut help = Args::command().name("names wallet");
@@ -787,32 +805,80 @@ fn write_default_wallet_files() -> Result<()> {
 
 /// Opens the wallet at the wallet home. Without one, opens an empty wallet that is
 /// not saved, so lookups need no setup; anything that signs then fails for want of a key.
-async fn open_wallet() -> Result<WalletCore> {
+async fn open_wallet(overrides: Option<WalletConfigOverrides>) -> Result<WalletCore> {
     write_default_wallet_files()?;
     let storage_path = fetch_persistent_storage_path()?;
     if storage_path.exists() {
-        return WalletCore::from_env().await;
+        return WalletCore::new_update_chain(
+            fetch_config_path()?,
+            storage_path,
+            fetch_statistics_path()?,
+            overrides,
+        )
+        .await;
     }
     let (wallet, _) = WalletCore::new_init_storage(
         fetch_config_path()?,
         storage_path,
         fetch_statistics_path()?,
-        None,
+        overrides,
         "",
     )
     .await?;
     Ok(wallet)
 }
 
+/// The sequencer the wallet should use instead of the one in its config: `--rpc` if
+/// given, else the Names test chain's unless `--program` names another registry.
+fn sequencer_overrides(cli: &Cli) -> Result<Option<WalletConfigOverrides>> {
+    let rpc = match (&cli.rpc, &cli.program) {
+        (Some(rpc), _) => rpc.as_str(),
+        (None, Some(_)) => return Ok(None),
+        (None, None) => DEFAULT_RPC,
+    };
+    let sequencer_addr = rpc.parse().map_err(|_| anyhow!("{rpc} is not a URL"))?;
+    Ok(Some(WalletConfigOverrides {
+        sequencers: Some(vec![SequencerConnectionData { sequencer_addr, basic_auth: None }]),
+        ..Default::default()
+    }))
+}
+
+/// Asks the Names test chain's faucet to fund `account`.
+fn faucet(account: &str) -> Result<()> {
+    let account = account.trim().trim_start_matches("Public/");
+    let body = serde_json::json!({ "account": account }).to_string();
+    let mut response = ureq::post(FAUCET_URL)
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .header("Content-Type", "application/json")
+        .send(body)
+        .context("could not reach the faucet")?;
+    let reply: serde_json::Value = serde_json::from_str(&response.body_mut().read_to_string()?)
+        .context("the faucet's reply is not JSON")?;
+    if let Some(error) = reply["error"].as_str() {
+        bail!("faucet: {error}");
+    }
+    println!(
+        "sent {} to Public/{account} in block {}",
+        reply["amount"].as_str().unwrap_or("?"),
+        reply["block"]
+    );
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    if let Command::Wallet { args } = cli.command {
-        return run_wallet(args).await;
+    let overrides = sequencer_overrides(&cli)?;
+    match cli.command {
+        Command::Wallet { args } => return run_wallet(args, overrides).await,
+        Command::Faucet { account } => return faucet(&account),
+        _ => {}
     }
     let program = match cli.program {
         Some(program) => program,
-        None => TESTNET_PROGRAM.parse().map_err(|_| anyhow!("bad built-in program ID"))?,
+        None => DEFAULT_PROGRAM.parse().map_err(|_| anyhow!("bad built-in program ID"))?,
     };
 
     if let Command::Address { name } = &cli.command {
@@ -824,7 +890,7 @@ async fn main() -> Result<()> {
     }
 
     let mut client = Client {
-        wallet: open_wallet().await?,
+        wallet: open_wallet(overrides).await?,
         program,
     };
 
@@ -985,7 +1051,7 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Address { .. } | Command::Wallet { .. } => {
+        Command::Address { .. } | Command::Wallet { .. } | Command::Faucet { .. } => {
             unreachable!("handled before the wallet is opened")
         }
     }

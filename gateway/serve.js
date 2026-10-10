@@ -11,12 +11,17 @@ const env = {
   LEZ_RPC_URL: process.env.LEZ_RPC_URL,
   NAMES_PROGRAM: process.env.NAMES_PROGRAM,
   ROOT_HOSTS: process.env.ROOT_HOSTS,
+  FAUCET_URL: process.env.FAUCET_URL,
 };
 
 createServer(async (incoming, outgoing) => {
+  const chunks = [];
+  for await (const chunk of incoming) chunks.push(chunk);
+  const hasBody = incoming.method !== "GET" && incoming.method !== "HEAD";
   const request = new Request(`http://${incoming.headers.host}${incoming.url}`, {
     method: incoming.method,
     headers: incoming.headers,
+    body: hasBody ? Buffer.concat(chunks) : undefined,
   });
   const response = await worker.fetch(request, env);
   outgoing.writeHead(response.status, Object.fromEntries(response.headers));

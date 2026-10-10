@@ -1,0 +1,42 @@
+{
+ "home": "/Users/jef/lez-chain/home",
+ "max_num_tx_in_block": 20,
+ "max_block_size": "1 MiB",
+ "mempool_max_size": 1000,
+ "block_create_timeout": "15s",
+ "retry_pending_blocks_timeout": "5s",
+ "bedrock_config": {
+  "backoff": {
+   "start_delay": "100ms",
+   "max_retries": 5
+  },
+  "channel_id": "0101010101010101010101010101010101010101010101010101010101010101",
+  "node_url": "http://localhost:18080",
+  "funding_key": "<32 random bytes as hex, unused in standalone mode>",
+  "channel_params": {
+   "minimum_sequencer_stake": 149,
+   "posting_timeframe": 300,
+   "posting_timeout": 25,
+   "exit_delay": 100
+  }
+ },
+ "gossip": {
+  "listen_addr": "/ip4/127.0.0.1/udp/0/quic-v1",
+  "bootstrap_peers": []
+ },
+ "genesis": [
+  {
+   "supply_account": {
+    "account_id": "EPwXhByaYpQDH4xfjkAmUX7rWGPaNZTnCkkMW3KzYeMi",
+    "balance": 1000000000000000
+   }
+  },
+  {
+   "supply_account": {
+    "account_id": "BJzLuDRny4wMmMCiJg8j3oajcv4wkZP9QcRNuefFKgn8",
+    "balance": 10000000000000
+   }
+  }
+ ],
+ "signing_key": "<32 random bytes, written by setup>"
+}

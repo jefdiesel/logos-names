@@ -5226,6 +5226,7 @@ dependencies = [
  "names_seal",
  "serde_json",
  "tokio",
+ "ureq",
  "wallet",
 ]
 

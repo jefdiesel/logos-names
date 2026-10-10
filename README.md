@@ -40,16 +40,20 @@ curl -fsSL https://logos-names.wrapit.workers.dev/install.sh | sh
 
 One binary (macOS on Apple silicon, Linux x86_64) that needs neither Basecamp nor
 a separate LEZ install: `names wallet …` is the LEZ wallet's own command line,
-built in, and the testnet registry is the default. Lookups work with no setup;
-`names wallet account new public` makes a wallet, and `names receive-privately
-<name>` gives a name private receiving keys from it. The guide is the gateway's
+built in, and the Names test chain is the default. Lookups work with no setup;
+`names wallet account new public` makes a wallet, `names faucet <account>` funds
+it, and `names receive-privately <name>` gives a name private receiving keys from
+it. `--rpc` and `--program` point it at another chain and registry. The guide is the gateway's
 front page (`gateway/public/index.html`). `scripts/publish-cli.sh` builds both
 binaries and deploys them with the gateway.
 
 ## Status
 
-Deployed on the public LEZ testnet as program
-`DugXYzVqYsXJumqsjaGtoZeJ742WmdRHGpByi8pNJm2z` (2026-10-07), with `jef.lez` and
+The CLI and gateway use the **Logos Names test chain** ([chain/](chain/README.md)),
+a standalone LEZ v0.3.0 chain run for this registry, as program
+`CsiBzfERqtLz9dYV9dPWzFPMbaUcUagYeCmvvJVmCGcF` (2026-10-10). It exists because
+the public LEZ testnet halted at block 13,982 on 2026-10-07, where the registry is
+deployed as `DugXYzVqYsXJumqsjaGtoZeJ742WmdRHGpByi8pNJm2z` with `jef.lez` and
 `logos.lez` registered. Everything below also runs against a local LEZ v0.3.0
 chain. Written directly against `lee_core` because
 the SPEL framework does not support LEZ v0.3 yet (`logos-co/spel#291`).
