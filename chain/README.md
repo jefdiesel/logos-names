@@ -15,7 +15,7 @@ with it.
 
 | Piece | Where | What |
 |---|---|---|
-| Sequencer | `127.0.0.1:3040` | `sequencer_service` from LEZ `dev` `4fba494`, normal (anchored) build |
+| Sequencer | `127.0.0.1:3040` | `sequencer_service` from LEZ `dev` `4fba494` with `lez-wal-cap.patch`, normal (anchored) build |
 | Faucet | `127.0.0.1:3041` | `faucet.py`: 50,000,000 to an account once a day |
 | Registry | `CsiBzfERqtLz9dYV9dPWzFPMbaUcUagYeCmvvJVmCGcF` | the CI guest `542ae051…`, prices 10000/100000/400000 |
 | Public | gateway `/rpc`, `/faucet` | the Worker forwards to the tunnel; `/rpc` passes reads and `sendTransaction` only |
@@ -48,3 +48,13 @@ deploy.sh   faucet.py   logos_names-ci-542ae051.bin   jef-page.html
    `logos`. Change `PAYER` in it to the registry operator's account.
 5. Start `faucet.py`, then the tunnel, and deploy the gateway with
    `CHAIN_ORIGIN` set (see `scripts/publish-cli.sh`).
+
+## Disk: apply `lez-wal-cap.patch`
+
+Unpatched, the sequencer's RocksDB keeps every write-ahead log: the tables
+written a little each block never fill a memtable, so nothing lets old logs go
+until RocksDB's default cap of several GB. On 2026-10-11 that reached 5.4 GB in
+a day and was growing about 2 GB an hour, while the chain's real data was 36 MB.
+The patch caps the logs at 256 MB (`set_max_total_wal_size`). A restart also
+clears them, but takes about 10 minutes, since the sequencer re-reads its
+channel's history from the node.
