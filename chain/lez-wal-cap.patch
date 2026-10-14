@@ -1,8 +1,8 @@
 diff --git a/lez/sequencer/actors/storage/src/actor/db.rs b/lez/sequencer/actors/storage/src/actor/db.rs
-index 3c7b0c07c..2eee803ca 100644
+index 3c7b0c07c..63a5b3960 100644
 --- a/lez/sequencer/actors/storage/src/actor/db.rs
 +++ b/lez/sequencer/actors/storage/src/actor/db.rs
-@@ -89,6 +89,10 @@ impl<C: ColumnFamilies> Database<C> {
+@@ -89,6 +89,15 @@ impl<C: ColumnFamilies> Database<C> {
          let mut db_opts = rocksdb::Options::default();
          db_opts.create_missing_column_families(true);
          db_opts.create_if_missing(true);
@@ -10,6 +10,11 @@ index 3c7b0c07c..2eee803ca 100644
 +        // cap every write-ahead log stays on disk until the default limit of several
 +        // GB. Flushing at 256 MB keeps the logs small.
 +        db_opts.set_max_total_wal_size(256 * 1024 * 1024);
++        // Keeping every table file open (the default) needs more descriptors than
++        // launchd grants (256 soft, 10240 per process), and once opens fail,
++        // compaction stops and each crash-restart leaves more files behind.
++        db_opts.set_max_open_files(200);
++        db_opts.set_keep_log_file_num(10);
          let db = rocksdb::DB::open_cf_descriptors(&db_opts, path, cfs)?;
  
          Ok(Self {

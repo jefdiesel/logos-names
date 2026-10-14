@@ -49,7 +49,7 @@ deploy.sh   faucet.py   logos_names-ci-542ae051.bin   jef-page.html
 5. Start `faucet.py`, then the tunnel, and deploy the gateway with
    `CHAIN_ORIGIN` set (see `scripts/publish-cli.sh`).
 
-## Disk: apply `lez-wal-cap.patch`
+## Disk and file limits: apply `lez-wal-cap.patch`
 
 Unpatched, the sequencer's RocksDB keeps every write-ahead log: the tables
 written a little each block never fill a memtable, so nothing lets old logs go
@@ -58,3 +58,12 @@ a day and was growing about 2 GB an hour, while the chain's real data was 36 MB.
 The patch caps the logs at 256 MB (`set_max_total_wal_size`). A restart also
 clears them, but takes about 10 minutes, since the sequencer re-reads its
 channel's history from the node.
+
+The patch also sets `max_open_files(200)`. By default RocksDB keeps every table
+file open, and launchd gives a job only 256 descriptors (10240 per process at
+most). On 2026-10-12 compaction started failing with `Too many open files`, the
+sequencer panicked, and launchd restarted it 3,895 times in 33 hours. Each try
+left new blob, manifest and info-log files behind, which grew `home/` to 16 GB
+and filled the M2's disk. With the cap, the first start deleted all of it
+(16 GB down to 40 MB). `keep_log_file_num(10)` limits the `LOG.old.*` files,
+and the plist raises the job's limit to 4096 as extra headroom.

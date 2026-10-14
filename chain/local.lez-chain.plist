@@ -11,6 +11,11 @@
 		<key>RISC0_SERVER_PATH</key>
 		<string>/Users/jef/lez-chain/bin/r0vm</string>
 	</dict>
+	<key>HardResourceLimits</key>
+	<dict>
+		<key>NumberOfFiles</key>
+		<integer>10240</integer>
+	</dict>
 	<key>KeepAlive</key>
 	<true/>
 	<key>Label</key>
@@ -30,6 +35,11 @@
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
+	<key>SoftResourceLimits</key>
+	<dict>
+		<key>NumberOfFiles</key>
+		<integer>4096</integer>
+	</dict>
 	<key>StandardErrorPath</key>
 	<string>/Users/jef/Library/Logs/local.lez-chain.log</string>
 	<key>StandardOutPath</key>
