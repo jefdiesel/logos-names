@@ -75,8 +75,13 @@ names settings               <span class="c"># the registry's prices</span></cod
   many registrations and changes.</p>
 <pre><code>names faucet Public/&lt;account&gt;
 names wallet account get --account-id Public/&lt;account&gt;   <span class="c"># check the balance</span></code></pre>
-  <p>3. Register, then point the name somewhere:</p>
-<pre><code>names register myname --owner &lt;account&gt; --term 1y   <span class="c"># 30d, 1y or 5y</span>
+  <p>3. Make a private account to hold the name, and move some tokens into it. The chain
+  never sees a private holder: each change to the name is proven on your machine, which takes
+  a few minutes.</p>
+<pre><code>names wallet account new private
+names wallet auth-transfer send --from Public/&lt;account&gt; --to Private/&lt;private&gt; --amount 1000000</code></pre>
+  <p>4. Register, then point the name somewhere:</p>
+<pre><code>names register myname --owner Private/&lt;private&gt; --term 1y   <span class="c"># 30d, 1y or 5y</span>
 names receive-privately myname                     <span class="c"># payments to myname.lez stay private</span>
 names set-text myname chat &lt;address&gt;               <span class="c"># optional text entries</span>
 names set-page myname index.html                   <span class="c"># optional page at /myname</span></code></pre>

@@ -229,11 +229,20 @@ function fixed32(bytes, what) {
   return bytes;
 }
 
+/**
+ * The tag that stands for the account `accountId` as the holder of the name
+ * `id` (32 bytes). A record keeps this in place of its holder, so it names no
+ * account and links no two names.
+ */
+export async function ownerTag(id, accountId) {
+  return toHex(await sha256(concat(utf8.encode("logos-names/v3/owner"), id, base58Decode(accountId))));
+}
+
 export function decodeNameRecord(bytes) {
   const reader = new Reader(bytes);
   return {
     version: reader.u8(),
-    owner: base58Encode(reader.take(32)),
+    ownerTag: toHex(reader.take(32)),
     expires: reader.u64(),
     sealed: reader.byteVec(),
   };
@@ -337,8 +346,8 @@ export async function resolveName(rpcUrl, program, name, now = Date.now()) {
   const { id, key } = await deriveName(name);
   const record = await readRecord(rpcUrl, program, id, now);
   if (record === null) return null;
-  const { owner, expires, sealed } = record;
-  const held = { name, owner, expires, lapsed: expires <= now };
+  const { expires, sealed } = record;
+  const held = { name, expires, lapsed: expires <= now };
   const profile = await openAs(key, sealed, "record", decodeProfile);
   if (profile === null || profile.name !== name) {
     return { ...held, account: null, npk: null, vpk: null, texts: {} };
@@ -370,7 +379,10 @@ export async function reverseLookup(rpcUrl, program, accountId, now = Date.now()
   if (bytes.length === 0) return null;
   const { name } = decodePrimaryName(bytes);
   if (!isValidName(name)) return null;
-  const record = await resolveName(rpcUrl, program, name, now);
-  const confirmed = record && (record.owner === accountId || record.account === accountId);
-  return confirmed ? name : null;
+  const { id, key } = await deriveName(name);
+  const record = await readRecord(rpcUrl, program, id, now);
+  if (record === null) return null;
+  if (record.ownerTag === (await ownerTag(id, accountId))) return name;
+  const profile = await openAs(key, record.sealed, "record", decodeProfile);
+  return profile !== null && profile.name === name && profile.account === accountId ? name : null;
 }

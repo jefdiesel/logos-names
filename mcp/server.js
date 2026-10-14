@@ -43,13 +43,14 @@ const tools = [
   {
     name: "resolve_name",
     description:
-      "Look up a Logos name. Returns its owner, the public account it is an alias for, " +
+      "Look up a Logos name. Returns the public account it is an alias for, " +
       "its private receiving keys, and its text entries (such as chat, inbox and agent). " +
       "Names expire: `expires` is when, in milliseconds since the Unix epoch, and `lapsed` is " +
       "true once that has passed and the name is in its 30-day grace period, after which it " +
       "is no longer registered. Do not pay a lapsed name without the user knowing it has lapsed. " +
       "Looking a name up reveals nothing to the chain, which never sees names. A name that " +
-      "points at a public account shows that account, and so its balance and history.",
+      "points at a public account shows that account, and so its balance and history. " +
+      "Who holds a name is not public: the chain keeps only a tag of the holder's account.",
     inputSchema: nameArgument,
     async run({ name: typed }) {
       const name = requireName(typed);
@@ -155,7 +156,7 @@ An MCP server over stdio. Your MCP client starts it; you don't run it yourself.
 It is read-only: it never signs, pays or sends anything.
 
 Tools:
-  resolve_name    a name's owner, the account it stands for, its private
+  resolve_name    the account a name stands for, its private
                   receiving keys and its text entries (chat, inbox, agent...)
   get_page        the page kept under a name, as text
   reverse_lookup  the name an account has chosen to be shown as

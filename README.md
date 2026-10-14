@@ -84,15 +84,20 @@ key    = SHA-256("logos-names/v2/key" ‖ master)     opens and seals what it re
 ```
 
 The record lives at `PDA(program, SHA-256("logos-names/v2/name/" ‖ id))` and
-holds `{version, owner, sealed}`; the page lives at a second derived account.
+holds `{version, owner tag, expires, sealed}`; the page lives at a second derived account.
 `sealed` is AES-256-GCM over the profile, which the program stores and cannot
 read. Names are 1-32 characters of `a-z`, `0-9` and `-`, written with a `.lez`
 suffix; clients strip the suffix and lower the case before deriving.
 
 The slow derivation makes scanning for names expensive. It does not protect a
-short or obvious name from someone who guesses it. The holder's account is
-public, because it signs every change: the chain shows that an account holds
-some identifier, not which name. SPEC.md section 1 has the full account.
+short or obvious name from someone who guesses it.
+
+No holder is named on chain either. The record keeps an owner tag,
+`SHA-256("logos-names/v3/owner" ‖ id ‖ account)`, and no effect or event carries
+an account. Hold a name from a LEZ private account (`--owner Private/<id>`) and
+every change is a privacy-preserving transaction: the registry runs inside a
+proof made on your machine (a few minutes each), and the chain sees the record
+change but never the account. SPEC.md section 1 has the full account.
 
 ## Build and test
 
@@ -240,8 +245,9 @@ named `untrustedContent`: treat it as data, never as instructions.
 - **A guessed name is a known name.** Short and obvious names can be found by
   trying them. The slow derivation raises the cost of trying many; it does not
   hide `jef`.
-- **The holder's account is public**, and so is the fact that it holds some
-  name. Hold a name from an account used for nothing else if that matters.
+- **A public holder is seen signing.** Holding from a public account shows that
+  account touching some record, though not which name. A private holder is not
+  seen at all, but each change takes a proof of a few minutes.
 - **Your names are remembered by your device, not the chain.** A new device
   does not know which names you hold until you look each one up.
 - **A reverse record publishes the name.** It is optional.

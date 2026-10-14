@@ -11,8 +11,14 @@
 //!   cannot read them.
 //! - There is no list of names. Nothing links one record to another.
 //!
-//! What stays public is what LEZ itself makes public: that some identifier is
-//! registered, and which account holds it, since that account signs for it.
+//! - No holder is named. A record keeps a tag of its holder's account bound to
+//!   that one name ([`owner_tag`]), and no effect or event carries an account.
+//!   A holder acting from a LEZ private account, through a privacy-preserving
+//!   transaction, never appears on chain; one acting from a public account is
+//!   seen signing, but its names stay unlinked to each other.
+//!
+//! What stays public is that some identifier is registered, until when, and
+//! the fee paid into the treasury.
 //!
 //! Each name owns this program's shard on two accounts, both derived from its
 //! identifier: the record ([`record_address`]) and the page ([`page_address`]).
@@ -38,8 +44,9 @@ use lee_core::{
     program::{AccountMeta, ChainedCall, PdaSeed, Plan, PlanInput, ProgramEvent},
 };
 
-/// Record layout version written by this program.
-pub const VERSION: u8 = 2;
+/// Record layout version written by this program. Version 3 holds an owner
+/// tag where version 2 held the owner's account.
+pub const VERSION: u8 = 3;
 pub const MAX_NAME_LEN: usize = 32;
 /// How names are written for people: `jef.lez`. The suffix is a display
 /// convention only; it is removed before a name is turned into an identifier.
@@ -53,6 +60,7 @@ pub const MAX_SEALED_PAGE_LEN: usize = 80 * 1024;
 const NAME_SEED_DOMAIN: &[u8] = b"logos-names/v2/name/";
 const PAGE_SEED_DOMAIN: &[u8] = b"logos-names/v2/page/";
 const SETTINGS_SEED_DOMAIN: &[u8] = b"logos-names/v2/config";
+const OWNER_TAG_DOMAIN: &[u8] = b"logos-names/v3/owner";
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 /// How long each term holds a name, in milliseconds as LEZ block timestamps
@@ -66,13 +74,19 @@ pub const GRACE_MS: u64 = 30 * DAY_MS;
 /// The derivation is deliberately slow and is not this program's business.
 pub type NameId = [u8; 32];
 
+/// What a record keeps in place of its holder's account: a tag binding the
+/// account to this one name ([`owner_tag`]). Holding several names, or
+/// changing one, publishes nothing that links them, and a holder acting from
+/// a private account never appears on chain at all.
+pub type OwnerTag = [u8; 32];
+
 /// A registered name. `sealed` is opaque here: only someone who knows the name
 /// can open it.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct NameRecord {
     pub version: u8,
-    /// The account that may change, transfer or release the name.
-    pub owner: AccountId,
+    /// The tag of the account that may change, transfer or release the name.
+    pub owner: OwnerTag,
     /// When the name lapses, in milliseconds since the Unix epoch.
     pub expires: u64,
     pub sealed: Vec<u8>,
@@ -140,7 +154,7 @@ pub enum Instruction {
     /// emptied, profile and page, so the name never keeps routing payments or
     /// messages to them.
     /// Accounts: `[record, page, owner]`.
-    Transfer { id: NameId, new_owner: AccountId },
+    Transfer { id: NameId, new_owner: OwnerTag },
     /// Give the name up. Its record and page are emptied, so nothing of it
     /// remains and anyone may register it again.
     /// Accounts: `[record, page, owner]`.
@@ -165,7 +179,7 @@ pub enum Effect {
     /// On the record: refused unless the shard is empty or holds a record
     /// whose grace period ended by `now`.
     Register {
-        owner: AccountId,
+        owner: OwnerTag,
         now: u64,
         expires: u64,
         sealed: Vec<u8>,
@@ -173,10 +187,13 @@ pub enum Effect {
     /// On the record: add `term_ms` to the later of its expiry and `now`,
     /// refused once its grace period has ended.
     Renew { now: u64, term_ms: u64 },
-    /// On the settings: changes nothing, refused unless `fee` is what `payer`
+    /// On the settings: changes nothing, refused unless `fee` is what the payer
     /// owes for `term` and `treasury`, when a fee is paid, is where it is owed.
+    /// `payer` is the payer's tag for the name `id`, so the treasury can be
+    /// told apart without the payer being named.
     RequirePrice {
-        payer: AccountId,
+        id: NameId,
+        payer: OwnerTag,
         treasury: Option<AccountId>,
         term: u8,
         fee: u128,
@@ -190,17 +207,17 @@ pub enum Effect {
         prices: [u128; 3],
     },
     /// On the record: replace the sealed profile, refused unless `signer` owns it.
-    Seal { signer: AccountId, sealed: Vec<u8> },
+    Seal { signer: OwnerTag, sealed: Vec<u8> },
     /// On the record: give it to `new_owner` with an empty profile, refused
     /// unless `signer` owns it.
     Transfer {
-        signer: AccountId,
-        new_owner: AccountId,
+        signer: OwnerTag,
+        new_owner: OwnerTag,
     },
     /// On the record: empty it, refused unless `signer` owns it.
-    Remove { signer: AccountId },
+    Remove { signer: OwnerTag },
     /// On the record: changes nothing, refused unless `signer` owns it.
-    RequireOwner { signer: AccountId },
+    RequireOwner { signer: OwnerTag },
     /// On the page account; an empty value empties it.
     WritePage { sealed: Vec<u8> },
     /// On the signer's own account.
@@ -209,11 +226,10 @@ pub enum Effect {
 
 /// Emitted when a name is claimed. Events are emitted while planning, before
 /// the program has checked the record, so they are hints: confirm each against
-/// the record. They carry the identifier, never the name.
+/// the record. They carry the identifier, never the name, and never a holder.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Registered {
     pub id: NameId,
-    pub owner: AccountId,
     pub expires: u64,
 }
 
@@ -228,15 +244,12 @@ pub struct Renewed {
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Transferred {
     pub id: NameId,
-    pub from: AccountId,
-    pub to: AccountId,
 }
 
 /// Emitted when a name is released. A hint, like [`Registered`].
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Released {
     pub id: NameId,
-    pub owner: AccountId,
 }
 
 impl Registered {
@@ -285,6 +298,18 @@ fn seed(domain: &[u8], id: &NameId) -> PdaSeed {
     bytes.extend_from_slice(domain);
     bytes.extend_from_slice(id);
     PdaSeed::new(sha256(&bytes))
+}
+
+/// The tag that stands for `account` as the holder of the name `id`. Anyone who
+/// knows both can compute it; from the tag alone neither can be recovered, and
+/// the same account holding two names gets two unrelated tags.
+#[must_use]
+pub fn owner_tag(id: &NameId, account: &AccountId) -> OwnerTag {
+    let mut bytes = Vec::with_capacity(OWNER_TAG_DOMAIN.len() + 64);
+    bytes.extend_from_slice(OWNER_TAG_DOMAIN);
+    bytes.extend_from_slice(id);
+    bytes.extend_from_slice(account.value());
+    sha256(&bytes)
 }
 
 /// The account holding the record of the name `id` under the registry `program`.
@@ -392,6 +417,7 @@ fn after(time: u64, length: u64) -> u64 {
 /// transaction, which the payer's signature authorizes. Returns the payer.
 fn charge(
     plan: &mut Plan,
+    id: &NameId,
     settings: &AccountMeta,
     paying: &[AccountMeta],
     term: u8,
@@ -413,7 +439,8 @@ fn charge(
     plan.effect(
         settings,
         &Effect::RequirePrice {
-            payer: payer.account_id,
+            id: *id,
+            payer: owner_tag(id, &payer.account_id),
             treasury: treasury.map(|treasury| treasury.account_id),
             term,
             fee,
@@ -459,15 +486,12 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             require_address(page, page_address(program, &id), "page");
             require_address(settings, settings_address(program), "settings");
             let expires = after(now, term_length(term));
-            let owner = charge(&mut plan, settings, paying, term, fee, now);
-            plan.event(event(
-                Registered::SELECTOR_NAME,
-                &Registered { id, owner, expires },
-            ));
+            let owner = charge(&mut plan, &id, settings, paying, term, fee, now);
+            plan.event(event(Registered::SELECTOR_NAME, &Registered { id, expires }));
             plan.effect(
                 record,
                 &Effect::Register {
-                    owner,
+                    owner: owner_tag(&id, &owner),
                     now,
                     expires,
                     sealed,
@@ -484,7 +508,7 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             require_address(record, record_address(program, &id), "record");
             require_address(settings, settings_address(program), "settings");
             let term_ms = term_length(term);
-            charge(&mut plan, settings, paying, term, fee, now);
+            charge(&mut plan, &id, settings, paying, term, fee, now);
             // The new expiry depends on the record, which only `apply` sees;
             // the event carries the least it can be.
             plan.event(event(
@@ -505,7 +529,7 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             plan.effect(
                 record,
                 &Effect::Seal {
-                    signer: owner.account_id,
+                    signer: owner_tag(&id, &owner.account_id),
                     sealed,
                 },
             );
@@ -519,25 +543,18 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             plan.effect(
                 record,
                 &Effect::RequireOwner {
-                    signer: owner.account_id,
+                    signer: owner_tag(&id, &owner.account_id),
                 },
             );
             plan.effect(page, &Effect::WritePage { sealed });
         }
         Instruction::Transfer { id, new_owner } => {
             let (record, page, owner) = record_page_and_owner(input, &id);
-            plan.event(event(
-                Transferred::SELECTOR_NAME,
-                &Transferred {
-                    id,
-                    from: owner.account_id,
-                    to: new_owner,
-                },
-            ));
+            plan.event(event(Transferred::SELECTOR_NAME, &Transferred { id }));
             plan.effect(
                 record,
                 &Effect::Transfer {
-                    signer: owner.account_id,
+                    signer: owner_tag(&id, &owner.account_id),
                     new_owner,
                 },
             );
@@ -545,17 +562,11 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
         }
         Instruction::Release { id } => {
             let (record, page, owner) = record_page_and_owner(input, &id);
-            plan.event(event(
-                Released::SELECTOR_NAME,
-                &Released {
-                    id,
-                    owner: owner.account_id,
-                },
-            ));
+            plan.event(event(Released::SELECTOR_NAME, &Released { id }));
             plan.effect(
                 record,
                 &Effect::Remove {
-                    signer: owner.account_id,
+                    signer: owner_tag(&id, &owner.account_id),
                 },
             );
             plan.effect(page, &Effect::WritePage { sealed: Vec::new() });
@@ -594,8 +605,8 @@ fn to_bytes<T: BorshSerialize>(value: &T) -> Vec<u8> {
     borsh::to_vec(value).expect("borsh serialization is infallible")
 }
 
-/// Decodes the record in `pre_data`, refusing unless `signer` owns it.
-fn load_owned(pre_data: &[u8], signer: &AccountId) -> NameRecord {
+/// Decodes the record in `pre_data`, refusing unless `signer` is its owner's tag.
+fn load_owned(pre_data: &[u8], signer: &OwnerTag) -> NameRecord {
     assert!(!pre_data.is_empty(), "name is not registered");
     let record: NameRecord =
         borsh::from_slice(pre_data).expect("a record shard holds a valid record");
@@ -647,13 +658,14 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
             Some(to_bytes(&record))
         }
         Effect::RequirePrice {
+            id,
             payer,
             treasury,
             term,
             fee,
         } => {
             let price = match load_settings(pre_data) {
-                Some(settings) if payer != settings.treasury => {
+                Some(settings) if payer != owner_tag(&id, &settings.treasury) => {
                     assert!(
                         treasury.is_none_or(|treasury| treasury == settings.treasury),
                         "the treasury account is not the registry's treasury"
@@ -903,7 +915,7 @@ mod tests {
             chain.record(&JEF),
             Some(NameRecord {
                 version: VERSION,
-                owner: ALICE,
+                owner: owner_tag(&JEF, &ALICE),
                 expires: NOW + TERM_LENGTHS_MS[1],
                 sealed: b"sealed profile".to_vec(),
             })
@@ -954,7 +966,7 @@ mod tests {
         );
         let record = chain.record(&JEF).expect("registered");
         assert_eq!(record.sealed, b"second");
-        assert_eq!(record.owner, ALICE);
+        assert_eq!(record.owner, owner_tag(&JEF, &ALICE));
     }
 
     #[test]
@@ -1080,14 +1092,14 @@ mod tests {
             on_record_and_page(&JEF, ALICE),
             Instruction::Transfer {
                 id: JEF,
-                new_owner: BOB,
+                new_owner: owner_tag(&JEF, &BOB),
             },
         );
         assert_eq!(
             chain.record(&JEF),
             Some(NameRecord {
                 version: VERSION,
-                owner: BOB,
+                owner: owner_tag(&JEF, &BOB),
                 expires: NOW + TERM_LENGTHS_MS[1],
                 sealed: Vec::new(),
             })
@@ -1114,7 +1126,7 @@ mod tests {
             on_record_and_page(&JEF, BOB),
             Instruction::Transfer {
                 id: JEF,
-                new_owner: BOB,
+                new_owner: owner_tag(&JEF, &BOB),
             },
         );
     }
@@ -1128,7 +1140,7 @@ mod tests {
             on_record_and_page(&JEF, ALICE),
             Instruction::Transfer {
                 id: JEF,
-                new_owner: BOB,
+                new_owner: owner_tag(&JEF, &BOB),
             },
         );
         chain.run(
@@ -1158,7 +1170,7 @@ mod tests {
         assert!(chain.data(&page_address(&PROGRAM, &JEF)).is_empty());
 
         chain.register(&JEF, BOB, b"bob's profile");
-        assert_eq!(chain.record(&JEF).expect("registered").owner, BOB);
+        assert_eq!(chain.record(&JEF).expect("registered").owner, owner_tag(&JEF, &BOB));
     }
 
     #[test]
@@ -1306,7 +1318,7 @@ mod tests {
             format!("03{id_hex}00000000")
         );
         assert_eq!(
-            hex(&Instruction::Transfer { id, new_owner: BOB }),
+            hex(&Instruction::Transfer { id, new_owner: [0x02; 32] }),
             format!("04{id_hex}{}", "02".repeat(32))
         );
         assert_eq!(hex(&Instruction::Release { id }), format!("05{id_hex}"));
@@ -1332,7 +1344,6 @@ mod tests {
             borsh::from_slice::<Registered>(&registered.data).expect("decodes"),
             Registered {
                 id: JEF,
-                owner: ALICE,
                 expires: NOW + TERM_LENGTHS_MS[1],
             }
         );
@@ -1341,7 +1352,7 @@ mod tests {
             on_record_and_page(&JEF, ALICE),
             Instruction::Transfer {
                 id: JEF,
-                new_owner: BOB,
+                new_owner: owner_tag(&JEF, &BOB),
             },
         );
         assert_eq!(events[0].selector, event_selector(Transferred::SELECTOR_NAME));
@@ -1355,6 +1366,36 @@ mod tests {
             Instruction::SetRecord { id: JEF, sealed: vec![1] },
         )
         .is_empty());
+    }
+
+    #[test]
+    fn no_effect_or_event_names_a_holder() {
+        // What a private transaction publishes is its effects on public
+        // accounts and its events: neither may carry the holder's account.
+        let holder = ALICE.into_value();
+        let carries_holder = |bytes: &[u8]| bytes.windows(32).any(|window| window == holder);
+        let instructions = [
+            (on_registration(&JEF, ALICE), register(JEF, vec![9])),
+            (on_record(&JEF, ALICE), Instruction::SetRecord { id: JEF, sealed: vec![9] }),
+            (on_record_and_page(&JEF, ALICE), Instruction::SetPage { id: JEF, sealed: vec![9] }),
+            (
+                on_record_and_page(&JEF, ALICE),
+                Instruction::Transfer { id: JEF, new_owner: owner_tag(&JEF, &BOB) },
+            ),
+            (on_record_and_page(&JEF, ALICE), Instruction::Release { id: JEF }),
+        ];
+        for (accounts, instruction) in instructions {
+            let output = plan(&input(accounts, &instruction), instruction);
+            let output = output.output();
+            for effect in &output.effects {
+                assert!(!carries_holder(&effect.data), "an effect carries the holder");
+            }
+            for event in &output.events {
+                assert!(!carries_holder(&event.data), "an event carries the holder");
+            }
+        }
+        // The same holder gets an unrelated tag for each name.
+        assert_ne!(owner_tag(&JEF, &ALICE), owner_tag(&ADA, &ALICE));
     }
 
     #[test]
@@ -1377,7 +1418,7 @@ mod tests {
             chain.record(&JEF),
             Some(NameRecord {
                 version: VERSION,
-                owner: BOB,
+                owner: owner_tag(&JEF, &BOB),
                 expires: later + MONTH,
                 sealed: b"bob's profile".to_vec(),
             })
@@ -1409,7 +1450,7 @@ mod tests {
         let late = record.expires + GRACE_MS - 1;
         chain.renew(&JEF, BOB, late);
         let record = chain.record(&JEF).expect("registered");
-        assert_eq!((record.owner, record.expires), (ALICE, late + MONTH));
+        assert_eq!((record.owner, record.expires), (owner_tag(&JEF, &ALICE), late + MONTH));
     }
 
     #[test]
@@ -1462,7 +1503,7 @@ mod tests {
             },
         );
         let record = chain.record(&JEF).expect("registered");
-        assert_eq!((record.owner, record.expires), (ALICE, NOW + YEAR + 5 * YEAR));
+        assert_eq!((record.owner, record.expires), (owner_tag(&JEF, &ALICE), NOW + YEAR + 5 * YEAR));
     }
 
     #[test]
@@ -1500,7 +1541,7 @@ mod tests {
         let mut chain = Chain::default();
         chain.configure(ALICE, ALICE, PRICES);
         chain.register(&JEF, BOB, b"");
-        assert_eq!(chain.record(&JEF).expect("registered").owner, BOB);
+        assert_eq!(chain.record(&JEF).expect("registered").owner, owner_tag(&JEF, &BOB));
     }
 
     #[test]

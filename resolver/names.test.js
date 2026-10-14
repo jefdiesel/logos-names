@@ -15,6 +15,7 @@ import {
   encodeProfile,
   isValidName,
   normalizeName,
+  ownerTag,
   openSealed,
   pageAddress,
   recordAddress,
@@ -56,6 +57,8 @@ const SEALED_PAGE =
   "64767f7cf7b5a511";
 
 const jef = await deriveName("jef");
+/** What jef's record keeps for its holder `OWNER`. */
+const OWNER_TAG = await ownerTag(jef.id, OWNER);
 
 test("a name derives its identifier and key", async () => {
   assert.equal(toHex(jef.id), JEF_ID);
@@ -160,26 +163,27 @@ function borsh(...parts) {
   return Uint8Array.from(chunks.flatMap((chunk) => [...chunk]));
 }
 
-/** A `NameRecord` shard: the owner goes in raw, then the expiry, then the sealed bytes length-prefixed. */
-function recordShard(owner, sealed, expires = EXPIRES) {
+/** A `NameRecord` shard: the owner tag goes in raw, then the expiry, then the sealed bytes length-prefixed. */
+function recordShard(tag, sealed, expires = EXPIRES) {
   const expiry = new Uint8Array(8);
   new DataView(expiry.buffer).setBigUint64(0, BigInt(expires), true);
-  return Uint8Array.from([2, ...base58Decode(owner), ...expiry, ...borsh(sealed)]);
+  const tagBytes = tag.match(/../g).map((pair) => parseInt(pair, 16));
+  return Uint8Array.from([3, ...tagBytes, ...expiry, ...borsh(sealed)]);
 }
 
 test("the on-chain layouts decode, and truncated data is refused", () => {
   const sealed = Uint8Array.of(0xee, 0xff);
-  assert.deepEqual(decodeNameRecord(recordShard(OWNER, sealed)), {
-    version: 2,
-    owner: OWNER,
+  assert.deepEqual(decodeNameRecord(recordShard(OWNER_TAG, sealed)), {
+    version: 3,
+    ownerTag: OWNER_TAG,
     expires: EXPIRES,
     sealed,
   });
-  assert.equal(decodeNameRecord(recordShard(OWNER, sealed, 0x0102030405)).expires, 0x0102030405);
+  assert.equal(decodeNameRecord(recordShard(OWNER_TAG, sealed, 0x0102030405)).expires, 0x0102030405);
   assert.deepEqual(decodePage(borsh(2, sealed)), { version: 2, sealed });
   assert.deepEqual(decodePrimaryName(borsh(2, "jef")), { version: 2, name: "jef" });
   assert.throws(() => decodeNameRecord(Uint8Array.of(2, 9, 0, 0, 0)), /truncated/);
-  assert.throws(() => decodeNameRecord(recordShard(OWNER, sealed).subarray(0, 40)), /truncated/);
+  assert.throws(() => decodeNameRecord(recordShard(OWNER_TAG, sealed).subarray(0, 40)), /truncated/);
 });
 
 /**
@@ -209,7 +213,6 @@ const JEF_RECORD = await recordAddress(PROGRAM, jef.id);
 const JEF_PAGE = await pageAddress(PROGRAM, jef.id);
 const RESOLVED = {
   name: "jef",
-  owner: OWNER,
   expires: EXPIRES,
   lapsed: false,
   account: ACCOUNT,
@@ -220,7 +223,7 @@ const RESOLVED = {
 const NOTHING_SET = { ...RESOLVED, account: null, texts: {} };
 
 test("a name resolves with one read of its record account", async () => {
-  const asked = stubSequencer({ [JEF_RECORD]: recordShard(OWNER, Buffer.from(SEALED_PROFILE, "hex")) });
+  const asked = stubSequencer({ [JEF_RECORD]: recordShard(OWNER_TAG, Buffer.from(SEALED_PROFILE, "hex")) });
   assert.deepEqual(await resolveName(RPC_URL, PROGRAM, "jef"), RESOLVED);
   assert.deepEqual(asked, [JEF_RECORD]);
 });
@@ -232,22 +235,22 @@ test("an unregistered name resolves to null", async () => {
 });
 
 test("a record with nothing readable in it is a registered name with nothing set", async () => {
-  stubSequencer({ [JEF_RECORD]: recordShard(OWNER, new Uint8Array(0)) });
+  stubSequencer({ [JEF_RECORD]: recordShard(OWNER_TAG, new Uint8Array(0)) });
   assert.deepEqual(await resolveName(RPC_URL, PROGRAM, "jef"), NOTHING_SET);
 
   // Sealed under another name's key.
   const { key: otherKey } = await deriveName("ada");
-  stubSequencer({ [JEF_RECORD]: recordShard(OWNER, await seal(otherKey, encodeProfile(PROFILE), "record")) });
+  stubSequencer({ [JEF_RECORD]: recordShard(OWNER_TAG, await seal(otherKey, encodeProfile(PROFILE), "record")) });
   assert.deepEqual(await resolveName(RPC_URL, PROGRAM, "jef"), NOTHING_SET);
 
   // Sealed under the right key, but the profile names another name.
   const foreign = encodeProfile({ ...PROFILE, name: "ada" });
-  stubSequencer({ [JEF_RECORD]: recordShard(OWNER, await seal(jef.key, foreign, "record")) });
+  stubSequencer({ [JEF_RECORD]: recordShard(OWNER_TAG, await seal(jef.key, foreign, "record")) });
   assert.deepEqual(await resolveName(RPC_URL, PROGRAM, "jef"), NOTHING_SET);
 });
 
 test("a page resolves, and a missing or unreadable one is null", async () => {
-  const record = recordShard(OWNER, Buffer.from(SEALED_PROFILE, "hex"));
+  const record = recordShard(OWNER_TAG, Buffer.from(SEALED_PROFILE, "hex"));
   const page = borsh(2, Buffer.from(SEALED_PAGE, "hex"));
   const asked = stubSequencer({ [JEF_RECORD]: record, [JEF_PAGE]: page });
   assert.deepEqual(await resolvePage(RPC_URL, PROGRAM, "jef"), PAGE);
@@ -270,7 +273,7 @@ test("a page resolves, and a missing or unreadable one is null", async () => {
 function stubHeldName() {
   const claim = borsh(2, "jef");
   return stubSequencer({
-    [JEF_RECORD]: recordShard(OWNER, Buffer.from(SEALED_PROFILE, "hex")),
+    [JEF_RECORD]: recordShard(OWNER_TAG, Buffer.from(SEALED_PROFILE, "hex")),
     [JEF_PAGE]: borsh(2, Buffer.from(SEALED_PAGE, "hex")),
     [OWNER]: claim,
     [ACCOUNT]: claim,
@@ -296,7 +299,7 @@ test("a name in its grace period still resolves, flagged as lapsed", async () =>
   }
 
   // Nothing set is flagged the same way.
-  stubSequencer({ [JEF_RECORD]: recordShard(OWNER, new Uint8Array(0)) });
+  stubSequencer({ [JEF_RECORD]: recordShard(OWNER_TAG, new Uint8Array(0)) });
   assert.deepEqual(await resolveName(RPC_URL, PROGRAM, "jef", EXPIRES), { ...NOTHING_SET, lapsed: true });
 });
 
@@ -318,13 +321,13 @@ test("without a time given, the reader's own clock decides", async () => {
   const accounts = { [JEF_PAGE]: borsh(2, Buffer.from(SEALED_PAGE, "hex")), [OWNER]: borsh(2, "jef") };
 
   const inGrace = Date.now() - 60_000;
-  stubSequencer({ ...accounts, [JEF_RECORD]: recordShard(OWNER, sealed, inGrace) });
+  stubSequencer({ ...accounts, [JEF_RECORD]: recordShard(OWNER_TAG, sealed, inGrace) });
   const resolved = await resolveName(RPC_URL, PROGRAM, "jef");
   assert.deepEqual(resolved, { ...RESOLVED, expires: inGrace, lapsed: true });
   assert.deepEqual(await resolvePage(RPC_URL, PROGRAM, "jef"), PAGE);
   assert.equal(await reverseLookup(RPC_URL, PROGRAM, OWNER), "jef");
 
-  stubSequencer({ ...accounts, [JEF_RECORD]: recordShard(OWNER, sealed, inGrace - GRACE_MS) });
+  stubSequencer({ ...accounts, [JEF_RECORD]: recordShard(OWNER_TAG, sealed, inGrace - GRACE_MS) });
   assert.equal(await resolveName(RPC_URL, PROGRAM, "jef"), null);
   assert.equal(await resolvePage(RPC_URL, PROGRAM, "jef"), null);
   assert.equal(await reverseLookup(RPC_URL, PROGRAM, OWNER), null);
@@ -334,7 +337,7 @@ test("a reverse record counts only when the name points back", async () => {
   const sealed = Buffer.from(SEALED_PROFILE, "hex");
   const claim = borsh(2, "jef");
   const accounts = {
-    [JEF_RECORD]: recordShard(OWNER, sealed),
+    [JEF_RECORD]: recordShard(OWNER_TAG, sealed),
     [OWNER]: claim,
     [ACCOUNT]: claim,
     [STRANGER]: claim,
@@ -347,9 +350,19 @@ test("a reverse record counts only when the name points back", async () => {
   assert.equal(await reverseLookup(RPC_URL, PROGRAM, STRANGER), null);
 
   // The owner still counts when the profile is empty; the account it used to name does not.
-  stubSequencer({ ...accounts, [JEF_RECORD]: recordShard(OWNER, new Uint8Array(0)) });
+  stubSequencer({ ...accounts, [JEF_RECORD]: recordShard(OWNER_TAG, new Uint8Array(0)) });
   assert.equal(await reverseLookup(RPC_URL, PROGRAM, OWNER), "jef");
   assert.equal(await reverseLookup(RPC_URL, PROGRAM, ACCOUNT), null);
+});
+
+test("the owner tag binds an account to one name, and a lookup never shows it", async () => {
+  const ada = await deriveName("ada");
+  assert.match(OWNER_TAG, /^[0-9a-f]{64}$/);
+  assert.notEqual(await ownerTag(ada.id, OWNER), OWNER_TAG);
+  stubSequencer({ [JEF_RECORD]: recordShard(OWNER_TAG, new Uint8Array(0)) });
+  const resolved = await resolveName(RPC_URL, PROGRAM, "jef", EXPIRES - 1);
+  assert.equal(JSON.stringify(resolved).includes(OWNER), false);
+  assert.equal(JSON.stringify(resolved).includes(OWNER_TAG), false);
 });
 
 test("an account with no reverse record, or one that claims nothing usable, has no name", async () => {

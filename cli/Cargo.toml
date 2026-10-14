@@ -12,6 +12,8 @@ path = "src/main.rs"
 names_core.workspace = true
 names_seal.workspace = true
 lee_core.workspace = true
+lee.workspace = true
+common.workspace = true
 wallet.workspace = true
 clock_core.workspace = true
 

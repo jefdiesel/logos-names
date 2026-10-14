@@ -25,16 +25,24 @@ What this does not hide:
   name usable. The derivation is slow on purpose, about 100,000 times the cost
   of one hash, which makes scanning for names expensive. It does not protect a
   short or obvious name from a targeted guess.
-- **The holder's account is public.** It signs every change, so the chain shows
-  that an account holds some identifier. It does not show which name. A holder
-  who wants no link to themselves holds the name from an account used for
-  nothing else.
+- **Who holds a name is not stored.** A record keeps an owner tag,
+  `SHA-256("logos-names/v3/owner" ‖ id ‖ account)`, in place of its holder: it
+  names no account, and one account's tags for two names are unrelated. No
+  instruction's effects or events carry an account either. A holder acting
+  from a **LEZ private account** sends privacy-preserving transactions: the
+  registry runs inside a proof made on the holder's machine, and the chain sees
+  only the change to the record, never the account (section 8).
 - **A name that points at a public account** shows that account, and so its
   balance and history, to anyone who resolves it. A name that points only at
   private receiving keys shows keys that reveal nothing about funds.
 - **When a name expires and what was paid for it** are public: the record
-  holds its expiry in the clear, and the fee is an ordinary transfer from the
-  holder's account to the treasury. Neither says which name.
+  holds its expiry in the clear, and the fee arrives in the treasury. Neither
+  says which name, and from a private holder the fee does not say who paid.
+- **A public holder is seen signing.** A holder acting from a public account
+  signs each change, so the chain shows that account touching some record. Use
+  a private account to avoid that.
+- **The connection.** Whoever serves the sequencer's RPC sees which record
+  addresses a client reads and from where, though not the names.
 - **A reverse record** (section 6) publishes a name in the clear. It is
   optional and exists for holders who want their account shown by name.
 
@@ -104,7 +112,7 @@ raw bytes.
 On the chain:
 
 ```rust
-struct NameRecord { version: u8, owner: AccountId, expires: u64, sealed: Vec<u8> }   // version 2; sealed at most 12,288 bytes
+struct NameRecord { version: u8, owner: [u8; 32], expires: u64, sealed: Vec<u8> }   // version 3; owner is the owner tag; sealed at most 12,288 bytes
 struct Page       { version: u8, sealed: Vec<u8> }                     // sealed at most 81,920 bytes
 struct PrimaryName { version: u8, name: String }                       // the reverse record, in the clear
 struct Settings   { version: u8, admin: AccountId, treasury: AccountId, prices: [u128; 3] }
@@ -199,7 +207,8 @@ from a private account, neither is.
 **Reverse (account to name).** Read the registry's shard on the account and
 decode `PrimaryName`. This is only a claim, set by the account itself. A client
 MUST then resolve that name forward and accept it only if the record's `owner`
-or the profile's `account` equals the account. Otherwise the account has no
+equals the account's owner tag for that name, or the profile's `account` equals
+the account. Otherwise the account has no
 name.
 
 **There is no listing.** A client that wants to show a person the names they
@@ -228,7 +237,7 @@ byte). `id` is 32 raw bytes.
 | 1 | `Renew` | `id, term: u8, fee: u128, now: u64` | record, settings, payer, then treasury if `fee` is not 0 |
 | 2 | `SetRecord` | `id, sealed: Vec<u8>` | record, owner |
 | 3 | `SetPage` | `id, sealed: Vec<u8>` | record, page, owner |
-| 4 | `Transfer` | `id, new_owner: AccountId` | record, page, owner |
+| 4 | `Transfer` | `id, new_owner: [u8; 32]` (the new holder's owner tag) | record, page, owner |
 | 5 | `Release` | `id` | record, page, owner |
 | 6 | `SetPrimary` | `name: String` | owner |
 | 7 | `Configure` | `admin: AccountId, treasury: AccountId, prices: [u128; 3]` | settings, admin |
@@ -238,6 +247,14 @@ Rules:
 - Every account is passed with the registry's own shard selected, except
   `payer` and `treasury`, which are passed with the native token's shard
   selected (the all-zero program ID). `owner`, `payer` and `admin` must sign.
+- **Private holders.** `owner` and `payer` may be LEZ private accounts. The
+  client then sends a privacy-preserving transaction: it runs the registry's
+  bytecode in the privacy-preserving circuit, with the private account as an
+  authorized input, and submits the proof. The chain sees the registry's
+  effects on the public accounts (record, page, settings, treasury) and the
+  fee arriving in the treasury, not the private account. Such transactions
+  carry no fee of their own on LEZ v0.3.1. The client needs the registry's
+  exact bytecode; the sequencer refuses a proof of any other.
 - **Time.** `now` is the sender's claim of the current time in milliseconds. The
   program makes the transaction valid only in a block whose timestamp is at
   least `now`, so `now` is never in the future, and uses it as the time. A
@@ -253,7 +270,7 @@ Rules:
   treasury itself, `fee` is 0 and no treasury account is passed. A client reads
   the settings account first.
 - `Register` succeeds if the name is unregistered, or if its record's
-  `expires + grace <= now`. The payer becomes the owner, `expires` becomes
+  `expires + grace <= now`. The payer becomes the owner (its tag is stored), `expires` becomes
   `now` plus the term, and any page left by a lapsed holder is emptied. Its
   `sealed` is the name's first profile and may be empty.
 - `Renew` succeeds while `now < expires + grace`, for any payer. `expires`
@@ -261,8 +278,8 @@ Rules:
 - `Configure` sets the settings. While the settings account is empty anyone may
   send it, so whoever deploys a registry configures it at once and checks that
   the admin is theirs; afterwards only the settings' `admin` may.
-- Every other instruction on a name succeeds only if the signer is the record's
-  `owner`.
+- Every other instruction on a name succeeds only if the signer's owner tag
+  for the name is the record's `owner`.
 - A profile is changed by reading it, opening it, changing it, sealing it again
   and sending the whole of it with `SetRecord`.
 - `SetPage` with an empty `sealed` removes the page. `SetPrimary` with an empty
@@ -288,14 +305,14 @@ The registry emits LEZ program events. The selector is the first 8 bytes of
 
 | Event | Selector (hex) | Data |
 |---|---|---|
-| `logos_names::Registered` | `e87848390f741b1a` | `id, owner: AccountId, expires: u64` |
+| `logos_names::Registered` | `e87848390f741b1a` | `id, expires: u64` |
 | `logos_names::Renewed` | `c0a35e0e73dbcc59` | `id, expires: u64` (`now` plus the term: the earliest the new expiry can be) |
-| `logos_names::Transferred` | `b78a6f5ae756bf67` | `id, from: AccountId, to: AccountId` |
-| `logos_names::Released` | `3d2e60d8d0ed2a9a` | `id, owner: AccountId` |
+| `logos_names::Transferred` | `b78a6f5ae756bf67` | `id` |
+| `logos_names::Released` | `3d2e60d8d0ed2a9a` | `id` |
 
 Events are emitted before the registry has checked the record, so an event can
 exist for a change that was refused: they are hints to confirm against the
-record. They carry identifiers, never names.
+record. They carry identifiers, never names and never accounts.
 
 ## 10. Test vectors
 
@@ -388,7 +405,7 @@ that most clients do not have to.
 | `GET https://<name>.<gateway>/` or `GET https://<gateway>/<name>` | The name's page, with its content type |
 | `GET …/.well-known/logos-name.json` for a name | The resolved name as JSON, or 404 `{"error": "not registered"}` |
 
-The JSON has `name`, `owner`, `expires` (milliseconds), `lapsed` (true in the
+The JSON has `name`, `expires` (milliseconds), `lapsed` (true in the
 grace period) and the fields of `Profile`: account IDs in base58, `npk` and
 `vpk` in hex or `null`, and `texts` as an object. A name past its grace period
 is not registered. A gateway

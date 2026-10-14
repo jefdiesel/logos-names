@@ -17,9 +17,10 @@ use lee_core::{
     account::{AccountId, ProgramShardSelector},
     program::{AccountMeta, PlanInput},
 };
+use lee::{privacy_preserving_transaction::circuit::ProgramWithDependencies, program::Program};
 use names_core::{
     Effect, GRACE_MS, Instruction, NAME_SUFFIX, NameId, NameRecord, Page, PrimaryName, Settings,
-    normalize_name, page_address, record_address, settings_address,
+    normalize_name, owner_tag, page_address, record_address, settings_address,
     validate_name,
 };
 use names_seal::{
@@ -27,7 +28,7 @@ use names_seal::{
     seal_profile, validate_page, validate_profile, validate_text_key,
 };
 use wallet::{
-    AccountIdentity, WalletCore,
+    AccDecodeData, AccountIdentity, WalletCore,
     config::{SequencerConnectionData, WalletConfigOverrides},
     helperfunctions::{fetch_config_path, fetch_persistent_storage_path},
     program_facades::native_token_transfer::NativeTokenTransfer,
@@ -51,13 +52,16 @@ const FAUCET_URL: &str = "https://logos-names.wrapit.workers.dev/faucet";
         Looking a name up needs no setup. Anything that changes the chain signs and pays \
         through the LEZ wallet, built in as `names wallet`, whose keys live in \
         LEE_WALLET_HOME_DIR (default ~/.lee/wallet).\n\n\
-        Getting started:\n  \
+        Getting started, holding a name anonymously:\n  \
         names resolve jef.lez\n  \
-        names wallet account new public\n  \
-        names faucet Public/<account>\n  \
-        names register <name> --owner <account>\n\n\
-        The chain never sees a name: names are turned into identifiers and keys on this \
-        machine. Guide: https://logos-names.wrapit.workers.dev/"
+        names wallet account new public            (pays to get started)\n  \
+        names faucet Public/<public>\n  \
+        names wallet account new private           (will hold the name)\n  \
+        names wallet auth-transfer send --from Public/<public> --to Private/<private> --amount 1000000\n  \
+        names register <name> --owner Private/<private>\n\n\
+        The chain never sees a name, and never sees a private holder: names are turned \
+        into identifiers and keys on this machine, and a private holder's changes are \
+        proven here. Guide: https://logos-names.wrapit.workers.dev/"
 )]
 struct Cli {
     /// Account ID of the deployed registry program. Defaults to the Names test chain's.
@@ -79,8 +83,10 @@ enum Command {
     Register {
         #[arg(value_parser = parse_name)]
         name: String,
-        /// Public account that will own the name; the wallet must hold its key.
-        #[arg(long)]
+        /// Account that will own the name and pay for it; the wallet must hold its
+        /// key. A private account (`Private/<id>`) holds the name without ever
+        /// appearing on chain, at the cost of a proof (minutes) per change.
+        #[arg(long, value_parser = parse_account)]
         owner: AccountId,
         /// How long to hold the name: 30d, 1y or 5y.
         #[arg(long, default_value = "1y", value_parser = parse_term)]
@@ -96,8 +102,8 @@ enum Command {
         /// How long to add: 30d, 1y or 5y.
         #[arg(long, default_value = "1y", value_parser = parse_term)]
         term: u8,
-        /// Public account that pays; the wallet must hold its key. Defaults to the owner.
-        #[arg(long)]
+        /// Account that pays; the wallet must hold its key. Defaults to the owner.
+        #[arg(long, value_parser = parse_account)]
         payer: Option<AccountId>,
     },
     /// Set the registry's admin, treasury and prices. Anyone may while it has no
@@ -121,6 +127,7 @@ enum Command {
     SetAccount {
         #[arg(value_parser = parse_name)]
         name: String,
+        #[arg(value_parser = parse_account)]
         account: AccountId },
     /// Publish the keys needed for private transfers to this name.
     SetKeys {
@@ -160,6 +167,8 @@ enum Command {
     Transfer {
         #[arg(value_parser = parse_name)]
         name: String,
+        /// The new holder, public or private. Only a tag of it reaches the chain.
+        #[arg(value_parser = parse_account)]
         new_owner: AccountId },
     /// Publish a file as the name's page.
     SetPage {
@@ -190,7 +199,7 @@ enum Command {
         /// Amount in base units.
         amount: u128,
         /// Public account to pay from; the wallet must hold its key.
-        #[arg(long)]
+        #[arg(long, value_parser = parse_account)]
         from: AccountId,
         /// Pay the name's private keys with a shielded transfer. The amount and
         /// recipient stay off the public record; generating the proof takes a while.
@@ -203,7 +212,10 @@ enum Command {
         name: String,
     },
     /// Print the name an account is shown as, checked against the forward record.
-    Reverse { account: AccountId },
+    Reverse {
+        #[arg(value_parser = parse_account)]
+        account: AccountId,
+    },
     /// Print a name's identifier and the accounts that hold its record and page.
     Address {
         #[arg(value_parser = parse_name)]
@@ -241,6 +253,16 @@ fn write_man_pages(dir: &std::path::Path) -> Result<()> {
 fn parse_name(input: &str) -> Result<String, String> {
     let name = normalize_name(input);
     validate_name(&name).map(|()| name).map_err(str::to_owned)
+}
+
+/// Accepts an account as the wallet prints it (`Public/<id>`, `Private/<id>`) or bare.
+fn parse_account(input: &str) -> Result<AccountId, String> {
+    let bare = input
+        .strip_prefix("Public/")
+        .or_else(|| input.strip_prefix("Private/"))
+        .unwrap_or(input);
+    bare.parse()
+        .map_err(|_| format!("not an account ID: {input}"))
 }
 
 fn parse_term(input: &str) -> Result<u8, String> {
@@ -290,7 +312,53 @@ struct Client {
     program: AccountId,
 }
 
+/// Where the registry's own bytecode can be fetched, by program ID. A private
+/// holder's client runs the program inside its proof, so it needs the exact
+/// bytecode the chain has; the sequencer refuses a proof of any other.
+const PROGRAM_BYTECODE_URL: &str = "https://logos-names.wrapit.workers.dev/dl/program";
+
 impl Client {
+    /// The registry's bytecode: `LOGOS_NAMES_PROGRAM_ELF` if set, else a copy cached
+    /// next to the wallet, else downloaded once from the gateway.
+    fn program_bytecode(&self) -> Result<Vec<u8>> {
+        if let Some(path) = std::env::var_os("LOGOS_NAMES_PROGRAM_ELF") {
+            return std::fs::read(&path)
+                .with_context(|| format!("cannot read {}", PathBuf::from(path).display()));
+        }
+        let cache = fetch_persistent_storage_path()?
+            .with_file_name(format!("logos-names-{}.bin", self.program));
+        if let Ok(bytes) = std::fs::read(&cache) {
+            return Ok(bytes);
+        }
+        let url = format!("{PROGRAM_BYTECODE_URL}/{}.bin", self.program);
+        println!("fetching the registry's bytecode from {url}");
+        let bytes = ureq::get(&url)
+            .call()
+            .with_context(|| format!("cannot fetch {url}; set LOGOS_NAMES_PROGRAM_ELF"))?
+            .body_mut()
+            .with_config()
+            .limit(16 * 1024 * 1024)
+            .read_to_vec()?;
+        std::fs::write(&cache, &bytes).ok();
+        Ok(bytes)
+    }
+
+    /// The wallet's account that holds `record` as the name `id`, public or private.
+    /// The chain stores only the holder's tag, so it is found by trying each one.
+    fn holder(&self, name: &str, id: &NameId, record: &NameRecord) -> Result<AccountId> {
+        let key_chain = self.wallet.storage().key_chain();
+        key_chain
+            .public_account_ids()
+            .map(|(account, _)| account)
+            .chain(key_chain.private_account_ids().map(|(account, _)| account))
+            .find(|account| owner_tag(id, account) == record.owner)
+            .ok_or_else(|| anyhow!("this wallet does not hold {name}{NAME_SUFFIX}"))
+    }
+
+    fn is_private(&self, account: AccountId) -> bool {
+        self.wallet.resolve_private_account(account).is_some()
+    }
+
     async fn shard(&self, account: AccountId) -> Result<Vec<u8>> {
         let view = self
             .wallet
@@ -380,7 +448,7 @@ impl Client {
 
     /// Registers `name` with a first profile that holds only the name.
     async fn register(
-        &self,
+        &mut self,
         name: &str,
         owner: AccountId,
         term: u8,
@@ -416,9 +484,13 @@ impl Client {
         .await
     }
     /// Adds `term` to the time `name` is held for, paid by `payer` or else its owner.
-    async fn renew(&self, name: &str, term: u8, payer: Option<AccountId>) -> Result<()> {
+    async fn renew(&mut self, name: &str, term: u8, payer: Option<AccountId>) -> Result<()> {
         let (Derived { id, .. }, record, _) = self.lookup(name).await?;
-        let (fee, paying) = self.price(payer.unwrap_or(record.owner), term).await?;
+        let payer = match payer {
+            Some(payer) => payer,
+            None => self.holder(name, &id, &record)?,
+        };
+        let (fee, paying) = self.price(payer, term).await?;
         let now = self.now().await;
         println!("renewing {name}{NAME_SUFFIX} at {now} for a fee of {fee}");
         self.send_paying(
@@ -434,7 +506,7 @@ impl Client {
     /// Sets the registry's settings, signed by their admin or, while there are none,
     /// by the admin being set.
     async fn configure(
-        &self,
+        &mut self,
         admin: AccountId,
         treasury: AccountId,
         prices: [u128; 3],
@@ -458,15 +530,16 @@ impl Client {
 
     /// Changes the profile of `name`: reads and opens it, applies `change`, then
     /// seals the whole of it again and replaces the record's sealed bytes.
-    async fn edit(&self, name: &str, change: impl FnOnce(&mut Profile) -> Result<()>) -> Result<()> {
+    async fn edit(&mut self, name: &str, change: impl FnOnce(&mut Profile) -> Result<()>) -> Result<()> {
         let (Derived { id, key }, record, mut profile) = self.lookup_held(name).await?;
+        let holder = self.holder(name, &id, &record)?;
         change(&mut profile)?;
         validate_profile(&profile).map_err(|reason| anyhow!(reason))?;
         let sealed = seal_profile(&key, &profile);
         self.send(
             vec![
                 (record_address(&self.program, &id), false),
-                (record.owner, true),
+                (holder, true),
             ],
             &Instruction::SetRecord { id, sealed },
         )
@@ -483,8 +556,9 @@ impl Client {
     }
 
     /// Seals `page` as the page of `name`; `None` removes the page.
-    async fn set_page(&self, name: &str, page: Option<PageContent>) -> Result<()> {
+    async fn set_page(&mut self, name: &str, page: Option<PageContent>) -> Result<()> {
         let (Derived { id, key }, record, _) = self.lookup_held(name).await?;
+        let holder = self.holder(name, &id, &record)?;
         let sealed = match page {
             Some(page) => {
                 validate_page(&page).map_err(|reason| anyhow!(reason))?;
@@ -493,27 +567,32 @@ impl Client {
             None => Vec::new(),
         };
         self.send(
-            self.page_accounts(&id, record.owner),
+            self.page_accounts(&id, holder),
             &Instruction::SetPage { id, sealed },
         )
         .await
     }
 
     /// Hands `name` to `new_owner`, clearing what the current owner set on it.
-    async fn transfer(&self, name: &str, new_owner: AccountId) -> Result<()> {
+    async fn transfer(&mut self, name: &str, new_owner: AccountId) -> Result<()> {
         let (Derived { id, .. }, record, _) = self.lookup_held(name).await?;
+        let holder = self.holder(name, &id, &record)?;
         self.send(
-            self.page_accounts(&id, record.owner),
-            &Instruction::Transfer { id, new_owner },
+            self.page_accounts(&id, holder),
+            &Instruction::Transfer {
+                id,
+                new_owner: owner_tag(&id, &new_owner),
+            },
         )
         .await
     }
 
     /// Releases `name`, emptying its record and page.
-    async fn release(&self, name: &str) -> Result<()> {
+    async fn release(&mut self, name: &str) -> Result<()> {
         let (Derived { id, .. }, record, _) = self.lookup_held(name).await?;
+        let holder = self.holder(name, &id, &record)?;
         self.send(
-            self.page_accounts(&id, record.owner),
+            self.page_accounts(&id, holder),
             &Instruction::Release { id },
         )
         .await
@@ -563,23 +642,32 @@ impl Client {
     /// Submits `instruction` over `accounts` (each flagged with whether it signs) and
     /// confirms its changes landed. A block includes failed transactions too, so
     /// inclusion alone proves nothing: the touched shards are read back and compared.
-    async fn send(&self, accounts: Vec<(AccountId, bool)>, instruction: &Instruction) -> Result<()> {
+    async fn send(&mut self, accounts: Vec<(AccountId, bool)>, instruction: &Instruction) -> Result<()> {
         self.send_paying(accounts, &[], instruction).await
     }
     /// As [`Self::send`], with the `paying` accounts added after `accounts`. They are
     /// passed with the native token's shard selected, where the program moves the fee.
     async fn send_paying(
-        &self,
+        &mut self,
         accounts: Vec<(AccountId, bool)>,
         paying: &[(AccountId, bool)],
         instruction: &Instruction,
     ) -> Result<()> {
         let expected = self.simulate(&accounts, paying, instruction).await?;
+        // A private signer makes the whole transaction privacy-preserving: the
+        // program runs inside a proof made here, and the chain sees only its
+        // effects on the public accounts, never the signer.
+        let private = accounts
+            .iter()
+            .chain(paying)
+            .any(|(account, signs)| *signs && self.is_private(*account));
         let identity = |(account, signs): &(AccountId, bool)| {
-            if *signs {
-                AccountIdentity::Public(*account)
-            } else {
+            if !*signs {
                 AccountIdentity::PublicNoSign(*account)
+            } else if private && let Some(owned) = self.wallet.resolve_private_account(*account) {
+                owned
+            } else {
+                AccountIdentity::Public(*account)
             }
         };
         let mentions = accounts
@@ -587,17 +675,50 @@ impl Client {
             .map(|row| identity(row).select_program_shard(self.program))
             .chain(paying.iter().map(|row| identity(row).balance()))
             .collect();
-        let hash = self
-            .wallet
-            .send_pub_tx(mentions, borsh::to_vec(instruction)?, self.program)
-            .await
-            .context("the sequencer did not accept the transaction")?;
+        // The private accounts in the order the transaction carries their notes.
+        let private_accounts: Vec<AccountId> = accounts
+            .iter()
+            .chain(paying)
+            .filter(|(account, signs)| private && *signs && self.is_private(*account))
+            .map(|(account, _)| *account)
+            .collect();
+        let mut secrets = Vec::new();
+        let hash = if private {
+            let program = Program::new(self.program_bytecode()?.into())
+                .map_err(|error| anyhow!("the registry's bytecode does not load: {error}"))?;
+            let program = ProgramWithDependencies::new(program, self.program, Default::default());
+            println!("acting privately; generating the proof (this takes minutes)");
+            let (hash, shared) = self
+                .wallet
+                .send_privacy_preserving_tx(mentions, borsh::to_vec(instruction)?, &program)
+                .await
+                .context("the sequencer did not accept the transaction")?;
+            secrets = shared;
+            hash
+        } else {
+            self.wallet
+                .send_pub_tx(mentions, borsh::to_vec(instruction)?, self.program)
+                .await
+                .context("the sequencer did not accept the transaction")?
+        };
         println!("submitted {hash}");
-        let (_, block) = self
+        let (tx, block) = self
             .wallet
             .poll_transaction(hash)
             .await
             .context("the transaction was not included in a block")?;
+        // A private signer's note was spent and a new one made: record it, or the
+        // next private change would spend the old note and be refused.
+        if let common::transaction::LeeTransaction::PrivacyPreserving(tx) = &tx {
+            let decode: Vec<AccDecodeData> = secrets
+                .into_iter()
+                .zip(private_accounts)
+                .map(|(secret, account)| AccDecodeData::Decode(secret, account))
+                .collect();
+            self.wallet
+                .decode_insert_privacy_preserving_transaction_results(tx, &decode)?;
+            self.wallet.store_persistent_data()?;
+        }
 
         for (account, data) in expected {
             if self.shard(account).await? != data {
@@ -709,7 +830,9 @@ impl Client {
             .collect();
         Ok(serde_json::json!({
             "name": name,
-            "owner": record.owner.to_string(),
+            // The chain keeps only a tag of the holder; this wallet can tell
+            // whether it is one of its own accounts, and nobody can tell more.
+            "held_by": self.holder(name, &id, &record).ok().map(|account| account.to_string()),
             "expires": record.expires,
             "expires_date": readable(record.expires),
             "lapsed": local_now() >= record.expires,
@@ -735,7 +858,7 @@ impl Client {
         }
         let Derived { id, key } = derive(&primary.name);
         let confirmed = self.live_record(&id).await?.is_some_and(|record| {
-            record.owner == account
+            record.owner == owner_tag(&id, &account)
                 || open_profile(&key, &record.sealed, &primary.name)
                     .is_some_and(|profile| profile.account == Some(account.into_value()))
         });
