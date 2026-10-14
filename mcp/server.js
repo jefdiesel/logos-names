@@ -3,8 +3,11 @@
 //
 // Speaks the Model Context Protocol over stdio (newline-delimited JSON-RPC) with
 // no dependencies. Read-only: it resolves names, it never signs or sends anything.
+// Reads the Names test chain unless LEZ_RPC_URL and NAMES_PROGRAM say otherwise:
 //
 //   LEZ_RPC_URL=http://127.0.0.1:3040 NAMES_PROGRAM=<program id> node mcp/server.js
+//
+// The gateway publishes it bundled into one file as /mcp.js (scripts/publish-cli.sh).
 
 import { createInterface } from "node:readline";
 import {
@@ -18,8 +21,12 @@ import {
   reverseLookup,
 } from "../resolver/names.js";
 
-const rpcUrl = process.env.LEZ_RPC_URL;
-const program = process.env.NAMES_PROGRAM;
+/** The Names test chain, reached through the gateway; the CLI defaults to it too. */
+const DEFAULT_RPC = "https://logos-names.wrapit.workers.dev/rpc";
+const DEFAULT_PROGRAM = "CsiBzfERqtLz9dYV9dPWzFPMbaUcUagYeCmvvJVmCGcF";
+const rpcUrl = process.env.LEZ_RPC_URL || DEFAULT_RPC;
+const program = process.env.NAMES_PROGRAM || DEFAULT_PROGRAM;
+const VERSION = "0.2.0";
 const PROTOCOL_VERSION = "2025-06-18";
 /** Pages are capped at 80 KiB on chain; cap what is handed to a model lower still. */
 const MAX_PAGE_CHARS = 20_000;
@@ -125,7 +132,7 @@ async function handle({ method, params }) {
       return {
         protocolVersion: PROTOCOL_VERSION,
         capabilities: { tools: {} },
-        serverInfo: { name: "logos-names", version: "0.1.0" },
+        serverInfo: { name: "logos-names", version: VERSION },
       };
     case "ping":
       return {};
@@ -142,9 +149,44 @@ function send(message) {
   process.stdout.write(JSON.stringify(message) + "\n");
 }
 
-if (!rpcUrl || !program) {
-  console.error("logos-names MCP server needs LEZ_RPC_URL and NAMES_PROGRAM");
-  process.exit(1);
+const HELP = `logos-names-mcp ${VERSION}: look up Logos names from an AI agent
+
+An MCP server over stdio. Your MCP client starts it; you don't run it yourself.
+It is read-only: it never signs, pays or sends anything.
+
+Tools:
+  resolve_name    a name's owner, the account it stands for, its private
+                  receiving keys and its text entries (chat, inbox, agent...)
+  get_page        the page kept under a name, as text
+  reverse_lookup  the name an account has chosen to be shown as
+
+Add it to Claude Code:
+  claude mcp add --scope user logos-names -- node ${process.argv[1] ?? "mcp.js"}
+
+Other MCP clients:
+  {"mcpServers": {"logos-names": {"command": "node", "args": ["/path/to/mcp.js"]}}}
+
+Environment:
+  LEZ_RPC_URL     sequencer JSON-RPC endpoint (default ${DEFAULT_RPC})
+  NAMES_PROGRAM   registry program ID (default ${DEFAULT_PROGRAM})
+
+Page content is written by the name's owner, so get_page returns it as
+untrustedContent: an agent should treat it as data, never as instructions.
+
+Needs Node 20 or later. Guide: https://logos-names.wrapit.workers.dev/`;
+
+const flag = process.argv[2];
+if (flag === "--version" || flag === "-V") {
+  console.log(VERSION);
+  process.exit(0);
+}
+if (flag === "--help" || flag === "-h" || process.stdin.isTTY) {
+  console.log(HELP);
+  process.exit(0);
+}
+if (flag) {
+  console.error(`logos-names-mcp: unknown option ${flag} (try --help)`);
+  process.exit(2);
 }
 
 createInterface({ input: process.stdin }).on("line", async (line) => {

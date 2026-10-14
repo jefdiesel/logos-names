@@ -3,12 +3,14 @@
 #
 #   curl -fsSL https://logos-names.wrapit.workers.dev/install.sh | sh
 #
-# Puts the binary in ~/.local/bin (set NAMES_INSTALL_DIR to change that) and
-# checks it against the published SHA-256. Nothing else is installed or changed.
+# Puts the binary in ~/.local/bin (set NAMES_INSTALL_DIR to change that) and its
+# man pages in ~/.local/share/man/man1 (NAMES_MAN_DIR), each checked against the
+# published SHA-256. Nothing else is installed or changed.
 set -eu
 
 BASE="${NAMES_DOWNLOAD_BASE:-https://logos-names.wrapit.workers.dev/dl}"
 DIR="${NAMES_INSTALL_DIR:-$HOME/.local/bin}"
+MAN_DIR="${NAMES_MAN_DIR:-$HOME/.local/share/man/man1}"
 
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) target=macos-arm64 ;;
@@ -39,6 +41,15 @@ mkdir -p "$DIR"
 install -m 755 "$tmp/names" "$DIR/names"
 echo "Installed $DIR/names ($("$DIR/names" --version))"
 
+# The man pages are a bonus: if they can't be fetched, the install still stands.
+if curl -fsSL "$BASE/names-man.tar.gz" -o "$tmp/man.tar.gz" 2>/dev/null &&
+  curl -fsSL "$BASE/names-man.tar.gz.sha256" -o "$tmp/man.sha256" 2>/dev/null &&
+  [ "$(cut -d' ' -f1 "$tmp/man.sha256")" = "$(sha "$tmp/man.tar.gz")" ] &&
+  mkdir -p "$MAN_DIR" && tar -xzf "$tmp/man.tar.gz" -C "$tmp" &&
+  cp "$tmp"/man1/*.1 "$MAN_DIR"/; then
+  echo "Installed man pages in $MAN_DIR (man names)"
+fi
+
 if [ "$target" = linux-x86_64 ] && ! ldconfig -p 2>/dev/null | grep -q libpcsclite.so.1; then
   echo
   echo "It needs the PC/SC library: sudo apt install libpcsclite1 (Debian/Ubuntu)"
@@ -61,5 +72,6 @@ Try it:
   names faucet Public/<account>            free test tokens for it
   names register <name> --owner <account>  claim a name
 
+Every command: names --help, or man names
 Guide: https://logos-names.wrapit.workers.dev/
 EOF

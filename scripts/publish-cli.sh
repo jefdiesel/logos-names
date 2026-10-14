@@ -6,7 +6,9 @@
 # macOS (Apple silicon): built on the Mac mini (see README, "Build and test").
 # Linux x86_64: the artifact of the latest successful "CLI release build" run
 # (`gh workflow run cli-release.yml` first if the CLI changed).
-# Both land in gateway/public/dl/ with SHA-256 files; then the gateway is deployed.
+# Both land in gateway/public/dl/ with SHA-256 files, with the man pages
+# (names-man.tar.gz) and the MCP server bundled as gateway/public/mcp.js;
+# then the gateway is deployed.
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -21,6 +23,11 @@ ssh "$MINI" "export PATH=\$HOME/.cargo/bin:\$HOME/.risc0/bin:/opt/homebrew/bin:\
   cd $DEV/logos-names && CARGO_TARGET_DIR=$DEV/target-names cargo build --locked --release -p names_cli"
 scp -q "$MINI:$DEV/target-names/release/names" "$DL/names-macos-arm64"
 
+echo "== man pages (from the macOS build; they are the same everywhere)"
+ssh "$MINI" "rm -rf /tmp/names-man && $DEV/target-names/release/names man /tmp/names-man/man1 &&
+  tar -C /tmp/names-man -czf /tmp/names-man.tar.gz man1"
+scp -q "$MINI:/tmp/names-man.tar.gz" "$DL/names-man.tar.gz"
+
 echo "== linux x86_64 (CI artifact)"
 run=$(gh run list --workflow cli-release.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId')
 [ -n "$run" ] || { echo "no successful cli-release run; start one with: gh workflow run cli-release.yml" >&2; exit 1; }
@@ -29,9 +36,12 @@ gh run download "$run" --name names-linux-x86_64 --dir "$tmp"
 cp "$tmp/names-linux-x86_64" "$DL/names-linux-x86_64"
 rm -rf "$tmp"
 
-for f in "$DL"/names-macos-arm64 "$DL"/names-linux-x86_64; do
-  chmod 755 "$f"
-  (cd "$DL" && shasum -a 256 "$(basename "$f")" > "$(basename "$f").sha256")
+echo "== MCP server, bundled into one file"
+(cd gateway && npx rolldown ../mcp/server.js --platform node --format esm --file public/mcp.js)
+
+for f in "$DL"/names-macos-arm64 "$DL"/names-linux-x86_64 "$DL"/names-man.tar.gz gateway/public/mcp.js; do
+  case "$f" in *.tar.gz) chmod 644 "$f" ;; *) chmod 755 "$f" ;; esac
+  (cd "$(dirname "$f")" && shasum -a 256 "$(basename "$f")" > "$(basename "$f").sha256")
   cat "$f.sha256"
 done
 

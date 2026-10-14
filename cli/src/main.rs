@@ -43,7 +43,22 @@ const DEFAULT_RPC: &str = "https://logos-names.wrapit.workers.dev/rpc";
 const FAUCET_URL: &str = "https://logos-names.wrapit.workers.dev/faucet";
 
 #[derive(Parser)]
-#[command(name = "names", version, about = "Register and resolve Logos names")]
+#[command(
+    name = "names",
+    version,
+    about = "Register and resolve Logos names",
+    long_about = "Register and resolve Logos names on the Logos Execution Zone (LEZ).\n\n\
+        Looking a name up needs no setup. Anything that changes the chain signs and pays \
+        through the LEZ wallet, built in as `names wallet`, whose keys live in \
+        LEE_WALLET_HOME_DIR (default ~/.lee/wallet).\n\n\
+        Getting started:\n  \
+        names resolve jef.lez\n  \
+        names wallet account new public\n  \
+        names faucet Public/<account>\n  \
+        names register <name> --owner <account>\n\n\
+        The chain never sees a name: names are turned into identifiers and keys on this \
+        machine. Guide: https://logos-names.wrapit.workers.dev/"
+)]
 struct Cli {
     /// Account ID of the deployed registry program. Defaults to the Names test chain's.
     #[arg(long, env = "LOGOS_NAMES_PROGRAM", global = true)]
@@ -206,6 +221,20 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Write the man pages (`names.1`, `names-register.1`, ...) into a directory.
+    #[command(hide = true)]
+    Man { dir: PathBuf },
+}
+
+/// Renders a page for `names` and one for each command, leaving out this one.
+fn write_man_pages(dir: &std::path::Path) -> Result<()> {
+    let command = <Cli as clap::CommandFactory>::command();
+    std::fs::create_dir_all(dir)?;
+    clap_mangen::generate_to(command, dir)?;
+    for skipped in ["names-man.1", "names-help.1"] {
+        let _ = std::fs::remove_file(dir.join(skipped));
+    }
+    Ok(())
 }
 
 /// Accepts a name as people write it (`jef.lez`, any case) and returns the bare name.
@@ -854,6 +883,9 @@ fn faucet(account: &str) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Command::Man { dir } = &cli.command {
+        return write_man_pages(dir);
+    }
     let overrides = sequencer_overrides(&cli)?;
     match cli.command {
         Command::Wallet { args } => return run_wallet(args, overrides).await,
@@ -1035,7 +1067,10 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Address { .. } | Command::Wallet { .. } | Command::Faucet { .. } => {
+        Command::Address { .. }
+        | Command::Wallet { .. }
+        | Command::Faucet { .. }
+        | Command::Man { .. } => {
             unreachable!("handled before the wallet is opened")
         }
     }

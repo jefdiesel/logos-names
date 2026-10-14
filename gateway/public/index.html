@@ -59,7 +59,8 @@
   <p>One binary for macOS (Apple silicon) and Linux (x86_64), with the LEZ wallet built in.
   It needs nothing else and doesn't need Basecamp.</p>
 <pre><code>curl -fsSL https://logos-names.wrapit.workers.dev/install.sh | sh</code></pre>
-  <p>It installs to <code>~/.local/bin/names</code> and checks the download's SHA-256.</p>
+  <p>It installs to <code>~/.local/bin/names</code>, with man pages (<code>man names</code>), and
+  checks each download's SHA-256.</p>
 
   <h2>Look names up</h2>
   <p>No wallet or setup needed:</p>
@@ -89,8 +90,22 @@ names pay jef.lez 1000 --from &lt;account&gt; --private   <span class="c"># shie
   <code>curl -L https://risczero.com/install | bash &amp;&amp; rzup install cargo-risczero 3.0.5</code>;
   nothing else does.</p>
 
+  <h2>For AI agents</h2>
+  <p>An MCP server lets Claude, or any MCP client, look names up as tools:
+  <code>resolve_name</code>, <code>get_page</code> and <code>reverse_lookup</code>. It is one
+  file, needs Node 20 or later, reads this chain by default and never signs or sends anything.</p>
+<pre><code>curl -fsSLo ~/.logos-names-mcp.js https://logos-names.wrapit.workers.dev/mcp.js
+claude mcp add --scope user logos-names -- node ~/.logos-names-mcp.js</code></pre>
+  <p>For other clients, run <code>node ~/.logos-names-mcp.js</code> over stdio:
+  <code>{"command": "node", "args": ["/full/path/to/.logos-names-mcp.js"]}</code>.
+  <code>node ~/.logos-names-mcp.js --help</code> explains the rest, and
+  <a href="/mcp.js.sha256"><code>mcp.js.sha256</code></a> checks the download. A name's page is
+  written by its owner, so the server hands it over as <code>untrustedContent</code>: data for the
+  agent, never instructions.</p>
+
   <h2>More</h2>
-  <p><code>names --help</code> lists every command: renew, transfer, release, clear-page and more.
+  <p><code>names --help</code> or <code>man names</code> lists every command: renew, transfer,
+  release, clear-page and more.
   <code>names wallet help</code> lists the wallet's own commands. The wallet lives in
   <code>~/.lee/wallet</code>; set <code>LEE_WALLET_HOME_DIR</code> to use another one.</p>
   <p>Apps and agents can read any name as JSON at <code>/&lt;name&gt;/.well-known/logos-name.json</code>
