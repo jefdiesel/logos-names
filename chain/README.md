@@ -5,7 +5,7 @@ halted (it stopped at block 13,982 on 2026-10-07). It runs on one machine: a
 sequencer, a faucet, and a tunnel the gateway reaches them through.
 
 Since 2026-10-10 it is **anchored to the Logos Blockchain**: the sequencer runs
-LEZ `dev` at `4fba494` (the v0.3.1 candidate; v0.3.0 cannot talk to node 0.3.1)
+LEZ `4fba494`, the same code as the v0.3.1 release (v0.3.0 cannot talk to node 0.3.1)
 and posts every block to its own channel,
 `c20f23a3c56544c9cf063c94618af29457877182c1c102be55dbfd4e536ee66b`, through the
 Logos node on the same machine (`node_url` `http://127.0.0.1:8081`). The node's
@@ -15,7 +15,7 @@ with it.
 
 | Piece | Where | What |
 |---|---|---|
-| Sequencer | `127.0.0.1:3040` | `sequencer_service` from LEZ `dev` `4fba494` with `lez-wal-cap.patch`, normal (anchored) build |
+| Sequencer | `127.0.0.1:3040` | `sequencer_service` from LEZ `4fba494` (= v0.3.1) with `lez-wal-cap.patch`, normal (anchored) build |
 | Faucet | `127.0.0.1:3041` | `faucet.py`: 50,000,000 to an account once a day |
 | Registry | `CsiBzfERqtLz9dYV9dPWzFPMbaUcUagYeCmvvJVmCGcF` | the CI guest `542ae051…`, prices 10000/100000/400000 |
 | Public | gateway `/rpc`, `/faucet` | the Worker forwards to the tunnel; `/rpc` passes reads and `sendTransaction` only |
