@@ -91,10 +91,13 @@ names set-page myname index.html                   <span class="c"># optional pa
 
   <h2>Pay a name</h2>
 <pre><code>names pay jef.lez 1000 --from Private/&lt;private&gt;   <span class="c"># nobody sees payer, recipient or amount</span>
-names pay jef.lez 1000 --from Public/&lt;account&gt;     <span class="c"># works too, but shows you as the payer</span></code></pre>
-  <p>A name never shows an address. It carries private receiving keys, made when it is
-  registered, and every payment goes to them: the chain shows neither the recipient nor the
-  amount, and nobody, the payer included, learns the account behind the name. The recipient
+names pay jef.lez 1000 --from Public/&lt;account&gt;     <span class="c"># works too, but shows you as the payer</span>
+names pay shop.lez 1000 --from Public/&lt;account&gt; --public   <span class="c"># to a public account the holder published</span></code></pre>
+  <p>Names are private by default. Each carries private receiving keys, made when it is
+  registered, and payments go to them: the chain shows neither the recipient nor the
+  amount, and nobody, the payer included, learns the account behind the name. A holder can
+  also publish a public account with <code>names set-account myname &lt;account&gt;</code>, for
+  names meant to be paid openly; anyone who resolves the name then sees that account. The recipient
   finds payments with <code>names wallet account sync-private</code>. Everything private (holding a
   name, shielding tokens, private payments) is proven on your machine by RISC Zero's prover,
   <code>r0vm</code>, which the installer fetches from RISC Zero's own release.</p>

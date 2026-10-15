@@ -52,7 +52,7 @@ entries).
    sealing key on the client (a slow derivation, so guessing many names is
    costly). The chain stores only the identifier and a record sealed under the
    key. An observer who doesn't know a name cannot learn it, list names, or
-   link two records.
+   link two records, unless the holder lists it (requirement 4).
 2. **Private by default.** A name carries private receiving keys (LEZ
    nullifier and viewing public keys). Paying it sends a private transfer to
    those keys: the chain shows neither the recipient nor the amount, and the
@@ -65,24 +65,28 @@ entries).
    Wallets then let the payer choose public or private, and say clearly that a
    public address shows its balance and history to anyone who resolves the
    name.
-4. **Hidden holders.** The chain stores only a tag of the holder, unique per
+4. **Optional public listing.** A holder can list a name in an on-chain
+   directory, in the clear, so people and apps can find and browse it. Listing
+   is per name and can be undone. It reveals the name, not the holder, and a
+   listed name can still be paid only privately.
+5. **Hidden holders.** The chain stores only a tag of the holder, unique per
    name, so two names held by the same account cannot be linked. A holder
    acting from a private account never appears on chain.
-5. **Register, renew, transfer, release** with a term and an expiry, and a
+6. **Register, renew, transfer, release** with a term and an expiry, and a
    grace period after expiry. A released or lapsed name leaves nothing behind
    on chain.
-6. **Registration fees** to a configurable treasury, with one price per term.
+7. **Registration fees** to a configurable treasury, with one price per term.
    The chain can't see names, so it can't price them by length.
-7. **Records:** receiving keys, free-form text entries (such as `chat`,
+8. **Records:** receiving keys, free-form text entries (such as `chat`,
    `inbox`, `agent`), and a page of at least 64 KiB, all sealed under the
    name's key.
-8. **Logos Chat usernames.** A name's `chat` entry points at its holder's chat
+9. **Logos Chat usernames.** A name's `chat` entry points at its holder's chat
     address, so a chat client can open a conversation from `alice.lez`, and can
     show a name as verified for a sender whose chat address the name's record
     points back to. Chat usernames can be LNS names, which gives them
     uniqueness and ordering from the registry. The holder opts in per name, and
     their other names stay unlinked.
-9. **No server in the trust path.** Clients talk to a LEZ sequencer directly,
+10. **No server in the trust path.** Clients talk to a LEZ sequencer directly,
     read the program's bytecode from the chain when they need it to prove, and
     work without any gateway, faucet or indexer run by the team.
 
@@ -127,8 +131,9 @@ entries).
 4. A privacy properties document: what observers see for each operation, what
    private paths protect, trust assumptions, and what leaks if a client misbehaves
    (for example, anyone who types an exact name can see that it exists, when
-   it was last changed and what its holder published; for a private-only
-   name, never an address, balance or payment history).
+   it was last changed and what its holder published; a private name shows no
+   address, balance or payment history, while a name with a public account
+   shows that account and so its balance and history).
 5. A design decision log.
 6. CI green on the default branch; MIT + Apache-2.0 licence.
 
@@ -163,8 +168,8 @@ entries).
 
 Estimated duration: **2–3 weeks**. The prototype linked below, which already
 meets most hard requirements, was built in about two days. What remains is
-the public-address option in the client, Logos Chat integration, CI tests for
-the private paths, the privacy properties document and the design log.
+the opt-in public listing, Logos Chat integration, CI tests for the private
+paths, the privacy properties document and the design log.
 
 ## 🌍 Open Source Requirement
 
@@ -174,8 +179,8 @@ All code must be released under the **MIT + Apache-2.0 License**.
 
 - Prototype: [jefdiesel/logos-names](https://github.com/jefdiesel/logos-names),
   running on the LEZ testnet as registry `66nUvzJtTxA729aUpTcAWDrb7cV9Heb2bDzceHQhLYad`.
-  It already does requirements 1, 2, 4–7 and 9, and the `chat` entry of 8 (the
-  program supports public addresses; the client doesn't offer them yet), with a
+  It already does requirements 1–3, 5–8 and 10, and the `chat` entry of 9 (not
+  the public listing), with a
   [specification](https://github.com/jefdiesel/logos-names/blob/main/SPEC.md),
   a CLI, a resolver library, a gateway and an MCP server. Guide:
   https://logos-names.wrapit.workers.dev/

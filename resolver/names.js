@@ -357,13 +357,21 @@ export async function resolveName(rpcUrl, program, name, now = Date.now()) {
 }
 
 /**
- * What a name shows people: whether it can be paid, never an address or the
- * receiving keys behind it. A payer's wallet uses the keys from `resolveName`
- * without displaying them.
+ * What a name shows people: whether it can be paid privately, and the public
+ * account only if its holder published one. The private receiving keys are
+ * never shown; a payer's wallet uses them from `resolveName`.
  */
 export function publicView(record) {
-  const { name, expires, lapsed, npk, vpk, texts } = record;
-  return { name, expires, lapsed, payable: Boolean(npk && vpk), texts };
+  const { name, expires, lapsed, account, npk, vpk, texts } = record;
+  return {
+    name,
+    expires,
+    lapsed,
+    payablePrivately: Boolean(npk && vpk),
+    // Only if the holder chose to publish one.
+    publicAccount: account,
+    texts,
+  };
 }
 
 /**

@@ -40,9 +40,11 @@ const tools = [
   {
     name: "resolve_name",
     description:
-      "Look up a Logos name. Returns whether it can be paid and its text entries (such as " +
-      "chat, inbox and agent). A name never shows an address: it is paid privately with " +
-      "`names pay <name>`, and nobody, the payer included, learns the account behind it. " +
+      "Look up a Logos name. Returns whether it can be paid privately, its public account " +
+      "if the holder chose to publish one, and its text entries (such as chat, inbox and " +
+      "agent). By default a name is paid privately with `names pay <name>`, and nobody, the " +
+      "payer included, learns the account behind it; a published public account shows its " +
+      "balance and history to anyone. " +
       "Names expire: `expires` is when, in milliseconds since the Unix epoch, and `lapsed` is " +
       "true once that has passed and the name is in its 30-day grace period, after which it " +
       "is no longer registered. Do not pay a lapsed name without the user knowing it has lapsed. " +
@@ -130,8 +132,8 @@ An MCP server over stdio. Your MCP client starts it; you don't run it yourself.
 It is read-only: it never signs, pays or sends anything.
 
 Tools:
-  resolve_name    whether a name can be paid (always privately; it never
-                  shows an address) and its text entries (chat, inbox, agent...)
+  resolve_name    whether a name can be paid privately, its public account if
+                  the holder published one, and its text entries (chat, inbox...)
   get_page        the page kept under a name, as text
 
 Add it to Claude Code:

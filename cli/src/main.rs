@@ -126,6 +126,20 @@ enum Command {
     },
     /// Print the registry's admin, treasury and prices, as JSON.
     Settings,
+    /// Publish a public account on the name, so it can also be paid openly (a shop,
+    /// donations). Anyone who resolves the name then sees that account, and so its
+    /// balance and history. Private payments keep working.
+    SetAccount {
+        #[arg(value_parser = parse_name)]
+        name: String,
+        #[arg(value_parser = parse_account)]
+        account: AccountId,
+    },
+    /// Remove the public account from the name; it stays payable privately.
+    ClearAccount {
+        #[arg(value_parser = parse_name)]
+        name: String,
+    },
     /// Give the name fresh private receiving keys, from a new private account in this
     /// wallet. Registering does this already; use it after a transfer, or to rotate.
     ReceivePrivately {
@@ -164,9 +178,11 @@ enum Command {
         #[arg(value_parser = parse_name)]
         name: String,
     },
-    /// Pay a name. The payment goes to the name's private receiving keys: nobody, the
-    /// payer included, learns the account behind the name, and the chain shows neither
-    /// recipient nor amount. Proving it takes a few minutes.
+    /// Pay a name. By default the payment goes to the name's private receiving keys:
+    /// nobody, the payer included, learns the account behind the name, and the chain
+    /// shows neither recipient nor amount; proving it takes a few minutes. With
+    /// `--public`, or when the name has only a public account, it is an ordinary
+    /// public transfer to that account.
     Pay {
         #[arg(value_parser = parse_name)]
         name: String,
@@ -176,8 +192,11 @@ enum Command {
         /// (`Private/<id>`) hides the payer too; a public one is seen paying.
         #[arg(long, value_parser = parse_account)]
         from: AccountId,
-        /// Accepted for older scripts; every payment is private.
-        #[arg(long, hide = true)]
+        /// Pay the name's public account instead of its private keys.
+        #[arg(long, conflicts_with = "private")]
+        public: bool,
+        /// Pay the name's private keys (the default when it has them).
+        #[arg(long)]
         private: bool,
     },
     /// Print everything a name resolves to, as JSON.
@@ -763,6 +782,39 @@ impl Client {
     }
 
     /// Pays `amount` to the public account `name` points at.
+    async fn pay(&self, name: &str, amount: u128, from: AccountId) -> Result<()> {
+        let (_, _, profile) = self.lookup(name).await?;
+        let to = profile
+            .account
+            .map(AccountId::new)
+            .ok_or_else(|| anyhow!("{name} has no public account set"))?;
+        let before = self.wallet.get_account_balance(to).await?;
+
+        println!("paying {amount} to {name}{NAME_SUFFIX} ({to})");
+        let hash = NativeTokenTransfer(&self.wallet)
+            .send_public_transfer(
+                AccountIdentity::Public(from),
+                AccountIdentity::PublicNoSign(to),
+                amount,
+            )
+            .await
+            .context("the sequencer did not accept the transfer")?;
+        println!("submitted {hash}");
+        let (_, block) = self
+            .wallet
+            .poll_transaction(hash)
+            .await
+            .context("the transfer was not included in a block")?;
+
+        // A block includes failed transactions too, so confirm the money arrived.
+        let after = self.wallet.get_account_balance(to).await?;
+        if from != to && after < before.saturating_add(amount) {
+            bail!("transfer {hash} was included in block {block} but {name} was not credited");
+        }
+        println!("paid in block {block}");
+        Ok(())
+    }
+
     /// Pays `amount` to the private receiving keys `name` publishes.
     async fn pay_private(&mut self, name: &str, amount: u128, from: AccountId) -> Result<()> {
         let (_, _, profile) = self.lookup(name).await?;
@@ -867,7 +919,9 @@ impl Client {
             "lapsed": local_now() >= record.expires,
             // A name never shows an address: payers' wallets use its receiving keys
             // without printing them, and `names pay` pays them.
-            "payable": profile.npk.is_some() && !profile.vpk.is_empty(),
+            "payable_privately": profile.npk.is_some() && !profile.vpk.is_empty(),
+            // Only if the holder chose to publish one.
+            "public_account": profile.account.map(|account| AccountId::new(account).to_string()),
             "texts": texts,
             "page": page,
         }))
@@ -1229,6 +1283,22 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&settings)?);
             Ok(())
         }
+        Command::SetAccount { name, account } => {
+            client
+                .edit(&name, |profile| {
+                    profile.account = Some(account.into_value());
+                    Ok(())
+                })
+                .await
+        }
+        Command::ClearAccount { name } => {
+            client
+                .edit(&name, |profile| {
+                    profile.account = None;
+                    Ok(())
+                })
+                .await
+        }
         Command::ReceivePrivately { name } => {
             let (account, npk, vpk) = client.new_receiving_keys()?;
             println!("made private account Private/{account} to receive payments to {name}{NAME_SUFFIX}");
@@ -1273,7 +1343,15 @@ async fn main() -> Result<()> {
                 .await
         }
         Command::ClearPage { name } => client.set_page(&name, None).await,
-        Command::Pay { name, amount, from, .. } => client.pay_private(&name, amount, from).await,
+        Command::Pay { name, amount, from, public, private } => {
+            let (_, _, profile) = client.lookup(&name).await?;
+            let has_keys = profile.npk.is_some() && !profile.vpk.is_empty();
+            if public || (!private && !has_keys && profile.account.is_some()) {
+                client.pay(&name, amount, from).await
+            } else {
+                client.pay_private(&name, amount, from).await
+            }
+        }
         Command::Resolve { name } => {
             println!("{}", serde_json::to_string_pretty(&client.resolve(&name).await?)?);
             Ok(())
