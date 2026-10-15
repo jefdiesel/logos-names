@@ -50,6 +50,8 @@ In short:
 7. Clients talk to a LEZ sequencer directly; no gateway, faucet or indexer is required.
 8. CLI, SDK (Rust and JS), MCP server for agents, and a spec that independent wallets can implement.
 
+**Future idea:** subnames such as `pay.alice.lez`, names under a name that observers can't link to the parent.
+
 ## Risks and deployment
 
 - **Proof time:** a private transfer takes about 3.5 minutes to prove on an M4 Mac, all on CPU (RISC Zero 3.0.5 has its Apple GPU backend disabled). About 2 min is the circuit, about 47 s a Keccak proof and about 47 s recursion. Faster proving in LEZ would help every private app.

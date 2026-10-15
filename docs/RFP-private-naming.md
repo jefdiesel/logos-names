@@ -154,6 +154,11 @@ no DNS registrar and no record of who owns it.
    Logos Storage (pages larger than one account).
 5. A migration path when LEZ or its account model changes between testnets.
 
+### Future ideas (not in scope)
+
+- **Subnames** such as `pay.alice.lez`: names under a name, created by its
+  holder, that observers can't link to the parent.
+
 ## 👤 Recommended Team Profile
 
 - LEZ program development (plan/apply execution, shards, program loader)
