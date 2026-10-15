@@ -1,19 +1,25 @@
-# Logos Names
+# LNS — LEZ Name Service
 
-A private name registry for the Logos Execution Zone (LEZ v0.3). A name such as
-`jef.lez` resolves to:
+Names for the Logos Execution Zone (LEZ v0.3), **private by default and public
+by choice**. Suggested as a Logos RFP:
+[forum post](https://forum.logos.co/t/lns-lez-name-service-lez-names-private-by-default/2016),
+[draft](docs/RFP-private-naming.md). A name such as `jef.lez` resolves to:
 
 - **private receiving keys**, made when it is registered: anyone can pay the name,
-  and nobody, the payer included, learns the account behind it. A name never
-  shows an address,
+  and nobody, the payer included, learns the account behind it,
+- optionally a **public account**, if the holder publishes one for a name meant to
+  be paid openly (a shop, donations); anyone who resolves the name then sees it,
+  and so its balance and history,
 - **text entries**: free-form key/value pairs such as `chat`, `inbox` or `agent`,
-- a **page**: up to about 80 KiB served at `jef.<any gateway domain>`.
+- a **page**: up to about 80 KiB, served by gateways.
 
-Knowing a name is the only way to find it. The chain never sees a name: it
-holds a 32-byte identifier derived from the name and a profile sealed under a
-key that is also derived from the name. There is no list of names and nothing
-links one record to another, so nobody can browse the registry. Anyone who
-knows or guesses a name can resolve it, which is what lets them pay it.
+The chain never sees a name: it holds a 32-byte identifier derived from the
+name and a profile sealed under a key that is also derived from the name.
+There is no list of names and nothing links one record to another, so nobody
+can browse the registry, and a name its holder hasn't made public can only be
+found by someone who knows or guesses it. Anyone who knows a name can resolve
+it, which is what lets them pay it. An opt-in public listing, where a holder
+can list a name so people can find and browse it, is planned.
 
 A name that points only at private receiving keys reveals nothing about its
 holder's accounts, and each payment to it lands where only the holder can find
@@ -43,8 +49,7 @@ One binary (macOS on Apple silicon, Linux x86_64) that needs neither Basecamp no
 a separate LEZ install: `names wallet …` is the LEZ wallet's own command line,
 built in, and the public LEZ testnet is the default. Lookups work with no setup;
 `names wallet account new public` makes a wallet, `names faucet <account>` funds
-it, and `names receive-privately <name>` gives a name private receiving keys from
-it. `--rpc` and `--program` point it at another chain and registry. `names --help`
+it, and `names register` gives the name private receiving keys at once. `--rpc` and `--program` point it at another chain and registry. `names --help`
 and `man names` (installed alongside) cover every command. The guide is the gateway's
 front page (`gateway/public/index.html`). `scripts/publish-cli.sh` builds both
 binaries and the man pages, bundles the MCP server and deploys them with the gateway.
@@ -137,12 +142,15 @@ export LOGOS_NAMES_PROGRAM=<header account id>
 names configure --admin <account> --treasury <account> --prices 10000,100000,400000
 names settings                                       # who is paid, and the price of each term
 
-names register jef --owner Private/<account> --term 1y   # 30d, 1y or 5y; makes receiving keys
+names register jef --owner <account> --term 1y   # 30d, 1y or 5y; makes receiving keys
 names renew jef --term 30d
 names set-text jef chat <address>
 names set-page jef index.html
-names resolve jef                         # expiry, payable, text entries, page; never an address
-names pay jef.lez 1000 --from <account>   # always private, to the name's receiving keys
+names set-account jef <account>           # optional: also payable publicly, at a visible account
+names clear-account jef
+names resolve jef                         # expiry, payable privately, public account if set, entries, page
+names pay jef.lez 1000 --from <account>   # private, to the name's receiving keys
+names pay jef.lez 1000 --from <account> --public   # to its public account, if it has one
 names receive-privately jef               # fresh receiving keys (after a transfer, or to rotate)
 names transfer jef <account>              # new holder; keys, profile and page are emptied
 names release jef                         # give it up: nothing of it remains
@@ -216,7 +224,7 @@ deleting it. `basecamp/tools/render.py` draws its screens without Basecamp.
 `mcp/server.js` is a dependency-free MCP server over stdio with two read-only
 tools: `resolve_name` and `get_page`. It never signs or sends
 anything, and it cannot list names: nothing can. The gateway publishes it bundled
-into one file, reading the Names test chain by default (Node 20 or later):
+into one file, reading the public LEZ testnet by default (Node 20 or later):
 
 ```sh
 curl -fsSLo ~/.logos-names-mcp.js https://logos-names.wrapit.workers.dev/mcp.js
