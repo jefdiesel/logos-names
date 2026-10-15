@@ -1,13 +1,13 @@
 ---
 id: RFP-0XX
-title: LNS — LEZ Name Service (private .lez names and subnames)
+title: LNS — LEZ Name Service (private .lez names, with a website at each name)
 tier: M
 status: suggested
 category: Developer Tooling & Infrastructure
 dependencies: []
 ---
 
-# RFP-0XX — LNS: LEZ Name Service (private .lez names and subnames)
+# RFP-0XX — LNS: LEZ Name Service (private .lez names, with a website at each name)
 
 > **Suggested RFP.** Written by the author of [Logos Names](https://github.com/jefdiesel/logos-names),
 > a working prototype on the LEZ testnet, as a proposal for the Logos RFP
@@ -24,9 +24,9 @@ balance and history, and anyone can list every name and who owns it. That is
 the opposite of what Logos stands for. This RFP asks for a **private naming
 standard and program for LEZ**: a name can be paid without anyone, the payer
 included, learning the account behind it; the chain never sees names; nobody
-can list or browse them; and who holds a name is hidden. It also asks for
-**subnames** (`pay.alice.lez`, `bob.team.lez`) so people, teams and apps can
-issue names under their own. A team with LEZ program, zero-knowledge and
+can list or browse them; and who holds a name is hidden. Every name is also
+a **website address**: `alice.lez` serves its page at `alice.<gateway domain>`,
+so a name works in a browser as well as in a wallet. A team with LEZ program, zero-knowledge and
 wallet experience is a good fit.
 
 ## 🔥 Why This Matters
@@ -38,9 +38,9 @@ an account. LEZ's private accounts make a better design possible: a name can
 carry only private receiving keys, so every payment to it lands as a private
 note that observers can't attribute. Names also give Logos Messaging, Storage
 and Basecamp apps a shared way to find a person or service (`chat`, `inbox`,
-`agent` entries, and a page served by gateways). Subnames let one holder give
-names to devices, payment purposes, team members or customers without each one
-registering separately, which is how most real organisations use names.
+`agent` entries). And a name that is also a URL gives every person or project
+on Logos a website they control from their wallet, with no hosting account,
+no DNS registrar and no record of who owns it.
 
 ## ✅ Scope of Work
 
@@ -73,34 +73,20 @@ registering separately, which is how most real organisations use names.
 7. **Records:** receiving keys, free-form text entries (such as `chat`,
    `inbox`, `agent`), and a page of at least 64 KiB, all sealed under the
    name's key.
-8. **Subnames.** The holder of `alice.lez` can create `pay.alice.lez`,
-   `bob.alice.lez` and so on, to any depth:
-   - each subname is a full name with its own record, receiving keys, text
-     entries, page and holder;
-   - the parent holder can assign a subname to another holder, and either
-     keep the right to revoke it or give that right up permanently (like ENS
-     "fuses"), chosen per subname;
-   - a subname resolves only while its parent is registered; resolvers, which
-     know the full name, check this;
-   - **an observer can't link a subname to its parent**: creating, changing
-     or resolving `pay.alice.lez` must not reveal `alice.lez`'s identifier or
-     touch its record visibly. (One approach: the parent's sealed record holds
-     a subname authority secret, and a subname's record carries a tag derived
-     from it, so creating a subname needs the secret but never touches the
-     parent's account.)
-   - subnames cost no registry fee by default; the registry may set one.
-9. **Gateways and subdomains.** A gateway serves a name's page at
-   `alice.<gateway domain>` and a subname's at `pay.alice.<gateway domain>`,
-   and its record as JSON at a well-known path that shows only whether the
-   name can be paid and its public entries, never keys or addresses. A gateway
-   only sees the names it is asked for.
-10. **Logos Chat usernames.** A name's `chat` entry points at its holder's chat
+8. **A website at every name.** A gateway serves a name's page at
+   `alice.<gateway domain>` (one subdomain per name, through a wildcard), and
+   the name's public record as JSON at a well-known path. The JSON shows only
+   when the name expires, whether it can be paid, and the entries the holder
+   chose to publish; never an address or keys. Anyone can run a gateway on
+   their own domain; a gateway only learns the names it is asked for, and
+   serves pages so one name's page can't read another's data.
+9. **Logos Chat usernames.** A name's `chat` entry points at its holder's chat
     address, so a chat client can open a conversation from `alice.lez`, and can
     show a name as verified for a sender whose chat address the name's record
     points back to. Chat usernames can be LNS names, which gives them
     uniqueness and ordering from the registry. The holder opts in per name, and
     their other names stay unlinked.
-11. **No server in the trust path.** Clients talk to a LEZ sequencer directly,
+10. **No server in the trust path.** Clients talk to a LEZ sequencer directly,
     read the program's bytecode from the chain when they need it to prove, and
     work without any gateway, faucet or indexer run by the team.
 
@@ -141,12 +127,14 @@ registering separately, which is how most real organisations use names.
 
 1. Deployed and tested on the LEZ testnet, with program addresses published.
 2. End-to-end tests against a standalone LEZ sequencer in CI, including the
-   private paths (proof generation) and subnames.
+   private paths (proof generation) and the gateway.
 3. A specification precise enough for an independent wallet to implement
    resolution and payment without this code.
 4. A privacy properties document: what observers see for each operation, what
    private paths protect, trust assumptions, and what leaks if a client misbehaves
-   (for example, anyone who guesses a name can confirm it's registered).
+   (for example, anyone who types an exact name can see that it exists and
+   read the entries its holder published, but never an address, balance or
+   payment history).
 5. A design decision log.
 6. CI green on the default branch; MIT + Apache-2.0 licence.
 
@@ -181,7 +169,7 @@ All code must be released under the **MIT + Apache-2.0 License**.
 
 - Prototype: [jefdiesel/logos-names](https://github.com/jefdiesel/logos-names),
   running on the LEZ testnet as registry `66nUvzJtTxA729aUpTcAWDrb7cV9Heb2bDzceHQhLYad`.
-  It already does requirements 1–7, 9 and 11, and the `chat` entry of 10 (not subnames or chat-client integration), with a
+  It already does requirements 1–8 and 10, and the `chat` entry of 9 (not chat-client integration; its gateway runs at `/<name>` paths until it has a domain with a wildcard), with a
   [specification](https://github.com/jefdiesel/logos-names/blob/main/SPEC.md),
   a CLI, a resolver library, a gateway and an MCP server. Guide:
   https://logos-names.wrapit.workers.dev/
@@ -190,6 +178,4 @@ All code must be released under the **MIT + Apache-2.0 License**.
   disabled. About 2 minutes are the circuit's 1.3M cycles, about 47 s a separate
   Keccak proof, about 47 s recursion.
 - [LEZ](https://github.com/logos-blockchain/logos-execution-zone),
-  [SPEL](https://github.com/logos-co/spel),
-  [ENS name wrapper fuses](https://docs.ens.domains/wrapper/fuses) (for revocable
-  and permanent subnames).
+  [SPEL](https://github.com/logos-co/spel).
