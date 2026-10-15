@@ -9,7 +9,8 @@
 # (NAMES_SKIP_PROVER=1 skips it). Nothing else is installed or changed.
 set -eu
 
-BASE="${NAMES_DOWNLOAD_BASE:-https://logos-names.wrapit.workers.dev/dl}"
+# Binaries come from the project's GitHub releases.
+BASE="${NAMES_DOWNLOAD_BASE:-https://github.com/jefdiesel/logos-names/releases/latest/download}"
 DIR="${NAMES_INSTALL_DIR:-$HOME/.local/bin}"
 MAN_DIR="${NAMES_MAN_DIR:-$HOME/.local/share/man/man1}"
 

@@ -1,21 +1,22 @@
 #!/bin/sh
-# Builds and publishes the `names` command line through the gateway.
+# Builds and publishes the `names` command line.
 #
 #   scripts/publish-cli.sh
 #
 # macOS (Apple silicon): built on the Mac mini (see README, "Build and test").
 # Linux x86_64: the artifact of the latest successful "CLI release build" run
 # (`gh workflow run cli-release.yml` first if the CLI changed).
-# Both land in gateway/public/dl/ with SHA-256 files, with the man pages
-# (names-man.tar.gz) and the MCP server bundled as gateway/public/mcp.js;
-# then the gateway is deployed.
+# Both binaries and the man pages (names-man.tar.gz), with SHA-256 files, go to
+# a GitHub release of this repository, which install.sh downloads from. The MCP
+# server is bundled as gateway/public/mcp.js, and the gateway (guide, install.sh)
+# is deployed.
 set -eu
 cd "$(dirname "$0")/.."
 
 MINI=${MINI:-minim4}
 DEV=/Volumes/exos162/logos/dev
-DL=gateway/public/dl
-mkdir -p "$DL"
+DL=dist
+rm -rf "$DL" && mkdir -p "$DL"
 
 echo "== macOS arm64 (on $MINI)"
 rsync -a --delete --exclude target --exclude .git --exclude node_modules ./ "$MINI:$DEV/logos-names/"
@@ -44,6 +45,14 @@ for f in "$DL"/names-macos-arm64 "$DL"/names-linux-x86_64 "$DL"/names-man.tar.gz
   (cd "$(dirname "$f")" && shasum -a 256 "$(basename "$f")" > "$(basename "$f").sha256")
   cat "$f.sha256"
 done
+
+echo "== GitHub release"
+TAG=cli-$(date -u +%Y%m%d-%H%M)
+gh release create "$TAG" --latest --title "names CLI $TAG" \
+  --notes "names for macOS (Apple silicon) and Linux (x86_64), with man pages. Install: curl -fsSL https://logos-names.wrapit.workers.dev/install.sh | sh" \
+  "$DL"/names-macos-arm64 "$DL"/names-macos-arm64.sha256 \
+  "$DL"/names-linux-x86_64 "$DL"/names-linux-x86_64.sha256 \
+  "$DL"/names-man.tar.gz "$DL"/names-man.tar.gz.sha256
 
 echo "== deploy gateway"
 cd gateway
