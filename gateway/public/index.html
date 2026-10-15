@@ -114,12 +114,14 @@ claude mcp add --scope user logos-names -- node ~/.logos-names-mcp.js</code></pr
   <code>names wallet help</code> lists the wallet's own commands. The wallet lives in
   <code>~/.lee/wallet</code>; set <code>LEE_WALLET_HOME_DIR</code> to use another one.</p>
   <p>Apps and agents can read any name as JSON at <code>/&lt;name&gt;/.well-known/logos-name.json</code>
-  on this gateway. The chain's JSON-RPC is at <code>/rpc</code>, and any LEZ v0.3.1 wallet can use
-  it: <code>names</code> does by default; to use a different chain, pass <code>--rpc</code> and
-  <code>--program</code>.</p>
+  on this gateway. <code>names</code> and the MCP server don't need it: they talk to the LEZ
+  sequencer directly (<code>https://testnet.lez.logos.co</code>) and read the registry's program
+  from the chain itself, so no server of ours sits between you and the chain. Pass
+  <code>--rpc</code> and <code>--program</code> to use another chain or registry.</p>
 
-  <footer>Logos Names runs on the public LEZ testnet. This gateway can see which names you
-  look up, and it passes on the transactions you send.</footer>
+  <footer>Logos Names runs on the public LEZ testnet. This website can see which names you
+  look up <em>here</em>; the command line and the MCP server never contact it, except
+  <code>names faucet</code>.</footer>
 </main>
 </body>
 </html>

@@ -19,6 +19,8 @@ clock_core.workspace = true
 
 anyhow = "1.0.98"
 borsh.workspace = true
+risc0-binfmt = "3.0.2"
+risc0-zkos-v1compat = "=2.2.2"
 clap = { version = "4.5.42", features = ["derive", "env"] }
 clap_mangen = "0.2"
 hex = "0.4.3"

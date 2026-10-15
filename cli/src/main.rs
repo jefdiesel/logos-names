@@ -15,7 +15,10 @@ use clap::{Parser, Subcommand};
 use clock_core::{CLOCK_01_PROGRAM_ACCOUNT_ID, ClockAccountData, clock_account_id};
 use lee_core::{
     account::{AccountId, ProgramShardSelector},
-    program::{AccountMeta, PlanInput},
+    program::{
+        AccountMeta, MAX_PROGRAM_SEGMENTS, PROGRAM_LOADER_ACCOUNT_ID, PlanInput, ProgramHeader,
+        ProgramSegment,
+    },
 };
 use lee::{privacy_preserving_transaction::circuit::ProgramWithDependencies, program::Program};
 use names_core::{
@@ -37,8 +40,9 @@ use wallet::{
 /// The registry on the public LEZ testnet (deployed 2026-10-15). Used unless
 /// `--program` or `LOGOS_NAMES_PROGRAM` names another.
 const DEFAULT_PROGRAM: &str = "66nUvzJtTxA729aUpTcAWDrb7cV9Heb2bDzceHQhLYad";
-/// The public LEZ testnet's sequencer, reached through the gateway.
-const DEFAULT_RPC: &str = "https://logos-names.wrapit.workers.dev/rpc";
+/// The public LEZ testnet's sequencer, reached directly: no server of ours sits between a
+/// user and the chain.
+const DEFAULT_RPC: &str = "https://testnet.lez.logos.co";
 /// The Names faucet for the public LEZ testnet, reached through the gateway.
 const FAUCET_URL: &str = "https://logos-names.wrapit.workers.dev/faucet";
 
@@ -311,35 +315,62 @@ struct Client {
     program: AccountId,
 }
 
-/// Where the registry's own bytecode can be fetched, by program ID. A private
-/// holder's client runs the program inside its proof, so it needs the exact
-/// bytecode the chain has; the sequencer refuses a proof of any other.
-const PROGRAM_BYTECODE_URL: &str = "https://logos-names.wrapit.workers.dev/dl/program";
-
 impl Client {
-    /// The registry's bytecode: `LOGOS_NAMES_PROGRAM_ELF` if set, else a copy cached
-    /// next to the wallet, else downloaded once from the gateway.
-    fn program_bytecode(&self) -> Result<Vec<u8>> {
+    /// The registry's bytecode, read from the chain itself: the program loader keeps it in a
+    /// chain of segment accounts behind the program's header. A private holder's client runs
+    /// the program inside its proof, so it needs the exact bytecode the chain has; the result
+    /// is checked against the header's image ID, and cached next to the wallet.
+    /// `LOGOS_NAMES_PROGRAM_ELF` overrides it with a local file.
+    async fn program(&self) -> Result<Program> {
         if let Some(path) = std::env::var_os("LOGOS_NAMES_PROGRAM_ELF") {
-            return std::fs::read(&path)
-                .with_context(|| format!("cannot read {}", PathBuf::from(path).display()));
+            let bytes = std::fs::read(&path)
+                .with_context(|| format!("cannot read {}", PathBuf::from(path).display()))?;
+            return Program::new(bytes.into())
+                .map_err(|error| anyhow!("the registry's bytecode does not load: {error}"));
         }
+        let header = ProgramHeader::from_bytes(&self.loader_shard(self.program).await?)
+            .ok_or_else(|| anyhow!("{} is not a deployed program", self.program))?;
         let cache = fetch_persistent_storage_path()?
             .with_file_name(format!("logos-names-{}.bin", self.program));
         if let Ok(bytes) = std::fs::read(&cache) {
-            return Ok(bytes);
+            if let Ok(program) = Program::new(bytes.into()) {
+                if program.id() == header.image_id {
+                    return Ok(program);
+                }
+            }
         }
-        let url = format!("{PROGRAM_BYTECODE_URL}/{}.bin", self.program);
-        println!("fetching the registry's bytecode from {url}");
-        let bytes = ureq::get(&url)
-            .call()
-            .with_context(|| format!("cannot fetch {url}; set LOGOS_NAMES_PROGRAM_ELF"))?
-            .body_mut()
-            .with_config()
-            .limit(16 * 1024 * 1024)
-            .read_to_vec()?;
+        println!("reading the registry's bytecode from the chain");
+        let mut user_elf = Vec::new();
+        let mut next = Some(header.program_first_segment);
+        for _ in 0..MAX_PROGRAM_SEGMENTS {
+            let Some(segment) = next else { break };
+            let segment = ProgramSegment::from_bytes(&self.loader_shard(segment).await?)
+                .ok_or_else(|| anyhow!("program segment {segment} does not decode"))?;
+            user_elf.extend_from_slice(&segment.bytecode);
+            next = segment.next_segment;
+        }
+        if next.is_some() {
+            bail!("the program's segment chain is longer than {MAX_PROGRAM_SEGMENTS}");
+        }
+        // The loader stores only the user ELF; every LEZ program runs on the same kernel.
+        let bytes =
+            risc0_binfmt::ProgramBinary::new(&user_elf, risc0_zkos_v1compat::V1COMPAT_ELF).encode();
+        let program = Program::new(bytes.clone().into())
+            .map_err(|error| anyhow!("the registry's bytecode does not load: {error}"))?;
+        if program.id() != header.image_id {
+            bail!("the bytecode read from the chain does not match the program's image ID");
+        }
         std::fs::write(&cache, &bytes).ok();
-        Ok(bytes)
+        Ok(program)
+    }
+
+    async fn loader_shard(&self, account: AccountId) -> Result<Vec<u8>> {
+        let view = self
+            .wallet
+            .get_account_view(ProgramShardSelector::new(account, PROGRAM_LOADER_ACCOUNT_ID))
+            .await
+            .context("failed to read the program from the sequencer")?;
+        Ok(view.data.shard(PROGRAM_LOADER_ACCOUNT_ID).to_vec())
     }
 
     /// The wallet's account that holds `record` as the name `id`, public or private.
@@ -683,8 +714,7 @@ impl Client {
             .collect();
         let mut secrets = Vec::new();
         let hash = if private {
-            let program = Program::new(self.program_bytecode()?.into())
-                .map_err(|error| anyhow!("the registry's bytecode does not load: {error}"))?;
+            let program = self.program().await?;
             let program = ProgramWithDependencies::new(program, self.program, Default::default());
             println!("acting privately; generating the proof (this takes minutes)");
             let (hash, shared) = self

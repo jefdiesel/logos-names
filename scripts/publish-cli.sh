@@ -36,13 +36,6 @@ gh run download "$run" --name names-linux-x86_64 --dir "$tmp"
 cp "$tmp/names-linux-x86_64" "$DL/names-linux-x86_64"
 rm -rf "$tmp"
 
-echo "== registry bytecode, for clients proving private changes (CI guest of commit 6a08124)"
-PROGRAM_ID=${NAMES_PROGRAM:-66nUvzJtTxA729aUpTcAWDrb7cV9Heb2bDzceHQhLYad}
-PROGRAM_SHA=${PROGRAM_SHA:-506bfbfd0c4dd388c33c8169f6dd24a14620464b9f583aa15042825bbfc3e9c4}
-mkdir -p "$DL/program"
-scp -q "$MINI:$DEV/logos_names-ci-$(echo "$PROGRAM_SHA" | cut -c1-8).bin" "$DL/program/$PROGRAM_ID.bin"
-echo "$PROGRAM_SHA  $DL/program/$PROGRAM_ID.bin" | shasum -a 256 -c -
-
 echo "== MCP server, bundled into one file"
 (cd gateway && npx rolldown ../mcp/server.js --platform node --format esm --file public/mcp.js)
 

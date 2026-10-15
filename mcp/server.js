@@ -21,8 +21,8 @@ import {
   reverseLookup,
 } from "../resolver/names.js";
 
-/** The public LEZ testnet, reached through the gateway; the CLI defaults to it too. */
-const DEFAULT_RPC = "https://logos-names.wrapit.workers.dev/rpc";
+/** The public LEZ testnet's sequencer, reached directly; the CLI defaults to it too. */
+const DEFAULT_RPC = "https://testnet.lez.logos.co";
 const DEFAULT_PROGRAM = "66nUvzJtTxA729aUpTcAWDrb7cV9Heb2bDzceHQhLYad";
 const rpcUrl = process.env.LEZ_RPC_URL || DEFAULT_RPC;
 const program = process.env.NAMES_PROGRAM || DEFAULT_PROGRAM;
