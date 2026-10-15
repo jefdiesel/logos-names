@@ -1,13 +1,13 @@
 ---
 id: RFP-0XX
-title: LNS — LEZ Name Service (private .lez names, with a website at each name)
+title: LNS — LEZ Name Service (.lez names, private by default)
 tier: S
 status: suggested
 category: Developer Tooling & Infrastructure
 dependencies: []
 ---
 
-# RFP-0XX — LNS: LEZ Name Service (private .lez names, with a website at each name)
+# RFP-0XX — LNS: LEZ Name Service (.lez names, private by default)
 
 > **Suggested RFP.** Written by the author of [Logos Names](https://github.com/jefdiesel/logos-names),
 > a working prototype on the LEZ testnet, as a proposal for the Logos RFP
@@ -20,27 +20,27 @@ LEZ needs human-readable names, so people can pay `alice.lez` instead of a
 32-byte account ID, and so apps, chat and agents can find each other by name.
 Every existing name system (ENS, SNS, Handshake) is a public directory: a
 name points at a public address, so resolving a name exposes that address's
-balance and history, and anyone can list every name and who owns it. That is
-the opposite of what Logos stands for. This RFP asks for a **private naming
-standard and program for LEZ**: a name can be paid without anyone, the payer
-included, learning the account behind it; the chain never sees names; nobody
-can list or browse them; and who holds a name is hidden. Every name is also
-a **website address**: `alice.lez` serves its page at `alice.<gateway domain>`,
-so a name works in a browser as well as in a wallet. A team with LEZ program, zero-knowledge and
-wallet experience is a good fit.
+balance and history, and anyone can list every name and who owns it. This RFP
+asks for a **naming standard and program for LEZ that is private by default
+and public by choice**: by default a name can be paid without anyone, the
+payer included, learning the account behind it; a holder who wants a public
+address (a shop, a project, donations) can publish one. Either way the chain
+never sees names, nobody can list or browse them, and who holds a name is
+hidden. A team with LEZ program, zero-knowledge and wallet experience is a
+good fit.
 
 ## 🔥 Why This Matters
 
 Readable names are one of the main things that make a chain usable: people
-remember `alice.lez`, not account IDs. But a public name service on a privacy
-chain undoes its privacy, because the name becomes a permanent public label on
-an account. LEZ's private accounts make a better design possible: a name can
-carry only private receiving keys, so every payment to it lands as a private
-note that observers can't attribute. Names also give Logos Messaging, Storage
-and Basecamp apps a shared way to find a person or service (`chat`, `inbox`,
-`agent` entries). And a name that is also a URL gives every person or project
-on Logos a website they control from their wallet, with no hosting account,
-no DNS registrar and no record of who owns it.
+remember `alice.lez`, not account IDs. But a name service that only maps names
+to public addresses undoes a privacy chain's privacy, because every name
+becomes a permanent public label on an account. LEZ's private accounts make a
+better default possible: a name carries private receiving keys, so every
+payment to it lands as a private note that observers can't attribute. Some
+names should be public (a shop, a DAO, a donations page), so the holder can
+also publish a public address. Names also give Logos Messaging, Storage and
+apps a shared way to find a person or service (`chat`, `inbox`, `agent`
+entries).
 
 ## ✅ Scope of Work
 
@@ -53,15 +53,18 @@ no DNS registrar and no record of who owns it.
    costly). The chain stores only the identifier and a record sealed under the
    key. An observer who doesn't know a name cannot learn it, list names, or
    link two records.
-2. **Pay a name without learning its address.** A name carries private
-   receiving keys (LEZ nullifier and viewing public keys), never a public
-   account ID. Paying a name sends a private transfer to those keys; the
-   chain shows neither the recipient nor the amount, and the payer learns no
-   account, balance or history of the recipient. Paying from a private account
-   also hides the payer.
-3. **Receiving keys from the start.** Registering a name gives it receiving
-   keys of a fresh private account, so it is payable immediately. The holder
-   can rotate them.
+2. **Private by default.** A name carries private receiving keys (LEZ
+   nullifier and viewing public keys). Paying it sends a private transfer to
+   those keys: the chain shows neither the recipient nor the amount, and the
+   payer learns no account, balance or history of the recipient. Paying from
+   a private account also hides the payer. Registering a name gives it keys of
+   a fresh private account, so it is payable at once; the holder can rotate
+   them.
+3. **Public by choice.** A holder can also publish a public account on a name,
+   for names that should be openly payable (a shop, a project, donations).
+   Wallets then let the payer choose public or private, and say clearly that a
+   public address shows its balance and history to anyone who resolves the
+   name.
 4. **Hidden holders.** The chain stores only a tag of the holder, unique per
    name, so two names held by the same account cannot be linked. A holder
    acting from a private account never appears on chain.
@@ -73,20 +76,13 @@ no DNS registrar and no record of who owns it.
 7. **Records:** receiving keys, free-form text entries (such as `chat`,
    `inbox`, `agent`), and a page of at least 64 KiB, all sealed under the
    name's key.
-8. **A website at every name.** A gateway serves a name's page at
-   `alice.<gateway domain>` (one subdomain per name, through a wildcard), and
-   the name's public record as JSON at a well-known path. The JSON shows only
-   when the name expires, whether it can be paid, and the entries the holder
-   chose to publish; never an address or keys. Anyone can run a gateway on
-   their own domain; a gateway only learns the names it is asked for, and
-   serves pages so one name's page can't read another's data.
-9. **Logos Chat usernames.** A name's `chat` entry points at its holder's chat
+8. **Logos Chat usernames.** A name's `chat` entry points at its holder's chat
     address, so a chat client can open a conversation from `alice.lez`, and can
     show a name as verified for a sender whose chat address the name's record
     points back to. Chat usernames can be LNS names, which gives them
     uniqueness and ordering from the registry. The holder opts in per name, and
     their other names stay unlinked.
-10. **No server in the trust path.** Clients talk to a LEZ sequencer directly,
+9. **No server in the trust path.** Clients talk to a LEZ sequencer directly,
     read the program's bytecode from the chain when they need it to prove, and
     work without any gateway, faucet or indexer run by the team.
 
@@ -125,14 +121,14 @@ no DNS registrar and no record of who owns it.
 
 1. Deployed and tested on the LEZ testnet, with program addresses published.
 2. End-to-end tests against a standalone LEZ sequencer in CI, including the
-   private paths (proof generation) and the gateway.
+   private paths (proof generation).
 3. A specification precise enough for an independent wallet to implement
    resolution and payment without this code.
 4. A privacy properties document: what observers see for each operation, what
    private paths protect, trust assumptions, and what leaks if a client misbehaves
-   (for example, anyone who types an exact name can see that it exists and
-   read the entries its holder published, but never an address, balance or
-   payment history).
+   (for example, anyone who types an exact name can see that it exists, when
+   it was last changed and what its holder published; for a private-only
+   name, never an address, balance or payment history).
 5. A design decision log.
 6. CI green on the default branch; MIT + Apache-2.0 licence.
 
@@ -151,6 +147,8 @@ no DNS registrar and no record of who owns it.
 
 ### Future ideas (not in scope)
 
+- **A website at every name:** a gateway serving `alice.lez`'s page at
+  `alice.<gateway domain>`, through a wildcard subdomain.
 - **Subnames** such as `pay.alice.lez`: names under a name, created by its
   holder, that observers can't link to the parent.
 
@@ -164,10 +162,9 @@ no DNS registrar and no record of who owns it.
 ## ⏱ Timeline Expectations
 
 Estimated duration: **2–3 weeks**. The prototype linked below, which already
-meets most hard requirements, was built in about two days. What remains is the
-gateway on a domain with a subdomain per name, Logos Chat integration, CI
-tests for the private paths, the privacy properties document and the design
-log.
+meets most hard requirements, was built in about two days. What remains is
+the public-address option in the client, Logos Chat integration, CI tests for
+the private paths, the privacy properties document and the design log.
 
 ## 🌍 Open Source Requirement
 
@@ -177,7 +174,8 @@ All code must be released under the **MIT + Apache-2.0 License**.
 
 - Prototype: [jefdiesel/logos-names](https://github.com/jefdiesel/logos-names),
   running on the LEZ testnet as registry `66nUvzJtTxA729aUpTcAWDrb7cV9Heb2bDzceHQhLYad`.
-  It already does requirements 1–8 and 10, and the `chat` entry of 9 (not chat-client integration; its gateway runs at `/<name>` paths until it has a domain with a wildcard), with a
+  It already does requirements 1, 2, 4–7 and 9, and the `chat` entry of 8 (the
+  program supports public addresses; the client doesn't offer them yet), with a
   [specification](https://github.com/jefdiesel/logos-names/blob/main/SPEC.md),
   a CLI, a resolver library, a gateway and an MCP server. Guide:
   https://logos-names.wrapit.workers.dev/
