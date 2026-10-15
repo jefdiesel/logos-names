@@ -357,6 +357,16 @@ export async function resolveName(rpcUrl, program, name, now = Date.now()) {
 }
 
 /**
+ * What a name shows people: whether it can be paid, never an address or the
+ * receiving keys behind it. A payer's wallet uses the keys from `resolveName`
+ * without displaying them.
+ */
+export function publicView(record) {
+  const { name, expires, lapsed, npk, vpk, texts } = record;
+  return { name, expires, lapsed, payable: Boolean(npk && vpk), texts };
+}
+
+/**
  * The page for `name` at the time `now`, or null when the name is not
  * registered or is past its grace period, has no page, or the page does not
  * open with the name's key.

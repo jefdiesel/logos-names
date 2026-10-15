@@ -16,7 +16,7 @@
 //                   forward `/faucet` to it and `/rpc` to LEZ_RPC_URL, so clients
 //                   reach the chain through the gateway's address.
 
-import { isValidName, normalizeName, resolveName, resolvePage } from "../resolver/names.js";
+import { isValidName, normalizeName, publicView, resolveName, resolvePage } from "../resolver/names.js";
 
 const RECORD_PATH = "/.well-known/logos-name.json";
 
@@ -145,7 +145,7 @@ export default {
     try {
       if (path === RECORD_PATH) {
         const record = await resolveName(rpcUrl, program, name);
-        return record ? json(record) : json({ error: "not registered", name }, 404);
+        return record ? json(publicView(record)) : json({ error: "not registered", name }, 404);
       }
       if (path !== "/") return text("not found", 404);
 

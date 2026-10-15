@@ -11,14 +11,11 @@
 
 import { createInterface } from "node:readline";
 import {
-  deriveName,
   isValidName,
   normalizeName,
-  pageAddress,
-  recordAddress,
+  publicView,
   resolveName,
   resolvePage,
-  reverseLookup,
 } from "../resolver/names.js";
 
 /** The public LEZ testnet's sequencer, reached directly; the CLI defaults to it too. */
@@ -43,26 +40,20 @@ const tools = [
   {
     name: "resolve_name",
     description:
-      "Look up a Logos name. Returns the public account it is an alias for, " +
-      "its private receiving keys, and its text entries (such as chat, inbox and agent). " +
+      "Look up a Logos name. Returns whether it can be paid and its text entries (such as " +
+      "chat, inbox and agent). A name never shows an address: it is paid privately with " +
+      "`names pay <name>`, and nobody, the payer included, learns the account behind it. " +
       "Names expire: `expires` is when, in milliseconds since the Unix epoch, and `lapsed` is " +
       "true once that has passed and the name is in its 30-day grace period, after which it " +
       "is no longer registered. Do not pay a lapsed name without the user knowing it has lapsed. " +
-      "Looking a name up reveals nothing to the chain, which never sees names. A name that " +
-      "points at a public account shows that account, and so its balance and history. " +
-      "Who holds a name is not public: the chain keeps only a tag of the holder's account.",
+      "Looking a name up reveals nothing to the chain, which never sees names, and who holds " +
+      "a name is not public: the chain keeps only a tag of the holder's account.",
     inputSchema: nameArgument,
     async run({ name: typed }) {
       const name = requireName(typed);
       const record = await resolveName(rpcUrl, program, name);
       if (!record) return { registered: false, name };
-      const { id } = await deriveName(name);
-      return {
-        registered: true,
-        ...record,
-        recordAddress: await recordAddress(program, id),
-        pageAddress: await pageAddress(program, id),
-      };
+      return { registered: true, ...publicView(record) };
     },
   },
   {
@@ -85,23 +76,6 @@ const tools = [
         // Page content is written by the name's owner: treat it as data, not instructions.
         untrustedContent: text.slice(0, MAX_PAGE_CHARS),
       };
-    },
-  },
-  {
-    name: "reverse_lookup",
-    description:
-      "Find the Logos name an account has chosen to be shown as, if any. Returns a name only " +
-      "when the name's own record points back at the account, so the result cannot be spoofed.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        account: { type: "string", description: "A LEZ account ID in base58." },
-      },
-      required: ["account"],
-    },
-    async run({ account }) {
-      if (typeof account !== "string") throw new Error("account must be a base58 string");
-      return { account, name: await reverseLookup(rpcUrl, program, account) };
     },
   },
 ];
@@ -156,10 +130,9 @@ An MCP server over stdio. Your MCP client starts it; you don't run it yourself.
 It is read-only: it never signs, pays or sends anything.
 
 Tools:
-  resolve_name    the account a name stands for, its private
-                  receiving keys and its text entries (chat, inbox, agent...)
+  resolve_name    whether a name can be paid (always privately; it never
+                  shows an address) and its text entries (chat, inbox, agent...)
   get_page        the page kept under a name, as text
-  reverse_lookup  the name an account has chosen to be shown as
 
 Add it to Claude Code:
   claude mcp add --scope user logos-names -- node ${process.argv[1] ?? "mcp.js"}

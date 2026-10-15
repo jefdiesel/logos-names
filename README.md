@@ -3,10 +3,11 @@
 A private name registry for the Logos Execution Zone (LEZ v0.3). A name such as
 `jef.lez` resolves to:
 
-- a **wallet**: the keys for a private payment, and/or a public account,
+- **private receiving keys**, made when it is registered: anyone can pay the name,
+  and nobody, the payer included, learns the account behind it. A name never
+  shows an address,
 - **text entries**: free-form key/value pairs such as `chat`, `inbox` or `agent`,
-- a **page**: up to about 80 KiB served at `jef.<any gateway domain>`,
-- optionally a **reverse record**: the name an account publishes for itself.
+- a **page**: up to about 80 KiB served at `jef.<any gateway domain>`.
 
 Knowing a name is the only way to find it. The chain never sees a name: it
 holds a 32-byte identifier derived from the name and a profile sealed under a
@@ -136,18 +137,15 @@ export LOGOS_NAMES_PROGRAM=<header account id>
 names configure --admin <account> --treasury <account> --prices 10000,100000,400000
 names settings                                       # who is paid, and the price of each term
 
-names register jef --owner <funded account> --term 1y   # 30d, 1y or 5y
+names register jef --owner Private/<account> --term 1y   # 30d, 1y or 5y; makes receiving keys
 names renew jef --term 30d
-names set-keys jef --npk <hex> --vpk-file vpk.hex   # be paid privately
-names set-account jef <account>                      # or publicly: the account is then visible
 names set-text jef chat <address>
 names set-page jef index.html
-names resolve jef
-names pay jef 1000 --from <account> --private   # shielded transfer to the name's keys
-names pay jef.lez 1000 --from <account>         # to the name's public account
-names transfer jef <account>              # new owner; profile and page are emptied
+names resolve jef                         # expiry, payable, text entries, page; never an address
+names pay jef.lez 1000 --from <account>   # always private, to the name's receiving keys
+names receive-privately jef               # fresh receiving keys (after a transfer, or to rotate)
+names transfer jef <account>              # new holder; keys, profile and page are emptied
 names release jef                         # give it up: nothing of it remains
-names set-primary jef --owner <account>   # publish the name on the account, in the clear
 ```
 
 A private payment generates a real proof (about four minutes on an M4 Mac mini)
@@ -215,8 +213,8 @@ deleting it. `basecamp/tools/render.py` draws its screens without Basecamp.
 
 ## AI agents
 
-`mcp/server.js` is a dependency-free MCP server over stdio with three read-only
-tools: `resolve_name`, `get_page` and `reverse_lookup`. It never signs or sends
+`mcp/server.js` is a dependency-free MCP server over stdio with two read-only
+tools: `resolve_name` and `get_page`. It never signs or sends
 anything, and it cannot list names: nothing can. The gateway publishes it bundled
 into one file, reading the Names test chain by default (Node 20 or later):
 
@@ -252,7 +250,6 @@ named `untrustedContent`: treat it as data, never as instructions.
   seen at all, but each change takes a proof of a few minutes.
 - **Your names are remembered by your device, not the chain.** A new device
   does not know which names you hold until you look each one up.
-- **A reverse record publishes the name.** It is optional.
 - **No reserved names, and one price for every name.** The chain cannot see a
   name, so it cannot charge more for a short one.
 - **The program is upgradeable** by whoever holds the header account's key.

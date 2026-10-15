@@ -62,8 +62,7 @@
 
   <h2>Look names up</h2>
   <p>No wallet or setup needed:</p>
-<pre><code>names resolve jef.lez        <span class="c"># what the name points to, as JSON</span>
-names reverse &lt;account&gt;      <span class="c"># the name an account goes by</span>
+<pre><code>names resolve jef.lez        <span class="c"># expiry, whether it can be paid, text entries, page</span>
 names settings               <span class="c"># the registry's prices</span></code></pre>
 
   <h2>Get a name</h2>
@@ -86,22 +85,22 @@ names wallet account get --account-id Public/&lt;account&gt;                    
 <pre><code>names wallet account new private
 names wallet auth-transfer send --from Public/&lt;account&gt; --to Private/&lt;private&gt; --amount 1000000</code></pre>
   <p>4. Register, then point the name somewhere:</p>
-<pre><code>names register myname --owner Private/&lt;private&gt; --term 1y   <span class="c"># 30d, 1y or 5y</span>
-names receive-privately myname                     <span class="c"># payments to myname.lez stay private</span>
+<pre><code>names register myname --owner Private/&lt;private&gt; --term 1y   <span class="c"># 30d, 1y or 5y; payable at once</span>
 names set-text myname chat &lt;address&gt;               <span class="c"># optional text entries</span>
 names set-page myname index.html                   <span class="c"># optional page at /myname</span></code></pre>
 
   <h2>Pay a name</h2>
-<pre><code>names pay jef.lez 1000 --from &lt;account&gt;             <span class="c"># to its public account</span>
-names pay jef.lez 1000 --from &lt;account&gt; --private   <span class="c"># shielded; the proof takes minutes</span></code></pre>
-  <p>Payments sent with <code>--private</code> land on a fresh private account. The recipient
-  finds them with <code>names wallet account sync-private</code>. Everything private (holding a
+<pre><code>names pay jef.lez 1000 --from &lt;account&gt;   <span class="c"># private; the proof takes a few minutes</span></code></pre>
+  <p>A name never shows an address. It carries private receiving keys, made when it is
+  registered, and every payment goes to them: the chain shows neither the recipient nor the
+  amount, and nobody, the payer included, learns the account behind the name. The recipient
+  finds payments with <code>names wallet account sync-private</code>. Everything private (holding a
   name, shielding tokens, private payments) is proven on your machine by RISC Zero's prover,
   <code>r0vm</code>, which the installer fetches from RISC Zero's own release.</p>
 
   <h2>For AI agents</h2>
   <p>An MCP server lets Claude, or any MCP client, look names up as tools:
-  <code>resolve_name</code>, <code>get_page</code> and <code>reverse_lookup</code>. It is one
+  <code>resolve_name</code> and <code>get_page</code>. It is one
   file, needs Node 20 or later, reads the public LEZ testnet by default and never signs or sends anything.</p>
 <pre><code>curl -fsSLo ~/.logos-names-mcp.js https://logos-names.wrapit.workers.dev/mcp.js
 claude mcp add --scope user logos-names -- node ~/.logos-names-mcp.js</code></pre>

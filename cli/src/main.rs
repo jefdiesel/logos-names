@@ -22,7 +22,7 @@ use lee_core::{
 };
 use lee::{privacy_preserving_transaction::circuit::ProgramWithDependencies, program::Program};
 use names_core::{
-    Effect, GRACE_MS, Instruction, NAME_SUFFIX, NameId, NameRecord, Page, PrimaryName, Settings,
+    Effect, GRACE_MS, Instruction, NAME_SUFFIX, NameId, NameRecord, Page, Settings,
     normalize_name, owner_tag, page_address, record_address, settings_address,
     validate_name,
 };
@@ -126,31 +126,9 @@ enum Command {
     },
     /// Print the registry's admin, treasury and prices, as JSON.
     Settings,
-    /// Point the name at a public account.
-    SetAccount {
-        #[arg(value_parser = parse_name)]
-        name: String,
-        #[arg(value_parser = parse_account)]
-        account: AccountId },
-    /// Publish the keys needed for private transfers to this name.
-    SetKeys {
-        #[arg(value_parser = parse_name)]
-        name: String,
-        /// Nullifier public key, 32 bytes hex.
-        #[arg(long)]
-        npk: String,
-        /// File holding the hex-encoded viewing public key (1184 bytes).
-        #[arg(long)]
-        vpk_file: PathBuf,
-    },
-    /// Make a new private account in the wallet and publish its receiving keys on
-    /// the name, so payments to the name stay private.
+    /// Give the name fresh private receiving keys, from a new private account in this
+    /// wallet. Registering does this already; use it after a transfer, or to rotate.
     ReceivePrivately {
-        #[arg(value_parser = parse_name)]
-        name: String,
-    },
-    /// Remove the public account and private keys from the name.
-    ClearAddresses {
         #[arg(value_parser = parse_name)]
         name: String,
     },
@@ -166,7 +144,7 @@ enum Command {
         #[arg(value_parser = parse_name)]
         name: String,
     },
-    /// Hand the name to another account. Its addresses, text entries and page are cleared.
+    /// Hand the name to another account. Its receiving keys, text entries and page are cleared; the new holder runs `receive-privately`.
     Transfer {
         #[arg(value_parser = parse_name)]
         name: String,
@@ -186,38 +164,25 @@ enum Command {
         #[arg(value_parser = parse_name)]
         name: String,
     },
-    /// Set the name an account is shown as; an empty name removes it. This
-    /// publishes the name on the chain in the clear.
-    SetPrimary {
-        #[arg(value_parser = parse_name_or_empty)]
-        name: String,
-        #[arg(long)]
-        owner: AccountId,
-    },
-    /// Send native tokens to a name: to its public account, or with `--private`
-    /// to its private receiving keys.
+    /// Pay a name. The payment goes to the name's private receiving keys: nobody, the
+    /// payer included, learns the account behind the name, and the chain shows neither
+    /// recipient nor amount. Proving it takes a few minutes.
     Pay {
         #[arg(value_parser = parse_name)]
         name: String,
         /// Amount in base units.
         amount: u128,
-        /// Public account to pay from; the wallet must hold its key.
+        /// Account to pay from; the wallet must hold its key.
         #[arg(long, value_parser = parse_account)]
         from: AccountId,
-        /// Pay the name's private keys with a shielded transfer. The amount and
-        /// recipient stay off the public record; generating the proof takes a while.
-        #[arg(long)]
+        /// Accepted for older scripts; every payment is private.
+        #[arg(long, hide = true)]
         private: bool,
     },
     /// Print everything a name resolves to, as JSON.
     Resolve {
         #[arg(value_parser = parse_name)]
         name: String,
-    },
-    /// Print the name an account is shown as, checked against the forward record.
-    Reverse {
-        #[arg(value_parser = parse_account)]
-        account: AccountId,
     },
     /// Print a name's identifier and the accounts that hold its record and page.
     Address {
@@ -326,14 +291,6 @@ fn readable(time: u64) -> String {
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}Z")
 }
 
-fn parse_name_or_empty(input: &str) -> Result<String, String> {
-    if input.trim().is_empty() {
-        Ok(String::new())
-    } else {
-        parse_name(input)
-    }
-}
-
 struct Client {
     wallet: WalletCore,
     program: AccountId,
@@ -432,12 +389,6 @@ impl Client {
         ))
     }
 
-    /// The record of the name `id` as a reader sees it: a name past its grace period
-    /// is not registered, whatever its record still holds.
-    async fn live_record(&self, id: &NameId) -> Result<Option<NameRecord>> {
-        let record = self.record(id).await?;
-        Ok(record.filter(|record| local_now() < record.expires.saturating_add(GRACE_MS)))
-    }
     async fn settings(&self) -> Result<Option<Settings>> {
         let bytes = self.shard(settings_address(&self.program)).await?;
         if bytes.is_empty() {
@@ -500,7 +451,26 @@ impl Client {
         Ok((derived, record, profile))
     }
 
-    /// Registers `name` with a first profile that holds only the name.
+    /// A new private account in the wallet, and the keys a payer needs to pay it
+    /// privately: its nullifier and viewing public keys.
+    fn new_receiving_keys(&mut self) -> Result<(AccountId, [u8; 32], Vec<u8>)> {
+        if !fetch_persistent_storage_path()?.exists() {
+            bail!("there is no wallet yet; make one with `names wallet account new public`");
+        }
+        let (account, _) = self.wallet.create_new_account_private(None);
+        let keys = &self
+            .wallet
+            .storage()
+            .key_chain()
+            .private_account(account)
+            .context("the new private account is missing from the wallet")?
+            .key_chain;
+        let (npk, vpk) = (keys.nullifier_public_key.0, keys.viewing_public_key.to_bytes().to_vec());
+        self.wallet.store_persistent_data()?;
+        Ok((account, npk, vpk))
+    }
+
+    /// Registers `name` with a first profile that holds the name and its receiving keys.
     async fn register(
         &mut self,
         name: &str,
@@ -509,12 +479,18 @@ impl Client {
         now: Option<u64>,
     ) -> Result<()> {
         let Derived { id, key } = derive(name);
+        let (fee, paying) = self.price(owner, term).await?;
+        // Every name can be paid from the start, and only privately: the profile
+        // carries receiving keys of a fresh private account, never an address.
+        let (receiving, npk, vpk) = self.new_receiving_keys()?;
         let profile = Profile {
             name: name.to_owned(),
+            npk: Some(npk),
+            vpk,
             ..Profile::default()
         };
         let sealed = seal_profile(&key, &profile);
-        let (fee, paying) = self.price(owner, term).await?;
+        println!("payments to {name}{NAME_SUFFIX} will arrive privately at Private/{receiving}");
         let now = match now {
             Some(now) => now,
             None => self.now().await,
@@ -786,39 +762,6 @@ impl Client {
     }
 
     /// Pays `amount` to the public account `name` points at.
-    async fn pay(&self, name: &str, amount: u128, from: AccountId) -> Result<()> {
-        let (_, _, profile) = self.lookup(name).await?;
-        let to = profile
-            .account
-            .map(AccountId::new)
-            .ok_or_else(|| anyhow!("{name} has no public account set"))?;
-        let before = self.wallet.get_account_balance(to).await?;
-
-        println!("paying {amount} to {name}{NAME_SUFFIX} ({to})");
-        let hash = NativeTokenTransfer(&self.wallet)
-            .send_public_transfer(
-                AccountIdentity::Public(from),
-                AccountIdentity::PublicNoSign(to),
-                amount,
-            )
-            .await
-            .context("the sequencer did not accept the transfer")?;
-        println!("submitted {hash}");
-        let (_, block) = self
-            .wallet
-            .poll_transaction(hash)
-            .await
-            .context("the transfer was not included in a block")?;
-
-        // A block includes failed transactions too, so confirm the money arrived.
-        let after = self.wallet.get_account_balance(to).await?;
-        if from != to && after < before.saturating_add(amount) {
-            bail!("transfer {hash} was included in block {block} but {name} was not credited");
-        }
-        println!("paid in block {block}");
-        Ok(())
-    }
-
     /// Pays `amount` to the private receiving keys `name` publishes.
     async fn pay_private(&self, name: &str, amount: u128, from: AccountId) -> Result<()> {
         let (_, _, profile) = self.lookup(name).await?;
@@ -889,34 +832,14 @@ impl Client {
             "expires": record.expires,
             "expires_date": readable(record.expires),
             "lapsed": local_now() >= record.expires,
-            "account": profile.account.map(|account| AccountId::new(account).to_string()),
-            "npk": profile.npk.map(hex::encode),
-            "vpk": (!profile.vpk.is_empty()).then(|| hex::encode(&profile.vpk)),
+            // A name never shows an address: payers' wallets use its receiving keys
+            // without printing them, and `names pay` pays them.
+            "payable": profile.npk.is_some() && !profile.vpk.is_empty(),
             "texts": texts,
             "page": page,
         }))
     }
 
-    /// The account's primary name, or `None` unless the forward record points back at it.
-    async fn reverse(&self, account: AccountId) -> Result<Option<String>> {
-        let bytes = self.shard(account).await?;
-        if bytes.is_empty() {
-            return Ok(None);
-        }
-        let primary: PrimaryName =
-            borsh::from_slice(&bytes).context("the account's shard does not hold a primary name")?;
-        // The claim is whatever the account wrote; only a valid name can be looked up.
-        if validate_name(&primary.name).is_err() {
-            return Ok(None);
-        }
-        let Derived { id, key } = derive(&primary.name);
-        let confirmed = self.live_record(&id).await?.is_some_and(|record| {
-            record.owner == owner_tag(&id, &account)
-                || open_profile(&key, &record.sealed, &primary.name)
-                    .is_some_and(|profile| profile.account == Some(account.into_value()))
-        });
-        Ok(confirmed.then_some(primary.name))
-    }
 }
 
 /// Runs program logic that reports refusal by panicking, turning the panic into an error.
@@ -935,12 +858,6 @@ fn refusal_as_error<T>(run: impl FnOnce() -> T) -> Result<T> {
     })
 }
 
-fn parse_hex<const N: usize>(text: &str, what: &str) -> Result<[u8; N]> {
-    hex::decode(text.trim())
-        .with_context(|| format!("{what} is not valid hex"))?
-        .try_into()
-        .map_err(|_| anyhow!("{what} must be {N} bytes"))
-}
 
 /// Runs the LEZ wallet's command line with `args`, as its own `wallet` binary would.
 async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>) -> Result<()> {
@@ -1272,44 +1189,8 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&settings)?);
             Ok(())
         }
-        Command::SetAccount { name, account } => {
-            client
-                .edit(&name, |profile| {
-                    profile.account = Some(account.into_value());
-                    Ok(())
-                })
-                .await
-        }
-        Command::SetKeys {
-            name,
-            npk,
-            vpk_file,
-        } => {
-            let npk = parse_hex::<32>(&npk, "npk")?;
-            let vpk = hex::decode(std::fs::read_to_string(&vpk_file)?.trim())
-                .context("the vpk file is not valid hex")?;
-            client
-                .edit(&name, |profile| {
-                    profile.npk = Some(npk);
-                    profile.vpk = vpk;
-                    Ok(())
-                })
-                .await
-        }
         Command::ReceivePrivately { name } => {
-            if !fetch_persistent_storage_path()?.exists() {
-                bail!("there is no wallet yet; make one with `names wallet account new public`");
-            }
-            let (account, _) = client.wallet.create_new_account_private(None);
-            let keys = &client
-                .wallet
-                .storage()
-                .key_chain()
-                .private_account(account)
-                .context("the new private account is missing from the wallet")?
-                .key_chain;
-            let (npk, vpk) = (keys.nullifier_public_key.0, keys.viewing_public_key.to_bytes().to_vec());
-            client.wallet.store_persistent_data()?;
+            let (account, npk, vpk) = client.new_receiving_keys()?;
             println!("made private account Private/{account} to receive payments to {name}{NAME_SUFFIX}");
             client
                 .edit(&name, |profile| {
@@ -1320,16 +1201,6 @@ async fn main() -> Result<()> {
                 .await?;
             println!("payments arrive privately; see them with `names wallet account sync-private`");
             Ok(())
-        }
-        Command::ClearAddresses { name } => {
-            client
-                .edit(&name, |profile| {
-                    profile.account = None;
-                    profile.npk = None;
-                    profile.vpk = Vec::new();
-                    Ok(())
-                })
-                .await
         }
         Command::SetText { name, key, value } => {
             validate_text_key(&key).map_err(|reason| anyhow!(reason))?;
@@ -1362,38 +1233,9 @@ async fn main() -> Result<()> {
                 .await
         }
         Command::ClearPage { name } => client.set_page(&name, None).await,
-        Command::SetPrimary { name, owner } => {
-            if !name.is_empty() {
-                eprintln!(
-                    "warning: this publishes {name}{NAME_SUFFIX} on the chain in the clear, as \
-                     the name of {owner}"
-                );
-            }
-            client
-                .send(vec![(owner, true)], &Instruction::SetPrimary { name })
-                .await
-        }
-        Command::Pay {
-            name,
-            amount,
-            from,
-            private,
-        } => {
-            if private {
-                client.pay_private(&name, amount, from).await
-            } else {
-                client.pay(&name, amount, from).await
-            }
-        }
+        Command::Pay { name, amount, from, .. } => client.pay_private(&name, amount, from).await,
         Command::Resolve { name } => {
             println!("{}", serde_json::to_string_pretty(&client.resolve(&name).await?)?);
-            Ok(())
-        }
-        Command::Reverse { account } => {
-            match client.reverse(account).await? {
-                Some(name) => println!("{name}{NAME_SUFFIX}"),
-                None => println!("(no confirmed primary name)"),
-            }
             Ok(())
         }
         Command::Address { .. }

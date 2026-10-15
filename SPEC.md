@@ -43,8 +43,11 @@ What this does not hide:
   a private account to avoid that.
 - **The connection.** Whoever serves the sequencer's RPC sees which record
   addresses a client reads and from where, though not the names.
-- **A reverse record** (section 6) publishes a name in the clear. It is
-  optional and exists for holders who want their account shown by name.
+- **Clients never tie a name to an account.** A conforming client sets only
+  `npk` and `vpk` in a profile, never `account`; pays a name only through its
+  receiving keys; never displays an address or the keys behind a name; and
+  writes no reverse record (section 6). Those fields remain in the format for
+  compatibility only.
 
 ## 2. Names
 
