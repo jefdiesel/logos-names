@@ -1,7 +1,7 @@
 ---
 id: RFP-0XX
 title: LNS — LEZ Name Service (private .lez names, with a website at each name)
-tier: M
+tier: S
 status: suggested
 category: Developer Tooling & Infrastructure
 dependencies: []
@@ -97,12 +97,10 @@ no DNS registrar and no record of who owns it.
 2. Provide a CLI covering all operations, installable with one command on
    macOS (Apple silicon) and Linux (x86_64), including RISC Zero's prover for
    private actions.
-3. Provide a Logos mini-app (Basecamp) for looking up, paying and managing
-   names.
-4. Provide an IDL for the LEZ program, preferably with SPEL once it supports
+3. Provide an IDL for the LEZ program, preferably with SPEL once it supports
    LEZ v0.3.
-5. Provide an MCP server so AI agents can resolve names, read-only.
-6. Paying a name is one command or one button: the user never handles keys or
+4. Provide an MCP server so AI agents can resolve names, read-only.
+5. Paying a name is one command or one button: the user never handles keys or
    account IDs.
 
 #### Reliability
@@ -140,15 +138,16 @@ no DNS registrar and no record of who owns it.
 
 ### Soft Requirements
 
-1. Private funding of a holder or payer account in one step (faucet or bridge
+1. A Logos mini-app (Basecamp) for looking up, paying and managing names.
+2. Private funding of a holder or payer account in one step (faucet or bridge
    deposit straight into a private account).
-2. Payments that don't block the user: proving in the background with a
+3. Payments that don't block the user: proving in the background with a
    notification when it lands.
-3. Reverse resolution that an account holder opts into without linking their
+4. Reverse resolution that an account holder opts into without linking their
    other names.
-4. Integration with Logos Messaging (`chat` entry opens a conversation) and
+5. Integration with Logos Messaging (`chat` entry opens a conversation) and
    Logos Storage (pages larger than one account).
-5. A migration path when LEZ or its account model changes between testnets.
+6. A migration path when LEZ or its account model changes between testnets.
 
 ### Future ideas (not in scope)
 
@@ -164,7 +163,11 @@ no DNS registrar and no record of who owns it.
 
 ## ⏱ Timeline Expectations
 
-Estimated duration: **6–10 weeks**.
+Estimated duration: **2–3 weeks**. The prototype linked below, which already
+meets most hard requirements, was built in about two days. What remains is the
+gateway on a domain with a subdomain per name, Logos Chat integration, CI
+tests for the private paths, the privacy properties document and the design
+log.
 
 ## 🌍 Open Source Requirement
 

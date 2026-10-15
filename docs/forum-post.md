@@ -38,7 +38,7 @@ Hypothesis: private names that are still payable are a basic primitive that paym
 
 ## Scope (suggested RFP)
 
-Full spec, in Logos RFP format (tier M, 6–10 weeks): https://github.com/jefdiesel/logos-names/blob/main/docs/RFP-private-naming.md
+Full spec, in Logos RFP format (tier S, 2–3 weeks; the prototype took about two days): https://github.com/jefdiesel/logos-names/blob/main/docs/RFP-private-naming.md
 
 In short:
 1. Names never reach the chain (slow client-side derivation; identifier plus sealed record).
