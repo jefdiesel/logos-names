@@ -37,6 +37,9 @@ use wallet::{
     program_facades::native_token_transfer::NativeTokenTransfer,
 };
 
+/// The text entry linking a name to a Logos account (an AccountLog address).
+const LOGOS_ACCOUNT_KEY: &str = "logos.account";
+
 /// The registry on the public LEZ testnet (deployed 2026-10-15). Used unless
 /// `--program` or `LOGOS_NAMES_PROGRAM` names another.
 const DEFAULT_PROGRAM: &str = "66nUvzJtTxA729aUpTcAWDrb7cV9Heb2bDzceHQhLYad";
@@ -145,6 +148,31 @@ enum Command {
     ReceivePrivately {
         #[arg(value_parser = parse_name)]
         name: String,
+    },
+    /// Link the name to a Logos account (an AccountLog address: the account's Ed25519
+    /// public key, 64 lowercase hex characters). Anyone who resolves the name sees it.
+    /// The link is confirmed only when the account's log endorses the name too: see
+    /// `account-log-entry` and `verify-account`. An empty address removes it.
+    SetLogosAccount {
+        #[arg(value_parser = parse_name)]
+        name: String,
+        address: String,
+    },
+    /// Print the AccountLog entry (hex) by which a Logos account endorses this name, for
+    /// the account's owner to append to their log and sign.
+    AccountLogEntry {
+        #[arg(value_parser = parse_name)]
+        name: String,
+    },
+    /// Check that the name and a Logos account point at each other: the name's
+    /// `logos.account` is the address the signed log verifies under, and the log's live
+    /// entries endorse the name. Prints the account's live keys and records as JSON.
+    VerifyAccount {
+        #[arg(value_parser = parse_name)]
+        name: String,
+        /// The account's signed log (signature, then payload), as raw bytes or hex.
+        #[arg(long)]
+        log: PathBuf,
     },
     /// Set a text entry such as `chat`, `inbox` or `agent`; an empty value removes it.
     SetText {
@@ -1244,6 +1272,10 @@ async fn main() -> Result<()> {
         None => DEFAULT_PROGRAM.parse().map_err(|_| anyhow!("bad built-in program ID"))?,
     };
 
+    if let Command::AccountLogEntry { name } = &cli.command {
+        println!("{}", hex::encode(names_accountlog::name_entry(&format!("{name}{NAME_SUFFIX}"))));
+        return Ok(());
+    }
     if let Command::Address { name } = &cli.command {
         let Derived { id, .. } = derive(name);
         println!("id     {}", hex::encode(id));
@@ -1319,6 +1351,62 @@ async fn main() -> Result<()> {
             println!("payments arrive privately; see them with `names wallet account sync-private`");
             Ok(())
         }
+        Command::SetLogosAccount { name, address } => {
+            if !address.is_empty() {
+                names_accountlog::parse_address(&address).map_err(|e| anyhow!(e))?;
+            }
+            client
+                .edit(&name, |profile| {
+                    profile.texts.retain(|text| text.key != LOGOS_ACCOUNT_KEY);
+                    if !address.is_empty() {
+                        profile.texts.push(TextRecord { key: LOGOS_ACCOUNT_KEY.to_owned(), value: address });
+                    }
+                    Ok(())
+                })
+                .await
+        }
+        Command::VerifyAccount { name, log } => {
+            let (_, _, profile) = client.lookup(&name).await?;
+            let address = profile
+                .texts
+                .iter()
+                .find(|text| text.key == LOGOS_ACCOUNT_KEY)
+                .map(|text| text.value.clone())
+                .ok_or_else(|| anyhow!("{name}{NAME_SUFFIX} names no Logos account"))?;
+            let bytes = std::fs::read(&log).with_context(|| format!("cannot read {}", log.display()))?;
+            // Accept the log as raw bytes or as hex text.
+            let text = String::from_utf8_lossy(&bytes);
+            let compact: String = text.split_whitespace().collect();
+            let signed = hex::decode(&compact).unwrap_or(bytes);
+            let account = names_accountlog::parse_address(&address).map_err(|e| anyhow!(e))?;
+            let live = names_accountlog::verify(&account, &signed)
+                .map_err(|e| anyhow!("the account log is not valid for {address}: {e}"))?;
+            let full_name = format!("{name}{NAME_SUFFIX}");
+            let endorsed = names_accountlog::endorses_name(&live, &full_name);
+            let entries: Vec<_> = live
+                .iter()
+                .map(|entry| {
+                    let value = match &entry.data {
+                        names_accountlog::Data::Ed25519Key(key) => hex::encode(key),
+                        names_accountlog::Data::Text(text) => text.clone(),
+                    };
+                    serde_json::json!({ "index": entry.index, "context": entry.context, "value": value })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "name": full_name,
+                    "logos_account": address,
+                    "verified": endorsed,
+                    "live_entries": entries,
+                }))?
+            );
+            if !endorsed {
+                bail!("the account's log does not endorse {full_name} (no live `{}` entry)", names_accountlog::NAME_CONTEXT);
+            }
+            Ok(())
+        }
         Command::SetText { name, key, value } => {
             validate_text_key(&key).map_err(|reason| anyhow!(reason))?;
             client
@@ -1364,6 +1452,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Address { .. }
+        | Command::AccountLogEntry { .. }
         | Command::Wallet { .. }
         | Command::Faucet { .. }
         | Command::Bridge { .. }

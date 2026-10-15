@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 names_core.workspace = true
 names_seal.workspace = true
+names_accountlog.workspace = true
 lee_core.workspace = true
 lee.workspace = true
 common.workspace = true

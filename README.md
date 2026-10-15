@@ -74,6 +74,7 @@ the SPEL framework does not support LEZ v0.3 yet (`logos-co/spel#291`).
 | `core/` | The program (`plan`, `apply`), its on-chain types and address derivation. Unit-tested on the host. |
 | `methods/guest/` | The on-chain program: a thin wrapper around `core`. |
 | `methods/` | Builds the guest with the local RISC Zero toolchain. |
+| `accountlog/` | Reads a Logos AccountLog (identity LIP) to check that an account endorses a name; tested on the LIP's vectors. |
 | `seal/` | What a client adds: deriving a name's identifier and key, and sealing and opening profiles and pages. |
 | `cli/` | `names`, the command-line client. Signs and pays through the LEZ wallet. |
 | `resolver/names.js` | Dependency-free resolver for Node, browsers and Workers. |
@@ -152,6 +153,9 @@ names resolve jef                         # expiry, payable privately, public ac
 names pay jef.lez 1000 --from <account>   # private, to the name's receiving keys
 names pay jef.lez 1000 --from <account> --public   # to its public account, if it has one
 names receive-privately jef               # fresh receiving keys (after a transfer, or to rotate)
+names set-logos-account jef <address>     # link to a Logos account (AccountLog address, 64 hex)
+names account-log-entry jef               # the AccountLog entry the account appends to endorse jef.lez
+names verify-account jef --log <file>     # both ways: name -> account, and the signed log -> name
 names transfer jef <account>              # new holder; keys, profile and page are emptied
 names release jef                         # give it up: nothing of it remains
 ```

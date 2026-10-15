@@ -228,6 +228,29 @@ application-defined and should be namespaced, for example `myapp.setting`.
 | `inbox` | A Logos Delivery content topic, `/{app}/{version}/{name}/{encoding}`. A topic routes only: anyone can read or publish to it. |
 | `agent` | A URL or address where the holder's AI agent can be reached. |
 | `cid` | A Logos Storage content ID the name pins. |
+| `logos.account` | The holder's Logos account: an [AccountLog](https://github.com/logos-co/logos-lips/blob/main/docs/identity/raw/accountlog.md) address, the account's Ed25519 public key as 64 lowercase hex characters. See below. |
+
+### Linking a name to a Logos account
+
+A Logos account (AccountLog LIP) is an Ed25519 key pair whose public key is its
+address; it publishes a signed, append-only log of the keys and records it
+endorses. The AccountLog leaves out how a consumer comes to hold an address and
+whose it is. An LNS name fills that in, with a link each way:
+
+- **Name to account:** the name's `logos.account` entry holds the address.
+- **Account to name:** the account's log has a live `Add(Text)` entry under the
+  context `lns.name` whose value is the name with its suffix, such as
+  `jef.lez`. Its bytes are `01 <len u16 LE> 08 "lns.name" 02 <name>`.
+
+A client treats a name as belonging to an account only when both hold: it
+verifies the log under the address from `logos.account` (strictly, as the
+AccountLog LIP requires), derives the live set, and finds the name in it. One
+side alone proves nothing: anyone can write any address into a name they hold,
+and any account can endorse any name. How the log is fetched (a DHT, Logos
+Storage, a file) is out of scope, as it is in the AccountLog LIP.
+
+Linking is public: anyone who resolves the name sees the address, and so the
+account's log, which is public and permanent by design.
 
 ## 8. Changing a name
 
