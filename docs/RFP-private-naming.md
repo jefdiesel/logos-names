@@ -1,13 +1,13 @@
 ---
 id: RFP-0XX
-title: Private Naming for LEZ (.lez names and subnames)
+title: LNS — LEZ Name Service (private .lez names and subnames)
 tier: M
 status: suggested
 category: Developer Tooling & Infrastructure
 dependencies: []
 ---
 
-# RFP-0XX — Private Naming for LEZ (.lez names and subnames)
+# RFP-0XX — LNS: LEZ Name Service (private .lez names and subnames)
 
 > **Suggested RFP.** Written by the author of [Logos Names](https://github.com/jefdiesel/logos-names),
 > a working prototype on the LEZ testnet, as a proposal for the Logos RFP
@@ -94,7 +94,13 @@ registering separately, which is how most real organisations use names.
    and its record as JSON at a well-known path that shows only whether the
    name can be paid and its public entries, never keys or addresses. A gateway
    only sees the names it is asked for.
-10. **No server in the trust path.** Clients talk to a LEZ sequencer directly,
+10. **Logos Chat usernames.** A name's `chat` entry points at its holder's chat
+    address, so a chat client can open a conversation from `alice.lez`, and can
+    show a name as verified for a sender whose chat address the name's record
+    points back to. Chat usernames can be LNS names, which gives them
+    uniqueness and ordering from the registry. The holder opts in per name, and
+    their other names stay unlinked.
+11. **No server in the trust path.** Clients talk to a LEZ sequencer directly,
     read the program's bytecode from the chain when they need it to prove, and
     work without any gateway, faucet or indexer run by the team.
 
@@ -175,7 +181,7 @@ All code must be released under the **MIT + Apache-2.0 License**.
 
 - Prototype: [jefdiesel/logos-names](https://github.com/jefdiesel/logos-names),
   running on the LEZ testnet as registry `66nUvzJtTxA729aUpTcAWDrb7cV9Heb2bDzceHQhLYad`.
-  It already does requirements 1–7, 9 and 10 (not subnames), with a
+  It already does requirements 1–7, 9 and 11, and the `chat` entry of 10 (not subnames or chat-client integration), with a
   [specification](https://github.com/jefdiesel/logos-names/blob/main/SPEC.md),
   a CLI, a resolver library, a gateway and an MCP server. Guide:
   https://logos-names.wrapit.workers.dev/
