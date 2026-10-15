@@ -90,7 +90,8 @@ names set-text myname chat &lt;address&gt;               <span class="c"># optio
 names set-page myname index.html                   <span class="c"># optional page at /myname</span></code></pre>
 
   <h2>Pay a name</h2>
-<pre><code>names pay jef.lez 1000 --from &lt;account&gt;   <span class="c"># private; the proof takes a few minutes</span></code></pre>
+<pre><code>names pay jef.lez 1000 --from Private/&lt;private&gt;   <span class="c"># nobody sees payer, recipient or amount</span>
+names pay jef.lez 1000 --from Public/&lt;account&gt;     <span class="c"># works too, but shows you as the payer</span></code></pre>
   <p>A name never shows an address. It carries private receiving keys, made when it is
   registered, and every payment goes to them: the chain shows neither the recipient nor the
   amount, and nobody, the payer included, learns the account behind the name. The recipient

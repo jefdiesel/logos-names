@@ -172,7 +172,8 @@ enum Command {
         name: String,
         /// Amount in base units.
         amount: u128,
-        /// Account to pay from; the wallet must hold its key.
+        /// Account to pay from; the wallet must hold its key. A private account
+        /// (`Private/<id>`) hides the payer too; a public one is seen paying.
         #[arg(long, value_parser = parse_account)]
         from: AccountId,
         /// Accepted for older scripts; every payment is private.
@@ -763,16 +764,48 @@ impl Client {
 
     /// Pays `amount` to the public account `name` points at.
     /// Pays `amount` to the private receiving keys `name` publishes.
-    async fn pay_private(&self, name: &str, amount: u128, from: AccountId) -> Result<()> {
+    async fn pay_private(&mut self, name: &str, amount: u128, from: AccountId) -> Result<()> {
         let (_, _, profile) = self.lookup(name).await?;
         let npk = profile
             .npk
             .ok_or_else(|| anyhow!("{name} has no private keys set"))?;
         let vpk = lee_core::encryption::ViewingPublicKey::from_bytes(profile.vpk)
             .map_err(|error| anyhow!("{name} publishes an invalid viewing key: {error}"))?;
+        if self.is_private(from) {
+            // From a private account neither side is seen: no sender, no recipient,
+            // no amount.
+            println!("paying {amount} privately to {name}{NAME_SUFFIX} from a private account; generating the proof");
+            let (hash, [sender_secret, _]) = NativeTokenTransfer(&self.wallet)
+                .send_private_transfer_to_outer_account(
+                    from,
+                    lee_core::NullifierPublicKey(npk),
+                    vpk,
+                    wallet::cli::identifier_or_random(None),
+                    amount,
+                )
+                .await
+                .context("the sequencer did not accept the transfer")?;
+            println!("submitted {hash}");
+            let (tx, block) = self
+                .wallet
+                .poll_transaction(hash)
+                .await
+                .context("the transfer was not included in a block")?;
+            // The sender's note was spent and its change made into a new one: record it.
+            if let common::transaction::LeeTransaction::PrivacyPreserving(tx) = &tx {
+                self.wallet.decode_insert_privacy_preserving_transaction_results(
+                    tx,
+                    &[AccDecodeData::Decode(sender_secret, from)],
+                )?;
+                self.wallet.store_persistent_data()?;
+            }
+            println!("included in block {block}; the recipient sees it after syncing their private accounts");
+            return Ok(());
+        }
         let before = self.wallet.get_account_balance(from).await?;
 
         println!("paying {amount} privately to {name}{NAME_SUFFIX}; generating the proof");
+        println!("(paying from a public account shows that account as the payer; pay from a Private/ account to hide it)");
         let (hash, _) = NativeTokenTransfer(&self.wallet)
             .send_shielded_transfer_to_outer_account(
                 AccountIdentity::Public(from),
