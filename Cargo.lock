@@ -5256,6 +5256,7 @@ dependencies = [
  "names_seal",
  "risc0-binfmt",
  "risc0-zkos-v1compat",
+ "serde",
  "serde_json",
  "tokio",
  "ureq",

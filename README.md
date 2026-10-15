@@ -48,8 +48,9 @@ curl -fsSL https://logos-names.wrapit.workers.dev/install.sh | sh
 One binary (macOS on Apple silicon, Linux x86_64) that needs neither Basecamp nor
 a separate LEZ install: `names wallet …` is the LEZ wallet's own command line,
 built in, and the public LEZ testnet is the default. Lookups work with no setup;
-`names wallet account new public` makes a wallet, `names faucet <account>` funds
-it, and `names register` gives the name private receiving keys at once. `--rpc` and `--program` point it at another chain and registry. `names --help`
+`names setup` makes a wallet with a public and a private account, funds it from
+the faucet and moves some to the private account; then `names register <name>`
+and `names pay <name>.lez <amount>` need no account arguments. `--rpc` and `--program` point it at another chain and registry. `names --help`
 and `man names` (installed alongside) cover every command. The guide is the gateway's
 front page (`gateway/public/index.html`). `scripts/publish-cli.sh` builds both
 binaries and the man pages, bundles the MCP server and deploys them with the gateway.

@@ -37,6 +37,41 @@ use wallet::{
     program_facades::native_token_transfer::NativeTokenTransfer,
 };
 
+/// This wallet's own accounts and names, kept next to the wallet so commands don't
+/// need account IDs. Written by `names setup` and `names register`.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct Defaults {
+    public: Option<String>,
+    private: Option<String>,
+    #[serde(default)]
+    names: Vec<String>,
+}
+
+fn defaults_path() -> Result<PathBuf> {
+    Ok(fetch_persistent_storage_path()?.with_file_name("names.json"))
+}
+
+fn load_defaults() -> Defaults {
+    defaults_path()
+        .ok()
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn save_defaults(defaults: &Defaults) -> Result<()> {
+    std::fs::write(defaults_path()?, serde_json::to_vec_pretty(defaults)?)?;
+    Ok(())
+}
+
+/// The account a command uses when none is given: the setup's private account.
+fn default_private() -> Result<AccountId> {
+    load_defaults()
+        .private
+        .and_then(|id| id.parse().ok())
+        .ok_or_else(|| anyhow!("no account given and none set up; run `names setup` first, or pass one"))
+}
+
 /// The text entry linking a name to a Logos account (an AccountLog address).
 const LOGOS_ACCOUNT_KEY: &str = "logos.account";
 
@@ -85,15 +120,27 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Set up this machine: a wallet with a public and a private account, funded from
+    /// the faucet, with some of it moved to the private account. Run it once; after
+    /// it, `register` and `pay` need no account arguments.
+    Setup {
+        /// How much of the faucet's payment to move to the private account.
+        #[arg(long, default_value_t = 2_000_000)]
+        shield: u128,
+    },
+    /// Show this wallet's accounts and balances.
+    Balance,
+    /// List the names this wallet holds.
+    Mine,
     /// Claim a name that is unregistered or has lapsed, paying the registry's price.
     Register {
         #[arg(value_parser = parse_name)]
         name: String,
         /// Account that will own the name and pay for it; the wallet must hold its
-        /// key. A private account (`Private/<id>`) holds the name without ever
-        /// appearing on chain, at the cost of a proof (minutes) per change.
+        /// key. Defaults to the private account from `names setup`, which never
+        /// appears on chain; each change then takes a proof of a few minutes.
         #[arg(long, value_parser = parse_account)]
-        owner: AccountId,
+        owner: Option<AccountId>,
         /// How long to hold the name: 30d, 1y or 5y.
         #[arg(long, default_value = "1y", value_parser = parse_term)]
         term: u8,
@@ -216,10 +263,11 @@ enum Command {
         name: String,
         /// Amount in base units.
         amount: u128,
-        /// Account to pay from; the wallet must hold its key. A private account
-        /// (`Private/<id>`) hides the payer too; a public one is seen paying.
+        /// Account to pay from; the wallet must hold its key. Defaults to the private
+        /// account from `names setup`, which hides the payer too; a public one is seen
+        /// paying.
         #[arg(long, value_parser = parse_account)]
-        from: AccountId,
+        from: Option<AccountId>,
         /// Pay the name's public account instead of its private keys.
         #[arg(long, conflicts_with = "private")]
         public: bool,
@@ -1052,7 +1100,19 @@ async fn open_wallet(overrides: Option<WalletConfigOverrides>) -> Result<WalletC
     if storage_path.exists() {
         return WalletCore::new_update_chain(fetch_config_path()?, storage_path, overrides);
     }
-    let (wallet, _) = WalletCore::new_init_storage(fetch_config_path()?, storage_path, overrides, "")?;
+    let (mut wallet, mnemonic) =
+        WalletCore::new_init_storage(fetch_config_path()?, storage_path, overrides, "")?;
+    // A new wallet's keys can't have anything in past blocks, so start syncing from
+    // now instead of scanning the whole chain (minutes on the testnet).
+    if let Ok(latest) = wallet.get_last_block_id().await {
+        wallet.storage_mut().set_last_synced_block(latest);
+    }
+    println!("Created a new wallet. Write down its recovery phrase and keep it safe;");
+    println!("it is the only way to get the wallet back:");
+    println!();
+    println!("  {mnemonic}");
+    println!();
+    wallet.store_persistent_data()?;
     Ok(wallet)
 }
 
@@ -1112,6 +1172,55 @@ fn faucet(account: &str, rpc: &str) -> Result<()> {
         }
     }
     bail!("the transfer has not arrived after 5 minutes; check later with `names wallet account get --account-id Public/{account}`")
+}
+
+/// `names setup`: a public and a private account, the faucet's payment, and some of
+/// it moved to the private account so names can be held and paid privately.
+async fn setup(client: &mut Client, rpc: &str, shield: u128) -> Result<()> {
+    let mut defaults = load_defaults();
+    let public: AccountId = match defaults.public.as_deref().and_then(|id| id.parse().ok()) {
+        Some(id) => id,
+        None => client.wallet.create_new_account_public(None).0,
+    };
+    let private: AccountId = match defaults.private.as_deref().and_then(|id| id.parse().ok()) {
+        Some(id) => id,
+        None => client.wallet.create_new_account_private(None).0,
+    };
+    client.wallet.store_persistent_data()?;
+    defaults.public = Some(public.to_string());
+    defaults.private = Some(private.to_string());
+    save_defaults(&defaults)?;
+    println!("public account   Public/{public}");
+    println!("private account  Private/{private}");
+
+    let mut balance = client.wallet.get_account_balance(public).await.unwrap_or(0);
+    if balance < shield {
+        println!("asking the faucet for tokens");
+        if let Err(error) = faucet(&public.to_string(), rpc) {
+            println!("{error:#}");
+            println!(
+                "fund Public/{public} another way (`names bridge`), then run `names setup` again"
+            );
+            return Ok(());
+        }
+        balance = client.wallet.get_account_balance(public).await.unwrap_or(0);
+    }
+    if shield > 0 && balance >= shield {
+        println!("moving {shield} to the private account; generating the proof (a few minutes)");
+        let (hash, _) = NativeTokenTransfer(&client.wallet)
+            .send_shielded_transfer(AccountIdentity::Public(public), private, shield)
+            .await
+            .context("the sequencer did not accept the transfer")?;
+        client
+            .wallet
+            .poll_transaction(hash)
+            .await
+            .context("the transfer was not included in a block")?;
+        client.wallet.sync_to_latest_block().await?;
+        client.wallet.store_persistent_data()?;
+    }
+    println!("ready: `names register <name>` holds a name privately, `names pay <name>.lez <amount>` pays one");
+    Ok(())
 }
 
 /// Most notes one deposit may spend: the node signs at most 32 items per transaction.
@@ -1290,12 +1399,70 @@ async fn main() -> Result<()> {
     };
 
     match cli.command {
+        Command::Setup { shield } => setup(&mut client, cli.rpc.as_deref().unwrap_or(DEFAULT_RPC), shield).await,
+        Command::Balance => {
+            client.wallet.sync_to_latest_block().await.ok();
+            let defaults = load_defaults();
+            let key_chain = client.wallet.storage().key_chain();
+            let publics: Vec<AccountId> = key_chain.public_account_ids().map(|(id, _)| id).collect();
+            let privates: Vec<AccountId> = key_chain.private_account_ids().map(|(id, _)| id).collect();
+            let mut total_private = 0_u128;
+            println!("public accounts (seen on chain):");
+            for id in publics {
+                let balance = client.wallet.get_account_balance(id).await.unwrap_or(0);
+                let tag = if defaults.public.as_deref() == Some(&id.to_string()) { "  (default)" } else { "" };
+                println!("  Public/{id}  {balance}{tag}");
+            }
+            println!("private accounts (only this wallet sees them):");
+            for id in privates {
+                let balance = client
+                    .wallet
+                    .get_account_private(id)
+                    .and_then(|account| account.data.native_balance().ok())
+                    .unwrap_or(0);
+                total_private += balance;
+                let tag = if defaults.private.as_deref() == Some(&id.to_string()) { "  (default)" } else { "" };
+                if balance > 0 || !tag.is_empty() {
+                    println!("  Private/{id}  {balance}{tag}");
+                }
+            }
+            println!("private total: {total_private}");
+            Ok(())
+        }
+        Command::Mine => {
+            let defaults = load_defaults();
+            if defaults.names.is_empty() {
+                println!("no names yet; register one with `names register <name>`");
+            }
+            for name in defaults.names {
+                match client.lookup(&name).await {
+                    Ok((Derived { id, .. }, record, _)) if client.holder(&name, &id, &record).is_ok() => {
+                        let state = if local_now() >= record.expires { "lapsed" } else { "held" };
+                        println!("{name}{NAME_SUFFIX}  {state} until {}", readable(record.expires));
+                    }
+                    _ => println!("{name}{NAME_SUFFIX}  no longer held by this wallet"),
+                }
+            }
+            Ok(())
+        }
         Command::Register {
             name,
             owner,
             term,
             now,
-        } => client.register(&name, owner, term, now).await,
+        } => {
+            let owner = match owner {
+                Some(owner) => owner,
+                None => default_private()?,
+            };
+            client.register(&name, owner, term, now).await?;
+            let mut defaults = load_defaults();
+            if !defaults.names.contains(&name) {
+                defaults.names.push(name);
+                save_defaults(&defaults)?;
+            }
+            Ok(())
+        }
         Command::Renew { name, term, payer } => client.renew(&name, term, payer).await,
         Command::Configure {
             admin,
@@ -1439,6 +1606,10 @@ async fn main() -> Result<()> {
         }
         Command::ClearPage { name } => client.set_page(&name, None).await,
         Command::Pay { name, amount, from, public, private } => {
+            let from = match from {
+                Some(from) => from,
+                None => default_private()?,
+            };
             let (_, _, profile) = client.lookup(&name).await?;
             let has_keys = profile.npk.is_some() && !profile.vpk.is_empty();
             if public || (!private && !has_keys && profile.account.is_some()) {
