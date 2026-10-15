@@ -34,13 +34,12 @@ use wallet::{
     program_facades::native_token_transfer::NativeTokenTransfer,
 };
 
-/// The registry on the Logos Names test chain, a LEZ v0.3 chain run for this
-/// registry while the public LEZ testnet is halted. Used unless `--program` or
-/// `LOGOS_NAMES_PROGRAM` names another.
-const DEFAULT_PROGRAM: &str = "CsiBzfERqtLz9dYV9dPWzFPMbaUcUagYeCmvvJVmCGcF";
-/// The test chain's sequencer, reached through the gateway.
+/// The registry on the public LEZ testnet (deployed 2026-10-15). Used unless
+/// `--program` or `LOGOS_NAMES_PROGRAM` names another.
+const DEFAULT_PROGRAM: &str = "66nUvzJtTxA729aUpTcAWDrb7cV9Heb2bDzceHQhLYad";
+/// The public LEZ testnet's sequencer, reached through the gateway.
 const DEFAULT_RPC: &str = "https://logos-names.wrapit.workers.dev/rpc";
-/// The test chain's faucet, reached through the gateway.
+/// The Names faucet for the public LEZ testnet, reached through the gateway.
 const FAUCET_URL: &str = "https://logos-names.wrapit.workers.dev/faucet";
 
 #[derive(Parser)]
@@ -64,11 +63,11 @@ const FAUCET_URL: &str = "https://logos-names.wrapit.workers.dev/faucet";
         proven here. Guide: https://logos-names.wrapit.workers.dev/"
 )]
 struct Cli {
-    /// Account ID of the deployed registry program. Defaults to the Names test chain's.
+    /// Account ID of the deployed registry program. Defaults to the one on the public LEZ testnet.
     #[arg(long, env = "LOGOS_NAMES_PROGRAM", global = true)]
     program: Option<AccountId>,
 
-    /// Sequencer to use. Defaults to the Names test chain's, unless `--program` is
+    /// Sequencer to use. Defaults to the public LEZ testnet, unless `--program` is
     /// given, in which case the wallet's own config decides.
     #[arg(long, env = "LOGOS_NAMES_RPC", global = true)]
     rpc: Option<String>,
@@ -221,7 +220,7 @@ enum Command {
         #[arg(value_parser = parse_name)]
         name: String,
     },
-    /// Fund a public account on the Names test chain, once a day per account.
+    /// Fund a public account on the public LEZ testnet, once a day per account.
     Faucet {
         /// The account to fund, such as `Public/<id>` from `names wallet account new public`.
         account: String,
@@ -965,7 +964,7 @@ async fn open_wallet(overrides: Option<WalletConfigOverrides>) -> Result<WalletC
 }
 
 /// The sequencer the wallet should use instead of the one in its config: `--rpc` if
-/// given, else the Names test chain's unless `--program` names another registry.
+/// given, else the public LEZ testnet unless `--program` names another registry.
 fn sequencer_overrides(cli: &Cli) -> Result<Option<WalletConfigOverrides>> {
     let rpc = match (&cli.rpc, &cli.program) {
         (Some(rpc), _) => rpc.as_str(),
@@ -979,7 +978,7 @@ fn sequencer_overrides(cli: &Cli) -> Result<Option<WalletConfigOverrides>> {
     }))
 }
 
-/// Asks the Names test chain's faucet to fund `account`.
+/// Asks the Names faucet to fund `account`.
 fn faucet(account: &str) -> Result<()> {
     let account = account.trim().trim_start_matches("Public/");
     let body = serde_json::json!({ "account": account }).to_string();

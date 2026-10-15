@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Faucet for the Logos Names test chain.
+"""Faucet for Logos Names on the public LEZ testnet.
 
 POST /faucet {"account": "<base58 account id>"} sends DRIP base units from the
 faucet account. Listens on localhost only; the gateway forwards to it and puts
@@ -15,16 +15,20 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HOME = os.path.expanduser("~/lez-chain")
-NAMES = f"{HOME}/bin/names"
-FAUCET = "EPwXhByaYpQDH4xfjkAmUX7rWGPaNZTnCkkMW3KzYeMi"
-DRIP = 50_000_000
+NAMES = os.environ.get("FAUCET_NAMES", f"{HOME}/bin/names")
+WALLET = os.environ.get("FAUCET_WALLET", f"{HOME}/faucet-official")
+RPC = os.environ.get("FAUCET_RPC", "https://testnet.lez.logos.co")
+with open(f"{WALLET}/faucet-account.txt") as f:
+    FAUCET = f.read().strip().removeprefix("Public/")
+# Enough to register a name: the sequencer admits a transaction only if the
+# payer covers its fee ceiling (gas limit 2,000,000 x base fee 8 = 16M).
+DRIP = int(os.environ.get("FAUCET_DRIP", 20_000_000))
 PER_ADDRESS = 3
 PER_DAY = 500
 DAY = 86400
 STATE = f"{HOME}/faucet-state.json"
 ACCOUNT = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
-ENV = dict(os.environ, LEE_WALLET_HOME_DIR=f"{HOME}/faucet-wallet",
-           LOGOS_NAMES_RPC="http://127.0.0.1:3040")
+ENV = dict(os.environ, LEE_WALLET_HOME_DIR=WALLET, LOGOS_NAMES_RPC=RPC)
 
 lock = threading.Lock()  # one send at a time: one transaction per signer per block
 
@@ -79,7 +83,7 @@ class Handler(BaseHTTPRequestHandler):
             run = subprocess.run(
                 [NAMES, "wallet", "auth-transfer", "send", "--from", f"Public/{FAUCET}",
                  "--to", f"Public/{account}", "--amount", str(DRIP)],
-                env=ENV, capture_output=True, text=True, timeout=120)
+                env=ENV, capture_output=True, text=True, timeout=300)
             included = re.search(r"included in block (\d+)", run.stdout)
             if run.returncode != 0 or not included:
                 self.log_message("send failed: %s %s", run.stdout[-300:], run.stderr[-300:])

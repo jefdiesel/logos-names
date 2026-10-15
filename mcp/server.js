@@ -3,7 +3,7 @@
 //
 // Speaks the Model Context Protocol over stdio (newline-delimited JSON-RPC) with
 // no dependencies. Read-only: it resolves names, it never signs or sends anything.
-// Reads the Names test chain unless LEZ_RPC_URL and NAMES_PROGRAM say otherwise:
+// Reads the public LEZ testnet unless LEZ_RPC_URL and NAMES_PROGRAM say otherwise:
 //
 //   LEZ_RPC_URL=http://127.0.0.1:3040 NAMES_PROGRAM=<program id> node mcp/server.js
 //
@@ -21,9 +21,9 @@ import {
   reverseLookup,
 } from "../resolver/names.js";
 
-/** The Names test chain, reached through the gateway; the CLI defaults to it too. */
+/** The public LEZ testnet, reached through the gateway; the CLI defaults to it too. */
 const DEFAULT_RPC = "https://logos-names.wrapit.workers.dev/rpc";
-const DEFAULT_PROGRAM = "CsiBzfERqtLz9dYV9dPWzFPMbaUcUagYeCmvvJVmCGcF";
+const DEFAULT_PROGRAM = "66nUvzJtTxA729aUpTcAWDrb7cV9Heb2bDzceHQhLYad";
 const rpcUrl = process.env.LEZ_RPC_URL || DEFAULT_RPC;
 const program = process.env.NAMES_PROGRAM || DEFAULT_PROGRAM;
 const VERSION = "0.2.0";

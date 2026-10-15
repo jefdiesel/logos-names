@@ -44,11 +44,9 @@
   <h1>Logos Names</h1>
   <p class="lede">Names like <code>jef.lez</code> for the Logos Execution Zone. Pay a name instead
   of a 32-byte account. The chain never sees the name, so nobody can list or browse them.</p>
-  <p class="note">This runs on the <strong>Logos Names test chain</strong>, a LEZ chain kept
-  running for this registry while the public LEZ testnet is halted, and anchored to the Logos
-  Blockchain: every block is posted there. Its tokens come free from the
-  faucet below and are worth nothing. Names here won't carry over to the public testnet or to
-  testnet v0.4.</p>
+  <p class="note">This runs on the <strong>public LEZ testnet</strong> (testnet v0.3). Its
+  tokens are test tokens, free from the faucet below and worth nothing. Names won't carry over
+  to testnet v0.4.</p>
 
   <form onsubmit="event.preventDefault(); const n = this.n.value.trim(); if (n) location.href = '/' + encodeURIComponent(n);">
     <input name="n" placeholder="Look up a name, such as jef.lez" aria-label="Name" autocapitalize="off" spellcheck="false">
@@ -71,8 +69,10 @@ names settings               <span class="c"># the registry's prices</span></cod
   <h2>Get a name</h2>
   <p>1. Make a wallet and an account. Write down the recovery phrase it prints.</p>
 <pre><code>names wallet account new public</code></pre>
-  <p>2. Fund it from the faucet: 50,000,000 test tokens, once a day per account. That covers
-  many registrations and changes.</p>
+  <p>2. Fund it from the faucet: 20,000,000 test tokens, once a day per account. That covers
+  a registration and many changes. You can also bridge your own tokens from the Logos
+  Blockchain: see <a href="https://docs.logos.co/blockchain/node-app/bridge-assets-from-logos-blockchain-to-zone-using-app">the
+  bridge guide</a>.</p>
 <pre><code>names faucet Public/&lt;account&gt;
 names wallet account get --account-id Public/&lt;account&gt;   <span class="c"># check the balance</span></code></pre>
   <p>3. Make a private account to hold the name, and move some tokens into it. The chain
@@ -98,7 +98,7 @@ names pay jef.lez 1000 --from &lt;account&gt; --private   <span class="c"># shie
   <h2>For AI agents</h2>
   <p>An MCP server lets Claude, or any MCP client, look names up as tools:
   <code>resolve_name</code>, <code>get_page</code> and <code>reverse_lookup</code>. It is one
-  file, needs Node 20 or later, reads this chain by default and never signs or sends anything.</p>
+  file, needs Node 20 or later, reads the public LEZ testnet by default and never signs or sends anything.</p>
 <pre><code>curl -fsSLo ~/.logos-names-mcp.js https://logos-names.wrapit.workers.dev/mcp.js
 claude mcp add --scope user logos-names -- node ~/.logos-names-mcp.js</code></pre>
   <p>For other clients, run <code>node ~/.logos-names-mcp.js</code> over stdio:
@@ -118,7 +118,7 @@ claude mcp add --scope user logos-names -- node ~/.logos-names-mcp.js</code></pr
   it: <code>names</code> does by default; to use a different chain, pass <code>--rpc</code> and
   <code>--program</code>.</p>
 
-  <footer>Logos Names runs on its own LEZ test chain. This gateway can see which names you
+  <footer>Logos Names runs on the public LEZ testnet. This gateway can see which names you
   look up, and it passes on the transactions you send.</footer>
 </main>
 </body>

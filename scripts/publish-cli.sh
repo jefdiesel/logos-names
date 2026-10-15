@@ -36,6 +36,13 @@ gh run download "$run" --name names-linux-x86_64 --dir "$tmp"
 cp "$tmp/names-linux-x86_64" "$DL/names-linux-x86_64"
 rm -rf "$tmp"
 
+echo "== registry bytecode, for clients proving private changes (CI guest of commit 6a08124)"
+PROGRAM_ID=${NAMES_PROGRAM:-66nUvzJtTxA729aUpTcAWDrb7cV9Heb2bDzceHQhLYad}
+PROGRAM_SHA=${PROGRAM_SHA:-506bfbfd0c4dd388c33c8169f6dd24a14620464b9f583aa15042825bbfc3e9c4}
+mkdir -p "$DL/program"
+scp -q "$MINI:$DEV/logos_names-ci-$(echo "$PROGRAM_SHA" | cut -c1-8).bin" "$DL/program/$PROGRAM_ID.bin"
+echo "$PROGRAM_SHA  $DL/program/$PROGRAM_ID.bin" | shasum -a 256 -c -
+
 echo "== MCP server, bundled into one file"
 (cd gateway && npx rolldown ../mcp/server.js --platform node --format esm --file public/mcp.js)
 
@@ -47,8 +54,9 @@ done
 
 echo "== deploy gateway"
 cd gateway
-# The Names test chain (chain/): its sequencer and faucet, reached through a tunnel.
-CHAIN_ORIGIN=${CHAIN_ORIGIN:?set CHAIN_ORIGIN to the test chain tunnel address}
-NAMES_PROGRAM=${NAMES_PROGRAM:-CsiBzfERqtLz9dYV9dPWzFPMbaUcUagYeCmvvJVmCGcF} \
-  LEZ_RPC_URL=${LEZ_RPC_URL:-$CHAIN_ORIGIN} FAUCET_URL=${FAUCET_URL:-$CHAIN_ORIGIN/faucet} \
+# The public LEZ testnet, and the Names faucet on the M2 (chain/faucet.py) reached
+# through its tunnel.
+CHAIN_ORIGIN=${CHAIN_ORIGIN:-https://lez.buggers.online}
+NAMES_PROGRAM=${NAMES_PROGRAM:-66nUvzJtTxA729aUpTcAWDrb7cV9Heb2bDzceHQhLYad} \
+  LEZ_RPC_URL=${LEZ_RPC_URL:-https://testnet.lez.logos.co} FAUCET_URL=${FAUCET_URL:-$CHAIN_ORIGIN/faucet} \
   npx cf deploy

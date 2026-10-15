@@ -40,7 +40,7 @@ curl -fsSL https://logos-names.wrapit.workers.dev/install.sh | sh
 
 One binary (macOS on Apple silicon, Linux x86_64) that needs neither Basecamp nor
 a separate LEZ install: `names wallet …` is the LEZ wallet's own command line,
-built in, and the Names test chain is the default. Lookups work with no setup;
+built in, and the public LEZ testnet is the default. Lookups work with no setup;
 `names wallet account new public` makes a wallet, `names faucet <account>` funds
 it, and `names receive-privately <name>` gives a name private receiving keys from
 it. `--rpc` and `--program` point it at another chain and registry. `names --help`
@@ -50,12 +50,14 @@ binaries and the man pages, bundles the MCP server and deploys them with the gat
 
 ## Status
 
-The CLI and gateway use the **Logos Names test chain** ([chain/](chain/README.md)),
-a LEZ chain run for this registry and anchored to the Logos Blockchain, as program
-`CsiBzfERqtLz9dYV9dPWzFPMbaUcUagYeCmvvJVmCGcF` (2026-10-10). It exists because
-the public LEZ testnet halted at block 13,982 on 2026-10-07, where the registry is
-deployed as `DugXYzVqYsXJumqsjaGtoZeJ742WmdRHGpByi8pNJm2z` with `jef.lez` and
-`logos.lez` registered. Everything below also runs against a local LEZ v0.3.0
+The CLI and gateway use the **public LEZ testnet** (testnet v0.3), registry
+`66nUvzJtTxA729aUpTcAWDrb7cV9Heb2bDzceHQhLYad` (record version 3, anonymous
+holders; deployed 2026-10-15 from CI build `506bfbfd…e9c4`), with `jef.lez` and
+`logos.lez` held by a private account. The faucet (`chain/faucet.py`) runs on the
+M2 behind the gateway's `/faucet` and is funded by bridge deposits from the Logos
+Blockchain. The Names test chain ([chain/](chain/README.md)) was the default while
+the public LEZ was halted (2026-10-07 to about 10-14); it still runs, with the
+older registry `CsiBzfERqtLz9dYV9dPWzFPMbaUcUagYeCmvvJVmCGcF`. Everything below also runs against a local LEZ v0.3.0
 chain. Written directly against `lee_core` because
 the SPEL framework does not support LEZ v0.3 yet (`logos-co/spel#291`).
 
