@@ -49,7 +49,9 @@ echo "== deploy gateway"
 cd gateway
 # The public LEZ testnet, and the Names faucet on the M2 (chain/faucet.py) reached
 # through its tunnel.
-CHAIN_ORIGIN=${CHAIN_ORIGIN:-https://lez.buggers.online}
+# The tunnel's address is kept out of the repo, in .chain-origin (gitignored).
+CHAIN_ORIGIN=${CHAIN_ORIGIN:-$(cat ../.chain-origin 2>/dev/null || true)}
+[ -n "$CHAIN_ORIGIN" ] || { echo "set CHAIN_ORIGIN, or put the faucet tunnel's address in .chain-origin" >&2; exit 1; }
 NAMES_PROGRAM=${NAMES_PROGRAM:-66nUvzJtTxA729aUpTcAWDrb7cV9Heb2bDzceHQhLYad} \
   LEZ_RPC_URL=${LEZ_RPC_URL:-https://testnet.lez.logos.co} FAUCET_URL=${FAUCET_URL:-$CHAIN_ORIGIN/faucet} \
   npx cf deploy
