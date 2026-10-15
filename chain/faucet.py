@@ -12,6 +12,7 @@ import re
 import subprocess
 import threading
 import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HOME = os.path.expanduser("~/lez-chain")
@@ -23,6 +24,9 @@ with open(f"{WALLET}/faucet-account.txt") as f:
 # Enough to register a name: the sequencer admits a transaction only if the
 # payer covers its fee ceiling (gas limit 2,000,000 x base fee 8 = 16M).
 DRIP = int(os.environ.get("FAUCET_DRIP", 20_000_000))
+# A transfer must also cover that fee ceiling, or it is included, fails and is
+# charged anyway.
+RESERVE = 16_100_000
 PER_ADDRESS = 3
 PER_DAY = 500
 DAY = 86400
@@ -30,7 +34,46 @@ STATE = f"{HOME}/faucet-state.json"
 ACCOUNT = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 ENV = dict(os.environ, LEE_WALLET_HOME_DIR=WALLET, LOGOS_NAMES_RPC=RPC)
 
-lock = threading.Lock()  # one send at a time: one transaction per signer per block
+def balance(account):
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "getAccountBalance",
+                       "params": {"account_id": account}}).encode()
+    request = urllib.request.Request(RPC, body, {"Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=20) as response:
+        return int(json.load(response)["result"])
+
+
+lock = threading.Lock()  # guards the state file
+sending = threading.Lock()  # one transfer in flight at a time
+
+
+def forget(record):
+    with lock:
+        state = load()
+        state["sends"] = [s for s in state["sends"] if s != record]
+        save(state)
+
+
+def confirm(process, record, before):
+    """Waits until the tokens arrive. LEZ includes failed transactions, and a
+    late inclusion looks like a timeout to the wallet, so the recipient's
+    balance is what counts. A send that never arrives is forgotten, so the
+    account may ask again."""
+    try:
+        process.communicate(timeout=600)
+    except subprocess.TimeoutExpired:
+        process.kill()
+    try:
+        for _ in range(60):
+            try:
+                if balance(record["account"]) >= before + DRIP:
+                    return
+            except (OSError, ValueError, KeyError):
+                pass
+            time.sleep(5)
+        forget(record)
+        print(f"send to {record['account']} never arrived", flush=True)
+    finally:
+        sending.release()
 
 
 def load():
@@ -70,28 +113,56 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(400, {"error": "that is not a public account ID"})
         address = self.headers.get("X-Client-IP", "local")
 
-        with lock:
-            now = time.time()
-            state = load()
-            sends = [s for s in state["sends"] if now - s["at"] < DAY]
-            if any(s["account"] == account for s in sends):
-                return self.reply(429, {"error": "this account was funded in the last day"})
-            if sum(s["address"] == address for s in sends) >= PER_ADDRESS:
-                return self.reply(429, {"error": "too many requests from your address today"})
-            if len(sends) >= PER_DAY:
-                return self.reply(429, {"error": "the faucet's daily limit is spent; try tomorrow"})
-            run = subprocess.run(
+        # One send at a time: a signer gets one transaction per block, and the
+        # faucet's balance must cover each transfer plus its fee ceiling.
+        if not sending.acquire(blocking=False):
+            return self.reply(409, {"error": "the faucet is busy sending; try again in a minute"})
+        handed_off = False  # once the confirming thread owns `sending`, it releases it
+        try:
+            with lock:
+                now = time.time()
+                state = load()
+                sends = [s for s in state["sends"] if now - s["at"] < DAY]
+                if any(s["account"] == account for s in sends):
+                    return self.reply(429, {"error": "this account was funded in the last day"})
+                if sum(s["address"] == address for s in sends) >= PER_ADDRESS:
+                    return self.reply(429, {"error": "too many requests from your address today"})
+                if len(sends) >= PER_DAY:
+                    return self.reply(429, {"error": "the faucet's daily limit is spent; try tomorrow"})
+                try:
+                    before = balance(account)
+                    funds = balance(FAUCET)
+                except (OSError, ValueError, KeyError):
+                    return self.reply(409, {"error": "cannot reach the chain; try again shortly"})
+                if funds < DRIP + RESERVE:
+                    return self.reply(409, {"error": "the faucet is empty until its next refill; "
+                                            "you can bridge tokens from the Logos Blockchain instead"})
+                record = {"account": account, "address": address, "at": now}
+                state["sends"] = sends + [record]
+                save(state)
+            process = subprocess.Popen(
                 [NAMES, "wallet", "auth-transfer", "send", "--from", f"Public/{FAUCET}",
                  "--to", f"Public/{account}", "--amount", str(DRIP)],
-                env=ENV, capture_output=True, text=True, timeout=300)
-            included = re.search(r"included in block (\d+)", run.stdout)
-            if run.returncode != 0 or not included:
-                self.log_message("send failed: %s %s", run.stdout[-300:], run.stderr[-300:])
-                return self.reply(502, {"error": "the transfer did not go through; try again shortly"})
-            sends.append({"account": account, "address": address, "at": now})
-            state["sends"] = sends
-            save(state)
-        self.reply(200, {"account": account, "amount": str(DRIP), "block": int(included.group(1))})
+                env=ENV, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            tx = None
+            for line in process.stdout:
+                found = re.search(r"Transaction hash is ([0-9a-f]{64})", line)
+                if found:
+                    tx = found.group(1)
+                    break
+            if not tx:
+                process.wait()
+                forget(record)
+                self.log_message("send failed before submitting")
+                return self.reply(422, {"error": "the transfer could not be sent; try again shortly"})
+            # Inclusion on the public testnet can take minutes, longer than a
+            # proxied request may stay open: answer now, confirm in the background.
+            threading.Thread(target=confirm, args=(process, record, before), daemon=True).start()
+            handed_off = True
+        finally:
+            if not handed_off:
+                sending.release()
+        self.reply(200, {"account": account, "amount": str(DRIP), "tx": tx})
 
     def do_GET(self):
         if self.path == "/faucet":

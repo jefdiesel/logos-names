@@ -58,7 +58,7 @@ const FAUCET_URL: &str = "https://logos-names.wrapit.workers.dev/faucet";
         Getting started, holding a name anonymously:\n  \
         names resolve jef.lez\n  \
         names wallet account new public            (pays to get started)\n  \
-        names faucet Public/<public>\n  \
+        names faucet Public/<public>               (or: names bridge <amount> --to Public/<public> --from-key <key>)\n  \
         names wallet account new private           (will hold the name)\n  \
         names wallet auth-transfer send --from Public/<public> --to Private/<private> --amount 1000000\n  \
         names register <name> --owner Private/<private>\n\n\
@@ -228,6 +228,30 @@ enum Command {
     Faucet {
         /// The account to fund, such as `Public/<id>` from `names wallet account new public`.
         account: String,
+    },
+    /// Move tokens from the Logos Blockchain into a LEZ public account, through your
+    /// own Logos Blockchain node (Basecamp's, or a headless one). The node spends whole
+    /// notes of `--from-key`, so slightly more than `amount` may move. LEZ credits it
+    /// once the Logos Blockchain block is final. Without `--yes` it only shows the plan.
+    Bridge {
+        /// How much to move, in base units; whole notes are used, so it may be a little more.
+        amount: u128,
+        /// The LEZ public account to credit, such as `Public/<id>`.
+        #[arg(long)]
+        to: String,
+        /// The Logos Blockchain public key (64 hex characters) whose notes pay, as the
+        /// node's wallet lists it.
+        #[arg(long)]
+        from_key: String,
+        /// Your Logos Blockchain node's HTTP API (Basecamp: 127.0.0.1:8080).
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        node: String,
+        /// The most the Logos Blockchain transaction may cost in fees.
+        #[arg(long, default_value_t = 100_000)]
+        max_fee: u64,
+        /// Send it. Deposits cannot be undone.
+        #[arg(long)]
+        yes: bool,
     },
     /// The LEZ wallet's own commands: make accounts, check balances, sync private
     /// accounts and more. Run `names wallet help` for the list.
@@ -1009,8 +1033,9 @@ fn sequencer_overrides(cli: &Cli) -> Result<Option<WalletConfigOverrides>> {
 }
 
 /// Asks the Names faucet to fund `account`.
-fn faucet(account: &str) -> Result<()> {
+fn faucet(account: &str, rpc: &str) -> Result<()> {
     let account = account.trim().trim_start_matches("Public/");
+    let before = public_balance(rpc, account).unwrap_or(0);
     let body = serde_json::json!({ "account": account }).to_string();
     let mut response = ureq::post(FAUCET_URL)
         .config()
@@ -1019,17 +1044,146 @@ fn faucet(account: &str) -> Result<()> {
         .header("Content-Type", "application/json")
         .send(body)
         .context("could not reach the faucet")?;
+    let status = response.status();
     let reply: serde_json::Value = serde_json::from_str(&response.body_mut().read_to_string()?)
-        .context("the faucet's reply is not JSON")?;
+        .map_err(|_| anyhow!("the faucet is not answering (HTTP {status}); try again shortly"))?;
     if let Some(error) = reply["error"].as_str() {
         bail!("faucet: {error}");
     }
+    let amount: u128 = reply["amount"].as_str().and_then(|a| a.parse().ok()).unwrap_or(0);
     println!(
-        "sent {} to Public/{account} in block {}",
-        reply["amount"].as_str().unwrap_or("?"),
-        reply["block"]
+        "the faucet sent {amount} to Public/{account} (transaction {}); waiting for it to land",
+        reply["tx"].as_str().unwrap_or("?")
+    );
+    // Read the chain directly: inclusion on the public testnet can take a few minutes.
+    for _ in 0..60 {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        if let Ok(now) = public_balance(rpc, account) {
+            if now >= before + amount {
+                println!("Public/{account} now holds {now}");
+                return Ok(());
+            }
+        }
+    }
+    bail!("the transfer has not arrived after 5 minutes; check later with `names wallet account get --account-id Public/{account}`")
+}
+
+/// Most notes one deposit may spend: the node signs at most 32 items per transaction.
+const MAX_DEPOSIT_NOTES: usize = 30;
+
+/// Deposits whole notes of `from_key` into the LEZ channel through the user's own node,
+/// with the LEZ account as the deposit's metadata: the sequencer reads it as
+/// `borsh(AccountId)` and credits that account once the deposit is final.
+fn bridge(
+    rpc: &str,
+    node: &str,
+    amount: u128,
+    to: &str,
+    from_key: &str,
+    max_fee: u64,
+    yes: bool,
+) -> Result<()> {
+    let node = node.trim_end_matches('/');
+    let to = parse_account(to).map_err(|error| anyhow!(error))?;
+    let from_key = from_key.trim().to_lowercase();
+    if from_key.len() != 64 || hex::decode(&from_key).is_err() {
+        bail!("--from-key must be a 64-character hex public key");
+    }
+    let channel = rpc_call(rpc, "getChannelId", serde_json::json!({}))?;
+    let channel = channel
+        .as_str()
+        .filter(|c| c.len() == 64)
+        .ok_or_else(|| anyhow!("the sequencer did not return a channel ID"))?
+        .to_owned();
+
+    let wallet: serde_json::Value = serde_json::from_str(
+        &ureq::get(&format!("{node}/wallet/{from_key}/balance"))
+            .call()
+            .with_context(|| format!("cannot reach your Logos Blockchain node at {node}"))?
+            .body_mut()
+            .read_to_string()?,
+    )
+    .context("the node's wallet reply is not JSON")?;
+    let mut notes: Vec<(String, u128)> = wallet["notes"]
+        .as_object()
+        .ok_or_else(|| anyhow!("the node lists no notes for {from_key}"))?
+        .iter()
+        .filter_map(|(id, value)| Some((id.clone(), value.as_u64()? as u128)))
+        .collect();
+    notes.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut picked = Vec::new();
+    let mut total = 0_u128;
+    for (id, value) in notes {
+        if total >= amount || picked.len() == MAX_DEPOSIT_NOTES {
+            break;
+        }
+        total += value;
+        picked.push(id);
+    }
+    if total < amount {
+        bail!(
+            "{} note(s) of {from_key} hold {total}, less than {amount}; one deposit spends at most {MAX_DEPOSIT_NOTES} notes, so bridge in smaller steps",
+            picked.len()
+        );
+    }
+    println!("deposit {total} from {} note(s) of {from_key}", picked.len());
+    println!("  into LEZ channel {channel}, credited to Public/{to}");
+    println!("  through {node}, fee at most {max_fee}");
+    if !yes {
+        println!("nothing sent; run again with --yes to deposit (it cannot be undone)");
+        return Ok(());
+    }
+    let body = serde_json::json!({
+        "tip": null,
+        "deposit": { "channel_id": channel, "inputs": picked, "metadata": borsh::to_vec(&to)? },
+        "change_public_key": from_key,
+        "funding_public_keys": [from_key],
+        "max_tx_fee": max_fee,
+    });
+    let mut response = ureq::post(&format!("{node}/channel/deposit"))
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .header("Content-Type", "application/json")
+        .send(body.to_string())
+        .with_context(|| format!("cannot reach your Logos Blockchain node at {node}"))?;
+    let status = response.status();
+    let text = response.body_mut().read_to_string()?;
+    if !status.is_success() {
+        bail!("the node refused the deposit (HTTP {status}): {text}");
+    }
+    let reply: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+    println!("submitted deposit {}", reply["hash"].as_str().unwrap_or(&text));
+    println!(
+        "LEZ credits Public/{to} once the Logos Blockchain block holding it is final, which can take hours; check with `names wallet account get --account-id Public/{to}`"
     );
     Ok(())
+}
+
+fn rpc_call(rpc: &str, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+    let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+    let reply: serde_json::Value = serde_json::from_str(
+        &ureq::post(rpc)
+            .header("Content-Type", "application/json")
+            .send(body.to_string())
+            .with_context(|| format!("cannot reach the sequencer at {rpc}"))?
+            .body_mut()
+            .read_to_string()?,
+    )?;
+    if let Some(error) = reply.get("error") {
+        bail!("{method}: {error}");
+    }
+    Ok(reply["result"].clone())
+}
+
+/// A public account's native balance, read straight from the sequencer.
+fn public_balance(rpc: &str, account: &str) -> Result<u128> {
+    let result = rpc_call(rpc, "getAccountBalance", serde_json::json!({ "account_id": account }))?;
+    result
+        .as_u64()
+        .map(u128::from)
+        .or_else(|| result.as_str().and_then(|s| s.parse().ok()))
+        .ok_or_else(|| anyhow!("unexpected balance reply"))
 }
 
 #[tokio::main]
@@ -1041,7 +1195,13 @@ async fn main() -> Result<()> {
     let overrides = sequencer_overrides(&cli)?;
     match cli.command {
         Command::Wallet { args } => return run_wallet(args, overrides).await,
-        Command::Faucet { account } => return faucet(&account),
+        Command::Bridge { amount, to, from_key, node, max_fee, yes } => {
+            let rpc = cli.rpc.as_deref().unwrap_or(DEFAULT_RPC);
+            return bridge(rpc, &node, amount, &to, &from_key, max_fee, yes);
+        }
+        Command::Faucet { account } => {
+            return faucet(&account, cli.rpc.as_deref().unwrap_or(DEFAULT_RPC));
+        }
         _ => {}
     }
     let program = match cli.program {
@@ -1222,6 +1382,7 @@ async fn main() -> Result<()> {
         Command::Address { .. }
         | Command::Wallet { .. }
         | Command::Faucet { .. }
+        | Command::Bridge { .. }
         | Command::Man { .. } => {
             unreachable!("handled before the wallet is opened")
         }
