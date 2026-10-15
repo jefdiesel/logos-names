@@ -69,12 +69,17 @@ names settings               <span class="c"># the registry's prices</span></cod
   <h2>Get a name</h2>
   <p>1. Make a wallet and an account. Write down the recovery phrase it prints.</p>
 <pre><code>names wallet account new public</code></pre>
-  <p>2. Fund it from the faucet: 20,000,000 test tokens, once a day per account. That covers
-  a registration and many changes. You can also bridge your own tokens from the Logos
-  Blockchain: see <a href="https://docs.logos.co/blockchain/node-app/bridge-assets-from-logos-blockchain-to-zone-using-app">the
-  bridge guide</a>.</p>
-<pre><code>names faucet Public/&lt;account&gt;
-names wallet account get --account-id Public/&lt;account&gt;   <span class="c"># check the balance</span></code></pre>
+  <p>2. Fund it. Either bridge your own tokens from the Logos Blockchain through your own node
+  (Basecamp's Blockchain app, or a headless node; mine some first with its Fund button), or
+  take 20,000,000 from the faucet, once a day per account. Either covers a registration and
+  many changes.</p>
+<pre><code>names bridge 20000000 --to Public/&lt;account&gt; --from-key &lt;your node's key&gt;        <span class="c"># shows the plan</span>
+names bridge 20000000 --to Public/&lt;account&gt; --from-key &lt;your node's key&gt; --yes  <span class="c"># deposits</span>
+names faucet Public/&lt;account&gt;                                               <span class="c"># or this</span>
+names wallet account get --account-id Public/&lt;account&gt;                      <span class="c"># check the balance</span></code></pre>
+  <p>A bridge deposit is credited once its Logos Blockchain block is final, which takes hours
+  on today's testnet. <code>--node</code> points it at your node's API if it isn't Basecamp's
+  <code>127.0.0.1:8080</code>; the key is a public key listed in the node's wallet.</p>
   <p>3. Make a private account to hold the name, and move some tokens into it. The chain
   never sees a private holder: each change to the name is proven on your machine, which takes
   a few minutes.</p>
