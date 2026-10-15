@@ -5,7 +5,8 @@
 #
 # Puts the binary in ~/.local/bin (set NAMES_INSTALL_DIR to change that) and its
 # man pages in ~/.local/share/man/man1 (NAMES_MAN_DIR), each checked against the
-# published SHA-256. Nothing else is installed or changed.
+# published SHA-256, plus RISC Zero's prover r0vm from RISC Zero's GitHub release
+# (NAMES_SKIP_PROVER=1 skips it). Nothing else is installed or changed.
 set -eu
 
 BASE="${NAMES_DOWNLOAD_BASE:-https://logos-names.wrapit.workers.dev/dl}"
@@ -48,6 +49,24 @@ if curl -fsSL "$BASE/names-man.tar.gz" -o "$tmp/man.tar.gz" 2>/dev/null &&
   mkdir -p "$MAN_DIR" && tar -xzf "$tmp/man.tar.gz" -C "$tmp" &&
   cp "$tmp"/man1/*.1 "$MAN_DIR"/; then
   echo "Installed man pages in $MAN_DIR (man names)"
+fi
+
+# Private changes are proven locally by RISC Zero's r0vm (3.0.5, what LEZ v0.3.1
+# uses). It comes from RISC Zero's own GitHub release, checked against the
+# release's SHA-256, and goes next to names, which finds it there.
+case "$target" in
+  macos-arm64) r0=aarch64-apple-darwin; r0sha=0f676055ad88d7ede06beaec3b7f850413e091db08bb7cf9969a78d9ad168562 ;;
+  linux-x86_64) r0=x86_64-unknown-linux-gnu; r0sha=936ef988b78f20e3bd9f80e375f3adc934b13addc6ae2680f2e5fc0bcc966158 ;;
+esac
+if [ "${NAMES_SKIP_PROVER:-}" != 1 ] && ! { [ -x "$DIR/r0vm" ] && "$DIR/r0vm" --version 2>/dev/null | grep -q " 3.0.5"; }; then
+  echo "Downloading RISC Zero's prover (r0vm 3.0.5, about 70 MB) for private changes..."
+  if curl -fsSL "https://github.com/risc0/risc0/releases/download/v3.0.5/cargo-risczero-$r0.tgz" -o "$tmp/r0.tgz" &&
+    [ "$(sha "$tmp/r0.tgz")" = "$r0sha" ] && tar -xzf "$tmp/r0.tgz" -C "$tmp" r0vm; then
+    install -m 755 "$tmp/r0vm" "$DIR/r0vm"
+    echo "Installed $DIR/r0vm"
+  else
+    echo "Could not install r0vm; lookups and public changes still work, private ones need it." >&2
+  fi
 fi
 
 if [ "$target" = linux-x86_64 ] && ! ldconfig -p 2>/dev/null | grep -q libpcsclite.so.1; then

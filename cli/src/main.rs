@@ -1186,8 +1186,25 @@ fn public_balance(rpc: &str, account: &str) -> Result<u128> {
         .ok_or_else(|| anyhow!("unexpected balance reply"))
 }
 
+/// Private changes are proven by RISC Zero's `r0vm`. The installer puts it next to
+/// `names`; use that copy unless `RISC0_SERVER_PATH` names another.
+fn use_bundled_prover() {
+    if std::env::var_os("RISC0_SERVER_PATH").is_some() {
+        return;
+    }
+    let bundled = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.canonicalize().ok())
+        .and_then(|exe| Some(exe.parent()?.join("r0vm")));
+    if let Some(r0vm) = bundled.filter(|path| path.is_file()) {
+        // SAFETY: called first thing in main, before any other thread starts.
+        unsafe { std::env::set_var("RISC0_SERVER_PATH", r0vm) };
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    use_bundled_prover();
     let cli = Cli::parse();
     if let Command::Man { dir } = &cli.command {
         return write_man_pages(dir);
