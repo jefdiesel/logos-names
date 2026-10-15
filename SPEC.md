@@ -38,16 +38,21 @@ What this does not hide:
 - **When a name expires and what was paid for it** are public: the record
   holds its expiry in the clear, and the fee arrives in the treasury. Neither
   says which name, and from a private holder the fee does not say who paid.
-- **A public holder is seen signing.** A holder acting from a public account
-  signs each change, so the chain shows that account touching some record. Use
-  a private account to avoid that.
+- **A public holder can be found.** Anyone who knows a name can compute the
+  owner tag for any public account and compare it with the record, and a
+  public holder signs each change. So names are held only from private
+  accounts (see below).
+- **Timing.** The record account is public, so anyone who knows a name sees
+  when it was created and last changed, though not by whom.
 - **The connection.** Whoever serves the sequencer's RPC sees which record
   addresses a client reads and from where, though not the names.
 - **Clients never tie a name to an account.** A conforming client sets only
   `npk` and `vpk` in a profile, never `account`; pays a name only through its
   receiving keys; never displays an address or the keys behind a name; and
-  writes no reverse record (section 6). Those fields remain in the format for
-  compatibility only.
+  writes no reverse record (section 6); and holds names only from private
+  accounts, because anyone who knows a name can test any public account
+  against its owner tag. Those fields remain in the format for compatibility
+  only.
 
 ## 2. Names
 

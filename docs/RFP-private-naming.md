@@ -62,9 +62,11 @@ no DNS registrar and no record of who owns it.
 3. **Receiving keys from the start.** Registering a name gives it receiving
    keys of a fresh private account, so it is payable immediately. The holder
    can rotate them.
-4. **Hidden holders.** The chain stores only a tag of the holder, unique per
-   name, so two names held by the same account cannot be linked. A holder
-   acting from a private account never appears on chain.
+4. **Hidden holders.** Names are held by private accounts only. The chain
+   stores only a tag of the holder, unique per name, so two names of one holder
+   can't be linked, and the holder never appears on chain. (A public holder
+   would be findable: anyone who knows the name could test every public
+   account against the tag. Clients must refuse public holders.)
 5. **Register, renew, transfer, release** with a term and an expiry, and a
    grace period after expiry. A released or lapsed name leaves nothing behind
    on chain.
@@ -132,9 +134,11 @@ no DNS registrar and no record of who owns it.
    resolution and payment without this code.
 4. A privacy properties document: what observers see for each operation, what
    private paths protect, trust assumptions, and what leaks if a client misbehaves
-   (for example, anyone who types an exact name can see that it exists and
-   read the entries its holder published, but never an address, balance or
-   payment history).
+   (for example, anyone who types an exact name can see that it exists, when
+   it was registered and last changed, and the entries its holder published,
+   but never an address, balance, payment history or holder; and the
+   sequencer a client reads from sees which records it reads, though not the
+   names).
 5. A design decision log.
 6. CI green on the default branch; MIT + Apache-2.0 licence.
 

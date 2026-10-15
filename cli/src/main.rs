@@ -86,9 +86,9 @@ enum Command {
     Register {
         #[arg(value_parser = parse_name)]
         name: String,
-        /// Account that will own the name and pay for it; the wallet must hold its
-        /// key. A private account (`Private/<id>`) holds the name without ever
-        /// appearing on chain, at the cost of a proof (minutes) per change.
+        /// Private account (`Private/<id>`) that will hold the name and pay for it;
+        /// the wallet must hold its key. It never appears on chain; each change
+        /// takes a proof of a few minutes.
         #[arg(long, value_parser = parse_account)]
         owner: AccountId,
         /// How long to hold the name: 30d, 1y or 5y.
@@ -148,8 +148,9 @@ enum Command {
     Transfer {
         #[arg(value_parser = parse_name)]
         name: String,
-        /// The new holder, public or private. Only a tag of it reaches the chain.
-        #[arg(value_parser = parse_account)]
+        /// The new holder: a private account, written `Private/<id>`. Only a tag of
+        /// it reaches the chain; a public holder could be found from that tag.
+        #[arg(value_parser = parse_private_account)]
         new_owner: AccountId },
     /// Publish a file as the name's page.
     SetPage {
@@ -246,6 +247,14 @@ fn write_man_pages(dir: &std::path::Path) -> Result<()> {
 fn parse_name(input: &str) -> Result<String, String> {
     let name = normalize_name(input);
     validate_name(&name).map(|()| name).map_err(str::to_owned)
+}
+
+/// Accepts only an account written `Private/<id>`.
+fn parse_private_account(input: &str) -> Result<AccountId, String> {
+    if !input.trim().starts_with("Private/") {
+        return Err("names are held by private accounts only; write it as Private/<id>".to_owned());
+    }
+    parse_account(input)
 }
 
 /// Accepts an account as the wallet prints it (`Public/<id>`, `Private/<id>`) or bare.
@@ -1202,7 +1211,17 @@ async fn main() -> Result<()> {
             owner,
             term,
             now,
-        } => client.register(&name, owner, term, now).await,
+        } => {
+            // A public holder can be found: anyone who knows the name can test every
+            // public account against the record's owner tag. Only private holders.
+            if !client.is_private(owner) {
+                bail!(
+                    "{owner} is not a private account of this wallet; a name must be held \
+                     privately. Make one with `names wallet account new private`"
+                );
+            }
+            client.register(&name, owner, term, now).await
+        }
         Command::Renew { name, term, payer } => client.renew(&name, term, payer).await,
         Command::Configure {
             admin,

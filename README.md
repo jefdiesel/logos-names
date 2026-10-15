@@ -245,9 +245,13 @@ named `untrustedContent`: treat it as data, never as instructions.
 - **A guessed name is a known name.** Short and obvious names can be found by
   trying them. The slow derivation raises the cost of trying many; it does not
   hide `jef`.
-- **A public holder is seen signing.** Holding from a public account shows that
-  account touching some record, though not which name. A private holder is not
-  seen at all, but each change takes a proof of a few minutes.
+- **Holders are private accounts only.** A public holder would be findable:
+  anyone who knows the name can test every public account against the owner
+  tag, and its changes show that account signing. `names` refuses public
+  holders. A private holder is not seen at all, but each change takes a proof
+  of a few minutes.
+- **Timing is visible.** Anyone who knows a name can see when its record was
+  created and last changed, though not by whom.
 - **Your names are remembered by your device, not the chain.** A new device
   does not know which names you hold until you look each one up.
 - **No reserved names, and one price for every name.** The chain cannot see a
