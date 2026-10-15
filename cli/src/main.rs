@@ -499,6 +499,13 @@ impl Client {
         now: Option<u64>,
     ) -> Result<()> {
         let Derived { id, key } = derive(name);
+        // Check first, so a taken name isn't given a receiving account it won't use.
+        // The program refuses it anyway; this only makes the refusal come sooner.
+        if let Some(held) = self.record(&id).await? {
+            if local_now() < held.expires.saturating_add(GRACE_MS) {
+                bail!("{name}{NAME_SUFFIX} is already registered");
+            }
+        }
         let (fee, paying) = self.price(owner, term).await?;
         // Every name can be paid from the start, and only privately: the profile
         // carries receiving keys of a fresh private account, never an address.
