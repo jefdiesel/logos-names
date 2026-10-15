@@ -1,0 +1,189 @@
+---
+id: RFP-0XX
+title: Private Naming for LEZ (.lez names and subnames)
+tier: M
+status: suggested
+category: Developer Tooling & Infrastructure
+dependencies: []
+---
+
+# RFP-0XX — Private Naming for LEZ (.lez names and subnames)
+
+> **Suggested RFP.** Written by the author of [Logos Names](https://github.com/jefdiesel/logos-names),
+> a working prototype on the LEZ testnet, as a proposal for the Logos RFP
+> program. The standard Logos RFP notices (terms, regulatory responsibility)
+> apply as in [RFP-000](https://github.com/logos-co/rfp/blob/master/RFPs/RFP-000-template.md).
+
+## 🧭 Overview
+
+LEZ needs human-readable names, so people can pay `alice.lez` instead of a
+32-byte account ID, and so apps, chat and agents can find each other by name.
+Every existing name system (ENS, SNS, Handshake) is a public directory: a
+name points at a public address, so resolving a name exposes that address's
+balance and history, and anyone can list every name and who owns it. That is
+the opposite of what Logos stands for. This RFP asks for a **private naming
+standard and program for LEZ**: a name can be paid without anyone, the payer
+included, learning the account behind it; the chain never sees names; nobody
+can list or browse them; and who holds a name is hidden. It also asks for
+**subnames** (`pay.alice.lez`, `bob.team.lez`) so people, teams and apps can
+issue names under their own. A team with LEZ program, zero-knowledge and
+wallet experience is a good fit.
+
+## 🔥 Why This Matters
+
+Readable names are one of the main things that make a chain usable: people
+remember `alice.lez`, not account IDs. But a public name service on a privacy
+chain undoes its privacy, because the name becomes a permanent public label on
+an account. LEZ's private accounts make a better design possible: a name can
+carry only private receiving keys, so every payment to it lands as a private
+note that observers can't attribute. Names also give Logos Messaging, Storage
+and Basecamp apps a shared way to find a person or service (`chat`, `inbox`,
+`agent` entries, and a page served by gateways). Subnames let one holder give
+names to devices, payment purposes, team members or customers without each one
+registering separately, which is how most real organisations use names.
+
+## ✅ Scope of Work
+
+### Hard Requirements
+
+#### Functionality
+
+1. **Names never reach the chain.** A name is turned into an identifier and a
+   sealing key on the client (a slow derivation, so guessing many names is
+   costly). The chain stores only the identifier and a record sealed under the
+   key. An observer who doesn't know a name cannot learn it, list names, or
+   link two records.
+2. **Pay a name without learning its address.** A name carries private
+   receiving keys (LEZ nullifier and viewing public keys), never a public
+   account ID. Paying a name sends a private transfer to those keys; the
+   chain shows neither the recipient nor the amount, and the payer learns no
+   account, balance or history of the recipient. Paying from a private account
+   also hides the payer.
+3. **Receiving keys from the start.** Registering a name gives it receiving
+   keys of a fresh private account, so it is payable immediately. The holder
+   can rotate them.
+4. **Hidden holders.** The chain stores only a tag of the holder, unique per
+   name, so two names held by the same account cannot be linked. A holder
+   acting from a private account never appears on chain.
+5. **Register, renew, transfer, release** with a term and an expiry, and a
+   grace period after expiry. A released or lapsed name leaves nothing behind
+   on chain.
+6. **Registration fees** to a configurable treasury, with one price per term.
+   The chain can't see names, so it can't price them by length.
+7. **Records:** receiving keys, free-form text entries (such as `chat`,
+   `inbox`, `agent`), and a page of at least 64 KiB, all sealed under the
+   name's key.
+8. **Subnames.** The holder of `alice.lez` can create `pay.alice.lez`,
+   `bob.alice.lez` and so on, to any depth:
+   - each subname is a full name with its own record, receiving keys, text
+     entries, page and holder;
+   - the parent holder can assign a subname to another holder, and either
+     keep the right to revoke it or give that right up permanently (like ENS
+     "fuses"), chosen per subname;
+   - a subname resolves only while its parent is registered; resolvers, which
+     know the full name, check this;
+   - **an observer can't link a subname to its parent**: creating, changing
+     or resolving `pay.alice.lez` must not reveal `alice.lez`'s identifier or
+     touch its record visibly. (One approach: the parent's sealed record holds
+     a subname authority secret, and a subname's record carries a tag derived
+     from it, so creating a subname needs the secret but never touches the
+     parent's account.)
+   - subnames cost no registry fee by default; the registry may set one.
+9. **Gateways and subdomains.** A gateway serves a name's page at
+   `alice.<gateway domain>` and a subname's at `pay.alice.<gateway domain>`,
+   and its record as JSON at a well-known path that shows only whether the
+   name can be paid and its public entries, never keys or addresses. A gateway
+   only sees the names it is asked for.
+10. **No server in the trust path.** Clients talk to a LEZ sequencer directly,
+    read the program's bytecode from the chain when they need it to prove, and
+    work without any gateway, faucet or indexer run by the team.
+
+#### Usability
+
+1. Provide an SDK (Rust, and JavaScript for resolvers) that wallets, apps and
+   Logos modules can use to resolve and pay names.
+2. Provide a CLI covering all operations, installable with one command on
+   macOS (Apple silicon) and Linux (x86_64), including RISC Zero's prover for
+   private actions.
+3. Provide a Logos mini-app (Basecamp) for looking up, paying and managing
+   names.
+4. Provide an IDL for the LEZ program, preferably with SPEL once it supports
+   LEZ v0.3.
+5. Provide an MCP server so AI agents can resolve names, read-only.
+6. Paying a name is one command or one button: the user never handles keys or
+   account IDs.
+
+#### Reliability
+
+1. Clients run the program's logic locally before sending, so a refused
+   transaction fails with the program's reason and costs no fee.
+2. Clients confirm each change by reading state back, since LEZ includes failed
+   transactions in blocks.
+3. A private holder's client records each new private note after a change, so
+   consecutive private changes don't collide.
+
+#### Performance
+
+1. Document the cycle count and proving time of every operation on consumer
+   hardware (an Apple M-series Mac and a Linux machine with and without an
+   NVIDIA GPU).
+2. Resolving a name takes at most two account reads.
+3. Report which parts of proving time come from LEZ's privacy circuit versus
+   the naming program, so the LEZ team can see where to optimise.
+
+#### Supportability
+
+1. Deployed and tested on the LEZ testnet, with program addresses published.
+2. End-to-end tests against a standalone LEZ sequencer in CI, including the
+   private paths (proof generation) and subnames.
+3. A specification precise enough for an independent wallet to implement
+   resolution and payment without this code.
+4. A privacy properties document: what observers see for each operation, what
+   private paths protect, trust assumptions, and what leaks if a client misbehaves
+   (for example, anyone who guesses a name can confirm it's registered).
+5. A design decision log.
+6. CI green on the default branch; MIT + Apache-2.0 licence.
+
+### Soft Requirements
+
+1. Private funding of a holder or payer account in one step (faucet or bridge
+   deposit straight into a private account).
+2. Payments that don't block the user: proving in the background with a
+   notification when it lands.
+3. Reverse resolution that an account holder opts into without linking their
+   other names.
+4. Integration with Logos Messaging (`chat` entry opens a conversation) and
+   Logos Storage (pages larger than one account).
+5. A migration path when LEZ or its account model changes between testnets.
+
+## 👤 Recommended Team Profile
+
+- LEZ program development (plan/apply execution, shards, program loader)
+- Zero-knowledge proving with RISC Zero; LEZ private accounts and notes
+- Wallet and key-management UX
+- Applied cryptography (key derivation, authenticated encryption)
+
+## ⏱ Timeline Expectations
+
+Estimated duration: **6–10 weeks**.
+
+## 🌍 Open Source Requirement
+
+All code must be released under the **MIT + Apache-2.0 License**.
+
+## Resources
+
+- Prototype: [jefdiesel/logos-names](https://github.com/jefdiesel/logos-names),
+  running on the LEZ testnet as registry `66nUvzJtTxA729aUpTcAWDrb7cV9Heb2bDzceHQhLYad`.
+  It already does requirements 1–7, 9 and 10 (not subnames), with a
+  [specification](https://github.com/jefdiesel/logos-names/blob/main/SPEC.md),
+  a CLI, a resolver library, a gateway and an MCP server. Guide:
+  https://logos-names.wrapit.workers.dev/
+- Measured on an M4 Mac, LEZ v0.3.1: a private transfer takes about 3.5 minutes
+  to prove, all on CPU, because RISC Zero 3.0.5 has its Metal (Apple GPU) backend
+  disabled. About 2 minutes are the circuit's 1.3M cycles, about 47 s a separate
+  Keccak proof, about 47 s recursion.
+- [LEZ](https://github.com/logos-blockchain/logos-execution-zone),
+  [SPEL](https://github.com/logos-co/spel),
+  [ENS name wrapper fuses](https://docs.ens.domains/wrapper/fuses) (for revocable
+  and permanent subnames).
