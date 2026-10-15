@@ -970,17 +970,24 @@ async fn open_wallet(overrides: Option<WalletConfigOverrides>) -> Result<WalletC
 /// The sequencer the wallet should use instead of the one in its config: `--rpc` if
 /// given, else the public LEZ testnet unless `--program` names another registry.
 fn sequencer_overrides(cli: &Cli) -> Result<Option<WalletConfigOverrides>> {
+    // The public testnet sometimes takes a few minutes to include a transaction; the
+    // wallet's default wait gives up first and reports a failure that isn't one.
+    let mut overrides = WalletConfigOverrides {
+        seq_tx_poll_max_blocks: Some(TX_POLL_MAX_BLOCKS),
+        ..Default::default()
+    };
     let rpc = match (&cli.rpc, &cli.program) {
         (Some(rpc), _) => rpc.as_str(),
-        (None, Some(_)) => return Ok(None),
+        (None, Some(_)) => return Ok(Some(overrides)),
         (None, None) => DEFAULT_RPC,
     };
     let sequencer_addr = rpc.parse().map_err(|_| anyhow!("{rpc} is not a URL"))?;
-    Ok(Some(WalletConfigOverrides {
-        sequencer: Some(SequencerConnectionData { sequencer_addr, basic_auth: None }),
-        ..Default::default()
-    }))
+    overrides.sequencer = Some(SequencerConnectionData { sequencer_addr, basic_auth: None });
+    Ok(Some(overrides))
 }
+
+/// How many blocks to wait for a transaction to be included before giving up.
+const TX_POLL_MAX_BLOCKS: usize = 60;
 
 /// Asks the Names faucet to fund `account`.
 fn faucet(account: &str, rpc: &str) -> Result<()> {
