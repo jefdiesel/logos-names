@@ -278,3 +278,7 @@ named `untrustedContent`: treat it as data, never as instructions.
   that the sender was debited, but only the recipient can confirm it arrived.
 - **The Basecamp app pays from public accounts only**, so the sender and amount
   of a payment made from it are visible even when the recipient is not.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option. Unless you state otherwise, any contribution you submit for inclusion is dual-licensed as above, without additional terms or conditions.
