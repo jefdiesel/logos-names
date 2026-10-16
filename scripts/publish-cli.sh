@@ -11,7 +11,7 @@
 # ~/.config/logos-names/release-signing-key; its public half is
 # scripts/release-signing-key.pub and embedded in install.sh), go to
 # a GitHub release of this repository, which install.sh downloads from. The MCP
-# server is bundled as gateway/public/mcp.js, and the gateway (guide, install.sh)
+# server is bundled as gateway/public/mcp.js, and the static site (guide, install.sh)
 # is deployed.
 set -eu
 cd "$(dirname "$0")/.."
@@ -66,13 +66,5 @@ gh release create "$TAG" --latest --title "names CLI $TAG" \
   "$DL"/names-linux-x86_64 "$DL"/names-linux-x86_64.sha256 "$DL"/names-linux-x86_64.sig \
   "$DL"/names-man.tar.gz "$DL"/names-man.tar.gz.sha256 "$DL"/names-man.tar.gz.sig
 
-echo "== deploy gateway"
-cd gateway
-# The public LEZ testnet, and the Names faucet on the M2 (chain/faucet.py) reached
-# through its tunnel.
-# The tunnel's address is kept out of the repo, in .chain-origin (gitignored).
-CHAIN_ORIGIN=${CHAIN_ORIGIN:-$(cat ../.chain-origin 2>/dev/null || true)}
-[ -n "$CHAIN_ORIGIN" ] || { echo "set CHAIN_ORIGIN, or put the faucet tunnel's address in .chain-origin" >&2; exit 1; }
-NAMES_PROGRAM=${NAMES_PROGRAM:-2PXg3SSmh5hvECTz4xcfV2d5YvxwyF6yVhpnjTokzCkX} \
-  LEZ_RPC_URL=${LEZ_RPC_URL:-https://testnet.lez.logos.co} FAUCET_URL=${FAUCET_URL:-$CHAIN_ORIGIN/faucet} \
-  npx cf deploy
+echo "== deploy the static site"
+cd gateway && npx cf deploy

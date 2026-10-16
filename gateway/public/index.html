@@ -45,7 +45,7 @@
   <p class="lede">Names like <code>jef.lez</code> for the Logos Execution Zone. Pay a name instead
   of a 32-byte account. The chain never sees the name, so nobody can list or browse them.</p>
   <p class="note">This runs on the <strong>public LEZ testnet</strong> (testnet v0.3). Its
-  tokens are test tokens, free from the faucet below and worth nothing. Names won't carry over
+  tokens are test tokens and worth nothing. Names won't carry over
   to testnet v0.4.</p>
 
 
@@ -54,7 +54,7 @@
   It needs nothing else and doesn't need Basecamp.</p>
 <pre><code>curl -fsSL https://logos-names.wrapit.workers.dev/install.sh | sh</code></pre>
   <p>It downloads from this project's <a href="https://github.com/jefdiesel/logos-names/releases">GitHub releases</a>, installs to <code>~/.local/bin/names</code> with man pages (<code>man names</code>), and
-  checks each download's SHA-256.</p>
+  checks each download's signature and SHA-256.</p>
 
   <h2>Look names up</h2>
   <p>No wallet or setup needed:</p>
@@ -63,15 +63,16 @@ names open jef.lez           <span class="c"># show its page in your browser, se
 names settings               <span class="c"># the registry's prices</span></code></pre>
 
   <h2>Get a name</h2>
-<pre><code>names setup                <span class="c"># once: wallet, accounts, faucet tokens, a private balance</span>
+<pre><code>names setup                <span class="c"># wallet and accounts; run again once funded, for a private balance</span>
 names register myname      <span class="c"># held privately; payable at once</span>
 names mine                 <span class="c"># the names you hold</span>
 names balance              <span class="c"># what you have, public and private</span></code></pre>
-  <p><code>setup</code> prints a recovery phrase: write it down. It makes a public account,
-  funds it from the faucet (once a day per account) and moves some to a private account, which
-  then holds your names and pays from. Private actions are proven on your machine and take a few
-  minutes each. If the faucet is empty, fund the public account with
-  <code>names bridge</code> from the Logos Blockchain and run <code>setup</code> again.</p>
+  <p><code>setup</code> prints a recovery phrase: write it down. It makes a public and a private
+  account. Send the public one some testnet tokens from your LEZ wallet (or with
+  <code>names bridge</code> from the Logos Blockchain) and run <code>setup</code> again: it moves some
+  to the private account, which then holds your names and pays from. Private actions are proven on
+  your machine and take a few minutes each. <code>register</code> returns once the name is committed
+  and finishes by itself about 20 minutes later; <code>names mine</code> shows when.</p>
   <p>Optional extras:</p>
 <pre><code>names set-text myname chat &lt;address&gt;      <span class="c"># text entries</span>
 names set-page myname index.html          <span class="c"># a page</span>
@@ -116,8 +117,7 @@ claude mcp add --scope user logos-names -- node ~/.logos-names-mcp.js</code></pr
   <code>--rpc</code> and <code>--program</code> to use another chain or registry.</p>
 
   <footer>Logos Names runs on the public LEZ testnet. This website is static files and never
-  looks names up; the command line and the MCP server never contact it, except
-  <code>names faucet</code>.</footer>
+  looks names up; the command line and the MCP server never contact it.</footer>
 </main>
 </body>
 </html>

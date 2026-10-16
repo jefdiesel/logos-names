@@ -104,8 +104,6 @@ const DEFAULT_PROGRAM: &str = "2PXg3SSmh5hvECTz4xcfV2d5YvxwyF6yVhpnjTokzCkX";
 /// The public LEZ testnet's sequencer, reached directly: no server of ours sits between a
 /// user and the chain.
 const DEFAULT_RPC: &str = "https://testnet.lez.logos.co";
-/// The Names faucet for the public LEZ testnet, reached through the gateway.
-const FAUCET_URL: &str = "https://logos-names.wrapit.workers.dev/faucet";
 
 #[derive(Parser)]
 #[command(
@@ -118,11 +116,10 @@ const FAUCET_URL: &str = "https://logos-names.wrapit.workers.dev/faucet";
         LEE_WALLET_HOME_DIR (default ~/.lee/wallet).\n\n\
         Getting started, holding a name anonymously:\n  \
         names resolve jef.lez\n  \
-        names wallet account new public            (pays to get started)\n  \
-        names faucet Public/<public>               (or: names bridge <amount> --to Public/<public> --from-key <key>)\n  \
-        names wallet account new private           (will hold the name)\n  \
-        names wallet auth-transfer send --from Public/<public> --to Private/<private> --amount 1000000\n  \
-        names register <name> --owner Private/<private>\n\n\
+        names setup                                (makes a public and a private account)\n  \
+        fund the public account with testnet tokens from your LEZ wallet (or `names bridge`)\n  \
+        names setup                                (again: moves some to the private account)\n  \
+        names register <name>\n\n\
         The chain never sees a name, and never sees a private holder: names are turned \
         into identifiers and keys on this machine, and a private holder's changes are \
         proven here. Guide: https://logos-names.wrapit.workers.dev/"
@@ -143,11 +140,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Set up this machine: a wallet with a public and a private account, funded from
-    /// the faucet, with some of it moved to the private account. Run it once; after
-    /// it, `register` and `pay` need no account arguments.
+    /// Set up this machine: a wallet with a public and a private account. Fund the
+    /// public one with testnet tokens and run it again, and it moves some of them to
+    /// the private account; after that, `register` and `pay` need no account arguments.
     Setup {
-        /// How much of the faucet's payment to move to the private account.
+        /// How much of the public account's tokens to move to the private account.
         #[arg(long, default_value_t = 2_000_000)]
         shield: u128,
     },
@@ -325,11 +322,6 @@ enum Command {
     Address {
         #[arg(value_parser = parse_name)]
         name: String,
-    },
-    /// Fund a public account on the public LEZ testnet, once a day per account.
-    Faucet {
-        /// The account to fund, such as `Public/<id>` from `names wallet account new public`.
-        account: String,
     },
     /// Move tokens from the Logos Blockchain into a LEZ public account, through your
     /// own Logos Blockchain node (Basecamp's, or a headless one). The node spends whole
@@ -1391,45 +1383,9 @@ const REVEAL_ATTEMPTS: u32 = 4;
 /// How many blocks to wait for a transaction to be included before giving up.
 const TX_POLL_MAX_BLOCKS: usize = 60;
 
-/// Asks the Names faucet to fund `account`.
-fn faucet(account: &str, rpc: &str) -> Result<()> {
-    let account = account.trim().trim_start_matches("Public/");
-    let before = public_balance(rpc, account).unwrap_or(0);
-    let body = serde_json::json!({ "account": account }).to_string();
-    let mut response = ureq::post(FAUCET_URL)
-        .config()
-        .http_status_as_error(false)
-        .build()
-        .header("Content-Type", "application/json")
-        .send(body)
-        .context("could not reach the faucet")?;
-    let status = response.status();
-    let reply: serde_json::Value = serde_json::from_str(&response.body_mut().read_to_string()?)
-        .map_err(|_| anyhow!("the faucet is not answering (HTTP {status}); try again shortly"))?;
-    if let Some(error) = reply["error"].as_str() {
-        bail!("faucet: {error}");
-    }
-    let amount: u128 = reply["amount"].as_str().and_then(|a| a.parse().ok()).unwrap_or(0);
-    println!(
-        "the faucet sent {amount} to Public/{account} (transaction {}); waiting for it to land",
-        reply["tx"].as_str().unwrap_or("?")
-    );
-    // Read the chain directly: inclusion on the public testnet can take a few minutes.
-    for _ in 0..60 {
-        std::thread::sleep(std::time::Duration::from_secs(5));
-        if let Ok(now) = public_balance(rpc, account) {
-            if now >= before + amount {
-                println!("Public/{account} now holds {now}");
-                return Ok(());
-            }
-        }
-    }
-    bail!("the transfer has not arrived after 5 minutes; check later with `names wallet account get --account-id Public/{account}`")
-}
-
-/// `names setup`: a public and a private account, the faucet's payment, and some of
-/// it moved to the private account so names can be held and paid privately.
-async fn setup(client: &mut Client, rpc: &str, shield: u128) -> Result<()> {
+/// `names setup`: a public and a private account, and, once the public one is funded,
+/// some of its tokens moved to the private account so names can be held and paid privately.
+async fn setup(client: &mut Client, shield: u128) -> Result<()> {
     let mut defaults = load_defaults();
     let public: AccountId = match defaults.public.as_deref().and_then(|id| id.parse().ok()) {
         Some(id) => id,
@@ -1446,19 +1402,15 @@ async fn setup(client: &mut Client, rpc: &str, shield: u128) -> Result<()> {
     println!("public account   Public/{public}");
     println!("private account  Private/{private}");
 
-    let mut balance = client.wallet.get_account_balance(public).await.unwrap_or(0);
+    let balance = client.wallet.get_account_balance(public).await.unwrap_or(0);
     if balance < shield {
-        println!("asking the faucet for tokens");
-        if let Err(error) = faucet(&public.to_string(), rpc) {
-            println!("{error:#}");
-            println!(
-                "fund Public/{public} another way (`names bridge`), then run `names setup` again"
-            );
-            return Ok(());
-        }
-        balance = client.wallet.get_account_balance(public).await.unwrap_or(0);
+        println!(
+            "Public/{public} holds {balance}; send it at least {shield} testnet tokens from your LEZ \
+             wallet (or with `names bridge`), then run `names setup` again"
+        );
+        return Ok(());
     }
-    if shield > 0 && balance >= shield {
+    if shield > 0 {
         println!("moving {shield} to the private account; generating the proof (a few minutes)");
         let (hash, _) = NativeTokenTransfer(&client.wallet)
             .send_shielded_transfer(AccountIdentity::Public(public), private, shield)
@@ -1584,16 +1536,6 @@ fn rpc_call(rpc: &str, method: &str, params: serde_json::Value) -> Result<serde_
     Ok(reply["result"].clone())
 }
 
-/// A public account's native balance, read straight from the sequencer.
-fn public_balance(rpc: &str, account: &str) -> Result<u128> {
-    let result = rpc_call(rpc, "getAccountBalance", serde_json::json!({ "account_id": account }))?;
-    result
-        .as_u64()
-        .map(u128::from)
-        .or_else(|| result.as_str().and_then(|s| s.parse().ok()))
-        .ok_or_else(|| anyhow!("unexpected balance reply"))
-}
-
 /// Private changes are proven by RISC Zero's `r0vm`. The installer puts it next to
 /// `names`; use that copy unless `RISC0_SERVER_PATH` names another.
 fn use_bundled_prover() {
@@ -1623,9 +1565,6 @@ async fn main() -> Result<()> {
         Command::Bridge { amount, to, from_key, node, max_fee, yes } => {
             let rpc = cli.rpc.as_deref().unwrap_or(DEFAULT_RPC);
             return bridge(rpc, &node, amount, &to, &from_key, max_fee, yes);
-        }
-        Command::Faucet { account } => {
-            return faucet(&account, cli.rpc.as_deref().unwrap_or(DEFAULT_RPC));
         }
         _ => {}
     }
@@ -1659,7 +1598,7 @@ async fn main() -> Result<()> {
     };
 
     match cli.command {
-        Command::Setup { shield } => setup(&mut client, cli.rpc.as_deref().unwrap_or(DEFAULT_RPC), shield).await,
+        Command::Setup { shield } => setup(&mut client, shield).await,
         Command::Balance => {
             client.wallet.sync_to_latest_block().await.ok();
             let defaults = load_defaults();
@@ -1905,7 +1844,6 @@ async fn main() -> Result<()> {
         Command::Address { .. }
         | Command::AccountLogEntry { .. }
         | Command::Wallet { .. }
-        | Command::Faucet { .. }
         | Command::Bridge { .. }
         | Command::Man { .. } => {
             unreachable!("handled before the wallet is opened")

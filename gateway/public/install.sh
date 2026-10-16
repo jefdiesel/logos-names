@@ -121,10 +121,10 @@ esac
 cat <<'EOF'
 
 Try it:
-  names resolve jef.lez                    look a name up (no setup needed)
-  names wallet account new public          make a wallet and an account
-  names faucet Public/<account>            free test tokens for it
-  names register <name> --owner <account>  claim a name
+  names resolve jef.lez     look a name up (no setup needed)
+  names open jef.lez        show its page, served from this machine
+  names setup               make a wallet; fund its public account, then run it again
+  names register <name>     claim a name, held privately
 
 Every command: names --help, or man names
 Guide: https://logos-names.wrapit.workers.dev/

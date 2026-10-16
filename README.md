@@ -11,7 +11,7 @@ by choice**. Suggested as a Logos RFP:
   be paid openly (a shop, donations); anyone who resolves the name then sees it,
   and so its balance and history,
 - **text entries**: free-form key/value pairs such as `chat`, `inbox` or `agent`,
-- a **page**: up to about 80 KiB, served by gateways.
+- a **page**: up to about 80 KiB, shown with `names open`.
 
 The chain never sees a name: it holds a 32-byte identifier derived from the
 name and a profile sealed under a key that is also derived from the name.
@@ -48,12 +48,13 @@ curl -fsSL https://logos-names.wrapit.workers.dev/install.sh | sh
 One binary (macOS on Apple silicon, Linux x86_64) that needs neither Basecamp nor
 a separate LEZ install: `names wallet …` is the LEZ wallet's own command line,
 built in, and the public LEZ testnet is the default. Lookups work with no setup;
-`names setup` makes a wallet with a public and a private account, funds it from
-the faucet and moves some to the private account; then `names register <name>`
-and `names pay <name>.lez <amount>` need no account arguments. `--rpc` and `--program` point it at another chain and registry. `names --help`
-and `man names` (installed alongside) cover every command. The guide is the gateway's
+`names setup` makes a wallet with a public and a private account and, once the public
+one holds testnet tokens, moves some to the private account; then `names register <name>`
+and `names pay <name>.lez <amount>` need no account arguments. `names open <name>` shows a
+name's page in the browser, served from this machine only. `--rpc` and `--program` point it at another chain and registry. `names --help`
+and `man names` (installed alongside) cover every command. The guide is the website's
 front page (`gateway/public/index.html`). `scripts/publish-cli.sh` builds both
-binaries and the man pages, signs them, bundles the MCP server and deploys them with the gateway.
+binaries and the man pages, signs them, bundles the MCP server and deploys the static site.
 
 The installer checks each download against a signature from the release key
 (`scripts/release-signing-key.pub`) using `ssh-keygen`, which is already on macOS and
@@ -69,12 +70,11 @@ Key fingerprint: `SHA256:dAQbSDw6smVMxkwJdQ2104U3Xem+cDOldUmpW+wQzcE`.
 
 ## Status
 
-The CLI and gateway use the **public LEZ testnet** (testnet v0.3), registry
+The CLI uses the **public LEZ testnet** (testnet v0.3), registry
 `2PXg3SSmh5hvECTz4xcfV2d5YvxwyF6yVhpnjTokzCkX` (registry v4.1: commit-then-reveal registration, anonymous
 holders; deployed 2026-10-16 from CI build `99bc4e36…79e6`), with `jef.lez` and
-`logos.lez` held by a private account. The faucet (`chain/faucet.py`) runs on the
-M2 behind the gateway's `/faucet` and is funded by bridge deposits from the Logos
-Blockchain. The Names test chain ([chain/](chain/README.md)) was the default while
+`logos.lez` held by a private account. There is no faucet: testnet users fund their
+own accounts. The Names test chain ([chain/](chain/README.md)) was the default while
 the public LEZ was halted (2026-10-07 to about 10-14); it still runs, with the
 older registry `CsiBzfERqtLz9dYV9dPWzFPMbaUcUagYeCmvvJVmCGcF`. Everything below also runs against a local LEZ v0.3.0
 chain. Written directly against `lee_core` because
@@ -91,7 +91,7 @@ the SPEL framework does not support LEZ v0.3 yet (`logos-co/spel#291`).
 | `seal/` | What a client adds: deriving a name's identifier and key, and sealing and opening profiles and pages. |
 | `cli/` | `names`, the command-line client. Signs and pays through the LEZ wallet. |
 | `resolver/names.js` | Dependency-free resolver for Node, browsers and Workers. |
-| `gateway/` | Serves `<name>.<domain>`; runs as a Cloudflare Worker or locally. |
+| `gateway/` | The static website: guide, `install.sh`, the MCP server. |
 | `mcp/server.js` | Read-only MCP server so AI agents can look names up as tools. |
 | `basecamp-module/` | `names`, a Logos core module: lookups and changes for every Basecamp app. |
 | `basecamp/` | A Basecamp app to find, register, manage, pay and message names. |
@@ -185,32 +185,18 @@ program's reason and costs no fee. After sending it reads the touched accounts
 back: LEZ includes failed transactions in blocks, so inclusion alone does not
 mean the change was applied.
 
-## Gateway
+## Website
+
+`gateway/` is the static site (`gateway/public/`: the guide, `install.sh`, the MCP
+server), deployed to Cloudflare as static files with no code: a request costs
+nothing, and the site never looks names up. Pages are viewed with `names open`,
+which reads them from the chain on the viewer's own machine (SPEC 12.2). A site
+that resolves names in the browser is specified for when sequencers allow
+cross-origin requests (SPEC 12.3).
 
 ```sh
-LEZ_RPC_URL=http://127.0.0.1:3040 NAMES_PROGRAM=<program id> node gateway/serve.js
+cd gateway && npm install && cf deploy
 ```
-
-- `http://jef.localhost:8787/` serves the page.
-- `http://jef.localhost:8787/.well-known/logos-name.json` returns the resolved
-  name as JSON, for apps and AI agents.
-
-`gateway/` is also a Cloudflare project. To deploy it:
-
-```sh
-cd gateway && npm install
-cf auth login
-NAMES_PROGRAM=<program id> cf deploy
-```
-
-A `workers.dev` address has no wildcard subdomains, so it serves names by path
-(`<host>/jef`); so does any host listed in `ROOT_HOSTS`. Add a wildcard route
-(`*.yourdomain/*`) to serve `jef.yourdomain` instead. Pages served by path are
-sandboxed into their own origin, since they would otherwise share one.
-
-A gateway is a convenience, not a trust anchor or a private channel: it learns
-every name asked of it and can alter what it serves. The local gateway is the
-path that trusts nobody.
 
 ## Logos apps
 
@@ -242,7 +228,7 @@ deleting it. `basecamp/tools/render.py` draws its screens without Basecamp.
 
 `mcp/server.js` is a dependency-free MCP server over stdio with two read-only
 tools: `resolve_name` and `get_page`. It never signs or sends
-anything, and it cannot list names: nothing can. The gateway publishes it bundled
+anything, and it cannot list names: nothing can. The website publishes it bundled
 into one file, reading the public LEZ testnet by default (Node 20 or later):
 
 ```sh
