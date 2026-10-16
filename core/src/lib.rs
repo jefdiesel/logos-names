@@ -927,7 +927,12 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
                             "the registry charges fees, not deposits"
                         }
                     );
-                    if deposit_mode {
+                    if deposit_mode && payer == owner_tag(&id, &settings.admin) {
+                        // The admin places names (a locked one it releases, a
+                        // built-in one) without a deposit; there is nothing to
+                        // refund when they are released.
+                        0
+                    } else if deposit_mode {
                         settings.deposits[usize::from(tier == TIER_THREE)]
                     } else if payer == owner_tag(&id, &settings.treasury) {
                         // A treasury paying itself would move nothing.
@@ -2446,7 +2451,7 @@ mod tests {
     fn the_admin_releases_a_locked_name_by_registering_and_transferring_it() {
         let mut chain = Chain::default();
         chain.configure_deposits(CAROL);
-        chain.register_with_deposit(&LOCKED_NAME, CAROL, DEPOSITS[0], NOW);
+        chain.register_with_deposit(&LOCKED_NAME, CAROL, 0, NOW);
         chain.run(
             on_record_and_page(&LOCKED_NAME, CAROL),
             Instruction::Transfer { id: LOCKED_NAME, new_owner: owner_tag(&LOCKED_NAME, &ALICE) },
@@ -2467,5 +2472,25 @@ mod tests {
     fn an_unconfigured_registry_locks_short_names() {
         let mut chain = Chain::default();
         chain.run(on_registration(&LOCKED_NAME, ALICE), register_at(LOCKED_NAME, Vec::new(), 1, 0, NOW));
+    }
+
+    #[test]
+    fn the_admin_places_a_name_without_a_deposit() {
+        let mut chain = Chain::default();
+        chain.configure_deposits(CAROL);
+        chain.register_with_deposit(&THREE_NAME, CAROL, 0, NOW);
+        chain.run(
+            on_record_and_page(&THREE_NAME, CAROL),
+            Instruction::Transfer { id: THREE_NAME, new_owner: owner_tag(&THREE_NAME, &ALICE) },
+        );
+        assert_eq!(chain.record(&THREE_NAME).expect("held").owner, owner_tag(&THREE_NAME, &ALICE));
+    }
+
+    #[test]
+    #[should_panic(expected = "the deposit is not this name's deposit")]
+    fn only_the_admin_skips_the_deposit() {
+        let mut chain = Chain::default();
+        chain.configure_deposits(CAROL);
+        chain.register_with_deposit(&THREE_NAME, ALICE, 0, NOW);
     }
 }

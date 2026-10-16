@@ -63,6 +63,7 @@ Short names are guessable in seconds anyway, so the list reveals nothing new.
   only: each name's deposit sits in its own account (a PDA per name) and the holder
   gets back exactly what was locked.
 - Mainnet amounts are set at mainnet launch, once the token's value is known.
+- The admin places names without a deposit (nothing to refund on release): a locked name it releases, or a built-in one. `jef.lez` is placed this way at deploy: the admin registers it and transfers it to jef's private holder.
 - On a transfer the deposit stays with the name: whoever holds it when it is
   released gets it back.
 - Known gap: the commit step is free for private users, so commitment accounts can

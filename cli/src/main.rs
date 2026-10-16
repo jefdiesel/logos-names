@@ -696,7 +696,8 @@ impl Client {
     ) -> Result<(u128, Vec<(AccountId, bool)>, bool)> {
         match self.settings().await? {
             Some(settings) if settings.mode == MODE_DEPOSIT => {
-                let amount = settings.deposits[usize::from(tier == TIER_THREE)];
+                // The admin places names without a deposit.
+                let amount = if payer == settings.admin { 0 } else { settings.deposits[usize::from(tier == TIER_THREE)] };
                 let mut paying = vec![(payer, true)];
                 if amount != 0 {
                     paying.push((deposit_address(&self.program, id), false));
@@ -1887,6 +1888,7 @@ async fn main() -> Result<()> {
         println!("id     {}", hex::encode(id));
         println!("record {}", record_address(&program, &id));
         println!("page   {}", page_address(&program, &id));
+        println!("deposit {}", deposit_address(&program, &id));
         return Ok(());
     }
 
