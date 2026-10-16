@@ -311,10 +311,10 @@ Rules:
   the client keeps. `Register` names that commitment account and `secret`; the
   program recomputes `c` with the payer's tag, so a reveal seen pending can't
   be replayed for another account. The commitment must have been made at least
-  5 minutes and less than 24 hours before the reveal's `now`; the reveal uses it
+  15 minutes and less than 24 hours before the reveal's `now`; the reveal uses it
   up. `Commit` and `Register` are valid only in a block whose timestamp is in
-  `[now, now + 3 minutes)`, so a claimed time is at most 3 minutes early and at
-  least 2 minutes really pass between a commitment and its reveal: longer than a
+  `[now, now + 10 minutes)` (room for a private holder's proof), so a claimed
+  time is at most 10 minutes early and at least 5 minutes really pass between a commitment and its reveal: longer than a
   reveal waits to be included, so a commitment made after seeing one loses.
   A `Commit` refuses to overwrite a commitment that can still be revealed.
 - `Register` succeeds if the name is unregistered, or if its record's
@@ -425,7 +425,7 @@ registry, as they agree on one token contract.
 
 | Network | Registry program ID |
 |---|---|
-| Logos testnet v0.3 (LEZ) | `66nUvzJtTxA729aUpTcAWDrb7cV9Heb2bDzceHQhLYad` (record version 3, deployed 2026-10-15, CI build `506bfbfd…e9c4`; replaces `DugXYz…m2z`, version 2) |
+| Logos testnet v0.3 (LEZ) | `E6oXebf6sicLtYBpEMijFdB8mqbXg3HRsWfYoJBgjvdj` (registry v4, deployed 2026-10-16, CI build `72481ede…1a13`; replaces `66nUvz…LYad`, v3, which allowed front-running and a configure race) |
 
 The deployed program is the reproducible build produced by this repository's
 CI; its SHA-256 is recorded with each release. The program is upgradeable by

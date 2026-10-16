@@ -73,13 +73,14 @@ const COMMITMENT_SEED_DOMAIN: &[u8] = b"logos-names/v4/commit/";
 
 /// How far a commit or a reveal may be from the time it claims: it is valid only
 /// in a block whose timestamp is in `[now, now + TIME_WINDOW_MS)`. So a claimed
-/// time is at most this much earlier than the real one.
-pub const TIME_WINDOW_MS: u64 = 3 * 60 * 1000;
+/// time is at most this much earlier than the real one. Long enough for a
+/// private holder's proof (minutes on a laptop) to be made and included.
+pub const TIME_WINDOW_MS: u64 = 10 * 60 * 1000;
 /// How long a commitment must wait before its reveal. With a claimed time off
 /// by at most [`TIME_WINDOW_MS`], at least `MIN_COMMIT_AGE_MS - TIME_WINDOW_MS`
-/// (two minutes) really passes between a commitment and its reveal, so a reveal
-/// seen pending can't be beaten by a commitment made after seeing it.
-pub const MIN_COMMIT_AGE_MS: u64 = 5 * 60 * 1000;
+/// (five minutes) really passes between a commitment and its reveal, so a
+/// reveal seen pending can't be beaten by a commitment made after seeing it.
+pub const MIN_COMMIT_AGE_MS: u64 = 15 * 60 * 1000;
 /// How long a commitment can still be revealed.
 pub const MAX_COMMIT_AGE_MS: u64 = 24 * 60 * 60 * 1000;
 
