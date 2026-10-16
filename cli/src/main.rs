@@ -246,6 +246,41 @@ enum Command {
         #[arg(long)]
         log: PathBuf,
     },
+    /// Set the name's profile in one transaction: any of the card entries, plus
+    /// other entries with `--set key=value`, and `--clear key` to remove one.
+    /// Everything not mentioned stays as it is.
+    Profile {
+        #[arg(value_parser = parse_name)]
+        name: String,
+        /// Display name.
+        #[arg(long)]
+        display: Option<String>,
+        /// A short text about you.
+        #[arg(long)]
+        bio: Option<String>,
+        /// An image file (PNG, JPEG, GIF or WebP), stored in the record itself:
+        /// keep it small (the whole record is at most 12 KiB).
+        #[arg(long)]
+        avatar: Option<PathBuf>,
+        /// Card theme: light, dark or auto.
+        #[arg(long, value_parser = ["light", "dark", "auto"])]
+        theme: Option<String>,
+        /// Card accent colour, #rrggbb.
+        #[arg(long, value_parser = parse_color)]
+        color: Option<String>,
+        /// Card font: sans, serif, mono or rounded.
+        #[arg(long, value_parser = ["sans", "serif", "mono", "rounded"])]
+        font: Option<String>,
+        /// A Logos Storage content ID.
+        #[arg(long)]
+        cid: Option<String>,
+        /// Any other entry, as key=value. Repeatable.
+        #[arg(long = "set", value_parser = parse_key_value)]
+        set: Vec<(String, String)>,
+        /// Remove an entry. Repeatable.
+        #[arg(long)]
+        clear: Vec<String>,
+    },
     /// Set a text entry such as `chat`, `inbox` or `agent`; an empty value removes it.
     SetText {
         #[arg(value_parser = parse_name)]
@@ -388,6 +423,52 @@ fn parse_account(input: &str) -> Result<AccountId, String> {
         .unwrap_or(input);
     bare.parse()
         .map_err(|_| format!("not an account ID: {input}"))
+}
+
+fn parse_color(input: &str) -> Result<String, String> {
+    let ok = input.len() == 7 && input.starts_with('#') && input[1..].chars().all(|c| c.is_ascii_hexdigit());
+    if ok { Ok(input.to_ascii_lowercase()) } else { Err("colour must be #rrggbb".to_owned()) }
+}
+
+fn parse_key_value(input: &str) -> Result<(String, String), String> {
+    let (key, value) = input.split_once('=').ok_or("expected key=value")?;
+    validate_text_key(key).map_err(str::to_owned)?;
+    Ok((key.to_owned(), value.to_owned()))
+}
+
+/// An image file as a data: URL, recognised by its first bytes.
+fn image_data_url(path: &std::path::Path) -> Result<String> {
+    let bytes = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let kind = if bytes.starts_with(b"\x89PNG") {
+        "png"
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        "jpeg"
+    } else if bytes.starts_with(b"GIF8") {
+        "gif"
+    } else if bytes.len() > 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        "webp"
+    } else {
+        bail!("{} is not a PNG, JPEG, GIF or WebP image", path.display());
+    };
+    Ok(format!("data:image/{kind};base64,{}", base64_encode(&bytes)))
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = u32::from(chunk[0]) << 16
+            | u32::from(*chunk.get(1).unwrap_or(&0)) << 8
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(TABLE[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 fn parse_term(input: &str) -> Result<u8, String> {
@@ -1912,6 +1993,35 @@ async fn main() -> Result<()> {
                 bail!("the account's log does not endorse {full_name} (no live `{}` entry)", names_accountlog::NAME_CONTEXT);
             }
             Ok(())
+        }
+        Command::Profile { name, display, bio, avatar, theme, color, font, cid, set, clear } => {
+            let mut changes: Vec<(String, String)> = Vec::new();
+            for (key, value) in [("display", display), ("bio", bio), ("theme", theme), ("color", color), ("font", font), ("cid", cid)] {
+                if let Some(value) = value {
+                    changes.push((key.to_owned(), value));
+                }
+            }
+            if let Some(path) = avatar {
+                changes.push(("avatar".to_owned(), image_data_url(&path)?));
+            }
+            changes.extend(set);
+            if changes.is_empty() && clear.is_empty() {
+                bail!("nothing to change: give at least one entry, --set or --clear");
+            }
+            client
+                .edit(&name, |profile| {
+                    for key in &clear {
+                        profile.texts.retain(|text| &text.key != key);
+                    }
+                    for (key, value) in changes {
+                        match profile.texts.iter_mut().find(|text| text.key == key) {
+                            Some(text) => text.value = value,
+                            None => profile.texts.push(TextRecord { key, value }),
+                        }
+                    }
+                    Ok(())
+                })
+                .await
         }
         Command::SetText { name, key, value } => {
             validate_text_key(&key).map_err(|reason| anyhow!(reason))?;

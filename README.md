@@ -161,6 +161,7 @@ names register jef --owner <account> --term 1y   # 30d, 1y or 5y; makes receivin
                                                 # 15 minutes (`names mine` shows it); --wait stays
 names renew jef --term 30d
 names set-text jef chat <address>
+names profile jef --display "jef" --bio "..." --avatar me.png --theme dark --color "#96d678"   # one transaction
 names set-page jef index.html
 names set-account jef <account>           # optional: also payable publicly, at a visible account
 names clear-account jef
