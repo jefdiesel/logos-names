@@ -22,7 +22,8 @@ use lee_core::{
 };
 use lee::{privacy_preserving_transaction::circuit::ProgramWithDependencies, program::Program};
 use names_core::{
-    Effect, GRACE_MS, Instruction, NAME_SUFFIX, NameId, NameRecord, Page, Settings,
+    Effect, GRACE_MS, Instruction, MAX_COMMIT_AGE_MS, MIN_COMMIT_AGE_MS, NAME_SUFFIX, NameId,
+    NameRecord, Page, Settings, commitment, commitment_address,
     normalize_name, owner_tag, page_address, record_address, settings_address,
     validate_name,
 };
@@ -45,6 +46,17 @@ struct Defaults {
     private: Option<String>,
     #[serde(default)]
     names: Vec<String>,
+    /// Commitments made but not yet revealed, by name, so an interrupted
+    /// `register` picks up where it stopped.
+    #[serde(default)]
+    pending: std::collections::BTreeMap<String, Pending>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct Pending {
+    owner: String,
+    secret: String,
+    made: u64,
 }
 
 fn defaults_path() -> Result<PathBuf> {
@@ -62,6 +74,10 @@ fn load_defaults() -> Defaults {
 fn save_defaults(defaults: &Defaults) -> Result<()> {
     std::fs::write(defaults_path()?, serde_json::to_vec_pretty(defaults)?)?;
     Ok(())
+}
+
+fn parse_hex32(text: &str) -> Option<[u8; 32]> {
+    hex::decode(text).ok()?.try_into().ok()
 }
 
 /// The account a command uses when none is given: the setup's private account.
@@ -583,8 +599,54 @@ impl Client {
             }
         }
         let (fee, paying) = self.price(owner, term).await?;
-        // Every name can be paid from the start, and only privately: the profile
-        // carries receiving keys of a fresh private account, never an address.
+        let holder = owner_tag(&id, &owner);
+
+        // Step 1: commit. The commitment hides the identifier, so watching
+        // pending transactions doesn't let anyone claim the name first.
+        let mut defaults = load_defaults();
+        let resumed = defaults
+            .pending
+            .get(name)
+            .filter(|p| p.owner == owner.to_string() && local_now() < p.made.saturating_add(MAX_COMMIT_AGE_MS))
+            .and_then(|p| Some((parse_hex32(&p.secret)?, p.made)));
+        let (secret, made) = match resumed {
+            Some(found) => {
+                println!("resuming the commitment to {name}{NAME_SUFFIX} made earlier");
+                found
+            }
+            None => {
+                let mut secret = [0u8; 32];
+                getrandom::fill(&mut secret).map_err(|e| anyhow!("no randomness: {e}"))?;
+                let made = self.now().await;
+                let promised = commitment(&id, &holder, &secret);
+                println!("step 1 of 2: committing to {name}{NAME_SUFFIX}");
+                self.send(
+                    vec![(commitment_address(&self.program, &promised), false), (owner, true)],
+                    &Instruction::Commit { commitment: promised, now: made },
+                )
+                .await?;
+                defaults.pending.insert(
+                    name.to_owned(),
+                    Pending { owner: owner.to_string(), secret: hex::encode(secret), made },
+                );
+                save_defaults(&defaults)?;
+                (secret, made)
+            }
+        };
+
+        // Step 2: reveal, once the commitment is old enough.
+        let ready = made.saturating_add(MIN_COMMIT_AGE_MS);
+        loop {
+            let chain_now = self.now().await;
+            if chain_now >= ready {
+                break;
+            }
+            let wait = (ready - chain_now).div_ceil(1000);
+            println!("waiting {wait}s before revealing (the commitment must be {} minutes old)", MIN_COMMIT_AGE_MS / 60_000);
+            tokio::time::sleep(std::time::Duration::from_secs(wait.clamp(5, 30))).await;
+        }
+        // Every name can be paid from the start: the profile carries receiving
+        // keys of a fresh private account.
         let (receiving, npk, vpk) = self.new_receiving_keys()?;
         let profile = Profile {
             name: name.to_owned(),
@@ -598,12 +660,14 @@ impl Client {
             Some(now) => now,
             None => self.now().await,
         };
-        println!("registering {name}{NAME_SUFFIX} at {now} for a fee of {fee}");
+        let promised = commitment(&id, &holder, &secret);
+        println!("step 2 of 2: registering {name}{NAME_SUFFIX} at {now} for a fee of {fee}");
         self.send_paying(
             vec![
                 (record_address(&self.program, &id), false),
                 (page_address(&self.program, &id), false),
                 (settings_address(&self.program), false),
+                (commitment_address(&self.program, &promised), false),
             ],
             &paying,
             &Instruction::Register {
@@ -612,9 +676,14 @@ impl Client {
                 term,
                 fee,
                 now,
+                secret,
             },
         )
-        .await
+        .await?;
+        let mut defaults = load_defaults();
+        defaults.pending.remove(name);
+        save_defaults(&defaults)?;
+        Ok(())
     }
     /// Adds `term` to the time `name` is held for, paid by `payer` or else its owner.
     async fn renew(&mut self, name: &str, term: u8, payer: Option<AccountId>) -> Result<()> {
@@ -637,7 +706,7 @@ impl Client {
         .await
     }
     /// Sets the registry's settings, signed by their admin or, while there are none,
-    /// by the admin being set.
+    /// by the program's own account, whose key its deployer holds.
     async fn configure(
         &mut self,
         admin: AccountId,
@@ -648,7 +717,7 @@ impl Client {
         let signer = match (signer, self.settings().await?) {
             (Some(signer), _) => signer,
             (None, Some(settings)) => settings.admin,
-            (None, None) => admin,
+            (None, None) => self.program,
         };
         self.send(
             vec![(settings_address(&self.program), false), (signer, true)],

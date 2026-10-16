@@ -23,8 +23,11 @@ What this does not hide:
 
 - **Anyone who knows or guesses a name can resolve it.** That is what makes a
   name usable. The derivation is slow on purpose, about 100,000 times the cost
-  of one hash, which makes scanning for names expensive. It does not protect a
-  short or obvious name from a targeted guess.
+  of one hash. But its salt is the same for every name and every registry, so
+  that cost is paid once per candidate name, not per registry: a dictionary of
+  likely names (a few million short or common ones is hours on one GPU, since
+  PBKDF2 is not memory-hard) is computed once and then checks every registry,
+  now and later, for free. Treat any name someone might guess as public.
 - **Who holds a name is not stored.** A record keeps an owner tag,
   `SHA-256("logos-names/v3/owner" ‖ id ‖ account)`, in place of its holder: it
   names no account, and one account's tags for two names are unrelated. No
@@ -38,9 +41,13 @@ What this does not hide:
 - **When a name expires and what was paid for it** are public: the record
   holds its expiry in the clear, and the fee arrives in the treasury. Neither
   says which name, and from a private holder the fee does not say who paid.
-- **A public holder is seen signing.** A holder acting from a public account
-  signs each change, so the chain shows that account touching some record. Use
-  a private account to avoid that.
+- **A public holder can be found, at any time.** A holder acting from a public
+  account signs each change, so the chain shows that account touching some
+  record. Worse, the owner tag is a plain hash: anyone who knows a name can
+  test every public account that ever appeared on chain against its record
+  and find the holder, long after the fact, without having watched anything.
+  Only a private-account holder is hidden. Whoever serves the RPC, holding a
+  dictionary of name identifiers, can also tell which names a client looks up.
 - **The connection.** Whoever serves the sequencer's RPC sees which record
   addresses a client reads and from where, though not the names.
 - **Clients never tie a name to an account.** A conforming client sets only
@@ -259,14 +266,15 @@ byte). `id` is 32 raw bytes.
 
 | # | Instruction | Fields | Accounts, in order |
 |---|---|---|---|
-| 0 | `Register` | `id, sealed: Vec<u8>, term: u8, fee: u128, now: u64` | record, page, settings, payer, then treasury if `fee` is not 0 |
+| 0 | `Register` | `id, sealed: Vec<u8>, term: u8, fee: u128, now: u64, secret: [u8; 32]` | record, page, settings, commitment, payer, then treasury if `fee` is not 0 |
 | 1 | `Renew` | `id, term: u8, fee: u128, now: u64` | record, settings, payer, then treasury if `fee` is not 0 |
 | 2 | `SetRecord` | `id, sealed: Vec<u8>` | record, owner |
 | 3 | `SetPage` | `id, sealed: Vec<u8>` | record, page, owner |
 | 4 | `Transfer` | `id, new_owner: [u8; 32]` (the new holder's owner tag) | record, page, owner |
 | 5 | `Release` | `id` | record, page, owner |
 | 6 | `SetPrimary` | `name: String` | owner |
-| 7 | `Configure` | `admin: AccountId, treasury: AccountId, prices: [u128; 3]` | settings, admin |
+| 7 | `Configure` | `admin: AccountId, treasury: AccountId, prices: [u128; 3]` | settings, signer (the program's own account the first time, then the admin) |
+| 8 | `Commit` | `commitment: [u8; 32], now: u64` | commitment, signer |
 
 Rules:
 
@@ -295,15 +303,29 @@ Rules:
   settings account is empty, the price for the term is 0, or `payer` is the
   treasury itself, `fee` is 0 and no treasury account is passed. A client reads
   the settings account first.
+- **Claiming is commit, then reveal** (registry version 4), so nobody watching
+  pending transactions can register an identifier first. `Commit` stores, at
+  `PDA(program, SHA-256("logos-names/v4/commit/" ‖ c))`, when it was made, where
+  `c = SHA-256("logos-names/v4/commitment" ‖ id ‖ tag ‖ secret)`, `tag` is the
+  owner tag of the account that will reveal it and `secret` is 32 random bytes
+  the client keeps. `Register` names that commitment account and `secret`; the
+  program recomputes `c` with the payer's tag, so a reveal seen pending can't
+  be replayed for another account. The commitment must have been made at least
+  5 minutes and less than 24 hours before the reveal's `now`; the reveal uses it
+  up. `Commit` and `Register` are valid only in a block whose timestamp is in
+  `[now, now + 3 minutes)`, so a claimed time is at most 3 minutes early and at
+  least 2 minutes really pass between a commitment and its reveal: longer than a
+  reveal waits to be included, so a commitment made after seeing one loses.
+  A `Commit` refuses to overwrite a commitment that can still be revealed.
 - `Register` succeeds if the name is unregistered, or if its record's
   `expires + grace <= now`. The payer becomes the owner (its tag is stored), `expires` becomes
   `now` plus the term, and any page left by a lapsed holder is emptied. Its
   `sealed` is the name's first profile and may be empty.
 - `Renew` succeeds while `now < expires + grace`, for any payer. `expires`
   becomes the later of `expires` and `now`, plus the term.
-- `Configure` sets the settings. While the settings account is empty anyone may
-  send it, so whoever deploys a registry configures it at once and checks that
-  the admin is theirs; afterwards only the settings' `admin` may.
+- `Configure` sets the settings. While the settings account is empty only the
+  program's own account may sign it: the account the program was deployed at,
+  whose key only the deployer holds. Afterwards only the settings' `admin` may.
 - Every other instruction on a name succeeds only if the signer's owner tag
   for the name is the record's `owner`.
 - A profile is changed by reading it, opening it, changing it, sealing it again
@@ -386,7 +408,7 @@ and `now` 8 bytes, little-endian:
 
 | Instruction | Encoding |
 |---|---|
-| `Register { id, sealed: [ee, ff], term: 1, fee: 100000, now: 1700000000000 }` | `00` ‖ id ‖ `02000000eeff` ‖ `01` ‖ `a0860100000000000000000000000000` ‖ `0068e5cf8b010000` |
+| `Register { id, sealed: [ee, ff], term: 1, fee: 100000, now: 1700000000000, secret: 32 × 0x5a }` | `00` ‖ id ‖ `02000000eeff` ‖ `01` ‖ `a0860100000000000000000000000000` ‖ `0068e5cf8b010000` ‖ `5a` 32 times |
 | `Renew { id, term: 2, fee: 0, now: 1700000000000 }` | `01` ‖ id ‖ `02` ‖ `00` 16 times ‖ `0068e5cf8b010000` |
 | `SetRecord { id, sealed: [ee] }` | `02` ‖ id ‖ `01000000ee` |
 | `SetPage { id, sealed: [] }` | `03` ‖ id ‖ `00000000` |
@@ -394,6 +416,7 @@ and `now` 8 bytes, little-endian:
 | `Release { id }` | `05` ‖ id |
 | `SetPrimary { name: "jef" }` | `06030000006a6566` |
 | `Configure { admin: 32 × 0x01, treasury: 32 × 0x02, prices: [1, 2, 3] }` | `07` ‖ `01` 32 times ‖ `02` 32 times ‖ three 16-byte little-endian numbers |
+| `Commit { commitment: 32 × 0xc0, now: 1700000000000 }` | `08` ‖ `c0` 32 times ‖ `0068e5cf8b010000` |
 
 ## 11. Canonical registries
 

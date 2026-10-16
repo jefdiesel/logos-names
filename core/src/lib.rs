@@ -32,6 +32,12 @@
 //! The registry keeps no history. Releasing a name empties its record and page;
 //! transferring a name empties everything its last holder sealed.
 //!
+//! A name is claimed in two steps, commit then reveal ([`Instruction::Commit`],
+//! [`Instruction::Register`]), so that watching pending transactions doesn't let
+//! anyone register an identifier before the person who knows its name: the
+//! commitment hides the identifier, and the reveal is bound to the committed
+//! holder and only valid a while after the commitment.
+//!
 //! `plan` never sees account data, so every ownership check is carried by an
 //! effect and enforced in `apply`, where the shard's current data is visible.
 //! `apply` sees no clock either: the time is the sender's claim, which `plan`
@@ -45,8 +51,9 @@ use lee_core::{
 };
 
 /// Record layout version written by this program. Version 3 holds an owner
-/// tag where version 2 held the owner's account.
-pub const VERSION: u8 = 3;
+/// tag where version 2 held the owner's account; version 4 records are laid out
+/// as version 3's, and are only written after a commitment ([`Instruction::Commit`]).
+pub const VERSION: u8 = 4;
 pub const MAX_NAME_LEN: usize = 32;
 /// How names are written for people: `jef.lez`. The suffix is a display
 /// convention only; it is removed before a name is turned into an identifier.
@@ -61,6 +68,20 @@ const NAME_SEED_DOMAIN: &[u8] = b"logos-names/v2/name/";
 const PAGE_SEED_DOMAIN: &[u8] = b"logos-names/v2/page/";
 const SETTINGS_SEED_DOMAIN: &[u8] = b"logos-names/v2/config";
 const OWNER_TAG_DOMAIN: &[u8] = b"logos-names/v3/owner";
+const COMMITMENT_DOMAIN: &[u8] = b"logos-names/v4/commitment";
+const COMMITMENT_SEED_DOMAIN: &[u8] = b"logos-names/v4/commit/";
+
+/// How far a commit or a reveal may be from the time it claims: it is valid only
+/// in a block whose timestamp is in `[now, now + TIME_WINDOW_MS)`. So a claimed
+/// time is at most this much earlier than the real one.
+pub const TIME_WINDOW_MS: u64 = 3 * 60 * 1000;
+/// How long a commitment must wait before its reveal. With a claimed time off
+/// by at most [`TIME_WINDOW_MS`], at least `MIN_COMMIT_AGE_MS - TIME_WINDOW_MS`
+/// (two minutes) really passes between a commitment and its reveal, so a reveal
+/// seen pending can't be beaten by a commitment made after seeing it.
+pub const MIN_COMMIT_AGE_MS: u64 = 5 * 60 * 1000;
+/// How long a commitment can still be revealed.
+pub const MAX_COMMIT_AGE_MS: u64 = 24 * 60 * 60 * 1000;
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 /// How long each term holds a name, in milliseconds as LEZ block timestamps
@@ -90,6 +111,15 @@ pub struct NameRecord {
     /// When the name lapses, in milliseconds since the Unix epoch.
     pub expires: u64,
     pub sealed: Vec<u8>,
+}
+
+/// A commitment to claim some name: when it was made. The name, its
+/// identifier and the holder are hidden in the commitment's address.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct Commitment {
+    pub version: u8,
+    /// The committer's claimed time, at most [`TIME_WINDOW_MS`] early.
+    pub made: u64,
 }
 
 /// A name's page, sealed like its record.
@@ -122,18 +152,23 @@ pub struct Settings {
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum Instruction {
-    /// Claim a name that is unregistered, or lapsed past its grace period, for
-    /// the payer, with its first sealed profile (which may be empty). `now` is
-    /// the sender's claim of the time; the transaction is only valid in a
-    /// block at least that late. `fee` is the settings' price for `term`.
-    /// Accounts: `[record, page, settings, payer]`, then `treasury` if `fee`
-    /// is not 0. `payer` and `treasury` select the native token's shard.
+    /// Reveal a commitment and claim a name that is unregistered, or lapsed
+    /// past its grace period, for the payer, with its first sealed profile
+    /// (which may be empty). The commitment must be
+    /// [`commitment(id, owner_tag(id, payer), secret)`](commitment), made at
+    /// least [`MIN_COMMIT_AGE_MS`] and less than [`MAX_COMMIT_AGE_MS`] before
+    /// `now`; revealing uses it up. `now` is the sender's claim of the time; the
+    /// transaction is only valid in a block whose timestamp is in
+    /// `[now, now + TIME_WINDOW_MS)`. `fee` is the settings' price for `term`.
+    /// Accounts: `[record, page, settings, commitment, payer]`, then `treasury`
+    /// if `fee` is not 0. `payer` and `treasury` select the native token's shard.
     Register {
         id: NameId,
         sealed: Vec<u8>,
         term: u8,
         fee: u128,
         now: u64,
+        secret: [u8; 32],
     },
     /// Extend a name that is active or in grace by `term`; anyone may pay.
     /// Accounts: `[record, settings, payer]`, then `treasury` if `fee` is not
@@ -164,14 +199,22 @@ pub enum Instruction {
     /// in the clear.
     /// Accounts: `[owner]`.
     SetPrimary { name: String },
-    /// Set the registry's settings. Anyone may while there are none; afterwards
-    /// only their admin.
-    /// Accounts: `[settings, admin]`.
+    /// Set the registry's settings. The first settings must be signed by the
+    /// program's own account, whose key only its deployer holds; afterwards
+    /// only by their admin.
+    /// Accounts: `[settings, signer]`.
     Configure {
         admin: AccountId,
         treasury: AccountId,
         prices: [u128; 3],
     },
+    /// Commit to claiming a name: the first step of [`Instruction::Register`].
+    /// `commitment` is [`commitment`]`(id, owner_tag(id, payer), secret)` for
+    /// the account that will reveal it; nothing here names the name, its
+    /// identifier or that account. Valid only in a block whose timestamp is in
+    /// `[now, now + TIME_WINDOW_MS)`. Anyone may commit; whoever signs pays.
+    /// Accounts: `[commitment, signer]`.
+    Commit { commitment: [u8; 32], now: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -198,10 +241,11 @@ pub enum Effect {
         term: u8,
         fee: u128,
     },
-    /// On the settings: replace them, refused unless there are none or `signer`
-    /// is their admin.
+    /// On the settings: replace them, refused unless `signer` is their admin,
+    /// or, while there are none, unless the program's own account signed.
     WriteSettings {
         signer: AccountId,
+        by_program: bool,
         admin: AccountId,
         treasury: AccountId,
         prices: [u128; 3],
@@ -222,6 +266,12 @@ pub enum Effect {
     WritePage { sealed: Vec<u8> },
     /// On the signer's own account.
     WritePrimary { name: String },
+    /// On a commitment account: record that it was made at `now`, refused if
+    /// one is there that can still be revealed.
+    Commit { now: u64 },
+    /// On a commitment account: use it up, refused unless it was made at least
+    /// [`MIN_COMMIT_AGE_MS`] and less than [`MAX_COMMIT_AGE_MS`] before `now`.
+    Reveal { now: u64 },
 }
 
 /// Emitted when a name is claimed. Events are emitted while planning, before
@@ -310,6 +360,34 @@ pub fn owner_tag(id: &NameId, account: &AccountId) -> OwnerTag {
     bytes.extend_from_slice(id);
     bytes.extend_from_slice(account.value());
     sha256(&bytes)
+}
+
+/// What a claim commits to: the name's identifier, the tag of the account that
+/// will hold it, and a secret the committer picks at random.
+#[must_use]
+pub fn commitment(id: &NameId, holder: &OwnerTag, secret: &[u8; 32]) -> [u8; 32] {
+    let mut bytes = Vec::with_capacity(COMMITMENT_DOMAIN.len() + 96);
+    bytes.extend_from_slice(COMMITMENT_DOMAIN);
+    bytes.extend_from_slice(id);
+    bytes.extend_from_slice(holder);
+    bytes.extend_from_slice(secret);
+    sha256(&bytes)
+}
+
+/// The account holding the commitment `commitment` under the registry `program`.
+#[must_use]
+pub fn commitment_address(program: &AccountId, commitment: &[u8; 32]) -> AccountId {
+    AccountId::for_public_pda(program, &seed(COMMITMENT_SEED_DOMAIN, commitment))
+}
+
+/// Valid only in a block whose timestamp is in `[now, now + TIME_WINDOW_MS)`.
+fn bounded_window(plan: &mut Plan, now: u64) {
+    let window = lee_core::program::TimestampValidityWindow::try_from((
+        Some(now),
+        Some(after(now, TIME_WINDOW_MS)),
+    ))
+    .expect("a window of positive length");
+    plan.timestamp_window(window);
 }
 
 /// The account holding the record of the name `id` under the registry `program`.
@@ -473,13 +551,14 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             term,
             fee,
             now,
+            secret,
         } => {
             assert!(
                 sealed.len() <= MAX_SEALED_RECORD_LEN,
                 "sealed profile exceeds {MAX_SEALED_RECORD_LEN} bytes"
             );
-            let [record, page, settings, paying @ ..] = input.accounts.as_slice() else {
-                panic!("expected at least 4 input accounts, got {}", input.accounts.len());
+            let [record, page, settings, committed, paying @ ..] = input.accounts.as_slice() else {
+                panic!("expected at least 5 input accounts, got {}", input.accounts.len());
             };
             let program = &input.self_account_id;
             require_address(record, record_address(program, &id), "record");
@@ -487,6 +566,15 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             require_address(settings, settings_address(program), "settings");
             let expires = after(now, term_length(term));
             let owner = charge(&mut plan, &id, settings, paying, term, fee, now);
+            // Bound to the holder: a reveal seen pending can't be replayed for
+            // another account.
+            let promised = commitment(&id, &owner_tag(&id, &owner), &secret);
+            assert!(
+                committed.account_id == commitment_address(program, &promised),
+                "no commitment to this name for this account and secret"
+            );
+            plan.effect(committed, &Effect::Reveal { now });
+            bounded_window(&mut plan, now);
             plan.event(event(Registered::SELECTOR_NAME, &Registered { id, expires }));
             plan.effect(
                 record,
@@ -591,11 +679,22 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
                 settings,
                 &Effect::WriteSettings {
                     signer: signer.account_id,
+                    by_program: signer.account_id == input.self_account_id,
                     admin,
                     treasury,
                     prices,
                 },
             );
+        }
+        Instruction::Commit { commitment, now } => {
+            let [committed, signer] = accounts::<2>(input);
+            assert!(
+                committed.account_id == commitment_address(&input.self_account_id, &commitment),
+                "the commitment account does not match the commitment"
+            );
+            assert!(signer.is_authorized, "the committing account must sign");
+            plan.effect(committed, &Effect::Commit { now });
+            bounded_window(&mut plan, now);
         }
     }
     plan
@@ -681,12 +780,17 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
         }
         Effect::WriteSettings {
             signer,
+            by_program,
             admin,
             treasury,
             prices,
         } => {
-            if let Some(settings) = load_settings(pre_data) {
-                assert!(signer == settings.admin, "signer is not the registry's admin");
+            match load_settings(pre_data) {
+                Some(settings) => {
+                    assert!(signer == settings.admin, "signer is not the registry's admin");
+                }
+                // Nobody but the deployer can configure a fresh registry.
+                None => assert!(by_program, "the first settings must be signed by the program's own account"),
             }
             Some(to_bytes(&Settings {
                 version: VERSION,
@@ -730,7 +834,30 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
                 name,
             })
         }),
+        Effect::Commit { now } => {
+            if let Some(held) = load_commitment(pre_data) {
+                assert!(
+                    after(held.made, MAX_COMMIT_AGE_MS) <= now,
+                    "this commitment was already made"
+                );
+            }
+            Some(to_bytes(&Commitment { version: VERSION, made: now }))
+        }
+        Effect::Reveal { now } => {
+            let made = load_commitment(pre_data).expect("no commitment to reveal").made;
+            assert!(
+                after(made, MIN_COMMIT_AGE_MS) <= now,
+                "the commitment is too recent; reveal it later"
+            );
+            assert!(now < after(made, MAX_COMMIT_AGE_MS), "the commitment has expired");
+            Some(Vec::new())
+        }
     }
+}
+
+fn load_commitment(pre_data: &[u8]) -> Option<Commitment> {
+    (!pre_data.is_empty())
+        .then(|| borsh::from_slice(pre_data).expect("a commitment shard holds a commitment"))
 }
 
 #[cfg(test)]
@@ -787,11 +914,19 @@ mod tests {
     }
 
     /// The accounts of a `Register` that pays no fee.
+    /// The secret the test registrations commit with.
+    const SECRET: [u8; 32] = [5; 32];
+
+    fn committed(id: &NameId, holder: AccountId) -> AccountId {
+        commitment_address(&PROGRAM, &commitment(id, &owner_tag(id, &holder), &SECRET))
+    }
+
     fn on_registration(id: &NameId, payer: AccountId) -> Vec<AccountMeta> {
         vec![
             meta(record_address(&PROGRAM, id), false),
             meta(page_address(&PROGRAM, id), false),
             meta(settings_address(&PROGRAM), false),
+            meta(committed(id, payer), false),
             native(payer),
         ]
     }
@@ -823,6 +958,7 @@ mod tests {
             term,
             fee,
             now,
+            secret: SECRET,
         }
     }
 
@@ -847,6 +983,17 @@ mod tests {
 
     impl Chain {
         fn run(&mut self, accounts: Vec<AccountMeta>, instruction: Instruction) {
+            // Tests that are not about commitments register as if one had been
+            // made long enough before.
+            if let (Instruction::Register { now, .. }, Some(slot)) = (&instruction, accounts.get(3)) {
+                self.shards.entry(slot.account_id).or_insert_with(|| {
+                    to_bytes(&Commitment { version: VERSION, made: now - MIN_COMMIT_AGE_MS })
+                });
+            }
+            self.run_exactly(accounts, instruction);
+        }
+
+        fn run_exactly(&mut self, accounts: Vec<AccountMeta>, instruction: Instruction) {
             let mut next = self.shards.clone();
             for (account, effect) in run_plan(accounts, instruction) {
                 let before = next.get(&account).cloned().unwrap_or_default();
@@ -876,7 +1023,22 @@ mod tests {
             (!data.is_empty()).then(|| borsh::from_slice(data).expect("settings decode"))
         }
 
+        fn commit(&mut self, id: &NameId, holder: AccountId, now: u64) {
+            let promised = commitment(id, &owner_tag(id, &holder), &SECRET);
+            self.run_exactly(
+                vec![meta(commitment_address(&PROGRAM, &promised), false), meta(CAROL, true)],
+                Instruction::Commit { commitment: promised, now },
+            );
+        }
+
+        fn reveal(&mut self, id: &NameId, holder: AccountId, now: u64) {
+            self.run_exactly(on_registration(id, holder), register_at(*id, Vec::new(), 1, 0, now));
+        }
+
+        /// The first settings are signed by the program's own account, as its
+        /// deployer does; later ones by `signer`.
         fn configure(&mut self, signer: AccountId, admin: AccountId, prices: [u128; 3]) {
+            let signer = if self.settings().is_none() { PROGRAM } else { signer };
             self.run(
                 vec![meta(settings_address(&PROGRAM), false), meta(signer, true)],
                 Instruction::Configure {
@@ -1284,8 +1446,19 @@ mod tests {
                 term: 1,
                 fee: 100_000,
                 now: 1_700_000_000_000,
+                secret: [0x5A; 32],
             }),
-            format!("00{id_hex}02000000eeff01a08601000000000000000000000000000068e5cf8b010000")
+            format!(
+                "00{id_hex}02000000eeff01a08601000000000000000000000000000068e5cf8b010000{}",
+                "5a".repeat(32)
+            )
+        );
+        assert_eq!(
+            hex(&Instruction::Commit {
+                commitment: [0xC0; 32],
+                now: 1_700_000_000_000,
+            }),
+            format!("08{}0068e5cf8b010000", "c0".repeat(32))
         );
         assert_eq!(
             hex(&Instruction::Renew {
@@ -1556,7 +1729,89 @@ mod tests {
     }
 
     #[test]
-    fn anyone_configures_an_unconfigured_registry_and_then_only_its_admin() {
+    #[should_panic(expected = "the first settings must be signed by the program's own account")]
+    fn nobody_but_the_deployer_configures_a_fresh_registry() {
+        Chain::default().run(
+            vec![meta(settings_address(&PROGRAM), false), meta(CAROL, true)],
+            Instruction::Configure {
+                admin: CAROL,
+                treasury: CAROL,
+                prices: PRICES,
+            },
+        );
+    }
+
+    #[test]
+    fn a_name_is_claimed_by_commit_then_reveal() {
+        let mut chain = Chain::default();
+        chain.commit(&JEF, ALICE, NOW - MIN_COMMIT_AGE_MS);
+        chain.reveal(&JEF, ALICE, NOW);
+        assert_eq!(chain.record(&JEF).map(|r| r.owner), Some(owner_tag(&JEF, &ALICE)));
+        assert!(chain.data(&committed(&JEF, ALICE)).is_empty(), "revealing uses the commitment up");
+    }
+
+    #[test]
+    #[should_panic(expected = "the commitment is too recent")]
+    fn a_reveal_waits_for_its_commitment_to_age() {
+        let mut chain = Chain::default();
+        chain.commit(&JEF, ALICE, NOW);
+        chain.reveal(&JEF, ALICE, NOW + MIN_COMMIT_AGE_MS - 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "the commitment has expired")]
+    fn an_old_commitment_cannot_be_revealed() {
+        let mut chain = Chain::default();
+        chain.commit(&JEF, ALICE, NOW);
+        chain.reveal(&JEF, ALICE, NOW + MAX_COMMIT_AGE_MS);
+    }
+
+    #[test]
+    #[should_panic(expected = "no commitment to reveal")]
+    fn a_reveal_without_a_commitment_is_refused() {
+        Chain::default().reveal(&JEF, ALICE, NOW);
+    }
+
+    /// A front-runner who sees Alice's reveal pending knows `id` and `secret`, but
+    /// the commitment is bound to Alice, so it can't claim the name with it.
+    #[test]
+    #[should_panic(expected = "no commitment to this name for this account and secret")]
+    fn a_seen_reveal_cannot_be_replayed_for_another_account() {
+        let mut chain = Chain::default();
+        chain.commit(&JEF, ALICE, NOW - MIN_COMMIT_AGE_MS);
+        let mut accounts = on_registration(&JEF, BOB);
+        accounts[3] = meta(committed(&JEF, ALICE), false);
+        chain.run_exactly(accounts, register_at(JEF, Vec::new(), 1, 0, NOW));
+    }
+
+    #[test]
+    #[should_panic(expected = "this commitment was already made")]
+    fn a_live_commitment_cannot_be_reset() {
+        let mut chain = Chain::default();
+        chain.commit(&JEF, ALICE, NOW - MIN_COMMIT_AGE_MS);
+        chain.commit(&JEF, ALICE, NOW);
+    }
+
+    #[test]
+    fn commit_and_reveal_are_valid_only_near_their_claimed_time() {
+        let promised = commitment(&JEF, &owner_tag(&JEF, &ALICE), &SECRET);
+        for instruction in [
+            Instruction::Commit { commitment: promised, now: NOW },
+            register_at(JEF, Vec::new(), 1, 0, NOW),
+        ] {
+            let accounts = match &instruction {
+                Instruction::Commit { .. } => {
+                    vec![meta(commitment_address(&PROGRAM, &promised), false), meta(CAROL, true)]
+                }
+                _ => on_registration(&JEF, ALICE),
+            };
+            let window = plan(&input(accounts, &instruction), instruction).output().timestamp_validity_window;
+            assert_eq!((window.start(), window.end()), (Some(NOW), Some(NOW + TIME_WINDOW_MS)));
+        }
+    }
+
+    #[test]
+    fn the_deployer_configures_a_fresh_registry_and_then_only_its_admin() {
         let mut chain = Chain::default();
         assert_eq!(chain.settings(), None);
         chain.configure(CAROL, ALICE, PRICES);

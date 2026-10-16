@@ -5248,6 +5248,7 @@ dependencies = [
  "clap_mangen",
  "clock_core",
  "common",
+ "getrandom 0.3.4",
  "hex",
  "lee",
  "lee_core",
