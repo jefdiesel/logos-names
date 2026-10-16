@@ -240,6 +240,9 @@ application-defined and should be namespaced, for example `myapp.setting`.
 | `display` | A display name, shown on the name's profile card. |
 | `bio` | A short text about the holder, shown on the profile card. |
 | `avatar` | A small image as a `data:image/png`, `jpeg`, `gif` or `webp` base64 URL, kept within the record's 12 KiB. A viewer shows only inline images, so showing one fetches nothing. |
+| `color` | The card's accent colour, `#rrggbb`. |
+| `theme` | The card's theme: `light` (the default), `dark` or `auto` (follows the viewer). |
+| `font` | The card's font: `sans` (the default), `serif`, `mono` or `rounded`, from the viewer's own system fonts. |
 | `logos.account` | The holder's Logos account: an [AccountLog](https://github.com/logos-co/logos-lips/blob/main/docs/identity/raw/accountlog.md) address, the account's Ed25519 public key as 64 lowercase hex characters. See below. |
 
 ### Linking a name to a Logos account

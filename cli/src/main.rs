@@ -1262,7 +1262,7 @@ fn profile_card(name: &str, profile: &Profile, has_page: bool, storage: &str) ->
         rows.push(("public account".to_owned(), format!("<code>{}</code>", AccountId::new(account))));
     }
     for entry in &profile.texts {
-        if ["display", "bio", "avatar"].contains(&entry.key.as_str()) {
+        if ["display", "bio", "avatar", "color", "theme", "font"].contains(&entry.key.as_str()) {
             continue;
         }
         let mut value = format!("<code>{}</code>", html_escape(&entry.value));
@@ -1284,17 +1284,38 @@ fn profile_card(name: &str, profile: &Profile, has_page: bool, storage: &str) ->
         .iter()
         .map(|(key, value)| format!("<tr><th>{}</th><td>{value}</td></tr>", html_escape(key)))
         .collect();
-    let page_link = if has_page { "<p><a href=\"/\">the name's page</a></p>" } else { "" };
+    let page_link = if has_page { "<p class=\"more\"><a href=\"/\">the name's page</a></p>" } else { "" };
+    // Styling entries are checked against fixed forms, so none can inject CSS.
+    let accent = text("color")
+        .filter(|v| v.len() == 7 && v.starts_with('#') && v[1..].chars().all(|c| c.is_ascii_hexdigit()))
+        .unwrap_or("#3b6fd8");
+    let font = match text("font") {
+        Some("serif") => "ui-serif,Georgia,serif",
+        Some("mono") => "ui-monospace,SFMono-Regular,Menlo,monospace",
+        Some("rounded") => "ui-rounded,'SF Pro Rounded',system-ui,sans-serif",
+        _ => "system-ui,-apple-system,'Segoe UI',sans-serif",
+    };
+    let light = "--bg:#f5f5f7;--card:#fff;--text:#1d1d1f;--muted:#6e6e73;--line:#e5e5ea";
+    let dark = "--bg:#111;--card:#1c1c1e;--text:#f2f2f7;--muted:#98989f;--line:#2c2c2e";
+    let theme = match text("theme") {
+        Some("dark") => format!(":root{{{dark}}}"),
+        Some("auto") => format!(":root{{{light}}}@media(prefers-color-scheme:dark){{:root{{{dark}}}}}"),
+        _ => format!(":root{{{light}}}"),
+    };
     format!(
         "<!doctype html><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\">\
-         <title>{name}{NAME_SUFFIX}</title><style>\
-         body{{font:16px/1.5 system-ui,sans-serif;max-width:36rem;margin:3rem auto;padding:0 1rem;color:#1d1d1f;background:#fff}}\
-         @media(prefers-color-scheme:dark){{body{{color:#eee;background:#141414}}th{{color:#aaa}}}}\
-         .avatar{{width:96px;height:96px;border-radius:50%;object-fit:cover;image-rendering:pixelated}}h1{{margin:.5rem 0 0}}\
-         .handle{{color:#888;margin:0}}.bio{{white-space:pre-wrap}}table{{border-collapse:collapse;width:100%}}\
-         th{{text-align:left;font-weight:500;color:#666;padding:.4rem 1rem .4rem 0;vertical-align:top;white-space:nowrap}}\
-         td{{padding:.4rem 0;word-break:break-all}}code{{font-size:.9em}}.note{{color:#888;font-size:.85em}}</style>\
-         {avatar}<h1>{}</h1><p class=\"handle\">{name}{NAME_SUFFIX}</p>{bio}<table>{rows}</table>{page_link}",
+         <title>{name}{NAME_SUFFIX}</title><style>{theme}:root{{--accent:{accent}}}\
+         body{{font:16px/1.5 {font};margin:0;padding:3rem 1rem;color:var(--text);background:var(--bg)}}\
+         .card{{max-width:34rem;margin:0 auto;background:var(--card);border-radius:18px;padding:2rem;\
+         box-shadow:0 1px 3px rgba(0,0,0,.08);border-top:4px solid var(--accent)}}\
+         .avatar{{width:96px;height:96px;border-radius:50%;object-fit:cover;image-rendering:pixelated;\
+         border:3px solid var(--accent)}}h1{{margin:.75rem 0 0;font-size:1.6rem}}\
+         .handle{{color:var(--accent);margin:0;font-weight:600}}.bio{{white-space:pre-wrap;margin:1rem 0}}\
+         table{{border-collapse:collapse;width:100%;margin-top:1rem}}tr+tr td,tr+tr th{{border-top:1px solid var(--line)}}\
+         th{{text-align:left;font-weight:500;color:var(--muted);padding:.6rem 1rem .6rem 0;vertical-align:top;white-space:nowrap}}\
+         td{{padding:.6rem 0;word-break:break-all}}code{{font-size:.88em}}a{{color:var(--accent)}}\
+         .note{{color:var(--muted);font-size:.85em}}.more{{margin:1.5rem 0 0}}</style>\
+         <div class=\"card\">{avatar}<h1>{}</h1><p class=\"handle\">{name}{NAME_SUFFIX}</p>{bio}<table>{rows}</table>{page_link}</div>",
         html_escape(display),
         name = html_escape(name),
     )
