@@ -1211,9 +1211,10 @@ fn write_default_wallet_files() -> Result<()> {
     Ok(())
 }
 
-/// Opens the wallet at the wallet home. Without one, opens an empty wallet that is
-/// not saved, so lookups need no setup; anything that signs then fails for want of a key.
-async fn open_wallet(overrides: Option<WalletConfigOverrides>) -> Result<WalletCore> {
+/// Opens the wallet at the wallet home. Without one, makes a new wallet and saves it,
+/// or, for a lookup (`save` false), uses an empty one that is never saved or shown,
+/// so lookups need no setup and leave nothing behind.
+async fn open_wallet(overrides: Option<WalletConfigOverrides>, save: bool) -> Result<WalletCore> {
     write_default_wallet_files()?;
     let storage_path = fetch_persistent_storage_path()?;
     if storage_path.exists() {
@@ -1221,6 +1222,9 @@ async fn open_wallet(overrides: Option<WalletConfigOverrides>) -> Result<WalletC
     }
     let (mut wallet, mnemonic) =
         WalletCore::new_init_storage(fetch_config_path()?, storage_path, overrides, "")?;
+    if !save {
+        return Ok(wallet);
+    }
     // A new wallet's keys can't have anything in past blocks, so start syncing from
     // now instead of scanning the whole chain (minutes on the testnet).
     if let Ok(latest) = wallet.get_last_block_id().await {
@@ -1513,7 +1517,11 @@ async fn main() -> Result<()> {
     }
 
     let mut client = Client {
-        wallet: open_wallet(overrides).await?,
+        wallet: open_wallet(
+            overrides,
+            !matches!(cli.command, Command::Resolve { .. } | Command::Settings | Command::VerifyAccount { .. }),
+        )
+        .await?,
         program,
     };
 
