@@ -30,7 +30,7 @@ use std::collections::HashMap;
 
 const DEFAULT_SEQUENCER: &str = "https://testnet.lez.logos.co";
 /// The canonical registry on the default network: the one SPEC.md section 11 lists.
-const DEFAULT_REGISTRY: &str = "66nUvzJtTxA729aUpTcAWDrb7cV9Heb2bDzceHQhLYad";
+const DEFAULT_REGISTRY: &str = "2PXg3SSmh5hvECTz4xcfV2d5YvxwyF6yVhpnjTokzCkX";
 
 pub trait NamesModule: Send + 'static {
     /// Where to send a payment for `name` (`jef.lez` or `jef`). The value is

@@ -425,7 +425,7 @@ registry, as they agree on one token contract.
 
 | Network | Registry program ID |
 |---|---|
-| Logos testnet v0.3 (LEZ) | `E6oXebf6sicLtYBpEMijFdB8mqbXg3HRsWfYoJBgjvdj` (registry v4, deployed 2026-10-16, CI build `72481ede…1a13`; replaces `66nUvz…LYad`, v3, which allowed front-running and a configure race) |
+| Logos testnet v0.3 (LEZ) | `2PXg3SSmh5hvECTz4xcfV2d5YvxwyF6yVhpnjTokzCkX` (registry v4.1, deployed 2026-10-16, CI build `99bc4e36…79e6`; replaces `66nUvz…LYad`, v3, which allowed front-running and a configure race) |
 
 The deployed program is the reproducible build produced by this repository's
 CI; its SHA-256 is recorded with each release. The program is upgradeable by

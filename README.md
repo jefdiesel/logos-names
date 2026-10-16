@@ -58,8 +58,8 @@ binaries and the man pages, bundles the MCP server and deploys them with the gat
 ## Status
 
 The CLI and gateway use the **public LEZ testnet** (testnet v0.3), registry
-`66nUvzJtTxA729aUpTcAWDrb7cV9Heb2bDzceHQhLYad` (record version 3, anonymous
-holders; deployed 2026-10-15 from CI build `506bfbfd…e9c4`), with `jef.lez` and
+`2PXg3SSmh5hvECTz4xcfV2d5YvxwyF6yVhpnjTokzCkX` (registry v4.1: commit-then-reveal registration, anonymous
+holders; deployed 2026-10-16 from CI build `99bc4e36…79e6`), with `jef.lez` and
 `logos.lez` held by a private account. The faucet (`chain/faucet.py`) runs on the
 M2 behind the gateway's `/faucet` and is funded by bridge deposits from the Logos
 Blockchain. The Names test chain ([chain/](chain/README.md)) was the default while
@@ -145,6 +145,8 @@ names configure --admin <account> --treasury <account> --prices 10000,100000,400
 names settings                                       # who is paid, and the price of each term
 
 names register jef --owner <account> --term 1y   # 30d, 1y or 5y; makes receiving keys
+                                                # commits, then reveals in the background after
+                                                # 15 minutes (`names mine` shows it); --wait stays
 names renew jef --term 30d
 names set-text jef chat <address>
 names set-page jef index.html

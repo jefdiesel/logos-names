@@ -76,6 +76,10 @@ fn save_defaults(defaults: &Defaults) -> Result<()> {
     Ok(())
 }
 
+fn register_log(name: &str) -> Result<PathBuf> {
+    Ok(fetch_persistent_storage_path()?.with_file_name(format!("names-register-{name}.log")))
+}
+
 fn parse_hex32(text: &str) -> Option<[u8; 32]> {
     hex::decode(text).ok()?.try_into().ok()
 }
@@ -91,9 +95,9 @@ fn default_private() -> Result<AccountId> {
 /// The text entry linking a name to a Logos account (an AccountLog address).
 const LOGOS_ACCOUNT_KEY: &str = "logos.account";
 
-/// The registry on the public LEZ testnet (deployed 2026-10-15). Used unless
+/// The registry on the public LEZ testnet (v4, deployed 2026-10-16). Used unless
 /// `--program` or `LOGOS_NAMES_PROGRAM` names another.
-const DEFAULT_PROGRAM: &str = "66nUvzJtTxA729aUpTcAWDrb7cV9Heb2bDzceHQhLYad";
+const DEFAULT_PROGRAM: &str = "2PXg3SSmh5hvECTz4xcfV2d5YvxwyF6yVhpnjTokzCkX";
 /// The public LEZ testnet's sequencer, reached directly: no server of ours sits between a
 /// user and the chain.
 const DEFAULT_RPC: &str = "https://testnet.lez.logos.co";
@@ -163,6 +167,11 @@ enum Command {
         /// Claim this time, in milliseconds, instead of reading the chain's clock.
         #[arg(long, hide = true)]
         now: Option<u64>,
+        /// Stay until the name is registered. Without it, `register` returns once
+        /// the commitment is made and finishes in the background (`names mine`
+        /// shows when it's done).
+        #[arg(long)]
+        wait: bool,
     },
     /// Hold a name for longer. Anyone may pay for it.
     Renew {
@@ -583,13 +592,17 @@ impl Client {
     }
 
     /// Registers `name` with a first profile that holds the name and its receiving keys.
+    /// Registers `name`: commit, wait, reveal. Without `wait` it returns `false` once
+    /// the commitment is made, leaving the rest to a background `names register`.
     async fn register(
         &mut self,
         name: &str,
         owner: AccountId,
         term: u8,
         now: Option<u64>,
-    ) -> Result<()> {
+        wait: bool,
+        rpc: Option<&str>,
+    ) -> Result<bool> {
         let Derived { id, key } = derive(name);
         // Check first, so a taken name isn't given a receiving account it won't use.
         // The program refuses it anyway; this only makes the refusal come sooner.
@@ -636,6 +649,16 @@ impl Client {
 
         // Step 2: reveal, once the commitment is old enough.
         let ready = made.saturating_add(MIN_COMMIT_AGE_MS);
+        if !wait {
+            let log = self.finish_in_background(name, owner, term, rpc)?;
+            println!(
+                "{name}{NAME_SUFFIX} is committed; it registers in the background from {} (about {} minutes)",
+                readable(ready),
+                MIN_COMMIT_AGE_MS / 60_000 + 5
+            );
+            println!("check with `names mine`; the log is {}", log.display());
+            return Ok(false);
+        }
         loop {
             let chain_now = self.now().await;
             if chain_now >= ready {
@@ -683,7 +706,34 @@ impl Client {
         let mut defaults = load_defaults();
         defaults.pending.remove(name);
         save_defaults(&defaults)?;
-        Ok(())
+        println!("{name}{NAME_SUFFIX} is registered");
+        Ok(true)
+    }
+
+    /// Starts `names register <name> --wait` detached from this terminal, logging to
+    /// a file next to the wallet. It resumes the saved commitment.
+    fn finish_in_background(&self, name: &str, owner: AccountId, term: u8, rpc: Option<&str>) -> Result<PathBuf> {
+        let log = register_log(name)?;
+        let file = std::fs::File::create(&log).with_context(|| format!("cannot write {}", log.display()))?;
+        let term = ["30d", "1y", "5y"][usize::from(term)];
+        let mut command = std::process::Command::new(std::env::current_exe()?);
+        command
+            .args(["register", name, "--owner", &owner.to_string(), "--term", term, "--wait"])
+            .env("LOGOS_NAMES_PROGRAM", self.program.to_string())
+            .stdin(std::process::Stdio::null())
+            .stdout(file.try_clone()?)
+            .stderr(file);
+        if let Some(rpc) = rpc {
+            command.env("LOGOS_NAMES_RPC", rpc);
+        }
+        #[cfg(unix)]
+        {
+            // Its own process group, so closing the terminal doesn't stop it.
+            use std::os::unix::process::CommandExt as _;
+            command.process_group(0);
+        }
+        command.spawn().context("cannot start the background registration")?;
+        Ok(log)
     }
     /// Adds `term` to the time `name` is held for, paid by `payer` or else its owner.
     async fn renew(&mut self, name: &str, term: u8, payer: Option<AccountId>) -> Result<()> {
@@ -1500,7 +1550,14 @@ async fn main() -> Result<()> {
         }
         Command::Mine => {
             let defaults = load_defaults();
-            if defaults.names.is_empty() {
+            for (name, pending) in &defaults.pending {
+                println!(
+                    "{name}{NAME_SUFFIX}  registering, ready from about {} (log: {})",
+                    readable(pending.made.saturating_add(MIN_COMMIT_AGE_MS)),
+                    register_log(name)?.display()
+                );
+            }
+            if defaults.names.is_empty() && defaults.pending.is_empty() {
                 println!("no names yet; register one with `names register <name>`");
             }
             for name in defaults.names {
@@ -1519,12 +1576,15 @@ async fn main() -> Result<()> {
             owner,
             term,
             now,
+            wait,
         } => {
             let owner = match owner {
                 Some(owner) => owner,
                 None => default_private()?,
             };
-            client.register(&name, owner, term, now).await?;
+            if !client.register(&name, owner, term, now, wait, cli.rpc.as_deref()).await? {
+                return Ok(());
+            }
             let mut defaults = load_defaults();
             if !defaults.names.contains(&name) {
                 defaults.names.push(name);

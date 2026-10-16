@@ -178,7 +178,7 @@ All code must be released under the **MIT + Apache-2.0 License**.
 ## Resources
 
 - Prototype: [jefdiesel/logos-names](https://github.com/jefdiesel/logos-names),
-  running on the LEZ testnet as registry `66nUvzJtTxA729aUpTcAWDrb7cV9Heb2bDzceHQhLYad`.
+  running on the LEZ testnet as registry `2PXg3SSmh5hvECTz4xcfV2d5YvxwyF6yVhpnjTokzCkX`.
   It already does requirements 1–3, 5–8 and 10, and the `chat` entry of 9 (not
   the public listing), with a
   [specification](https://github.com/jefdiesel/logos-names/blob/main/SPEC.md),
