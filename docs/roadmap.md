@@ -41,6 +41,24 @@ target it. A `dev` wallet also cannot read today's testnet (`unknown field
 shards`), so the LEZ wallet PR (`--to-name`) can be tried live only once the
 testnet runs the new release.
 
+## Temporary names
+
+Throwaway names like `orange-liquid-rhino.lez`: three random words, made by the
+client and registered with a tiny deposit in the same transaction. Hand one out to
+receive a payment; it works once or for a short period, then reverts and can't be
+paid any more. Like a router's printed login: readable, single-purpose, not reused.
+
+- **Why:** a fresh, readable address per payment, so payments can't be linked by
+  a reused name.
+- **Lifetime:** either one use (the record is spent by the first payment) or a short
+  period (for example 24 hours). This is the only place names expire; long-lived
+  names keep no expiry.
+- **Open questions:** how "one use" is enforced, since today payers pay the keys a
+  name publishes, not through the registry (either payments go through the
+  program, or the holder's wallet clears the name when the first payment arrives);
+  who gets the tiny deposit back when a name reverts; a separate namespace or word
+  list so temporary names never collide with chosen ones.
+
 ## Later
 
 - Websites per name on Logos Storage (a `cid` text entry; vpavlin's viewer).
