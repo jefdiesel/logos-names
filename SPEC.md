@@ -237,6 +237,9 @@ application-defined and should be namespaced, for example `myapp.setting`.
 | `inbox` | A Logos Delivery content topic, `/{app}/{version}/{name}/{encoding}`. A topic routes only: anyone can read or publish to it. |
 | `agent` | A URL or address where the holder's AI agent can be reached. |
 | `cid` | A Logos Storage content ID the name pins. |
+| `display` | A display name, shown on the name's profile card. |
+| `bio` | A short text about the holder, shown on the profile card. |
+| `avatar` | A small image as a `data:image/png`, `jpeg`, `gif` or `webp` base64 URL, kept within the record's 12 KiB. A viewer shows only inline images, so showing one fetches nothing. |
 | `logos.account` | The holder's Logos account: an [AccountLog](https://github.com/logos-co/logos-lips/blob/main/docs/identity/raw/accountlog.md) address, the account's Ed25519 public key as 64 lowercase hex characters. See below. |
 
 ### Linking a name to a Logos account
@@ -468,6 +471,11 @@ must:
   font-src data:; media-src data:; form-action 'none'; base-uri 'none'`, plus
   `Referrer-Policy: no-referrer`. A page is self-contained: anything it shows is
   inline or a `data:` URL, so opening a name tells no third party.
+
+Without a page, a viewer shows a profile card built on the viewer's machine from
+the name's entries (`display`, `bio`, `avatar`, how to pay it, and the other
+entries), every value HTML-escaped; `names open` serves it at `/` when there is no
+page and always at `/profile`.
 
 ### 12.3 In a browser (once sequencers allow it)
 

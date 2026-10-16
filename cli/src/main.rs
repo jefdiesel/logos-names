@@ -265,9 +265,10 @@ enum Command {
         /// The new holder, public or private. Only a tag of it reaches the chain.
         #[arg(value_parser = parse_account)]
         new_owner: AccountId },
-    /// Show a name's page in your browser. It is read from the chain on this machine
-    /// and served only to this machine (127.0.0.1); no server sees which name you
-    /// opened. The page cannot load anything from the internet.
+    /// Show a name in your browser: its page, or, without one, a profile card made
+    /// from its entries (`/profile` always shows the card). It is read from the chain
+    /// on this machine and served only to this machine (127.0.0.1); no server sees
+    /// which name you opened, and nothing shown can load anything from the internet.
     Open {
         #[arg(value_parser = parse_name)]
         name: String,
@@ -1221,7 +1222,73 @@ const VIEWER_CSP: &str = "sandbox allow-scripts allow-popups; default-src 'none'
     media-src data:; form-action 'none'; base-uri 'none'";
 
 /// Serves `page` to this machine only, until interrupted.
-fn serve_page(name: &str, page: &PageContent, port: u16, no_browser: bool) -> Result<()> {
+/// Escapes text for HTML: entries are written by whoever holds the name.
+fn html_escape(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '&' => "&amp;".to_owned(),
+            '<' => "&lt;".to_owned(),
+            '>' => "&gt;".to_owned(),
+            '"' => "&quot;".to_owned(),
+            '\'' => "&#39;".to_owned(),
+            c => c.to_string(),
+        })
+        .collect()
+}
+
+/// A profile card built on this machine from the name's own entries (`display`,
+/// `bio`, `avatar` and the rest): nothing beyond the record is published or fetched.
+fn profile_card(name: &str, profile: &Profile, has_page: bool) -> String {
+    let text = |key: &str| profile.texts.iter().find(|t| t.key == key).map(|t| t.value.as_str());
+    let display = text("display").unwrap_or(name);
+    // Only an inline image: anything else would make the browser fetch it.
+    let avatar = text("avatar")
+        .filter(|v| {
+            ["data:image/png;base64,", "data:image/jpeg;base64,", "data:image/gif;base64,", "data:image/webp;base64,"]
+                .iter()
+                .any(|prefix| v.starts_with(prefix))
+        })
+        .map(|v| format!("<img class=\"avatar\" src=\"{}\" alt=\"\">", html_escape(v)))
+        .unwrap_or_default();
+    let bio = text("bio").map(|v| format!("<p class=\"bio\">{}</p>", html_escape(v))).unwrap_or_default();
+    let mut rows = Vec::new();
+    if profile.npk.is_some() && !profile.vpk.is_empty() {
+        rows.push(("pay privately".to_owned(), format!("<code>names pay {}{NAME_SUFFIX} &lt;amount&gt;</code>", html_escape(name))));
+    }
+    if let Some(account) = profile.account {
+        rows.push(("public account".to_owned(), format!("<code>{}</code>", AccountId::new(account))));
+    }
+    for entry in &profile.texts {
+        if ["display", "bio", "avatar"].contains(&entry.key.as_str()) {
+            continue;
+        }
+        let mut value = format!("<code>{}</code>", html_escape(&entry.value));
+        if entry.key == "logos.account" {
+            value.push_str(" <span class=\"note\">confirm with <code>names verify-account</code></span>");
+        }
+        rows.push((entry.key.clone(), value));
+    }
+    let rows: String = rows
+        .iter()
+        .map(|(key, value)| format!("<tr><th>{}</th><td>{value}</td></tr>", html_escape(key)))
+        .collect();
+    let page_link = if has_page { "<p><a href=\"/\">the name's page</a></p>" } else { "" };
+    format!(
+        "<!doctype html><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\">\
+         <title>{name}{NAME_SUFFIX}</title><style>\
+         body{{font:16px/1.5 system-ui,sans-serif;max-width:36rem;margin:3rem auto;padding:0 1rem;color:#1d1d1f;background:#fff}}\
+         @media(prefers-color-scheme:dark){{body{{color:#eee;background:#141414}}th{{color:#aaa}}}}\
+         .avatar{{width:96px;height:96px;border-radius:50%;object-fit:cover}}h1{{margin:.5rem 0 0}}\
+         .handle{{color:#888;margin:0}}.bio{{white-space:pre-wrap}}table{{border-collapse:collapse;width:100%}}\
+         th{{text-align:left;font-weight:500;color:#666;padding:.4rem 1rem .4rem 0;vertical-align:top;white-space:nowrap}}\
+         td{{padding:.4rem 0;word-break:break-all}}code{{font-size:.9em}}.note{{color:#888;font-size:.85em}}</style>\
+         {avatar}<h1>{}</h1><p class=\"handle\">{name}{NAME_SUFFIX}</p>{bio}<table>{rows}</table>{page_link}",
+        html_escape(display),
+        name = html_escape(name),
+    )
+}
+
+fn serve_page(name: &str, page: Option<&PageContent>, card: &str, port: u16, no_browser: bool) -> Result<()> {
     use std::io::{Read as _, Write as _};
     let listener = std::net::TcpListener::bind(("127.0.0.1", port))
         .with_context(|| format!("cannot listen on 127.0.0.1:{port}"))?;
@@ -1255,8 +1322,11 @@ fn serve_page(name: &str, page: &PageContent, port: u16, no_browser: bool) -> Re
             .any(|(key, value)| key.eq_ignore_ascii_case("host") && allowed_hosts.iter().any(|h| h == value.trim()));
         let (status, content_type, body): (&str, &str, &[u8]) = if !host_ok {
             ("421 Misdirected Request", "text/plain", b"wrong host")
-        } else if path == "/" {
+        } else if path == "/" && page.is_some() {
+            let page = page.expect("checked");
             ("200 OK", page.content_type.as_str(), &page.body)
+        } else if path == "/" || path == "/profile" {
+            ("200 OK", "text/html; charset=utf-8", card.as_bytes())
         } else {
             ("404 Not Found", "text/plain", b"not found")
         };
@@ -1829,10 +1899,12 @@ async fn main() -> Result<()> {
         }
         Command::Transfer { name, new_owner } => client.transfer(&name, new_owner).await,
         Command::Release { name } => client.release(&name).await,
-        Command::Open { name, port, no_browser } => match client.page(&name).await? {
-            Some(page) => serve_page(&name, &page, port, no_browser),
-            None => bail!("{name}{NAME_SUFFIX} has no page"),
-        },
+        Command::Open { name, port, no_browser } => {
+            let (_, _, profile) = client.lookup(&name).await?;
+            let page = client.page(&name).await?;
+            let card = profile_card(&name, &profile, page.is_some());
+            serve_page(&name, page.as_ref(), &card, port, no_browser)
+        }
         Command::SetPage {
             name,
             file,
