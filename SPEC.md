@@ -449,26 +449,52 @@ that most clients do not have to.
   and the decoders. The three resolvers take the current time as an optional
   last argument.
 
-### 12.2 HTTP (by the gateway)
+### 12.2 Viewing pages
 
-| Request | Response |
-|---|---|
-| `GET https://<name>.<gateway>/` or `GET https://<gateway>/<name>` | The name's page, with its content type |
-| `GET …/.well-known/logos-name.json` for a name | The resolved name as JSON, or 404 `{"error": "not registered"}` |
+A name's page is read and opened on the viewer's own machine; no server sits
+between the viewer and the chain, and none learns which name was opened.
 
-The JSON has `name`, `expires` (milliseconds), `lapsed` (true in the
-grace period) and the fields of `Profile`: account IDs in base58, `npk` and
-`vpk` in hex or `null`, and `texts` as an object. A name past its grace period
-is not registered. A gateway
-learns every name asked of it and can alter what it serves; a client that needs
-privacy or certainty reads the chain itself.
+`names open <name>` reads the page from the chain, opens it with the name's key
+and serves it over HTTP on the loopback interface only (`127.0.0.1`, a free port
+unless `--port` is given), then opens the browser there. A viewer that does this
+must:
 
-### 12.3 Model Context Protocol
+- listen on loopback only, and answer only requests whose `Host` is its own
+  `127.0.0.1:<port>` or `localhost:<port>` (another site's page could otherwise
+  reach it through DNS rebinding);
+- serve the page with a policy that loads nothing from the network:
+  `Content-Security-Policy: sandbox allow-scripts allow-popups; default-src 'none';
+  script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:;
+  font-src data:; media-src data:; form-action 'none'; base-uri 'none'`, plus
+  `Referrer-Policy: no-referrer`. A page is self-contained: anything it shows is
+  inline or a `data:` URL, so opening a name tells no third party.
+
+### 12.3 In a browser (once sequencers allow it)
+
+A web page can read the chain directly only if the sequencer's RPC allows
+cross-origin requests (CORS: it answers the `OPTIONS` preflight and sends
+`Access-Control-Allow-Origin`). The LEZ testnet does not yet. When a sequencer
+does, a static page resolves names entirely in the visitor's browser:
+
+- the name is carried after `#` (`https://<site>/#jef.lez`), which browsers
+  never send to the server, so the host of the static files cannot see it;
+- the page derives the identifier and key (section 3), reads the record and page
+  accounts from the sequencer's JSON-RPC itself, and opens them;
+- it shows the page in an `<iframe sandbox="allow-scripts allow-popups">` whose
+  document carries the policy of 12.2, so the page has an opaque origin and
+  loads nothing from the network.
+
+No relay or proxy may stand between the page and the sequencer: one would see
+every visitor's address and the record addresses they read, which a dictionary
+of names turns back into names (section 1). A site whose sequencer does not
+allow cross-origin requests shows no names and points to `names open`.
+
+### 12.4 Model Context Protocol
 
 `mcp/server.js` exposes `resolve_name`, `get_page` and `reverse_lookup` as
 read-only tools.
 
-### 12.4 Logos module
+### 12.5 Logos module
 
 A Logos core module named `names`, so that any Basecamp app or module,
 including a wallet, resolves and manages names with one call and no knowledge of

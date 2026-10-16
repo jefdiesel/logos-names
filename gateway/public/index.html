@@ -48,10 +48,6 @@
   tokens are test tokens, free from the faucet below and worth nothing. Names won't carry over
   to testnet v0.4.</p>
 
-  <form onsubmit="event.preventDefault(); const n = this.n.value.trim(); if (n) location.href = '/' + encodeURIComponent(n);">
-    <input name="n" placeholder="Look up a name, such as jef.lez" aria-label="Name" autocapitalize="off" spellcheck="false">
-    <button>Look up</button>
-  </form>
 
   <h2>Install the command line</h2>
   <p>One binary for macOS (Apple silicon) and Linux (x86_64), with the LEZ wallet built in.
@@ -63,6 +59,7 @@
   <h2>Look names up</h2>
   <p>No wallet or setup needed:</p>
 <pre><code>names resolve jef.lez        <span class="c"># expiry, whether it can be paid, text entries, page</span>
+names open jef.lez           <span class="c"># show its page in your browser, served from your own machine</span>
 names settings               <span class="c"># the registry's prices</span></code></pre>
 
   <h2>Get a name</h2>
@@ -111,14 +108,15 @@ claude mcp add --scope user logos-names -- node ~/.logos-names-mcp.js</code></pr
   release, clear-page and more.
   <code>names wallet help</code> lists the wallet's own commands. The wallet lives in
   <code>~/.lee/wallet</code>; set <code>LEE_WALLET_HOME_DIR</code> to use another one.</p>
-  <p>Apps and agents can read any name as JSON at <code>/&lt;name&gt;/.well-known/logos-name.json</code>
-  on this gateway. <code>names</code> and the MCP server don't need it: they talk to the LEZ
-  sequencer directly (<code>https://testnet.lez.logos.co</code>) and read the registry's program
+  <p>To see a name's page, run <code>names open jef.lez</code>: the page is read from the chain on
+  your machine and shown in your browser from <code>127.0.0.1</code>, so no server learns which name
+  you opened, and the page can't load anything from the internet. This website never looks names up.
+  <code>names</code> and the MCP server talk to the LEZ sequencer directly (<code>https://testnet.lez.logos.co</code>) and read the registry's program
   from the chain itself, so no server of ours sits between you and the chain. Pass
   <code>--rpc</code> and <code>--program</code> to use another chain or registry.</p>
 
-  <footer>Logos Names runs on the public LEZ testnet. This website can see which names you
-  look up <em>here</em>; the command line and the MCP server never contact it, except
+  <footer>Logos Names runs on the public LEZ testnet. This website is static files and never
+  looks names up; the command line and the MCP server never contact it, except
   <code>names faucet</code>.</footer>
 </main>
 </body>

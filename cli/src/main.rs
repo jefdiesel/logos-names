@@ -22,7 +22,7 @@ use lee_core::{
 };
 use lee::{privacy_preserving_transaction::circuit::ProgramWithDependencies, program::Program};
 use names_core::{
-    Effect, GRACE_MS, Instruction, MAX_COMMIT_AGE_MS, MIN_COMMIT_AGE_MS, NAME_SUFFIX, NameId,
+    Effect, GRACE_MS, Instruction, MAX_COMMIT_AGE_MS, MIN_COMMIT_AGE_MS, NAME_SUFFIX, TIME_WINDOW_MS, NameId,
     NameRecord, Page, Settings, commitment, commitment_address,
     normalize_name, owner_tag, page_address, record_address, settings_address,
     validate_name,
@@ -57,6 +57,9 @@ struct Pending {
     owner: String,
     secret: String,
     made: u64,
+    /// Why the last reveal gave up, so `names mine` can say so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    failed: Option<String>,
 }
 
 fn defaults_path() -> Result<PathBuf> {
@@ -265,6 +268,19 @@ enum Command {
         /// The new holder, public or private. Only a tag of it reaches the chain.
         #[arg(value_parser = parse_account)]
         new_owner: AccountId },
+    /// Show a name's page in your browser. It is read from the chain on this machine
+    /// and served only to this machine (127.0.0.1); no server sees which name you
+    /// opened. The page cannot load anything from the internet.
+    Open {
+        #[arg(value_parser = parse_name)]
+        name: String,
+        /// Port on 127.0.0.1 to serve it from (0: any free port).
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        /// Print the address instead of opening the browser.
+        #[arg(long)]
+        no_browser: bool,
+    },
     /// Publish a file as the name's page.
     SetPage {
         #[arg(value_parser = parse_name)]
@@ -607,6 +623,14 @@ impl Client {
         // Check first, so a taken name isn't given a receiving account it won't use.
         // The program refuses it anyway; this only makes the refusal come sooner.
         if let Some(held) = self.record(&id).await? {
+            if held.owner == owner_tag(&id, &owner) && load_defaults().pending.contains_key(name) {
+                // An earlier reveal landed after `register` stopped waiting for it.
+                let mut defaults = load_defaults();
+                defaults.pending.remove(name);
+                save_defaults(&defaults)?;
+                println!("{name}{NAME_SUFFIX} is registered");
+                return Ok(true);
+            }
             if local_now() < held.expires.saturating_add(GRACE_MS) {
                 bail!("{name}{NAME_SUFFIX} is already registered");
             }
@@ -625,6 +649,10 @@ impl Client {
         let (secret, made) = match resumed {
             Some(found) => {
                 println!("resuming the commitment to {name}{NAME_SUFFIX} made earlier");
+                if let Some(pending) = defaults.pending.get_mut(name) {
+                    pending.failed = None;
+                }
+                save_defaults(&defaults)?;
                 found
             }
             None => {
@@ -640,7 +668,7 @@ impl Client {
                 .await?;
                 defaults.pending.insert(
                     name.to_owned(),
-                    Pending { owner: owner.to_string(), secret: hex::encode(secret), made },
+                    Pending { owner: owner.to_string(), secret: hex::encode(secret), made, failed: None },
                 );
                 save_defaults(&defaults)?;
                 (secret, made)
@@ -679,35 +707,65 @@ impl Client {
         };
         let sealed = seal_profile(&key, &profile);
         println!("payments to {name}{NAME_SUFFIX} will arrive privately at Private/{receiving}");
-        let now = match now {
-            Some(now) => now,
-            None => self.now().await,
-        };
         let promised = commitment(&id, &holder, &secret);
-        println!("step 2 of 2: registering {name}{NAME_SUFFIX} at {now} for a fee of {fee}");
-        self.send_paying(
-            vec![
-                (record_address(&self.program, &id), false),
-                (page_address(&self.program, &id), false),
-                (settings_address(&self.program), false),
-                (commitment_address(&self.program, &promised), false),
-            ],
-            &paying,
-            &Instruction::Register {
-                id,
-                sealed,
-                term,
-                fee,
-                now,
-                secret,
-            },
-        )
-        .await?;
+        // A reveal claims the chain's time before its proof is made, and the program
+        // takes it only within TIME_WINDOW_MS of that; a slow chain can include it too
+        // late. The commitment stays usable for MAX_COMMIT_AGE_MS, so try again.
+        let expires_at = made.saturating_add(MAX_COMMIT_AGE_MS);
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let claimed = match now {
+                Some(now) => now,
+                None => self.now().await,
+            };
+            println!("step 2 of 2: registering {name}{NAME_SUFFIX} at {claimed} for a fee of {fee}");
+            let sent = self
+                .send_paying(
+                    vec![
+                        (record_address(&self.program, &id), false),
+                        (page_address(&self.program, &id), false),
+                        (settings_address(&self.program), false),
+                        (commitment_address(&self.program, &promised), false),
+                    ],
+                    &paying,
+                    &Instruction::Register {
+                        id,
+                        sealed: sealed.clone(),
+                        term,
+                        fee,
+                        now: claimed,
+                        secret,
+                    },
+                )
+                .await;
+            let Err(error) = sent else { break };
+            // The wait may have given up on a reveal that landed after all.
+            match self.record(&id).await {
+                Ok(Some(held)) if held.owner == holder => break,
+                Ok(Some(_)) => return Err(self.give_up(name, error.context("someone else holds the name"))),
+                _ => {}
+            }
+            if attempt >= REVEAL_ATTEMPTS || self.now().await.saturating_add(TIME_WINDOW_MS) >= expires_at {
+                return Err(self.give_up(name, error));
+            }
+            println!("the reveal did not land ({error:#}); trying again (attempt {} of {REVEAL_ATTEMPTS})", attempt + 1);
+        }
         let mut defaults = load_defaults();
         defaults.pending.remove(name);
         save_defaults(&defaults)?;
         println!("{name}{NAME_SUFFIX} is registered");
         Ok(true)
+    }
+
+    /// Records why registering `name` stopped, for `names mine`, and returns the error.
+    fn give_up(&self, name: &str, error: anyhow::Error) -> anyhow::Error {
+        let mut defaults = load_defaults();
+        if let Some(pending) = defaults.pending.get_mut(name) {
+            pending.failed = Some(format!("{error:#}"));
+            let _ = save_defaults(&defaults);
+        }
+        error.context(format!("{name}{NAME_SUFFIX} was not registered; `names register {name}` tries again"))
     }
 
     /// Starts `names register <name> --wait` detached from this terminal, logging to
@@ -1090,6 +1148,17 @@ impl Client {
         Ok(())
     }
 
+    /// The name's page, opened with its key, if it has one.
+    async fn page(&self, name: &str) -> Result<Option<PageContent>> {
+        let (Derived { id, key }, _, _) = self.lookup(name).await?;
+        let bytes = self.shard(page_address(&self.program, &id)).await?;
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        let page: Page = borsh::from_slice(&bytes).context("the page shard does not hold a page")?;
+        Ok(open_page(&key, &page.sealed))
+    }
+
     async fn resolve(&self, name: &str) -> Result<serde_json::Value> {
         let (Derived { id, key }, record, profile) = self.lookup(name).await?;
         let page_bytes = self.shard(page_address(&self.program, &id)).await?;
@@ -1129,6 +1198,64 @@ impl Client {
         }))
     }
 
+}
+
+/// What a page shown by `names open` may do: run its own inline script and style and
+/// use data: URLs, nothing else. It loads nothing from the network, so opening a
+/// name tells no third party, and the sandbox gives it an origin of its own.
+const VIEWER_CSP: &str = "sandbox allow-scripts allow-popups; default-src 'none'; \
+    script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; \
+    media-src data:; form-action 'none'; base-uri 'none'";
+
+/// Serves `page` to this machine only, until interrupted.
+fn serve_page(name: &str, page: &PageContent, port: u16, no_browser: bool) -> Result<()> {
+    use std::io::{Read as _, Write as _};
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port))
+        .with_context(|| format!("cannot listen on 127.0.0.1:{port}"))?;
+    let port = listener.local_addr()?.port();
+    let url = format!("http://127.0.0.1:{port}/");
+    println!("{name}{NAME_SUFFIX} is at {url} (only this machine can reach it; Ctrl-C stops it)");
+    if !no_browser {
+        let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        if std::process::Command::new(opener).arg(&url).spawn().is_err() {
+            println!("open {url} in your browser");
+        }
+    }
+    let allowed_hosts = [format!("127.0.0.1:{port}"), format!("localhost:{port}")];
+    for stream in listener.incoming() {
+        let Ok(mut stream) = stream else { continue };
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 4096];
+        while !request.windows(4).any(|w| w == b"\r\n\r\n") && request.len() < 64 * 1024 {
+            match stream.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => request.extend_from_slice(&buffer[..n]),
+            }
+        }
+        let request = String::from_utf8_lossy(&request);
+        let mut lines = request.lines();
+        let path = lines.next().and_then(|line| line.split(' ').nth(1)).unwrap_or("");
+        // Another site's page can make the browser ask a name that points at
+        // 127.0.0.1 (DNS rebinding); answer only requests addressed to this server.
+        let host_ok = lines
+            .filter_map(|line| line.split_once(':'))
+            .any(|(key, value)| key.eq_ignore_ascii_case("host") && allowed_hosts.iter().any(|h| h == value.trim()));
+        let (status, content_type, body): (&str, &str, &[u8]) = if !host_ok {
+            ("421 Misdirected Request", "text/plain", b"wrong host")
+        } else if path == "/" {
+            ("200 OK", page.content_type.as_str(), &page.body)
+        } else {
+            ("404 Not Found", "text/plain", b"not found")
+        };
+        let head = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
+             Content-Security-Policy: {VIEWER_CSP}\r\nX-Content-Type-Options: nosniff\r\n\
+             Referrer-Policy: no-referrer\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(head.as_bytes()).and_then(|()| stream.write_all(body));
+    }
+    Ok(())
 }
 
 /// Runs program logic that reports refusal by panicking, turning the panic into an error.
@@ -1257,6 +1384,9 @@ fn sequencer_overrides(cli: &Cli) -> Result<Option<WalletConfigOverrides>> {
     overrides.sequencer = Some(SequencerConnectionData { sequencer_addr, basic_auth: None });
     Ok(Some(overrides))
 }
+
+/// How many times `register` sends its reveal before giving up.
+const REVEAL_ATTEMPTS: u32 = 4;
 
 /// How many blocks to wait for a transaction to be included before giving up.
 const TX_POLL_MAX_BLOCKS: usize = 60;
@@ -1519,7 +1649,10 @@ async fn main() -> Result<()> {
     let mut client = Client {
         wallet: open_wallet(
             overrides,
-            !matches!(cli.command, Command::Resolve { .. } | Command::Settings | Command::VerifyAccount { .. }),
+            !matches!(
+                cli.command,
+                Command::Resolve { .. } | Command::Open { .. } | Command::Settings | Command::VerifyAccount { .. }
+            ),
         )
         .await?,
         program,
@@ -1559,11 +1692,17 @@ async fn main() -> Result<()> {
         Command::Mine => {
             let defaults = load_defaults();
             for (name, pending) in &defaults.pending {
-                println!(
-                    "{name}{NAME_SUFFIX}  registering, ready from about {} (log: {})",
-                    readable(pending.made.saturating_add(MIN_COMMIT_AGE_MS)),
-                    register_log(name)?.display()
-                );
+                match &pending.failed {
+                    Some(why) => println!(
+                        "{name}{NAME_SUFFIX}  NOT registered: {why}; run `names register {name}` to try again (log: {})",
+                        register_log(name)?.display()
+                    ),
+                    None => println!(
+                        "{name}{NAME_SUFFIX}  registering, ready from about {} (log: {})",
+                        readable(pending.made.saturating_add(MIN_COMMIT_AGE_MS)),
+                        register_log(name)?.display()
+                    ),
+                }
             }
             if defaults.names.is_empty() && defaults.pending.is_empty() {
                 println!("no names yet; register one with `names register <name>`");
@@ -1730,6 +1869,10 @@ async fn main() -> Result<()> {
         }
         Command::Transfer { name, new_owner } => client.transfer(&name, new_owner).await,
         Command::Release { name } => client.release(&name).await,
+        Command::Open { name, port, no_browser } => match client.page(&name).await? {
+            Some(page) => serve_page(&name, &page, port, no_browser),
+            None => bail!("{name}{NAME_SUFFIX} has no page"),
+        },
         Command::SetPage {
             name,
             file,
