@@ -1034,7 +1034,7 @@ impl Client {
     }
 
     /// Pays `amount` to the public account `name` points at.
-    async fn pay(&self, name: &str, amount: u128, from: AccountId) -> Result<()> {
+    async fn pay(&mut self, name: &str, amount: u128, from: AccountId) -> Result<()> {
         let (_, _, profile) = self.lookup(name).await?;
         let to = profile
             .account
@@ -1043,20 +1043,41 @@ impl Client {
         let before = self.wallet.get_account_balance(to).await?;
 
         println!("paying {amount} to {name}{NAME_SUFFIX} ({to})");
-        let hash = NativeTokenTransfer(&self.wallet)
-            .send_public_transfer(
-                AccountIdentity::Public(from),
-                AccountIdentity::PublicNoSign(to),
-                amount,
-            )
-            .await
-            .context("the sequencer did not accept the transfer")?;
+        // From a private account this is a deshielded transfer: the chain sees the
+        // public account credited, but not who paid.
+        let (hash, sender_secret) = if self.is_private(from) {
+            println!("from a private account; generating the proof (this takes minutes)");
+            NativeTokenTransfer(&self.wallet)
+                .send_deshielded_transfer(from, to, amount)
+                .await
+                .map(|(hash, secret)| (hash, Some(secret)))
+        } else {
+            NativeTokenTransfer(&self.wallet)
+                .send_public_transfer(
+                    AccountIdentity::Public(from),
+                    AccountIdentity::PublicNoSign(to),
+                    amount,
+                )
+                .await
+                .map(|hash| (hash, None))
+        }
+        .context("the sequencer did not accept the transfer")?;
         println!("submitted {hash}");
-        let (_, block) = self
+        let (tx, block) = self
             .wallet
             .poll_transaction(hash)
             .await
             .context("the transfer was not included in a block")?;
+        // A private sender's note was spent and its change made into a new one: record it.
+        if let (Some(secret), common::transaction::LeeTransaction::PrivacyPreserving(tx)) =
+            (sender_secret, &tx)
+        {
+            self.wallet.decode_insert_privacy_preserving_transaction_results(
+                tx,
+                &[AccDecodeData::Decode(secret, from)],
+            )?;
+            self.wallet.store_persistent_data()?;
+        }
 
         // A block includes failed transactions too, so confirm the money arrived.
         let after = self.wallet.get_account_balance(to).await?;
