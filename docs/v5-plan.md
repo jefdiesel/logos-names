@@ -39,19 +39,34 @@ Decided with the maintainer on 2026-10-16. Nothing here is built yet.
 
 ## Name lengths
 
-The chain never sees a name, so length rules are enforced with a fixed list. Every
-name of 1 to 4 characters has its ID computed once (about 1.8M names, roughly 3
-days of Argon2id on one machine, or less in parallel) and committed to as a sorted
-Merkle tree whose root is built into the program.
+The chain never sees a name, so length rules are enforced with a fixed list: every
+name of 1 to 3 characters (49,284 names) has its ID computed once and committed to
+as a sorted Merkle tree whose root is built into the program. The list (about
+1.6 MB) ships inside the CLI. A registration proves its ID is on the list (and
+which length) or that it is not (two adjacent leaves, with sentinels at both
+ends).
 
 | Length | Rule |
 |---|---|
-| 1-2 characters (1,332 names) | Locked. Only the admin can release one. |
+| 1-2 characters (1,332 names) | Locked. Only the admin can release one, to an owner tag the recipient supplies. |
 | 3 characters (47,952) | Higher deposit. |
-| 4 characters (1,774,224) | Middle deposit. |
-| 5 or more | Normal deposit. Registration carries a short proof that the ID is not on the list. |
+| 4 or more | Normal deposit. |
 
 Short names are guessable in seconds anyway, so the list reveals nothing new.
+(4-character names were considered for a middle tier; it would have meant a 1.8M-ID,
+~28 MB list for every client, so it was dropped.)
+
+## Deposit amounts (testnet)
+
+- Normal names: **100,000,000**. Three-character names: **2,000,000,000**.
+- Both are admin settings, editable later. A change applies to new registrations
+  only: each name's deposit sits in its own account (a PDA per name) and the holder
+  gets back exactly what was locked.
+- Mainnet amounts are set at mainnet launch, once the token's value is known.
+- On a transfer the deposit stays with the name: whoever holds it when it is
+  released gets it back.
+- Known gap: the commit step is free for private users, so commitment accounts can
+  be spammed. That claims no names; not addressed in v5.
 
 ## Testnet to mainnet
 
