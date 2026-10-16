@@ -9,17 +9,22 @@ use aes_gcm::{
     Aes256Gcm, Key, Nonce,
     aead::{Aead as _, KeyInit as _, Payload},
 };
+use argon2::{Algorithm, Argon2, Params, Version};
 use borsh::{BorshDeserialize, BorshSerialize};
 use names_core::{MAX_SEALED_PAGE_LEN, MAX_SEALED_RECORD_LEN, NameId};
 use sha2::{Digest as _, Sha256};
 
-const MASTER_SALT: &[u8] = b"logos-names/v2";
-/// The most a Cloudflare Worker's Web Crypto allows, so a gateway can derive too.
-const MASTER_ITERATIONS: u32 = 100_000;
-const ID_DOMAIN: &[u8] = b"logos-names/v2/id";
-const KEY_DOMAIN: &[u8] = b"logos-names/v2/key";
-const RECORD_ASSOCIATED_DATA: &[u8] = b"logos-names/v2/record";
-const PAGE_ASSOCIATED_DATA: &[u8] = b"logos-names/v2/page";
+/// One fixed salt for every network, on purpose: a name keeps its identifier and
+/// key from testnet to mainnet.
+const MASTER_SALT: &[u8] = b"logos-names/v5";
+/// Argon2id memory in KiB (64 MiB), passes and lanes.
+const MASTER_MEMORY_KIB: u32 = 65_536;
+const MASTER_PASSES: u32 = 3;
+const MASTER_LANES: u32 = 1;
+const ID_DOMAIN: &[u8] = b"logos-names/v5/id";
+const KEY_DOMAIN: &[u8] = b"logos-names/v5/key";
+const RECORD_ASSOCIATED_DATA: &[u8] = b"logos-names/v5/record";
+const PAGE_ASSOCIATED_DATA: &[u8] = b"logos-names/v5/page";
 
 pub const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
@@ -80,7 +85,21 @@ pub fn derive(name: &str) -> Derived {
 }
 
 fn master(name: &str) -> [u8; 32] {
-    pbkdf2::pbkdf2_hmac_array::<Sha256, 32>(name.as_bytes(), MASTER_SALT, MASTER_ITERATIONS)
+    let params = Params::new(MASTER_MEMORY_KIB, MASTER_PASSES, MASTER_LANES, Some(32))
+        .expect("the Argon2 parameters are valid");
+    argon2id(
+        &Argon2::new(Algorithm::Argon2id, Version::V0x13, params),
+        name.as_bytes(),
+        MASTER_SALT,
+    )
+}
+
+fn argon2id(argon2: &Argon2<'_>, password: &[u8], salt: &[u8]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    argon2
+        .hash_password_into(password, salt, &mut out)
+        .expect("Argon2 accepts these inputs");
+    out
 }
 
 fn domain_hash(domain: &[u8], master: &[u8; 32]) -> [u8; 32] {
@@ -237,22 +256,53 @@ mod tests {
     use super::*;
 
     // The vectors of SPEC.md, section 10.
-    const MASTER: &str = "83a5b494ae6f1505c3a8abca5389bb60b0f614e9d1f0490858708dd2a2dff800";
-    const ID: &str = "86d7e719e7acabe344ef8a69782b72ed0c21087e73e400e7056ab0daf7e6c618";
-    const KEY: &str = "d19aa10c57273a3ff4f569cc3a9c35819b2a9bcac7ba8a48deb131269cb6e2e0";
+    const KEY: &str = "aad91a1a3dd0fb56a213212fbea58fe25d9139db42fc59ce2116c3cfa3440088";
+    /// (name, master, id, key), asserted in resolver/names.test.js too.
+    const DERIVATIONS: [(&str, &str, &str, &str); 5] = [
+        (
+            "jef",
+            "60e3df20e1c473ab71c666b913af96619fa14b49593e92598bd7709582e5a74e",
+            "7041d9e447f06bdfe327d870402b1524cfe38bd03445b8fc3d0e87bc978eb763",
+            "aad91a1a3dd0fb56a213212fbea58fe25d9139db42fc59ce2116c3cfa3440088",
+        ),
+        (
+            "logos",
+            "140f118f9f0c7a99f04e3214d8e084590cd69687be6effb7f57dcc1a06a35372",
+            "4a8bf61b00dbc63907a935aa15ed534bb32d866978aa1f2128f9b6f37e0c4025",
+            "d67dd628fa51fa62bd32ea82c3e9ff1b67f93b01103be956eaebc52f1699df44",
+        ),
+        (
+            "a",
+            "c42903b96a43d01c6c912b647c21902bffd17afdf932e5f8c407dea08a32b494",
+            "24b73f0b70605c7f27fb91f9952b550e13c4cc38dcf325be45442d1a2cb085b4",
+            "cd9ded7c94d52743db4ee67152766480be5bb5199e83b6696e502cf818933150",
+        ),
+        (
+            "abcdefghijklmnopqrstuvwxyz012345",
+            "a9296b3bfd39d63908326e19c2d1b20a27cb6b47df1829725c68355bc3585f5b",
+            "0044f00be946536689d83e364ac25462c65c615d74059652d1f3e2977bd75403",
+            "79c7aa8c06d4983a59b235915ae4f5767918824a9150d5d8b576761b7d3654f6",
+        ),
+        (
+            "a-b-c",
+            "c098ecc6c6af9cfcf449666ce012e3e930e076d870cb135ed8f1f058e7728362",
+            "707decf4fde6d9fb61d255c23b34e042c846a0f4b0834151dcb2c1ef4160e849",
+            "e3666a8572f7cabe94f6717491bff34c70eeca216436a142185bd8a86b6ccf31",
+        ),
+    ];
     const NONCE: [u8; NONCE_LEN] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
     const SEALED_PROFILE: &str = "\
-        000102030405060708090a0b67bf760994a19946abc799235b95e48bfb804c3ca05471c9261f5099\
-        e1b00570e6139ab5bbb5fac423627e0fd18c5299475a5c4ed914f1e506f23b66d4d2377de959bff4\
-        e8d4ab02b63865f9a2453fef24302c211eb70eadebf5b38038d080e2b6f3b1fa17a777b940f17eb9\
-        4a83f4ce719552c92108600800f3d020a7d8fee73e2792c907db62125ba636607ed94ea46b73f046\
-        981a751be920449222629d2561194416c993b4bfdeeec20026656f11b64f1c2ac368d64e57d07054\
-        ac0fcdac4a6e83b60ac363901963488c93c7762d19b34b6991b9abdbc5d293fca06b69cab31e7eaa\
-        769142940f4813c73713dbd34b24386fb53937e2c9915323f35d39bf50e63d4289cb48a7c7aff0e5\
-        404987b0";
+        000102030405060708090a0b7a39f7ff67b20894263a28d040c0f2711c04ba247fcf5cb107e27b59\
+        05b8a0664b28cd25512addcb74af3efa5a8d6eb3bbb8e89fb8dba0aa2739252efed2be01ab019998\
+        a07d416c788d8c9b699891e85bedd1118da7089377220bdb0ab8ae29661bf20e006c5fbffb222237\
+        2ea0a2589ed49023186a77e9afee1af338f4a2377afa40da018789ca715318d981b556f71f9640eb\
+        d056d8dcbe2b71845b45a578721ccc2c889df37b926c7da5a5202dbf3d50dc04883673134ce0772f\
+        bcd7fbc8f31f455bb39b3d867d5e6772c86e59f42a9d04ffaacaa6119b1156d238665c0cf50028a9\
+        cbf8b3189fc45a15a724c5775a835a8ccdff6a573d8e046d78e847b7da5668bc8529aedb3bdc70a9\
+        9db9b9b4";
     const SEALED_PAGE: &str = "\
-        000102030405060708090a0b6ebf76098aa1873386b5f74030f9e489f9822657c6ba930c224eb1f2\
-        64767f7cf7b5a511";
+        000102030405060708090a0b7339f7ff79b216e10b4846b32bacf2731e06d04f8cf43af535da58e9\
+        92f033cb16a471d0";
 
     fn key() -> [u8; 32] {
         hex::decode(KEY).unwrap().try_into().unwrap()
@@ -283,11 +333,34 @@ mod tests {
     }
 
     #[test]
-    fn derives_the_spec_vector() {
-        assert_eq!(hex::encode(master("jef")), MASTER);
-        let derived = derive("jef");
-        assert_eq!(hex::encode(derived.id), ID);
-        assert_eq!(hex::encode(derived.key), KEY);
+    fn derives_the_spec_vectors() {
+        for (name, master_hex, id, key) in DERIVATIONS {
+            assert_eq!(hex::encode(master(name)), master_hex, "{name}");
+            let derived = derive(name);
+            assert_eq!(hex::encode(derived.id), id, "{name}");
+            assert_eq!(hex::encode(derived.key), key, "{name}");
+        }
+    }
+
+    /// RFC 9106 section 5.3 (Argon2id, version 0x13), which uses a secret and
+    /// associated data. It checks the Argon2id implementation itself, so a
+    /// mix-up of variant, version or parameters cannot pass silently.
+    #[test]
+    fn argon2id_matches_rfc_9106() {
+        let params = argon2::ParamsBuilder::new()
+            .m_cost(32)
+            .t_cost(3)
+            .p_cost(4)
+            .data(argon2::AssociatedData::new(&[4; 12]).unwrap())
+            .output_len(32)
+            .build()
+            .unwrap();
+        let argon2 =
+            Argon2::new_with_secret(&[3; 8], Algorithm::Argon2id, Version::V0x13, params).unwrap();
+        assert_eq!(
+            hex::encode(argon2id(&argon2, &[1; 32], &[2; 16])),
+            "0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659"
+        );
     }
 
     #[test]

@@ -100,12 +100,12 @@ the SPEL framework does not support LEZ v0.3 yet (`logos-co/spel#291`).
 ## How a name is hidden
 
 ```
-master = PBKDF2-HMAC-SHA256(name, "logos-names/v2", 100000 rounds)
-id     = SHA-256("logos-names/v2/id"  ‖ master)     what the chain knows the name by
-key    = SHA-256("logos-names/v2/key" ‖ master)     opens and seals what it resolves to
+master = Argon2id(name, "logos-names/v5", 64 MiB, 3 passes, 1 lane)
+id     = SHA-256("logos-names/v5/id"  ‖ master)     what the chain knows the name by
+key    = SHA-256("logos-names/v5/key" ‖ master)     opens and seals what it resolves to
 ```
 
-The record lives at `PDA(program, SHA-256("logos-names/v2/name/" ‖ id))` and
+The record lives at `PDA(program, SHA-256("logos-names/v5/name/" ‖ id))` and
 holds `{version, owner tag, expires, sealed}`; the page lives at a second derived account.
 `sealed` is AES-256-GCM over the profile, which the program stores and cannot
 read. Names are 1-32 characters of `a-z`, `0-9` and `-`, written with a `.lez`

@@ -22,16 +22,19 @@ The registry is built so that knowing a name is the only way to find it.
 What this does not hide:
 
 - **Anyone who knows or guesses a name can resolve it.** That is what makes a
-  name usable. The derivation is slow on purpose, about 100,000 times the cost
-  of one hash. But its salt is the same for every name and every registry, so
-  that cost is paid once per candidate name, not per registry: a dictionary of
-  likely names is computed once and then checks every registry, now and later,
-  for free. PBKDF2 is not memory-hard, so this is cheap: one current GPU does
-  roughly 90,000 derivations a second (hashcat's PBKDF2-HMAC-SHA256 benchmark on
-  an RTX 4090, scaled to 100,000 iterations), so five million common names take
-  about a minute. Treat any name someone might guess as public.
+  name usable. The derivation is slow and memory-hard on purpose (Argon2id,
+  64 MiB, about 70 to 140 ms per name on a current laptop). But its salt is the
+  same for every name and every registry, and for testnet and mainnet alike so
+  that a name carries over between networks, so that cost is paid once per
+  candidate name, not per registry: a dictionary of likely names is computed
+  once and then checks every registry, now and later, for free. The memory
+  requirement is what limits a GPU: one RTX 4090 does roughly 1,700 derivations
+  a second at these parameters (an estimate from hashcat's Argon2 mode),
+  against roughly 90,000 a second for the PBKDF2 version 2 used, so a
+  dictionary costs about 50 times more to run. Five million common names still
+  take under an hour on one GPU. Treat any name someone might guess as public.
 - **Who holds a name is not stored.** A record keeps an owner tag,
-  `SHA-256("logos-names/v3/owner" ‖ id ‖ account)`, in place of its holder: it
+  `SHA-256("logos-names/v5/owner" ‖ id ‖ account)`, in place of its holder: it
   names no account, and one account's tags for two names are unrelated. No
   instruction's effects or events carry an account either. A holder acting
   from a **LEZ private account** sends privacy-preserving transactions: the
@@ -77,18 +80,31 @@ record a name means, so a client MUST apply them exactly.
 ## 3. From a name to its identifier and key
 
 ```
-master = PBKDF2-HMAC-SHA256(password = name, salt = "logos-names/v2",
-                            iterations = 100000, length = 32 bytes)
-id     = SHA-256("logos-names/v2/id"  ‖ master)
-key    = SHA-256("logos-names/v2/key" ‖ master)
+master = Argon2id(password = name, salt = "logos-names/v5",
+                  version = 0x13, memory = 65536 KiB, passes = 3,
+                  lanes = 1, length = 32 bytes)
+id     = SHA-256("logos-names/v5/id"  ‖ master)
+key    = SHA-256("logos-names/v5/key" ‖ master)
 ```
 
-`name` is the normalised name as ASCII. `id` is public: it is what the chain
-knows the name by. `key` is never sent anywhere: it opens and seals what the
-name resolves to. Neither can be turned back into the name except by guessing.
+`name` is the normalised name, as UTF-8 bytes (names are ASCII). Argon2id is
+the variant of RFC 9106; no secret and no associated data are used. `id` is
+public: it is what the chain knows the name by. `key` is never sent anywhere:
+it opens and seals what the name resolves to. Neither can be turned back into
+the name except by guessing.
 
-100,000 iterations is the most a Cloudflare Worker's Web Crypto allows, so a
-gateway can run the derivation.
+The salt is one fixed string, shared by every registry and every network. That
+is deliberate: a name keeps the same identifier and key on testnet and on
+mainnet, so a name moves between them without being derived again. The price is
+the one section 1 states: a dictionary computed for one registry serves all.
+
+The derivation needs 64 MiB of memory and takes about 70 to 140 ms on an Apple
+M4 in native code (about 0.5 s in pure JavaScript). Memory is what makes it
+costly on a GPU: a dictionary run is about 50 times dearer than with the
+100,000-round PBKDF2 of version 2. A client SHOULD derive once per name and
+keep the result. A server that derives for each request pays this cost for
+every request, including requests for names that do not exist, so a gateway
+SHOULD NOT derive on behalf of anonymous callers.
 
 ## 4. Where a name lives
 
@@ -98,10 +114,10 @@ of account, and one settings account.
 
 | Data | Account ID |
 |---|---|
-| Name record | `PDA(program, SHA-256("logos-names/v2/name/" ‖ id))` |
-| Page | `PDA(program, SHA-256("logos-names/v2/page/" ‖ id))` |
+| Name record | `PDA(program, SHA-256("logos-names/v5/name/" ‖ id))` |
+| Page | `PDA(program, SHA-256("logos-names/v5/page/" ‖ id))` |
 | Reverse record | the account itself |
-| Settings | `PDA(program, SHA-256("logos-names/v2/config"))` |
+| Settings | `PDA(program, SHA-256("logos-names/v5/config"))` |
 
 `PDA(program, seed)` is LEZ's public program-derived address:
 
@@ -149,7 +165,7 @@ nonce (12 random bytes) ‖ AES-256-GCM(key, nonce, plaintext, associated data)
 
 with the 16-byte tag appended to the ciphertext, as Web Crypto and most
 libraries produce it. The associated data is the ASCII string
-`logos-names/v2/record` for a record and `logos-names/v2/page` for a page. A
+`logos-names/v5/record` for a record and `logos-names/v5/page` for a page. A
 fresh random nonce is used every time something is sealed.
 
 Inside a record's `sealed`, the plaintext is a profile followed by zero bytes
@@ -405,43 +421,63 @@ record. They carry identifiers, never names and never accounts.
 
 ## 10. Test vectors
 
-For the name `jef`:
+Argon2id itself, RFC 9106 section 5.3 (version 0x13, 32 KiB, 3 passes, 4 lanes,
+with a secret and associated data): password `01` × 32, salt `02` × 16, secret
+`03` × 8, associated data `04` × 12, 32 bytes out:
+`0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659`.
+A client MUST reproduce this before trusting its Argon2id.
 
-| Value | Hex |
-|---|---|
-| `master` | `83a5b494ae6f1505c3a8abca5389bb60b0f614e9d1f0490858708dd2a2dff800` |
-| `id` | `86d7e719e7acabe344ef8a69782b72ed0c21087e73e400e7056ab0daf7e6c618` |
-| `key` | `d19aa10c57273a3ff4f569cc3a9c35819b2a9bcac7ba8a48deb131269cb6e2e0` |
+Derivation (section 3), generated by the Rust implementation and reproduced
+byte for byte by the JavaScript one:
+
+| Name | Value | Hex |
+|---|---|---|
+| `jef` | `master` | `60e3df20e1c473ab71c666b913af96619fa14b49593e92598bd7709582e5a74e` |
+| | `id` | `7041d9e447f06bdfe327d870402b1524cfe38bd03445b8fc3d0e87bc978eb763` |
+| | `key` | `aad91a1a3dd0fb56a213212fbea58fe25d9139db42fc59ce2116c3cfa3440088` |
+| `logos` | `master` | `140f118f9f0c7a99f04e3214d8e084590cd69687be6effb7f57dcc1a06a35372` |
+| | `id` | `4a8bf61b00dbc63907a935aa15ed534bb32d866978aa1f2128f9b6f37e0c4025` |
+| | `key` | `d67dd628fa51fa62bd32ea82c3e9ff1b67f93b01103be956eaebc52f1699df44` |
+| `a` | `master` | `c42903b96a43d01c6c912b647c21902bffd17afdf932e5f8c407dea08a32b494` |
+| | `id` | `24b73f0b70605c7f27fb91f9952b550e13c4cc38dcf325be45442d1a2cb085b4` |
+| | `key` | `cd9ded7c94d52743db4ee67152766480be5bb5199e83b6696e502cf818933150` |
+| `abcdefghijklmnopqrstuvwxyz012345` | `master` | `a9296b3bfd39d63908326e19c2d1b20a27cb6b47df1829725c68355bc3585f5b` |
+| | `id` | `0044f00be946536689d83e364ac25462c65c615d74059652d1f3e2977bd75403` |
+| | `key` | `79c7aa8c06d4983a59b235915ae4f5767918824a9150d5d8b576761b7d3654f6` |
+| `a-b-c` | `master` | `c098ecc6c6af9cfcf449666ce012e3e930e076d870cb135ed8f1f058e7728362` |
+| | `id` | `707decf4fde6d9fb61d255c23b34e042c846a0f4b0834151dcb2c1ef4160e849` |
+| | `key` | `e3666a8572f7cabe94f6717491bff34c70eeca216436a142185bd8a86b6ccf31` |
 
 With `program` = 32 bytes of `0x07` (base58 `US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx`):
 
 | Account | Base58 |
 |---|---|
-| Record of `jef` | `6gsCMau9ajq4FcxDCJmqqtUWVnuCiJHtXoYbCzCZPGJJ` |
-| Page of `jef` | `338iYF6WmqnFryDjLWyKTYUhAgpT6o7C8qhHAd5pSf32` |
-| Record of the identifier `00 01 02 … 1f` | `HqAjYDvn33ACMyTPQ5VELMbfMvQserWSvpPkzCHJPqN9` |
-| Page of the identifier `00 01 02 … 1f` | `9UFQXB1QKPHScwFpPzjXUVYGJW3LQCvXHvL7dmSTkaCu` |
+| Record of `jef` | `5b5xVGob2GYvrq21MSuxm1MfieucDEy9yxhDwdXndbpD` |
+| Page of `jef` | `HEES9BpNxrAtwxFkyEQTEnjUcSr7usgbefeqiYJsG9mY` |
+| Record of the identifier `00 01 02 … 1f` | `7bwwvMLtxqqNYiXsd5bYaq8e31E1odYf6jAK5z7tmUdd` |
+| Page of the identifier `00 01 02 … 1f` | `8M4vmdxCXL4eS8QXiHSdbeUUPt5Vbx1UVjLcv2cPk9Y5` |
 
-Sealing, with the nonce `00 01 02 … 0b` (a real client uses a random one). The
-profile is `{ name: "jef", account: 32 bytes of 0x02, npk: none, vpk: empty,
-texts: [("chat", "hi")] }`, 63 bytes, padded to 256:
+Sealing, under the key of `jef` above, with the nonce `00 01 02 … 0b` (a real
+client uses a random one). The profile is `{ name: "jef", account: 32 bytes of
+0x02, npk: none, vpk: empty, texts: [("chat", "hi")] }`, 63 bytes, padded to
+256:
 
 ```
-000102030405060708090a0b67bf760994a19946abc799235b95e48bfb804c3ca05471c9261f5099
-e1b00570e6139ab5bbb5fac423627e0fd18c5299475a5c4ed914f1e506f23b66d4d2377de959bff4
-e8d4ab02b63865f9a2453fef24302c211eb70eadebf5b38038d080e2b6f3b1fa17a777b940f17eb9
-4a83f4ce719552c92108600800f3d020a7d8fee73e2792c907db62125ba636607ed94ea46b73f046
-981a751be920449222629d2561194416c993b4bfdeeec20026656f11b64f1c2ac368d64e57d07054
-ac0fcdac4a6e83b60ac363901963488c93c7762d19b34b6991b9abdbc5d293fca06b69cab31e7eaa
-769142940f4813c73713dbd34b24386fb53937e2c9915323f35d39bf50e63d4289cb48a7c7aff0e5
-404987b0
+000102030405060708090a0b7a39f7ff67b20894263a28d040c0f2711c04ba247fcf5cb107e27b59
+05b8a0664b28cd25512addcb74af3efa5a8d6eb3bbb8e89fb8dba0aa2739252efed2be01ab019998
+a07d416c788d8c9b699891e85bedd1118da7089377220bdb0ab8ae29661bf20e006c5fbffb222237
+2ea0a2589ed49023186a77e9afee1af338f4a2377afa40da018789ca715318d981b556f71f9640eb
+d056d8dcbe2b71845b45a578721ccc2c889df37b926c7da5a5202dbf3d50dc04883673134ce0772f
+bcd7fbc8f31f455bb39b3d867d5e6772c86e59f42a9d04ffaacaa6119b1156d238665c0cf50028a9
+cbf8b3189fc45a15a724c5775a835a8ccdff6a573d8e046d78e847b7da5668bc8529aedb3bdc70a9
+9db9b9b4
 ```
 
 The page `{ content_type: "text/plain", body: "hi" }`, same nonce:
 
 ```
-000102030405060708090a0b6ebf76098aa1873386b5f74030f9e489f9822657c6ba930c224eb1f2
-64767f7cf7b5a511
+000102030405060708090a0b7339f7ff79b216e10b4846b32bacf2731e06d04f8cf43af535da58e9
+92f033cb16a471d0
 ```
 
 Instructions, with `id` = `00 01 02 … 1f`. `term` is one byte, `fee` 16 bytes
@@ -641,6 +677,6 @@ refused, so the caller confirms it by calling `resolve` (or `page`, or
 
 ## 13. Versioning
 
-The `version` byte in each structure and the `v2` in each derivation string
+The `version` byte in each structure and the `v5` in each derivation string
 identify this version. A future version uses new strings, so its identifiers
 and accounts never collide with this one's, and a client can support both.

@@ -20,6 +20,7 @@ lee = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", ta
 common = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.3.1" }
 risc0-zkvm = { version = "3.0.5", default-features = false, features = ["std"] }
 borsh = "1.5.7"
+argon2 = "0.6"
 
 # Same keccak patch LEZ applies, so the guest matches what the zone builds.
 [patch.crates-io]

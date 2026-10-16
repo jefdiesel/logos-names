@@ -1,6 +1,7 @@
 // Run with: node --test resolver/names.test.js
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
+import { argon2id } from "@noble/hashes/argon2.js";
 import {
   GRACE_MS,
   base58Decode,
@@ -39,22 +40,30 @@ const toHex = (bytes) => Buffer.from(bytes).toString("hex");
 
 // The vectors of SPEC.md section 10. They are asserted in seal/src/lib.rs too,
 // so Rust and JavaScript must agree.
-const JEF_ID = "86d7e719e7acabe344ef8a69782b72ed0c21087e73e400e7056ab0daf7e6c618";
-const JEF_KEY = "d19aa10c57273a3ff4f569cc3a9c35819b2a9bcac7ba8a48deb131269cb6e2e0";
+const JEF_ID = "7041d9e447f06bdfe327d870402b1524cfe38bd03445b8fc3d0e87bc978eb763";
+const JEF_KEY = "aad91a1a3dd0fb56a213212fbea58fe25d9139db42fc59ce2116c3cfa3440088";
+// [name, id, key]; the masters are in the Rust test.
+const DERIVATIONS = [
+  ["jef", JEF_ID, JEF_KEY],
+  ["logos", "4a8bf61b00dbc63907a935aa15ed534bb32d866978aa1f2128f9b6f37e0c4025", "d67dd628fa51fa62bd32ea82c3e9ff1b67f93b01103be956eaebc52f1699df44"],
+  ["a", "24b73f0b70605c7f27fb91f9952b550e13c4cc38dcf325be45442d1a2cb085b4", "cd9ded7c94d52743db4ee67152766480be5bb5199e83b6696e502cf818933150"],
+  ["abcdefghijklmnopqrstuvwxyz012345", "0044f00be946536689d83e364ac25462c65c615d74059652d1f3e2977bd75403", "79c7aa8c06d4983a59b235915ae4f5767918824a9150d5d8b576761b7d3654f6"],
+  ["a-b-c", "707decf4fde6d9fb61d255c23b34e042c846a0f4b0834151dcb2c1ef4160e849", "e3666a8572f7cabe94f6717491bff34c70eeca216436a142185bd8a86b6ccf31"],
+];
 const PROFILE = { name: "jef", account: ACCOUNT, npk: null, vpk: null, texts: { chat: "hi" } };
 const SEALED_PROFILE =
-  "000102030405060708090a0b67bf760994a19946abc799235b95e48bfb804c3ca05471c9261f5099" +
-  "e1b00570e6139ab5bbb5fac423627e0fd18c5299475a5c4ed914f1e506f23b66d4d2377de959bff4" +
-  "e8d4ab02b63865f9a2453fef24302c211eb70eadebf5b38038d080e2b6f3b1fa17a777b940f17eb9" +
-  "4a83f4ce719552c92108600800f3d020a7d8fee73e2792c907db62125ba636607ed94ea46b73f046" +
-  "981a751be920449222629d2561194416c993b4bfdeeec20026656f11b64f1c2ac368d64e57d07054" +
-  "ac0fcdac4a6e83b60ac363901963488c93c7762d19b34b6991b9abdbc5d293fca06b69cab31e7eaa" +
-  "769142940f4813c73713dbd34b24386fb53937e2c9915323f35d39bf50e63d4289cb48a7c7aff0e5" +
-  "404987b0";
+  "000102030405060708090a0b7a39f7ff67b20894263a28d040c0f2711c04ba247fcf5cb107e27b59" +
+  "05b8a0664b28cd25512addcb74af3efa5a8d6eb3bbb8e89fb8dba0aa2739252efed2be01ab019998" +
+  "a07d416c788d8c9b699891e85bedd1118da7089377220bdb0ab8ae29661bf20e006c5fbffb222237" +
+  "2ea0a2589ed49023186a77e9afee1af338f4a2377afa40da018789ca715318d981b556f71f9640eb" +
+  "d056d8dcbe2b71845b45a578721ccc2c889df37b926c7da5a5202dbf3d50dc04883673134ce0772f" +
+  "bcd7fbc8f31f455bb39b3d867d5e6772c86e59f42a9d04ffaacaa6119b1156d238665c0cf50028a9" +
+  "cbf8b3189fc45a15a724c5775a835a8ccdff6a573d8e046d78e847b7da5668bc8529aedb3bdc70a9" +
+  "9db9b9b4";
 const PAGE = { contentType: "text/plain", body: new TextEncoder().encode("hi") };
 const SEALED_PAGE =
-  "000102030405060708090a0b6ebf76098aa1873386b5f74030f9e489f9822657c6ba930c224eb1f2" +
-  "64767f7cf7b5a511";
+  "000102030405060708090a0b7339f7ff79b216e10b4846b32bacf2731e06d04f8cf43af535da58e9" +
+  "92f033cb16a471d0";
 
 const jef = await deriveName("jef");
 /** What jef's record keeps for its holder `OWNER`. */
@@ -63,16 +72,36 @@ const OWNER_TAG = await ownerTag(jef.id, OWNER);
 test("a name derives its identifier and key", async () => {
   assert.equal(toHex(jef.id), JEF_ID);
   assert.equal(toHex(jef.key), JEF_KEY);
+  for (const [name, id, key] of DERIVATIONS) {
+    const derived = await deriveName(name);
+    assert.equal(toHex(derived.id), id, name);
+    assert.equal(toHex(derived.key), key, name);
+  }
   await assert.rejects(deriveName("Not Valid"), /invalid name/);
   await assert.rejects(deriveName("jef.lez"), /invalid name/);
 });
 
+// RFC 9106 section 5.3 (Argon2id, version 0x13, with a secret and associated
+// data): checks the Argon2id implementation itself, as the Rust test does.
+test("Argon2id matches RFC 9106", () => {
+  const tag = argon2id(new Uint8Array(32).fill(1), new Uint8Array(16).fill(2), {
+    t: 3,
+    m: 32,
+    p: 4,
+    dkLen: 32,
+    version: 0x13,
+    key: new Uint8Array(8).fill(3),
+    personalization: new Uint8Array(12).fill(4),
+  });
+  assert.equal(toHex(tag), "0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659");
+});
+
 test("addresses match the Rust implementation", async () => {
   assert.equal(base58Encode(new Uint8Array(32).fill(7)), "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx");
-  assert.equal(await recordAddress(PROGRAM, jef.id), "6gsCMau9ajq4FcxDCJmqqtUWVnuCiJHtXoYbCzCZPGJJ");
-  assert.equal(await pageAddress(PROGRAM, jef.id), "338iYF6WmqnFryDjLWyKTYUhAgpT6o7C8qhHAd5pSf32");
-  assert.equal(await recordAddress(PROGRAM, COUNTING_ID), "HqAjYDvn33ACMyTPQ5VELMbfMvQserWSvpPkzCHJPqN9");
-  assert.equal(await pageAddress(PROGRAM, COUNTING_ID), "9UFQXB1QKPHScwFpPzjXUVYGJW3LQCvXHvL7dmSTkaCu");
+  assert.equal(await recordAddress(PROGRAM, jef.id), "5b5xVGob2GYvrq21MSuxm1MfieucDEy9yxhDwdXndbpD");
+  assert.equal(await pageAddress(PROGRAM, jef.id), "HEES9BpNxrAtwxFkyEQTEnjUcSr7usgbefeqiYJsG9mY");
+  assert.equal(await recordAddress(PROGRAM, COUNTING_ID), "7bwwvMLtxqqNYiXsd5bYaq8e31E1odYf6jAK5z7tmUdd");
+  assert.equal(await pageAddress(PROGRAM, COUNTING_ID), "8M4vmdxCXL4eS8QXiHSdbeUUPt5Vbx1UVjLcv2cPk9Y5");
   await assert.rejects(recordAddress(PROGRAM, "jef"), /32 bytes/);
 });
 

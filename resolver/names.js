@@ -1,20 +1,24 @@
 // Logos Names resolver: derives a name's identifier, key and accounts, reads
-// them over the LEZ sequencer's JSON-RPC and opens what they hold. No
-// dependencies; runs in Node 20+, browsers and Cloudflare Workers (anything
-// with fetch and WebCrypto).
+// them over the LEZ sequencer's JSON-RPC and opens what they hold. Its one
+// dependency is @noble/hashes (pure-JS Argon2id); it runs in Node 20+, browsers
+// and Cloudflare Workers (anything with fetch and WebCrypto).
+
+import { argon2idAsync } from "@noble/hashes/argon2.js";
 
 const utf8 = new TextEncoder();
 
 const BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const PDA_PREFIX = pad32("/LEE/v0.2/AccountId/PDA/");
-const DERIVE_SALT = "logos-names/v2";
-const DERIVE_ITERATIONS = 100000;
-const ID_DOMAIN = "logos-names/v2/id";
-const KEY_DOMAIN = "logos-names/v2/key";
-const NAME_SEED_DOMAIN = "logos-names/v2/name/";
-const PAGE_SEED_DOMAIN = "logos-names/v2/page/";
+const DERIVE_SALT = "logos-names/v5";
+// Argon2id version 0x13: 64 MiB, 3 passes, 1 lane, 32 bytes out. One fixed salt for
+// every network, so a name keeps its identifier and key from testnet to mainnet.
+const DERIVE_PARAMS = { t: 3, m: 65536, p: 1, dkLen: 32, version: 0x13, asyncTick: 50 };
+const ID_DOMAIN = "logos-names/v5/id";
+const KEY_DOMAIN = "logos-names/v5/key";
+const NAME_SEED_DOMAIN = "logos-names/v5/name/";
+const PAGE_SEED_DOMAIN = "logos-names/v5/page/";
 // Sealed data is bound to its kind, so a sealed page never opens as a record.
-const ASSOCIATED_DATA = { record: "logos-names/v2/record", page: "logos-names/v2/page" };
+const ASSOCIATED_DATA = { record: "logos-names/v5/record", page: "logos-names/v5/page" };
 const NONCE_LENGTH = 12;
 const TAG_LENGTH = 16;
 const PROFILE_BLOCK = 256;
@@ -112,19 +116,12 @@ export function isValidName(name) {
 /**
  * The identifier and key of `name`. The chain knows the name only by `id`;
  * `key` opens and seals what the name resolves to and is never sent anywhere.
- * The derivation is slow on purpose, to make scanning for names expensive.
+ * The derivation is slow and memory-hard on purpose, to make scanning for names
+ * expensive: about half a second and 64 MiB in pure JavaScript.
  */
 export async function deriveName(name) {
   if (!isValidName(name)) throw new Error(`invalid name: ${name}`);
-  const usages = ["deriveBits"];
-  const password = await crypto.subtle.importKey("raw", utf8.encode(name), "PBKDF2", false, usages);
-  const params = {
-    name: "PBKDF2",
-    hash: "SHA-256",
-    salt: utf8.encode(DERIVE_SALT),
-    iterations: DERIVE_ITERATIONS,
-  };
-  const master = new Uint8Array(await crypto.subtle.deriveBits(params, password, 256));
+  const master = await argon2idAsync(utf8.encode(name), utf8.encode(DERIVE_SALT), DERIVE_PARAMS);
   return {
     id: await sha256(concat(utf8.encode(ID_DOMAIN), master)),
     key: await sha256(concat(utf8.encode(KEY_DOMAIN), master)),
@@ -235,7 +232,7 @@ function fixed32(bytes, what) {
  * account and links no two names.
  */
 export async function ownerTag(id, accountId) {
-  return toHex(await sha256(concat(utf8.encode("logos-names/v3/owner"), id, base58Decode(accountId))));
+  return toHex(await sha256(concat(utf8.encode("logos-names/v5/owner"), id, base58Decode(accountId))));
 }
 
 export function decodeNameRecord(bytes) {

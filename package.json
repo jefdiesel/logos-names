@@ -1,0 +1,9 @@
+{
+	"name": "logos-names",
+	"private": true,
+	"type": "module",
+	"description": "JavaScript side of Logos Names: the resolver, the MCP server and the gateway share this one dependency.",
+	"dependencies": {
+		"@noble/hashes": "^2.4.0"
+	}
+}
