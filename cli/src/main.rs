@@ -1278,7 +1278,7 @@ fn profile_card(name: &str, profile: &Profile, has_page: bool) -> String {
          <title>{name}{NAME_SUFFIX}</title><style>\
          body{{font:16px/1.5 system-ui,sans-serif;max-width:36rem;margin:3rem auto;padding:0 1rem;color:#1d1d1f;background:#fff}}\
          @media(prefers-color-scheme:dark){{body{{color:#eee;background:#141414}}th{{color:#aaa}}}}\
-         .avatar{{width:96px;height:96px;border-radius:50%;object-fit:cover}}h1{{margin:.5rem 0 0}}\
+         .avatar{{width:96px;height:96px;border-radius:50%;object-fit:cover;image-rendering:pixelated}}h1{{margin:.5rem 0 0}}\
          .handle{{color:#888;margin:0}}.bio{{white-space:pre-wrap}}table{{border-collapse:collapse;width:100%}}\
          th{{text-align:left;font-weight:500;color:#666;padding:.4rem 1rem .4rem 0;vertical-align:top;white-space:nowrap}}\
          td{{padding:.4rem 0;word-break:break-all}}code{{font-size:.9em}}.note{{color:#888;font-size:.85em}}</style>\
