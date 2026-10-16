@@ -44,7 +44,6 @@
 //! binds to the block's timestamp and passes on inside the effects.
 
 pub mod shortlist;
-
 use borsh::{BorshDeserialize, BorshSerialize};
 use lee_core::{
     account::{AccountId, ProgramShardSelector},
@@ -55,7 +54,9 @@ use lee_core::{
 /// Record layout version written by this program. Version 3 holds an owner
 /// tag where version 2 held the owner's account; version 4 records are laid out
 /// as version 3's, and are only written after a commitment ([`Instruction::Commit`]).
-pub const VERSION: u8 = 4;
+/// Version 5 records are laid out as version 3's; a name registered in deposit
+/// mode never lapses (`expires` is `u64::MAX`).
+pub const VERSION: u8 = 5;
 pub const MAX_NAME_LEN: usize = 32;
 /// How names are written for people: `jef.lez`. The suffix is a display
 /// convention only; it is removed before a name is turned into an identifier.
@@ -66,12 +67,19 @@ pub const MAX_SEALED_RECORD_LEN: usize = 12 * 1024;
 /// transaction under the wallet's default gas limit: 80 KiB applies, 96 KiB fails.
 pub const MAX_SEALED_PAGE_LEN: usize = 80 * 1024;
 
-const NAME_SEED_DOMAIN: &[u8] = b"logos-names/v2/name/";
-const PAGE_SEED_DOMAIN: &[u8] = b"logos-names/v2/page/";
-const SETTINGS_SEED_DOMAIN: &[u8] = b"logos-names/v2/config";
-const OWNER_TAG_DOMAIN: &[u8] = b"logos-names/v3/owner";
-const COMMITMENT_DOMAIN: &[u8] = b"logos-names/v4/commitment";
-const COMMITMENT_SEED_DOMAIN: &[u8] = b"logos-names/v4/commit/";
+const NAME_SEED_DOMAIN: &[u8] = b"logos-names/v5/name/";
+const PAGE_SEED_DOMAIN: &[u8] = b"logos-names/v5/page/";
+const SETTINGS_SEED_DOMAIN: &[u8] = b"logos-names/v5/config";
+const OWNER_TAG_DOMAIN: &[u8] = b"logos-names/v5/owner";
+const COMMITMENT_DOMAIN: &[u8] = b"logos-names/v5/commitment";
+const COMMITMENT_SEED_DOMAIN: &[u8] = b"logos-names/v5/commit/";
+const DEPOSIT_SEED_DOMAIN: &[u8] = b"logos-names/v5/deposit/";
+
+/// The registry charges a fee per term, paid to its treasury; names lapse.
+pub const MODE_FEE: u8 = 0;
+/// The registry takes a deposit, held in the name's deposit account until the
+/// name is released; names never lapse.
+pub const MODE_DEPOSIT: u8 = 1;
 
 /// How far a commit or a reveal may be from the time it claims: it is valid only
 /// in a block whose timestamp is in `[now, now + TIME_WINDOW_MS)`. So a claimed
@@ -150,7 +158,14 @@ pub struct Settings {
     /// The account fees are paid to. It pays nothing itself.
     pub treasury: AccountId,
     /// The price of each term in the native token's base units, by term index.
+    /// Used in [`MODE_FEE`].
     pub prices: [u128; 3],
+    /// [`MODE_FEE`] or [`MODE_DEPOSIT`].
+    pub mode: u8,
+    /// The deposit for a normal name and for a three-character name, in
+    /// [`MODE_DEPOSIT`]. A change applies to new registrations only: each name's
+    /// deposit stays in its own account.
+    pub deposits: [u128; 2],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -162,9 +177,13 @@ pub enum Instruction {
     /// least [`MIN_COMMIT_AGE_MS`] and less than [`MAX_COMMIT_AGE_MS`] before
     /// `now`; revealing uses it up. `now` is the sender's claim of the time; the
     /// transaction is only valid in a block whose timestamp is in
-    /// `[now, now + TIME_WINDOW_MS)`. `fee` is the settings' price for `term`.
-    /// Accounts: `[record, page, settings, commitment, payer]`, then `treasury`
-    /// if `fee` is not 0. `payer` and `treasury` select the native token's shard.
+    /// `[now, now + TIME_WINDOW_MS)`. With `deposit` false (fee mode), `fee`
+    /// is the settings' price for `term`, paid to the treasury; with `deposit`
+    /// true (deposit mode), `fee` is the settings' deposit for the name's
+    /// length, paid into the name's deposit account, and `term` is ignored.
+    /// Accounts: `[record, page, settings, commitment, payer]`, then, if `fee`
+    /// is not 0, `treasury` (fee mode) or the name's [`deposit_address`]
+    /// (deposit mode), all money accounts selecting the native token's shard.
     Register {
         id: NameId,
         sealed: Vec<u8>,
@@ -172,6 +191,10 @@ pub enum Instruction {
         fee: u128,
         now: u64,
         secret: [u8; 32],
+        deposit: bool,
+        /// Where the name's identifier sits relative to the short-name list,
+        /// which decides its tier ([`shortlist`]).
+        length: LengthProof,
     },
     /// Extend a name that is active or in grace by `term`; anyone may pay.
     /// Accounts: `[record, settings, payer]`, then `treasury` if `fee` is not
@@ -194,9 +217,13 @@ pub enum Instruction {
     /// Accounts: `[record, page, owner]`.
     Transfer { id: NameId, new_owner: OwnerTag },
     /// Give the name up. Its record and page are emptied, so nothing of it
-    /// remains and anyone may register it again.
-    /// Accounts: `[record, page, owner]`.
-    Release { id: NameId },
+    /// remains and anyone may register it again, and `refund` moves from the
+    /// name's deposit account to the owner: a client passes the account's whole
+    /// balance (0 for a name with no deposit).
+    /// Accounts: `[record, page, owner]`, then, if `refund` is not 0, the
+    /// name's [`deposit_address`]; `owner` and the deposit account select the
+    /// native token's shard.
+    Release { id: NameId, refund: u128 },
     /// Publish `name` as what the signer's account is shown as; an empty name
     /// removes it. Unlike everything else here, this puts a name on the chain
     /// in the clear.
@@ -210,6 +237,8 @@ pub enum Instruction {
         admin: AccountId,
         treasury: AccountId,
         prices: [u128; 3],
+        mode: u8,
+        deposits: [u128; 2],
     },
     /// Commit to claiming a name: the first step of [`Instruction::Register`].
     /// `commitment` is [`commitment`]`(id, owner_tag(id, payer), secret)` for
@@ -243,6 +272,10 @@ pub enum Effect {
         treasury: Option<AccountId>,
         term: u8,
         fee: u128,
+        /// Paid as a deposit (deposit mode) rather than a fee (fee mode).
+        deposit: bool,
+        /// The name's length tier, as proven against the short-name list.
+        tier: u8,
     },
     /// On the settings: replace them, refused unless `signer` is their admin,
     /// or, while there are none, unless the program's own account signed.
@@ -252,6 +285,8 @@ pub enum Effect {
         admin: AccountId,
         treasury: AccountId,
         prices: [u128; 3],
+        mode: u8,
+        deposits: [u128; 2],
     },
     /// On the record: replace the sealed profile, refused unless `signer` owns it.
     Seal { signer: OwnerTag, sealed: Vec<u8> },
@@ -405,6 +440,13 @@ pub fn page_address(program: &AccountId, id: &NameId) -> AccountId {
     AccountId::for_public_pda(program, &seed(PAGE_SEED_DOMAIN, id))
 }
 
+/// The account holding the deposit of the name `id` under the registry
+/// `program`, as its native balance. Only the registry can move it, on release.
+#[must_use]
+pub fn deposit_address(program: &AccountId, id: &NameId) -> AccountId {
+    AccountId::for_public_pda(program, &seed(DEPOSIT_SEED_DOMAIN, id))
+}
+
 /// The account holding the settings of the registry `program`.
 #[must_use]
 pub fn settings_address(program: &AccountId) -> AccountId {
@@ -491,51 +533,84 @@ fn after(time: u64, length: u64) -> u64 {
     time.checked_add(length).expect("the time is out of range")
 }
 
-/// Checks and charges the price of `term`. `paying` is the `payer` account
-/// and, when a fee is paid, the `treasury` account, both with the native
-/// token's shard selected. The settings decide in `apply` whether `fee` is
-/// right; the fee itself moves by a native token transfer chained to this
-/// transaction, which the payer's signature authorizes. Returns the payer.
+pub use shortlist::{LengthProof, TIER_LOCKED, TIER_NORMAL, TIER_THREE};
+
+/// The root of the short-name list ([`shortlist`]): the identifiers of every name
+/// of one to three characters, with their tiers. Set from `tools/shortlist`'s
+/// output for the released derivation; until then it matches no proof, so a
+/// registry built with it refuses every registration rather than let a short
+/// name through.
+pub const SHORTLIST_ROOT: [u8; 32] = [0; 32];
+
+/// The tier `proof` shows for the name `id`; refuses a proof that does not hold.
+fn length_tier(id: &NameId, proof: &LengthProof) -> u8 {
+    #[cfg(not(test))]
+    let checked = shortlist::verify(&SHORTLIST_ROOT, id, proof);
+    #[cfg(test)]
+    let checked = tests::verify_against_test_list(id, proof);
+    checked.unwrap_or_else(|reason| panic!("the length proof does not hold: {reason}"))
+}
+
+/// Checks and charges a registration or renewal. `paying` is the `payer`
+/// account and, when something is paid, the account it is paid to (the
+/// treasury in fee mode, the name's deposit account in deposit mode), all with
+/// the native token's shard selected. The settings decide in `apply` whether
+/// the amount is right; the money moves by a native token transfer chained to
+/// this transaction, which the payer's signature authorizes. Returns the payer.
+#[allow(clippy::too_many_arguments)]
 fn charge(
     plan: &mut Plan,
+    program: &AccountId,
     id: &NameId,
     settings: &AccountMeta,
     paying: &[AccountMeta],
     term: u8,
     fee: u128,
     now: u64,
+    deposit: bool,
+    tier: u8,
 ) -> AccountId {
-    let (payer, treasury) = match (paying, fee) {
+    let (payer, to) = match (paying, fee) {
         ([payer], 0) => (payer, None),
-        ([payer, treasury], 1..) => (payer, Some(treasury)),
-        _ => panic!("expected a payer account, then a treasury account only if a fee is paid"),
+        ([payer, to], 1..) => (payer, Some(to)),
+        _ => panic!("expected a payer account, then the account paid only if something is paid"),
     };
     assert!(payer.is_authorized, "the payer account must sign");
     assert!(
         paying
             .iter()
             .all(|account| account.program_account_id == NATIVE_TOKEN_PROGRAM_ID),
-        "the payer and treasury accounts must select the native token's shard"
+        "the payer and paid accounts must select the native token's shard"
     );
+    if deposit {
+        if let Some(to) = to {
+            assert!(
+                to.account_id == deposit_address(program, id),
+                "the deposit account does not match the name"
+            );
+        }
+    }
     plan.effect(
         settings,
         &Effect::RequirePrice {
             id: *id,
             payer: owner_tag(id, &payer.account_id),
-            treasury: treasury.map(|treasury| treasury.account_id),
+            treasury: if deposit { None } else { to.map(|to| to.account_id) },
             term,
             fee,
+            deposit,
+            tier,
         },
     );
     // Valid only in a block at least as late as `now`, so `now` is never in
     // the future and `apply` can use it as the time.
     plan.timestamp_window(now..);
-    if let Some(treasury) = treasury {
+    if let Some(to) = to {
         plan.call(ChainedCall::new(
             NATIVE_TOKEN_PROGRAM_ID,
             vec![
                 ProgramShardSelector::native_balance(payer.account_id),
-                ProgramShardSelector::native_balance(treasury.account_id),
+                ProgramShardSelector::native_balance(to.account_id),
             ],
             &native_token::Instruction::Transfer { amount: fee },
         ));
@@ -555,6 +630,8 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             fee,
             now,
             secret,
+            deposit,
+            length,
         } => {
             assert!(
                 sealed.len() <= MAX_SEALED_RECORD_LEN,
@@ -567,8 +644,10 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             require_address(record, record_address(program, &id), "record");
             require_address(page, page_address(program, &id), "page");
             require_address(settings, settings_address(program), "settings");
-            let expires = after(now, term_length(term));
-            let owner = charge(&mut plan, &id, settings, paying, term, fee, now);
+            // A deposit holds the name until it is released.
+            let expires = if deposit { u64::MAX } else { after(now, term_length(term)) };
+            let tier = length_tier(&id, &length);
+            let owner = charge(&mut plan, program, &id, settings, paying, term, fee, now, deposit, tier);
             // Bound to the holder: a reveal seen pending can't be replayed for
             // another account.
             let promised = commitment(&id, &owner_tag(&id, &owner), &secret);
@@ -599,7 +678,7 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             require_address(record, record_address(program, &id), "record");
             require_address(settings, settings_address(program), "settings");
             let term_ms = term_length(term);
-            charge(&mut plan, &id, settings, paying, term, fee, now);
+            charge(&mut plan, program, &id, settings, paying, term, fee, now, false, TIER_NORMAL);
             // The new expiry depends on the record, which only `apply` sees;
             // the event carries the least it can be.
             plan.event(event(
@@ -651,8 +730,14 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             );
             plan.effect(page, &Effect::WritePage { sealed: Vec::new() });
         }
-        Instruction::Release { id } => {
-            let (record, page, owner) = record_page_and_owner(input, &id);
+        Instruction::Release { id, refund } => {
+            let program = &input.self_account_id;
+            let [record, page, owner, held @ ..] = input.accounts.as_slice() else {
+                panic!("expected at least 3 input accounts, got {}", input.accounts.len());
+            };
+            require_address(record, record_address(program, &id), "record");
+            require_address(page, page_address(program, &id), "page");
+            require_signer(owner);
             plan.event(event(Released::SELECTOR_NAME, &Released { id }));
             plan.effect(
                 record,
@@ -661,6 +746,36 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
                 },
             );
             plan.effect(page, &Effect::WritePage { sealed: Vec::new() });
+            match (held, refund) {
+                ([], 0) => {}
+                ([held], 1..) => {
+                    // Whoever holds the name gets its deposit: only the owner
+                    // passes `Remove`, and only this program can sign for the
+                    // deposit account.
+                    let deposit_seed = seed(DEPOSIT_SEED_DOMAIN, &id);
+                    assert!(
+                        held.account_id == AccountId::for_public_pda(program, &deposit_seed),
+                        "the deposit account does not match the name"
+                    );
+                    assert!(
+                        owner.program_account_id == NATIVE_TOKEN_PROGRAM_ID
+                            && held.program_account_id == NATIVE_TOKEN_PROGRAM_ID,
+                        "the owner and deposit accounts must select the native token's shard"
+                    );
+                    plan.call(
+                        ChainedCall::new(
+                            NATIVE_TOKEN_PROGRAM_ID,
+                            vec![
+                                ProgramShardSelector::native_balance(held.account_id),
+                                ProgramShardSelector::native_balance(owner.account_id),
+                            ],
+                            &native_token::Instruction::Transfer { amount: refund },
+                        )
+                        .with_pda_seeds(vec![deposit_seed]),
+                    );
+                }
+                _ => panic!("expected the deposit account only if something is refunded"),
+            }
         }
         Instruction::SetPrimary { name } => {
             if !name.is_empty() {
@@ -674,7 +789,10 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
             admin,
             treasury,
             prices,
+            mode,
+            deposits,
         } => {
+            assert!(mode == MODE_FEE || mode == MODE_DEPOSIT, "mode must be fee (0) or deposit (1)");
             let [settings, signer] = accounts::<2>(input);
             require_address(settings, settings_address(&input.self_account_id), "settings");
             assert!(signer.is_authorized, "the admin account must sign");
@@ -686,6 +804,8 @@ pub fn plan(input: &PlanInput, instruction: Instruction) -> Plan {
                     admin,
                     treasury,
                     prices,
+                    mode,
+                    deposits,
                 },
             );
         }
@@ -737,7 +857,7 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
                 let held: NameRecord =
                     borsh::from_slice(pre_data).expect("a record shard holds a valid record");
                 assert!(
-                    after(held.expires, GRACE_MS) <= now,
+                    held.expires.saturating_add(GRACE_MS) <= now,
                     "name is already registered"
                 );
             }
@@ -752,6 +872,7 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
             assert!(!pre_data.is_empty(), "name is not registered");
             let mut record: NameRecord =
                 borsh::from_slice(pre_data).expect("a record shard holds a valid record");
+            assert!(record.expires != u64::MAX, "a name held by a deposit does not lapse or renew");
             assert!(
                 now < after(record.expires, GRACE_MS),
                 "name has lapsed and must be registered again"
@@ -765,20 +886,51 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
             treasury,
             term,
             fee,
+            deposit,
+            tier,
         } => {
-            let price = match load_settings(pre_data) {
-                Some(settings) if payer != owner_tag(&id, &settings.treasury) => {
+            let settings = load_settings(pre_data);
+            if tier == TIER_LOCKED {
+                // Locked names are released by the admin registering them, then
+                // transferring them to whoever they are for.
+                assert!(
+                    settings.as_ref().is_some_and(|settings| payer == owner_tag(&id, &settings.admin)),
+                    "one- and two-character names are locked; only the registry's admin may register one"
+                );
+            }
+            let owed = match settings {
+                Some(settings) => {
+                    let deposit_mode = settings.mode == MODE_DEPOSIT;
                     assert!(
-                        treasury.is_none_or(|treasury| treasury == settings.treasury),
-                        "the treasury account is not the registry's treasury"
+                        deposit == deposit_mode,
+                        "{}",
+                        if deposit_mode {
+                            "the registry takes deposits: register with a deposit; names don't renew"
+                        } else {
+                            "the registry charges fees, not deposits"
+                        }
                     );
-                    settings.prices[usize::from(term)]
+                    if deposit_mode {
+                        settings.deposits[usize::from(tier == TIER_THREE)]
+                    } else if payer == owner_tag(&id, &settings.treasury) {
+                        // A treasury paying itself would move nothing.
+                        0
+                    } else {
+                        assert!(
+                            treasury.is_none_or(|treasury| treasury == settings.treasury),
+                            "the treasury account is not the registry's treasury"
+                        );
+                        settings.prices[usize::from(term)]
+                    }
                 }
-                // An unconfigured registry charges nothing, and a treasury
-                // paying itself would move nothing.
-                _ => 0,
+                // An unconfigured registry charges nothing.
+                None => 0,
             };
-            assert!(fee == price, "the fee is not the price of this term");
+            assert!(
+                fee == owed,
+                "{}",
+                if deposit { "the deposit is not this name's deposit" } else { "the fee is not the price of this term" }
+            );
             None
         }
         Effect::WriteSettings {
@@ -787,6 +939,8 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
             admin,
             treasury,
             prices,
+            mode,
+            deposits,
         } => {
             match load_settings(pre_data) {
                 Some(settings) => {
@@ -800,6 +954,8 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
                 admin,
                 treasury,
                 prices,
+                mode,
+                deposits,
             }))
         }
         Effect::Seal { signer, sealed } => {
@@ -866,6 +1022,36 @@ fn load_commitment(pre_data: &[u8]) -> Option<Commitment> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tests' stand-in for the short-name list: two locked names and two
+    /// three-character names, among ids the other tests don't use.
+    pub(super) const LOCKED_NAME: NameId = [0x11; 32];
+    pub(super) const LOCKED_NAME_2: NameId = [0x12; 32];
+    pub(super) const THREE_NAME: NameId = [0x33; 32];
+    pub(super) const THREE_NAME_2: NameId = [0x34; 32];
+
+    fn test_list() -> &'static shortlist::ShortList {
+        static LIST: std::sync::OnceLock<shortlist::ShortList> = std::sync::OnceLock::new();
+        LIST.get_or_init(|| {
+            shortlist::ShortList::new(vec![
+                (LOCKED_NAME, TIER_LOCKED),
+                (LOCKED_NAME_2, TIER_LOCKED),
+                (THREE_NAME, TIER_THREE),
+                (THREE_NAME_2, TIER_THREE),
+            ])
+            .expect("a valid test list")
+        })
+    }
+
+    pub(super) fn verify_against_test_list(id: &NameId, proof: &LengthProof) -> Result<u8, &'static str> {
+        let list = test_list();
+        shortlist::verify_depth(&list.root(), id, proof, list.depth())
+    }
+
+    /// The true length proof for `id` under the test list.
+    fn length_of(id: &NameId) -> LengthProof {
+        test_list().prove(id).expect("a proof")
+    }
 
     const PROGRAM: AccountId = AccountId::new([7; 32]);
     const ALICE: AccountId = AccountId::new([1; 32]);
@@ -962,6 +1148,8 @@ mod tests {
             fee,
             now,
             secret: SECRET,
+            deposit: false,
+            length: length_of(&id),
         }
     }
 
@@ -1048,6 +1236,8 @@ mod tests {
                     admin,
                     treasury: BOB,
                     prices,
+                    mode: MODE_FEE,
+                    deposits: [0, 0],
                 },
             );
         }
@@ -1328,7 +1518,7 @@ mod tests {
                 sealed: b"alice's page".to_vec(),
             },
         );
-        chain.run(on_record_and_page(&JEF, ALICE), Instruction::Release { id: JEF });
+        chain.run(on_record_and_page(&JEF, ALICE), Instruction::Release { id: JEF, refund: 0 });
         assert_eq!(chain.record(&JEF), None);
         assert_eq!(chain.page(&JEF), None);
         assert!(chain.data(&record_address(&PROGRAM, &JEF)).is_empty());
@@ -1343,14 +1533,14 @@ mod tests {
     fn someone_else_cannot_release_the_name() {
         let mut chain = Chain::default();
         chain.register(&JEF, ALICE, b"");
-        chain.run(on_record_and_page(&JEF, BOB), Instruction::Release { id: JEF });
+        chain.run(on_record_and_page(&JEF, BOB), Instruction::Release { id: JEF, refund: 0 });
     }
 
     #[test]
     #[should_panic(expected = "name is not registered")]
     fn an_unregistered_name_cannot_be_released() {
         let mut chain = Chain::default();
-        chain.run(on_record_and_page(&JEF, ALICE), Instruction::Release { id: JEF });
+        chain.run(on_record_and_page(&JEF, ALICE), Instruction::Release { id: JEF, refund: 0 });
     }
 
     #[test]
@@ -1358,7 +1548,7 @@ mod tests {
         let mut chain = Chain::default();
         chain.register(&JEF, ALICE, b"jef");
         chain.register(&ADA, BOB, b"ada");
-        chain.run(on_record_and_page(&JEF, ALICE), Instruction::Release { id: JEF });
+        chain.run(on_record_and_page(&JEF, ALICE), Instruction::Release { id: JEF, refund: 0 });
         assert_eq!(chain.record(&ADA).expect("registered").sealed, b"ada");
         assert_eq!(chain.shards.values().filter(|data| !data.is_empty()).count(), 1);
     }
@@ -1450,10 +1640,13 @@ mod tests {
                 fee: 100_000,
                 now: 1_700_000_000_000,
                 secret: [0x5A; 32],
+                deposit: false,
+                length: LengthProof::Membership(shortlist::Membership { index: 7, tier: TIER_THREE, path: Vec::new() }),
             }),
             format!(
-                "00{id_hex}02000000eeff01a08601000000000000000000000000000068e5cf8b010000{}",
-                "5a".repeat(32)
+                "00{id_hex}02000000eeff01a08601000000000000000000000000000068e5cf8b010000{}00000700000003{}",
+                "5a".repeat(32),
+                "00".repeat(4)
             )
         );
         assert_eq!(
@@ -1477,11 +1670,14 @@ mod tests {
                 admin: ALICE,
                 treasury: BOB,
                 prices: [1, 2, 3],
+                mode: MODE_FEE,
+                deposits: [0, 0],
             }),
             format!(
-                "07{}{}01{z}02{z}03{z}",
+                "07{}{}01{z}02{z}03{z}00{}",
                 "01".repeat(32),
                 "02".repeat(32),
+                "00".repeat(32),
                 z = "00".repeat(15)
             )
         );
@@ -1497,15 +1693,15 @@ mod tests {
             hex(&Instruction::Transfer { id, new_owner: [0x02; 32] }),
             format!("04{id_hex}{}", "02".repeat(32))
         );
-        assert_eq!(hex(&Instruction::Release { id }), format!("05{id_hex}"));
+        assert_eq!(hex(&Instruction::Release { id, refund: 0 }), format!("05{id_hex}{}", "00".repeat(16)));
         assert_eq!(
             hex(&Instruction::SetPrimary { name: "jef".into() }),
             "06030000006a6566"
         );
     }
 
-    const RECORD_VECTOR: &str = "HqAjYDvn33ACMyTPQ5VELMbfMvQserWSvpPkzCHJPqN9";
-    const PAGE_VECTOR: &str = "9UFQXB1QKPHScwFpPzjXUVYGJW3LQCvXHvL7dmSTkaCu";
+    const RECORD_VECTOR: &str = "7bwwvMLtxqqNYiXsd5bYaq8e31E1odYf6jAK5z7tmUdd";
+    const PAGE_VECTOR: &str = "8M4vmdxCXL4eS8QXiHSdbeUUPt5Vbx1UVjLcv2cPk9Y5";
 
     #[test]
     fn events_carry_the_identifier_and_never_a_name() {
@@ -1533,7 +1729,7 @@ mod tests {
         );
         assert_eq!(events[0].selector, event_selector(Transferred::SELECTOR_NAME));
 
-        let events = run_plan_events(on_record_and_page(&JEF, ALICE), Instruction::Release { id: JEF });
+        let events = run_plan_events(on_record_and_page(&JEF, ALICE), Instruction::Release { id: JEF, refund: 0 });
         assert_eq!(events[0].selector, event_selector(Released::SELECTOR_NAME));
 
         // Changing a profile or a page says nothing at all.
@@ -1558,7 +1754,7 @@ mod tests {
                 on_record_and_page(&JEF, ALICE),
                 Instruction::Transfer { id: JEF, new_owner: owner_tag(&JEF, &BOB) },
             ),
-            (on_record_and_page(&JEF, ALICE), Instruction::Release { id: JEF }),
+            (on_record_and_page(&JEF, ALICE), Instruction::Release { id: JEF, refund: 0 }),
         ];
         for (accounts, instruction) in instructions {
             let output = plan(&input(accounts, &instruction), instruction);
@@ -1740,6 +1936,8 @@ mod tests {
                 admin: CAROL,
                 treasury: CAROL,
                 prices: PRICES,
+                mode: MODE_FEE,
+                deposits: [0, 0],
             },
         );
     }
@@ -1826,6 +2024,8 @@ mod tests {
                 admin: ALICE,
                 treasury: BOB,
                 prices: [1, 2, 3],
+                mode: MODE_FEE,
+                deposits: [0, 0],
             })
         );
     }
@@ -1847,6 +2047,8 @@ mod tests {
                 admin: ALICE,
                 treasury: BOB,
                 prices: PRICES,
+                mode: MODE_FEE,
+                deposits: [0, 0],
             },
         );
     }
@@ -1881,5 +2083,372 @@ mod tests {
         let instruction = register(JEF, Vec::new());
         let planned = plan(&input(on_registration(&JEF, ALICE), &instruction), instruction);
         assert!(planned.output().chained_calls.is_empty());
+    }
+
+    const DEPOSITS: [u128; 2] = [100_000_000, 2_000_000_000];
+
+    impl Chain {
+        /// A registry in deposit mode, administered by `admin`.
+        fn configure_deposits(&mut self, admin: AccountId) {
+            self.run(
+                vec![meta(settings_address(&PROGRAM), false), meta(PROGRAM, true)],
+                Instruction::Configure {
+                    admin,
+                    treasury: BOB,
+                    prices: PRICES,
+                    mode: MODE_DEPOSIT,
+                    deposits: DEPOSITS,
+                },
+            );
+        }
+
+        /// A deposit-mode registration of `id` for `holder`, paying `deposit`.
+        fn register_with_deposit(&mut self, id: &NameId, holder: AccountId, deposit: u128, now: u64) {
+            let mut accounts = on_registration(id, holder);
+            if deposit > 0 {
+                accounts.push(AccountMeta::native_balance(deposit_address(&PROGRAM, id), false));
+            }
+            self.run(accounts, deposit_registration(*id, deposit, now));
+        }
+    }
+
+    fn deposit_registration(id: NameId, deposit: u128, now: u64) -> Instruction {
+        Instruction::Register {
+            id,
+            sealed: Vec::new(),
+            term: 0,
+            fee: deposit,
+            now,
+            secret: SECRET,
+            deposit: true,
+            length: length_of(&id),
+        }
+    }
+
+    /// The `[record, page, owner]` accounts of a release, with the owner's native
+    /// shard, and the deposit account when something is refunded.
+    fn on_release(id: &NameId, owner: AccountId, refund: u128) -> Vec<AccountMeta> {
+        let mut accounts = vec![
+            meta(record_address(&PROGRAM, id), false),
+            meta(page_address(&PROGRAM, id), false),
+            AccountMeta::native_balance(owner, true),
+        ];
+        if refund > 0 {
+            accounts.push(AccountMeta::native_balance(deposit_address(&PROGRAM, id), false));
+        }
+        accounts
+    }
+
+    fn only_call(accounts: Vec<AccountMeta>, instruction: Instruction) -> ChainedCall {
+        let planned = plan(&input(accounts, &instruction), instruction);
+        let [call] = planned.output().chained_calls.as_slice() else {
+            panic!("expected one chained call");
+        };
+        call.clone()
+    }
+
+    #[test]
+    fn a_deposit_moves_from_the_payer_into_the_names_deposit_account() {
+        let mut accounts = on_registration(&JEF, ALICE);
+        accounts.push(AccountMeta::native_balance(deposit_address(&PROGRAM, &JEF), false));
+        let call = only_call(accounts, deposit_registration(JEF, DEPOSITS[0], NOW));
+        assert!(call.program_account_id == NATIVE_TOKEN_PROGRAM_ID);
+        assert!(
+            call.shard_selectors
+                == vec![
+                    ProgramShardSelector::native_balance(ALICE),
+                    ProgramShardSelector::native_balance(deposit_address(&PROGRAM, &JEF)),
+                ]
+        );
+        assert_eq!(
+            call.instruction_data,
+            borsh::to_vec(&native_token::Instruction::Transfer { amount: DEPOSITS[0] }).expect("serializes")
+        );
+        assert!(call.pda_seeds.is_empty(), "the payer's own signature authorizes a deposit");
+    }
+
+    #[test]
+    #[should_panic(expected = "the deposit account does not match the name")]
+    fn a_deposit_into_another_names_account_is_refused() {
+        let mut accounts = on_registration(&JEF, ALICE);
+        accounts.push(AccountMeta::native_balance(deposit_address(&PROGRAM, &ADA), false));
+        let instruction = deposit_registration(JEF, DEPOSITS[0], NOW);
+        let _ = plan(&input(accounts, &instruction), instruction);
+    }
+
+    #[test]
+    #[should_panic(expected = "the deposit account does not match the name")]
+    fn a_deposit_to_the_treasury_is_refused() {
+        let mut accounts = on_registration(&JEF, ALICE);
+        accounts.push(AccountMeta::native_balance(BOB, false));
+        let instruction = deposit_registration(JEF, DEPOSITS[0], NOW);
+        let _ = plan(&input(accounts, &instruction), instruction);
+    }
+
+    #[test]
+    fn a_name_held_by_a_deposit_never_lapses() {
+        let mut chain = Chain::default();
+        chain.configure_deposits(CAROL);
+        chain.register_with_deposit(&JEF, ALICE, DEPOSITS[0], NOW);
+        let record = chain.record(&JEF).expect("registered");
+        assert_eq!(record.expires, u64::MAX);
+        assert_eq!(record.owner, owner_tag(&JEF, &ALICE));
+        assert_eq!(record.version, 5);
+    }
+
+    #[test]
+    #[should_panic(expected = "name is already registered")]
+    fn nobody_takes_a_deposit_held_name_even_decades_later() {
+        let mut chain = Chain::default();
+        chain.configure_deposits(CAROL);
+        chain.register_with_deposit(&JEF, ALICE, DEPOSITS[0], NOW);
+        chain.register_with_deposit(&JEF, BOB, DEPOSITS[0], NOW + 50 * YEAR);
+    }
+
+    #[test]
+    #[should_panic(expected = "the deposit is not this name's deposit")]
+    fn a_short_deposit_is_refused() {
+        let mut chain = Chain::default();
+        chain.configure_deposits(CAROL);
+        chain.register_with_deposit(&JEF, ALICE, DEPOSITS[0] - 1, NOW);
+    }
+
+    #[test]
+    #[should_panic(expected = "the deposit is not this name's deposit")]
+    fn no_deposit_is_refused_in_deposit_mode() {
+        let mut chain = Chain::default();
+        chain.configure_deposits(CAROL);
+        chain.register_with_deposit(&JEF, ALICE, 0, NOW);
+    }
+
+    #[test]
+    #[should_panic(expected = "the registry takes deposits")]
+    fn a_fee_registration_is_refused_in_deposit_mode() {
+        let mut chain = Chain::default();
+        chain.configure_deposits(CAROL);
+        chain.run(paying(on_registration(&JEF, ALICE), BOB), register_at(JEF, Vec::new(), 1, PRICES[1], NOW));
+    }
+
+    #[test]
+    #[should_panic(expected = "the registry charges fees, not deposits")]
+    fn a_deposit_registration_is_refused_in_fee_mode() {
+        let mut chain = Chain::default();
+        chain.configure(PROGRAM, ALICE, PRICES);
+        chain.register_with_deposit(&JEF, ALICE, DEPOSITS[0], NOW);
+    }
+
+    #[test]
+    #[should_panic(expected = "the registry takes deposits")]
+    fn names_do_not_renew_in_deposit_mode() {
+        let mut chain = Chain::default();
+        chain.configure_deposits(CAROL);
+        chain.register_with_deposit(&JEF, ALICE, DEPOSITS[0], NOW);
+        chain.run(
+            paying(on_renewal(&JEF, ALICE), BOB),
+            Instruction::Renew { id: JEF, term: 1, fee: PRICES[1], now: NOW },
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "a name held by a deposit does not lapse or renew")]
+    fn a_deposit_name_cannot_be_renewed_even_after_a_switch_to_fees() {
+        let mut chain = Chain::default();
+        chain.configure_deposits(CAROL);
+        chain.register_with_deposit(&JEF, ALICE, DEPOSITS[0], NOW);
+        chain.configure(CAROL, CAROL, PRICES);
+        chain.run(
+            paying(on_renewal(&JEF, ALICE), BOB),
+            Instruction::Renew { id: JEF, term: 1, fee: PRICES[1], now: NOW },
+        );
+    }
+
+    #[test]
+    fn a_release_refunds_the_deposit_to_the_holder_from_the_names_account() {
+        let call = only_call(
+            on_release(&JEF, ALICE, DEPOSITS[0]),
+            Instruction::Release { id: JEF, refund: DEPOSITS[0] },
+        );
+        assert!(call.program_account_id == NATIVE_TOKEN_PROGRAM_ID);
+        assert!(
+            call.shard_selectors
+                == vec![
+                    ProgramShardSelector::native_balance(deposit_address(&PROGRAM, &JEF)),
+                    ProgramShardSelector::native_balance(ALICE),
+                ]
+        );
+        assert_eq!(
+            call.instruction_data,
+            borsh::to_vec(&native_token::Instruction::Transfer { amount: DEPOSITS[0] }).expect("serializes")
+        );
+        // Only the registry can sign for the deposit account.
+        assert!(call.pda_seeds == vec![seed(DEPOSIT_SEED_DOMAIN, &JEF)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "signer does not own this name")]
+    fn only_the_holder_collects_the_deposit() {
+        let mut chain = Chain::default();
+        chain.configure_deposits(CAROL);
+        chain.register_with_deposit(&JEF, ALICE, DEPOSITS[0], NOW);
+        chain.run(on_release(&JEF, BOB, DEPOSITS[0]), Instruction::Release { id: JEF, refund: DEPOSITS[0] });
+    }
+
+    #[test]
+    #[should_panic(expected = "the deposit account does not match the name")]
+    fn a_refund_from_another_names_deposit_is_refused() {
+        let mut accounts = on_release(&JEF, ALICE, 0);
+        accounts.push(AccountMeta::native_balance(deposit_address(&PROGRAM, &ADA), false));
+        let instruction = Instruction::Release { id: JEF, refund: DEPOSITS[0] };
+        let _ = plan(&input(accounts, &instruction), instruction);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected the deposit account only if something is refunded")]
+    fn a_refund_without_the_deposit_account_is_refused() {
+        let instruction = Instruction::Release { id: JEF, refund: DEPOSITS[0] };
+        let _ = plan(&input(on_release(&JEF, ALICE, 0), &instruction), instruction);
+    }
+
+    #[test]
+    fn a_transferred_name_keeps_its_deposit_for_the_new_holder() {
+        let mut chain = Chain::default();
+        chain.configure_deposits(CAROL);
+        chain.register_with_deposit(&JEF, ALICE, DEPOSITS[0], NOW);
+        chain.run(
+            on_record_and_page(&JEF, ALICE),
+            Instruction::Transfer { id: JEF, new_owner: owner_tag(&JEF, &BOB) },
+        );
+        // The new holder releases it and is refunded; the old one no longer can.
+        chain.run(on_release(&JEF, BOB, DEPOSITS[0]), Instruction::Release { id: JEF, refund: DEPOSITS[0] });
+        assert!(chain.record(&JEF).is_none());
+    }
+
+    #[test]
+    fn a_released_deposit_name_can_be_registered_again() {
+        let mut chain = Chain::default();
+        chain.configure_deposits(CAROL);
+        chain.register_with_deposit(&JEF, ALICE, DEPOSITS[0], NOW);
+        chain.run(on_release(&JEF, ALICE, DEPOSITS[0]), Instruction::Release { id: JEF, refund: DEPOSITS[0] });
+        chain.register_with_deposit(&JEF, BOB, DEPOSITS[0], NOW + MONTH);
+        assert_eq!(chain.record(&JEF).expect("registered").owner, owner_tag(&JEF, &BOB));
+    }
+
+    #[test]
+    fn the_admin_switches_modes_and_changes_deposits() {
+        let mut chain = Chain::default();
+        chain.configure_deposits(CAROL);
+        chain.run(
+            vec![meta(settings_address(&PROGRAM), false), meta(CAROL, true)],
+            Instruction::Configure {
+                admin: CAROL,
+                treasury: BOB,
+                prices: PRICES,
+                mode: MODE_DEPOSIT,
+                deposits: [5, 50],
+            },
+        );
+        assert_eq!(chain.settings().expect("configured").deposits, [5, 50]);
+        chain.register_with_deposit(&JEF, ALICE, 5, NOW);
+    }
+
+    #[test]
+    #[should_panic(expected = "mode must be fee (0) or deposit (1)")]
+    fn an_unknown_mode_is_refused() {
+        let mut chain = Chain::default();
+        chain.run(
+            vec![meta(settings_address(&PROGRAM), false), meta(PROGRAM, true)],
+            Instruction::Configure { admin: CAROL, treasury: BOB, prices: PRICES, mode: 2, deposits: DEPOSITS },
+        );
+    }
+
+    fn deposit_registration_with(id: NameId, deposit: u128, length: LengthProof) -> Instruction {
+        Instruction::Register {
+            id,
+            sealed: Vec::new(),
+            term: 0,
+            fee: deposit,
+            now: NOW,
+            secret: SECRET,
+            deposit: true,
+            length,
+        }
+    }
+
+    fn with_deposit_account(id: &NameId, holder: AccountId) -> Vec<AccountMeta> {
+        let mut accounts = on_registration(id, holder);
+        accounts.push(AccountMeta::native_balance(deposit_address(&PROGRAM, id), false));
+        accounts
+    }
+
+    #[test]
+    fn a_three_character_name_takes_the_higher_deposit() {
+        let mut chain = Chain::default();
+        chain.configure_deposits(CAROL);
+        chain.register_with_deposit(&THREE_NAME, ALICE, DEPOSITS[1], NOW);
+        assert!(chain.record(&THREE_NAME).is_some());
+    }
+
+    #[test]
+    #[should_panic(expected = "the deposit is not this name's deposit")]
+    fn a_three_character_name_is_refused_at_the_normal_deposit() {
+        let mut chain = Chain::default();
+        chain.configure_deposits(CAROL);
+        chain.register_with_deposit(&THREE_NAME, ALICE, DEPOSITS[0], NOW);
+    }
+
+    #[test]
+    #[should_panic(expected = "the length proof does not hold")]
+    fn a_short_name_cannot_pass_as_a_normal_one() {
+        // A non-membership proof built around the short name's neighbours.
+        let around_ada = length_of(&ADA);
+        let mut chain = Chain::default();
+        chain.configure_deposits(CAROL);
+        chain.run(with_deposit_account(&THREE_NAME, ALICE), deposit_registration_with(THREE_NAME, DEPOSITS[0], around_ada));
+    }
+
+    #[test]
+    #[should_panic(expected = "the length proof does not hold")]
+    fn a_short_name_cannot_borrow_another_short_names_proof() {
+        let mut chain = Chain::default();
+        chain.configure_deposits(CAROL);
+        chain.run(
+            with_deposit_account(&LOCKED_NAME, ALICE),
+            deposit_registration_with(LOCKED_NAME, DEPOSITS[1], length_of(&THREE_NAME)),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "only the registry's admin may register one")]
+    fn a_locked_name_is_refused_to_everyone_but_the_admin() {
+        let mut chain = Chain::default();
+        chain.configure_deposits(CAROL);
+        chain.register_with_deposit(&LOCKED_NAME, ALICE, DEPOSITS[0], NOW);
+    }
+
+    #[test]
+    fn the_admin_releases_a_locked_name_by_registering_and_transferring_it() {
+        let mut chain = Chain::default();
+        chain.configure_deposits(CAROL);
+        chain.register_with_deposit(&LOCKED_NAME, CAROL, DEPOSITS[0], NOW);
+        chain.run(
+            on_record_and_page(&LOCKED_NAME, CAROL),
+            Instruction::Transfer { id: LOCKED_NAME, new_owner: owner_tag(&LOCKED_NAME, &ALICE) },
+        );
+        assert_eq!(chain.record(&LOCKED_NAME).expect("held").owner, owner_tag(&LOCKED_NAME, &ALICE));
+    }
+
+    #[test]
+    #[should_panic(expected = "only the registry's admin may register one")]
+    fn locked_names_are_locked_in_fee_mode_too() {
+        let mut chain = Chain::default();
+        chain.configure(PROGRAM, CAROL, PRICES);
+        chain.run(on_registration(&LOCKED_NAME_2, ALICE), register_at(LOCKED_NAME_2, Vec::new(), 1, 0, NOW));
+    }
+
+    #[test]
+    #[should_panic(expected = "only the registry's admin may register one")]
+    fn an_unconfigured_registry_locks_short_names() {
+        let mut chain = Chain::default();
+        chain.run(on_registration(&LOCKED_NAME, ALICE), register_at(LOCKED_NAME, Vec::new(), 1, 0, NOW));
     }
 }
