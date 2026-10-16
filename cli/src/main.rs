@@ -278,6 +278,9 @@ enum Command {
         /// Print the address instead of opening the browser.
         #[arg(long)]
         no_browser: bool,
+        /// Your own Logos Storage node, which the card links a `cid` entry to.
+        #[arg(long, env = "LOGOS_STORAGE_API", default_value = "http://127.0.0.1:8080")]
+        storage: String,
     },
     /// Publish a file as the name's page.
     SetPage {
@@ -1238,7 +1241,7 @@ fn html_escape(text: &str) -> String {
 
 /// A profile card built on this machine from the name's own entries (`display`,
 /// `bio`, `avatar` and the rest): nothing beyond the record is published or fetched.
-fn profile_card(name: &str, profile: &Profile, has_page: bool) -> String {
+fn profile_card(name: &str, profile: &Profile, has_page: bool, storage: &str) -> String {
     let text = |key: &str| profile.texts.iter().find(|t| t.key == key).map(|t| t.value.as_str());
     let display = text("display").unwrap_or(name);
     // Only an inline image: anything else would make the browser fetch it.
@@ -1263,6 +1266,15 @@ fn profile_card(name: &str, profile: &Profile, has_page: bool) -> String {
             continue;
         }
         let mut value = format!("<code>{}</code>", html_escape(&entry.value));
+        // Linked to the viewer's own Storage node only, never a public gateway, and
+        // only for a plain CID, so an entry can't make the link point elsewhere.
+        if entry.key == "cid" && !entry.value.is_empty() && entry.value.chars().all(|c| c.is_ascii_alphanumeric()) {
+            value.push_str(&format!(
+                " <a href=\"{}/api/storage/v1/data/{}/network/stream\">open from your Storage node</a>",
+                html_escape(storage.trim_end_matches('/')),
+                entry.value
+            ));
+        }
         if entry.key == "logos.account" {
             value.push_str(" <span class=\"note\">confirm with <code>names verify-account</code></span>");
         }
@@ -1899,10 +1911,10 @@ async fn main() -> Result<()> {
         }
         Command::Transfer { name, new_owner } => client.transfer(&name, new_owner).await,
         Command::Release { name } => client.release(&name).await,
-        Command::Open { name, port, no_browser } => {
+        Command::Open { name, port, no_browser, storage } => {
             let (_, _, profile) = client.lookup(&name).await?;
             let page = client.page(&name).await?;
-            let card = profile_card(&name, &profile, page.is_some());
+            let card = profile_card(&name, &profile, page.is_some(), &storage);
             serve_page(&name, page.as_ref(), &card, port, no_browser)
         }
         Command::SetPage {

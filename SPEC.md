@@ -476,6 +476,9 @@ Without a page, a viewer shows a profile card built on the viewer's machine from
 the name's entries (`display`, `bio`, `avatar`, how to pay it, and the other
 entries), every value HTML-escaped; `names open` serves it at `/` when there is no
 page and always at `/profile`.
+A `cid` made only of letters and digits is linked to the viewer's own Logos
+Storage node (`--storage`, default `http://127.0.0.1:8080`,
+`/api/storage/v1/data/<cid>/network/stream`), never to a public gateway.
 
 ### 12.3 In a browser (once sequencers allow it)
 
