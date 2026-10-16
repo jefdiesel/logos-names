@@ -22,13 +22,16 @@ Decided with the maintainer on 2026-10-16. Nothing here is built yet.
 
 ## Payment: deposits now, fees possible
 
-- **Deposit mode (on now).** Registering locks a deposit in the registry program.
-  Releasing a name, or letting it lapse past its grace period, returns the
-  deposit to the holder. A private holder's refund goes to their private account
+- **Deposit mode (on now).** Registering locks a deposit in the registry program,
+  and the name is held for as long as the deposit stays locked: there are no
+  terms, renewals, expiry or grace period. Releasing the name returns the deposit
+  to the holder and frees the name. A private holder's refund goes to their private account
   in the same private transaction. Nobody profits; tying up tokens is what stops
   squatting. This follows Status's username registrar (10 SNT, refundable).
+  Consequence: a holder who loses their keys leaves the name and its deposit
+  locked for good.
 - **Fee mode (kept in the code, off).** The present fee-to-treasury path stays,
-  selected by a setting the admin can switch. It is isolated so it can be removed
+  with its terms, renewals and expiry, selected by a setting the admin can switch. It is isolated so it can be removed
   entirely.
 - The admin (the maintainer for now) can change amounts and the mode, and can be
   locked later (admin set to an account nobody controls) or handed to the Logos
@@ -50,12 +53,6 @@ Merkle tree whose root is built into the program.
 
 Short names are guessable in seconds anyway, so the list reveals nothing new.
 
-## Expired names
-
-After the grace period, a name is re-released with a premium that starts high and
-falls to the normal amount over about three weeks (as ENS does), so bots can't
-take it the moment it frees up. In deposit mode the premium is a larger deposit.
-
 ## Testnet to mainnet
 
 - **Snapshot** of every testnet v5 name (ID, owner tag) before mainnet, committed
@@ -74,8 +71,8 @@ take it the moment it frees up. In deposit mode the premium is a larger deposit.
 
 1. The CLI and website changes already shipped (static site, `names open`,
    reveal retries, signed releases).
-2. v5 program: deposits and refunds (fee mode behind a setting), the length list
-   and its proofs, the expired-name premium. Unit tests for each.
+2. v5 program: deposits and refunds (fee mode, with terms and expiry, behind a
+   setting), the length list and its proofs. Unit tests for each.
 3. v5 derivation (Argon2id, shared salt) in every resolver, with new vectors.
 4. Compute the short-name list; deploy v5 on the testnet; re-register `jef`
    and `logos`.
