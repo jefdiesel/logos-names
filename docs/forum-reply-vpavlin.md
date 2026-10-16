@@ -11,7 +11,7 @@ Thanks for the review, it was useful. Both blockers are fixed in registry v4.1, 
 - the new holder taking over with fresh receiving keys (block 23131);
 - release, after which the name resolves as not registered (block 23159).
 
-**Fixed salt (1.3):** your numbers were, if anything, generous to us. At hashcat's PBKDF2-SHA256 rate on an RTX 4090, five million common names take about a minute, and the fixed salt means that dictionary works against every registry. SPEC §1 now says so plainly. A memory-hard KDF with a per-registry salt is the real fix, and we're looking at it for the next registry version.
+**Fixed salt (1.3):** your numbers were, if anything, generous to us. At hashcat's PBKDF2-SHA256 rate on an RTX 4090, five million common names take about a minute, and the fixed salt means that dictionary works against every registry. SPEC §1 now says so plainly. A memory-hard KDF (Argon2id) is the real fix, planned for the next registry version.
 
 **Owner tags (1.4):** SPEC §1 now says plainly that the holder of a name held from a public account can be found after the fact, by testing public accounts against the tag. A private-account holder stays hidden, which is why names are held privately by default.
 
@@ -19,6 +19,6 @@ Thanks for the review, it was useful. Both blockers are fixed in registry v4.1, 
 
 **Installer (1.8):** releases are now signed (ed25519, `ssh-keygen -Y`), and `install.sh` refuses a missing or bad signature.
 
-**Websites on Logos Storage:** yes. A name can carry a `cid` text entry, so your viewer can take `vpavlin.lez`, resolve it in the client (JS resolver in `resolver/`; in a browser that needs the testnet RPC to allow CORS, which I'm asking for), and fetch that CID from Logos Storage. Would that work for you?
+**Websites on Logos Storage:** yes. A name can carry a `cid` text entry, so your viewer can take `vpavlin.lez`, resolve it in the client (JS resolver in `resolver/`; in a browser that needs the testnet RPC to allow CORS, which I asked for in https://github.com/logos-blockchain/logos-execution-zone/issues/992), and fetch that CID from Logos Storage. Would that work for you?
 
 Would you be up for a re-review of v4.1?
