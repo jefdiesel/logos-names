@@ -25,6 +25,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - run: npm ci
       - run: node --test resolver/names.test.js
       - run: node basecamp/logic.test.mjs
 

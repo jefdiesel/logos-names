@@ -537,10 +537,27 @@ pub use shortlist::{LengthProof, TIER_LOCKED, TIER_NORMAL, TIER_THREE};
 
 /// The root of the short-name list ([`shortlist`]): the identifiers of every name
 /// of one to three characters, with their tiers. Set from `tools/shortlist`'s
-/// output for the released derivation; until then it matches no proof, so a
-/// registry built with it refuses every registration rather than let a short
-/// name through.
-pub const SHORTLIST_ROOT: [u8; 32] = [0; 32];
+/// output (`shortlist/root.hex`) for the v5 derivation: 49,284 names and two
+/// sentinels, depth 16. Regenerate it if the derivation ever changes.
+pub const SHORTLIST_ROOT: [u8; 32] = hex_literal(b"66c75f76e42f1e87c80b8783c8a315dd84471041b029066bd5f8911d6c5a5e3c");
+
+/// 64 hex characters as 32 bytes, at compile time.
+const fn hex_literal(hex: &[u8; 64]) -> [u8; 32] {
+    const fn nibble(c: u8) -> u8 {
+        match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            _ => panic!("not a lowercase hex digit"),
+        }
+    }
+    let mut out = [0u8; 32];
+    let mut i = 0;
+    while i < 32 {
+        out[i] = nibble(hex[2 * i]) << 4 | nibble(hex[2 * i + 1]);
+        i += 1;
+    }
+    out
+}
 
 /// The tier `proof` shows for the name `id`; refuses a proof that does not hold.
 fn length_tier(id: &NameId, proof: &LengthProof) -> u8 {

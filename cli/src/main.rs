@@ -22,7 +22,8 @@ use lee_core::{
 };
 use lee::{privacy_preserving_transaction::circuit::ProgramWithDependencies, program::Program};
 use names_core::{
-    Effect, GRACE_MS, Instruction, MAX_COMMIT_AGE_MS, MIN_COMMIT_AGE_MS, NAME_SUFFIX, TIME_WINDOW_MS, NameId,
+    Effect, GRACE_MS, Instruction, LengthProof, MAX_COMMIT_AGE_MS, MIN_COMMIT_AGE_MS, MODE_DEPOSIT, MODE_FEE,
+    NAME_SUFFIX, TIER_LOCKED, TIER_THREE, TIME_WINDOW_MS, NameId, deposit_address, shortlist,
     NameRecord, Page, Settings, commitment, commitment_address,
     normalize_name, owner_tag, page_address, record_address, settings_address,
     validate_name,
@@ -77,6 +78,35 @@ fn load_defaults() -> Defaults {
 fn save_defaults(defaults: &Defaults) -> Result<()> {
     std::fs::write(defaults_path()?, serde_json::to_vec_pretty(defaults)?)?;
     Ok(())
+}
+
+/// The short-name list this build was made with: the identifiers of every name of
+/// one to three characters. Its root is the one the registry program checks.
+static SHORTLIST_BIN: &[u8] = include_bytes!("../../shortlist/shortlist.bin");
+
+fn short_list() -> Result<&'static shortlist::ShortList> {
+    static LIST: std::sync::OnceLock<Result<shortlist::ShortList, String>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        let leaves = SHORTLIST_BIN
+            .chunks_exact(33)
+            .map(|chunk| shortlist::Leaf { id: chunk[..32].try_into().expect("32 bytes"), tier: chunk[32] })
+            .collect();
+        shortlist::ShortList::from_sorted_leaves(leaves).map_err(str::to_owned)
+    })
+    .as_ref()
+    .map_err(|reason| anyhow!("the built-in short-name list is invalid: {reason}"))
+}
+
+/// The proof of where `id` sits relative to the short-name list, and its tier.
+fn length_proof(id: &NameId) -> Result<(LengthProof, u8)> {
+    let list = short_list()?;
+    if list.root() != names_core::SHORTLIST_ROOT {
+        bail!("this build's short-name list doesn't match the registry program's; use a matching release");
+    }
+    let proof = list.prove(id).map_err(|reason| anyhow!("no length proof: {reason}"))?;
+    let tier = shortlist::verify(&names_core::SHORTLIST_ROOT, id, &proof)
+        .map_err(|reason| anyhow!("the length proof does not hold: {reason}"))?;
+    Ok((proof, tier))
 }
 
 fn register_log(name: &str) -> Result<PathBuf> {
@@ -192,14 +222,22 @@ enum Command {
         /// Account the fees are paid to.
         #[arg(long)]
         treasury: AccountId,
-        /// Prices in base units for 30d, 1y and 5y, separated by commas.
-        #[arg(long, value_delimiter = ',')]
+        /// Prices in base units for 30d, 1y and 5y, separated by commas (fee mode).
+        #[arg(long, value_delimiter = ',', default_value = "0,0,0")]
         prices: Vec<u128>,
+        /// `deposit` (names are held by a refundable deposit) or `fee` (names are
+        /// rented for a term and fees go to the treasury).
+        #[arg(long, default_value = "deposit", value_parser = ["deposit", "fee"])]
+        mode: String,
+        /// Deposits in base units for a normal name and a three-character name,
+        /// separated by a comma (deposit mode).
+        #[arg(long, value_delimiter = ',', default_value = "0,0")]
+        deposits: Vec<u128>,
         /// Sign with this account instead of the settings' admin.
         #[arg(long, hide = true)]
         signer: Option<AccountId>,
     },
-    /// Print the registry's admin, treasury and prices, as JSON.
+    /// Print the registry's admin, mode, deposits, treasury and prices, as JSON.
     Settings,
     /// Publish a public account on the name, so it can also be paid openly (a shop,
     /// donations). Anyone who resolves the name then sees that account, and so its
@@ -634,7 +672,7 @@ impl Client {
     async fn price(&self, payer: AccountId, term: u8) -> Result<(u128, Vec<(AccountId, bool)>)> {
         let mut paying = vec![(payer, true)];
         let fee = match self.settings().await? {
-            Some(settings) if settings.treasury != payer => {
+            Some(settings) if settings.mode == MODE_FEE && settings.treasury != payer => {
                 let fee = settings.prices[usize::from(term)];
                 if fee != 0 {
                     paying.push((settings.treasury, false));
@@ -644,6 +682,32 @@ impl Client {
             _ => 0,
         };
         Ok((fee, paying))
+    }
+
+    /// What registering `id` costs and where it goes: in deposit mode the deposit
+    /// for its length, paid into the name's deposit account; otherwise the fee
+    /// for `term`, paid to the treasury. Returns (amount, paying accounts, deposit mode).
+    async fn registration_cost(
+        &self,
+        id: &NameId,
+        tier: u8,
+        payer: AccountId,
+        term: u8,
+    ) -> Result<(u128, Vec<(AccountId, bool)>, bool)> {
+        match self.settings().await? {
+            Some(settings) if settings.mode == MODE_DEPOSIT => {
+                let amount = settings.deposits[usize::from(tier == TIER_THREE)];
+                let mut paying = vec![(payer, true)];
+                if amount != 0 {
+                    paying.push((deposit_address(&self.program, id), false));
+                }
+                Ok((amount, paying, true))
+            }
+            _ => {
+                let (fee, paying) = self.price(payer, term).await?;
+                Ok((fee, paying, false))
+            }
+        }
     }
     /// The record of `name` and its opened profile, for reading: a name past its
     /// grace period is not registered.
@@ -717,7 +781,21 @@ impl Client {
                 bail!("{name}{NAME_SUFFIX} is already registered");
             }
         }
-        let (fee, paying) = self.price(owner, term).await?;
+        let (length, tier) = length_proof(&id)?;
+        if tier == TIER_LOCKED {
+            let admin = self.settings().await?.map(|settings| settings.admin);
+            if admin != Some(owner) {
+                bail!(
+                    "{name}{NAME_SUFFIX} is locked: one- and two-character names are released by the registry's admin"
+                );
+            }
+        }
+        let (fee, paying, deposit) = self.registration_cost(&id, tier, owner, term).await?;
+        if deposit && fee > 0 {
+            println!(
+                "{name}{NAME_SUFFIX} takes a deposit of {fee}, held for as long as you keep the name and refunded when you release it"
+            );
+        }
         let holder = owner_tag(&id, &owner);
 
         // Step 1: commit. The commitment hides the identifier, so watching
@@ -818,6 +896,8 @@ impl Client {
                         fee,
                         now: claimed,
                         secret,
+                        deposit,
+                        length: length.clone(),
                     },
                 )
                 .await;
@@ -878,6 +958,9 @@ impl Client {
     /// Adds `term` to the time `name` is held for, paid by `payer` or else its owner.
     async fn renew(&mut self, name: &str, term: u8, payer: Option<AccountId>) -> Result<()> {
         let (Derived { id, .. }, record, _) = self.lookup(name).await?;
+        if record.expires == u64::MAX {
+            bail!("{name}{NAME_SUFFIX} is held by a deposit: it doesn't expire, so there is nothing to renew");
+        }
         let payer = match payer {
             Some(payer) => payer,
             None => self.holder(name, &id, &record)?,
@@ -902,6 +985,8 @@ impl Client {
         admin: AccountId,
         treasury: AccountId,
         prices: [u128; 3],
+        mode: u8,
+        deposits: [u128; 2],
         signer: Option<AccountId>,
     ) -> Result<()> {
         let signer = match (signer, self.settings().await?) {
@@ -915,6 +1000,8 @@ impl Client {
                 admin,
                 treasury,
                 prices,
+                mode,
+                deposits,
             },
         )
         .await
@@ -983,9 +1070,17 @@ impl Client {
     async fn release(&mut self, name: &str) -> Result<()> {
         let (Derived { id, .. }, record, _) = self.lookup_held(name).await?;
         let holder = self.holder(name, &id, &record)?;
-        self.send(
-            self.page_accounts(&id, holder),
-            &Instruction::Release { id },
+        // The deposit account's whole balance comes back to whoever releases.
+        let held = deposit_address(&self.program, &id);
+        let refund = self.wallet.get_account_balance(held).await.unwrap_or(0);
+        if refund == 0 {
+            return self.send(self.page_accounts(&id, holder), &Instruction::Release { id, refund: 0 }).await;
+        }
+        println!("releasing {name}{NAME_SUFFIX}; its deposit of {refund} comes back to you");
+        self.send_paying(
+            vec![(record_address(&self.program, &id), false), (page_address(&self.program, &id), false)],
+            &[(holder, true), (held, false)],
+            &Instruction::Release { id, refund },
         )
         .await
     }
@@ -1893,16 +1988,26 @@ async fn main() -> Result<()> {
             admin,
             treasury,
             prices,
+            mode,
+            deposits,
             signer,
         } => {
             let prices = <[u128; 3]>::try_from(prices)
                 .map_err(|_| anyhow!("--prices takes three prices: 30d,1y,5y"))?;
-            client.configure(admin, treasury, prices, signer).await
+            let deposits = <[u128; 2]>::try_from(deposits)
+                .map_err(|_| anyhow!("--deposits takes two amounts: normal,three-character"))?;
+            let mode = if mode == "deposit" { MODE_DEPOSIT } else { MODE_FEE };
+            client.configure(admin, treasury, prices, mode, deposits, signer).await
         }
         Command::Settings => {
             let settings = client.settings().await?.map(|settings| {
                 serde_json::json!({
                     "admin": settings.admin.to_string(),
+                    "mode": if settings.mode == MODE_DEPOSIT { "deposit" } else { "fee" },
+                    "deposits": {
+                        "normal": settings.deposits[0].to_string(),
+                        "three_characters": settings.deposits[1].to_string(),
+                    },
                     "treasury": settings.treasury.to_string(),
                     "prices": {
                         "30d": settings.prices[0].to_string(),
@@ -2091,6 +2196,21 @@ async fn main() -> Result<()> {
         | Command::Bridge { .. }
         | Command::Man { .. } => {
             unreachable!("handled before the wallet is opened")
+        }
+    }
+}
+
+#[cfg(test)]
+mod shortlist_tests {
+    /// The list shipped in the CLI is the one the program's root commits to, and it
+    /// sorts names into the right tiers.
+    #[test]
+    fn the_built_in_list_matches_the_program() {
+        let list = super::short_list().expect("the built-in list loads");
+        assert_eq!(list.root(), names_core::SHORTLIST_ROOT);
+        for (name, tier) in [("ab", names_core::TIER_LOCKED), ("jef", names_core::TIER_THREE), ("logos", names_core::TIER_NORMAL)] {
+            let (_, got) = super::length_proof(&names_seal::derive(name).id).expect("a proof");
+            assert_eq!(got, tier, "{name}");
         }
     }
 }
