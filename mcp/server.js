@@ -45,7 +45,8 @@ const tools = [
       "agent). By default a name is paid privately with `names pay <name>`, and nobody, the " +
       "payer included, learns the account behind it; a published public account shows its " +
       "balance and history to anyone. " +
-      "Names expire: `expires` is when, in milliseconds since the Unix epoch, and `lapsed` is " +
+      "A name held by a deposit never expires: its `expires` is null. Otherwise names expire: " +
+      "`expires` is when, in milliseconds since the Unix epoch, and `lapsed` is " +
       "true once that has passed and the name is in its 30-day grace period, after which it " +
       "is no longer registered. Do not pay a lapsed name without the user knowing it has lapsed. " +
       "Looking a name up reveals nothing to the chain, which never sees names, and who holds " +

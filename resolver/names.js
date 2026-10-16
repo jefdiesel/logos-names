@@ -343,8 +343,10 @@ export async function resolveName(rpcUrl, program, name, now = Date.now()) {
   const { id, key } = await deriveName(name);
   const record = await readRecord(rpcUrl, program, id, now);
   if (record === null) return null;
-  const { expires, sealed } = record;
-  const held = { name, expires, lapsed: expires <= now };
+  const { sealed } = record;
+  // A name held by a deposit (registry v5) never expires: its expiry is u64::MAX.
+  const expires = record.expires >= Number.MAX_SAFE_INTEGER ? null : record.expires;
+  const held = { name, expires, lapsed: expires !== null && expires <= now };
   const profile = await openAs(key, sealed, "record", decodeProfile);
   if (profile === null || profile.name !== name) {
     return { ...held, account: null, npk: null, vpk: null, texts: {} };

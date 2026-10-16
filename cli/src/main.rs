@@ -1385,7 +1385,8 @@ impl Client {
             // whether it is one of its own accounts, and nobody can tell more.
             "held_by": self.holder(name, &id, &record).ok().map(|account| account.to_string()),
             "expires": record.expires,
-            "expires_date": readable(record.expires),
+            // A name held by a deposit never expires (its expiry is u64::MAX).
+            "expires_date": if record.expires == u64::MAX { "never".to_owned() } else { readable(record.expires) },
             "lapsed": local_now() >= record.expires,
             // A name never shows an address: payers' wallets use its receiving keys
             // without printing them, and `names pay` pays them.
@@ -1956,8 +1957,12 @@ async fn main() -> Result<()> {
             for name in defaults.names {
                 match client.lookup(&name).await {
                     Ok((Derived { id, .. }, record, _)) if client.holder(&name, &id, &record).is_ok() => {
-                        let state = if local_now() >= record.expires { "lapsed" } else { "held" };
-                        println!("{name}{NAME_SUFFIX}  {state} until {}", readable(record.expires));
+                        if record.expires == u64::MAX {
+                            println!("{name}{NAME_SUFFIX}  held by a deposit (no expiry)");
+                        } else {
+                            let state = if local_now() >= record.expires { "lapsed" } else { "held" };
+                            println!("{name}{NAME_SUFFIX}  {state} until {}", readable(record.expires));
+                        }
                     }
                     _ => println!("{name}{NAME_SUFFIX}  no longer held by this wallet"),
                 }
