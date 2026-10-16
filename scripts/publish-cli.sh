@@ -6,7 +6,10 @@
 # macOS (Apple silicon): built on the Mac mini (see README, "Build and test").
 # Linux x86_64: the artifact of the latest successful "CLI release build" run
 # (`gh workflow run cli-release.yml` first if the CLI changed).
-# Both binaries and the man pages (names-man.tar.gz), with SHA-256 files, go to
+# Both binaries and the man pages (names-man.tar.gz), with SHA-256 files and
+# signatures (.sig, made with the key at $NAMES_SIGNING_KEY, default
+# ~/.config/logos-names/release-signing-key; its public half is
+# scripts/release-signing-key.pub and embedded in install.sh), go to
 # a GitHub release of this repository, which install.sh downloads from. The MCP
 # server is bundled as gateway/public/mcp.js, and the gateway (guide, install.sh)
 # is deployed.
@@ -16,6 +19,8 @@ cd "$(dirname "$0")/.."
 MINI=${MINI:-minim4}
 DEV=/Volumes/exos162/logos/dev
 DL=dist
+KEY=${NAMES_SIGNING_KEY:-$HOME/.config/logos-names/release-signing-key}
+[ -f "$KEY" ] || { echo "signing key not found at $KEY; set NAMES_SIGNING_KEY (public half: scripts/release-signing-key.pub)" >&2; exit 1; }
 rm -rf "$DL" && mkdir -p "$DL"
 
 echo "== macOS arm64 (on $MINI)"
@@ -46,13 +51,20 @@ for f in "$DL"/names-macos-arm64 "$DL"/names-linux-x86_64 "$DL"/names-man.tar.gz
   cat "$f.sha256"
 done
 
+echo "== sign the release files"
+for f in "$DL"/names-macos-arm64 "$DL"/names-linux-x86_64 "$DL"/names-man.tar.gz; do
+  rm -f "$f.sig"
+  ssh-keygen -Y sign -q -f "$KEY" -n logos-names-release "$f"
+  [ -s "$f.sig" ] || { echo "signing $f failed" >&2; exit 1; }
+done
+
 echo "== GitHub release"
 TAG=cli-$(date -u +%Y%m%d-%H%M)
 gh release create "$TAG" --latest --title "names CLI $TAG" \
   --notes "names for macOS (Apple silicon) and Linux (x86_64), with man pages. Install: curl -fsSL https://logos-names.wrapit.workers.dev/install.sh | sh" \
-  "$DL"/names-macos-arm64 "$DL"/names-macos-arm64.sha256 \
-  "$DL"/names-linux-x86_64 "$DL"/names-linux-x86_64.sha256 \
-  "$DL"/names-man.tar.gz "$DL"/names-man.tar.gz.sha256
+  "$DL"/names-macos-arm64 "$DL"/names-macos-arm64.sha256 "$DL"/names-macos-arm64.sig \
+  "$DL"/names-linux-x86_64 "$DL"/names-linux-x86_64.sha256 "$DL"/names-linux-x86_64.sig \
+  "$DL"/names-man.tar.gz "$DL"/names-man.tar.gz.sha256 "$DL"/names-man.tar.gz.sig
 
 echo "== deploy gateway"
 cd gateway

@@ -5,7 +5,8 @@
 #
 # Puts the binary in ~/.local/bin (set NAMES_INSTALL_DIR to change that) and its
 # man pages in ~/.local/share/man/man1 (NAMES_MAN_DIR), each checked against the
-# published SHA-256, plus RISC Zero's prover r0vm from RISC Zero's GitHub release
+# release signing key's signature (ssh-keygen -Y verify) and the published
+# SHA-256, plus RISC Zero's prover r0vm from RISC Zero's GitHub release
 # (NAMES_SKIP_PROVER=1 skips it). Nothing else is installed or changed.
 set -eu
 
@@ -29,9 +30,41 @@ else sha() { shasum -a 256 "$1" | cut -d' ' -f1; }; fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
+# Releases are signed with the maintainer's key (scripts/release-signing-key.pub in
+# the repository). The public key is embedded here as an allowed_signers line, so a
+# swapped binary on the download host cannot also swap the key. Verification needs
+# ssh-keygen -Y (OpenSSH 8.0 or newer, on stock macOS and Linux). Without it the
+# installer warns and falls back to the SHA-256 check alone, which only catches
+# corruption; with it, a missing or bad signature stops the install.
+cat >"$tmp/allowed_signers" <<'EOF_KEY'
+release@logos-names namespaces="logos-names-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBTV+Zb8/xPUbSkfG5T54jmrSRyY/jBIJKAtAobvH3Q+
+EOF_KEY
+have_sig=0
+if command -v ssh-keygen >/dev/null 2>&1 &&
+  ! ssh-keygen -Y verify 2>&1 | grep -qiE 'illegal option|unknown option|invalid option'; then
+  have_sig=1
+else
+  echo "names: warning: ssh-keygen (OpenSSH 8.0 or newer) not found; checking only the SHA-256, not the release signature." >&2
+fi
+
+# verify <file> <release asset name>: fetch <asset>.sig and check <file> against it.
+verify() {
+  [ "$have_sig" = 1 ] || return 0
+  if ! curl -fsSL "$BASE/$2.sig" -o "$1.sig" 2>/dev/null; then
+    echo "names: no signature published for $2; not installing." >&2
+    return 1
+  fi
+  if ! ssh-keygen -Y verify -f "$tmp/allowed_signers" -I release@logos-names \
+    -n logos-names-release -s "$1.sig" <"$1" >/dev/null 2>&1; then
+    echo "names: bad signature on $2; not installing." >&2
+    return 1
+  fi
+}
+
 echo "Downloading names for $target..."
 curl -fsSL "$BASE/names-$target" -o "$tmp/names"
 curl -fsSL "$BASE/names-$target.sha256" -o "$tmp/names.sha256"
+verify "$tmp/names" "names-$target" || exit 1
 expected="$(cut -d' ' -f1 "$tmp/names.sha256")"
 actual="$(sha "$tmp/names")"
 if [ "$expected" != "$actual" ]; then
@@ -47,6 +80,7 @@ echo "Installed $DIR/names ($("$DIR/names" --version))"
 if curl -fsSL "$BASE/names-man.tar.gz" -o "$tmp/man.tar.gz" 2>/dev/null &&
   curl -fsSL "$BASE/names-man.tar.gz.sha256" -o "$tmp/man.sha256" 2>/dev/null &&
   [ "$(cut -d' ' -f1 "$tmp/man.sha256")" = "$(sha "$tmp/man.tar.gz")" ] &&
+  verify "$tmp/man.tar.gz" names-man.tar.gz &&
   mkdir -p "$MAN_DIR" && tar -xzf "$tmp/man.tar.gz" -C "$tmp" &&
   cp "$tmp"/man1/*.1 "$MAN_DIR"/; then
   echo "Installed man pages in $MAN_DIR (man names)"

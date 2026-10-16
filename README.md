@@ -53,7 +53,19 @@ the faucet and moves some to the private account; then `names register <name>`
 and `names pay <name>.lez <amount>` need no account arguments. `--rpc` and `--program` point it at another chain and registry. `names --help`
 and `man names` (installed alongside) cover every command. The guide is the gateway's
 front page (`gateway/public/index.html`). `scripts/publish-cli.sh` builds both
-binaries and the man pages, bundles the MCP server and deploys them with the gateway.
+binaries and the man pages, signs them, bundles the MCP server and deploys them with the gateway.
+
+The installer checks each download against a signature from the release key
+(`scripts/release-signing-key.pub`) using `ssh-keygen`, which is already on macOS and
+Linux, and stops if it does not match. To check a download by hand, with its `.sig`
+from the release page:
+
+```sh
+echo "release@logos-names namespaces=\"logos-names-release\" $(cut -d' ' -f1,2 scripts/release-signing-key.pub)" > allowed_signers
+ssh-keygen -Y verify -f allowed_signers -I release@logos-names -n logos-names-release -s names-macos-arm64.sig < names-macos-arm64
+```
+
+Key fingerprint: `SHA256:dAQbSDw6smVMxkwJdQ2104U3Xem+cDOldUmpW+wQzcE`.
 
 ## Status
 
