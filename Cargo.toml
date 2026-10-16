@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["core", "seal", "accountlog", "methods", "methods/guest", "cli"]
+members = ["core", "seal", "accountlog", "methods", "methods/guest", "cli", "tools/shortlist"]
 
 [workspace.package]
 version = "0.1.0"

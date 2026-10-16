@@ -1,0 +1,10 @@
+[package]
+name = "shortlist"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+names_core.workspace = true
+names_seal.workspace = true
+hex = "0.4.3"

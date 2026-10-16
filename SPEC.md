@@ -354,6 +354,39 @@ Rules:
 - A client sends one change per signing account at a time, and waits for it to
   show before sending the next.
 
+### 8.1 The short-name list (v5)
+
+The chain never sees a name, so the length rules of v5 (1-2 character names
+locked, 3-character names at a higher deposit) are enforced with a fixed list of
+the ids of all 49,284 names of 1 to 3 characters (36 + 1,296 + 47,952), derived
+with the normal name derivation. The program has the list's Merkle root built
+in; the list itself (about 1.6 MB, `shortlist.bin`) ships with the CLI and any
+other client, which builds a proof from it for each registration.
+
+- A leaf is `(id, tier)`: tier 1 for a 1-2 character name, 3 for a 3-character
+  name. Two sentinel leaves, `id = 00..00` and `id = ff..ff`, tier `0xff`, are
+  added and are never names. Leaves are sorted by id, strictly ascending.
+- `leaf = SHA-256("logos-names/v5/short-leaf" || id || tier)`,
+  `node = SHA-256("logos-names/v5/short-node" || left || right)`,
+  `empty = SHA-256("logos-names/v5/short-empty")`.
+- The leaf count (49,286) is padded with `empty` to the next power of two
+  (65,536), so every path has exactly 16 hashes. Level 0 is the leaf hashes;
+  each node hashes two neighbours (even index on the left). A path lists the
+  sibling at each level from the leaf up; bit `k` of the index says whether the
+  node at level `k` is a left (0) or right (1) child.
+- A registration carries a borsh `LengthProof`: `Membership { index: u32, tier:
+  u8, path }` (the id is a leaf with that tier; 521 bytes) or `NonMembership {
+  left: Leaf, left_path, right: Leaf, right_path, left_index: u32 }` (the two
+  adjacent leaves at `left_index` and `left_index + 1` with `left.id < id <
+  right.id`; 1,098 bytes), each plus one byte for the enum variant. The program
+  rejects a wrong path length, an out-of-range index, a membership claim whose
+  tier is not 1 or 3 (so a sentinel or a padding slot never passes), and
+  non-adjacent or non-surrounding leaves. A non-membership proof means a normal
+  name.
+- `shortlist generate <dir>` (tools/shortlist) writes `shortlist.bin` (33 bytes
+  per leaf, `id || tier`, sentinels included) and `root.hex`;
+  `shortlist verify <dir>` rebuilds the root and spot-checks proofs.
+
 ## 9. Events
 
 The registry emits LEZ program events. The selector is the first 8 bytes of

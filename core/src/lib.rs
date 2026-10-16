@@ -43,6 +43,8 @@
 //! `apply` sees no clock either: the time is the sender's claim, which `plan`
 //! binds to the block's timestamp and passes on inside the effects.
 
+pub mod shortlist;
+
 use borsh::{BorshDeserialize, BorshSerialize};
 use lee_core::{
     account::{AccountId, ProgramShardSelector},
