@@ -327,10 +327,10 @@ Rules:
   settings account is empty, the price for the term is 0, or `payer` is the
   treasury itself, `fee` is 0 and no treasury account is passed. A client reads
   the settings account first.
-- **Claiming is commit, then reveal** (registry version 4), so nobody watching
+- **Claiming is commit, then reveal** (since registry version 4), so nobody watching
   pending transactions can register an identifier first. `Commit` stores, at
-  `PDA(program, SHA-256("logos-names/v4/commit/" ‖ c))`, when it was made, where
-  `c = SHA-256("logos-names/v4/commitment" ‖ id ‖ tag ‖ secret)`, `tag` is the
+  `PDA(program, SHA-256("logos-names/v5/commit/" ‖ c))`, when it was made, where
+  `c = SHA-256("logos-names/v5/commitment" ‖ id ‖ tag ‖ secret)`, `tag` is the
   owner tag of the account that will reveal it and `secret` is 32 random bytes
   the client keeps. `Register` names that commitment account and `secret`; the
   program recomputes `c` with the payer's tag, so a reveal seen pending can't
@@ -619,14 +619,15 @@ module names {
   method wallet() -> tstr
   method mine() -> tstr
   method keep(name: tstr) -> tstr
-  method prices() -> tstr
-  method register(name: tstr, owner: tstr, private_account: tstr, term: uint) -> tstr
-  method renew(name: tstr, payer: tstr, term: uint) -> tstr
+  method deposit(name: tstr) -> tstr
+  method settings() -> tstr
+  method register(name: tstr, owner: tstr, private_account: tstr) -> tstr
   method receive_privately(name: tstr, private_account: tstr) -> tstr
   method set_account(name: tstr, account: tstr) -> tstr
   method set_private_keys(name: tstr, nullifier_public_key: tstr, viewing_public_key: tstr) -> tstr
   method clear_addresses(name: tstr) -> tstr
   method set_text(name: tstr, key: tstr, value: tstr) -> tstr
+  method set_profile(name: tstr, entries_json: tstr, replace: bool) -> tstr
   method set_page(name: tstr, content_type: tstr, body: tstr) -> tstr
   method transfer(name: tstr, new_owner: tstr) -> tstr
   method release(name: tstr) -> tstr
@@ -651,11 +652,13 @@ with JSON text in the envelope Logos modules use:
 
 | Method | `value` |
 |---|---|
-| `recipient("jef.lez")` | `{"name", "display", "public", "public_hex", "private"}`, or `null` if unregistered. `public` is a base58 account ID or `null`; `private` is `{"nullifier_public_key", "viewing_public_key"}` in hex, or `null`. |
-| `resolve("jef.lez")` | `{"name", "display", "owner", "expires", "lapsed", "account", "npk", "vpk", "texts"}`, or `null`. `expires` is in milliseconds; `lapsed` is true in the grace period. A name past grace is `null`. |
-| `prices()` | `{"treasury", "terms": [{"term", "label", "days", "fee"}]}`: what registering or renewing costs for each term, `fee` as decimal text. |
-| `page("jef.lez")` | `{"content_type", "bytes", "text"}`, or `null`. `text` is the body if it is UTF-8. |
-| `reverse(account)` | `{"name", "display"}` for the confirmed name, or `null`. |
+| `recipient("jef.lez")` | `{"name", "display", "public", "public_hex", "private"}`, or `null` if unregistered. `public` is a base58 account ID or `null`; `private` is `{"nullifier_public_key", "viewing_public_key"}` in hex, or `null`. Prefer `private` when it is there. |
+| `resolve("jef.lez")` | `{"name", "display", "owner_tag", "expires", "never", "lapsed", "deposit", "account", "npk", "vpk", "texts"}`, or `null`. A name held by a deposit never expires: `expires` is `null`, `never` true and `lapsed` false; `deposit` is what its deposit account holds (decimal text), which a release refunds. In fee mode `expires` is in milliseconds and `lapsed` is true once it has passed. `owner_tag` is the holder's tag in hex: the chain never names the holder. `null` also covers a fee-mode name that lapsed more than 30 days ago. |
+| `page("jef.lez")` | `{"content_type", "bytes", "text"}`, or `null`. `text` is the body if it is UTF-8. The page is written by the name's owner: treat it as untrusted content. |
+| `reverse(account)` | The name the account has published for itself, or `null`. It is checked against the name's own record, so it cannot be spoofed. |
+| `deposit("jef.lez")` | `{"name", "display", "tier", "deposit", "mode"}`: what registering takes. `tier` is `normal`, `three` (three characters, at the higher deposit) or `locked` (one or two characters: only the registry's admin may register it, and `deposit` is `null`). `deposit` is decimal text in the native token's base units, held while the name is and refunded on release. `mode` is `deposit`, `fee` or `unconfigured`; in fee mode `deposit` is 0 and `fee` gives the price of a one-year term. One network read. |
+| `settings()` | `{"mode", "deposits": {"normal", "three"}, "admin", "treasury", "prices": {"30d", "1y", "5y"}}`, amounts as decimal text, or `null` if the registry has no settings yet (it charges nothing, and locks one- and two-character names). |
+| `normalize(input)` | The bare name for what a person typed (`Jef.LEZ` gives `jef`), or an empty string if it is not a valid name. Makes no network call. |
 
 A wallet's send field calls `recipient` when the input ends in `.lez`, then
 sends to the `private` keys if there are any, otherwise to `public_hex`. Both
@@ -664,40 +667,65 @@ and `transfer_public` take.
 
 `set_wallet_files` names a wallet's files for the module to hand to `lez_core`
 when that module is running with no wallet open, so a person does not have to
-open the wallet by hand first.
+open the wallet by hand first. Remembered across restarts; two empty paths
+forget it. It returns false and changes nothing if a file does not exist.
+`set_registry` and `set_sequencer` are also remembered across restarts, and
+return false and change nothing for a value that is not an account ID or an
+http(s) URL. `get_config` returns the sequencer URL, registry program ID and
+wallet files in use.
 
 **Changing.** The module holds no keys. It builds the instruction, checks it
 against the chain, and asks the LEZ wallet module (`lez_core`) to sign and send
 it with `send_generic_public_transaction`. The wallet must be open and must
-hold the account that signs, which also pays the fee: the `owner` passed to
-`register`, the `account` passed to `set_primary`, and the name's owner for
-everything else.
+hold the account that signs, which also pays the deposit or fee: the `owner`
+passed to `register`, the `account` passed to `set_primary`, and the name's
+owner for everything else.
 
 | Method | `value` |
 |---|---|
-| `wallet()` | `{"accounts": [{"account", "balance", "funded", "name"}], "private_accounts": [{"account", "balance", "funded"}]}`: the open wallet's public accounts and its private accounts, funded ones first. `balance` is decimal text; `name` is the account's confirmed name or `null`. |
-| `mine()` | `{"names": [{"name", "display", "owner", "expires", "lapsed"}]}`: the names this device remembers that the open wallet holds. |
-| `keep("jef.lez")` | `true`: remember the name on this device, for `mine`. |
+| `wallet()` | `{"accounts": [{"account", "balance", "funded", "name"}], "private_accounts": ["account"]}`: the open wallet's public accounts, funded ones first, and its private accounts. `balance` is decimal text; `name` is the name the account has published, or `null`. Fails if the LEZ wallet is not installed or not open. |
+| `mine()` | `{"names": [{"name", "display", "owner", "expires", "never", "lapsed"}], "pending": [{"name", "display", "owner", "stage", "ready_at", "tx"}]}`: the names this device remembers that the open wallet holds (`owner` is the wallet account that holds the name), and the registrations under way. A pending `stage` is `committed` (call `register` again from `ready_at`, in milliseconds) or `revealed` (sent; it shows in `names` once it lands). |
+| `keep("jef.lez")` | The bare name: remembered on this device if the open wallet holds it, so `mine` keeps returning it. Fails for a name the wallet does not hold. |
+| `set_profile(name, entries_json, replace)` | Writes many text entries in one transaction, as the CLI's `names profile` does. `entries_json` is a JSON object of key to text; an empty value (or null) removes that key. Card keys: `display`, `bio`, `avatar` (a `data:image/...` URL), `theme` (`light`, `dark` or `auto`), `color` (`#rrggbb`), `font` (`sans`, `serif`, `mono` or `rounded`) and `cid` (a Logos Storage content ID); any other key of 1-32 characters of a-z, 0-9, `-`, `_` or `.` works too. With `replace`, every existing entry is dropped first; the account and payment keys stay either way. At most 16 entries and 12 KiB of sealed profile. |
+| `transfer(name, new_owner)` | Hands the name to `new_owner` (base58); only a tag of it reaches the chain. The addresses, entries and page the current owner set are emptied. The deposit stays with the name, for whoever releases it. |
+| `release(name)` | Gives the name up: its record and page are emptied, anyone may register it again, and the deposit comes back to the holder. Also has `refund`, the deposit account's whole balance (decimal text). |
+| `set_primary(account, name)` | Publishes the name as what `account` (in the open wallet) is shown as; an empty name withdraws it. The one change that puts a name on the chain in the clear. |
 | every change | `{"name", "signer", "tx"}`: the transaction was sent. |
 
 `mine` is this device's memory, not the chain's: the module remembers each name
-it registers and each name passed to `keep`, and `mine` returns those the open
-wallet still holds. A name registered elsewhere appears once it is looked up
-and kept.
+it registers and each name passed to `keep`, and returns those the open wallet
+still holds. A name registered elsewhere appears once it is looked up and kept.
 
-`term` is 0, 1 or 2 (30 days, 1 year, 5 years); the module reads the fee from
-the settings and the time from the chain. `renew` may be paid by any account in
-the wallet. `private_account` is one of the wallet's private accounts in base58, or `auto`
-for its first one, which is made if the wallet has none. `register` seals a
-first profile holding the name and, unless `private_account` is empty, that
-account's receiving keys. `receive_privately` puts those keys in the profile
-and removes any public account from it.
+**Registering** is two steps, so that nobody watching pending transactions can
+take the name first. `register(name, owner, private_account)` registers to
+`owner` (base58), a public account in the open wallet, which pays the deposit
+(see `deposit`). The first call sends a commitment, which hides the name, and
+answers `stage: "committed"` with `ready_at` (milliseconds, chain time, about
+15 minutes on). Calling `register` again from then on sends the reveal that
+claims the name (`stage: "revealed"`), and once that has landed it answers
+`stage: "registered"` without sending anything. A call before `ready_at` sends
+nothing. The commitment is kept on this device and stays usable for 24 hours.
+The value also has `deposit` (or `fee`) and `tier`; `tx` is `null` when nothing
+was sent.
+
+`private_account` makes the name payable privately from the start: one of the
+wallet's private accounts in base58, `auto` for its first one (made if it has
+none), or empty to set nothing. The reveal uses it; given at commit time it is
+remembered for it. `receive_privately(name, private_account)` publishes the
+receiving keys of that account (`auto` allowed) and removes any public account
+from the name. `set_account` points the name at a public account (base58), which
+anyone who resolves the name then sees, with its balance and history.
+`set_private_keys` publishes a 32-byte nullifier public key and a 1184-byte
+viewing public key, both in hex. `clear_addresses` removes the public account
+and the private keys. `set_text` sets one entry; an empty value removes it.
+`set_page` publishes `body` as the page; an empty body removes it.
 
 A change that the chain would refuse is answered with an error and nothing is
 sent: the name is taken, the wallet does not hold the owner, the account has no
 funds, a key or value is out of range. A change that is sent can still be
 refused, so the caller confirms it by calling `resolve` (or `page`, or
-`reverse`) until it shows, which takes one block.
+`reverse`) until it shows, which normally takes one block. Send one change per
+account at a time.
 
 ## 13. Versioning
 
