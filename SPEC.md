@@ -143,7 +143,7 @@ On the chain:
 struct NameRecord { version: u8, owner: [u8; 32], expires: u64, sealed: Vec<u8> }   // version 3; owner is the owner tag; sealed at most 12,288 bytes
 struct Page       { version: u8, sealed: Vec<u8> }                     // sealed at most 81,920 bytes
 struct PrimaryName { version: u8, name: String }                       // the reverse record, in the clear
-struct Settings   { version: u8, admin: AccountId, treasury: AccountId, prices: [u128; 3] }
+struct Settings   { version: u8, admin: AccountId, treasury: AccountId, prices: [u128; 3], mode: u8, deposits: [u128; 2] }   // mode 0 fee, 1 deposit; deposits: normal, three-character
 ```
 
 `expires` is a time in milliseconds since the Unix epoch, as LEZ block
@@ -290,14 +290,14 @@ byte). `id` is 32 raw bytes.
 
 | # | Instruction | Fields | Accounts, in order |
 |---|---|---|---|
-| 0 | `Register` | `id, sealed: Vec<u8>, term: u8, fee: u128, now: u64, secret: [u8; 32]` | record, page, settings, commitment, payer, then treasury if `fee` is not 0 |
+| 0 | `Register` | `id, sealed: Vec<u8>, term: u8, fee: u128, now: u64, secret: [u8; 32], deposit: bool, length: LengthProof` | record, page, settings, commitment, payer, then, if `fee` is not 0, the treasury (fee mode) or the name's deposit account (deposit mode) |
 | 1 | `Renew` | `id, term: u8, fee: u128, now: u64` | record, settings, payer, then treasury if `fee` is not 0 |
 | 2 | `SetRecord` | `id, sealed: Vec<u8>` | record, owner |
 | 3 | `SetPage` | `id, sealed: Vec<u8>` | record, page, owner |
 | 4 | `Transfer` | `id, new_owner: [u8; 32]` (the new holder's owner tag) | record, page, owner |
-| 5 | `Release` | `id` | record, page, owner |
+| 5 | `Release` | `id, refund: u128` | record, page, owner, then the name's deposit account if `refund` is not 0 (owner and deposit account with the native token's shard) |
 | 6 | `SetPrimary` | `name: String` | owner |
-| 7 | `Configure` | `admin: AccountId, treasury: AccountId, prices: [u128; 3]` | settings, signer (the program's own account the first time, then the admin) |
+| 7 | `Configure` | `admin: AccountId, treasury: AccountId, prices: [u128; 3], mode: u8, deposits: [u128; 2]` | settings, signer (the program's own account the first time, then the admin) |
 | 8 | `Commit` | `commitment: [u8; 32], now: u64` | commitment, signer |
 
 Rules:
@@ -402,6 +402,30 @@ other client, which builds a proof from it for each registration.
 - `shortlist generate <dir>` (tools/shortlist) writes `shortlist.bin` (33 bytes
   per leaf, `id || tier`, sentinels included) and `root.hex`;
   `shortlist verify <dir>` rebuilds the root and spot-checks proofs.
+
+### 8.2 Deposits (v5)
+
+**Why:** a deposit stops name squatting without charging anyone. A name costs nothing in
+the end, because its deposit comes back when it is released, but hoarding names ties up a
+deposit for every one of them, and the scarcest names, the short ones, tie up more. Nobody
+profits: the deposit always goes back to whoever holds the name.
+
+- In deposit mode (`Settings.mode = 1`), `Register` with `deposit = true` moves `fee`
+  from the payer into the name's deposit account, a PDA of the registry with the seed
+  `SHA-256("logos-names/v5/deposit/" ‖ id)` that only the registry can sign for.
+  `fee` must equal `deposits[0]` for a normal name and `deposits[1]` for a
+  three-character one (the tier the length proof shows, 8.1). The record's `expires` is
+  `u64::MAX`: the name never lapses and `Renew` is refused.
+- A registration paid by the admin owes no deposit; that is how the admin releases a
+  locked one- or two-character name (register it, then `Transfer` it) or places a name.
+- `Release` moves `refund` from the deposit account to the owner, by a native transfer
+  the registry signs with the deposit account's seed. A client passes the account's whole
+  balance. The owner may be a private account: the refund then arrives privately.
+- `Transfer` leaves the deposit where it is: whoever holds the name when it is released
+  gets it back.
+- Changing `deposits` affects new registrations only; each name keeps what it locked.
+- Fee mode (`mode = 0`) is the v4.1 rule set (terms, renewals, fees to the treasury) and
+  stays available. One- and two-character names are locked in both modes.
 
 ## 9. Events
 

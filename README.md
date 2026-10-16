@@ -72,7 +72,9 @@ Key fingerprint: `SHA256:dAQbSDw6smVMxkwJdQ2104U3Xem+cDOldUmpW+wQzcE`.
 
 The CLI uses the **public LEZ testnet** (testnet v0.3), registry
 `38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq` (registry v5: refundable deposits, locked one- and two-character names, Argon2id names; deployed 2026-10-16 from CI build `322dda10…c4ce`), with `jef.lez` and
-`logos.lez` held by a private account. There is no faucet: testnet users fund their
+`logos.lez` held by a private account. The deposits are there to stop name squatting:
+a name costs nothing in the end, since its deposit comes back on release, but hoarding
+names ties up a deposit for each one, and the scarce short names tie up more. There is no faucet: testnet users fund their
 own accounts. The Names test chain ([chain/](chain/README.md)) was the default while
 the public LEZ was halted (2026-10-07 to about 10-14); it still runs, with the
 older registry `CsiBzfERqtLz9dYV9dPWzFPMbaUcUagYeCmvvJVmCGcF`. Everything below also runs against a local LEZ v0.3.0

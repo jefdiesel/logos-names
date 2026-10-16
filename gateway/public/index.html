@@ -77,6 +77,9 @@ names balance              <span class="c"># what you have, public and private</
   for three-character names (testnet amounts). It stays locked for as long as you keep the name and
   comes back in full when you <code>names release</code> it; names don't expire. One- and
   two-character names are reserved.</p>
+  <p>Why a deposit: it stops name squatting. Holding a name costs nothing in the end, but tying up
+  tokens for every name makes hoarding thousands of them expensive, and short names, which are the
+  scarcest, tie up more. Nobody profits from it: the deposit goes back to whoever holds the name.</p>
   <p>Optional extras:</p>
 <pre><code>names set-text myname chat &lt;address&gt;      <span class="c"># text entries</span>
 names set-page myname index.html          <span class="c"># a page</span>

@@ -797,6 +797,7 @@ impl Client {
             println!(
                 "{name}{NAME_SUFFIX} takes a deposit of {fee}, held for as long as you keep the name and refunded when you release it"
             );
+            println!("(the deposit stops name squatting: holding many names ties up many deposits; nobody keeps it)");
         }
         let holder = owner_tag(&id, &owner);
 
