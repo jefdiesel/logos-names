@@ -74,7 +74,21 @@ fi
 
 mkdir -p "$DIR"
 install -m 755 "$tmp/names" "$DIR/names"
-echo "Installed $DIR/names ($("$DIR/names" --version))"
+# The LEZ wallet inside names links the PC/SC smart-card library (for Keycard). macOS
+# ships it; on Linux it is a package that minimal systems lack.
+if ! version="$("$DIR/names" --version 2>&1)"; then
+  case "$version" in
+  *libpcsclite*)
+    echo "Installed $DIR/names, but it needs the PC/SC library (libpcsclite.so.1) to start. Install it with:" >&2
+    echo "  Debian/Ubuntu: sudo apt install libpcsclite1" >&2
+    echo "  Fedora:        sudo dnf install pcsc-lite-libs" >&2
+    echo "  Arch:          sudo pacman -S pcsclite" >&2
+    ;;
+  *) echo "Installed $DIR/names, but it does not start: $version" >&2 ;;
+  esac
+else
+  echo "Installed $DIR/names ($version)"
+fi
 
 # The man pages are a bonus: if they can't be fetched, the install still stands.
 if curl -fsSL "$BASE/names-man.tar.gz" -o "$tmp/man.tar.gz" 2>/dev/null &&
@@ -102,11 +116,6 @@ if [ "${NAMES_SKIP_PROVER:-}" != 1 ] && ! { [ -x "$DIR/r0vm" ] && "$DIR/r0vm" --
   else
     echo "Could not install r0vm; lookups and public changes still work, private ones need it." >&2
   fi
-fi
-
-if [ "$target" = linux-x86_64 ] && ! ldconfig -p 2>/dev/null | grep -q libpcsclite.so.1; then
-  echo
-  echo "It needs the PC/SC library: sudo apt install libpcsclite1 (Debian/Ubuntu)"
 fi
 
 case ":$PATH:" in
