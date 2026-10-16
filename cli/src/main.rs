@@ -248,7 +248,8 @@ enum Command {
     },
     /// Set the name's profile in one transaction: any of the card entries, plus
     /// other entries with `--set key=value`, and `--clear key` to remove one.
-    /// Everything not mentioned stays as it is.
+    /// Everything not mentioned stays as it is, unless `--replace` makes this push
+    /// the whole profile.
     Profile {
         #[arg(value_parser = parse_name)]
         name: String,
@@ -280,6 +281,10 @@ enum Command {
         /// Remove an entry. Repeatable.
         #[arg(long)]
         clear: Vec<String>,
+        /// Make this the whole profile: entries not given here are dropped. The
+        /// name's payment keys and public account stay.
+        #[arg(long)]
+        replace: bool,
     },
     /// Set a text entry such as `chat`, `inbox` or `agent`; an empty value removes it.
     SetText {
@@ -1994,7 +1999,7 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Profile { name, display, bio, avatar, theme, color, font, cid, set, clear } => {
+        Command::Profile { name, display, bio, avatar, theme, color, font, cid, set, clear, replace } => {
             let mut changes: Vec<(String, String)> = Vec::new();
             for (key, value) in [("display", display), ("bio", bio), ("theme", theme), ("color", color), ("font", font), ("cid", cid)] {
                 if let Some(value) = value {
@@ -2005,11 +2010,14 @@ async fn main() -> Result<()> {
                 changes.push(("avatar".to_owned(), image_data_url(&path)?));
             }
             changes.extend(set);
-            if changes.is_empty() && clear.is_empty() {
-                bail!("nothing to change: give at least one entry, --set or --clear");
+            if changes.is_empty() && clear.is_empty() && !replace {
+                bail!("nothing to change: give at least one entry, --set, --clear or --replace");
             }
             client
                 .edit(&name, |profile| {
+                    if replace {
+                        profile.texts.clear();
+                    }
                     for key in &clear {
                         profile.texts.retain(|text| &text.key != key);
                     }
