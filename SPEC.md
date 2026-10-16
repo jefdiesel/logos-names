@@ -25,9 +25,11 @@ What this does not hide:
   name usable. The derivation is slow on purpose, about 100,000 times the cost
   of one hash. But its salt is the same for every name and every registry, so
   that cost is paid once per candidate name, not per registry: a dictionary of
-  likely names (a few million short or common ones is hours on one GPU, since
-  PBKDF2 is not memory-hard) is computed once and then checks every registry,
-  now and later, for free. Treat any name someone might guess as public.
+  likely names is computed once and then checks every registry, now and later,
+  for free. PBKDF2 is not memory-hard, so this is cheap: one current GPU does
+  roughly 90,000 derivations a second (hashcat's PBKDF2-HMAC-SHA256 benchmark on
+  an RTX 4090, scaled to 100,000 iterations), so five million common names take
+  about a minute. Treat any name someone might guess as public.
 - **Who holds a name is not stored.** A record keeps an owner tag,
   `SHA-256("logos-names/v3/owner" ‖ id ‖ account)`, in place of its holder: it
   names no account, and one account's tags for two names are unrelated. No
