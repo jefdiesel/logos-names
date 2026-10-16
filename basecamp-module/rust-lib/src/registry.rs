@@ -1,51 +1,80 @@
-//! Reads a Logos Names registry, following SPEC.md. `changes.rs` builds on it
-//! to change one.
+//! Reads a Logos Names registry (v5), following SPEC.md. `changes.rs` builds on
+//! it to change one.
 //!
 //! This is a second implementation of what `core/` and `seal/` define, kept
 //! separate because a module build sees only its own directory and cannot take
-//! the LEZ crates as dependencies. The shared test vectors keep them in step.
+//! the LEZ crates as dependencies. The shared test vectors keep them in step:
+//! every layout and derivation here is checked against bytes `core` and `seal`
+//! produce.
 
 use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
     Aes256Gcm, Nonce,
 };
+use argon2::{Algorithm, Argon2, Params, Version};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 pub const NAME_SUFFIX: &str = ".lez";
 const MAX_NAME_LEN: usize = 32;
 const PDA_PREFIX: &[u8] = b"/LEE/v0.2/AccountId/PDA/";
-const DERIVATION_SALT: &[u8] = b"logos-names/v2";
-/// The most a Cloudflare Worker's Web Crypto allows, so a gateway can keep up.
-const DERIVATION_ROUNDS: u32 = 100_000;
-const ID_DOMAIN: &[u8] = b"logos-names/v2/id";
-const KEY_DOMAIN: &[u8] = b"logos-names/v2/key";
-const NAME_SEED_DOMAIN: &[u8] = b"logos-names/v2/name/";
-const PAGE_SEED_DOMAIN: &[u8] = b"logos-names/v2/page/";
-const SETTINGS_SEED: &[u8] = b"logos-names/v2/config";
-/// After a name expires, only its holder can renew it for this long. Past
-/// that it reads as unregistered and anyone may register it.
+/// One fixed salt for every network, on purpose: a name keeps its identifier
+/// and key from testnet to mainnet.
+const DERIVATION_SALT: &[u8] = b"logos-names/v5";
+/// Argon2id memory in KiB (64 MiB), passes and lanes.
+const DERIVATION_MEMORY_KIB: u32 = 65_536;
+const DERIVATION_PASSES: u32 = 3;
+const DERIVATION_LANES: u32 = 1;
+const ID_DOMAIN: &[u8] = b"logos-names/v5/id";
+const KEY_DOMAIN: &[u8] = b"logos-names/v5/key";
+const NAME_SEED_DOMAIN: &[u8] = b"logos-names/v5/name/";
+const PAGE_SEED_DOMAIN: &[u8] = b"logos-names/v5/page/";
+const SETTINGS_SEED: &[u8] = b"logos-names/v5/config";
+const OWNER_TAG_DOMAIN: &[u8] = b"logos-names/v5/owner";
+const COMMITMENT_DOMAIN: &[u8] = b"logos-names/v5/commitment";
+const COMMITMENT_SEED_DOMAIN: &[u8] = b"logos-names/v5/commit/";
+const DEPOSIT_SEED_DOMAIN: &[u8] = b"logos-names/v5/deposit/";
+/// After a fee-mode name expires, only its holder can renew it for this long.
+/// Past that it reads as unregistered and anyone may register it.
 pub const GRACE_MS: u64 = 30 * 24 * 60 * 60 * 1000;
-/// How long each term holds a name, in milliseconds, with its label.
-pub const TERMS: [(u64, &str, u64); 3] = [
-    (30 * 24 * 60 * 60 * 1000, "30 days", 30),
-    (365 * 24 * 60 * 60 * 1000, "1 year", 365),
-    (5 * 365 * 24 * 60 * 60 * 1000, "5 years", 5 * 365),
-];
+/// How long each fee-mode term holds a name, in milliseconds, by term index.
+#[allow(dead_code)] // Fee mode is read through `Settings::deposit_mode`; kept for the layout's sake.
+pub const TERM_LENGTHS_MS: [u64; 3] = [30 * 24 * 60 * 60 * 1000, 365 * 24 * 60 * 60 * 1000, 5 * 365 * 24 * 60 * 60 * 1000];
+/// The registry charges a fee per term, paid to its treasury; names lapse.
+#[allow(dead_code)] // Fee mode is read through `Settings::deposit_mode`; kept for the layout's sake.
+pub const MODE_FEE: u8 = 0;
+/// The registry takes a refundable deposit into the name's deposit account;
+/// names never lapse.
+pub const MODE_DEPOSIT: u8 = 1;
+/// The expiry of a name held by a deposit: it never lapses.
+pub const NEVER: u64 = u64::MAX;
+/// A commit or reveal is valid only in a block whose timestamp is in
+/// `[now, now + TIME_WINDOW_MS)`.
+pub const TIME_WINDOW_MS: u64 = 10 * 60 * 1000;
+/// How long a commitment must wait before its reveal.
+pub const MIN_COMMIT_AGE_MS: u64 = 15 * 60 * 1000;
+/// How long a commitment can still be revealed.
+pub const MAX_COMMIT_AGE_MS: u64 = 24 * 60 * 60 * 1000;
 /// The account the chain keeps its clock on, and the program whose shard on
 /// it holds the time: `{block_id: u64, timestamp: u64}`, in milliseconds.
 const CLOCK_ACCOUNT: &AccountId = b"/LEZ/ClockProgramAccount/0000001";
 const BUILTIN_PROGRAM_PREFIX: &[u8] = b"/LEE-BuiltinProgram/v1/AccountId";
-const RECORD_SEAL: &[u8] = b"logos-names/v2/record";
-const PAGE_SEAL: &[u8] = b"logos-names/v2/page";
+const RECORD_SEAL: &[u8] = b"logos-names/v5/record";
+const PAGE_SEAL: &[u8] = b"logos-names/v5/page";
 const NONCE_LEN: usize = 12;
+const TAG_LEN: usize = 16;
 /// A sealed profile's plaintext is padded to a multiple of this, so its
 /// length says little about what is in it.
 const PROFILE_PADDING: usize = 256;
+/// The most sealed bytes a record holds; the program refuses more.
+pub const MAX_SEALED_RECORD_LEN: usize = 12 * 1024;
 /// ML-KEM-768 encapsulation key, as used for LEZ private accounts.
 pub const VPK_LEN: usize = 1184;
 
 pub type AccountId = [u8; 32];
+pub type NameId = [u8; 32];
+/// What a record keeps in place of its holder's account: [`owner_tag`].
+pub type OwnerTag = [u8; 32];
 
 /// Turns what a person typed, such as `Jef.lez`, into the bare name.
 pub fn normalize_name(input: &str) -> String {
@@ -79,7 +108,12 @@ pub fn parse_name(input: &str) -> Result<String, String> {
 }
 
 pub fn parse_account(text: &str) -> Result<AccountId, String> {
-    bs58::decode(text.trim())
+    let text = text.trim();
+    let bare = text
+        .strip_prefix("Public/")
+        .or_else(|| text.strip_prefix("Private/"))
+        .unwrap_or(text);
+    bs58::decode(bare)
         .into_vec()
         .ok()
         .and_then(|bytes| AccountId::try_from(bytes).ok())
@@ -102,41 +136,79 @@ fn sha256(parts: &[&[u8]]) -> [u8; 32] {
 /// that opens and seals what it resolves to. The key never leaves the client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Derived {
-    pub id: [u8; 32],
+    pub id: NameId,
     pub key: [u8; 32],
 }
 
-/// Derives a name's identifier and key. Slow on purpose, so that scanning for
-/// names is expensive; callers that ask repeatedly should keep the result.
+/// Derives a name's identifier and key (SPEC.md section 3):
+/// `master = Argon2id(name, "logos-names/v5", 64 MiB, 3 passes, 1 lane)`, then
+/// `id = SHA-256("logos-names/v5/id" ‖ master)` and
+/// `key = SHA-256("logos-names/v5/key" ‖ master)`. Slow and memory-hard on
+/// purpose, so that scanning for names is expensive; callers that ask
+/// repeatedly should keep the result.
 pub fn derive(name: &str) -> Derived {
-    let mut master = [0_u8; 32];
-    pbkdf2::pbkdf2_hmac::<Sha256>(name.as_bytes(), DERIVATION_SALT, DERIVATION_ROUNDS, &mut master);
+    let master = master(name);
     Derived {
         id: sha256(&[ID_DOMAIN, &master]),
         key: sha256(&[KEY_DOMAIN, &master]),
     }
 }
 
-fn derived_address(program: &AccountId, domain: &[u8], id: &[u8; 32]) -> AccountId {
-    let mut prefix = [0_u8; 32];
-    prefix[..PDA_PREFIX.len()].copy_from_slice(PDA_PREFIX);
-    let seed = sha256(&[domain, id]);
-    sha256(&[&prefix, program, &seed])
+fn master(name: &str) -> [u8; 32] {
+    let params = Params::new(DERIVATION_MEMORY_KIB, DERIVATION_PASSES, DERIVATION_LANES, Some(32))
+        .expect("the Argon2 parameters are valid");
+    let mut out = [0_u8; 32];
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+        .hash_password_into(name.as_bytes(), DERIVATION_SALT, &mut out)
+        .expect("Argon2 accepts these inputs");
+    out
 }
 
-pub fn record_address(program: &AccountId, id: &[u8; 32]) -> AccountId {
+/// LEZ's public program-derived address for `seed` under `program`.
+fn pda(program: &AccountId, seed: &[u8; 32]) -> AccountId {
+    let mut prefix = [0_u8; 32];
+    prefix[..PDA_PREFIX.len()].copy_from_slice(PDA_PREFIX);
+    sha256(&[&prefix, program, seed])
+}
+
+fn derived_address(program: &AccountId, domain: &[u8], id: &[u8; 32]) -> AccountId {
+    pda(program, &sha256(&[domain, id]))
+}
+
+pub fn record_address(program: &AccountId, id: &NameId) -> AccountId {
     derived_address(program, NAME_SEED_DOMAIN, id)
 }
 
-pub fn page_address(program: &AccountId, id: &[u8; 32]) -> AccountId {
+pub fn page_address(program: &AccountId, id: &NameId) -> AccountId {
     derived_address(program, PAGE_SEED_DOMAIN, id)
 }
 
-/// The account holding the registry's settings: who is paid, and how much.
+/// The account holding a name's deposit, as its native balance. Only the
+/// registry can move it, on release.
+pub fn deposit_address(program: &AccountId, id: &NameId) -> AccountId {
+    derived_address(program, DEPOSIT_SEED_DOMAIN, id)
+}
+
+/// The account holding the commitment `commitment`.
+pub fn commitment_address(program: &AccountId, commitment: &[u8; 32]) -> AccountId {
+    derived_address(program, COMMITMENT_SEED_DOMAIN, commitment)
+}
+
+/// The account holding the registry's settings.
 pub fn settings_address(program: &AccountId) -> AccountId {
-    let mut prefix = [0_u8; 32];
-    prefix[..PDA_PREFIX.len()].copy_from_slice(PDA_PREFIX);
-    sha256(&[&prefix, program, &sha256(&[SETTINGS_SEED])])
+    pda(program, &sha256(&[SETTINGS_SEED]))
+}
+
+/// The tag that stands for `account` as the holder of the name `id`. A record
+/// stores this, never the account, so one account's names stay unlinked.
+pub fn owner_tag(id: &NameId, account: &AccountId) -> OwnerTag {
+    sha256(&[OWNER_TAG_DOMAIN, id, account])
+}
+
+/// What a claim commits to: the name's identifier, the tag of the account
+/// that will hold it, and a secret the committer picks at random.
+pub fn commitment(id: &NameId, holder: &OwnerTag, secret: &[u8; 32]) -> [u8; 32] {
+    sha256(&[COMMITMENT_DOMAIN, id, holder, secret])
 }
 
 /// The ID of the chain's built-in clock program.
@@ -151,35 +223,48 @@ pub fn local_now() -> u64 {
         .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
 }
 
-/// What registering and renewing cost, and who is paid.
+/// The registry's settings: who administers it, and how names are paid for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     pub admin: AccountId,
+    /// Where fees go in fee mode. It pays nothing itself.
     pub treasury: AccountId,
+    /// The fee for each term, in fee mode.
     pub prices: [u128; 3],
+    /// [`MODE_FEE`] or [`MODE_DEPOSIT`].
+    pub mode: u8,
+    /// The deposit for a normal name and for a three-character name, in deposit mode.
+    pub deposits: [u128; 2],
 }
 
 impl Settings {
-    fn decode(bytes: &[u8]) -> Result<Self, String> {
+    /// Decodes `{version, admin, treasury, prices: [u128; 3], mode: u8, deposits: [u128; 2]}`.
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         let mut reader = Reader { bytes };
         let _version = reader.u8()?;
         let admin = reader.account()?;
         let treasury = reader.account()?;
         let mut prices = [0_u128; 3];
         for price in &mut prices {
-            *price = u128::from_le_bytes(reader.take(16)?.try_into().expect("16 bytes"));
+            *price = reader.u128()?;
         }
-        Ok(Self { admin, treasury, prices })
+        let mode = reader.u8()?;
+        let mut deposits = [0_u128; 2];
+        for deposit in &mut deposits {
+            *deposit = reader.u128()?;
+        }
+        Ok(Self { admin, treasury, prices, mode, deposits })
     }
 
-    /// What `payer` owes for `term`, and whom it is paid to. Nothing is owed
-    /// by the treasury itself, which would only be paying itself.
-    pub fn fee(settings: Option<&Self>, payer: &AccountId, term: usize) -> (u128, Option<AccountId>) {
+    pub fn deposit_mode(&self) -> bool {
+        self.mode == MODE_DEPOSIT
+    }
+
+    pub fn mode_text(settings: Option<&Self>) -> &'static str {
         match settings {
-            Some(settings) if settings.treasury != *payer && settings.prices[term] > 0 => {
-                (settings.prices[term], Some(settings.treasury))
-            }
-            _ => (0, None),
+            Some(settings) if settings.deposit_mode() => "deposit",
+            Some(_) => "fee",
+            None => "unconfigured",
         }
     }
 }
@@ -204,13 +289,15 @@ impl<'bytes> Reader<'bytes> {
     }
 
     fn u64(&mut self) -> Result<u64, String> {
-        let bytes: [u8; 8] = self.take(8)?.try_into().expect("eight bytes");
-        Ok(u64::from_le_bytes(bytes))
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().expect("eight bytes")))
+    }
+
+    fn u128(&mut self) -> Result<u128, String> {
+        Ok(u128::from_le_bytes(self.take(16)?.try_into().expect("16 bytes")))
     }
 
     fn u32(&mut self) -> Result<usize, String> {
-        let bytes: [u8; 4] = self.take(4)?.try_into().expect("four bytes");
-        Ok(u32::from_le_bytes(bytes) as usize)
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().expect("four bytes")) as usize)
     }
 
     fn account(&mut self) -> Result<AccountId, String> {
@@ -236,8 +323,28 @@ impl<'bytes> Reader<'bytes> {
 pub struct Writer(pub Vec<u8>);
 
 impl Writer {
+    pub fn u8(&mut self, value: u8) {
+        self.0.push(value);
+    }
+
+    pub fn u32(&mut self, value: u32) {
+        self.0.extend(value.to_le_bytes());
+    }
+
+    pub fn u64(&mut self, value: u64) {
+        self.0.extend(value.to_le_bytes());
+    }
+
+    pub fn u128(&mut self, value: u128) {
+        self.0.extend(value.to_le_bytes());
+    }
+
+    pub fn bool(&mut self, value: bool) {
+        self.0.push(u8::from(value));
+    }
+
     pub fn bytes(&mut self, bytes: &[u8]) {
-        self.0.extend((bytes.len() as u32).to_le_bytes());
+        self.u32(bytes.len() as u32);
         self.0.extend(bytes);
     }
 
@@ -294,7 +401,7 @@ impl Profile {
         writer.optional(self.account.as_ref());
         writer.optional(self.npk.as_ref());
         writer.bytes(&self.vpk);
-        writer.0.extend((self.texts.len() as u32).to_le_bytes());
+        writer.u32(self.texts.len() as u32);
         for (key, value) in &self.texts {
             writer.string(key);
             writer.string(value);
@@ -302,6 +409,11 @@ impl Profile {
         let padded = writer.0.len().div_ceil(PROFILE_PADDING) * PROFILE_PADDING;
         writer.0.resize(padded, 0);
         writer.0
+    }
+
+    /// How many bytes the sealed profile takes in its record.
+    pub fn sealed_len(&self) -> usize {
+        NONCE_LEN + self.encode().len() + TAG_LEN
     }
 
     /// Seals the profile under the name's key.
@@ -342,10 +454,14 @@ pub fn open_page(key: &[u8; 32], sealed: &[u8]) -> Option<Value> {
     }))
 }
 
+pub fn fresh_bytes<const N: usize>() -> Result<[u8; N], String> {
+    let mut bytes = [0_u8; N];
+    getrandom::getrandom(&mut bytes).map_err(|_| "this machine gave no random bytes".to_owned())?;
+    Ok(bytes)
+}
+
 fn fresh_nonce() -> Result<[u8; NONCE_LEN], String> {
-    let mut nonce = [0_u8; NONCE_LEN];
-    getrandom::getrandom(&mut nonce).map_err(|_| "this machine gave no random bytes".to_owned())?;
-    Ok(nonce)
+    fresh_bytes()
 }
 
 /// `nonce ‖ AES-256-GCM(key, nonce, plaintext, associated data)`.
@@ -358,7 +474,7 @@ fn seal(key: &[u8; 32], plaintext: &[u8], associated: &[u8], nonce: [u8; NONCE_L
 }
 
 fn open(key: &[u8; 32], sealed: &[u8], associated: &[u8]) -> Option<Vec<u8>> {
-    if sealed.len() <= NONCE_LEN {
+    if sealed.len() < NONCE_LEN + TAG_LEN {
         return None;
     }
     let (nonce, ciphertext) = sealed.split_at(NONCE_LEN);
@@ -368,11 +484,13 @@ fn open(key: &[u8; 32], sealed: &[u8], associated: &[u8]) -> Option<Vec<u8>> {
         .ok()
 }
 
-/// A registered name: who holds it, until when, and its profile opened.
+/// A registered name: the tag of who holds it, until when, and its profile opened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
-    pub owner: AccountId,
-    /// When the name lapses, in milliseconds since the Unix epoch.
+    /// The holder's [`owner_tag`] for this name; the chain stores no account.
+    pub owner: OwnerTag,
+    /// When the name lapses, in milliseconds since the Unix epoch, or
+    /// [`NEVER`] for a name held by a deposit.
     pub expires: u64,
     pub profile: Profile,
 }
@@ -388,14 +506,35 @@ impl Resolved {
         Ok(Self { owner, expires, profile: Profile::open(key, sealed, name) })
     }
 
-    /// Whether the name has expired and is in its grace period.
+    /// Whether the name is held by a deposit, and so never lapses.
+    pub fn never_expires(&self) -> bool {
+        self.expires == NEVER
+    }
+
+    /// Whether `account` holds the name `id` this record is for.
+    pub fn is_held_by(&self, id: &NameId, account: &AccountId) -> bool {
+        self.owner == owner_tag(id, account)
+    }
+
+    /// Whether the name has expired and is in its grace period. A name held by
+    /// a deposit never is.
     pub fn lapsed(&self, now: u64) -> bool {
-        self.expires <= now
+        !self.never_expires() && self.expires <= now
     }
 
     /// Whether the name is past its grace period, and so counts as unregistered.
+    /// A name held by a deposit never is.
     pub fn gone(&self, now: u64) -> bool {
-        now >= self.expires.saturating_add(GRACE_MS)
+        !self.never_expires() && now >= self.expires.saturating_add(GRACE_MS)
+    }
+
+    /// The expiry as JSON: null for a name that never expires.
+    pub fn expires_json(&self) -> Value {
+        if self.never_expires() {
+            Value::Null
+        } else {
+            Value::from(self.expires)
+        }
     }
 
     /// The name in the JSON shape SPEC.md gives.
@@ -409,8 +548,9 @@ impl Resolved {
         json!({
             "name": profile.name,
             "display": format!("{}{NAME_SUFFIX}", profile.name),
-            "owner": account_text(&self.owner),
-            "expires": self.expires,
+            "owner_tag": hex(&self.owner),
+            "expires": self.expires_json(),
+            "never": self.never_expires(),
             "lapsed": self.lapsed(local_now()),
             "account": profile.account.as_ref().map(account_text),
             "npk": profile.npk.as_ref().map(|npk| hex(npk)),
@@ -469,6 +609,14 @@ fn shard_bytes(shards: &Map<String, Value>, program: &AccountId) -> Result<Vec<u
     }
 }
 
+/// An account's native balance, from its shards; 0 when it has none.
+fn native_balance(shards: &Map<String, Value>) -> Result<u128, String> {
+    Ok(match <[u8; 16]>::try_from(shard_bytes(shards, &SYSTEM_PROGRAM)?) {
+        Ok(bytes) => u128::from_le_bytes(bytes),
+        Err(_) => 0,
+    })
+}
+
 /// Reads hex, with or without a `0x` prefix.
 pub fn unhex(text: &str) -> Result<Vec<u8>, String> {
     let text = text.trim();
@@ -517,15 +665,22 @@ impl Registry {
         shard_bytes(&self.shards(account)?, &self.program)
     }
 
+    /// The native balance of `account`.
+    pub fn balance(&self, account: &AccountId) -> Result<u128, String> {
+        native_balance(&self.shards(account)?)
+    }
+
+    /// What the name `id`'s deposit account holds: the deposit a release refunds.
+    pub fn deposit(&self, id: &NameId) -> Result<u128, String> {
+        self.balance(&deposit_address(&self.program, id))
+    }
+
     /// What a wallet shows for one of its accounts: its balance, and the name
     /// it is shown as if it has a confirmed one. The balance is text because it
     /// is a 128-bit number.
     pub fn account_summary(&self, account: &AccountId) -> Result<Value, String> {
         let shards = self.shards(account)?;
-        let balance = match <[u8; 16]>::try_from(shard_bytes(&shards, &SYSTEM_PROGRAM)?) {
-            Ok(bytes) => u128::from_le_bytes(bytes),
-            Err(_) => 0,
-        };
+        let balance = native_balance(&shards)?;
         let claimed = shard_bytes(&shards, &self.program)?;
         let name = if claimed.is_empty() { None } else { self.confirmed(account, &claimed)? };
         Ok(json!({
@@ -537,7 +692,8 @@ impl Registry {
     }
 
     /// Resolves `name`, whose identifier and key the caller has derived. A
-    /// name past its grace period is not registered, whatever its record holds.
+    /// fee-mode name past its grace period is not registered, whatever its
+    /// record holds; a name held by a deposit is registered until released.
     pub fn resolve(&self, name: &str, derived: &Derived) -> Result<Option<Resolved>, String> {
         Ok(self.record(name, derived)?.filter(|resolved| !resolved.gone(local_now())))
     }
@@ -549,6 +705,19 @@ impl Registry {
             return Ok(None);
         }
         Resolved::decode(&bytes, &derived.key, name).map(Some)
+    }
+
+    /// When the commitment `promised` was made, as its account records it
+    /// (`{version, made}`), or `None` if there is none: it never landed, or a
+    /// reveal used it up.
+    pub fn commitment_made(&self, promised: &[u8; 32]) -> Result<Option<u64>, String> {
+        let bytes = self.shard(&commitment_address(&self.program, promised))?;
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        let mut reader = Reader { bytes: &bytes };
+        let _version = reader.u8()?;
+        reader.u64().map(Some)
     }
 
     /// The registry's settings, or `None` while it has none and charges nothing.
@@ -598,14 +767,16 @@ impl Registry {
         self.confirmed(account, &bytes)
     }
 
-    /// The name claimed in `reverse_record`, if its own record agrees.
+    /// The name claimed in `reverse_record`, if its own record agrees: the
+    /// account holds the name (its owner tag matches) or the name publishes it.
     fn confirmed(&self, account: &AccountId, reverse_record: &[u8]) -> Result<Option<String>, String> {
         let claimed = decode_primary(reverse_record)?;
         if !is_valid_name(&claimed) {
             return Ok(None);
         }
-        let confirmed = self.resolve(&claimed, &derive(&claimed))?.is_some_and(|resolved| {
-            resolved.owner == *account || resolved.profile.account == Some(*account)
+        let derived = derive(&claimed);
+        let confirmed = self.resolve(&claimed, &derived)?.is_some_and(|resolved| {
+            resolved.is_held_by(&derived.id, account) || resolved.profile.account == Some(*account)
         });
         Ok(confirmed.then_some(claimed))
     }
@@ -629,39 +800,74 @@ mod tests {
     }
 
     const NONCE: [u8; NONCE_LEN] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
-    const SEALED_PROFILE: &str = "000102030405060708090a0b67bf760994a19946abc799235b95e48bfb804c3ca05471c9261f5099\
-e1b00570e6139ab5bbb5fac423627e0fd18c5299475a5c4ed914f1e506f23b66d4d2377de959bff4\
-e8d4ab02b63865f9a2453fef24302c211eb70eadebf5b38038d080e2b6f3b1fa17a777b940f17eb9\
-4a83f4ce719552c92108600800f3d020a7d8fee73e2792c907db62125ba636607ed94ea46b73f046\
-981a751be920449222629d2561194416c993b4bfdeeec20026656f11b64f1c2ac368d64e57d07054\
-ac0fcdac4a6e83b60ac363901963488c93c7762d19b34b6991b9abdbc5d293fca06b69cab31e7eaa\
-769142940f4813c73713dbd34b24386fb53937e2c9915323f35d39bf50e63d4289cb48a7c7aff0e5\
-404987b0";
-    const SEALED_PAGE: &str =
-        "000102030405060708090a0b6ebf76098aa1873386b5f74030f9e489f9822657c6ba930c224eb1f264767f7cf7b5a511";
+    /// SPEC.md section 10, also asserted by `seal`'s tests.
+    const SEALED_PROFILE: &str = "\
+        000102030405060708090a0b7a39f7ff67b20894263a28d040c0f2711c04ba247fcf5cb107e27b59\
+        05b8a0664b28cd25512addcb74af3efa5a8d6eb3bbb8e89fb8dba0aa2739252efed2be01ab019998\
+        a07d416c788d8c9b699891e85bedd1118da7089377220bdb0ab8ae29661bf20e006c5fbffb222237\
+        2ea0a2589ed49023186a77e9afee1af338f4a2377afa40da018789ca715318d981b556f71f9640eb\
+        d056d8dcbe2b71845b45a578721ccc2c889df37b926c7da5a5202dbf3d50dc04883673134ce0772f\
+        bcd7fbc8f31f455bb39b3d867d5e6772c86e59f42a9d04ffaacaa6119b1156d238665c0cf50028a9\
+        cbf8b3189fc45a15a724c5775a835a8ccdff6a573d8e046d78e847b7da5668bc8529aedb3bdc70a9\
+        9db9b9b4";
+    const SEALED_PAGE: &str = "\
+        000102030405060708090a0b7339f7ff79b216e10b4846b32bacf2731e06d04f8cf43af535da58e9\
+        92f033cb16a471d0";
 
-    /// The vectors in SPEC.md, shared with the Rust client and the JavaScript resolver.
+    /// SPEC.md section 10's derivations, shared with `seal` and the JavaScript resolver.
     #[test]
     fn a_name_derives_the_identifier_and_key_the_specification_gives() {
-        let derived = derive("jef");
-        assert_eq!(hex(&derived.id), "86d7e719e7acabe344ef8a69782b72ed0c21087e73e400e7056ab0daf7e6c618");
-        assert_eq!(hex(&derived.key), "d19aa10c57273a3ff4f569cc3a9c35819b2a9bcac7ba8a48deb131269cb6e2e0");
+        for (name, master_hex, id, key) in [
+            (
+                "jef",
+                "60e3df20e1c473ab71c666b913af96619fa14b49593e92598bd7709582e5a74e",
+                "7041d9e447f06bdfe327d870402b1524cfe38bd03445b8fc3d0e87bc978eb763",
+                "aad91a1a3dd0fb56a213212fbea58fe25d9139db42fc59ce2116c3cfa3440088",
+            ),
+            (
+                "a-b-c",
+                "c098ecc6c6af9cfcf449666ce012e3e930e076d870cb135ed8f1f058e7728362",
+                "707decf4fde6d9fb61d255c23b34e042c846a0f4b0834151dcb2c1ef4160e849",
+                "e3666a8572f7cabe94f6717491bff34c70eeca216436a142185bd8a86b6ccf31",
+            ),
+        ] {
+            assert_eq!(hex(&master(name)), master_hex, "{name}");
+            let derived = derive(name);
+            assert_eq!(hex(&derived.id), id, "{name}");
+            assert_eq!(hex(&derived.key), key, "{name}");
+        }
+        let jef = hex(&derive("jef").id);
+        assert!(jef.starts_with("7041d9e4") && jef.ends_with("b763"));
+    }
+
+    /// Addresses as `core` computes them (SPEC.md section 10, and the rest from
+    /// `names_core` itself).
+    #[test]
+    fn addresses_match_core() {
+        let jef = derive("jef").id;
         assert_eq!(account_text(&PROGRAM), "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx");
-        assert_eq!(
-            account_text(&record_address(&PROGRAM, &derived.id)),
-            "6gsCMau9ajq4FcxDCJmqqtUWVnuCiJHtXoYbCzCZPGJJ"
-        );
-        assert_eq!(
-            account_text(&page_address(&PROGRAM, &derived.id)),
-            "338iYF6WmqnFryDjLWyKTYUhAgpT6o7C8qhHAd5pSf32"
-        );
+        assert_eq!(account_text(&record_address(&PROGRAM, &jef)), "5b5xVGob2GYvrq21MSuxm1MfieucDEy9yxhDwdXndbpD");
+        assert_eq!(account_text(&page_address(&PROGRAM, &jef)), "HEES9BpNxrAtwxFkyEQTEnjUcSr7usgbefeqiYJsG9mY");
+        assert_eq!(account_text(&deposit_address(&PROGRAM, &jef)), "46Qu3gAftVLaXXV2armT1NkWXNQd7KuLLHx5Gqu2FMrc");
+        assert_eq!(account_text(&settings_address(&PROGRAM)), "2aXkMrPG771Scj8LWBMyUGjJRou8Ls9kotSbnBfvoVfV");
+        let tag = owner_tag(&jef, &[1; 32]);
+        assert_eq!(hex(&tag), "f69d7a63559368fd63f7194d5d642d6f8ee3f3d190c784b079e76dfea828fba1");
+        let promised = commitment(&jef, &tag, &[5; 32]);
+        assert_eq!(hex(&promised), "1d84f6975de22294cad92f3b75056aacdd917c2887205e46132b400f4a24caa3");
+        assert_eq!(account_text(&commitment_address(&PROGRAM, &promised)), "8unwVs8Lo7JUNUDraBvPTXKEszrXZKaKcsZjg8C9cg8D");
+
+        let id: [u8; 32] = core::array::from_fn(|index| index as u8);
+        assert_eq!(account_text(&record_address(&PROGRAM, &id)), "7bwwvMLtxqqNYiXsd5bYaq8e31E1odYf6jAK5z7tmUdd");
+        assert_eq!(account_text(&page_address(&PROGRAM, &id)), "8M4vmdxCXL4eS8QXiHSdbeUUPt5Vbx1UVjLcv2cPk9Y5");
     }
 
     #[test]
     fn sealing_matches_the_specification_and_opens_again() {
         let key = derive("jef").key;
+        assert_eq!(hex(&key), "aad91a1a3dd0fb56a213212fbea58fe25d9139db42fc59ce2116c3cfa3440088");
         let sealed = seal(&key, &sample_profile().encode(), RECORD_SEAL, NONCE).expect("seals");
         assert_eq!(hex(&sealed), SEALED_PROFILE);
+        assert_eq!(sealed.len(), sample_profile().sealed_len());
         assert_eq!(Profile::open(&key, &sealed, "jef"), sample_profile());
 
         let mut page = Writer::default();
@@ -702,25 +908,44 @@ ac0fcdac4a6e83b60ac363901963488c93c7762d19b34b6991b9abdbc5d293fca06b69cab31e7eaa
         assert_eq!(Profile::open(&key, &unhex(SEALED_PAGE).expect("hex"), "jef"), bare);
     }
 
+    /// A record as `core` encodes `NameRecord { version: 5, owner: [1; 32],
+    /// expires: u64::MAX, sealed: [0xab] }`.
     #[test]
-    fn a_record_decodes_and_reports_where_to_pay() {
-        let key = derive("jef").key;
+    fn a_record_held_by_a_deposit_never_lapses() {
+        let bytes = unhex(&format!("05{}{}01000000ab", "01".repeat(32), "ff".repeat(8))).expect("hex");
+        let resolved = Resolved::decode(&bytes, &[0; 32], "jef").expect("decodes");
+        assert_eq!(resolved.owner, [1; 32]);
+        assert_eq!(resolved.expires, NEVER);
+        assert!(resolved.never_expires());
+        assert!(!resolved.lapsed(u64::MAX) && !resolved.gone(u64::MAX));
+        let json = resolved.to_json();
+        assert_eq!(json["expires"], Value::Null);
+        assert_eq!(json["never"], true);
+        assert_eq!(json["lapsed"], false);
+        assert_eq!(json["owner_tag"], "01".repeat(32));
+    }
+
+    #[test]
+    fn a_fee_mode_record_decodes_lapses_and_reports_where_to_pay() {
+        let derived = derive("jef");
+        let key = derived.key;
         let profile = Profile { npk: Some([3; 32]), vpk: vec![9, 9, 9, 9], ..sample_profile() };
-        let mut record = vec![2];
-        record.extend([1; 32]); // owner
-        record.extend(4_102_444_800_000_u64.to_le_bytes()); // expires at the start of 2100
+        let mut record = vec![5];
+        record.extend(owner_tag(&derived.id, &[1; 32]));
+        record.extend(4_102_444_800_000_u64.to_le_bytes()); // the start of 2100
         let sealed = profile.seal(&key).expect("seals");
         record.extend((sealed.len() as u32).to_le_bytes());
         record.extend(&sealed);
 
         let resolved = Resolved::decode(&record, &key, "jef").expect("decodes");
-        assert_eq!(resolved.owner, [1; 32]);
+        assert!(resolved.is_held_by(&derived.id, &[1; 32]));
+        assert!(!resolved.is_held_by(&derived.id, &[2; 32]));
         assert_eq!(resolved.expires, 4_102_444_800_000);
         assert_eq!(resolved.profile, profile);
         assert!(!resolved.lapsed(4_102_444_799_999) && resolved.lapsed(4_102_444_800_000));
         assert!(!resolved.gone(4_102_444_800_000 + GRACE_MS - 1) && resolved.gone(4_102_444_800_000 + GRACE_MS));
         assert_eq!(resolved.to_json()["expires"], 4_102_444_800_000_u64);
-        assert_eq!(resolved.to_json()["lapsed"], false);
+        assert_eq!(resolved.to_json()["never"], false);
 
         let recipient = resolved.recipient_json();
         assert_eq!(recipient["display"], "jef.lez");
@@ -729,40 +954,58 @@ ac0fcdac4a6e83b60ac363901963488c93c7762d19b34b6991b9abdbc5d293fca06b69cab31e7eaa
         assert_eq!(recipient["private"]["nullifier_public_key"], "03".repeat(32));
         assert_eq!(recipient["private"]["viewing_public_key"], "09090909");
         assert_eq!(resolved.to_json()["texts"]["chat"], "hi");
-        assert_eq!(resolved.to_json()["owner"], account_text(&[1; 32]));
 
         assert!(Resolved::decode(&record[..20], &key, "jef").is_err(), "truncated");
     }
 
+    /// The live v5 registry's settings shard (`38jEfVV1…h2gq` on the LEZ
+    /// testnet, read 2026-10-16), and core's encoding of
+    /// `Settings { version: 5, admin: [1; 32], treasury: [2; 32], prices: [1, 2, 3],
+    /// mode: 1, deposits: [100_000_000, 2_000_000_000] }`.
     #[test]
-    fn settings_decode_and_say_what_is_owed() {
-        let mut bytes = vec![2];
-        bytes.extend([1; 32]); // admin
-        bytes.extend([2; 32]); // treasury
-        for price in [10_000_u128, 100_000, 400_000] {
-            bytes.extend(price.to_le_bytes());
-        }
-        let settings = Settings::decode(&bytes).expect("decodes");
-        assert_eq!(settings.admin, [1; 32]);
-        assert_eq!(settings.prices, [10_000, 100_000, 400_000]);
-        assert_eq!(Settings::fee(Some(&settings), &[9; 32], 1), (100_000, Some([2; 32])));
-        assert_eq!(Settings::fee(Some(&settings), &[2; 32], 1), (0, None), "the treasury pays nothing");
-        assert_eq!(Settings::fee(None, &[9; 32], 2), (0, None), "an unconfigured registry is free");
-        assert_eq!(TERMS[1].0, 31_536_000_000);
+    fn settings_decode_as_core_writes_them() {
+        let live = unhex(&format!(
+            "05{admin}{admin}{}01{}{}",
+            "00".repeat(48),
+            "00e1f505000000000000000000000000",
+            "00943577000000000000000000000000",
+            admin = "b6b80d9b12a1f9e36d60476dd4e41b4a2d5412671592f7447827728f83557808",
+        ))
+        .expect("hex");
+        let settings = Settings::decode(&live).expect("decodes");
+        assert!(settings.deposit_mode());
+        assert_eq!(settings.deposits, [100_000_000, 2_000_000_000]);
+        assert_eq!(settings.prices, [0, 0, 0]);
+        assert_eq!(settings.admin, settings.treasury);
+        assert_eq!(Settings::mode_text(Some(&settings)), "deposit");
+        assert_eq!(Settings::mode_text(None), "unconfigured");
+
+        let core = unhex(
+            "05010101010101010101010101010101010101010101010101010101010101010102020202020202020202020202020202020202020202020202020202020202020100000000000000000000000000000002000000000000000000000000000000030000000000000000000000000000000100e1f50500000000000000000000000000943577000000000000000000000000",
+        )
+        .expect("hex");
+        assert_eq!(
+            Settings::decode(&core).expect("decodes"),
+            Settings { admin: [1; 32], treasury: [2; 32], prices: [1, 2, 3], mode: MODE_DEPOSIT, deposits: [100_000_000, 2_000_000_000] }
+        );
+        assert!(Settings::decode(&core[..core.len() - 1]).is_err(), "truncated");
         // The clock's address as the chain itself reports it.
         assert_eq!(account_text(&clock_program()), "2hwaRW8sMnyKLLRbDRw8k68tiv9bnfq98oxcdtcp157Z");
-        assert_eq!(account_text(CLOCK_ACCOUNT), bs58::encode(b"/LEZ/ClockProgramAccount/0000001").into_string());
-        assert_eq!(GRACE_MS, 2_592_000_000);
+        assert_eq!(TERM_LENGTHS_MS[1], 31_536_000_000);
     }
 
     #[test]
-    fn typed_names_are_normalised_and_checked() {
+    fn typed_names_and_accounts_are_normalised_and_checked() {
         for typed in ["jef", "jef.lez", "Jef.LEZ", "  jef.lez  "] {
             assert_eq!(parse_name(typed).as_deref(), Ok("jef"), "{typed}");
         }
         for bad in ["", ".lez", "jef.eth", "-jef", "jef-", "j f", &"a".repeat(33)] {
             assert!(parse_name(bad).is_err(), "{bad}");
         }
+        let text = account_text(&PROGRAM);
+        assert_eq!(parse_account(&text), Ok(PROGRAM));
+        assert_eq!(parse_account(&format!("Public/{text}")), Ok(PROGRAM));
+        assert!(parse_account("not-an-account").is_err());
     }
 
     #[test]
@@ -775,14 +1018,15 @@ ac0fcdac4a6e83b60ac363901963488c93c7762d19b34b6991b9abdbc5d293fca06b69cab31e7eaa
         assert_eq!(account_text(&SYSTEM_PROGRAM), "1".repeat(32));
         assert_eq!(shard_bytes(&shards, &PROGRAM), Ok(vec![1, 2, 3]));
         assert_eq!(shard_bytes(&shards, &[9; 32]), Ok(Vec::new()));
-        assert_eq!(shard_bytes(&shards, &SYSTEM_PROGRAM).map(|bytes| bytes.len()), Ok(16));
+        assert_eq!(native_balance(&shards), Ok(5));
+        assert_eq!(native_balance(&Map::new()), Ok(0));
 
         assert_eq!(unhex("0x0aFF"), Ok(vec![10, 255]));
         assert_eq!(unhex(&hex(&[0, 7, 255])), Ok(vec![0, 7, 255]));
         assert!(unhex("abc").is_err());
         assert!(unhex("zz").is_err());
 
-        let mut primary = vec![2];
+        let mut primary = vec![5];
         primary.extend(3_u32.to_le_bytes());
         primary.extend(b"jef");
         assert_eq!(decode_primary(&primary).as_deref(), Ok("jef"));

@@ -1,5 +1,5 @@
 //! Logos Names module: lets any Logos app resolve and manage `.lez` names
-//! with one call.
+//! with one call, against registry v5 (SPEC.md).
 //!
 //! The trait below is the module's contract; the builder derives the `.lidl`
 //! from it. Every method that answers a question returns JSON text in the
@@ -12,25 +12,39 @@
 //!
 //! A wallet's send field needs only `recipient`.
 //!
-//! Names are private: the chain holds an identifier derived from each name and
-//! a sealed profile, never the name, and there is no list of names. Whoever
-//! knows a name can resolve it; nobody can browse.
+//! Names are private: the chain holds an identifier derived from each name
+//! (Argon2id, then SHA-256) and a sealed profile, never the name, and there is
+//! no list of names. Whoever knows a name can resolve it; nobody can browse.
+//! A record names no holder either, only a tag of the holder's account bound
+//! to that one name.
+//!
+//! Registry v5 holds a name by a refundable deposit: it never lapses, and the
+//! deposit comes back to whoever releases it. One- and two-character names are
+//! locked, and three-character names take a higher deposit; the module proves a
+//! name's length tier from a built-in copy of the short-name list. Claiming a
+//! name is commit, then reveal at least 15 minutes later (see `register`).
 //!
 //! Reading needs nothing but the sequencer. Changing a name needs a signature,
 //! which this module asks the LEZ wallet module (`lez_core`) for: the keys stay
-//! in the wallet, and the wallet must be open.
+//! in the wallet, and the wallet must be open. The module signs only with the
+//! wallet's public accounts.
 
 mod changes;
 mod registry;
+mod shortlist;
 
 use changes::Change;
-use registry::{AccountId, Derived, Registry};
-use serde_json::{json, Value};
+use registry::{AccountId, Derived, Registry, Settings};
+use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
 const DEFAULT_SEQUENCER: &str = "https://testnet.lez.logos.co";
-/// The canonical registry on the default network: the one SPEC.md section 11 lists.
-const DEFAULT_REGISTRY: &str = "2PXg3SSmh5hvECTz4xcfV2d5YvxwyF6yVhpnjTokzCkX";
+/// The canonical registry on the default network: the one SPEC.md section 11
+/// lists, registry v5 in deposit mode.
+const DEFAULT_REGISTRY: &str = "38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq";
+/// Registries a saved configuration may still name whose names use an older
+/// derivation and can't be read by this version (v4.1). They are ignored.
+const RETIRED_REGISTRIES: [&str; 1] = ["2PXg3SSmh5hvECTz4xcfV2d5YvxwyF6yVhpnjTokzCkX"];
 
 pub trait NamesModule: Send + 'static {
     /// Where to send a payment for `name` (`jef.lez` or `jef`). The value is
@@ -40,10 +54,14 @@ pub trait NamesModule: Send + 'static {
     /// A null value means the name is not registered.
     fn recipient(&mut self, name: String) -> String;
 
-    /// Everything `name` resolves to: owner, expiry, account, keys and text
-    /// entries. `expires` is in milliseconds and `lapsed` is true once it has
-    /// passed. A null value means it is not registered, which includes a name
-    /// that lapsed more than 30 days ago.
+    /// Everything `name` resolves to: `{name, display, owner_tag, expires,
+    /// never, lapsed, deposit, account, npk, vpk, texts}`. A name held by a
+    /// deposit never expires: `expires` is null, `never` true and `lapsed`
+    /// false; `deposit` is what its deposit account holds (decimal text), which
+    /// a release refunds. In fee mode `expires` is in milliseconds and `lapsed`
+    /// is true once it has passed. `owner_tag` is the holder's tag (hex): the
+    /// chain never names the holder. A null value means it is not registered,
+    /// which includes a fee-mode name that lapsed more than 30 days ago.
     fn resolve(&mut self, name: String) -> String;
 
     /// The page published under `name`: `{content_type, bytes, text}`, where
@@ -66,40 +84,60 @@ pub trait NamesModule: Send + 'static {
     /// installed or not open.
     fn wallet(&mut self) -> String;
 
-    /// The names this device remembers that the open wallet holds:
-    /// `{names: [{name, display, owner, expires, lapsed}]}`. The chain keeps no list of names,
-    /// so this is the device's own memory: every name registered from here,
-    /// and every name passed to `keep`.
+    /// The names this device remembers that the open wallet holds, and the
+    /// registrations it has under way: `{names: [{name, display, owner,
+    /// expires, never, lapsed}], pending: [{name, display, owner, stage,
+    /// ready_at, tx}]}`. `owner` is the wallet's account that holds the name.
+    /// A pending `stage` is `committed` (call `register` again from
+    /// `ready_at`, in milliseconds) or `revealed` (sent; it shows in `names`
+    /// once it lands). The chain keeps no list of names, so this is the
+    /// device's own memory: every name registered from here, and every name
+    /// passed to `keep`.
     fn mine(&mut self) -> String;
 
-    /// Remembers `name` on this device, so `mine` returns it while the open
-    /// wallet holds it. The value is the bare name.
+    /// Remembers `name` on this device, if the open wallet holds it, so `mine`
+    /// keeps returning it. Fails for a name the wallet does not hold. The value is the bare name.
     fn keep(&mut self, name: String) -> String;
+
+    /// What registering `name` takes: `{name, display, tier, deposit, mode}`.
+    /// `tier` is `normal`, `three` (a three-character name, at the higher
+    /// deposit) or `locked` (one or two characters: only the registry's admin
+    /// may register it, and `deposit` is null). `deposit` is decimal text in
+    /// the native token's base units, held while the name is and refunded on
+    /// release. `mode` is `deposit`, `fee` or `unconfigured`; in fee mode
+    /// `deposit` is 0 and `fee` gives the price of a one-year term instead.
+    /// Makes one network read, besides deriving the name.
+    fn deposit(&mut self, name: String) -> String;
+
+    /// The registry's settings: `{mode, deposits: {normal, three}, admin,
+    /// treasury, prices: {30d, 1y, 5y}}`, amounts as decimal text. A null value
+    /// means the registry has no settings yet (it charges nothing, and locks
+    /// one- and two-character names).
+    fn settings(&mut self) -> String;
 
     // Changing a name. Each method below checks the change against the chain,
     // has the LEZ wallet sign it with the account that must authorise it, and
-    // sends it. The value is `{name, signer, tx}`. A sent transaction can
-    // still be refused, so confirm by calling `resolve` until the change
-    // shows; it normally takes one block. Send one change per account at a
-    // time.
+    // sends it. The value is `{name, signer, tx}`, plus what the method lists.
+    // A sent transaction can still be refused, so confirm by calling `resolve`
+    // until the change shows; it normally takes one block. Send one change per
+    // account at a time.
 
-    /// What registering or renewing a name costs: `{treasury, terms: [{term,
-    /// label, days, fee}]}`. `term` is the number to pass to `register` and
-    /// `renew`; `fee` is decimal text in the native token's base units, and 0
-    /// while the registry has no settings.
-    fn prices(&mut self) -> String;
-
-    /// Registers `name` to `owner` (base58), an account in the open wallet,
-    /// for `term`: 0 for 30 days, 1 for a year, 2 for five years. The fee for
-    /// the term is paid from `owner` to the registry's treasury.
+    /// Registers `name` to `owner` (base58), a public account in the open
+    /// wallet, which pays the deposit (see `deposit`). Registering is two
+    /// steps, so that nobody watching pending transactions can take the name
+    /// first: the first call sends a commitment, which hides the name, and
+    /// answers `stage: "committed"` with `ready_at` (milliseconds, chain time,
+    /// about 15 minutes on). Calling `register` again from then on sends the
+    /// reveal that claims the name (`stage: "revealed"`), and once that has
+    /// landed, answers `stage: "registered"` without sending anything. A call
+    /// before `ready_at` sends nothing. The commitment is kept on this device
+    /// and stays usable for 24 hours. The value also has `deposit` (or `fee`)
+    /// and `tier`; `tx` is null when nothing was sent.
     /// `private_account` makes the name payable privately from the start: one
     /// of the wallet's private accounts (base58), `auto` for its first one
-    /// (made if it has none), or empty to set nothing.
-    fn register(&mut self, name: String, owner: String, private_account: String, term: u64) -> String;
-
-    /// Extends `name` by `term`, paid by `payer` (base58), any account in the
-    /// open wallet. A lapsed name can be renewed for 30 days after it expires.
-    fn renew(&mut self, name: String, payer: String, term: u64) -> String;
+    /// (made if it has none), or empty to set nothing. It is used by the
+    /// reveal; given at commit time it is remembered for it.
+    fn register(&mut self, name: String, owner: String, private_account: String) -> String;
 
     /// Makes `name` payable privately and only privately: publishes the
     /// receiving keys of `private_account` (as for `register`, `auto` allowed)
@@ -120,15 +158,29 @@ pub trait NamesModule: Send + 'static {
     /// Sets the text entry `key` on `name`; an empty value removes it.
     fn set_text(&mut self, name: String, key: String, value: String) -> String;
 
+    /// Writes many text entries on `name` in one transaction, as the CLI's
+    /// `names profile` does. `entries_json` is a JSON object of key to value
+    /// (text); an empty value (or null) removes that key. The card keys are
+    /// `display`, `bio`, `avatar` (a `data:image/...` URL), `theme` (`light`,
+    /// `dark` or `auto`), `color` (`#rrggbb`), `font` (`sans`, `serif`, `mono`
+    /// or `rounded`) and `cid` (a Logos Storage content ID); any other key of
+    /// 1-32 characters of a-z, 0-9, `-`, `_` or `.` works too. With `replace`,
+    /// every existing entry is dropped first, so the object becomes the whole
+    /// set; the name's account and payment keys stay either way. A name holds
+    /// at most 16 entries and its sealed profile at most 12 KiB.
+    fn set_profile(&mut self, name: String, entries_json: String, replace: bool) -> String;
+
     /// Publishes `body` as the page of `name`; an empty body removes the page.
     fn set_page(&mut self, name: String, content_type: String, body: String) -> String;
 
-    /// Hands `name` to `new_owner` (base58). The addresses, entries and page
-    /// the current owner set are emptied.
+    /// Hands `name` to `new_owner` (base58); only a tag of it reaches the
+    /// chain. The addresses, entries and page the current owner set are
+    /// emptied. The deposit stays with the name, for whoever releases it.
     fn transfer(&mut self, name: String, new_owner: String) -> String;
 
-    /// Gives `name` up. Its record and page are emptied and anyone may
-    /// register it again.
+    /// Gives `name` up. Its record and page are emptied, anyone may register
+    /// it again, and its deposit comes back to the holder: the value has
+    /// `refund`, the deposit account's whole balance (decimal text).
     fn release(&mut self, name: String) -> String;
 
     /// Publishes `name` as what `account` (base58, in the open wallet) is
@@ -195,15 +247,7 @@ impl Default for Names {
             .and_then(|dir| std::fs::read_to_string(dir.join("config.json")).ok())
             .and_then(|text| serde_json::from_str::<Value>(&text).ok());
         if let Some(saved) = saved {
-            if let Some(url) = saved["sequencer"].as_str().filter(|url| is_http_url(url)) {
-                names.sequencer = url.to_owned();
-            }
-            if let Some(program) = saved["registry"].as_str() {
-                names.program = registry::parse_account(program).ok().or(names.program);
-            }
-            if let (Some(config), Some(storage)) = (saved["wallet_config"].as_str(), saved["wallet_storage"].as_str()) {
-                names.wallet_files = Some((config.to_owned(), storage.to_owned()));
-            }
+            names.apply_saved(&saved);
         }
         names
     }
@@ -221,11 +265,38 @@ fn reply(outcome: Result<Value, String>) -> String {
     .to_string()
 }
 
+/// Adds the fields of `extra`, when it is an object, to `value`.
+fn merged(mut value: Value, extra: &Value) -> Value {
+    if let (Some(value), Some(extra)) = (value.as_object_mut(), extra.as_object()) {
+        for (key, field) in extra {
+            value.insert(key.clone(), field.clone());
+        }
+    }
+    value
+}
+
+/// Text entries from a JSON object of key to text; null counts as empty.
+fn parse_entries(entries_json: &str) -> Result<Vec<(String, String)>, String> {
+    let parsed: Value = serde_json::from_str(entries_json.trim())
+        .map_err(|error| format!("the entries are not JSON: {error}"))?;
+    let object = parsed
+        .as_object()
+        .ok_or("the entries must be a JSON object of key to text")?;
+    object
+        .iter()
+        .map(|(key, value)| match value {
+            Value::String(text) => Ok((key.trim().to_owned(), text.clone())),
+            Value::Null => Ok((key.trim().to_owned(), String::new())),
+            _ => Err(format!("the value of {key} must be text")),
+        })
+        .collect()
+}
+
 /// The names this device remembers, per registry. The chain keeps no list, so
 /// without this a person could not be shown the names they hold.
 struct Memory {
     path: std::path::PathBuf,
-    registries: serde_json::Map<String, Value>,
+    registries: Map<String, Value>,
 }
 
 /// A remembered name that is not registered is dropped after this long. Until
@@ -238,13 +309,26 @@ fn now() -> u64 {
         .map_or(0, |since| since.as_secs())
 }
 
+fn load_object(path: &std::path::Path) -> Map<String, Value> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|saved| saved.as_object().cloned())
+        .unwrap_or_default()
+}
+
+/// Failing to save is not an error for the caller: the memory still serves
+/// this run.
+fn save_object(path: &std::path::Path, object: &Map<String, Value>) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, Value::Object(object.clone()).to_string());
+}
+
 impl Memory {
     fn load(path: std::path::PathBuf) -> Self {
-        let registries = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-            .and_then(|saved| saved.as_object().cloned())
-            .unwrap_or_default();
+        let registries = load_object(&path);
         Self { path, registries }
     }
 
@@ -277,13 +361,8 @@ impl Memory {
         }
     }
 
-    /// Failing to save is not an error for the caller: the memory still
-    /// serves this run.
     fn save(&self) {
-        if let Some(parent) = self.path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(&self.path, Value::Object(self.registries.clone()).to_string());
+        save_object(&self.path, &self.registries);
     }
 }
 
@@ -293,7 +372,129 @@ fn memory() -> Result<Memory, String> {
         .ok_or_else(|| "this device has nowhere to remember names".to_owned())
 }
 
+/// A commitment made and not yet revealed: what the reveal needs. The secret
+/// is what binds the reveal to the commitment, so it stays on this device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Commitment {
+    owner: AccountId,
+    secret: [u8; 32],
+    /// The chain time the commitment claimed.
+    made: u64,
+    /// The `private_account` choice for the reveal.
+    private_account: String,
+    /// The reveal's transaction, once sent.
+    revealed: Option<String>,
+    /// The chain time the reveal claimed. Until it can no longer land, the
+    /// reveal is not sent again.
+    revealed_at: Option<u64>,
+}
+
+impl Commitment {
+    fn to_json(&self) -> Value {
+        json!({
+            "owner": registry::account_text(&self.owner),
+            "secret": registry::hex(&self.secret),
+            "made": self.made,
+            "private_account": self.private_account,
+            "revealed": self.revealed,
+            "revealed_at": self.revealed_at,
+        })
+    }
+
+    fn from_json(value: &Value) -> Option<Self> {
+        Some(Self {
+            owner: registry::parse_account(value["owner"].as_str()?).ok()?,
+            secret: registry::unhex(value["secret"].as_str()?).ok()?.try_into().ok()?,
+            made: value["made"].as_u64()?,
+            private_account: value["private_account"].as_str().unwrap_or_default().to_owned(),
+            revealed: value["revealed"].as_str().map(str::to_owned),
+            revealed_at: value["revealed_at"].as_u64(),
+        })
+    }
+
+    /// When the reveal may be sent, in chain time.
+    fn ready_at(&self) -> u64 {
+        self.made.saturating_add(registry::MIN_COMMIT_AGE_MS)
+    }
+
+    /// Whether a reveal claiming `chain_now` can still land before the
+    /// commitment expires.
+    fn usable_at(&self, chain_now: u64) -> bool {
+        chain_now.saturating_add(registry::TIME_WINDOW_MS) < self.made.saturating_add(registry::MAX_COMMIT_AGE_MS)
+    }
+}
+
+/// The commitments this device has under way, per registry and name.
+struct Pending {
+    path: std::path::PathBuf,
+    registries: Map<String, Value>,
+}
+
+impl Pending {
+    fn load(path: std::path::PathBuf) -> Self {
+        let registries = load_object(&path);
+        Self { path, registries }
+    }
+
+    fn all(&self, program: &AccountId) -> Vec<(String, Commitment)> {
+        self.registries
+            .get(&registry::account_text(program))
+            .and_then(Value::as_object)
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(|(name, entry)| Some((name.clone(), Commitment::from_json(entry)?)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn get(&self, program: &AccountId, name: &str) -> Option<Commitment> {
+        Commitment::from_json(self.registries.get(&registry::account_text(program))?.get(name)?)
+    }
+
+    fn put(&mut self, program: &AccountId, name: &str, pending: &Commitment) {
+        let names = self
+            .registries
+            .entry(registry::account_text(program))
+            .or_insert_with(|| Value::Object(Map::new()));
+        if let Some(names) = names.as_object_mut() {
+            names.insert(name.to_owned(), pending.to_json());
+        }
+    }
+
+    fn remove(&mut self, program: &AccountId, name: &str) {
+        if let Some(names) = self.registries.get_mut(&registry::account_text(program)).and_then(Value::as_object_mut) {
+            names.remove(name);
+        }
+    }
+
+    fn save(&self) {
+        save_object(&self.path, &self.registries);
+    }
+}
+
+fn pending() -> Result<Pending, String> {
+    config_dir()
+        .map(|dir| Pending::load(dir.join("pending.json")))
+        .ok_or_else(|| "this device has nowhere to keep a commitment".to_owned())
+}
+
 impl Names {
+    /// Applies a saved configuration. A registry that this version can't read
+    /// is ignored, so the default stands.
+    fn apply_saved(&mut self, saved: &Value) {
+        if let Some(url) = saved["sequencer"].as_str().filter(|url| is_http_url(url)) {
+            self.sequencer = url.to_owned();
+        }
+        if let Some(program) = saved["registry"].as_str().filter(|program| !RETIRED_REGISTRIES.contains(program)) {
+            self.program = registry::parse_account(program).ok().or(self.program);
+        }
+        if let (Some(config), Some(storage)) = (saved["wallet_config"].as_str(), saved["wallet_storage"].as_str()) {
+            self.wallet_files = Some((config.to_owned(), storage.to_owned()));
+        }
+    }
+
     fn config(&self) -> Value {
         json!({
             "sequencer": self.sequencer,
@@ -352,31 +553,46 @@ impl Names {
         })())
     }
 
-    /// Has the wallet sign and send the change `build` makes. The signer must
-    /// be one of the wallet's accounts; it also pays the fee.
-    fn change(&self, name: &str, build: impl FnOnce(&Registry) -> Result<Change, String>) -> String {
-        reply((|| {
-            let registry = self.registry()?;
-            let held = self.held()?;
-            let change = build(&registry)?;
-            if !held.public.contains(&change.signer) {
-                return Err(format!(
-                    "the open wallet does not hold {}, which must sign this",
-                    registry::account_text(&change.signer)
-                ));
-            }
-            if registry.account_summary(&change.signer)?["funded"] != true {
-                return Err(format!(
-                    "{} has no funds to pay the fee",
-                    registry::account_text(&change.signer)
-                ));
-            }
-            let tx = wallet::send(&registry.program, &change)?;
-            Ok(json!({
+    /// Checks that the open wallet can sign and pay for `change`, has it sign
+    /// and send it, and returns `{name, signer, tx}` with the change's extras.
+    fn send(&self, registry: &Registry, held: &Held, name: &str, change: &Change) -> Result<Value, String> {
+        if !held.public.contains(&change.signer) {
+            return Err(format!(
+                "the open wallet does not hold {} as a public account, which must sign this",
+                registry::account_text(&change.signer)
+            ));
+        }
+        let balance = registry.balance(&change.signer)?;
+        if balance <= change.needs {
+            return Err(if change.needs == 0 {
+                format!("{} has no funds to pay the fee", registry::account_text(&change.signer))
+            } else {
+                format!(
+                    "{} holds {balance}, not enough for the {} it pays plus the fee",
+                    registry::account_text(&change.signer),
+                    change.needs
+                )
+            });
+        }
+        let tx = wallet::send(&registry.program, change)?;
+        Ok(merged(
+            json!({
                 "name": name,
                 "signer": registry::account_text(&change.signer),
                 "tx": tx,
-            }))
+            }),
+            &change.extra,
+        ))
+    }
+
+    /// Has the wallet sign and send the change `build` makes from the open
+    /// wallet's public accounts. The signer must be one of them; it also pays.
+    fn change(&self, name: &str, build: impl FnOnce(&Registry, &[AccountId]) -> Result<Change, String>) -> String {
+        reply((|| {
+            let registry = self.registry()?;
+            let held = self.held()?;
+            let change = build(&registry, &held.public)?;
+            self.send(&registry, &held, name, &change)
         })())
     }
 
@@ -384,14 +600,108 @@ impl Names {
     fn change_name(
         &mut self,
         typed: &str,
-        build: impl FnOnce(&Registry, &str, &Derived) -> Result<Change, String>,
+        build: impl FnOnce(&Registry, &str, &Derived, &[AccountId]) -> Result<Change, String>,
     ) -> String {
         match registry::parse_name(typed) {
             Ok(name) => {
                 let derived = self.derived(&name);
-                self.change(&name, |registry| build(registry, &name, &derived))
+                self.change(&name, |registry, held| build(registry, &name, &derived, held))
             }
             Err(error) => reply(Err(error)),
+        }
+    }
+
+    /// One step of registering `name` for `owner`: commit, wait, reveal, or
+    /// report that it is done. See [`NamesModule::register`].
+    fn register_step(&mut self, typed: &str, owner: &str, private_account: &str) -> Result<Value, String> {
+        let name = registry::parse_name(typed)?;
+        let registry = self.registry()?;
+        let held = self.held()?;
+        let owner = registry::parse_account(owner)?;
+        if !held.public.contains(&owner) {
+            return Err(format!(
+                "the open wallet does not hold {} as a public account; this module registers names only to public accounts",
+                registry::account_text(&owner)
+            ));
+        }
+        let derived = self.derived(&name);
+        let mut commitments = pending()?;
+        let saved = commitments.get(&registry.program, &name).filter(|saved| saved.owner == owner);
+        let status = |stage: &str, tx: Option<&str>, ready_at: Option<u64>| {
+            json!({
+                "name": name,
+                "signer": registry::account_text(&owner),
+                "tx": tx,
+                "stage": stage,
+                "ready_at": ready_at,
+            })
+        };
+
+        if let Some(record) = registry.resolve(&name, &derived)? {
+            if !record.is_held_by(&derived.id, &owner) {
+                return Err(format!("{name}{} is already registered", registry::NAME_SUFFIX));
+            }
+            // An earlier reveal has landed.
+            if saved.is_some() {
+                commitments.remove(&registry.program, &name);
+                commitments.save();
+            }
+            self.remember(&registry.program, &name);
+            return Ok(status("registered", None, None));
+        }
+
+        let chain_now = registry.now()?;
+        if let Some(mut saved) = saved.filter(|saved| saved.usable_at(chain_now)) {
+            let promised = registry::commitment(&derived.id, &registry::owner_tag(&derived.id, &owner), &saved.secret);
+            let landed = registry.commitment_made(&promised)?.is_some();
+            if !landed && chain_now < saved.made.saturating_add(registry::TIME_WINDOW_MS) {
+                // Sent, and still able to land.
+                return Ok(status("committed", None, Some(saved.ready_at())));
+            }
+            if landed {
+                if chain_now < saved.ready_at() {
+                    return Ok(status("committed", None, Some(saved.ready_at())));
+                }
+                if saved.revealed_at.is_some_and(|at| chain_now < at.saturating_add(registry::TIME_WINDOW_MS)) {
+                    // A reveal is on its way and may still land.
+                    return Ok(status("revealed", saved.revealed.as_deref(), Some(saved.ready_at())));
+                }
+                let choice = if private_account.trim().is_empty() { saved.private_account.clone() } else { private_account.to_owned() };
+                let keys = if choice.trim().is_empty() { None } else { Some(private_keys(&choice)?) };
+                let change = registry.reveal(&name, &derived, &owner, &saved.secret, keys)?;
+                let sent = self.send(&registry, &held, &name, &change)?;
+                saved.revealed = sent["tx"].as_str().map(str::to_owned);
+                saved.revealed_at = Some(chain_now);
+                commitments.put(&registry.program, &name, &saved);
+                commitments.save();
+                self.remember(&registry.program, &name);
+                return Ok(merged(sent, &json!({ "stage": "revealed", "ready_at": saved.ready_at() })));
+            }
+            // The commitment never landed: make a new one.
+        }
+
+        let secret: [u8; 32] = registry::fresh_bytes()?;
+        let (change, made) = registry.commit(&name, &derived, &owner, &secret)?;
+        let sent = self.send(&registry, &held, &name, &change)?;
+        let saved = Commitment {
+            owner,
+            secret,
+            made,
+            private_account: private_account.trim().to_owned(),
+            revealed: None,
+            revealed_at: None,
+        };
+        commitments.put(&registry.program, &name, &saved);
+        commitments.save();
+        self.remember(&registry.program, &name);
+        Ok(merged(sent, &json!({ "stage": "committed", "ready_at": saved.ready_at() })))
+    }
+
+    /// Remembers `name` for `program`, for `mine`.
+    fn remember(&self, program: &AccountId, name: &str) {
+        if let Ok(mut memory) = memory() {
+            memory.remember(program, name);
+            memory.save();
         }
     }
 }
@@ -418,6 +728,45 @@ fn private_keys(choice: &str) -> Result<([u8; 32], Vec<u8>), String> {
     wallet::private_keys(&account)
 }
 
+/// What registering a name of `tier` takes under `settings`, for `deposit`.
+fn deposit_json(name: &str, tier: u8, settings: Option<&Settings>) -> Value {
+    let mut value = json!({
+        "name": name,
+        "display": format!("{name}{}", registry::NAME_SUFFIX),
+        "tier": changes::tier_text(tier),
+        "mode": Settings::mode_text(settings),
+    });
+    let deposit = match settings {
+        _ if tier == shortlist::TIER_LOCKED => Value::Null,
+        Some(settings) if settings.deposit_mode() => {
+            Value::from(settings.deposits[usize::from(tier == shortlist::TIER_THREE)].to_string())
+        }
+        _ => Value::from("0"),
+    };
+    value["deposit"] = deposit;
+    if let Some(settings) = settings.filter(|settings| !settings.deposit_mode()) {
+        value["fee"] = Value::from(settings.prices[usize::from(changes::REGISTER_TERM)].to_string());
+    }
+    value
+}
+
+fn settings_json(settings: &Settings) -> Value {
+    json!({
+        "mode": Settings::mode_text(Some(settings)),
+        "deposits": {
+            "normal": settings.deposits[0].to_string(),
+            "three": settings.deposits[1].to_string(),
+        },
+        "admin": registry::account_text(&settings.admin),
+        "treasury": registry::account_text(&settings.treasury),
+        "prices": {
+            "30d": settings.prices[0].to_string(),
+            "1y": settings.prices[1].to_string(),
+            "5y": settings.prices[2].to_string(),
+        },
+    })
+}
+
 impl NamesModule for Names {
     fn recipient(&mut self, name: String) -> String {
         self.about(&name, |registry, name, derived| {
@@ -428,8 +777,12 @@ impl NamesModule for Names {
 
     fn resolve(&mut self, name: String) -> String {
         self.about(&name, |registry, name, derived| {
-            let resolved = registry.resolve(name, derived)?;
-            Ok(resolved.map_or(Value::Null, |resolved| resolved.to_json()))
+            let Some(resolved) = registry.resolve(name, derived)? else {
+                return Ok(Value::Null);
+            };
+            let mut value = resolved.to_json();
+            value["deposit"] = Value::from(registry.deposit(&derived.id)?.to_string());
+            Ok(value)
         })
     }
 
@@ -508,25 +861,32 @@ impl NamesModule for Names {
                     .map(|reader| reader.join().unwrap_or_else(|_| Err("a read failed".to_owned())))
                     .collect::<Result<Vec<_>, String>>()
             })?;
+            let mut commitments = pending()?;
             let mut names = Vec::new();
             let mut kept = Vec::new();
-            for ((name, added), found) in remembered.iter().cloned().zip(resolved) {
+            let mut landed = Vec::new();
+            for (((name, added), found), derived) in remembered.iter().cloned().zip(resolved).zip(&derived) {
                 match found {
                     Some(resolved) => {
-                        if held.contains(&resolved.owner) {
+                        let holder = held.iter().find(|account| resolved.is_held_by(&derived.id, account));
+                        if let Some(holder) = holder {
                             names.push(json!({
                                 "name": name,
                                 "display": format!("{name}{}", registry::NAME_SUFFIX),
-                                "owner": registry::account_text(&resolved.owner),
-                                "expires": resolved.expires,
+                                "owner": registry::account_text(holder),
+                                "expires": resolved.expires_json(),
+                                "never": resolved.never_expires(),
                                 "lapsed": resolved.lapsed(registry::local_now()),
                             }));
+                            landed.push(name.clone());
                         }
                         // A name another wallet holds is kept: it may be this
                         // person's other wallet.
                         kept.push((name, added));
                     }
                     None if now().saturating_sub(added) < FORGET_UNREGISTERED_AFTER => kept.push((name, added)),
+                    // A registration still under way is kept too.
+                    None if commitments.get(&registry.program, &name).is_some() => kept.push((name, added)),
                     None => {}
                 }
             }
@@ -534,7 +894,30 @@ impl NamesModule for Names {
                 memory.set(&registry.program, &kept);
                 memory.save();
             }
-            Ok(json!({ "names": names }))
+            // Registrations under way: a landed one is done, and an expired
+            // commitment is dropped.
+            let local = registry::local_now();
+            let mut under_way = Vec::new();
+            let mut changed = false;
+            for (name, saved) in commitments.all(&registry.program) {
+                if landed.contains(&name) || !saved.usable_at(local) {
+                    commitments.remove(&registry.program, &name);
+                    changed = true;
+                    continue;
+                }
+                under_way.push(json!({
+                    "name": name,
+                    "display": format!("{name}{}", registry::NAME_SUFFIX),
+                    "owner": registry::account_text(&saved.owner),
+                    "stage": if saved.revealed.is_some() { "revealed" } else { "committed" },
+                    "ready_at": saved.ready_at(),
+                    "tx": saved.revealed,
+                }));
+            }
+            if changed {
+                commitments.save();
+            }
+            Ok(json!({ "names": names, "pending": under_way }))
         })())
     }
 
@@ -542,6 +925,14 @@ impl NamesModule for Names {
         reply((|| {
             let name = registry::parse_name(&name)?;
             let registry = self.registry()?;
+            // Only names the open wallet holds are remembered, so the device
+            // keeps no list of names merely looked up.
+            let derived = self.derived(&name);
+            let held = self.held()?.public;
+            let found = registry.resolve(&name, &derived)?;
+            if !found.is_some_and(|resolved| held.iter().any(|account| resolved.is_held_by(&derived.id, account))) {
+                return Err(format!("{name}{} is not held by the open wallet", registry::NAME_SUFFIX));
+            }
             let mut memory = memory()?;
             memory.remember(&registry.program, &name);
             memory.save();
@@ -549,93 +940,77 @@ impl NamesModule for Names {
         })())
     }
 
-    fn prices(&mut self) -> String {
-        reply((|| {
-            let settings = self.registry()?.settings()?;
-            let terms: Vec<Value> = registry::TERMS
-                .iter()
-                .enumerate()
-                .map(|(term, (_, label, days))| {
-                    let fee = settings.as_ref().map_or(0, |settings| settings.prices[term]);
-                    json!({ "term": term, "label": label, "days": days, "fee": fee.to_string() })
-                })
-                .collect();
-            Ok(json!({
-                "treasury": settings.as_ref().map(|settings| registry::account_text(&settings.treasury)),
-                "terms": terms,
-            }))
-        })())
-    }
-
-    fn register(&mut self, name: String, owner: String, private_account: String, term: u64) -> String {
-        let sent = self.change_name(&name, |registry, name, derived| {
-            let term = changes::parse_term(term)?;
-            let keys = if private_account.trim().is_empty() {
-                None
-            } else {
-                Some(private_keys(&private_account)?)
-            };
-            registry.register(name, derived, &registry::parse_account(&owner)?, term, keys)
-        });
-        // Remembered as soon as it is sent: `mine` shows it once it is on the
-        // chain, and forgets it if it never gets there.
-        if sent.contains("\"success\":true") {
-            let _ = self.keep(name);
-        }
-        sent
-    }
-
-    fn renew(&mut self, name: String, payer: String, term: u64) -> String {
-        self.change_name(&name, |registry, name, derived| {
-            registry.renew(name, derived, &registry::parse_account(&payer)?, changes::parse_term(term)?)
+    fn deposit(&mut self, name: String) -> String {
+        self.about(&name, |registry, name, derived| {
+            let tier = changes::tier_of(&derived.id)?;
+            Ok(deposit_json(name, tier, registry.settings()?.as_ref()))
         })
     }
 
+    fn settings(&mut self) -> String {
+        reply((|| Ok(self.registry()?.settings()?.as_ref().map_or(Value::Null, settings_json)))())
+    }
+
+    fn register(&mut self, name: String, owner: String, private_account: String) -> String {
+        reply(self.register_step(&name, &owner, &private_account))
+    }
+
     fn receive_privately(&mut self, name: String, private_account: String) -> String {
-        self.change_name(&name, |registry, name, derived| {
+        self.change_name(&name, |registry, name, derived, held| {
             let (npk, vpk) = private_keys(&private_account)?;
-            registry.set_private_keys(name, derived, &npk, &vpk, true)
+            registry.set_private_keys(name, derived, held, &npk, &vpk, true)
         })
     }
 
     fn set_account(&mut self, name: String, account: String) -> String {
-        self.change_name(&name, |registry, name, derived| {
-            registry.set_account(name, derived, &registry::parse_account(&account)?)
+        self.change_name(&name, |registry, name, derived, held| {
+            registry.set_account(name, derived, held, &registry::parse_account(&account)?)
         })
     }
 
     fn set_private_keys(&mut self, name: String, nullifier_public_key: String, viewing_public_key: String) -> String {
-        self.change_name(&name, |registry, name, derived| {
+        self.change_name(&name, |registry, name, derived, held| {
             let npk = registry::unhex(&nullifier_public_key)?;
             let vpk = registry::unhex(&viewing_public_key)?;
-            registry.set_private_keys(name, derived, &npk, &vpk, false)
+            registry.set_private_keys(name, derived, held, &npk, &vpk, false)
         })
     }
 
     fn clear_addresses(&mut self, name: String) -> String {
-        self.change_name(&name, |registry, name, derived| registry.clear_addresses(name, derived))
+        self.change_name(&name, |registry, name, derived, held| registry.clear_addresses(name, derived, held))
     }
 
     fn set_text(&mut self, name: String, key: String, value: String) -> String {
-        self.change_name(&name, |registry, name, derived| {
-            registry.set_text(name, derived, key.trim(), &value)
+        self.change_name(&name, |registry, name, derived, held| {
+            registry.set_text(name, derived, held, key.trim(), &value)
+        })
+    }
+
+    fn set_profile(&mut self, name: String, entries_json: String, replace: bool) -> String {
+        // The entries are checked before anything is read from the chain.
+        let entries = match parse_entries(&entries_json) {
+            Ok(entries) => entries,
+            Err(error) => return reply(Err(error)),
+        };
+        self.change_name(&name, |registry, name, derived, held| {
+            registry.set_profile(name, derived, held, entries, replace)
         })
     }
 
     fn set_page(&mut self, name: String, content_type: String, body: String) -> String {
-        self.change_name(&name, |registry, name, derived| {
-            registry.set_page(name, derived, content_type.trim(), body.as_bytes())
+        self.change_name(&name, |registry, name, derived, held| {
+            registry.set_page(name, derived, held, content_type.trim(), body.as_bytes())
         })
     }
 
     fn transfer(&mut self, name: String, new_owner: String) -> String {
-        self.change_name(&name, |registry, name, derived| {
-            registry.transfer(name, derived, &registry::parse_account(&new_owner)?)
+        self.change_name(&name, |registry, name, derived, held| {
+            registry.transfer(name, derived, held, &registry::parse_account(&new_owner)?)
         })
     }
 
     fn release(&mut self, name: String) -> String {
-        self.change_name(&name, |registry, name, derived| registry.release(name, derived))
+        self.change_name(&name, |registry, name, derived, held| registry.release(name, derived, held))
     }
 
     fn set_primary(&mut self, account: String, name: String) -> String {
@@ -648,7 +1023,7 @@ impl NamesModule for Names {
             }
         };
         let derived = (!name.is_empty()).then(|| self.derived(&name));
-        self.change(&name, |registry| {
+        self.change(&name, |registry, _| {
             registry.set_primary(&registry::parse_account(&account)?, &name, derived.as_ref())
         })
     }
@@ -910,9 +1285,24 @@ mod tests {
     #[test]
     fn questions_fail_clearly_until_a_registry_is_configured() {
         let mut names = fresh();
-        let answer = parsed(&names.recipient("jef.lez".into()));
-        assert_eq!(answer["success"], false);
-        assert!(answer["error"].as_str().expect("an error").contains("set_registry"));
+        for answer in [names.recipient("jef.lez".into()), names.deposit("jef".into()), names.settings()] {
+            let answer = parsed(&answer);
+            assert_eq!(answer["success"], false);
+            assert!(answer["error"].as_str().expect("an error").contains("set_registry"));
+        }
+    }
+
+    #[test]
+    fn the_default_registry_is_v5_and_a_retired_one_is_not_kept() {
+        let v5 = registry::parse_account(DEFAULT_REGISTRY).expect("an account");
+        let mut names = fresh();
+        names.program = Some(v5);
+        names.apply_saved(&json!({ "registry": RETIRED_REGISTRIES[0], "sequencer": "http://127.0.0.1:3040" }));
+        assert_eq!(names.program, Some(v5));
+        assert_eq!(names.sequencer, "http://127.0.0.1:3040");
+        let other = registry::account_text(&[7; 32]);
+        names.apply_saved(&json!({ "registry": other }));
+        assert_eq!(names.program, Some([7; 32]));
     }
 
     #[test]
@@ -930,16 +1320,94 @@ mod tests {
         let mut names = fresh();
         names.program = Some([7; 32]);
         for answer in [
-            names.register("jef.eth".into(), "x".into(), String::new(), 1),
-            names.renew("jef.eth".into(), "x".into(), 1),
+            names.register("jef.eth".into(), "x".into(), String::new()),
             names.release("-jef".into()),
             names.set_primary("x".into(), "not a name".into()),
             names.receive_privately("j f".into(), "auto".into()),
+            names.set_profile("j f".into(), "{}".into(), true),
         ] {
             let answer = parsed(&answer);
             assert_eq!(answer["success"], false);
             assert!(answer["error"].as_str().expect("an error").contains("1-32 characters"));
         }
+    }
+
+    #[test]
+    fn profile_entries_are_read_from_a_json_object() {
+        assert_eq!(
+            parse_entries(r#"{"display": "Jef", "bio": "", "cid": null}"#),
+            Ok(vec![
+                ("bio".to_owned(), String::new()),
+                ("cid".to_owned(), String::new()),
+                ("display".to_owned(), "Jef".to_owned()),
+            ])
+        );
+        assert!(parse_entries("[1]").is_err());
+        assert!(parse_entries(r#"{"bio": 3}"#).is_err());
+        assert!(parse_entries("not json").is_err());
+        let mut names = fresh();
+        names.program = Some([7; 32]);
+        let answer = parsed(&names.set_profile("jef".into(), "[]".into(), false));
+        assert!(answer["error"].as_str().expect("an error").contains("JSON object"));
+    }
+
+    #[test]
+    fn deposits_are_reported_by_tier_and_mode() {
+        let deposits = Settings { admin: [1; 32], treasury: [2; 32], prices: [10, 20, 30], mode: registry::MODE_DEPOSIT, deposits: [100, 2_000] };
+        let normal = deposit_json("logos", shortlist::TIER_NORMAL, Some(&deposits));
+        assert_eq!(normal["tier"], "normal");
+        assert_eq!(normal["deposit"], "100");
+        assert_eq!(normal["mode"], "deposit");
+        assert_eq!(normal["display"], "logos.lez");
+        assert_eq!(deposit_json("jef", shortlist::TIER_THREE, Some(&deposits))["deposit"], "2000");
+        let locked = deposit_json("ab", shortlist::TIER_LOCKED, Some(&deposits));
+        assert_eq!((locked["tier"].clone(), locked["deposit"].clone()), (json!("locked"), Value::Null));
+        let fees = Settings { mode: registry::MODE_FEE, ..deposits.clone() };
+        let fee = deposit_json("logos", shortlist::TIER_NORMAL, Some(&fees));
+        assert_eq!((fee["mode"].clone(), fee["deposit"].clone(), fee["fee"].clone()), (json!("fee"), json!("0"), json!("20")));
+        assert_eq!(deposit_json("logos", shortlist::TIER_NORMAL, None)["mode"], "unconfigured");
+
+        let settings = settings_json(&deposits);
+        assert_eq!(settings["mode"], "deposit");
+        assert_eq!(settings["deposits"]["normal"], "100");
+        assert_eq!(settings["deposits"]["three"], "2000");
+        assert_eq!(settings["admin"], registry::account_text(&[1; 32]));
+    }
+
+    #[test]
+    fn a_commitment_is_kept_and_its_timing_follows_the_program() {
+        let saved = Commitment {
+            owner: [1; 32],
+            secret: [5; 32],
+            made: 1_000_000,
+            private_account: "auto".into(),
+            revealed: Some("ab".into()),
+            revealed_at: Some(2_000_000),
+        };
+        assert_eq!(Commitment::from_json(&saved.to_json()), Some(saved.clone()));
+        assert_eq!(saved.ready_at(), 1_000_000 + 15 * 60 * 1000);
+        assert!(saved.usable_at(1_000_000 + registry::MAX_COMMIT_AGE_MS - registry::TIME_WINDOW_MS - 1));
+        assert!(!saved.usable_at(1_000_000 + registry::MAX_COMMIT_AGE_MS - registry::TIME_WINDOW_MS));
+
+        let path = std::env::temp_dir().join(format!("logos-names-pending-{}-{}.json", std::process::id(), now()));
+        let mut pending = Pending::load(path.clone());
+        pending.put(&[7; 32], "jef", &saved);
+        pending.save();
+        let reloaded = Pending::load(path.clone());
+        assert_eq!(reloaded.get(&[7; 32], "jef"), Some(saved));
+        assert_eq!(reloaded.get(&[8; 32], "jef"), None);
+        assert_eq!(reloaded.all(&[7; 32]).len(), 1);
+        let mut reloaded = reloaded;
+        reloaded.remove(&[7; 32], "jef");
+        assert!(reloaded.all(&[7; 32]).is_empty());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn extras_are_merged_into_the_answer() {
+        let value = merged(json!({ "name": "jef", "tx": "ab" }), &json!({ "refund": "100" }));
+        assert_eq!(value, json!({ "name": "jef", "tx": "ab", "refund": "100" }));
+        assert_eq!(merged(json!({ "name": "jef" }), &Value::Null), json!({ "name": "jef" }));
     }
 
     #[test]

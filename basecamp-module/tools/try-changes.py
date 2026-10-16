@@ -4,7 +4,9 @@
 It drives the module the way an app does: send one change, then read the chain
 until the change shows, and only then send the next. Needs a logosctl session
 with `names` and `lez_core` loaded, a wallet open in `lez_core` that holds two
-funded accounts, and the registry already chosen with `set_registry`.
+public accounts each funded with more than a deposit, and a registry v5 in
+deposit mode chosen with `set_registry`. Registering waits out the commitment
+(about 15 minutes), twice.
 
 Usage: try-changes.py <logosctl binary> <session dir> <account A> <account B>
 """
@@ -17,7 +19,7 @@ failures = 0
 
 def call(method, *args):
     """One module call; returns the value, or raises the module's error."""
-    typed = ["str:" + arg if isinstance(arg, str) else str(arg) for arg in args]
+    typed = ["str:" + arg if isinstance(arg, str) else str(arg).lower() for arg in args]
     out = subprocess.run([LOGOSCTL, "--config-dir", SESSION, "call", "names", method, *typed],
                          capture_output=True, text=True).stdout
     reply = json.loads(out)["result"]
@@ -68,21 +70,50 @@ def check(label, ok):
     print("%s %s" % ("ok  " if ok else "FAIL", label))
 
 
-YEAR, MONTH = 31_536_000_000, 2_592_000_000
+def holder():
+    """The wallet account `mine` says holds the name: a record names only a tag."""
+    return next((entry["owner"] for entry in call("mine")["names"] if entry["name"] == NAME), None)
+
+
+def register(label, owner, private_account):
+    """Registers in two steps: commit, wait until the commitment may be revealed
+    (about 15 minutes), reveal, then wait for the name to show as `owner`'s."""
+    global failures
+    started = time.time()
+    try:
+        answer = call("register", NAME + ".lez", owner, private_account)
+        if answer["stage"] != "committed":
+            raise RuntimeError("the first step was %s, not a commitment" % answer["stage"])
+        while True:
+            answer = call("register", NAME, owner, private_account)
+            if answer["stage"] in ("revealed", "registered"):
+                break
+            if time.time() - started > 40 * 60:
+                raise RuntimeError("the commitment never became ready to reveal")
+            time.sleep(30)
+        while holder() != owner:
+            if time.time() - started > 45 * 60:
+                raise RuntimeError("revealed, but it never showed on the chain")
+            time.sleep(5)
+        print("ok   %-34s %4.0fs" % (label, time.time() - started))
+    except Exception as error:
+        failures += 1
+        print("FAIL %-34s %s" % (label, error))
+
+
 print("trying", NAME + ".lez")
-prices = call("prices")
-check("the registry says what each term costs", [term["days"] for term in prices["terms"]] == [30, 365, 1825])
-started = int(time.time() * 1000)
-change("register for a year, paid privately", "register", [NAME + ".lez", A, "auto", 1],
-       lambda: (record() or {}).get("owner") == A)
-check("it is held for a year from now", abs(record()["expires"] - (started + YEAR)) < 300_000 and not record()["lapsed"])
-until = record()["expires"]
-change("renew for 30 days", "renew", [NAME, A, 0], lambda: record()["expires"] > until)
-check("renewing added exactly 30 days", record()["expires"] == until + MONTH)
-refused("a term that does not exist", "renew", [NAME, A, 7], "term")
+settings = call("settings")
+check("the registry takes deposits", settings is not None and settings["mode"] == "deposit")
+quote = call("deposit", NAME)
+check("a normal name takes the normal deposit", quote["tier"] == "normal" and quote["deposit"] == settings["deposits"]["normal"])
+check("a two-character name is locked", call("deposit", "ab")["tier"] == "locked")
+check("a three-character name takes the higher deposit", call("deposit", "qkz")["deposit"] == settings["deposits"]["three"])
+register("register, paid privately", A, "auto")
+check("it never expires and holds its deposit",
+      record()["never"] and record()["expires"] is None and not record()["lapsed"] and record()["deposit"] == quote["deposit"])
 check("it takes private payments from the start", record()["npk"] is not None and record()["account"] is None)
 check("this device lists it among the wallet's names", NAME in mine())
-refused("register a taken name", "register", [NAME, B, "", 1], "already registered")
+refused("register a taken name", "register", [NAME, B, ""], "already registered")
 change("add a public account", "set_account", [NAME, B], lambda: record()["account"] == B)
 check("the private keys are still there", record()["npk"] is not None)
 change("go back to private only", "receive_privately", [NAME, "auto"],
@@ -95,6 +126,10 @@ change("remove an entry", "set_text", [NAME, "agent", ""], lambda: "agent" not i
 check("the other entry and the keys survived the edits", record()["texts"] == {"cid": "zb2rh"} and record()["npk"] is not None)
 refused("remove an entry that is not there", "set_text", [NAME, "agent", ""], "no entry")
 refused("a bad entry key", "set_text", [NAME, "Bad Key", "x"], "key")
+change("set a profile in one go", "set_profile", [NAME, json.dumps({"display": "Trial", "bio": "hi", "cid": ""}), False],
+       lambda: record()["texts"] == {"display": "Trial", "bio": "hi"})
+change("replace the whole profile", "set_profile", [NAME, json.dumps({"theme": "dark"}), True],
+       lambda: record()["texts"] == {"theme": "dark"} and record()["npk"] is not None)
 change("publish a page", "set_page", [NAME, "text/html; charset=utf-8", page],
        lambda: (call("page", NAME) or {}).get("text") == page)
 change("publish the account's name", "set_primary", [A, NAME],
@@ -102,20 +137,19 @@ change("publish the account's name", "set_primary", [A, NAME],
 refused("a name that points elsewhere", "set_primary", [B, NAME], "does not point")
 change("stop taking payments", "clear_addresses", [NAME],
        lambda: record()["account"] is None and record()["npk"] is None)
-change("transfer to B", "transfer", [NAME, B], lambda: record()["owner"] == B)
+change("transfer to B", "transfer", [NAME, B], lambda: holder() == B)
 after = record()
-check("transfer emptied the profile and the page",
-      after["texts"] == {} and after["account"] is None and after["npk"] is None and call("page", NAME) is None)
+check("transfer emptied the profile and the page, and kept the deposit",
+      after["texts"] == {} and after["account"] is None and after["npk"] is None and call("page", NAME) is None
+      and after["deposit"] == quote["deposit"])
 check("the old holder is no longer shown as it", call("reverse", A) is None)
 change("the new holder edits it", "set_text", [NAME, "chat", "ab" * 32], lambda: "chat" in record()["texts"])
-change("delete", "release", [NAME], lambda: record() is None)
+change("release, refunding the deposit", "release", [NAME], lambda: record() is None)
 check("it is no longer among the wallet's names", NAME not in mine())
-refused("delete a name nobody holds", "release", [NAME], "not registered")
-change("register it again, to B, with nothing set", "register", [NAME, B, "", 0],
-       lambda: (record() or {}).get("owner") == B)
+refused("release a name nobody holds", "release", [NAME], "not registered")
+register("register it again, to B, with nothing set", B, "")
 check("nothing of the first registration came back", record()["npk"] is None and record()["texts"] == {})
-check("and it is held for 30 days", abs(record()["expires"] - (int(time.time() * 1000) + MONTH)) < 300_000)
-change("delete it again", "release", [NAME], lambda: record() is None)
+change("release it again", "release", [NAME], lambda: record() is None)
 change("withdraw A's published name", "set_primary", [A, ""], lambda: call("reverse", A) is None)
 
 print("ALL PASS" if failures == 0 else "%d FAILED" % failures)

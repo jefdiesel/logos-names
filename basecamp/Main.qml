@@ -17,7 +17,9 @@ Item {
 
     // ── State ───────────────────────────────────────────────────────────
 
-    property var myNames: []           // [{name, owner}]: names this device remembers that the wallet holds
+    property var myNames: []           // [{name, display, owner, expires, never, lapsed}]: names the wallet holds; owner is the wallet account
+    property var pendingNames: []      // [{name, display, owner, stage, ready_at, tx}]: registrations still finishing
+    property bool revealing: false     // a pending registration is being asked about
     property var record: null          // the name on the plate
     property var page: null
     property string missing: ""        // a looked-up name that is not registered
@@ -28,15 +30,15 @@ Item {
     property string walletProblem: ""  // why the wallet cannot be used, if it cannot
     property int fromIndex: 0
     property string tool: ""           // the open panel: "", "pay" or "settings"
-    property bool confirmingDelete: false
+    property bool confirmingRelease: false
     property var pending: null         // a change that was sent and is not confirmed yet
     property string registry: ""
     property string sequencer: ""
     property string walletConfig: ""   // the wallet files the names module opens by itself
     property string walletStorage: ""
     property bool wokeWallet: false
-    property var terms: []             // [{term, label, days, fee}]: how long a name can be held, and the price
-    property int termIndex: 1
+    property var deposit: null         // what the typed name would lock: {name, tier, deposit, mode}
+    property var profileDraft: ({})    // the Profile fields as typed, by key
     property string notice: ""
     property bool noticeIsError: false
     property bool settingsOpen: false
@@ -45,7 +47,8 @@ Item {
 
     readonly property bool bridgeReady: typeof logos !== "undefined" && !!logos.callModule
     readonly property bool busy: pending !== null
-    readonly property bool mine: record !== null && holds(record.owner, wallet)
+    readonly property string holder: record !== null ? holderOf(record.name) : ""
+    readonly property bool mine: holder !== ""
     readonly property string chatAddress: record !== null && record.texts && /^[0-9a-f]{64}$/.test(record.texts.chat || "") ? record.texts.chat : ""
 
     // ── Palette and type ────────────────────────────────────────────────
@@ -157,7 +160,6 @@ Item {
             walletStorage = config.wallet_storage ? config.wallet_storage : ""
             configKnown = true
             settingsOpen = registry === ""
-            loadPrices()
             loadWallet(false)
             return true
         }
@@ -194,20 +196,15 @@ Item {
         loadConfig()
     }
 
-    /// Reads what each term costs. Until it is known, registering waits.
-    function loadPrices() {
-        if (registry === "")
-            return
-        askLater("prices", [], function(value) {
-            terms = value.terms
+    /// Reads the deposit a name would lock. Until it is known, registering waits.
+    function loadDeposit(name) {
+        deposit = null
+        askLater("deposit", [name], function(value) {
+            if (missing === name)
+                deposit = value
         }, function(message) {
-            console.log("names_ui: prices:", message)
+            console.log("names_ui: deposit:", message)
         })
-    }
-
-    /// A fee as people read it.
-    function priced(fee) {
-        return fee === "0" ? "Free" : grouped(fee)
     }
 
     /// A time in milliseconds as a date.
@@ -246,13 +243,68 @@ Item {
     function loadMine() {
         if (registry === "" || wallet.length === 0) {
             myNames = []
+            pendingNames = []
             return
         }
         askLater("mine", [], function(value) {
             myNames = value.names
+            pendingNames = value.pending ? value.pending : []
+            if (pendingNames.length > 0)
+                revealTimer.start()
         }, function(message) {
             console.log("names_ui: my names:", message)
         })
+    }
+
+    /// The wallet account that holds a name, or "".
+    function holderOf(name) {
+        for (var i = 0; i < myNames.length; i++)
+            if (myNames[i].name === name)
+                return myNames[i].owner
+        return ""
+    }
+
+    /// A chain time in milliseconds as a time of day.
+    function clock(milliseconds) {
+        return Qt.formatTime(new Date(milliseconds), "HH:mm")
+    }
+
+    /// Registration is two steps: a commitment, then, 15 minutes to 24 hours
+    /// later, the reveal. Asking `register` again sends the reveal once it is
+    /// due and answers with the stage. This asks for every registration that
+    /// is due, one at a time, until each is registered.
+    function revealDue() {
+        if (revealing || bridgeReady === false)
+            return
+        for (var i = 0; i < pendingNames.length; i++) {
+            var item = pendingNames[i]
+            if (item.ready_at !== null && item.ready_at !== undefined && Date.now() < item.ready_at)
+                continue
+            revealing = true
+            askLater("register", [item.name, item.owner, "auto"], function(value) {
+                revealing = false
+                if (value && value.stage === "registered") {
+                    say(item.name + ".LEZ is yours.", false)
+                    loadMine()
+                    if (record !== null && record.name === item.name)
+                        read(item.name)
+                } else {
+                    loadMine()
+                }
+            }, function(message) {
+                revealing = false
+                console.log("names_ui: reveal:", message)
+            })
+            return
+        }
+    }
+
+    Timer {
+        id: revealTimer
+        interval: 60000
+        repeat: true
+        running: root.pendingNames.length > 0
+        onTriggered: root.revealDue()
     }
 
     function remembers(name) {
@@ -346,7 +398,10 @@ Item {
                 page = null
                 tool = ""
                 missing = String(call("names", "normalize", [name]))
-                if (missing === "")
+                deposit = null
+                if (missing !== "")
+                    loadDeposit(missing)
+                else
                     say("A name is 1 to 32 characters of a-z, 0-9 or a hyphen, such as jef.LEZ.", true)
                 return
             }
@@ -355,8 +410,8 @@ Item {
             page = ask("page", [found.name])
             if (!mine && tool !== "pay")
                 tool = ""
-            // A name registered elsewhere joins "My names" once it is looked up.
-            if (mine && !remembers(found.name))
+            // A name the wallet holds joins "My names" once it is looked up (the module refuses others).
+            if (wallet.length > 0 && !remembers(found.name))
                 askLater("keep", [found.name], function() { root.loadMine() }, function() {})
         } catch (error) {
             say(error.message, true)
@@ -374,8 +429,9 @@ Item {
         var job = { name: name, settled: settled, done: done, sent: false, tries: 0 }
         pending = job
         say("Asking the wallet to sign.", false)
-        askLater(method, args, function() {
+        askLater(method, args, function(value) {
             job.sent = true
+            job.result = value
             say("Sent. Waiting for it to be confirmed.", false)
         }, function(message) {
             pending = null
@@ -400,18 +456,28 @@ Item {
         loadWallet(false)
         read(job.name)
         if (settled)
-            say(job.done, false)
+            say(typeof job.done === "function" ? job.done(job.result) : job.done, false)
         else
             say("That was sent but has not taken effect, so it may have been refused. Check the name and try again.", true)
     }
 
+    /// Sends the commitment. The reveal follows by itself (see revealDue).
     function registerName() {
         var name = missing
         var owner = wallet[fromIndex].account
-        change("register", [name, owner, "auto", termIndex], name, function() {
-            var found = ask("resolve", [name])
-            return found !== null && found.owner === owner
-        }, name + ".LEZ is yours.")
+        if (busy)
+            return
+        pending = { name: name, sent: false }
+        say("Asking the wallet to sign.", false)
+        askLater("register", [name, owner, "auto"], function(value) {
+            pending = null
+            say("Committed. The name finishes registering in about 15 to 20 minutes; keep Basecamp open.", false)
+            missing = ""
+            loadMine()
+        }, function(message) {
+            pending = null
+            say(message, true)
+        })
     }
 
     /// Opens the settings of a name picked from "My names".
@@ -422,15 +488,7 @@ Item {
     }
 
     /// Everything the holder can do with the name on the plate: where it
-    /// pays, its entries and page, transferring it, deleting it.
-    function renewName() {
-        var name = record.name
-        var until = record.expires
-        change("renew", [name, record.owner, termIndex], name, function() {
-            return ask("resolve", [name]).expires > until
-        }, shown(name) + " is renewed.")
-    }
-
+    /// pays, its entries and page, transferring it, releasing it.
     function openSettings() {
         say("", false)
         accountField.text = record.account !== null ? record.account : ""
@@ -438,7 +496,7 @@ Item {
         newKeyField.text = ""
         newValueField.text = ""
         newOwnerField.text = ""
-        confirmingDelete = false
+        confirmingRelease = false
         tool = "settings"
     }
 
@@ -476,6 +534,46 @@ Item {
         }, value === "" ? "Removed " + key + " from " + name + ".LEZ." : "Saved " + key + " on " + name + ".LEZ.")
     }
 
+    /// The Profile fields, with the text-entry key each one sets.
+    readonly property var profileFields: [
+        { key: "display", label: "Display name", hint: "How you want to be shown" },
+        { key: "bio", label: "Bio", hint: "A line about you" },
+        { key: "avatar", label: "Avatar", hint: "A URL or a CID" },
+        { key: "theme", label: "Theme", hint: "light or dark" },
+        { key: "color", label: "Colour", hint: "A hex colour, such as #F0C562" },
+        { key: "font", label: "Font", hint: "A font name" },
+        { key: "cid", label: "CID link", hint: "A file in Logos Storage" }
+    ]
+
+    /// The Profile fields that differ from the name's entries: the new value,
+    /// or an empty string for one that was cleared.
+    function profileChanges() {
+        var changed = {}
+        if (record === null)
+            return changed
+        for (var i = 0; i < profileFields.length; i++) {
+            var key = profileFields[i].key
+            var before = record.texts && record.texts[key] !== undefined ? record.texts[key] : ""
+            var now = profileDraft[key] !== undefined ? profileDraft[key] : before
+            if (now !== before)
+                changed[key] = now
+        }
+        return changed
+    }
+
+    /// Sets every changed Profile field in one transaction.
+    function saveProfile() {
+        var name = record.name
+        var entries = profileChanges()
+        change("set_profile", [name, JSON.stringify(entries), false], name, function() {
+            var texts = ask("resolve", [name]).texts || {}
+            for (var key in entries)
+                if (entries[key] === "" ? texts[key] !== undefined : texts[key] !== entries[key])
+                    return false
+            return true
+        }, "Saved the profile of " + name + ".LEZ.")
+    }
+
     /// Publishes the page; an empty body removes it. A body that opens with a
     /// tag is published as HTML, anything else as plain text.
     function savePage(body) {
@@ -489,7 +587,7 @@ Item {
 
     function showAccountAsName() {
         var name = record.name
-        var account = record.owner
+        var account = holder
         change("set_primary", [account, name], name, function() {
             var shown = ask("reverse", [account])
             return shown !== null && shown.name === name
@@ -499,16 +597,19 @@ Item {
     function transferName() {
         var name = record.name
         var newOwner = newOwnerField.text.trim()
+        var before = record.owner_tag
         change("transfer", [name, newOwner], name, function() {
-            return ask("resolve", [name]).owner === newOwner
+            return ask("resolve", [name]).owner_tag !== before
         }, name + ".LEZ now belongs to " + shorten(newOwner) + ".")
     }
 
-    function deleteName() {
+    function releaseName() {
         var name = record.name
         change("release", [name], name, function() {
             return ask("resolve", [name]) === null
-        }, "Deleted " + name + ".LEZ.")
+        }, function(result) {
+            return result && result.refund ? "Released " + name + ".LEZ. " + grouped(result.refund) + " returned to you." : "Released " + name + ".LEZ."
+        })
     }
 
     // ── Paying and messaging ────────────────────────────────────────────
@@ -1085,53 +1186,6 @@ Item {
         }
     }
 
-    /// The terms a name can be held for, each with its price; one is chosen.
-    component Terms: RowLayout {
-        Layout.fillWidth: true
-        spacing: 8
-        Repeater {
-            model: root.terms
-            Rectangle {
-                id: term
-                required property var modelData
-                required property int index
-                readonly property bool chosen: root.termIndex === index
-                Layout.fillWidth: true
-                implicitHeight: 60
-                radius: 6
-                color: chosen ? root.raised : termArea.containsMouse ? root.hover : "transparent"
-                border.width: 1
-                border.color: chosen ? root.brass : root.line
-                Column {
-                    anchors.centerIn: parent
-                    spacing: 2
-                    Text {
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        text: term.modelData.label
-                        color: root.ink
-                        font.family: root.sans
-                        font.pixelSize: 18
-                        font.weight: Font.DemiBold
-                    }
-                    Text {
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        text: root.priced(term.modelData.fee)
-                        color: root.dim
-                        font.family: root.sans
-                        font.pixelSize: 17
-                    }
-                }
-                MouseArea {
-                    id: termArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.termIndex = term.index
-                }
-            }
-        }
-    }
-
     /// A line of explanation under a control.
     component Hint: Text {
         Layout.fillWidth: true
@@ -1304,7 +1358,20 @@ Item {
                     ListHead {
                         visible: root.registry !== ""
                         label: "My names"
-                        count: root.myNames.length > 0 ? root.myNames.length : ""
+                        count: root.myNames.length + root.pendingNames.length > 0 ? root.myNames.length + root.pendingNames.length : ""
+                    }
+                    Repeater {
+                        model: root.pendingNames
+                        Text {
+                            required property var modelData
+                            Layout.fillWidth: true
+                            Layout.leftMargin: 8
+                            text: (modelData.display ? modelData.display : modelData.name + ".lez") + ": registering" + (modelData.ready_at ? ", ready at " + root.clock(modelData.ready_at) : "")
+                            color: root.dim
+                            font.family: root.sans
+                            font.pixelSize: 17
+                            elide: Text.ElideRight
+                        }
                     }
                     ListView {
                         id: myList
@@ -1344,7 +1411,7 @@ Item {
                                     weight: Font.Medium
                                 }
                                 Text {
-                                    visible: !!myRow.modelData.lapsed
+                                    visible: !!myRow.modelData.lapsed && !myRow.modelData.never
                                     text: "Lapsed"
                                     color: root.alarm
                                     font.family: root.sans
@@ -1358,7 +1425,7 @@ Item {
                         }
                     }
                     Hint {
-                        visible: root.myNames.length === 0 && root.wallet.length > 0
+                        visible: root.myNames.length === 0 && root.pendingNames.length === 0 && root.wallet.length > 0
                         text: "None yet. Type a name above; if nobody holds it, you can register it."
                     }
                     Hint {
@@ -1514,15 +1581,23 @@ Item {
                         visible: root.wallet.length > 0
                         title: "Register it to"
                         Accounts {}
-                        Hint { text: "The account you choose holds the name and pays for it. Only it can change, transfer or delete the name. The name is set up to be paid privately, to your wallet's private account." }
-                        Part { text: "For how long" }
-                        Terms {}
-                        Hint { text: "The price goes to the registry's treasury; the network's own fee is extra. You can renew at any time, and for 30 days after it runs out." }
+                        Hint { text: "The account you choose holds the name and pays for it. Only it can change, transfer or release the name. The name is set up to be paid privately, to your wallet's private account." }
+                        Part { text: "Deposit" }
+                        Hint {
+                            font.pixelSize: 20
+                            color: root.ink
+                            text: root.deposit === null ? "Checking the deposit." : root.deposit.tier === "locked" ? "One- and two-character names are reserved." : root.deposit.deposit === null || root.deposit.deposit === undefined ? (root.deposit.fee ? root.grouped(root.deposit.fee) + " to register" : "The registry is not set up for registering yet.") : root.grouped(root.deposit.deposit)
+                        }
+                        Hint {
+                            visible: root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode === "deposit"
+                            text: "Held for as long as you keep the name, and refunded in full when you release it. Names don't expire. The network's own fee is extra." + (root.deposit !== null && root.deposit.tier === "three" ? " Three-character names take a larger deposit." : "")
+                        }
+                        Hint { visible: root.deposit === null || root.deposit.mode === "deposit"; text: "The deposit stops name squatting: holding many names ties up many deposits, and nobody keeps it." }
                         Action {
                             label: "Register " + root.missing + ".LEZ"
                             strong: true
                             changes: true
-                            enabledNow: root.terms.length > 0
+                            enabledNow: root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode !== "unconfigured"
                             onPressed: root.registerName()
                         }
                     }
@@ -1532,7 +1607,7 @@ Item {
                         spacing: 12
                         Hint {
                             font.pixelSize: 17
-                            text: "Registering it takes an account that can pay the fee. " + root.walletProblem
+                            text: "Registering it takes an account that can pay the deposit. " + root.walletProblem
                         }
                         Action {
                             label: /not running/.test(root.walletProblem) ? "Open LEZ Wallet" : "Check the wallet again"
@@ -1553,7 +1628,7 @@ Item {
                         Seal {
                             Layout.preferredWidth: 104
                             Layout.preferredHeight: 104
-                            owner: root.record !== null ? root.record.owner : ""
+                            owner: root.record !== null ? root.record.owner_tag : ""
                             letter: root.record !== null ? root.record.name.charAt(0) : ""
                         }
                         ColumnLayout {
@@ -1630,9 +1705,9 @@ Item {
                             Action { label: "Cancel"; onPressed: root.tool = "" }
                         }
                         Hint {
-                            visible: root.record !== null && root.record.lapsed
+                            visible: root.record !== null && root.record.lapsed && !root.record.never
                             color: root.alarm
-                            text: root.record !== null && root.record.lapsed ? root.shown(root.record.name) + " lapsed on " + root.dated(root.record.expires) + ". Its holder can still renew it, but check with them before you pay." : ""
+                            text: root.record !== null && root.record.lapsed && !root.record.never ? root.shown(root.record.name) + " lapsed on " + root.dated(root.record.expires) + ". Check with its holder before you pay." : ""
                         }
                         Hint { text: root.record === null ? "" : (root.record.npk !== null ? root.payHidden(true) : root.payHidden(false)) + " A payment that hides anything is proved on this machine first and takes a few minutes." }
                     }
@@ -1642,18 +1717,45 @@ Item {
                         visible: root.tool === "settings"
                         title: root.record !== null ? "Settings for " + root.shown(root.record.name) : ""
 
-                        Part { text: "Renew" }
-                        Hint { text: root.record === null ? "" : root.record.lapsed ? "It lapsed on " + root.dated(root.record.expires) + ". Renew it by " + root.dated(root.record.expires + 2592000000) + " or anyone can register it." : "Yours until " + root.dated(root.record.expires) + ". Renewing adds to that." }
-                        Terms {}
+                        Part { text: "Profile" }
+                        Hint { text: "All optional. Other apps show these when they show your name." }
+                        Repeater {
+                            model: root.profileFields
+                            RowLayout {
+                                id: profileRow
+                                required property var modelData
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    Layout.preferredWidth: 110
+                                    text: profileRow.modelData.label
+                                    color: root.dim
+                                    font.family: root.sans
+                                    font.pixelSize: 17
+                                    elide: Text.ElideRight
+                                }
+                                Field {
+                                    Layout.fillWidth: true
+                                    size: 19
+                                    hint: profileRow.modelData.hint
+                                    text: root.record !== null && root.record.texts && root.record.texts[profileRow.modelData.key] !== undefined ? root.record.texts[profileRow.modelData.key] : ""
+                                    onTextChanged: {
+                                        var draft = Object.assign({}, root.profileDraft)
+                                        draft[profileRow.modelData.key] = text
+                                        root.profileDraft = draft
+                                    }
+                                }
+                            }
+                        }
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 8
                             Action {
-                                label: root.terms.length > root.termIndex ? "Renew for " + root.terms[root.termIndex].label : "Renew"
-                                strong: root.record !== null && root.record.lapsed
+                                label: "Save profile"
+                                strong: true
                                 changes: true
-                                enabledNow: root.terms.length > 0
-                                onPressed: root.renewName()
+                                enabledNow: Object.keys(root.profileChanges()).length > 0
+                                onPressed: root.saveProfile()
                             }
                             Item { Layout.fillWidth: true }
                         }
@@ -1783,7 +1885,7 @@ Item {
                         }
 
                         Part { text: "Your account's name" }
-                        Hint { text: root.record !== null ? "Apps can then show " + root.shorten(root.record.owner) + " as " + root.shown(root.record.name) + ". This publishes the name on the chain for anyone to see, which nothing else here does." : "" }
+                        Hint { text: root.record !== null ? "Apps can then show " + root.shorten(root.holder) + " as " + root.shown(root.record.name) + ". This publishes the name on the chain for anyone to see, which nothing else here does." : "" }
                         Action {
                             label: root.record !== null ? "Show my account as " + root.shown(root.record.name) : ""
                             changes: true
@@ -1811,37 +1913,37 @@ Item {
                         }
                         Hint { text: "The new holder starts clean: where the name pays, its entries and its page are cleared. After that only they can change it or give it back." }
 
-                        Part { text: "Delete" }
-                        Hint { text: "Its record and page are emptied, and nothing of it stays behind. The name is then free for anyone to register, including someone else." }
+                        Part { text: "Release" }
+                        Hint { text: "Its record and page are emptied, and nothing of it stays behind. Your deposit comes back to you, and the name is then free for anyone to register, including someone else." }
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 8
                             Action {
-                                visible: !root.confirmingDelete
-                                label: root.record !== null ? "Delete " + root.shown(root.record.name) : ""
+                                visible: !root.confirmingRelease
+                                label: root.record !== null ? "Release " + root.shown(root.record.name) : ""
                                 grave: true
-                                onPressed: root.confirmingDelete = true
+                                onPressed: root.confirmingRelease = true
                             }
                             Text {
-                                visible: root.confirmingDelete
-                                text: "Delete it for good?"
+                                visible: root.confirmingRelease
+                                text: "Release it?"
                                 color: root.alarm
                                 font.family: root.sans
                                 font.pixelSize: 18
                                 font.weight: Font.DemiBold
                             }
                             Action {
-                                visible: root.confirmingDelete
-                                label: "Yes, delete it"
+                                visible: root.confirmingRelease
+                                label: "Yes, release it"
                                 strong: true
                                 grave: true
                                 changes: true
-                                onPressed: root.deleteName()
+                                onPressed: root.releaseName()
                             }
                             Action {
-                                visible: root.confirmingDelete
+                                visible: root.confirmingRelease
                                 label: "Keep it"
-                                onPressed: root.confirmingDelete = false
+                                onPressed: root.confirmingRelease = false
                             }
                             Item { Layout.fillWidth: true }
                             Action { label: "Done"; onPressed: root.tool = "" }
@@ -1856,8 +1958,8 @@ Item {
                         Fact {
                             label: "Held by"
                             code: !root.mine
-                            value: root.record === null ? "" : root.mine ? "Your account " + root.shorten(root.record.owner) : root.shorten(root.record.owner)
-                            full: root.record !== null ? root.record.owner : ""
+                            value: root.record === null ? "" : root.mine ? "Your account " + root.shorten(root.holder) : root.shorten(root.record.owner_tag)
+                            full: root.record !== null ? (root.mine ? root.holder : root.record.owner_tag) : ""
                         }
                         Fact {
                             visible: root.record !== null && root.record.account !== null
@@ -1867,8 +1969,13 @@ Item {
                             full: root.record !== null && root.record.account !== null ? root.record.account : ""
                         }
                         Fact {
-                            label: "Held until"
-                            value: root.record === null ? "" : root.dated(root.record.expires) + (root.record.lapsed ? ". It has lapsed and can be renewed until " + root.dated(root.record.expires + 2592000000) : "")
+                            label: root.record !== null && root.record.never ? "Held" : "Held until"
+                            value: root.record === null ? "" : root.record.never ? "Never expires" : root.dated(root.record.expires)
+                        }
+                        Fact {
+                            visible: root.record !== null && !!root.record.deposit
+                            label: "Deposit"
+                            value: root.record !== null && root.record.deposit ? root.grouped(root.record.deposit) + ", refunded when released" : ""
                         }
                         Fact {
                             label: "Paid privately"
