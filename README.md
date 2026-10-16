@@ -71,8 +71,7 @@ Key fingerprint: `SHA256:dAQbSDw6smVMxkwJdQ2104U3Xem+cDOldUmpW+wQzcE`.
 ## Status
 
 The CLI uses the **public LEZ testnet** (testnet v0.3), registry
-`2PXg3SSmh5hvECTz4xcfV2d5YvxwyF6yVhpnjTokzCkX` (registry v4.1: commit-then-reveal registration, anonymous
-holders; deployed 2026-10-16 from CI build `99bc4e36…79e6`), with `jef.lez` and
+`38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq` (registry v5: refundable deposits, locked one- and two-character names, Argon2id names; deployed 2026-10-16 from CI build `322dda10…c4ce`), with `jef.lez` and
 `logos.lez` held by a private account. There is no faucet: testnet users fund their
 own accounts. The Names test chain ([chain/](chain/README.md)) was the default while
 the public LEZ was halted (2026-10-07 to about 10-14); it still runs, with the

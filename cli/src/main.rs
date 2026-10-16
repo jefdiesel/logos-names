@@ -130,7 +130,7 @@ const LOGOS_ACCOUNT_KEY: &str = "logos.account";
 
 /// The registry on the public LEZ testnet (v4, deployed 2026-10-16). Used unless
 /// `--program` or `LOGOS_NAMES_PROGRAM` names another.
-const DEFAULT_PROGRAM: &str = "2PXg3SSmh5hvECTz4xcfV2d5YvxwyF6yVhpnjTokzCkX";
+const DEFAULT_PROGRAM: &str = "38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq";
 /// The public LEZ testnet's sequencer, reached directly: no server of ours sits between a
 /// user and the chain.
 const DEFAULT_RPC: &str = "https://testnet.lez.logos.co";
@@ -175,7 +175,8 @@ enum Command {
     /// the private account; after that, `register` and `pay` need no account arguments.
     Setup {
         /// How much of the public account's tokens to move to the private account.
-        #[arg(long, default_value_t = 2_000_000)]
+        /// The default covers one name's deposit (100,000,000 on the testnet) with room to spare.
+        #[arg(long, default_value_t = 110_000_000)]
         shield: u128,
     },
     /// Show this wallet's accounts and balances.
@@ -1713,7 +1714,8 @@ async fn setup(client: &mut Client, shield: u128) -> Result<()> {
     if balance < shield {
         println!(
             "Public/{public} holds {balance}; send it at least {shield} testnet tokens from your LEZ \
-             wallet (or with `names bridge`), then run `names setup` again"
+             wallet (or with `names bridge`), then run `names setup` again. A name is held by a \
+             refundable deposit (`names settings` shows it), so the private account needs at least that"
         );
         return Ok(());
     }

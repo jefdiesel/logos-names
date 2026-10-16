@@ -20,7 +20,7 @@ import {
 
 /** The public LEZ testnet's sequencer, reached directly; the CLI defaults to it too. */
 const DEFAULT_RPC = "https://testnet.lez.logos.co";
-const DEFAULT_PROGRAM = "2PXg3SSmh5hvECTz4xcfV2d5YvxwyF6yVhpnjTokzCkX";
+const DEFAULT_PROGRAM = "38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq";
 const rpcUrl = process.env.LEZ_RPC_URL || DEFAULT_RPC;
 const program = process.env.NAMES_PROGRAM || DEFAULT_PROGRAM;
 const VERSION = "0.2.0";

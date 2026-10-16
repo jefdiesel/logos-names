@@ -15,7 +15,7 @@ Human-readable names for the Logos Execution Zone: pay `alice.lez` instead of a 
 - **Logos Chat usernames backed by LNS** (see [ideas #43](https://github.com/logos-co/ideas/issues/43)): a chat username can be an LNS name, which gives it uniqueness from the LEZ registry. A name's `chat` entry points at the holder's chat address, so typing `alice.lez` in a chat app opens a conversation with the right person, and the app can show the name as verified when the record points back at the sender. Opt-in per name.
 - **No server in between.** The client talks to the LEZ sequencer directly and reads the registry's program from the chain to prove private changes.
 
-A working prototype is live on the LEZ testnet (registry `2PXg3SSmh5hvECTz4xcfV2d5YvxwyF6yVhpnjTokzCkX`):
+A working prototype is live on the LEZ testnet (registry `38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq`):
 
 ```
 curl -fsSL https://logos-names.wrapit.workers.dev/install.sh | sh
