@@ -44,12 +44,24 @@ Item {
     property bool settingsOpen: false
     property bool configKnown: false   // the names module has answered once
     property string lastReply: ""
+    property bool showLastReply: false // for finding out why something failed
 
     readonly property bool bridgeReady: typeof logos !== "undefined" && !!logos.callModule
     readonly property bool busy: pending !== null
     readonly property string holder: record !== null ? holderOf(record.name) : ""
     readonly property bool mine: holder !== ""
     readonly property string chatAddress: record !== null && record.texts && /^[0-9a-f]{64}$/.test(record.texts.chat || "") ? record.texts.chat : ""
+    property bool pageSourceOpen: false  // the page's source is shown under its row
+
+    // The name's profile, as the holder set it. These entries are how the name
+    // is shown, so they are drawn rather than listed. Each is checked against a
+    // fixed form first: the holder writes them, and nothing else gets through.
+    readonly property var presentationKeys: ["display", "bio", "avatar", "color", "theme", "font"]
+    readonly property string profileDisplay: profileText("display")
+    readonly property string profileBio: profileText("bio")
+    readonly property string profileAvatar: /^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+\/]+=*$/.test(profileText("avatar")) ? profileText("avatar") : ""
+    readonly property color accent: /^#[0-9a-fA-F]{6}$/.test(profileText("color")) ? readable(profileText("color")) : brass
+    readonly property string headingFont: profileText("font") === "serif" ? "Georgia" : profileText("font") === "mono" ? mono : sans
 
     // ── Palette and type ────────────────────────────────────────────────
 
@@ -386,6 +398,7 @@ Item {
     /// Puts a name on the plate, with every panel closed.
     function show(name) {
         tool = ""
+        pageSourceOpen = false
         read(name)
     }
 
@@ -538,11 +551,11 @@ Item {
     readonly property var profileFields: [
         { key: "display", label: "Display name", hint: "How you want to be shown" },
         { key: "bio", label: "Bio", hint: "A line about you" },
-        { key: "avatar", label: "Avatar", hint: "A URL or a CID" },
-        { key: "theme", label: "Theme", hint: "light or dark" },
-        { key: "color", label: "Colour", hint: "A hex colour, such as #F0C562" },
-        { key: "font", label: "Font", hint: "A font name" },
-        { key: "cid", label: "CID link", hint: "A file in Logos Storage" }
+        { key: "avatar", label: "Avatar", hint: "data:image/png;base64,… (names profile --avatar)" },
+        { key: "theme", label: "Theme", hint: "light, dark or auto" },
+        { key: "color", label: "Color", hint: "#rrggbb, such as #96d678" },
+        { key: "font", label: "Font", hint: "serif, mono or rounded" },
+        { key: "cid", label: "File (CID)", hint: "A file in Logos Storage" }
     ]
 
     /// The Profile fields that differ from the name's entries: the new value,
@@ -763,23 +776,74 @@ Item {
         return String(digits).replace(/\B(?=(\d{3})+(?!\d))/g, ",")
     }
 
-    /// The readable words of a page. Markup is removed, never rendered: a page is
-    /// its owner's words, and nothing in it should be able to act inside this app.
-    function pageWords() {
-        if (page === null || page.text === null)
+    /// What the page is, in a few words: "HTML, 148 bytes".
+    function pageSummary() {
+        if (page === null)
             return ""
-        var words = page.text
-        if (/html/i.test(page.content_type)) {
-            words = words.replace(/<(script|style|title|head)[^>]*>[\s\S]*?<\/\1>/gi, " ")
-                         .replace(/<\/(p|div|h[1-6]|li|tr|section|article)>|<br\s*\/?>/gi, "\n")
-                         .replace(/<[^>]*>/g, "")
-                         .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&#39;|&apos;/g, "'").replace(/&nbsp;/g, " ")
-        }
-        return words.replace(/[ \t]+/g, " ").replace(/\s*\n\s*/g, "\n").trim().substr(0, 2400)
+        var size = page.bytes !== undefined && page.bytes !== null ? page.bytes : (page.text !== null ? page.text.length : 0)
+        var kind = /html/i.test(page.content_type) ? "HTML" : /^text\//i.test(page.content_type) ? "Text" : "File"
+        return kind + ", " + (size < 1024 ? size + " bytes" : (size / 1024).toFixed(1) + " KB")
     }
 
-    function textKeys() {
-        return record !== null && record.texts ? Object.keys(record.texts) : []
+    /// The page's source as plain text. It is never rendered: a page is its
+    /// holder's words, and nothing in it should be able to act inside this app.
+    function pageSource() {
+        if (page === null || page.text === null || page.text === undefined)
+            return "This page is not text."
+        return String(page.text).substr(0, 4000).replace(/\s+$/, "")
+    }
+
+    function profileText(key) {
+        return record !== null && record.texts && typeof record.texts[key] === "string" ? record.texts[key].trim() : ""
+    }
+
+    /// A `#rrggbb` colour bright enough to read on this app's near-black and
+    /// to carry dark text: a dark one is mixed with white until it does.
+    function readable(hex) {
+        var r = parseInt(hex.substr(1, 2), 16), g = parseInt(hex.substr(3, 2), 16), b = parseInt(hex.substr(5, 2), 16)
+        function luminance(r, g, b) {
+            function channel(v) { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4) }
+            return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+        }
+        for (var t = 0; t < 1 && luminance(r, g, b) < 0.3; t += 0.1) {
+            r = r + (255 - r) * 0.1
+            g = g + (255 - g) * 0.1
+            b = b + (255 - b) * 0.1
+        }
+        return Qt.rgba(r / 255, g / 255, b / 255, 1)
+    }
+
+    /// The entries other apps read (chat, inbox, agent, cid and the rest),
+    /// without the ones that draw the profile. `alsoHide` leaves out more.
+    function textKeys(alsoHide) {
+        if (record === null || !record.texts)
+            return []
+        var hidden = presentationKeys.concat(alsoHide || [])
+        return Object.keys(record.texts).filter(function(key) { return hidden.indexOf(key) < 0 })
+    }
+
+    /// An entry's key as a label.
+    function entryLabel(key) {
+        var known = { chat: "Chat", inbox: "Inbox", agent: "Agent", cid: "File (CID)", "logos.account": "Logos account" }
+        return known[key] !== undefined ? known[key] : key
+    }
+
+    /// An entry's value for reading: a long unbroken value is shortened in the middle.
+    function entryShown(value) {
+        var text = String(value)
+        return text.length > 40 && !/\s/.test(text) && !/^https?:/.test(text) ? text.substr(0, 12) + "…" + text.substr(text.length - 8) : text
+    }
+
+    /// Whether an amount (decimal text) is more than nothing.
+    function someAmount(digits) {
+        return digits !== null && digits !== undefined && !/^0*$/.test(String(digits))
+    }
+
+    /// How a name can be paid, in a word or two.
+    function paymentsText() {
+        if (record === null)
+            return ""
+        return record.npk !== null && record.account !== null ? "Privately or publicly" : record.npk !== null ? "Privately" : record.account !== null ? "Publicly" : "Not set up yet"
     }
 
     /// A stable number from a string, for drawing an owner's seal.
@@ -895,8 +959,9 @@ Item {
         property bool grave: false
         property bool changes: false
         property bool enabledNow: true
+        property color tint: root.brass
         readonly property bool live: enabledNow && !(changes && root.busy)
-        readonly property color fill: grave ? root.alarm : root.brass
+        readonly property color fill: grave ? root.alarm : tint
         signal pressed()
         implicitWidth: actionText.implicitWidth + 28
         implicitHeight: 38
@@ -1299,17 +1364,75 @@ Item {
         Text {
             Layout.fillWidth: true
             text: fact.value
+            textFormat: Text.PlainText
             color: root.ink
             font.family: fact.code ? root.mono : root.sans
             font.weight: Font.Medium
-            font.pixelSize: 18
-            wrapMode: Text.WrapAnywhere
+            font.pixelSize: fact.code ? 17 : 18
+            wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+            maximumLineCount: 3
+            elide: Text.ElideRight
         }
         Link {
             visible: fact.full !== ""
             text: "Copy"
             onPressed: root.copy(fact.full, fact.label)
         }
+    }
+
+    /// The name's picture: the holder's own image when the profile has one,
+    /// drawn crisp so pixel art stays pixel art, otherwise the owner's seal.
+    /// The plate behind it is plain slate, so the round cut is painted over
+    /// the corners rather than masked, which needs no extra Qt module.
+    component Avatar: Item {
+        id: avatar
+        property string source: ""
+        property string owner: ""
+        property string letter: ""
+        property color ring: root.brass
+        readonly property bool showsImage: picture.status === Image.Ready
+        Seal {
+            anchors.fill: parent
+            visible: !avatar.showsImage
+            owner: avatar.owner
+            letter: avatar.letter
+        }
+        Image {
+            id: picture
+            anchors.fill: parent
+            visible: avatar.showsImage
+            source: avatar.source
+            sourceSize: Qt.size(256, 256)
+            fillMode: Image.PreserveAspectCrop
+            smooth: false
+            mipmap: false
+            asynchronous: false
+            cache: false
+        }
+        Canvas {
+            id: cut
+            anchors.fill: parent
+            visible: avatar.showsImage
+            onPaint: {
+                var ctx = getContext("2d")
+                ctx.reset()
+                var size = Math.min(width, height)
+                var centre = size / 2
+                ctx.fillStyle = root.slate
+                ctx.beginPath()
+                ctx.rect(0, 0, size, size)
+                ctx.arc(centre, centre, centre - 1, 0, Math.PI * 2, true)
+                ctx.fill()
+                ctx.lineWidth = 3
+                ctx.strokeStyle = avatar.ring
+                ctx.beginPath()
+                ctx.arc(centre, centre, centre - 2.5, 0, Math.PI * 2)
+                ctx.stroke()
+            }
+        }
+        onRingChanged: cut.requestPaint()
+        onShowsImageChanged: cut.requestPaint()
+        onWidthChanged: cut.requestPaint()
     }
 
     // ── Layout ──────────────────────────────────────────────────────────
@@ -1426,11 +1549,11 @@ Item {
                     }
                     Hint {
                         visible: root.myNames.length === 0 && root.pendingNames.length === 0 && root.wallet.length > 0
-                        text: "None yet. Type a name above; if nobody holds it, you can register it."
+                        text: "None yet. Look one up to register it."
                     }
                     Hint {
                         visible: root.registry !== "" && root.wallet.length === 0
-                        text: /not running/.test(root.walletProblem) ? "The LEZ wallet is not running. Opening the LEZ Wallet app starts it; the names you hold appear here after that." : "Open your wallet in the LEZ Wallet app to see the .lez names you hold."
+                        text: /not running/.test(root.walletProblem) ? "Wallet not open" : /funds/.test(root.walletProblem) ? "No funded account in the wallet" : "Wallet not connected"
                     }
                     Link {
                         visible: root.registry !== "" && root.wallet.length === 0
@@ -1470,16 +1593,14 @@ Item {
                     Layout.fillWidth: true
                     spacing: 10
                     Text {
-                        text: "Which registry"
+                        text: "App settings"
                         color: root.ink
                         font.family: root.sans
                         font.weight: Font.DemiBold
                         font.pixelSize: 28
                     }
-                    Hint {
-                        font.pixelSize: 17
-                        text: "A registry is one program on the Logos Execution Zone. Everyone who uses the same program ID resolves the same .lez names."
-                    }
+                    Part { text: "Registry" }
+                    Hint { text: "Everyone using the same registry sees the same .lez names." }
                     Field {
                         id: registryField
                         Layout.fillWidth: true
@@ -1488,6 +1609,7 @@ Item {
                         hint: "Program ID of the registry"
                         onEdited: root.saveConfig(root.sequencer, registryField.text.trim())
                     }
+                    Part { text: "Sequencer" }
                     Field {
                         id: sequencerField
                         Layout.fillWidth: true
@@ -1496,29 +1618,37 @@ Item {
                         hint: "https://testnet.lez.logos.co"
                         onEdited: root.saveConfig(sequencerField.text.trim(), root.registry)
                     }
-                    Part { text: "Wallet" }
-                    Hint { text: "The wallet that signs for your names. Give the two files the LEZ Wallet keeps it in and it is opened for you whenever it is needed." }
+                    Part { text: "Wallet files" }
+                    Hint { text: "The LEZ wallet that signs for your names. It opens by itself when needed." }
                     Field {
                         id: walletConfigField
                         Layout.fillWidth: true
                         size: 17
                         text: root.walletConfig
-                        hint: "Path of the wallet's config file"
+                        hint: "Path of wallet_config.json"
                     }
                     Field {
                         id: walletStorageField
                         Layout.fillWidth: true
                         size: 17
                         text: root.walletStorage
-                        hint: "Path of the wallet's storage file"
+                        hint: "Path of storage.json"
                     }
                     Action {
                         label: "Use this wallet"
                         onPressed: root.saveWalletFiles(walletConfigField.text.trim(), walletStorageField.text.trim())
                     }
-                    Text {
+                    Link {
                         visible: root.lastReply !== ""
+                        Layout.topMargin: 4
+                        text: root.showLastReply ? "Hide last module reply" : "Show last module reply"
+                        font.pixelSize: 15
+                        onPressed: root.showLastReply = !root.showLastReply
+                    }
+                    Text {
+                        visible: root.lastReply !== "" && root.showLastReply
                         Layout.fillWidth: true
+                        textFormat: Text.PlainText
                         text: root.lastReply
                         color: root.dim
                         font.family: root.mono
@@ -1555,7 +1685,7 @@ Item {
                     Hint {
                         font.pixelSize: 18
                         color: root.ink
-                        text: !root.configKnown ? "Waiting for the names module to answer." : root.registry === "" ? "Open App settings and enter the registry's program ID." : "Type a name you know to see where it pays and how to reach its holder. If nobody holds it, you can register it. There is no list to browse: a .lez name is found only by someone who knows it."
+                        text: !root.configKnown ? "Waiting for the names module to answer." : root.registry === "" ? "Open App settings and enter the registry's program ID." : "Type a name to see how to pay or reach its holder. If nobody holds it, you can register it."
                     }
                 }
 
@@ -1581,7 +1711,7 @@ Item {
                         visible: root.wallet.length > 0
                         title: "Register it to"
                         Accounts {}
-                        Hint { text: "The account you choose holds the name and pays for it. Only it can change, transfer or release the name. The name is set up to be paid privately, to your wallet's private account." }
+                        Hint { text: "This account holds the name and pays the deposit. Payments to the name go to your private account." }
                         Part { text: "Deposit" }
                         Hint {
                             font.pixelSize: 20
@@ -1590,9 +1720,8 @@ Item {
                         }
                         Hint {
                             visible: root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode === "deposit"
-                            text: "Held for as long as you keep the name, and refunded in full when you release it. Names don't expire. The network's own fee is extra." + (root.deposit !== null && root.deposit.tier === "three" ? " Three-character names take a larger deposit." : "")
+                            text: (root.deposit !== null && root.deposit.tier === "three" ? "Three-character names take a larger deposit. " : "") + "Refunded in full when you release the name, which never expires. Network fee extra."
                         }
-                        Hint { visible: root.deposit === null || root.deposit.mode === "deposit"; text: "The deposit stops name squatting: holding many names ties up many deposits, and nobody keeps it." }
                         Action {
                             label: "Register " + root.missing + ".lez"
                             strong: true
@@ -1607,7 +1736,7 @@ Item {
                         spacing: 12
                         Hint {
                             font.pixelSize: 17
-                            text: "Registering it takes an account that can pay the deposit. " + root.walletProblem
+                            text: /not running/.test(root.walletProblem) ? "Open your wallet to register it." : root.walletProblem
                         }
                         Action {
                             label: /not running/.test(root.walletProblem) ? "Open LEZ Wallet" : "Check the wallet again"
@@ -1625,26 +1754,59 @@ Item {
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: 22
-                        Seal {
+                        Avatar {
                             Layout.preferredWidth: 104
                             Layout.preferredHeight: 104
+                            Layout.alignment: Qt.AlignTop
+                            source: root.profileAvatar
                             owner: root.record !== null ? root.record.owner_tag : ""
                             letter: root.record !== null ? root.record.name.charAt(0) : ""
+                            ring: root.accent
                         }
                         ColumnLayout {
                             Layout.fillWidth: true
-                            spacing: 2
+                            Layout.alignment: Qt.AlignVCenter
+                            spacing: 4
+                            Text {
+                                visible: root.profileDisplay !== ""
+                                Layout.fillWidth: true
+                                text: root.profileDisplay
+                                textFormat: Text.PlainText
+                                color: root.ink
+                                font.family: root.headingFont
+                                font.weight: Font.DemiBold
+                                font.pixelSize: 44
+                                elide: Text.ElideRight
+                            }
                             NameLabel {
+                                visible: root.profileDisplay === ""
                                 Layout.fillWidth: true
                                 name: root.record !== null ? root.record.name : ""
                                 size: 52
                                 weight: Font.DemiBold
                             }
                             Text {
-                                text: root.record === null ? "" : root.record.npk !== null && root.record.account !== null ? "Takes public and private payments" : root.record.npk !== null ? "Takes private payments" : root.record.account !== null ? "Takes public payments" : "Does not take payments yet"
+                                visible: root.profileDisplay !== ""
+                                text: root.record !== null ? root.shown(root.record.name) : ""
+                                textFormat: Text.PlainText
+                                color: root.accent
+                                font.family: root.sans
+                                font.weight: Font.DemiBold
+                                font.pixelSize: 20
+                            }
+                            Text {
+                                visible: root.profileBio !== ""
+                                Layout.fillWidth: true
+                                Layout.topMargin: 6
+                                text: root.profileBio
+                                textFormat: Text.PlainText
                                 color: root.dim
                                 font.family: root.sans
                                 font.pixelSize: 18
+                                lineHeight: 1.25
+                                wrapMode: Text.Wrap
+                                maximumLineCount: 4
+                                elide: Text.ElideRight
                             }
                         }
                     }
@@ -1653,14 +1815,15 @@ Item {
                         Layout.fillWidth: true
                         spacing: 8
                         Action {
+                            visible: root.record !== null && (root.record.account !== null || root.record.npk !== null)
                             label: "Send"
                             strong: true
-                            enabledNow: root.record !== null && (root.record.account !== null || root.record.npk !== null)
+                            tint: root.accent
                             onPressed: root.openPay()
                         }
                         Action {
+                            visible: root.chatAddress !== ""
                             label: "Message"
-                            enabledNow: root.chatAddress !== ""
                             onPressed: root.message()
                         }
                         Action {
@@ -1709,7 +1872,7 @@ Item {
                             color: root.alarm
                             text: root.record !== null && root.record.lapsed && !root.record.never ? root.shown(root.record.name) + " lapsed on " + root.dated(root.record.expires) + ". Check with its holder before you pay." : ""
                         }
-                        Hint { text: root.record === null ? "" : (root.record.npk !== null ? root.payHidden(true) : root.payHidden(false)) + " A payment that hides anything is proved on this machine first and takes a few minutes." }
+                        Hint { text: root.record === null ? "" : (root.record.npk !== null ? root.payHidden(true) : root.payHidden(false)) + (root.record.npk !== null ? " Private payments take a few minutes to prove." : "") }
                     }
 
                     // The holder's settings for this name.
@@ -1718,7 +1881,7 @@ Item {
                         title: root.record !== null ? "Settings for " + root.shown(root.record.name) : ""
 
                         Part { text: "Profile" }
-                        Hint { text: "All optional. Other apps show these when they show your name." }
+                        Hint { text: "All optional. Shown wherever your name is." }
                         Repeater {
                             model: root.profileFields
                             RowLayout {
@@ -1762,10 +1925,10 @@ Item {
 
                         Part { text: "Where it is paid" }
                         Hint {
-                            text: root.record === null ? "" : root.record.npk !== null && root.record.account === null ? "Private payments only. Someone who looks the name up sees receiving keys that say nothing about your accounts, and each payment lands where only you can find it."
-                                : root.record.npk !== null ? "Private payments, and a public account. Anyone who looks the name up sees that account, its balance and its history."
-                                : root.record.account !== null ? "A public account only. Anyone who looks the name up sees that account, its balance and its history."
-                                : "Nowhere yet. Nobody can pay this name."
+                            text: root.record === null ? "" : root.record.npk !== null && root.record.account === null ? "Private payments only. Nobody can link them to your accounts."
+                                : root.record.npk !== null ? "Private payments, and a public account anyone can see."
+                                : root.record.account !== null ? "A public account only. Anyone can see its balance and history."
+                                : "Not set up. Nobody can pay this name yet."
                         }
                         RowLayout {
                             Layout.fillWidth: true
@@ -1792,7 +1955,7 @@ Item {
                                 id: accountField
                                 Layout.fillWidth: true
                                 code: true
-                                hint: "Or a public account ID, visible to anyone who looks the name up"
+                                hint: "Or a public account ID (visible to anyone)"
                             }
                             Action {
                                 label: "Save"
@@ -1804,7 +1967,7 @@ Item {
 
                         Part { text: "Entries" }
                         Repeater {
-                            model: root.textKeys()
+                            model: root.textKeys(["cid"])
                             RowLayout {
                                 id: entry
                                 required property string modelData
@@ -1859,13 +2022,13 @@ Item {
                                 onPressed: root.saveText(newKeyField.text, newValueField.text)
                             }
                         }
-                        Hint { text: "Other apps read these. chat is your Logos Chat address, inbox a Logos Delivery topic, agent where your AI agent answers, cid a file in Logos Storage." }
+                        Hint { text: "Read by other apps: chat (Logos Chat address), inbox, agent." }
 
                         Part { text: "Page" }
                         Area {
                             id: pageArea
                             Layout.fillWidth: true
-                            hint: "Write plain text or HTML. Anyone can read it at this name."
+                            hint: "Plain text or HTML, public to anyone"
                         }
                         RowLayout {
                             Layout.fillWidth: true
@@ -1885,7 +2048,7 @@ Item {
                         }
 
                         Part { text: "Your account's name" }
-                        Hint { text: root.record !== null ? "Apps can then show " + root.shorten(root.holder) + " as " + root.shown(root.record.name) + ". This publishes the name on the chain for anyone to see, which nothing else here does." : "" }
+                        Hint { text: root.record !== null ? "Apps then show " + root.shorten(root.holder) + " as " + root.shown(root.record.name) + ". This links the two publicly." : "" }
                         Action {
                             label: root.record !== null ? "Show my account as " + root.shown(root.record.name) : ""
                             changes: true
@@ -1911,10 +2074,10 @@ Item {
                                 onPressed: root.transferName()
                             }
                         }
-                        Hint { text: "The new holder starts clean: where the name pays, its entries and its page are cleared. After that only they can change it or give it back." }
+                        Hint { text: "Payments, entries and page are cleared for the new holder." }
 
                         Part { text: "Release" }
-                        Hint { text: "Its record and page are emptied, and nothing of it stays behind. Your deposit comes back to you, and the name is then free for anyone to register, including someone else." }
+                        Hint { text: "Clears everything and refunds your deposit. Anyone can then register the name." }
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 8
@@ -1956,10 +2119,13 @@ Item {
                         Layout.fillWidth: true
                         spacing: 10
                         Fact {
-                            label: "Held by"
-                            code: !root.mine
-                            value: root.record === null ? "" : root.mine ? "Your account " + root.shorten(root.holder) : root.shorten(root.record.owner_tag)
-                            full: root.record !== null ? (root.mine ? root.holder : root.record.owner_tag) : ""
+                            label: "Holder"
+                            value: root.record === null ? "" : root.mine ? "You · " + root.shorten(root.holder) : "Held privately"
+                            full: root.mine ? root.holder : ""
+                        }
+                        Fact {
+                            label: "Payments"
+                            value: root.paymentsText()
                         }
                         Fact {
                             visible: root.record !== null && root.record.account !== null
@@ -1969,52 +2135,79 @@ Item {
                             full: root.record !== null && root.record.account !== null ? root.record.account : ""
                         }
                         Fact {
-                            label: root.record !== null && root.record.never ? "Held" : "Held until"
-                            value: root.record === null ? "" : root.record.never ? "Never expires" : root.dated(root.record.expires)
+                            visible: root.record !== null && !root.record.never
+                            label: root.record !== null && root.record.lapsed ? "Lapsed" : "Held until"
+                            value: root.record === null || root.record.never ? "" : root.dated(root.record.expires)
                         }
                         Fact {
-                            visible: root.record !== null && !!root.record.deposit
+                            visible: root.record !== null && root.someAmount(root.record.deposit)
                             label: "Deposit"
-                            value: root.record !== null && root.record.deposit ? root.grouped(root.record.deposit) + ", refunded when released" : ""
-                        }
-                        Fact {
-                            label: "Paid privately"
-                            value: root.record !== null && root.record.npk !== null ? "Yes" : "Not set up"
+                            value: root.record !== null && root.someAmount(root.record.deposit) ? root.grouped(root.record.deposit) + ", refunded when released" : ""
                         }
                         Repeater {
                             model: root.textKeys()
                             Fact {
                                 required property string modelData
-                                label: modelData
-                                value: root.record !== null && root.record.texts[modelData] !== undefined ? root.record.texts[modelData] : ""
-                                full: value
+                                label: root.entryLabel(modelData)
+                                code: modelData !== "agent"
+                                value: root.record !== null && root.record.texts[modelData] !== undefined ? root.entryShown(root.record.texts[modelData]) : ""
+                                full: root.record !== null && root.record.texts[modelData] !== undefined ? root.record.texts[modelData] : ""
                             }
                         }
-                    }
 
-                    // The name's page.
-                    ColumnLayout {
-                        visible: root.page !== null
-                        Layout.fillWidth: true
-                        spacing: 8
-                        Rectangle { Layout.fillWidth: true; height: 1; color: root.line }
-                        Text {
-                            text: root.record !== null ? "On " + root.record.name + "'s page" : ""
-                            color: root.dim
-                            font.family: root.sans
-                            font.pixelSize: 17
-                        }
-                        Text {
+                        // The page: what it is, and its source on request. It is
+                        // never rendered here (see pageSource).
+                        RowLayout {
+                            visible: root.page !== null
                             Layout.fillWidth: true
-                            Layout.maximumHeight: 300
+                            spacing: 12
+                            Text {
+                                Layout.preferredWidth: 120
+                                text: "Page"
+                                color: root.dim
+                                font.family: root.sans
+                                font.weight: Font.Medium
+                                font.pixelSize: 18
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                text: root.pageSummary() + (root.record !== null ? " · open with names open " + root.shown(root.record.name) : "")
+                                textFormat: Text.PlainText
+                                color: root.ink
+                                font.family: root.sans
+                                font.weight: Font.Medium
+                                font.pixelSize: 18
+                                elide: Text.ElideRight
+                            }
+                            Link {
+                                text: root.pageSourceOpen ? "Hide source" : "Show source"
+                                onPressed: root.pageSourceOpen = !root.pageSourceOpen
+                            }
+                        }
+                        Rectangle {
+                            visible: root.page !== null && root.pageSourceOpen
+                            Layout.fillWidth: true
+                            Layout.leftMargin: 132
+                            implicitHeight: sourceText.implicitHeight + 24
+                            radius: 6
+                            color: root.panel
+                            border.width: 1
+                            border.color: root.line
                             clip: true
-                            textFormat: Text.PlainText
-                            text: root.pageWords() !== "" ? root.pageWords() : "The page holds no readable text."
-                            color: root.ink
-                            font.family: root.sans
-                            font.pixelSize: 19
-                            lineHeight: 1.4
-                            wrapMode: Text.Wrap
+                            Text {
+                                id: sourceText
+                                x: 12
+                                y: 12
+                                width: parent.width - 24
+                                text: root.pageSource()
+                                textFormat: Text.PlainText
+                                color: root.dim
+                                font.family: root.mono
+                                font.pixelSize: 14
+                                wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                                maximumLineCount: 14
+                                elide: Text.ElideRight
+                            }
                         }
                     }
                 }
