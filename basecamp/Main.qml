@@ -1361,8 +1361,8 @@ Item {
         }
     }
 
-    /// A name with its suffix. The name leads; `.lez` follows in smaller,
-    /// quieter capitals, so it reads as a mark rather than part of the word.
+    /// A name with its suffix: `.lez` follows at the same size, in a quieter
+    /// colour.
     component NameLabel: Item {
         id: label
         property string name: ""
@@ -1389,8 +1389,7 @@ Item {
             color: root.dim
             font.family: root.sans
             font.weight: label.weight
-            font.pixelSize: Math.round(label.size * 0.7)
-            font.letterSpacing: label.size * 0.04
+            font.pixelSize: label.size
         }
     }
 
