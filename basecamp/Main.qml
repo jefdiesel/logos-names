@@ -1682,7 +1682,7 @@ Item {
         onTriggered: { root.clockTick = Date.now(); root.boardCheckJob() }
     }
     Timer {
-        interval: 60000
+        interval: 15000
         repeat: true
         running: root.section === "posts" && root.boardJob === null && root.boardView !== "thread"
         onTriggered: { root.clockTick = Date.now(); root.boardLoad() }

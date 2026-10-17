@@ -252,6 +252,41 @@ pub struct FeedPost {
     pub block: u64,
 }
 
+/// The board changes earlier scans found, kept next to the wallet.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct BoardCache {
+    /// The last block read.
+    last: u64,
+    events: Vec<BoardEvent>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BoardEvent {
+    block: u64,
+    /// post, like, unlike or hide.
+    kind: String,
+    /// Hex of the post, like or post ID it is about.
+    data: String,
+    /// The like's account, for likes and unlikes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account: Option<String>,
+}
+
+/// Blocks `start..=end` from the sequencer's `getBlockRange`.
+fn block_range(url: &str, start: u64, end: u64) -> Result<Vec<common::block::Block>> {
+    use base64::Engine as _;
+    let reply = super::rpc_call(url, "getBlockRange", serde_json::json!([start, end]))?;
+    let list = reply.as_array().ok_or_else(|| anyhow!("blocks {start}-{end} did not come back as a list"))?;
+    list.iter()
+        .map(|item| {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(item.as_str().unwrap_or_default())
+                .map_err(|error| anyhow!("a block is not base64: {error}"))?;
+            borsh::from_slice::<common::block::Block>(&bytes).map_err(|error| anyhow!("a block does not decode: {error}"))
+        })
+        .collect()
+}
+
 /// What a scan of recent blocks found on the board.
 #[derive(Default)]
 struct Scan {
@@ -265,69 +300,56 @@ impl Client {
     /// changes carry their effects on public accounts in the clear, so a post is
     /// read straight from the block that made it.
     async fn scan_board(&self, board: AccountId, blocks: u64) -> Result<Scan> {
-        use futures::StreamExt as _;
         let last = self.wallet.get_last_block_id().await.context("cannot read the chain's height")?;
         let first = last.saturating_sub(blocks.saturating_sub(1)).max(1);
-        let fetched: Vec<_> = futures::stream::iter(first..=last)
-            .map(|id| async move { (id, self.wallet.get_block(id).await) })
-            .buffered(24)
-            .collect()
-            .await;
+        // Blocks never change once in the chain: what earlier scans found is kept
+        // next to the wallet, and only the blocks since are read.
+        let path = fetch_persistent_storage_path()?.with_file_name(format!("board-{board}.json"));
+        let mut cache: BoardCache = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        let from = if cache.last >= first { cache.last + 1 } else { first };
+        if from <= last {
+            let found = self.board_events(board, from, last).await?;
+            cache.events.extend(found);
+            cache.last = last;
+        }
+        // Keep a week of blocks at most.
+        let keep_from = last.saturating_sub(60_000);
+        cache.events.retain(|event| event.block >= keep_from);
+        if let Ok(text) = serde_json::to_string(&cache) {
+            std::fs::write(&path, text).ok();
+        }
+
         let mut scan = Scan::default();
         let mut liked: std::collections::BTreeMap<AccountId, (NameId, u64)> = std::collections::BTreeMap::new();
         let mut unliked = Vec::new();
-        for (block_id, block) in fetched {
-            let Ok(Some(block)) = block else { continue };
-            for tx in &block.body.transactions {
-                // A public change carries its instruction, not its effects: read
-                // what it wrote from the post's account, which also says it applied.
-                if let common::transaction::LeeTransaction::Public(tx) = tx {
-                    if tx.message.program_account_id != board {
-                        continue;
-                    }
-                    match borsh::from_slice::<BoardInstruction>(&tx.message.instruction_data) {
-                        Ok(BoardInstruction::Post { author, n, .. }) => {
-                            let id = PostId { author, n };
-                            if let Ok(bytes) = self.board_shard(board, board_core::post_address(&board, &id)).await {
-                                if let Ok(post) = borsh::from_slice::<board_core::Post>(&bytes) {
-                                    scan.posts.push((post, block_id));
-                                }
-                            }
-                        }
-                        Ok(BoardInstruction::Like { liker, post, .. }) => {
-                            *scan.likes.entry((post.author, post.n)).or_default() += 1;
-                            liked.insert(board_core::like_address(&board, &post, &liker), (post.author, post.n));
-                        }
-                        Ok(BoardInstruction::Unlike { liker, post }) => unliked.push(board_core::like_address(&board, &post, &liker)),
-                        Ok(BoardInstruction::Hide { post }) => {
-                            scan.hidden.insert((post.author, post.n));
-                        }
-                        _ => {}
-                    }
-                    continue;
-                }
-                let common::transaction::LeeTransaction::PrivacyPreserving(tx) = tx else { continue };
-                for action in &tx.message.public_actions {
-                    for effect in &action.effects {
-                        if effect.program_account_id != board || effect.shard_program_account_id != board {
-                            continue;
-                        }
-                        match borsh::from_slice::<board_core::Effect>(&effect.data) {
-                            Ok(board_core::Effect::CreatePost(post)) => scan.posts.push((post, block_id)),
-                            Ok(board_core::Effect::CreateLike(like)) => {
-                                *scan.likes.entry((like.post.author, like.post.n)).or_default() += 1;
-                                liked.insert(action.account_id, (like.post.author, like.post.n));
-                            }
-                            Ok(board_core::Effect::DeleteLike) => unliked.push(action.account_id),
-                            Ok(board_core::Effect::HidePost) => {
-                                if let Some((post, _)) = scan.posts.iter().find(|(p, _)| board_core::post_address(&board, &p.id) == action.account_id) {
-                                    scan.hidden.insert((post.id.author, post.id.n));
-                                }
-                            }
-                            _ => {}
-                        }
+        for event in cache.events.iter().filter(|event| event.block >= first) {
+            let Ok(data) = hex::decode(&event.data) else { continue };
+            match event.kind.as_str() {
+                "post" => {
+                    if let Ok(post) = borsh::from_slice::<board_core::Post>(&data) {
+                        scan.posts.push((post, event.block));
                     }
                 }
+                "like" => {
+                    if let (Ok(like), Some(account)) = (borsh::from_slice::<board_core::Like>(&data), event.account.as_deref().and_then(|a| a.parse().ok())) {
+                        *scan.likes.entry((like.post.author, like.post.n)).or_default() += 1;
+                        liked.insert(account, (like.post.author, like.post.n));
+                    }
+                }
+                "unlike" => {
+                    if let Some(account) = event.account.as_deref().and_then(|a| a.parse().ok()) {
+                        unliked.push(account);
+                    }
+                }
+                "hide" => {
+                    if let Ok(post) = borsh::from_slice::<PostId>(&data) {
+                        scan.hidden.insert((post.author, post.n));
+                    }
+                }
+                _ => {}
             }
         }
         // An unlike names only the like's account; it counts against the post that
@@ -338,6 +360,96 @@ impl Client {
             }
         }
         Ok(scan)
+    }
+
+    /// The board's changes in blocks `from..=to`, read 200 blocks a call, several
+    /// calls at once.
+    async fn board_events(&self, board: AccountId, from: u64, to: u64) -> Result<Vec<BoardEvent>> {
+        use futures::StreamExt as _;
+        let url = self.wallet.config().sequencer.sequencer_addr.to_string();
+        let ranges: Vec<(u64, u64)> = (from..=to).step_by(200).map(|start| (start, (start + 199).min(to))).collect();
+        let fetched: Vec<Result<Vec<common::block::Block>>> = futures::stream::iter(ranges)
+            .map(|(start, end)| {
+                let url = url.clone();
+                async move {
+                    tokio::task::spawn_blocking(move || block_range(&url, start, end))
+                        .await
+                        .map_err(|error| anyhow!("{error}"))?
+                }
+            })
+            .buffered(8)
+            .collect()
+            .await;
+        let mut events = Vec::new();
+        for blocks in fetched {
+            for block in blocks? {
+                let block_id = block.header.block_id;
+                for tx in &block.body.transactions {
+                    self.events_of(board, block_id, tx, &mut events).await;
+                }
+            }
+        }
+        Ok(events)
+    }
+
+    /// The board changes one transaction made.
+    async fn events_of(&self, board: AccountId, block: u64, tx: &common::transaction::LeeTransaction, out: &mut Vec<BoardEvent>) {
+        let event = |kind: &str, data: Vec<u8>, account: Option<AccountId>| BoardEvent {
+            block,
+            kind: kind.to_owned(),
+            data: hex::encode(data),
+            account: account.map(|account| account.to_string()),
+        };
+        // A public change carries its instruction, not its effects: read what it
+        // wrote from the post's account, which also says it applied.
+        if let common::transaction::LeeTransaction::Public(tx) = tx {
+            if tx.message.program_account_id != board {
+                return;
+            }
+            match borsh::from_slice::<BoardInstruction>(&tx.message.instruction_data) {
+                Ok(BoardInstruction::Post { author, n, .. }) => {
+                    let id = PostId { author, n };
+                    if let Ok(bytes) = self.board_shard(board, board_core::post_address(&board, &id)).await {
+                        if !bytes.is_empty() {
+                            out.push(event("post", bytes, None));
+                        }
+                    }
+                }
+                Ok(BoardInstruction::Like { liker, post, now }) => {
+                    let like = board_core::Like { version: board_core::VERSION, post, liker, time: now };
+                    out.push(event("like", borsh::to_vec(&like).unwrap_or_default(), Some(board_core::like_address(&board, &post, &liker))));
+                }
+                Ok(BoardInstruction::Unlike { liker, post }) => {
+                    out.push(event("unlike", Vec::new(), Some(board_core::like_address(&board, &post, &liker))));
+                }
+                Ok(BoardInstruction::Hide { post }) => out.push(event("hide", borsh::to_vec(&post).unwrap_or_default(), None)),
+                _ => {}
+            }
+            return;
+        }
+        let common::transaction::LeeTransaction::PrivacyPreserving(tx) = tx else { return };
+        for action in &tx.message.public_actions {
+            for effect in &action.effects {
+                if effect.program_account_id != board || effect.shard_program_account_id != board {
+                    continue;
+                }
+                match borsh::from_slice::<board_core::Effect>(&effect.data) {
+                    Ok(board_core::Effect::CreatePost(post)) => out.push(event("post", borsh::to_vec(&post).unwrap_or_default(), None)),
+                    Ok(board_core::Effect::CreateLike(like)) => {
+                        out.push(event("like", borsh::to_vec(&like).unwrap_or_default(), Some(action.account_id)));
+                    }
+                    Ok(board_core::Effect::DeleteLike) => out.push(event("unlike", Vec::new(), Some(action.account_id))),
+                    Ok(board_core::Effect::HidePost) => {
+                        if let Ok(bytes) = self.board_shard(board, action.account_id).await {
+                            if let Ok(post) = borsh::from_slice::<board_core::Post>(&bytes) {
+                                out.push(event("hide", borsh::to_vec(&post.id).unwrap_or_default(), None));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     /// Checks each post's name against its author id (the program can't), and
