@@ -26,6 +26,8 @@ use std::time::{Duration, Instant};
 pub const STORAGE_FILE: &str = "storage.json";
 /// `names mine` is answered while the caller waits, so it gives up early.
 const MINE_PATIENCE: Duration = Duration::from_secs(15);
+/// A feed reads a few thousand recent blocks.
+const FEED_PATIENCE: Duration = Duration::from_secs(120);
 /// `names balance` first catches the wallet up with the chain.
 const BALANCE_PATIENCE: Duration = Duration::from_secs(90);
 /// A change that takes longer than this is stopped.
@@ -128,6 +130,69 @@ impl Setup {
 /// it in the background (`names mine` says when).
 pub fn register_args(name: &str) -> Result<Vec<String>, String> {
     Ok(vec!["register".to_owned(), "--".to_owned(), registry::parse_name(name)?])
+}
+
+/// A board post reference, `<name>/<n>`, checked like anything typed.
+fn post_ref(post: &str) -> Result<String, String> {
+    let (name, n) = post.trim().rsplit_once('/').ok_or("a post is written <name>/<number>")?;
+    let name = registry::parse_name(name)?;
+    let n: u64 = n.parse().map_err(|_| format!("not a post number: {n}"))?;
+    Ok(format!("{name}/{n}"))
+}
+
+/// `names post`.
+pub fn post_args(name: &str, text: &str, cids: &[String], reply: &str) -> Result<Vec<String>, String> {
+    let name = registry::parse_name(name)?;
+    if text.len() > 1024 {
+        return Err("a post holds at most 1,024 bytes of text".to_owned());
+    }
+    if text.trim().is_empty() && cids.is_empty() {
+        return Err("a post needs text or a file".to_owned());
+    }
+    if cids.len() > 4 || cids.iter().any(|cid| cid.is_empty() || cid.len() > 100 || !cid.bytes().all(|b| b.is_ascii_alphanumeric())) {
+        return Err("up to four CIDs, each letters and digits".to_owned());
+    }
+    let mut args = vec!["post".to_owned(), format!("--as={name}")];
+    args.extend(cids.iter().map(|cid| format!("--cid={cid}")));
+    if !reply.trim().is_empty() {
+        args.push(format!("--reply={}", post_ref(reply)?));
+    }
+    args.extend(["--".to_owned(), text.to_owned()]);
+    Ok(args)
+}
+
+/// `names like`.
+pub fn like_args(name: &str, post: &str, undo: bool) -> Result<Vec<String>, String> {
+    let mut args = vec!["like".to_owned(), format!("--as={}", registry::parse_name(name)?)];
+    if undo {
+        args.push("--undo".to_owned());
+    }
+    args.extend(["--".to_owned(), post_ref(post)?]);
+    Ok(args)
+}
+
+/// `names hide`, and the name whose job it is.
+pub fn hide_args(post: &str) -> Result<(String, Vec<String>), String> {
+    let post = post_ref(post)?;
+    let name = post.rsplit_once('/').map(|(name, _)| name.to_owned()).unwrap_or_default();
+    Ok((name, vec!["hide".to_owned(), "--".to_owned(), post]))
+}
+
+/// Runs `names feed --json`, for the names in `following` or, if none, everyone.
+pub fn run_feed(setup: &Setup, following: &[String]) -> Result<Value, String> {
+    setup.wallet_ready()?;
+    let mut args = vec!["feed".to_owned(), "--json".to_owned()];
+    if !following.is_empty() {
+        args.push(format!("--following={}", following.join(",")));
+    }
+    serde_json::from_str(last_line(&run_text(setup, args, FEED_PATIENCE)?)).map_err(|_| "the names CLI's feed did not decode".to_owned())
+}
+
+/// Runs `names thread --json` for `post`.
+pub fn run_thread(setup: &Setup, post: &str) -> Result<Value, String> {
+    setup.wallet_ready()?;
+    let args = vec!["thread".to_owned(), "--json".to_owned(), "--".to_owned(), post_ref(post)?];
+    serde_json::from_str(last_line(&run_text(setup, args, FEED_PATIENCE)?)).map_err(|_| "the names CLI's thread did not decode".to_owned())
 }
 
 pub fn mine_args() -> Vec<String> {
@@ -732,6 +797,22 @@ mod tests {
             strings(&["--program=38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq", "--rpc=https://testnet.lez.logos.co", "mine"])
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn board_commands_check_their_input() {
+        assert_eq!(
+            post_args("Jef", "-hi", &["zDvZ1".into()], "ada/3").unwrap(),
+            strings(&["post", "--as=jef", "--cid=zDvZ1", "--reply=ada/3", "--", "-hi"])
+        );
+        assert!(post_args("jef", "", &[], "").is_err());
+        assert!(post_args("jef", &"x".repeat(1025), &[], "").is_err());
+        assert!(post_args("jef", "hi", &["a b".into()], "").is_err());
+        assert!(post_args("jef", "hi", &[], "ada").is_err());
+        assert!(post_args("jef; rm", "hi", &[], "").is_err());
+        assert_eq!(like_args("jef", "@ada/0", true).unwrap(), strings(&["like", "--as=jef", "--undo", "--", "ada/0"]));
+        assert_eq!(hide_args("jef/2").unwrap(), ("jef".to_owned(), strings(&["hide", "--", "jef/2"])));
+        assert!(hide_args("jef/x").is_err());
     }
 
     #[test]

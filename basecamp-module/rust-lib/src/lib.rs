@@ -280,6 +280,34 @@ pub trait NamesModule: Send + 'static {
     /// later. `cli_mine` lists it with `registering` true until then.
     fn cli_register(&mut self, name: String) -> String;
 
+    // ── The LNS board (see board/ and docs/BOARD-PLAN.md) ──────────────
+
+    /// The board's recent posts, newest first, read through the names CLI:
+    /// `[{post, name, n, parent, time, text, cids, likes, hidden, block}]`, where
+    /// `post` and `parent` are written `<name>/<n>`. With `following` true, only
+    /// posts by the names this device follows. Takes seconds; ask with a long timeout.
+    fn board_feed(&mut self, following: bool) -> String;
+
+    /// A post (`<name>/<n>`) and its replies, oldest first, as in `board_feed`.
+    fn board_thread(&mut self, post: String) -> String;
+
+    /// Posts `text` as `name`, which the CLI's wallet holds privately, with up to
+    /// four Logos Storage CIDs (`cids_json`, a JSON list) and, if `reply` is a
+    /// post, as a reply to it. A CLI job, as `cli_set_text`; about 4 minutes.
+    fn board_post(&mut self, name: String, text: String, cids_json: String, reply: String) -> String;
+
+    /// Likes `post` as `name` (or takes the like back with `undo`). A CLI job.
+    fn board_like(&mut self, name: String, post: String, undo: bool) -> String;
+
+    /// Takes down `post`, one of the CLI wallet's names' posts. A CLI job.
+    fn board_hide(&mut self, post: String) -> String;
+
+    /// The names this device follows, a JSON list.
+    fn board_follows(&mut self) -> String;
+
+    /// Follows `name` (or stops, with `undo`); kept on this device only.
+    fn board_follow(&mut self, name: String, undo: bool) -> String;
+
     /// The names CLI's default private account and its balance:
     /// `{account, balance}` (decimal text), or null if it has none. Runs
     /// `names balance`, which first catches up with the chain (seconds to a
@@ -330,6 +358,8 @@ struct Names {
     cli_wallet: Option<String>,
     /// Where CLI jobs keep their logs; the config directory's `jobs` if unset.
     jobs_dir: Option<std::path::PathBuf>,
+    /// The names followed on the board, kept on this device only.
+    follows: Vec<String>,
 }
 
 /// Where this module keeps what it remembers between runs.
@@ -348,6 +378,7 @@ impl Default for Names {
             cli: None,
             cli_wallet: None,
             jobs_dir: None,
+            follows: Vec::new(),
         };
         // A missing or unreadable file just means the defaults stand.
         let saved = config_dir()
@@ -602,6 +633,10 @@ impl Names {
         }
         self.cli = saved["cli"].as_str().filter(|path| !path.is_empty()).map(str::to_owned);
         self.cli_wallet = saved["cli_wallet"].as_str().filter(|dir| !dir.is_empty()).map(str::to_owned);
+        self.follows = saved["follows"]
+            .as_array()
+            .map(|list| list.iter().filter_map(|name| registry::parse_name(name.as_str()?).ok()).collect())
+            .unwrap_or_default();
     }
 
     fn config(&self) -> Value {
@@ -612,6 +647,7 @@ impl Names {
             "wallet_storage": self.wallet_files.as_ref().map(|(_, storage)| storage),
             "cli": self.cli,
             "cli_wallet": self.cli_wallet,
+            "follows": self.follows,
         })
     }
 
@@ -1273,6 +1309,64 @@ impl NamesModule for Names {
         self.cli_job(&name, "register", |_, _, _| Ok((command, None, Value::Null)))
     }
 
+    fn board_feed(&mut self, following: bool) -> String {
+        reply((|| {
+            let setup = self.cli_setup()?;
+            if following && self.follows.is_empty() {
+                return Ok(json!([]));
+            }
+            cli::run_feed(&setup, if following { &self.follows } else { &[] })
+        })())
+    }
+
+    fn board_thread(&mut self, post: String) -> String {
+        reply((|| cli::run_thread(&self.cli_setup()?, &post))())
+    }
+
+    fn board_post(&mut self, name: String, text: String, cids_json: String, reply_to: String) -> String {
+        let cids: Vec<String> = match serde_json::from_str::<Vec<String>>(if cids_json.trim().is_empty() { "[]" } else { &cids_json }) {
+            Ok(cids) => cids,
+            Err(_) => return reply(Err("cids must be a JSON list of CIDs".to_owned())),
+        };
+        let command = match cli::post_args(&name, &text, &cids, &reply_to) {
+            Ok(command) => command,
+            Err(error) => return reply(Err(error)),
+        };
+        self.cli_job(&name, "post", |_, _, _| Ok((command, None, Value::Null)))
+    }
+
+    fn board_like(&mut self, name: String, post: String, undo: bool) -> String {
+        let command = match cli::like_args(&name, &post, undo) {
+            Ok(command) => command,
+            Err(error) => return reply(Err(error)),
+        };
+        self.cli_job(&name, "like", |_, _, _| Ok((command, None, Value::Null)))
+    }
+
+    fn board_hide(&mut self, post: String) -> String {
+        let (name, command) = match cli::hide_args(&post) {
+            Ok(made) => made,
+            Err(error) => return reply(Err(error)),
+        };
+        self.cli_job(&name, "hide", |_, _, _| Ok((command, None, Value::Null)))
+    }
+
+    fn board_follows(&mut self) -> String {
+        reply(Ok(json!(self.follows)))
+    }
+
+    fn board_follow(&mut self, name: String, undo: bool) -> String {
+        reply((|| {
+            let name = registry::parse_name(&name)?;
+            self.follows.retain(|followed| *followed != name);
+            if !undo {
+                self.follows.push(name);
+            }
+            self.save();
+            Ok(json!(self.follows))
+        })())
+    }
+
     fn job(&mut self, id: String) -> String {
         reply((|| self.jobs()?.state(id.trim()))())
     }
@@ -1553,6 +1647,7 @@ mod tests {
             cli: None,
             cli_wallet: None,
             jobs_dir: None,
+            follows: Vec::new(),
         }
     }
 
