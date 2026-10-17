@@ -2455,6 +2455,26 @@ Item {
                             onPressed: root.anonOn = !root.anonOn
                         }
                     }
+                    // A private name posts by a proof: say so before anyone presses Post.
+                    Rectangle {
+                        visible: root.boardAs !== "" && !(root.anonOn && !root.anonReady)
+                        Layout.fillWidth: true
+                        implicitHeight: privateWarning.implicitHeight + 20
+                        radius: 8
+                        color: "#2A2418"
+                        Text {
+                            id: privateWarning
+                            x: 14
+                            y: 10
+                            width: parent.width - 28
+                            text: root.boardAs + " is held privately, so each post, reply and like is proved on this computer first: about 4 minutes each, and free. "
+                                + (root.anonOn ? "That's what keeps an anon name unlinkable." : "The chain sees " + root.boardAs + ", never your account.")
+                            color: root.brass
+                            font.family: root.sans
+                            font.pixelSize: 15
+                            wrapMode: Text.Wrap
+                        }
+                    }
                     // The anon name, before it can post.
                     ColumnLayout {
                         visible: root.anonOn && !root.anonReady
@@ -2511,7 +2531,7 @@ Item {
                             onPressed: root.boardPost()
                         }
                     }
-                    Hint { font.pixelSize: 13; text: "Posts are public. Each is proved on this computer (about 4 min), so the chain sees the name, never your account. Anon can't hide your writing style or when you post." }
+                    Hint { font.pixelSize: 13; text: "Posts are public. Anon can't hide your writing style or when you post." }
                 }
 
                 Hint {
