@@ -568,10 +568,10 @@ must:
   `Referrer-Policy: no-referrer`. A page is self-contained: anything it shows is
   inline or a `data:` URL, so opening a name tells no third party.
 
-Without a page, a viewer shows a profile card built on the viewer's machine from
-the name's entries (`display`, `bio`, `avatar`, how to pay it, and the other
-entries), every value HTML-escaped; `names open` serves it at `/` when there is no
-page and always at `/profile`.
+A viewer opens on a profile card built on the viewer's machine from the name's
+entries (`display`, `bio`, `avatar`, how to pay it, and the other entries), every
+value HTML-escaped, with a link to the page when there is one; `names open` serves
+the card at `/` (and `/profile`) and the page at `/page`.
 A `cid` made only of letters and digits is linked to the viewer's own Logos
 Storage node (`--storage`, default `http://127.0.0.1:8080`,
 `/api/storage/v1/data/<cid>/network/stream`), never to a public gateway.

@@ -121,9 +121,19 @@ fi
 case ":$PATH:" in
   *":$DIR:"*) ;;
   *)
+    # Add it to the shell's startup file once, so new terminals find `names`.
+    case "${SHELL##*/}" in
+      zsh) RC="$HOME/.zshrc" ;;
+      bash) if [ "$(uname -s)" = Darwin ]; then RC="$HOME/.bash_profile"; else RC="$HOME/.bashrc"; fi ;;
+      *) RC="$HOME/.profile" ;;
+    esac
+    LINE="export PATH=\"$DIR:\$PATH\""
+    if ! grep -qsF "$LINE" "$RC"; then
+      printf '\n# Added by the names installer\n%s\n' "$LINE" >> "$RC"
+    fi
     echo
-    echo "$DIR is not on your PATH. Add it, for example:"
-    echo "  echo 'export PATH=\"$DIR:\$PATH\"' >> ~/.zshrc   # or ~/.bashrc"
+    echo "Added $DIR to your PATH in $RC. Open a new terminal, or run:"
+    echo "  export PATH=\"$DIR:\$PATH\""
     ;;
 esac
 

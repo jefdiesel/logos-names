@@ -344,8 +344,8 @@ enum Command {
         /// The new holder, public or private. Only a tag of it reaches the chain.
         #[arg(value_parser = parse_account)]
         new_owner: AccountId },
-    /// Show a name in your browser: its page, or, without one, a profile card made
-    /// from its entries (`/profile` always shows the card). It is read from the chain
+    /// Show a name in your browser: a profile card made from its entries, linking to
+    /// its page (served at `/page`) when it has one. It is read from the chain
     /// on this machine and served only to this machine (127.0.0.1); no server sees
     /// which name you opened, and nothing shown can load anything from the internet.
     Open {
@@ -533,6 +533,18 @@ fn local_now() -> u64 {
 }
 
 /// A time in milliseconds as a UTC date and time, such as `2027-10-06 09:30:00Z`.
+/// How long until `time` (milliseconds), from this machine's clock, in words.
+fn until(time: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX));
+    match time.saturating_sub(now) / 60_000 {
+        0 => "finishing now: the last step takes a few minutes".to_owned(),
+        1 => "the last step starts in about a minute".to_owned(),
+        minutes => format!("the last step starts in about {minutes} minutes"),
+    }
+}
+
 fn readable(time: u64) -> String {
     let seconds = time / 1000;
     // Days to a civil date, counting from 0000-03-01 so leap days fall at a year's end.
@@ -882,7 +894,8 @@ impl Client {
                 Some(now) => now,
                 None => self.now().await,
             };
-            println!("step 2 of 2: registering {name}{NAME_SUFFIX} at {claimed} for a fee of {fee}");
+            let cost = if deposit { "a deposit" } else { "a fee" };
+            println!("step 2 of 2: registering {name}{NAME_SUFFIX} at {claimed} for {cost} of {fee}");
             let sent = self
                 .send_paying(
                     vec![
@@ -1240,14 +1253,28 @@ impl Client {
                 .await
                 .map(|(hash, secret)| (hash, Some(secret)))
         } else {
-            NativeTokenTransfer(&self.wallet)
+            // The fee reserve leaves the account before the transfer runs, and a
+            // transfer that then fails is billed its whole gas limit; 64 is the
+            // wallet's assumed worst base fee.
+            let balance = self.wallet.get_account_balance(from).await?;
+            let reserve = u128::from(NATIVE_TRANSFER_GAS_LIMIT + 1_000) * 64;
+            if balance < amount.saturating_add(reserve) {
+                bail!("Public/{from} holds {balance}; sending {amount} needs about {reserve} more for the fee");
+            }
+            let saved = self.wallet.config().clone();
+            let mut config = saved.clone();
+            config.gas_limit = NATIVE_TRANSFER_GAS_LIMIT;
+            self.wallet.set_config(config);
+            let sent = NativeTokenTransfer(&self.wallet)
                 .send_public_transfer(
                     AccountIdentity::Public(from),
                     AccountIdentity::PublicNoSign(to),
                     amount,
                 )
                 .await
-                .map(|hash| (hash, None))
+                .map(|hash| (hash, None));
+            self.wallet.set_config(saved);
+            sent
         }
         .context("the sequencer did not accept the transfer")?;
         println!("submitted {hash}");
@@ -1344,7 +1371,7 @@ impl Client {
         if debited < amount {
             bail!("transfer {hash} was included in block {block} but {from} was not debited");
         }
-        println!("included in block {block}; {from} was debited {debited} (amount plus fee)");
+        println!("included in block {block}; {from} was debited {debited} (the amount, plus any fee)");
         println!("the recipient sees it after syncing their private accounts");
         Ok(())
     }
@@ -1386,7 +1413,7 @@ impl Client {
             // The chain keeps only a tag of the holder; this wallet can tell
             // whether it is one of its own accounts, and nobody can tell more.
             "held_by": self.holder(name, &id, &record).ok().map(|account| account.to_string()),
-            "expires": record.expires,
+            "expires": (record.expires != u64::MAX).then_some(record.expires),
             // A name held by a deposit never expires (its expiry is u64::MAX).
             "expires_date": if record.expires == u64::MAX { "never".to_owned() } else { readable(record.expires) },
             "lapsed": local_now() >= record.expires,
@@ -1469,7 +1496,7 @@ fn profile_card(name: &str, profile: &Profile, has_page: bool, storage: &str) ->
         .iter()
         .map(|(key, value)| format!("<tr><th>{}</th><td>{value}</td></tr>", html_escape(key)))
         .collect();
-    let page_link = if has_page { "<p class=\"more\"><a href=\"/\">the name's page</a></p>" } else { "" };
+    let page_link = if has_page { "<p class=\"more\"><a href=\"/page\">open the name's page</a></p>" } else { "" };
     // Styling entries are checked against fixed forms, so none can inject CSS.
     let accent = text("color")
         .filter(|v| v.len() == 7 && v.starts_with('#') && v[1..].chars().all(|c| c.is_ascii_hexdigit()))
@@ -1540,7 +1567,7 @@ fn serve_page(name: &str, page: Option<&PageContent>, card: &str, port: u16, no_
             .any(|(key, value)| key.eq_ignore_ascii_case("host") && allowed_hosts.iter().any(|h| h == value.trim()));
         let (status, content_type, body): (&str, &str, &[u8]) = if !host_ok {
             ("421 Misdirected Request", "text/plain", b"wrong host")
-        } else if path == "/" && page.is_some() {
+        } else if path == "/page" && page.is_some() {
             let page = page.expect("checked");
             ("200 OK", page.content_type.as_str(), &page.body)
         } else if path == "/" || path == "/profile" {
@@ -1691,6 +1718,11 @@ const REVEAL_ATTEMPTS: u32 = 4;
 
 /// How many blocks to wait for a transaction to be included before giving up.
 const TX_POLL_MAX_BLOCKS: usize = 60;
+/// Execution gas for a public native-token transfer: the native token is a built-in
+/// that meters no cycles (only the transaction's bytes are billed, outside this), and
+/// a failed transfer is billed the whole limit, so the wallet's default 2,000,000
+/// would cost about 16M on a failure.
+const NATIVE_TRANSFER_GAS_LIMIT: u64 = 1_000;
 
 /// `names setup`: a public and a private account, and, once the public one is funded,
 /// some of its tokens moved to the private account so names can be held and paid privately.
@@ -1871,7 +1903,15 @@ async fn main() -> Result<()> {
     }
     let overrides = sequencer_overrides(&cli)?;
     match cli.command {
-        Command::Wallet { args } => return run_wallet(args, overrides).await,
+        Command::Wallet { args } => {
+            // Native-token transfers meter no execution gas, but LEZ v0.3.1 bills a
+            // failed one its whole gas limit, so keep the limit tiny for them.
+            let mut overrides = overrides.unwrap_or_default();
+            if args.iter().any(|arg| arg == "auth-transfer") && overrides.gas_limit.is_none() {
+                overrides.gas_limit = Some(NATIVE_TRANSFER_GAS_LIMIT);
+            }
+            return run_wallet(args, Some(overrides)).await;
+        }
         Command::Bridge { amount, to, from_key, node, max_fee, yes } => {
             let rpc = cli.rpc.as_deref().unwrap_or(DEFAULT_RPC);
             return bridge(rpc, &node, amount, &to, &from_key, max_fee, yes);
@@ -1948,8 +1988,8 @@ async fn main() -> Result<()> {
                         register_log(name)?.display()
                     ),
                     None => println!(
-                        "{name}{NAME_SUFFIX}  registering, ready from about {} (log: {})",
-                        readable(pending.made.saturating_add(MIN_COMMIT_AGE_MS)),
+                        "{name}{NAME_SUFFIX}  registering, {} (log: {})",
+                        until(pending.made.saturating_add(MIN_COMMIT_AGE_MS)),
                         register_log(name)?.display()
                     ),
                 }
