@@ -1,0 +1,9 @@
+{
+ "schemaVersion": 1,
+ "name": "logos-names",
+ "displayName": "LNS",
+ "description": "The Names app (posts, messages, pay, profile) and the names module, for LEZ names.",
+ "homepage": "https://github.com/jefdiesel/logos-names",
+ "indexUrl": "https://logos-names.wrapit.workers.dev/basecamp/index.json",
+ "trustedSigners": []
+}

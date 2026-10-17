@@ -1,0 +1,92 @@
+{
+ "schemaVersion": 2,
+ "repositoryName": "logos-names",
+ "generatedAt": "2026-10-17T16:57:01Z",
+ "packages": [
+  {
+   "name": "names",
+   "versions": [
+    {
+     "releasedAt": "2026-10-17T16:57:01Z",
+     "publisherRef": "basecamp-v0.8.0",
+     "url": "https://github.com/jefdiesel/logos-names/releases/download/basecamp-v0.8.0/names-0.6.0.lgx",
+     "urls": [
+      "https://github.com/jefdiesel/logos-names/releases/download/basecamp-v0.8.0/names-0.6.0.lgx"
+     ],
+     "size": 8053364,
+     "sha256": "9b1129fa8553f7c5bb2c884ee4f7cfe23a455399de222d2b512cb26cfb444493",
+     "rootHash": "f681c6a172f618b91e816053345b28339d94d7adbb24ec72c7e77fe4d2ba0f21",
+     "manifest": {
+      "author": "",
+      "category": "identity",
+      "dependencies": [],
+      "description": "Resolve, register and manage private .lez names for any Logos app (registry v5: refundable deposits)",
+      "display_name": "Names",
+      "hashes": {
+       "assets": "e84f5ed891c29627c276af4a6d686c2c29ca59bd85b663f54765338f5eb4710b",
+       "root": "f681c6a172f618b91e816053345b28339d94d7adbb24ec72c7e77fe4d2ba0f21",
+       "variants": "e9fd9ad8ca5caa6b74fc0200ecddff40a3788c140ba17dd490fa0de82db2dbcd",
+       "variants/darwin-arm64": "a179bd5573b7dc818037a3f206e372c673c07ed2a9cb19309c6c48cb8660575c"
+      },
+      "icon": "",
+      "main": {
+       "darwin-arm64": "names_plugin.dylib"
+      },
+      "manifestVersion": "0.6.0",
+      "name": "names",
+      "type": "core",
+      "version": "0.6.0"
+     }
+    }
+   ]
+  },
+  {
+   "name": "names_ui",
+   "versions": [
+    {
+     "releasedAt": "2026-10-17T16:57:01Z",
+     "publisherRef": "basecamp-v0.8.0",
+     "url": "https://github.com/jefdiesel/logos-names/releases/download/basecamp-v0.8.0/names_ui-0.8.0.lgx",
+     "urls": [
+      "https://github.com/jefdiesel/logos-names/releases/download/basecamp-v0.8.0/names_ui-0.8.0.lgx"
+     ],
+     "size": 79374,
+     "sha256": "73664e37efe2cac576c595a10d097dc509d87358070162dd1988d29abfdd8593",
+     "rootHash": "50d623e1a3837c416d1dba1381514eb8ae03cd8584851f5381857cbef31689d5",
+     "manifest": {
+      "author": "",
+      "category": "identity",
+      "dependencies": [
+       "names"
+      ],
+      "description": "Your name on Logos: register it, post as it, edit its profile",
+      "display_name": "Names",
+      "hashes": {
+       "assets": "200131b2fe51261ba80e5cf4b441680ae13a0c7080b111d51668350c60beced6",
+       "root": "50d623e1a3837c416d1dba1381514eb8ae03cd8584851f5381857cbef31689d5",
+       "variants": "66a45ce236005642af9b64e8b99301089dee2c126d3341bde4d00ce258ec81a5",
+       "variants/darwin-arm64": "37be8167c87590e480992b3e43d8e4de98f94e5df8631fb01f9805ba36c86c16"
+      },
+      "icon": "assets/icon.png",
+      "main": {},
+      "manifestVersion": "0.6.0",
+      "name": "names_ui",
+      "provides": [
+       {
+        "intent": "names.open"
+       }
+      ],
+      "type": "ui_qml",
+      "version": "0.8.0",
+      "view": "Main.qml"
+     },
+     "icon": {
+      "path": "c251f4e3be913fd3e55f14802e513dfd2368141f4f40587c1efac47a8b9746e5.png",
+      "sha256": "c251f4e3be913fd3e55f14802e513dfd2368141f4f40587c1efac47a8b9746e5",
+      "size": 13805
+     }
+    }
+   ]
+  }
+ ]
+}
