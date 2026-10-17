@@ -109,7 +109,6 @@ SCENARIOS = {
     "start": "",
     "name": 'root.show("jef")',
     "plain": 'root.show("linus")',
-    "pay": 'root.show("jef"); root.openPay()',
     "register": 'root.show("satoshi")',
     "three": 'root.show("qkz")',
     "locked": 'root.show("xz")',

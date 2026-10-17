@@ -30,6 +30,7 @@ Item {
     property bool revealing: false     // a pending registration is being asked about
     property var record: null          // the name on the plate
     property var page: null
+    property bool entriesOpen: false     // the Entries part of a name's settings is shown
     property var pagePreview: null       // the page being written, as page_view would show it
     property string missing: ""        // a looked-up name that is not registered
     property var wallet: []            // the wallet's funded public accounts: [{account, balance, name}]
@@ -410,7 +411,7 @@ Item {
             privateWallet = (value.private_accounts || []).filter(function(account) { return account.funded })
             if (senderIndex >= funded.length + privateWallet.length)
                 senderIndex = 0
-            walletProblem = funded.length > 0 ? "" : "None of the wallet's accounts holds funds to pay the fee."
+            walletProblem = funded.length > 0 ? "" : "None of the wallet's accounts has funds."
             if (fromIndex >= funded.length)
                 fromIndex = 0
             console.log("names_ui: wallet has", funded.length, "funded account(s)")
@@ -655,7 +656,6 @@ Item {
     /// pays, its entries and page, transferring it, releasing it.
     function openSettings() {
         say("", false)
-        accountField.text = record.account !== null ? record.account : ""
         pageArea.text = page !== null && page.text !== null ? page.text : ""
         previewPage()
         newKeyField.text = ""
@@ -663,14 +663,6 @@ Item {
         newOwnerField.text = ""
         confirmingRelease = false
         tool = "settings"
-    }
-
-    function saveAccount() {
-        var name = record.name
-        var account = accountField.text.trim()
-        change("set_account", [name, account], name, function() {
-            return ask("resolve", [name]).account === account
-        }, name + ".lez now pays to " + shorten(account) + ".")
     }
 
     function receivePrivately() {
@@ -750,15 +742,6 @@ Item {
         }, body === "" ? "Removed the page of " + name + ".lez." : "Published the page of " + name + ".lez.")
     }
 
-    function showAccountAsName() {
-        var name = record.name
-        var account = holder
-        change("set_primary", [account, name], name, function() {
-            var shown = ask("reverse", [account])
-            return shown !== null && shown.name === name
-        }, shorten(account) + " is now shown as " + name + ".lez.")
-    }
-
     function transferName() {
         var name = record.name
         var newOwner = newOwnerField.text.trim()
@@ -777,33 +760,6 @@ Item {
         })
     }
 
-    // ── Paying and messaging ────────────────────────────────────────────
-
-    function openPay() {
-        if (wallet.length === 0) {
-            loadWallet(true)
-            return
-        }
-        say("", false)
-        tool = "pay"
-    }
-
-    /// A whole amount as the 16-byte little-endian hex the wallet expects, or "".
-    function amountHex(text) {
-        if (!/^[0-9]{1,15}$/.test(text.trim()))
-            return ""
-        var value = parseInt(text.trim(), 10)
-        if (value <= 0)
-            return ""
-        var hex = ""
-        for (var i = 0; i < 16; i++) {
-            var low = value % 256
-            hex += (low < 16 ? "0" : "") + low.toString(16)
-            value = Math.floor(value / 256)
-        }
-        return hex
-    }
-
     /// Who can pay: the wallet's funded public accounts, then its private ones.
     function senders() {
         var all = []
@@ -812,93 +768,6 @@ Item {
         for (var j = 0; j < privateWallet.length; j++)
             all.push({ account: privateWallet[j].account, balance: privateWallet[j].balance, name: null, isPrivate: true })
         return all
-    }
-
-    function sender() {
-        var all = senders()
-        return senderIndex < all.length ? all[senderIndex] : null
-    }
-
-    /// What a payment from the chosen account would hide.
-    function payHidden(usePrivateKeys) {
-        var from = sender()
-        if (from === null)
-            return ""
-        if (from.isPrivate && usePrivateKeys)
-            return "Nothing about this payment is visible: not who sent it, who received it, or how much."
-        if (from.isPrivate)
-            return "The sender stays hidden. The amount and the receiving account are visible, because the name is paid at a public account."
-        if (usePrivateKeys)
-            return "The receiver stays hidden. The amount and your account are visible, because it leaves a public account."
-        return "Everything about this payment is visible: your account, the receiving account and the amount."
-    }
-
-    /// Pays the name from the chosen account. A payment that hides anything
-    /// is proved on this machine first, which takes minutes, so the wallet is
-    /// asked without holding the screen still.
-    function pay(usePrivateKeys) {
-        var amount = amountHex(amountInput.text)
-        if (amount === "") {
-            say("Enter a whole amount.", true)
-            return
-        }
-        var from = sender()
-        if (from === null) {
-            say("Choose an account to pay from.", true)
-            return
-        }
-        try {
-            // Ask again at the moment of paying, so a name changed since it was shown is not paid stale.
-            var to = ask("recipient", [record.name])
-            if (to === null)
-                throw new Error(shown(record.name) + " is no longer registered.")
-            if (usePrivateKeys && to.private === null)
-                throw new Error(shown(record.name) + " does not take private payments.")
-            if (!usePrivateKeys && to.public_hex === null)
-                throw new Error(shown(record.name) + " does not take public payments.")
-            var fromHex = String(call("lez_core", "account_id_from_base58", [from.account]))
-            var method = from.isPrivate ? (usePrivateKeys ? "transfer_private" : "transfer_deshielded")
-                                        : (usePrivateKeys ? "transfer_shielded" : "transfer_public")
-            var args = [fromHex, usePrivateKeys ? JSON.stringify(to.private) : to.public_hex, amount]
-            var slow = from.isPrivate || usePrivateKeys
-            sending = true
-            say(slow ? "Preparing the payment. Proving it takes a few minutes; you can keep using the app." : "Sending.", false)
-            var amountText = amountInput.text.trim()
-            var display = shown(record.name)
-            function settle(reply) {
-                sending = false
-                reply = parsed(reply)
-                if (reply && reply.success) {
-                    tool = ""
-                    say("Sent " + amountText + " to " + display + ".", false)
-                    loadWallet(false)
-                } else {
-                    say("The wallet refused: " + (reply && reply.error ? reply.error : "no reason given") + ".", true)
-                }
-            }
-            if (logos.callModuleAsync)
-                logos.callModuleAsync("lez_core", method, args, settle, 20 * 60 * 1000)
-            else
-                settle(logos.callModule("lez_core", method, args))
-        } catch (error) {
-            sending = false
-            say(error.message, true)
-        }
-    }
-
-    function message() {
-        try {
-            var reply = call("chat_module", "create_conversation", [chatAddress])
-            if (reply && reply.success === false) {
-                say("Chat could not start the conversation: " + reply.error, true)
-                return
-            }
-            say("Conversation with " + shown(record.name) + " started. Opening Chat.", false)
-            if (logos.request)
-                logos.request("basecamp.apps.launch", { app: "chat_ui" }, function() {})
-        } catch (error) {
-            say(error.message, true)
-        }
     }
 
     // ── Small helpers ───────────────────────────────────────────────────
@@ -1766,7 +1635,7 @@ Item {
                     spacing: 6
                     Hint {
                         visible: root.configKnown && root.registry === ""
-                        text: "No registry chosen. Open App settings."
+                        text: "No registry chosen. Open Advanced."
                     }
                     ListHead {
                         visible: root.registry !== ""
@@ -1849,11 +1718,6 @@ Item {
                         text: "None yet. Look one up to register it."
                     }
                     Hint {
-                        visible: root.cliNames.length > 0 && root.wallet.length === 0
-                        font.pixelSize: 15
-                        text: "CLI: held by the names CLI on this machine."
-                    }
-                    Hint {
                         visible: root.registry !== "" && root.wallet.length === 0
                         text: /not running/.test(root.walletProblem) ? "Wallet not open" : /funds/.test(root.walletProblem) ? "No funded account in the wallet" : "Wallet not connected"
                     }
@@ -1867,7 +1731,7 @@ Item {
                 Item { Layout.fillHeight: true }
 
                 Link {
-                    text: root.settingsOpen ? "Close app settings" : "App settings"
+                    text: root.settingsOpen ? "Close advanced" : "Advanced"
                     onPressed: root.settingsOpen = !root.settingsOpen
                 }
             }
@@ -1895,7 +1759,7 @@ Item {
                     Layout.fillWidth: true
                     spacing: 10
                     Text {
-                        text: "App settings"
+                        text: "Advanced"
                         color: root.ink
                         font.family: root.sans
                         font.weight: Font.DemiBold
@@ -1921,7 +1785,7 @@ Item {
                         onEdited: root.saveConfig(sequencerField.text.trim(), root.registry)
                     }
                     Part { text: "Wallet files" }
-                    Hint { text: "The LEZ wallet that signs for your names. It opens by itself when needed." }
+                    Hint { text: "The LEZ wallet that signs for your names. Open the LEZ Wallet app before making changes." }
                     Field {
                         id: walletConfigField
                         Layout.fillWidth: true
@@ -2007,7 +1871,7 @@ Item {
                     Hint {
                         font.pixelSize: 18
                         color: root.ink
-                        text: !root.configKnown ? "Waiting for the names module to answer." : root.registry === "" ? "Open App settings and enter the registry's program ID." : "Type a name to see how to pay or reach its holder. If nobody holds it, you can register it."
+                        text: !root.configKnown ? "Waiting for the names module to answer." : root.registry === "" ? "Open Advanced and enter the registry's program ID." : "Type a name to see its profile and page. If nobody holds it, you can register it."
                     }
                 }
 
@@ -2033,7 +1897,7 @@ Item {
                         visible: root.wallet.length > 0
                         title: "Register it to"
                         Accounts {}
-                        Hint { text: "This account holds the name and pays the deposit. Payments to the name go to your private account." }
+                        Hint { text: "This public account holds the name and pays the deposit. Anyone who knows the name can find this account; to hide it, register with the names CLI from a private account. Payments to the name go to your private account." }
                         Part { text: "Deposit" }
                         Hint {
                             font.pixelSize: 20
@@ -2042,7 +1906,7 @@ Item {
                         }
                         Hint {
                             visible: root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode === "deposit"
-                            text: (root.deposit !== null && root.deposit.tier === "three" ? "Three-character names take a larger deposit. " : "") + "Refunded in full when you release the name, which never expires. Network fee extra."
+                            text: (root.deposit !== null && root.deposit.tier === "three" ? "Three-character names take a larger deposit. " : "") + "Testnet. Refunded in full when you release the name; it does not expire on this network. Network fee extra."
                         }
                         Action {
                             label: "Register " + root.missing + ".lez"
@@ -2137,70 +2001,21 @@ Item {
                         Layout.fillWidth: true
                         spacing: 8
                         Action {
-                            visible: root.record !== null && (root.record.account !== null || root.record.npk !== null)
-                            label: "Send"
-                            strong: true
-                            tint: root.accent
-                            onPressed: root.openPay()
-                        }
-                        Action {
-                            visible: root.chatAddress !== ""
-                            label: "Message"
-                            onPressed: root.message()
-                        }
-                        Action {
                             label: "Copy link"
                             onPressed: root.copy(root.linkFor(root.record.name), "Link")
                         }
                         Item { Layout.fillWidth: true }
                         Action {
                             visible: root.mine
-                            label: "Settings"
+                            label: "Edit"
                             onPressed: root.openSettings()
                         }
-                    }
-
-                    // Paying.
-                    Panel {
-                        visible: root.tool === "pay"
-                        title: root.record !== null ? "Send to " + root.shown(root.record.name) : ""
-                        Accounts { withPrivate: true }
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 8
-                            Field {
-                                id: amountInput
-                                Layout.preferredWidth: 160
-                                hint: "Amount"
-                                numbersOnly: true
-                            }
-                            Action {
-                                label: root.sending ? "Preparing" : "Send privately"
-                                strong: root.record !== null && root.record.npk !== null
-                                enabledNow: !root.sending && root.record !== null && root.record.npk !== null
-                                onPressed: root.pay(true)
-                            }
-                            Action {
-                                label: "Send publicly"
-                                strong: root.record !== null && root.record.npk === null
-                                enabledNow: !root.sending && root.record !== null && root.record.account !== null
-                                onPressed: root.pay(false)
-                            }
-                            Item { Layout.fillWidth: true }
-                            Action { label: "Cancel"; onPressed: root.tool = "" }
-                        }
-                        Hint {
-                            visible: root.record !== null && root.record.lapsed && !root.record.never
-                            color: root.alarm
-                            text: root.record !== null && root.record.lapsed && !root.record.never ? root.shown(root.record.name) + " lapsed on " + root.dated(root.record.expires) + ". Check with its holder before you pay." : ""
-                        }
-                        Hint { text: root.record === null ? "" : (root.record.npk !== null ? root.payHidden(true) : root.payHidden(false)) + (root.record.npk !== null ? " Private payments take a few minutes to prove." : "") }
                     }
 
                     // The holder's settings for this name.
                     Panel {
                         visible: root.tool === "settings"
-                        title: root.record !== null ? "Settings for " + root.shown(root.record.name) : ""
+                        title: root.record !== null ? "Edit " + root.shown(root.record.name) : ""
 
                         Hint {
                             visible: root.cliHeld && root.busy && root.notice !== ""
@@ -2277,7 +2092,7 @@ Item {
                         spacing: 10
                         Part { text: "Where it is paid" }
                         Hint {
-                            text: root.record === null ? "" : root.record.npk !== null && root.record.account === null ? "Private payments only. Nobody can link them to your accounts."
+                            text: root.record === null ? "" : root.record.npk !== null && root.record.account === null ? "Private payments only. They reveal nothing about your funds."
                                 : root.record.npk !== null ? "Private payments, and a public account anyone can see."
                                 : root.record.account !== null ? "A public account only. Anyone can see its balance and history."
                                 : "Not set up. Nobody can pay this name yet."
@@ -2300,82 +2115,75 @@ Item {
                             }
                             Item { Layout.fillWidth: true }
                         }
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 8
-                            Field {
-                                id: accountField
-                                Layout.fillWidth: true
-                                code: true
-                                hint: "Or a public account ID (visible to anyone)"
-                            }
-                            Action {
-                                label: "Save"
-                                changes: true
-                                enabledNow: accountField.text.trim() !== "" && root.record !== null && accountField.text.trim() !== root.record.account
-                                onPressed: root.saveAccount()
-                            }
-                        }
                         }
 
-                        Part { text: "Entries" }
-                        Repeater {
-                            model: root.textKeys(["cid"])
+                        Link {
+                            text: root.entriesOpen ? "Hide entries for other apps" : "Entries for other apps (chat, inbox, agent)"
+                            onPressed: root.entriesOpen = !root.entriesOpen
+                        }
+                        ColumnLayout {
+                            visible: root.entriesOpen
+                            Layout.fillWidth: true
+                            spacing: 10
+                            Part { text: "Entries" }
+                            Repeater {
+                                model: root.textKeys(["cid"])
+                                RowLayout {
+                                    id: entry
+                                    required property string modelData
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    Text {
+                                        Layout.preferredWidth: 96
+                                        text: entry.modelData
+                                        color: root.dim
+                                        font.family: root.sans
+                                        font.pixelSize: 17
+                                        elide: Text.ElideRight
+                                    }
+                                    Field {
+                                        id: entryValue
+                                        Layout.fillWidth: true
+                                        size: 19
+                                        text: root.record !== null && root.record.texts[entry.modelData] !== undefined ? root.record.texts[entry.modelData] : ""
+                                    }
+                                    Action {
+                                        label: "Save"
+                                        changes: true
+                                        enabledNow: entryValue.text !== "" && root.record !== null && entryValue.text !== root.record.texts[entry.modelData]
+                                        onPressed: root.saveText(entry.modelData, entryValue.text)
+                                    }
+                                    Action {
+                                        label: "Remove"
+                                        changes: true
+                                        onPressed: root.saveText(entry.modelData, "")
+                                    }
+                                }
+                            }
                             RowLayout {
-                                id: entry
-                                required property string modelData
                                 Layout.fillWidth: true
                                 spacing: 8
-                                Text {
+                                Field {
+                                    id: newKeyField
                                     Layout.preferredWidth: 96
-                                    text: entry.modelData
-                                    color: root.dim
-                                    font.family: root.sans
-                                    font.pixelSize: 17
-                                    elide: Text.ElideRight
+                                    size: 17
+                                    hint: "chat"
                                 }
                                 Field {
-                                    id: entryValue
+                                    id: newValueField
                                     Layout.fillWidth: true
-                                    size: 19
-                                    text: root.record !== null && root.record.texts[entry.modelData] !== undefined ? root.record.texts[entry.modelData] : ""
+                                    size: 17
+                                    hint: "Value"
                                 }
                                 Action {
-                                    label: "Save"
+                                    label: "Add"
                                     changes: true
-                                    enabledNow: entryValue.text !== "" && root.record !== null && entryValue.text !== root.record.texts[entry.modelData]
-                                    onPressed: root.saveText(entry.modelData, entryValue.text)
-                                }
-                                Action {
-                                    label: "Remove"
-                                    changes: true
-                                    onPressed: root.saveText(entry.modelData, "")
+                                    enabledNow: newKeyField.text.trim() !== "" && newValueField.text !== ""
+                                    onPressed: root.saveText(newKeyField.text, newValueField.text)
                                 }
                             }
+                            Hint { text: "Read by other apps: chat (Logos Chat address), inbox, agent." }
                         }
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 8
-                            Field {
-                                id: newKeyField
-                                Layout.preferredWidth: 96
-                                size: 17
-                                hint: "chat"
-                            }
-                            Field {
-                                id: newValueField
-                                Layout.fillWidth: true
-                                size: 17
-                                hint: "Value"
-                            }
-                            Action {
-                                label: "Add"
-                                changes: true
-                                enabledNow: newKeyField.text.trim() !== "" && newValueField.text !== ""
-                                onPressed: root.saveText(newKeyField.text, newValueField.text)
-                            }
-                        }
-                        Hint { text: "Read by other apps: chat (Logos Chat address), inbox, agent." }
 
                         Part { text: "Page" }
                         Hint { text: "Paste your page's HTML. Anyone can read it." }
@@ -2446,16 +2254,6 @@ Item {
                         visible: !root.cliHeld
                         Layout.fillWidth: true
                         spacing: 10
-                        Part { text: "Your account's name" }
-                        Hint { text: root.record !== null ? "Apps then show " + root.shorten(root.holder) + " as " + root.shown(root.record.name) + ". This links the two publicly." : "" }
-                        Action {
-                            label: root.record !== null ? "Show my account as " + root.shown(root.record.name) : ""
-                            changes: true
-                            onPressed: root.showAccountAsName()
-                        }
-
-                        Rectangle { Layout.fillWidth: true; Layout.topMargin: 8; height: 1; color: root.line }
-
                         Part { text: "Transfer to another wallet" }
                         RowLayout {
                             Layout.fillWidth: true
@@ -2473,7 +2271,7 @@ Item {
                                 onPressed: root.transferName()
                             }
                         }
-                        Hint { text: "Payments, entries and page are cleared for the new holder." }
+                        Hint { text: "Your deposit goes with the name: the new holder gets it back when they release it. Payments, entries and page are cleared." }
 
                         Part { text: "Release" }
                         Hint { text: "Clears everything and refunds your deposit. Anyone can then register the name." }
@@ -2530,19 +2328,12 @@ Item {
                         spacing: 10
                         Fact {
                             label: "Holder"
-                            value: root.record === null ? "" : root.cliHeld ? "You · privately, through the names CLI" : root.mine ? "You · " + root.shorten(root.holder) : "Held privately"
+                            value: root.record === null ? "" : root.cliHeld ? "You · privately, through the names CLI" : root.mine ? "You · " + root.shorten(root.holder) : "Not stored on chain"
                             full: root.mine && !root.cliHeld ? root.holder : ""
                         }
                         Fact {
                             label: "Payments"
                             value: root.paymentsText()
-                        }
-                        Fact {
-                            visible: root.record !== null && root.record.account !== null
-                            label: "Pays to"
-                            code: true
-                            value: root.record !== null && root.record.account !== null ? root.shorten(root.record.account) : ""
-                            full: root.record !== null && root.record.account !== null ? root.record.account : ""
                         }
                         Fact {
                             visible: root.record !== null && !root.record.never
