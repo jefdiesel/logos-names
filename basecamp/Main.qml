@@ -78,6 +78,8 @@ Item {
     property var chatNames: ({})        // chat address → name, as this device learned it
     property var chatMembers: []        // [{address, pending}] of the open group
     property bool chatNewGroup: false   // the New group form is open
+    property bool boardAttach: false    // the post box shows its file field
+    property bool registerHow: false    // the register card shows its three steps
     property bool anonPublic: false     // the anon name, once made, moves to its own public account
     property bool confirmingRelease: false
     property var pending: null         // a change that was sent and is not confirmed yet
@@ -1020,8 +1022,7 @@ Item {
     function pageHeading() {
         if (page === null)
             return ""
-        var title = typeof page.title === "string" && page.title !== "" ? page.title + " · " : ""
-        return title + pageSummary()
+        return typeof page.title === "string" && page.title !== "" ? page.title : ""
     }
 
     /// What the page card draws: for an HTML page, only the markup the names
@@ -1204,7 +1205,7 @@ Item {
         if (cliHeld)
             return "Yours · held privately"
         if (mine)
-            return "Yours · public account " + shorten(holder)
+            return "Yours · public"
         return "Holder not shown"
     }
 
@@ -3052,25 +3053,16 @@ Item {
                             wrapMode: Text.Wrap
                         }
                     }
-                    // A private name posts by a proof: say so before anyone presses Post.
-                    Rectangle {
-                        visible: root.boardAs !== "" && !(root.anonOn && !root.anonReady) && root.cliNames.some(function(entry) { return entry.name === root.boardAs && entry.private !== false })
+                    // How posting as this name works, in one line, before anyone presses Post.
+                    Text {
+                        visible: root.boardAs !== "" && !(root.anonOn && !root.anonReady) && !root.boardAsMoving
                         Layout.fillWidth: true
-                        implicitHeight: privateWarning.implicitHeight + 20
-                        radius: 8
-                        color: "#2A2418"
-                        Text {
-                            id: privateWarning
-                            x: 14
-                            y: 10
-                            width: parent.width - 28
-                            text: root.boardAs + " is held privately, so each post, reply and like is proved on this computer first: about 4 minutes each, and free. "
-                                + (root.anonOn ? "That's what keeps an anon name unlinkable." : "The chain sees " + root.boardAs + ", never your account.")
-                            color: root.brass
-                            font.family: root.sans
-                            font.pixelSize: 15
-                            wrapMode: Text.Wrap
-                        }
+                        text: root.heldPublicly(root.boardAs) ? "Public · about 30 seconds per post, a little gas"
+                            : "Private · about 4 minutes per post, free; the chain never learns your account"
+                        color: root.heldPublicly(root.boardAs) ? root.faint : root.brass
+                        font.family: root.sans
+                        font.pixelSize: 14
+                        wrapMode: Text.Wrap
                     }
                     // The anon name, before it can post.
                     ColumnLayout {
@@ -3146,13 +3138,22 @@ Item {
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: 10
+                        Link {
+                            visible: !root.boardAttach && boardCid.text === ""
+                            text: "Attach a file"
+                            color: root.faint
+                            font.pixelSize: 14
+                            onPressed: root.boardAttach = true
+                        }
                         Field {
                             id: boardCid
+                            visible: root.boardAttach || text !== ""
                             Layout.fillWidth: true
                             size: 15
                             code: true
-                            hint: "Attach a file: its Logos Storage CID (optional)"
+                            hint: "Its Logos Storage CID"
                         }
+                        Item { visible: !boardCid.visible; Layout.fillWidth: true }
                         Text {
                             text: boardComposer.text.length + " / 1024"
                             color: boardComposer.text.length > 1024 ? root.alarm : root.faint
@@ -3166,7 +3167,6 @@ Item {
                             onPressed: root.boardPost()
                         }
                     }
-                    Hint { font.pixelSize: 13; text: "Posts are public. Anon can't hide your writing style or when you post." }
                 }
 
                 Hint {
@@ -3370,7 +3370,7 @@ Item {
                     }
                     Hint { visible: root.anonName !== ""; text: "Anon name: " + root.anonName + (root.anonReady ? "" : " (being set up)") + ". Only your wallet links it to your main name." }
                     Part { text: "Your names" }
-                    Hint { text: "Held privately: posts take about 4 minutes, free, and nobody can find which account holds the name. Public: posts take about 30 seconds and a little gas, and anyone who knows the name can find the account that holds it. Payments to a name stay private either way." }
+                    Hint { font.pixelSize: 14; text: "Private: posts in about 4 min, free, holder hidden. Public: about 30 s, a little gas, holder visible. Payments stay private either way." }
                     Repeater {
                         model: root.cliPending
                         RowLayout {
@@ -3753,10 +3753,17 @@ Item {
                                 Layout.alignment: Qt.AlignTop
                                 label: "Time"
                                 value: "About 20 min"
-                                note: "Three steps, below. Keep this computer on and awake until it's done."
+                                note: "Keep this computer on and awake until it's done."
                             }
                         }
+                        Link {
+                            text: root.registerHow ? "Hide how it works" : "How it works: three steps"
+                            color: root.faint
+                            font.pixelSize: 14
+                            onPressed: root.registerHow = !root.registerHow
+                        }
                         Steps {
+                            visible: root.registerHow
                             Layout.fillWidth: true
                             Layout.topMargin: 4
                         }
@@ -3764,7 +3771,7 @@ Item {
                             Layout.fillWidth: true
                             text: root.cliBalance === undefined ? "Checking your private account…"
                                 : root.cliBalance === null ? "No private account found. Run names setup in a terminal first."
-                                : "Pays from your private account " + root.shorten(root.cliBalance.account) + " · balance " + root.grouped(root.cliBalance.balance)
+                                : "From your private account (balance " + root.grouped(root.cliBalance.balance) + ")"
                             color: root.cliBalance === null || !root.cliCanPay() ? root.alarm : root.dim
                             font.family: root.sans
                             font.pixelSize: 15
@@ -3797,7 +3804,7 @@ Item {
                             onPressed: root.registerPrivately()
                         }
                         Text {
-                            text: "Testnet. Names don't expire here, but to keep one on mainnet you claim it within 30 days of launch. Network fee extra."
+                            text: "Testnet name: to keep it on mainnet, claim it within 30 days of launch."
                             Layout.fillWidth: true
                             wrapMode: Text.Wrap
                             color: root.faint
@@ -3938,6 +3945,23 @@ Item {
                             onPressed: root.copy(root.linkFor(root.record.name), "Link")
                         }
                     }
+                    RowLayout {
+                        visible: root.tool !== "settings" && root.record !== null && !root.mine
+                        spacing: 8
+                        Action {
+                            label: "Message"
+                            strong: true
+                            onPressed: { var name = root.record.name; root.go("messages"); root.chatLoad(); root.chatStart(name) }
+                        }
+                        Action {
+                            label: "Pay"
+                            onPressed: { var name = root.record.name; root.go("pay"); payTo.text = name; root.loadCliBalance(); payAmount.forceActiveFocus() }
+                        }
+                        Action {
+                            label: root.record !== null && root.boardFollowing(root.record.name) ? "Following" : "Follow"
+                            onPressed: root.boardFollow(root.record.name, root.boardFollowing(root.record.name))
+                        }
+                    }
 
                     // The holder's settings for this name.
                     ColumnLayout {
@@ -3948,6 +3972,7 @@ Item {
                             Layout.fillWidth: true
                             spacing: 20
                             Link {
+                                visible: root.section !== "profile"
                                 text: "← Back"
                                 color: root.faint
                                 font.underline: false
@@ -3982,7 +4007,7 @@ Item {
                         Hint {
                             visible: root.cliHeld && !root.busy
                             color: root.brass
-                            text: "Held privately. Each save is proven on this machine and takes a few minutes; keep Basecamp open until it is done."
+                            text: root.record !== null && root.heldPublicly(root.record.name) ? "Saving takes about 30 seconds." : "Saving takes about 4 minutes (private name); keep Basecamp open until it's done."
                         }
                         RowLayout {
                         visible: root.editTab === "profile"
@@ -3992,12 +4017,13 @@ Item {
                         Layout.fillWidth: true
                         Layout.alignment: Qt.AlignTop
                         spacing: 12
-                        Hint { text: "All optional." + (root.cliHeld ? " For the avatar, give the full path of a PNG file." : "") }
+
                         Repeater {
                             model: root.profileFields
                             RowLayout {
                                 id: profileRow
                                 required property var modelData
+                                visible: profileRow.modelData.key !== "cid" || root.entriesOpen
                                 Layout.fillWidth: true
                                 spacing: 8
                                 Text {
@@ -4148,7 +4174,7 @@ Item {
                         }
 
                         Link {
-                            text: root.entriesOpen ? "Hide entries for other apps" : "Entries for other apps (chat, inbox, agent)"
+                            text: root.entriesOpen ? "Less" : "More: a file, entries for other apps"
                             onPressed: root.entriesOpen = !root.entriesOpen
                         }
                         ColumnLayout {
