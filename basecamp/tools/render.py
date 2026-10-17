@@ -77,6 +77,9 @@ BRIDGE = r"""
                 return ok({ id: args[0] + "-1792000000000", name: args[0], kind: method.substr(4), state: "running", started: Date.now() - 125000 })
             if (method === "cli_balance") return ok({ account: "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", balance: root.missing === "pauper" ? "5000" : "250000000" })
             if (method === "board_follows") return ok(["ada"])
+            if (method === "anon_name") return ok(root.anonMock || "")
+            if (method === "board_likes") return ok(["jef/0"])
+            if (method === "set_main_name") return ok(args[0])
             if (method === "board_follow") return ok(args[1] ? [] : ["ada", args[0]])
             if (method === "board_feed" || method === "board_thread") return ok({ updating: false, error: null, posts: [
                 { post: "ada/1", name: "ada", n: 1, parent: "jef/0", time: Date.now() - 240000, text: "Welcome! First reply on the board.", cids: [], likes: 2, hidden: false, block: 30601 },
@@ -118,6 +121,12 @@ BRIDGE = r"""
 SCENARIOS = {
     "start": "",
     "home-reply": 'root.boardReply("jef/0")',
+    "anon-off": 'root.anonOn = true',
+    "pay": 'root.section = "pay"',
+    "profile-tab": 'root.openProfile()',
+    "settings-tab": 'root.section = "settings"',
+    "search-tab": 'root.section = "search"',
+    "welcome": 'root.cliPath = ""',
     "home-thread": 'root.boardShow("thread", "jef/0")',
     "name": 'root.show("jef")',
     "plain": 'root.show("linus")',

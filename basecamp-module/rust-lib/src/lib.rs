@@ -311,6 +311,31 @@ pub trait NamesModule: Send + 'static {
     /// Follows `name` (or stops, with `undo`); kept on this device only.
     fn board_follow(&mut self, name: String, undo: bool) -> String;
 
+    /// The name this device posts, likes and pays as, or null if none is set.
+    fn main_name(&mut self) -> String;
+
+    /// Sets the name this device posts, likes and pays as.
+    fn set_main_name(&mut self, name: String) -> String;
+
+    /// The names CLI wallet's anonymous name (`names anon`), or null if it has none yet.
+    fn anon_name(&mut self) -> String;
+
+    /// Makes the wallet's anonymous name, a CLI job (`names anon`): a private
+    /// transfer of a few minutes, then a registration of about 20 that the CLI
+    /// finishes in the background.
+    fn make_anon(&mut self) -> String;
+
+    /// The posts this device's names have liked, `<name>/<n>`.
+    fn board_likes(&mut self) -> String;
+
+    /// Likes `post` as `name`, or takes the like back if this device liked it.
+    /// A CLI job; the like is remembered here once it is started.
+    fn board_toggle_like(&mut self, name: String, post: String) -> String;
+
+    /// Pays `amount` (base units, decimal text) to `name` from the CLI wallet's
+    /// private account, privately (`names pay`). A CLI job; about 4 minutes.
+    fn cli_pay(&mut self, name: String, amount: String) -> String;
+
     /// The names CLI's default private account and its balance:
     /// `{account, balance}` (decimal text), or null if it has none. Runs
     /// `names balance`, which first catches up with the chain (seconds to a
@@ -363,6 +388,10 @@ struct Names {
     jobs_dir: Option<std::path::PathBuf>,
     /// The names followed on the board, kept on this device only.
     follows: Vec<String>,
+    /// The name this device posts, likes and pays as (see `set_main_name`).
+    main_name: Option<String>,
+    /// The posts this device's names have liked, `<name>/<n>`, so a like toggles.
+    likes: Vec<String>,
     /// Board reads, by what was asked: they take the CLI many seconds, so they
     /// run on their own thread and every call answers at once with the last result.
     board_reads: std::sync::Arc<std::sync::Mutex<HashMap<String, BoardRead>>>,
@@ -393,6 +422,8 @@ impl Default for Names {
             cli_wallet: None,
             jobs_dir: None,
             follows: Vec::new(),
+            main_name: None,
+            likes: Vec::new(),
             board_reads: Default::default(),
         };
         // A missing or unreadable file just means the defaults stand.
@@ -652,6 +683,11 @@ impl Names {
             .as_array()
             .map(|list| list.iter().filter_map(|name| registry::parse_name(name.as_str()?).ok()).collect())
             .unwrap_or_default();
+        self.main_name = saved["main_name"].as_str().and_then(|name| registry::parse_name(name).ok());
+        self.likes = saved["likes"]
+            .as_array()
+            .map(|list| list.iter().filter_map(|post| post.as_str().map(str::to_owned)).collect())
+            .unwrap_or_default();
     }
 
     fn config(&self) -> Value {
@@ -663,6 +699,8 @@ impl Names {
             "cli": self.cli,
             "cli_wallet": self.cli_wallet,
             "follows": self.follows,
+            "main_name": self.main_name,
+            "likes": self.likes,
         })
     }
 
@@ -1410,6 +1448,67 @@ impl NamesModule for Names {
         self.cli_job(&name, "hide", |_, _, _| Ok((command, None, Value::Null)))
     }
 
+    fn main_name(&mut self) -> String {
+        reply(Ok(json!(self.main_name)))
+    }
+
+    fn set_main_name(&mut self, name: String) -> String {
+        reply((|| {
+            let name = registry::parse_name(&name)?;
+            self.main_name = Some(name.clone());
+            self.save();
+            Ok(json!(name))
+        })())
+    }
+
+    fn anon_name(&mut self) -> String {
+        reply((|| {
+            let setup = self.cli_setup()?;
+            let saved: Value = std::fs::read_to_string(setup.wallet.join("names.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or(Value::Null);
+            Ok(saved["anon"].as_str().and_then(|name| registry::parse_name(name).ok()).map_or(Value::Null, Value::from))
+        })())
+    }
+
+    fn make_anon(&mut self) -> String {
+        self.cli_job("anon", "anon", |_, _, _| Ok((vec!["anon".to_owned()], None, Value::Null)))
+    }
+
+    fn board_likes(&mut self) -> String {
+        reply(Ok(json!(self.likes)))
+    }
+
+    fn board_toggle_like(&mut self, name: String, post: String) -> String {
+        let post = match cli::post_ref(&post) {
+            Ok(post) => post,
+            Err(error) => return reply(Err(error)),
+        };
+        let undo = self.likes.contains(&post);
+        let command = match cli::like_args(&name, &post, undo) {
+            Ok(command) => command,
+            Err(error) => return reply(Err(error)),
+        };
+        let started = self.cli_job(&name, "like", |_, _, _| Ok((command, None, Value::Null)));
+        if serde_json::from_str::<Value>(&started).is_ok_and(|reply| reply["success"] == true) {
+            self.likes.retain(|liked| *liked != post);
+            if !undo {
+                self.likes.push(post);
+            }
+            self.save();
+        }
+        started
+    }
+
+    fn cli_pay(&mut self, name: String, amount: String) -> String {
+        let command = match cli::pay_args(&name, &amount) {
+            Ok(command) => command,
+            Err(error) => return reply(Err(error)),
+        };
+        self.cli_job(&name, "pay", |_, _, _| Ok((command, None, Value::Null)))
+    }
+
     fn board_follows(&mut self) -> String {
         reply(Ok(json!(self.follows)))
     }
@@ -1707,6 +1806,8 @@ mod tests {
             cli_wallet: None,
             jobs_dir: None,
             follows: Vec::new(),
+            main_name: None,
+            likes: Vec::new(),
             board_reads: Default::default(),
         }
     }

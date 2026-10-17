@@ -47,7 +47,7 @@ Item {
     property string walletProblem: ""  // why the wallet cannot be used, if it cannot
     property int fromIndex: 0
     property string tool: ""           // the open panel: "", "pay" or "settings"
-    property string section: "home"    // home (the board) or names (look up, register, edit)
+    property string section: "posts"   // posts, pay, profile, search or settings
     // The board (Home): see board/ and the names module's board_* calls.
     property string boardView: "all"   // all, following or thread
     property string boardThreadOf: ""  // the post a thread view shows, <name>/<n>
@@ -58,7 +58,11 @@ Item {
     property var boardPeople: ({})     // name → {display, color, pixels}
     property string boardReplyTo: ""
     property var boardJob: null        // {id, label, started, after}
-    property string boardMe: ""        // the name posts are made as
+    property string savedMain: ""      // the main name the module keeps for this device
+    property string anonName: ""       // this wallet's anonymous name, once made
+    property bool anonOn: false        // the post box posts as the anon name
+    property var boardLiked: []        // posts this device has liked, <name>/<n>
+    property bool cliKnown: false      // the CLI's names have been read at least once
     property bool confirmingRelease: false
     property var pending: null         // a change that was sent and is not confirmed yet
     property string registry: ""
@@ -237,8 +241,10 @@ Item {
             cliWallet = config.cli_wallet ? config.cli_wallet : ""
             configKnown = true
             settingsOpen = registry === ""
+            savedMain = config.main_name ? config.main_name : ""
             loadWallet(false)
             loadCliMine()
+            loadCliBalance()
             boardLoad()
             return true
         }
@@ -348,11 +354,15 @@ Item {
             value = value || []
             cliNames = value.filter(function(entry) { return !entry.registering && !entry.failed })
             cliPending = value.filter(function(entry) { return entry.registering || entry.failed })
+            cliKnown = true
+            if (savedMain === "" && mainName !== "")
+                setMain(mainName)
         }, function(message) {
-            cliNames = []
-            cliPending = []
             console.log("names_ui: CLI names:", message)
+            cliRetry.start()
         })
+        askLater("anon_name", [], function(value) { anonName = value || "" }, function() {})
+        askLater("board_likes", [], function(value) { boardLiked = value || [] }, function() {})
     }
 
     /// Asks how much the names CLI's private account holds, for registering.
@@ -563,7 +573,7 @@ Item {
     /// Puts a name on the plate, with every panel closed.
     /// Opens the "Register a name" screen.
     function openRegister() {
-        section = "names"
+        section = "settings"
         say("", false)
         record = null
         page = null
@@ -600,7 +610,7 @@ Item {
     }
 
     function show(name) {
-        section = "names"
+        section = "search"
         registering = false
         tool = ""
         pageSourceOpen = false
@@ -1212,8 +1222,67 @@ Item {
     /// The names this wallet can post as: those the names CLI holds, not by a
     /// public account (a public holder pays gas; offered once it is measured).
     readonly property var boardNames: cliNames.filter(function(entry) { return entry.private !== false })
-    readonly property string boardAs: boardMe !== "" && boardNames.some(function(entry) { return entry.name === boardMe }) ? boardMe
-        : boardNames.length > 0 ? boardNames[0].name : ""
+    /// Your main name: the one set for this device if the wallet still holds it,
+    /// else the first name the CLI holds privately that isn't the anon one.
+    readonly property string mainName: {
+        var own = boardNames.filter(function(entry) { return entry.name !== anonName })
+        if (savedMain !== "" && own.some(function(entry) { return entry.name === savedMain }))
+            return savedMain
+        return own.length > 0 ? own[0].name : ""
+    }
+    readonly property bool anonReady: anonName !== "" && cliHolds(anonName)
+    /// Who the post box posts as.
+    readonly property string boardAs: anonOn && anonReady ? anonName : mainName
+    /// First run: no names CLI yet, or no name to post as.
+    readonly property bool needsWelcome: configKnown && registry !== "" && (cliPath === "" || (cliKnown && mainName === "" && cliPending.length === 0))
+
+    function setMain(name) {
+        askLater("set_main_name", [name], function(value) { savedMain = value || "" }, function(message) { say(message, true) })
+    }
+
+    /// Opens Profile: the edit screen for your main name.
+    function openProfile() {
+        if (mainName === "") {
+            say("Register a name first.", true)
+            return
+        }
+        show(mainName)
+        if (record !== null && mine)
+            openSettings()
+        section = "profile"
+    }
+
+    /// Makes the anon name (once): a CLI job, then a registration the CLI finishes.
+    function makeAnon() {
+        boardStart("make_anon", [], "Setting up your anon name", function() {
+            askLater("anon_name", [], function(value) { anonName = value || "" }, function() {})
+            loadCliMine()
+        })
+    }
+
+    function boardToggleLike(post) {
+        if (boardAs === "") {
+            say("Register a name to like posts.", true)
+            return
+        }
+        var liked = boardLiked.indexOf(post) >= 0
+        boardStart("board_toggle_like", [boardAs, post], liked ? "Your unlike" : "Your like")
+        var next = boardLiked.filter(function(item) { return item !== post })
+        if (!liked)
+            next.push(post)
+        boardLiked = next
+    }
+
+    function payName() {
+        var to = payTo.text.trim()
+        var amount = payAmount.text.trim()
+        if (to === "" || amount === "")
+            return
+        boardStart("cli_pay", [to, amount], "Your payment to " + to, function() {
+            payAmount.text = ""
+            loadCliBalance()
+        })
+    }
 
     function boardAgo(time) {
         var seconds = Math.max(0, Math.floor((clockTick - time) / 1000))
@@ -1283,7 +1352,7 @@ Item {
     }
 
     function boardShow(which, post) {
-        section = "home"
+        section = "posts"
         boardView = which
         boardThreadOf = post || ""
         boardPosts = []
@@ -1368,8 +1437,13 @@ Item {
     Timer {
         interval: 60000
         repeat: true
-        running: root.section === "home" && root.boardJob === null && root.boardView !== "thread"
+        running: root.section === "posts" && root.boardJob === null && root.boardView !== "thread"
         onTriggered: { root.clockTick = Date.now(); root.boardLoad() }
+    }
+    Timer {
+        id: cliRetry
+        interval: 10000
+        onTriggered: root.loadCliMine()
     }
     Timer {
         id: boardRetry
@@ -2132,24 +2206,481 @@ Item {
         anchors.fill: parent
         spacing: 0
 
-        // Search, and the holder's own names.
+        // Who you are, and where to go.
         Rectangle {
-            Layout.preferredWidth: 320
+            Layout.preferredWidth: 260
             Layout.fillHeight: true
             color: root.panel
 
             ColumnLayout {
                 anchors.fill: parent
                 anchors.margins: 18
-                spacing: 14
+                spacing: 8
 
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.bottomMargin: 14
+                    spacing: 12
+                    Avatar {
+                        Layout.preferredWidth: 48
+                        Layout.preferredHeight: 48
+                        visible: root.mainName !== ""
+                        pixels: root.boardPeople[root.mainName] ? root.boardPeople[root.mainName].pixels : null
+                        owner: root.mainName
+                        letter: root.mainName.charAt(0)
+                        ring: root.boardPeople[root.mainName] && root.boardPeople[root.mainName].color !== "" ? root.boardPeople[root.mainName].color : root.brass
+                        Component.onCompleted: if (root.mainName !== "") root.boardLookUp(root.mainName)
+                    }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 0
+                        Text {
+                            Layout.fillWidth: true
+                            text: root.mainName !== "" && root.boardPeople[root.mainName] && root.boardPeople[root.mainName].display !== "" ? root.boardPeople[root.mainName].display : (root.mainName !== "" ? root.mainName : "Welcome")
+                            textFormat: Text.PlainText
+                            color: root.ink
+                            font.family: root.sans
+                            font.pixelSize: 19
+                            font.weight: Font.DemiBold
+                            elide: Text.ElideRight
+                        }
+                        Text {
+                            visible: root.mainName !== ""
+                            text: root.mainName
+                            color: root.faint
+                            font.family: root.sans
+                            font.pixelSize: 14
+                        }
+                    }
+                }
+
+                Tab { Layout.fillWidth: true; label: "Posts"; current: root.section === "posts"; onPressed: root.boardShow(root.boardView === "thread" ? "all" : root.boardView) }
+                Tab { Layout.fillWidth: true; label: "Pay"; current: root.section === "pay"; onPressed: { root.section = "pay"; root.loadCliBalance() } }
+                Tab { Layout.fillWidth: true; label: "Profile"; current: root.section === "profile"; onPressed: root.openProfile() }
+                Tab { Layout.fillWidth: true; label: "Search"; current: root.section === "search"; onPressed: { root.section = "search"; searchField.forceActiveFocus() } }
+                Tab { Layout.fillWidth: true; label: "Settings"; current: root.section === "settings"; onPressed: { root.section = "settings"; root.registering = false; root.record = null; root.missing = "" } }
+
+                Item { Layout.fillHeight: true }
+
+                RowLayout {
+                    visible: root.sequencer !== ""
+                    spacing: 8
+                    Rectangle { width: 8; height: 8; radius: 4; color: "#96D678" }
+                    Text { text: root.networkName(); color: root.faint; font.family: root.sans; font.pixelSize: 14 }
+                }
+            }
+        }
+
+        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: root.line }
+
+        // First run: install the CLI, then pick your name.
+        Flickable {
+            visible: root.needsWelcome && root.section !== "settings"
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            contentHeight: welcome.implicitHeight + 72
+            clip: true
+            ColumnLayout {
+                id: welcome
+                x: 56
+                y: 48
+                width: Math.min(parent.width - 112, 640)
+                spacing: 18
+                Text { text: "Welcome"; color: root.ink; font.family: root.sans; font.pixelSize: 36; font.weight: Font.DemiBold }
+                Hint { font.pixelSize: 18; text: "Get a name, then post, pay and be paid as it. Two steps." }
+                Card {
+                    Layout.fillWidth: true
+                    RowLayout {
+                        spacing: 12
+                        Rectangle {
+                            width: 30; height: 30; radius: 15
+                            color: root.cliPath !== "" ? "#96D678" : root.brass
+                            Text { anchors.centerIn: parent; text: root.cliPath !== "" ? "✓" : "1"; color: root.slate; font.family: root.sans; font.pixelSize: 15; font.weight: Font.DemiBold }
+                        }
+                        Text { text: "Install the names program"; color: root.ink; font.family: root.sans; font.pixelSize: 20; font.weight: Font.DemiBold }
+                    }
+                    Hint {
+                        visible: root.cliPath === ""
+                        text: "It proves your changes on this computer, so the chain never learns your account. Paste this in Terminal, then come back:"
+                    }
+                    RowLayout {
+                        visible: root.cliPath === ""
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Rectangle {
+                            Layout.fillWidth: true
+                            implicitHeight: 44
+                            radius: 6
+                            color: root.slate
+                            border.width: 1
+                            border.color: root.line
+                            Text {
+                                anchors.fill: parent
+                                anchors.leftMargin: 12
+                                verticalAlignment: Text.AlignVCenter
+                                text: "curl -fsSL https://logos-names.wrapit.workers.dev/install.sh | sh"
+                                color: root.dim
+                                font.family: root.mono
+                                font.pixelSize: 14
+                                elide: Text.ElideRight
+                            }
+                        }
+                        Action { label: "Copy"; onPressed: root.copy("curl -fsSL https://logos-names.wrapit.workers.dev/install.sh | sh && names setup", "The command") }
+                    }
+                    Link { visible: root.cliPath === ""; text: "I've installed it"; color: root.brass; onPressed: root.loadConfig() }
+                    Hint { visible: root.cliPath !== ""; text: "Installed." }
+                }
+                Card {
+                    Layout.fillWidth: true
+                    opacity: root.cliPath !== "" ? 1 : 0.5
+                    RowLayout {
+                        spacing: 12
+                        Rectangle {
+                            width: 30; height: 30; radius: 15
+                            color: root.brass
+                            Text { anchors.centerIn: parent; text: "2"; color: root.slate; font.family: root.sans; font.pixelSize: 15; font.weight: Font.DemiBold }
+                        }
+                        Text { text: "Pick your name"; color: root.ink; font.family: root.sans; font.pixelSize: 20; font.weight: Font.DemiBold }
+                    }
+                    Hint {
+                        text: "Held privately: nobody can find which account holds it. It takes a 1,000,000 deposit, returned in full if you ever give the name up, and about 20 minutes to register."
+                            + (root.cliBalance !== undefined && root.cliBalance !== null ? " Your private account holds " + root.grouped(root.cliBalance.balance) + "." : "")
+                    }
+                    Action {
+                        label: "Choose my name"
+                        strong: true
+                        enabledNow: root.cliPath !== ""
+                        onPressed: root.openRegister()
+                    }
+                }
+            }
+        }
+
+        // Pay: send to a name, privately.
+        Flickable {
+            visible: root.section === "pay" && !root.needsWelcome
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            contentHeight: payPage.implicitHeight + 72
+            clip: true
+            ColumnLayout {
+                id: payPage
+                x: 56
+                y: 40
+                width: Math.min(parent.width - 112, 560)
+                spacing: 16
+                Text { text: "Pay"; color: root.ink; font.family: root.sans; font.pixelSize: 28; font.weight: Font.DemiBold }
+                Hint { text: "Send to a name. It goes from your private account to the name's private keys: the chain doesn't show who paid whom, or how much." }
+                Text { text: "To"; color: root.faint; font.family: root.sans; font.pixelSize: 15 }
+                Field { id: payTo; Layout.fillWidth: true; size: 19; hint: "A name, such as ada" }
+                Text { text: "Amount"; color: root.faint; font.family: root.sans; font.pixelSize: 15 }
+                Field { id: payAmount; Layout.fillWidth: true; size: 19; numbersOnly: true; hint: "1000" }
+                Hint {
+                    font.pixelSize: 15
+                    text: root.cliBalance === undefined ? "Checking your private account…"
+                        : root.cliBalance === null ? "No private account found."
+                        : "Your private account holds " + root.grouped(root.cliBalance.balance) + "."
+                }
+                Action {
+                    label: "Pay privately"
+                    strong: true
+                    enabledNow: root.boardJob === null && payTo.text.trim() !== "" && payAmount.text.trim() !== ""
+                    onPressed: root.payName()
+                }
+                Hint {
+                    visible: root.boardJob !== null
+                    color: root.brass
+                    font.pixelSize: 16
+                    text: root.boardJob === null ? "" : root.boardJob.label + ": proving it on this computer. About 4 min, "
+                        + Math.max(0, Math.floor((Math.max(root.clockTick, Date.now()) - root.boardJob.started) / 60000)) + " so far."
+                }
+                Hint {
+                    visible: root.boardJob === null && root.notice !== ""
+                    color: root.noticeIsError ? root.alarm : root.dim
+                    text: root.notice
+                }
+                Hint { font.pixelSize: 14; text: "The other side sees the payment once their wallet catches up with the chain." }
+            }
+        }
+
+        // Posts: the board.
+        Flickable {
+            visible: root.section === "posts" && !root.needsWelcome
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            contentHeight: home.implicitHeight + 72
+            clip: true
+
+            ColumnLayout {
+                id: home
+                x: 56
+                y: 40
+                width: Math.min(parent.width - 112, 760)
+                spacing: 16
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 6
+                    Link {
+                        visible: root.boardView === "thread"
+                        text: "← Back"
+                        color: root.faint
+                        font.underline: false
+                        onPressed: root.boardShow("all")
+                    }
+                    Tab { visible: root.boardView !== "thread"; label: "Recent"; current: root.boardView === "all"; onPressed: root.boardShow("all") }
+                    Tab { visible: root.boardView !== "thread"; label: "Following" + (root.boardFollows.length > 0 ? "  " + root.boardFollows.length : ""); current: root.boardView === "following"; onPressed: root.boardShow("following") }
+                    Text { visible: root.boardView === "thread"; text: "Thread"; color: root.ink; font.family: root.sans; font.pixelSize: 22; font.weight: Font.DemiBold }
+                    Item { Layout.fillWidth: true }
+                    Link { text: root.boardLoading ? "Loading…" : "Refresh"; color: root.faint; font.pixelSize: 15; onPressed: root.boardLoad() }
+                }
+
+                // The post box.
+                Card {
+                    Layout.fillWidth: true
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Text {
+                            text: root.boardAs !== "" ? "Posting as " + root.boardAs : "No name to post as yet"
+                            color: root.anonOn && root.anonReady ? root.brass : root.dim
+                            font.family: root.sans
+                            font.pixelSize: 15
+                            font.weight: Font.DemiBold
+                        }
+                        Item { Layout.fillWidth: true }
+                        Chip {
+                            label: root.anonOn ? "Anon: on" : "Anon: off"
+                            link: true
+                            onPressed: root.anonOn = !root.anonOn
+                        }
+                    }
+                    // The anon name, before it can post.
+                    ColumnLayout {
+                        visible: root.anonOn && !root.anonReady
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Hint {
+                            font.pixelSize: 15
+                            text: root.anonName !== "" && root.cliPendingFor(root.anonName) !== null
+                                ? root.anonName + " is being set up: " + root.pendingLine(root.cliPendingFor(root.anonName)) + "."
+                                : "Anon posts come from a separate name, like anon-quiet-otter, held by its own private account. Nothing on chain links it to "
+                                  + (root.mainName !== "" ? root.mainName : "your name") + "; only your wallet knows both. Setting it up takes about 25 minutes, once, and a 1,000,000 deposit you get back if you release it."
+                        }
+                        Action {
+                            visible: root.anonName === "" || root.cliPendingFor(root.anonName) === null
+                            label: "Set up my anon name"
+                            strong: true
+                            enabledNow: root.boardJob === null && root.mainName !== ""
+                            onPressed: root.makeAnon()
+                        }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: root.boardReplyTo !== ""
+                        Text { Layout.fillWidth: true; text: "Replying to " + root.boardReplyTo; color: root.brass; font.family: root.sans; font.pixelSize: 15 }
+                        Link { text: "Cancel"; color: root.faint; font.pixelSize: 14; onPressed: root.boardReplyTo = "" }
+                    }
+                    Area {
+                        id: boardComposer
+                        Layout.fillWidth: true
+                        implicitHeight: 96
+                        code: false
+                        hint: root.boardAs !== "" ? "What's happening, " + root.boardAs + "?" : "Register a name to post"
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Field {
+                            id: boardCid
+                            Layout.fillWidth: true
+                            size: 15
+                            code: true
+                            hint: "Attach a file: its Logos Storage CID (optional)"
+                        }
+                        Text {
+                            text: boardComposer.text.length + " / 1024"
+                            color: boardComposer.text.length > 1024 ? root.alarm : root.faint
+                            font.family: root.sans
+                            font.pixelSize: 13
+                        }
+                        Action {
+                            label: root.boardReplyTo !== "" ? "Reply" : "Post"
+                            strong: true
+                            enabledNow: root.boardJob === null && root.boardAs !== "" && !(root.anonOn && !root.anonReady) && boardComposer.text.length <= 1024 && (boardComposer.text.trim() !== "" || boardCid.text.trim() !== "")
+                            onPressed: root.boardPost()
+                        }
+                    }
+                    Hint { font.pixelSize: 13; text: "Posts are public. Each is proved on this computer (about 4 min), so the chain sees the name, never your account. Anon can't hide your writing style or when you post." }
+                }
+
+                Hint {
+                    visible: root.boardJob !== null
+                    color: root.brass
+                    font.pixelSize: 16
+                    text: root.boardJob === null ? "" : root.boardJob.label + ": proving it on this computer, so the chain never learns your account. About 4 min, "
+                        + Math.max(0, Math.floor((Math.max(root.clockTick, Date.now()) - root.boardJob.started) / 60000)) + " so far."
+                }
+                Hint {
+                    visible: root.boardJob === null && root.notice !== "" && root.section === "posts"
+                    color: root.noticeIsError ? root.alarm : root.dim
+                    text: root.notice
+                }
+                Hint {
+                    visible: !root.boardLoading && root.boardPosts.length === 0
+                    font.pixelSize: 17
+                    text: root.cliPath === "" ? "The board needs the names CLI. Install it, then open Advanced to point at it."
+                        : root.boardError !== "" ? "Waiting for the board: " + root.boardError
+                        : root.boardView === "following" && root.boardFollows.length === 0 ? "You don't follow anyone yet. Press Follow on a post."
+                        : "No posts in the last few hours."
+                }
+
+                Repeater {
+                    model: root.boardPosts
+                    Card {
+                        id: postCard
+                        required property var modelData
+                        readonly property var who: root.boardPeople[modelData.name] || ({ display: "", color: "", pixels: null })
+                        readonly property bool isMine: root.cliNames.some(function(entry) { return entry.name === postCard.modelData.name })
+                        visible: !modelData.hidden
+                        Layout.fillWidth: true
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 14
+                            Avatar {
+                                Layout.preferredWidth: 44
+                                Layout.preferredHeight: 44
+                                Layout.alignment: Qt.AlignTop
+                                pixels: postCard.who.pixels
+                                owner: postCard.modelData.name
+                                letter: postCard.modelData.name.charAt(0)
+                                ring: postCard.who.color !== "" ? postCard.who.color : root.brass
+                            }
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 6
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    Text {
+                                        visible: postCard.who.display !== ""
+                                        text: postCard.who.display
+                                        textFormat: Text.PlainText
+                                        color: root.ink
+                                        font.family: root.sans
+                                        font.pixelSize: 17
+                                        font.weight: Font.DemiBold
+                                    }
+                                    Text {
+                                        text: postCard.modelData.name
+                                        color: postCard.who.display !== "" ? root.faint : root.ink
+                                        font.family: root.sans
+                                        font.pixelSize: postCard.who.display !== "" ? 15 : 17
+                                        font.weight: postCard.who.display !== "" ? Font.Normal : Font.DemiBold
+                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.show(postCard.modelData.name) }
+                                    }
+                                    Text { text: "· " + root.boardAgo(postCard.modelData.time); color: root.faint; font.family: root.sans; font.pixelSize: 14 }
+                                    Item { Layout.fillWidth: true }
+                                    Link {
+                                        visible: !postCard.isMine
+                                        text: root.boardFollowing(postCard.modelData.name) ? "Following" : "Follow"
+                                        color: root.boardFollowing(postCard.modelData.name) ? root.faint : root.brass
+                                        font.pixelSize: 14
+                                        onPressed: root.boardFollow(postCard.modelData.name, root.boardFollowing(postCard.modelData.name))
+                                    }
+                                }
+                                Text {
+                                    visible: !!postCard.modelData.parent
+                                    text: "replying to " + (postCard.modelData.parent ? String(postCard.modelData.parent).split("/")[0] : "")
+                                    color: root.faint
+                                    font.family: root.sans
+                                    font.pixelSize: 13
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    visible: postCard.modelData.text !== ""
+                                    text: postCard.modelData.text
+                                    textFormat: Text.PlainText
+                                    color: root.dim
+                                    font.family: root.sans
+                                    font.pixelSize: 17
+                                    lineHeight: 1.2
+                                    wrapMode: Text.Wrap
+                                }
+                                Flow {
+                                    Layout.fillWidth: true
+                                    visible: postCard.modelData.cids.length > 0
+                                    spacing: 8
+                                    Repeater {
+                                        model: postCard.modelData.cids
+                                        Chip {
+                                            required property string modelData
+                                            label: "File " + modelData.substr(0, 10) + "… · Copy CID"
+                                            link: true
+                                            onPressed: root.copy(modelData, "The CID")
+                                        }
+                                    }
+                                }
+                                RowLayout {
+                                    spacing: 18
+                                    Link { text: "Reply"; color: root.faint; font.pixelSize: 14; onPressed: root.boardReply(postCard.modelData.post) }
+                                    Link {
+                                        readonly property bool liked: root.boardLiked.indexOf(postCard.modelData.post) >= 0
+                                        text: (liked ? "♥ " : "♡ ") + Math.max(liked ? 1 : 0, postCard.modelData.likes)
+                                        color: liked ? root.alarm : root.faint
+                                        font.pixelSize: 14
+                                        font.underline: false
+                                        onPressed: root.boardToggleLike(postCard.modelData.post)
+                                    }
+                                    Link {
+                                        visible: root.boardView !== "thread"
+                                        text: "Thread"
+                                        color: root.faint
+                                        font.pixelSize: 14
+                                        onPressed: root.boardShow("thread", postCard.modelData.parent ? postCard.modelData.parent : postCard.modelData.post)
+                                    }
+                                    Link {
+                                        visible: postCard.isMine
+                                        text: "Take down"
+                                        color: root.faint
+                                        font.pixelSize: 14
+                                        onPressed: root.boardStart("board_hide", [postCard.modelData.post], "Taking it down")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // The plate: search, profile and settings.
+        Flickable {
+            visible: (root.section === "search" || root.section === "profile" || root.section === "settings") && !(root.needsWelcome && root.section !== "settings")
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            contentHeight: plate.implicitHeight + 72
+            clip: true
+
+            ColumnLayout {
+                id: plate
+                x: 56
+                y: 40
+                width: Math.min(parent.width - 112, root.tool === "settings" ? 1040 : 820)
+                spacing: 22
+
+                // Search: look up any name.
+                ColumnLayout {
+                    visible: root.section === "search"
+                    Layout.fillWidth: true
+                    spacing: 8
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
                     Field {
                         id: searchField
                         Layout.fillWidth: true
-                        hint: "Type a name"
+                        hint: "Look up a name, such as jef"
                         onAccepted: root.find(searchField.text)
                     }
                     IconButton {
@@ -2158,21 +2689,33 @@ Item {
                         onPressed: root.find(searchField.text)
                     }
                 }
-                Action {
-                    visible: root.registry !== ""
-                    Layout.fillWidth: true
-                    label: "+  Register a name"
-                    strong: true
-                    onPressed: root.openRegister()
-                }
-                Tab {
-                    visible: root.registry !== ""
-                    Layout.fillWidth: true
-                    label: "Home"
-                    current: root.section === "home"
-                    onPressed: root.boardShow(root.boardView === "thread" ? "all" : root.boardView)
                 }
 
+                // Settings: your names, registering another, and Advanced.
+                ColumnLayout {
+                    visible: root.section === "settings" && !root.registering
+                    Layout.fillWidth: true
+                    spacing: 14
+                    Text { text: "Settings"; color: root.ink; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: 28 }
+                    Part { text: "Main name" }
+                    Hint { text: "Your posts, likes and payments are made as this name." }
+                    Flow {
+                        Layout.fillWidth: true
+                        spacing: 6
+                        Repeater {
+                            model: root.boardNames.filter(function(entry) { return entry.name !== root.anonName })
+                            Tab {
+                                required property var modelData
+                                label: modelData.name
+                                current: root.mainName === modelData.name
+                                onPressed: root.setMain(modelData.name)
+                            }
+                        }
+                    }
+                    Hint { visible: root.anonName !== ""; text: "Anon name: " + root.anonName + (root.anonReady ? "" : " (being set up)") + ". Only your wallet links it to your main name." }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 6
                 // The names this wallet holds.
                 ColumnLayout {
                     Layout.fillWidth: true
@@ -2316,283 +2859,25 @@ Item {
                     }
                 }
 
-                Item { Layout.fillHeight: true }
-
-                RowLayout {
-                    visible: root.sequencer !== ""
-                    spacing: 8
-                    Rectangle { width: 8; height: 8; radius: 4; color: "#96D678" }
-                    Text { text: root.networkName(); color: root.faint; font.family: root.sans; font.pixelSize: 14 }
-                }
-                Link {
-                    text: root.settingsOpen ? "Close advanced" : "Advanced"
-                    color: root.faint
-                    font.pixelSize: 15
-                    onPressed: { root.settingsOpen = !root.settingsOpen; if (root.settingsOpen) root.section = "names" }
-                }
-            }
-        }
-
-        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: root.line }
-
-        // Home: the board.
-        Flickable {
-            visible: root.section === "home"
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            contentHeight: home.implicitHeight + 72
-            clip: true
-
-            ColumnLayout {
-                id: home
-                x: 56
-                y: 40
-                width: Math.min(parent.width - 112, 760)
-                spacing: 16
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 6
+                    }
+                    Action {
+                        Layout.topMargin: 6
+                        label: "+  Register another name"
+                        strong: true
+                        onPressed: root.openRegister()
+                    }
                     Link {
-                        visible: root.boardView === "thread"
-                        text: "← Back"
+                        Layout.topMargin: 10
+                        text: root.settingsOpen ? "Hide advanced" : "Advanced"
                         color: root.faint
-                        font.underline: false
-                        onPressed: root.boardShow("all")
-                    }
-                    Tab { visible: root.boardView !== "thread"; label: "All"; current: root.boardView === "all"; onPressed: root.boardShow("all") }
-                    Tab { visible: root.boardView !== "thread"; label: "Following" + (root.boardFollows.length > 0 ? "  " + root.boardFollows.length : ""); current: root.boardView === "following"; onPressed: root.boardShow("following") }
-                    Text { visible: root.boardView === "thread"; text: "Thread"; color: root.ink; font.family: root.sans; font.pixelSize: 22; font.weight: Font.DemiBold }
-                    Item { Layout.fillWidth: true }
-                    Link { text: root.boardLoading ? "Loading…" : "Refresh"; color: root.faint; font.pixelSize: 15; onPressed: root.boardLoad() }
-                }
-
-                // The post box.
-                Card {
-                    Layout.fillWidth: true
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
-                        Text { text: "Posting as"; color: root.faint; font.family: root.sans; font.pixelSize: 14 }
-                        Repeater {
-                            model: root.boardNames
-                            Tab {
-                                required property var modelData
-                                label: modelData.name
-                                current: root.boardAs === modelData.name
-                                onPressed: root.boardMe = modelData.name
-                            }
-                        }
-                        Text {
-                            visible: root.boardNames.length === 0
-                            text: "no name yet. Register one privately to post."
-                            color: root.faint
-                            font.family: root.sans
-                            font.pixelSize: 14
-                        }
-                        Item { Layout.fillWidth: true }
-                    }
-                    RowLayout {
-                        Layout.fillWidth: true
-                        visible: root.boardReplyTo !== ""
-                        Text { Layout.fillWidth: true; text: "Replying to " + root.boardReplyTo; color: root.brass; font.family: root.sans; font.pixelSize: 15 }
-                        Link { text: "Cancel"; color: root.faint; font.pixelSize: 14; onPressed: root.boardReplyTo = "" }
-                    }
-                    Area {
-                        id: boardComposer
-                        Layout.fillWidth: true
-                        implicitHeight: 96
-                        code: false
-                        hint: root.boardAs !== "" ? "What's happening, " + root.boardAs + "?" : "Register a name to post"
-                    }
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 10
-                        Field {
-                            id: boardCid
-                            Layout.fillWidth: true
-                            size: 15
-                            code: true
-                            hint: "Attach a file: its Logos Storage CID (optional)"
-                        }
-                        Text {
-                            text: boardComposer.text.length + " / 1024"
-                            color: boardComposer.text.length > 1024 ? root.alarm : root.faint
-                            font.family: root.sans
-                            font.pixelSize: 13
-                        }
-                        Action {
-                            label: root.boardReplyTo !== "" ? "Reply" : "Post"
-                            strong: true
-                            enabledNow: root.boardJob === null && root.boardAs !== "" && boardComposer.text.length <= 1024 && (boardComposer.text.trim() !== "" || boardCid.text.trim() !== "")
-                            onPressed: root.boardPost()
-                        }
-                    }
-                    Hint { font.pixelSize: 13; text: "Posts are public. Each is proved on this computer (about 4 min), so the chain sees your name, never your account." }
-                }
-
-                Hint {
-                    visible: root.boardJob !== null
-                    color: root.brass
-                    font.pixelSize: 16
-                    text: root.boardJob === null ? "" : root.boardJob.label + ": proving it on this computer, so the chain never learns your account. About 4 min, "
-                        + Math.max(0, Math.floor((Math.max(root.clockTick, Date.now()) - root.boardJob.started) / 60000)) + " so far."
-                }
-                Hint {
-                    visible: root.boardJob === null && root.notice !== "" && root.section === "home"
-                    color: root.noticeIsError ? root.alarm : root.dim
-                    text: root.notice
-                }
-                Hint {
-                    visible: !root.boardLoading && root.boardPosts.length === 0
-                    font.pixelSize: 17
-                    text: root.cliPath === "" ? "The board needs the names CLI. Install it, then open Advanced to point at it."
-                        : root.boardError !== "" ? "Waiting for the board: " + root.boardError
-                        : root.boardView === "following" && root.boardFollows.length === 0 ? "You don't follow anyone yet. Press Follow on a post."
-                        : "No posts yet."
-                }
-
-                Repeater {
-                    model: root.boardPosts
-                    Card {
-                        id: postCard
-                        required property var modelData
-                        readonly property var who: root.boardPeople[modelData.name] || ({ display: "", color: "", pixels: null })
-                        readonly property bool isMine: root.cliNames.some(function(entry) { return entry.name === postCard.modelData.name })
-                        visible: !modelData.hidden
-                        Layout.fillWidth: true
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 14
-                            Avatar {
-                                Layout.preferredWidth: 44
-                                Layout.preferredHeight: 44
-                                Layout.alignment: Qt.AlignTop
-                                pixels: postCard.who.pixels
-                                owner: postCard.modelData.name
-                                letter: postCard.modelData.name.charAt(0)
-                                ring: postCard.who.color !== "" ? postCard.who.color : root.brass
-                            }
-                            ColumnLayout {
-                                Layout.fillWidth: true
-                                spacing: 6
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 8
-                                    Text {
-                                        visible: postCard.who.display !== ""
-                                        text: postCard.who.display
-                                        textFormat: Text.PlainText
-                                        color: root.ink
-                                        font.family: root.sans
-                                        font.pixelSize: 17
-                                        font.weight: Font.DemiBold
-                                    }
-                                    Text {
-                                        text: postCard.modelData.name
-                                        color: postCard.who.display !== "" ? root.faint : root.ink
-                                        font.family: root.sans
-                                        font.pixelSize: postCard.who.display !== "" ? 15 : 17
-                                        font.weight: postCard.who.display !== "" ? Font.Normal : Font.DemiBold
-                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.show(postCard.modelData.name) }
-                                    }
-                                    Text { text: "· " + root.boardAgo(postCard.modelData.time); color: root.faint; font.family: root.sans; font.pixelSize: 14 }
-                                    Item { Layout.fillWidth: true }
-                                    Link {
-                                        visible: !postCard.isMine
-                                        text: root.boardFollowing(postCard.modelData.name) ? "Following" : "Follow"
-                                        color: root.boardFollowing(postCard.modelData.name) ? root.faint : root.brass
-                                        font.pixelSize: 14
-                                        onPressed: root.boardFollow(postCard.modelData.name, root.boardFollowing(postCard.modelData.name))
-                                    }
-                                }
-                                Text {
-                                    visible: !!postCard.modelData.parent
-                                    text: "replying to " + (postCard.modelData.parent ? String(postCard.modelData.parent).split("/")[0] : "")
-                                    color: root.faint
-                                    font.family: root.sans
-                                    font.pixelSize: 13
-                                }
-                                Text {
-                                    Layout.fillWidth: true
-                                    visible: postCard.modelData.text !== ""
-                                    text: postCard.modelData.text
-                                    textFormat: Text.PlainText
-                                    color: root.dim
-                                    font.family: root.sans
-                                    font.pixelSize: 17
-                                    lineHeight: 1.2
-                                    wrapMode: Text.Wrap
-                                }
-                                Flow {
-                                    Layout.fillWidth: true
-                                    visible: postCard.modelData.cids.length > 0
-                                    spacing: 8
-                                    Repeater {
-                                        model: postCard.modelData.cids
-                                        Chip {
-                                            required property string modelData
-                                            label: "File " + modelData.substr(0, 10) + "… · Copy CID"
-                                            link: true
-                                            onPressed: root.copy(modelData, "The CID")
-                                        }
-                                    }
-                                }
-                                RowLayout {
-                                    spacing: 18
-                                    Link { text: "Reply"; color: root.faint; font.pixelSize: 14; onPressed: root.boardReply(postCard.modelData.post) }
-                                    Link {
-                                        text: "♥ " + Math.max(0, postCard.modelData.likes)
-                                        color: root.faint
-                                        font.pixelSize: 14
-                                        font.underline: false
-                                        onPressed: {
-                                            if (root.boardAs === "")
-                                                root.say("Register a name privately to like posts.", true)
-                                            else
-                                                root.boardStart("board_like", [root.boardAs, postCard.modelData.post, false], "Your like")
-                                        }
-                                    }
-                                    Link {
-                                        visible: root.boardView !== "thread"
-                                        text: "Thread"
-                                        color: root.faint
-                                        font.pixelSize: 14
-                                        onPressed: root.boardShow("thread", postCard.modelData.parent ? postCard.modelData.parent : postCard.modelData.post)
-                                    }
-                                    Link {
-                                        visible: postCard.isMine
-                                        text: "Take down"
-                                        color: root.faint
-                                        font.pixelSize: 14
-                                        onPressed: root.boardStart("board_hide", [postCard.modelData.post], "Taking it down")
-                                    }
-                                }
-                            }
-                        }
+                        font.pixelSize: 15
+                        onPressed: root.settingsOpen = !root.settingsOpen
                     }
                 }
-            }
-        }
 
-        // The plate.
-        Flickable {
-            visible: root.section !== "home"
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            contentHeight: plate.implicitHeight + 72
-            clip: true
-
-            ColumnLayout {
-                id: plate
-                x: 56
-                y: 40
-                width: Math.min(parent.width - 112, root.tool === "settings" ? 1040 : 820)
-                spacing: 22
-
-                // Settings.
+                // Advanced.
                 ColumnLayout {
-                    visible: root.settingsOpen
+                    visible: root.settingsOpen && root.section === "settings"
                     Layout.fillWidth: true
                     spacing: 10
                     Text {
@@ -2694,12 +2979,12 @@ Item {
 
                 // Nothing chosen yet.
                 ColumnLayout {
-                    visible: root.record === null && root.missing === "" && !root.settingsOpen && !root.registering
+                    visible: root.section === "search" && root.record === null && root.missing === "" && !root.registering
                     Layout.fillWidth: true
                     Layout.topMargin: 60
                     spacing: 10
                     Text {
-                        text: !root.configKnown ? "Starting" : root.registry === "" ? "Choose a registry to begin" : "Look up a name"
+                        text: !root.configKnown ? "Starting" : root.registry === "" ? "Choose a registry to begin" : "Find someone"
                         color: root.ink
                         font.family: root.sans
                         font.weight: Font.DemiBold

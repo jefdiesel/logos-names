@@ -134,7 +134,7 @@ pub fn register_args(name: &str) -> Result<Vec<String>, String> {
 }
 
 /// A board post reference, `<name>/<n>`, checked like anything typed.
-fn post_ref(post: &str) -> Result<String, String> {
+pub fn post_ref(post: &str) -> Result<String, String> {
     let (name, n) = post.trim().rsplit_once('/').ok_or("a post is written <name>/<number>")?;
     let name = registry::parse_name(name)?;
     let n: u64 = n.parse().map_err(|_| format!("not a post number: {n}"))?;
@@ -170,6 +170,16 @@ pub fn like_args(name: &str, post: &str, undo: bool) -> Result<Vec<String>, Stri
     }
     args.extend(["--".to_owned(), post_ref(post)?]);
     Ok(args)
+}
+
+/// `names pay`, privately from the CLI's private account.
+pub fn pay_args(name: &str, amount: &str) -> Result<Vec<String>, String> {
+    let name = registry::parse_name(name)?;
+    let amount = amount.trim().replace(',', "");
+    if amount.is_empty() || amount.len() > 30 || !amount.bytes().all(|b| b.is_ascii_digit()) || amount.bytes().all(|b| b == b'0') {
+        return Err("enter a whole amount, such as 1000".to_owned());
+    }
+    Ok(vec!["pay".to_owned(), "--".to_owned(), name, amount])
 }
 
 /// `names hide`, and the name whose job it is.
@@ -814,6 +824,10 @@ mod tests {
         assert_eq!(like_args("jef", "@ada/0", true).unwrap(), strings(&["like", "--as=jef", "--undo", "--", "ada/0"]));
         assert_eq!(hide_args("jef/2").unwrap(), ("jef".to_owned(), strings(&["hide", "--", "jef/2"])));
         assert!(hide_args("jef/x").is_err());
+        assert_eq!(pay_args("Ada", "1,000").unwrap(), strings(&["pay", "--", "ada", "1000"]));
+        assert!(pay_args("ada", "0").is_err());
+        assert!(pay_args("ada", "-5").is_err());
+        assert!(pay_args("ada", "1e9").is_err());
     }
 
     #[test]
