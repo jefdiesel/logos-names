@@ -430,7 +430,14 @@ struct Names {
     /// Board reads, by what was asked: they take the CLI many seconds, so they
     /// run on their own thread and every call answers at once with the last result.
     board_reads: std::sync::Arc<std::sync::Mutex<HashMap<String, BoardRead>>>,
+    /// Recent answers to reads about a name (resolve, page, avatar), by kind and
+    /// name, so screens that ask again don't wait on the network. A change to
+    /// the name drops them.
+    read_cache: HashMap<(String, String), (String, std::time::Instant)>,
 }
+
+/// How long a cached read about a name is used before it is read again.
+const READ_FRESH: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// A board read: the last result, and whether a newer one is being fetched.
 #[derive(Default)]
@@ -462,6 +469,7 @@ impl Default for Names {
             dm_names: Default::default(),
             chat_names: Default::default(),
             board_reads: Default::default(),
+            read_cache: HashMap::new(),
         };
         // A missing or unreadable file just means the defaults stand.
         let saved = config_dir()
@@ -783,6 +791,77 @@ impl Names {
         })
     }
 
+    fn resolve_now(&mut self, name: String) -> String {
+        self.about(&name, |registry, name, derived| {
+            let Some(resolved) = registry.resolve(name, derived)? else {
+                return Ok(Value::Null);
+            };
+            let mut value = resolved.to_json();
+            value["deposit"] = Value::from(registry.deposit(&derived.id)?.to_string());
+            Ok(value)
+        })
+    }
+
+    fn page_now(&mut self, name: String) -> String {
+        self.about(&name, |registry, name, derived| {
+            Ok(registry.page(name, derived)?.unwrap_or(Value::Null))
+        })
+    }
+
+    fn page_view_now(&mut self, name: String) -> String {
+        self.about(&name, |registry, name, derived| {
+            Ok(registry.page(name, derived)?.map_or(Value::Null, |page| page_view::view(&page)))
+        })
+    }
+
+    fn avatar_now(&mut self, name: String) -> String {
+        self.about(&name, |registry, name, derived| {
+            let resolved = registry.resolve(name, derived)?;
+            let entry = resolved.as_ref().and_then(|resolved| {
+                resolved.profile.texts.iter().find(|(key, _)| key == "avatar").map(|(_, value)| value.as_str())
+            });
+            Ok(entry.and_then(avatar::pixels).unwrap_or(Value::Null))
+        })
+    }
+
+    /// Answers a read about `typed` from the cache while it is fresh, else asks
+    /// `read` and keeps a successful answer.
+    fn cached_read(&mut self, kind: &str, typed: &str, read: impl FnOnce(&mut Self) -> String) -> String {
+        let name = registry::normalize_name(typed);
+        let key = (kind.to_owned(), name);
+        if let Some((answer, at)) = self.read_cache.get(&key) {
+            if at.elapsed() < READ_FRESH {
+                return answer.clone();
+            }
+        }
+        let answer = read(self);
+        if serde_json::from_str::<Value>(&answer).is_ok_and(|reply| reply["success"] == true) {
+            self.read_cache.insert(key, (answer.clone(), std::time::Instant::now()));
+        }
+        answer
+    }
+
+    fn mine_known(&self, key: &str) -> bool {
+        self.board_reads.lock().expect("the board reads lock").get(key).is_some_and(|read| read.value.is_some())
+    }
+
+    fn remember_mine(&self, key: &str, list: Value) {
+        let mut reads = self.board_reads.lock().expect("the board reads lock");
+        reads.entry(key.to_owned()).or_default().value = Some(list);
+    }
+
+    /// The CLI's names changed (a registration or transfer ended): the next
+    /// `cli_mine` waits for a fresh list.
+    fn forget_mine(&self) {
+        self.board_reads.lock().expect("the board reads lock").retain(|key, _| !key.starts_with("cli_mine:"));
+    }
+
+    /// Drops what the cache knows about `typed`, after a change to it.
+    fn forget_reads(&mut self, typed: &str) {
+        let name = registry::normalize_name(typed);
+        self.read_cache.retain(|(_, cached), _| *cached != name);
+    }
+
     fn board_read(&self, key: String, fetch: impl FnOnce() -> Result<Value, String> + Send + 'static) -> Value {
         {
             let mut reads = self.board_reads.lock().expect("the board reads lock");
@@ -948,6 +1027,7 @@ impl Names {
         typed: &str,
         build: impl FnOnce(&Registry, &str, &Derived, &[AccountId]) -> Result<Change, String>,
     ) -> String {
+        self.forget_reads(typed);
         match registry::parse_name(typed) {
             Ok(name) => {
                 let derived = self.derived(&name);
@@ -1122,41 +1202,24 @@ impl NamesModule for Names {
     }
 
     fn resolve(&mut self, name: String) -> String {
-        self.about(&name, |registry, name, derived| {
-            let Some(resolved) = registry.resolve(name, derived)? else {
-                return Ok(Value::Null);
-            };
-            let mut value = resolved.to_json();
-            value["deposit"] = Value::from(registry.deposit(&derived.id)?.to_string());
-            Ok(value)
-        })
+        self.cached_read("resolve", &name.clone(), |this| this.resolve_now(name))
     }
 
     fn page(&mut self, name: String) -> String {
-        self.about(&name, |registry, name, derived| {
-            Ok(registry.page(name, derived)?.unwrap_or(Value::Null))
-        })
+        self.cached_read("page", &name.clone(), |this| this.page_now(name))
     }
 
     fn page_view(&mut self, name: String) -> String {
-        self.about(&name, |registry, name, derived| {
-            Ok(registry.page(name, derived)?.map_or(Value::Null, |page| page_view::view(&page)))
-        })
+        self.cached_read("page_view", &name.clone(), |this| this.page_view_now(name))
+    }
+
+    fn avatar(&mut self, name: String) -> String {
+        self.cached_read("avatar", &name.clone(), |this| this.avatar_now(name))
     }
 
     fn page_preview(&mut self, body: String) -> String {
         let content_type = if body.trim_start().starts_with('<') { "text/html; charset=utf-8" } else { "text/plain; charset=utf-8" };
         reply(Ok(page_view::view(&json!({ "content_type": content_type, "bytes": body.len(), "text": body }))))
-    }
-
-    fn avatar(&mut self, name: String) -> String {
-        self.about(&name, |registry, name, derived| {
-            let resolved = registry.resolve(name, derived)?;
-            let entry = resolved.as_ref().and_then(|resolved| {
-                resolved.profile.texts.iter().find(|(key, _)| key == "avatar").map(|(_, value)| value.as_str())
-            });
-            Ok(entry.and_then(avatar::pixels).unwrap_or(Value::Null))
-        })
     }
 
     fn reverse(&mut self, account: String) -> String {
@@ -1400,7 +1463,20 @@ impl NamesModule for Names {
     }
 
     fn cli_mine(&mut self) -> String {
-        reply((|| Ok(Value::from(cli::run_mine(&self.cli_setup()?)?)))())
+        reply((|| {
+            let setup = self.cli_setup()?;
+            // The CLI reads every name it holds from the chain, which takes seconds:
+            // answer with the last list and refresh it on its own thread.
+            // Kept per wallet: another wallet holds other names.
+            let key = format!("cli_mine:{}", setup.wallet.display());
+            if self.mine_known(&key) {
+                let cached = self.board_read(key, move || cli::run_mine(&setup).map(Value::from));
+                return Ok(cached["posts"].clone());
+            }
+            let fresh = Value::from(cli::run_mine(&setup)?);
+            self.remember_mine(&key, fresh.clone());
+            Ok(fresh)
+        })())
     }
 
     fn cli_profile(&mut self, name: String, entries_json: String, replace: bool) -> String {
@@ -1638,7 +1714,18 @@ impl NamesModule for Names {
     }
 
     fn job(&mut self, id: String) -> String {
-        reply((|| self.jobs()?.state(id.trim()))())
+        let state = (|| self.jobs()?.state(id.trim()))();
+        // A change that ended may have changed its name: read it fresh next time.
+        if let Ok(state) = &state {
+            if state["state"] != "running" {
+                if let Some(name) = state["name"].as_str() {
+                    let name = name.to_owned();
+                    self.forget_reads(&name);
+                    self.forget_mine();
+                }
+            }
+        }
+        reply(state)
     }
 
     fn set_cli(&mut self, path: String) -> bool {
@@ -1923,6 +2010,7 @@ mod tests {
             dm_names: Default::default(),
             chat_names: Default::default(),
             board_reads: Default::default(),
+            read_cache: HashMap::new(),
         }
     }
 
