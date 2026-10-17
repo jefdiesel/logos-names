@@ -71,8 +71,9 @@ BRIDGE = r"""
             if (method === "keep") return ok(String(args[0]))
             // hopper.lez and ada.lez are held privately by the names CLI's wallet.
             if (method === "cli_mine") return ok(["hopper", "ada"].map(function(name) {
-                return { name: name, display: name + ".lez", signer: "cli", state: "held by a deposit (no expiry)", lapsed: false } }))
-            if (method === "cli_set_text" || method === "cli_profile" || method === "cli_set_page")
+                return { name: name, display: name + ".lez", signer: "cli", state: "held by a deposit (no expiry)", lapsed: false, registering: false, failed: false } }).concat(
+                [{ name: "knuth", display: "knuth.lez", signer: "cli", state: "registering, ready in 12 min", lapsed: false, registering: true, failed: false }]))
+            if (method === "cli_set_text" || method === "cli_profile" || method === "cli_set_page" || method === "cli_register")
                 return ok({ id: args[0] + "-1792000000000", name: args[0], kind: method.substr(4), state: "running", started: Date.now() - 125000 })
             if (method === "job") return ok(%(job)s)
             if (method === "set_cli" || method === "set_cli_wallet") return true
@@ -110,6 +111,8 @@ SCENARIOS = {
     "name": 'root.show("jef")',
     "plain": 'root.show("linus")',
     "register": 'root.show("satoshi")',
+    "register-pending": 'root.show("knuth")',
+    "register-nocli": 'root.show("satoshi"); root.cliPath = ""',
     "three": 'root.show("qkz")',
     "locked": 'root.show("xz")',
     "nowallet": 'root.show("jef")',

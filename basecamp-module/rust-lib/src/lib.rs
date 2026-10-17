@@ -273,6 +273,13 @@ pub trait NamesModule: Send + 'static {
     /// Starts `names set-text`; an empty value removes the entry.
     fn cli_set_text(&mut self, name: String, key: String, value: String) -> String;
 
+    /// Registers `name` through the names CLI, from its private account, so
+    /// the holder never appears on chain. Starts a job like `cli_set_text`;
+    /// it ends once the commitment is made (a proof of a few minutes), and
+    /// the CLI finishes the registration in the background about 15 minutes
+    /// later. `cli_mine` lists it with `registering` true until then.
+    fn cli_register(&mut self, name: String) -> String;
+
     /// How job `id` is going: `{id, name, kind, state, started, finished,
     /// exit, log_tail}`. `state` is `running`, `done` (the CLI exited 0: the
     /// change was sent and included; `resolve` shows it) or `failed`;
@@ -1248,6 +1255,14 @@ impl NamesModule for Names {
         self.cli_job(&name, "set_text", |_, _, _| Ok((command, None, Value::Null)))
     }
 
+    fn cli_register(&mut self, name: String) -> String {
+        let command = match cli::register_args(&name) {
+            Ok(command) => command,
+            Err(error) => return reply(Err(error)),
+        };
+        self.cli_job(&name, "register", |_, _, _| Ok((command, None, Value::Null)))
+    }
+
     fn job(&mut self, id: String) -> String {
         reply((|| self.jobs()?.state(id.trim()))())
     }
@@ -1796,6 +1811,7 @@ mod tests {
             names.cli_set_text("$(id)".into(), "chat".into(), "x".into()),
             names.cli_set_page("a|b".into(), "text/plain".into(), "x".into()),
             names.cli_profile("jef`id`".into(), r#"{"bio": "x"}"#.into(), false),
+            names.cli_register("--owner=x".into()),
         ] {
             assert!(parsed(&answer)["error"].as_str().expect("an error").contains("1-32 characters"));
         }
@@ -1811,7 +1827,7 @@ mod tests {
     #[test]
     fn an_empty_cli_wallet_holds_nothing_and_takes_no_changes() {
         let (mut names, dir) = with_fake_cli("empty", "echo 'jef.lez  held by a deposit (no expiry)'");
-        assert_eq!(parsed(&names.cli_mine())["value"], json!([{ "name": "jef", "display": "jef.lez", "signer": "cli", "state": "held by a deposit (no expiry)", "lapsed": false }]));
+        assert_eq!(parsed(&names.cli_mine())["value"], json!([{ "name": "jef", "display": "jef.lez", "signer": "cli", "state": "held by a deposit (no expiry)", "lapsed": false, "registering": false, "failed": false }]));
         let empty = dir.join("empty-wallet");
         std::fs::create_dir_all(&empty).expect("a dir");
         names.cli_wallet = Some(empty.to_string_lossy().into_owned());

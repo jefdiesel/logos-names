@@ -121,6 +121,13 @@ impl Setup {
 
 // ── The commands ────────────────────────────────────────────────────────
 
+/// `names register`: from the CLI's private account, so the holder never
+/// appears on chain. It returns once the commitment is made; the CLI reveals
+/// it in the background (`names mine` says when).
+pub fn register_args(name: &str) -> Result<Vec<String>, String> {
+    Ok(vec!["register".to_owned(), "--".to_owned(), registry::parse_name(name)?])
+}
+
 pub fn mine_args() -> Vec<String> {
     vec!["mine".to_owned()]
 }
@@ -232,8 +239,9 @@ pub fn profile_args(name: &str, entries: &[(String, String)], replace: bool) -> 
 
 /// The names `names mine` lists as held by its wallet. Its output is text:
 /// `jef.lez  held by a deposit (no expiry)`, `jef.lez  held until ...` or
-/// `jef.lez  lapsed until ...`; every other line (a registration under way, a
-/// name no longer held, `no names yet`) is not a held name.
+/// `jef.lez  lapsed until ...`. A registration under way (`jef.lez  registering, ...`)
+/// or stopped (`jef.lez  NOT registered: ...`) is listed with `registering` or
+/// `failed` true; every other line (a name no longer held, `no names yet`) is skipped.
 pub fn parse_mine(output: &str) -> Vec<Value> {
     let mut seen = BTreeSet::new();
     let mut names = Vec::new();
@@ -246,13 +254,19 @@ pub fn parse_mine(output: &str) -> Vec<Value> {
             continue;
         }
         let state = state.trim();
-        let lapsed = if state.starts_with("held ") {
-            false
+        let (lapsed, registering, failed) = if state.starts_with("held ") {
+            (false, false, false)
         } else if state.starts_with("lapsed ") {
-            true
+            (true, false, false)
+        } else if state.starts_with("registering") {
+            (false, true, false)
+        } else if state.starts_with("NOT registered") {
+            (false, false, true)
         } else {
             continue;
         };
+        // The log path the CLI adds is of no use to an app.
+        let state = state.split(" (log: ").next().unwrap_or(state);
         if seen.insert(name.clone()) {
             names.push(json!({
                 "name": name,
@@ -260,6 +274,8 @@ pub fn parse_mine(output: &str) -> Vec<Value> {
                 "signer": "cli",
                 "state": state,
                 "lapsed": lapsed,
+                "registering": registering,
+                "failed": failed,
             }));
         }
     }
@@ -687,9 +703,15 @@ mod tests {
                       no names yet; register one with `names register <name>`\n";
         let names = parse_mine(output);
         let listed: Vec<&str> = names.iter().map(|name| name["name"].as_str().unwrap()).collect();
-        assert_eq!(listed, ["jef", "ada"]);
-        assert_eq!(names[0]["signer"], "cli");
-        assert_eq!(names[1]["lapsed"], true);
+        assert_eq!(listed, ["carol", "bob", "jef", "ada"]);
+        assert_eq!(names[0]["registering"], true);
+        assert_eq!(names[0]["state"], "registering, ready in 4 min");
+        assert_eq!(names[1]["failed"], true);
+        assert_eq!(names[2]["signer"], "cli");
+        assert_eq!(names[2]["registering"], false);
+        assert_eq!(names[3]["lapsed"], true);
+        assert_eq!(register_args("Jef.LEZ").unwrap(), strings(&["register", "--", "jef"]));
+        assert!(register_args("--help").is_err());
         assert!(parse_mine("no names yet; register one with `names register <name>`\n").is_empty());
     }
 

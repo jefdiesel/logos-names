@@ -24,6 +24,7 @@ Item {
 
     property var myNames: []           // [{name, display, owner, expires, never, lapsed}]: names the wallet holds; owner is the wallet account
     property var pendingNames: []      // [{name, display, owner, stage, ready_at, tx}]: registrations still finishing
+    property var cliPending: []        // [{name, display, state, registering, failed}]: the CLI's registrations still finishing, or stopped
     property var cliNames: []          // [{name, display, signer: "cli", state, lapsed}]: names the names CLI's wallet holds
     property string cliPath: ""        // the names CLI the module runs, and its wallet folder
     property string cliWallet: ""
@@ -306,14 +307,26 @@ Item {
     function loadCliMine() {
         if (registry === "") {
             cliNames = []
+            cliPending = []
             return
         }
         askLater("cli_mine", [], function(value) {
-            cliNames = value || []
+            value = value || []
+            cliNames = value.filter(function(entry) { return !entry.registering && !entry.failed })
+            cliPending = value.filter(function(entry) { return entry.registering || entry.failed })
         }, function(message) {
             cliNames = []
+            cliPending = []
             console.log("names_ui: CLI names:", message)
         })
+    }
+
+    /// The CLI's registration of `name` still finishing (or stopped), or null.
+    function cliPendingFor(name) {
+        for (var i = 0; i < cliPending.length; i++)
+            if (cliPending[i].name === name)
+                return cliPending[i]
+        return null
     }
 
     function cliHolds(name) {
@@ -390,6 +403,20 @@ Item {
         repeat: true
         running: root.pendingNames.length > 0
         onTriggered: root.revealDue()
+    }
+
+    // The names CLI finishes a private registration by itself; this notices
+    // when it has, and shows the name once it is registered.
+    Timer {
+        interval: 60000
+        repeat: true
+        running: root.cliPending.some(function(entry) { return entry.registering })
+        onTriggered: {
+            var waiting = root.missing !== "" && root.cliPendingFor(root.missing) !== null ? root.missing : ""
+            root.loadCliMine()
+            if (waiting !== "")
+                root.show(waiting)
+        }
     }
 
     function remembers(name) {
@@ -537,7 +564,7 @@ Item {
     /// The same change for a name the names CLI holds: the module starts the
     /// CLI, which proves the change on this machine (minutes), and this polls
     /// the job until it ends, then reads the name back.
-    readonly property var cliMethods: ({ set_text: "cli_set_text", set_profile: "cli_profile", set_page: "cli_set_page" })
+    readonly property var cliMethods: ({ set_text: "cli_set_text", set_profile: "cli_profile", set_page: "cli_set_page", register: "cli_register" })
     function cliChange(method, args, name, settled, done) {
         var cliMethod = cliMethods[method]
         if (cliMethod === undefined) {
@@ -624,6 +651,18 @@ Item {
             say(typeof job.done === "function" ? job.done(job.result) : job.done, false)
         else
             say("That was sent but has not taken effect, so it may have been refused. Check the name and try again.", true)
+    }
+
+    /// Registers through the names CLI, from its private account: nobody can
+    /// find who holds the name. The CLI finishes it in the background.
+    function registerPrivately() {
+        var name = missing
+        if (busy)
+            return
+        // The job ending is the answer: the commitment is made.
+        cliChange("register", [name], name, function() {
+            return true
+        }, "Committed privately. " + name + ".lez finishes registering in about 15 to 20 minutes, in the background.")
     }
 
     /// Sends the commitment. The reveal follows by itself (see revealDue).
@@ -1640,7 +1679,25 @@ Item {
                     ListHead {
                         visible: root.registry !== ""
                         label: "My names"
-                        count: root.allMine.length + root.pendingNames.length > 0 ? root.allMine.length + root.pendingNames.length : ""
+                        count: root.allMine.length + root.pendingNames.length + root.cliPending.length > 0 ? root.allMine.length + root.pendingNames.length + root.cliPending.length : ""
+                    }
+                    Repeater {
+                        model: root.cliPending
+                        Text {
+                            required property var modelData
+                            Layout.fillWidth: true
+                            Layout.leftMargin: 8
+                            text: modelData.display + ": " + (modelData.failed ? "not registered" : "registering privately")
+                            color: modelData.failed ? root.alarm : root.dim
+                            font.family: root.sans
+                            font.pixelSize: 17
+                            elide: Text.ElideRight
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.show(parent.modelData.name)
+                            }
+                        }
                     }
                     Repeater {
                         model: root.pendingNames
@@ -1714,7 +1771,7 @@ Item {
                         }
                     }
                     Hint {
-                        visible: root.allMine.length === 0 && root.pendingNames.length === 0 && root.wallet.length > 0
+                        visible: root.allMine.length === 0 && root.pendingNames.length === 0 && root.cliPending.length === 0 && (root.wallet.length > 0 || root.cliPath !== "")
                         text: "None yet. Look one up to register it."
                     }
                     Hint {
@@ -1888,16 +1945,25 @@ Item {
                         weight: Font.DemiBold
                     }
                     Text {
-                        text: "Nobody holds this name."
+                        text: root.cliPendingFor(root.missing) !== null && !root.cliPendingFor(root.missing).failed ? "Registering privately for you." : "Nobody holds this name."
                         color: root.ink
                         font.family: root.sans
                         font.pixelSize: 19
                     }
-                    Panel {
-                        visible: root.wallet.length > 0
-                        title: "Register it to"
-                        Accounts {}
-                        Hint { text: "This public account holds the name and pays the deposit. Anyone who knows the name can find this account; to hide it, register with the names CLI from a private account. Payments to the name go to your private account." }
+                    // A private registration through the names CLI, under way or stopped.
+                    Hint {
+                        visible: root.cliPendingFor(root.missing) !== null
+                        font.pixelSize: 18
+                        color: root.cliPendingFor(root.missing) !== null && root.cliPendingFor(root.missing).failed ? root.alarm : root.brass
+                        text: root.cliPendingFor(root.missing) === null ? "" : "Your names CLI: " + root.cliPendingFor(root.missing).state + "."
+                    }
+                    ColumnLayout {
+                        visible: root.cliPendingFor(root.missing) === null || root.cliPendingFor(root.missing).failed
+                        Layout.fillWidth: true
+                        spacing: 22
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
                         Part { text: "Deposit" }
                         Hint {
                             font.pixelSize: 20
@@ -1908,16 +1974,38 @@ Item {
                             visible: root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode === "deposit"
                             text: (root.deposit !== null && root.deposit.tier === "three" ? "Three-character names take a larger deposit. " : "") + "Testnet. Refunded in full when you release the name; it does not expire on this network. Network fee extra."
                         }
+                    }
+                    Panel {
+                        visible: root.cliPath !== ""
+                        title: "Register privately"
+                        Hint { text: "Your names CLI's private account holds the name and pays the deposit. That account never appears on chain, so nobody can find who holds it. Proving takes a few minutes, then the name finishes in about 15 minutes." }
                         Action {
-                            label: "Register " + root.missing + ".lez"
+                            label: "Register " + root.missing + ".lez privately"
                             strong: true
+                            changes: true
+                            enabledNow: root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode !== "unconfigured"
+                            onPressed: root.registerPrivately()
+                        }
+                    }
+                    Panel {
+                        visible: root.wallet.length > 0
+                        title: root.cliPath !== "" ? "Or from a public account" : "Register it to"
+                        Accounts {}
+                        Hint {
+                            color: root.cliPath !== "" ? root.dim : root.brass
+                            text: "Anyone who knows the name can find this account, and so its balance and history." + (root.cliPath !== "" ? "" : " To hide it, install the names CLI and register privately.") + " Payments to the name still go to your private account."
+                        }
+                        Action {
+                            label: "Register " + root.missing + ".lez publicly"
+                            strong: root.cliPath === ""
                             changes: true
                             enabledNow: root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode !== "unconfigured"
                             onPressed: root.registerName()
                         }
                     }
+                    }
                     ColumnLayout {
-                        visible: root.wallet.length === 0
+                        visible: root.wallet.length === 0 && root.cliPath === ""
                         Layout.fillWidth: true
                         spacing: 12
                         Hint {
