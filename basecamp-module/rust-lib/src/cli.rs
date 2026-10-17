@@ -81,6 +81,7 @@ pub fn find_wallet(configured: Option<&str>) -> Option<PathBuf> {
 
 /// Where the CLI is, which wallet it signs with, and which registry it uses:
 /// the module's own, so the app never shows one registry and edits another.
+#[derive(Clone)]
 pub struct Setup {
     pub program: PathBuf,
     pub wallet: PathBuf,

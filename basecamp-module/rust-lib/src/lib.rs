@@ -283,12 +283,15 @@ pub trait NamesModule: Send + 'static {
     // ── The LNS board (see board/ and docs/BOARD-PLAN.md) ──────────────
 
     /// The board's recent posts, newest first, read through the names CLI:
-    /// `[{post, name, n, parent, time, text, cids, likes, hidden, block}]`, where
-    /// `post` and `parent` are written `<name>/<n>`. With `following` true, only
-    /// posts by the names this device follows. Takes seconds; ask with a long timeout.
+    /// `{posts, updating, error}`, where `posts` is `[{post, name, n, parent,
+    /// time, text, cids, likes, hidden, block}]` (`post` and `parent` written
+    /// `<name>/<n>`). Reading takes the CLI many seconds, so this answers at once
+    /// with the last result and fetches a newer one on its own thread; while
+    /// `updating` is true, ask again shortly. With `following` true, only posts
+    /// by the names this device follows.
     fn board_feed(&mut self, following: bool) -> String;
 
-    /// A post (`<name>/<n>`) and its replies, oldest first, as in `board_feed`.
+    /// A post (`<name>/<n>`) and its replies, oldest first, answered as `board_feed` is.
     fn board_thread(&mut self, post: String) -> String;
 
     /// Posts `text` as `name`, which the CLI's wallet holds privately, with up to
@@ -360,6 +363,17 @@ struct Names {
     jobs_dir: Option<std::path::PathBuf>,
     /// The names followed on the board, kept on this device only.
     follows: Vec<String>,
+    /// Board reads, by what was asked: they take the CLI many seconds, so they
+    /// run on their own thread and every call answers at once with the last result.
+    board_reads: std::sync::Arc<std::sync::Mutex<HashMap<String, BoardRead>>>,
+}
+
+/// A board read: the last result, and whether a newer one is being fetched.
+#[derive(Default)]
+struct BoardRead {
+    value: Option<Value>,
+    error: Option<String>,
+    updating: bool,
 }
 
 /// Where this module keeps what it remembers between runs.
@@ -379,6 +393,7 @@ impl Default for Names {
             cli_wallet: None,
             jobs_dir: None,
             follows: Vec::new(),
+            board_reads: Default::default(),
         };
         // A missing or unreadable file just means the defaults stand.
         let saved = config_dir()
@@ -662,6 +677,45 @@ impl Names {
     }
 
     /// The CLI to run for this module's registry and sequencer.
+    /// Answers a board read at once with what it last returned, `{posts,
+    /// updating, error}`, and starts fetching a newer one on its own thread
+    /// unless one is already on the way.
+    fn board_read_now(&self, key: &str) -> Value {
+        let reads = self.board_reads.lock().expect("the board reads lock");
+        let read = reads.get(key);
+        json!({
+            "posts": read.and_then(|read| read.value.clone()).unwrap_or_else(|| json!([])),
+            "updating": read.is_some_and(|read| read.updating),
+            "error": read.and_then(|read| read.error.clone()),
+        })
+    }
+
+    fn board_read(&self, key: String, fetch: impl FnOnce() -> Result<Value, String> + Send + 'static) -> Value {
+        {
+            let mut reads = self.board_reads.lock().expect("the board reads lock");
+            let read = reads.entry(key.clone()).or_default();
+            if !read.updating {
+                read.updating = true;
+                let reads = std::sync::Arc::clone(&self.board_reads);
+                let key = key.clone();
+                std::thread::spawn(move || {
+                    let fetched = fetch();
+                    let mut reads = reads.lock().expect("the board reads lock");
+                    let read = reads.entry(key).or_default();
+                    read.updating = false;
+                    match fetched {
+                        Ok(value) => {
+                            read.value = Some(value);
+                            read.error = None;
+                        }
+                        Err(error) => read.error = Some(error),
+                    }
+                });
+            }
+        }
+        self.board_read_now(&key)
+    }
+
     fn cli_setup(&self) -> Result<cli::Setup, String> {
         let program = cli::find_program(self.cli.as_deref()).ok_or(
             "no names CLI found at ~/.local/bin/names or on PATH; install it, or give its path in App settings",
@@ -1313,14 +1367,19 @@ impl NamesModule for Names {
         reply((|| {
             let setup = self.cli_setup()?;
             if following && self.follows.is_empty() {
-                return Ok(json!([]));
+                return Ok(json!({ "posts": [], "updating": false, "error": null }));
             }
-            cli::run_feed(&setup, if following { &self.follows } else { &[] })
+            let follows = if following { self.follows.clone() } else { Vec::new() };
+            let key = format!("feed:{}", follows.join(","));
+            Ok(self.board_read(key, move || cli::run_feed(&setup, &follows)))
         })())
     }
 
     fn board_thread(&mut self, post: String) -> String {
-        reply((|| cli::run_thread(&self.cli_setup()?, &post))())
+        reply((|| {
+            let setup = self.cli_setup()?;
+            Ok(self.board_read(format!("thread:{post}"), move || cli::run_thread(&setup, &post)))
+        })())
     }
 
     fn board_post(&mut self, name: String, text: String, cids_json: String, reply_to: String) -> String {
@@ -1648,6 +1707,7 @@ mod tests {
             cli_wallet: None,
             jobs_dir: None,
             follows: Vec::new(),
+            board_reads: Default::default(),
         }
     }
 

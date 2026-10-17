@@ -78,10 +78,10 @@ BRIDGE = r"""
             if (method === "cli_balance") return ok({ account: "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", balance: root.missing === "pauper" ? "5000" : "250000000" })
             if (method === "board_follows") return ok(["ada"])
             if (method === "board_follow") return ok(args[1] ? [] : ["ada", args[0]])
-            if (method === "board_feed" || method === "board_thread") return ok([
+            if (method === "board_feed" || method === "board_thread") return ok({ updating: false, error: null, posts: [
                 { post: "ada/1", name: "ada", n: 1, parent: "jef/0", time: Date.now() - 240000, text: "Welcome! First reply on the board.", cids: [], likes: 2, hidden: false, block: 30601 },
                 { post: "jef/0", name: "jef", n: 0, parent: null, time: Date.now() - 1500000, text: "First post on the LNS board. Made privately as a name: the chain sees jef, never my account.", cids: ["zDvZRwzm8K4nJ2a7q9WTqN1"], likes: 5, hidden: false, block: 30564 },
-                { post: "hopper/3", name: "hopper", n: 3, parent: null, time: Date.now() - 10800000, text: "A ship in port is safe, but that is not what ships are built for.", cids: [], likes: 0, hidden: false, block: 29800 }])
+                { post: "hopper/3", name: "hopper", n: 3, parent: null, time: Date.now() - 10800000, text: "A ship in port is safe, but that is not what ships are built for.", cids: [], likes: 0, hidden: false, block: 29800 }] })
             if (method === "board_post" || method === "board_like" || method === "board_hide")
                 return ok({ id: args[0] + "-1792000000000", state: "running", started: Date.now() - 95000 })
             if (method === "job") return ok(%(job)s)

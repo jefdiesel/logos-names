@@ -1237,10 +1237,15 @@ Item {
         var method = boardView === "thread" ? "board_thread" : "board_feed"
         var args = boardView === "thread" ? [boardThreadOf] : [boardView === "following"]
         askLater(method, args, function(value) {
-            boardLoading = false
-            boardPosts = value || []
+            value = value || {}
+            boardLoading = !!value.updating
+            boardError = value.error ? String(value.error) : ""
+            boardPosts = value.posts || []
             for (var i = 0; i < boardPosts.length; i++)
                 boardLookUp(boardPosts[i].name)
+            // A newer read is on its way: look again shortly.
+            if (value.updating)
+                boardRetry.start()
         }, function(message) {
             boardLoading = false
             boardError = message
@@ -1368,7 +1373,7 @@ Item {
     }
     Timer {
         id: boardRetry
-        interval: 10000
+        interval: root.boardLoading ? 3000 : 10000
         onTriggered: root.boardLoad()
     }
 
