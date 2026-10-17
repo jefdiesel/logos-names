@@ -4,7 +4,7 @@
   "version": "0.7.0",
   "type": "ui_qml",
   "category": "identity",
-  "description": "Find, register and manage private .LEZ names",
+  "description": "Find, register and manage private .lez names",
   "view": "Main.qml",
   "icon": "src/icons/icon.png",
   "dependencies": [

@@ -1,4 +1,4 @@
-// Logos Names for Basecamp: find, register and manage .LEZ names.
+// Logos Names for Basecamp: find, register and manage .lez names.
 //
 // A front end on the `names` module. The module reads the chain itself, so
 // browsing needs no wallet. Registering a name, changing it, transferring it
@@ -284,7 +284,7 @@ Item {
             askLater("register", [item.name, item.owner, "auto"], function(value) {
                 revealing = false
                 if (value && value.stage === "registered") {
-                    say(item.name + ".LEZ is yours.", false)
+                    say(item.name + ".lez is yours.", false)
                     loadMine()
                     if (record !== null && record.name === item.name)
                         read(item.name)
@@ -402,7 +402,7 @@ Item {
                 if (missing !== "")
                     loadDeposit(missing)
                 else
-                    say("A name is 1 to 32 characters of a-z, 0-9 or a hyphen, such as jef.LEZ.", true)
+                    say("A name is 1 to 32 characters of a-z, 0-9 or a hyphen, such as jef.lez.", true)
                 return
             }
             missing = ""
@@ -505,7 +505,7 @@ Item {
         var account = accountField.text.trim()
         change("set_account", [name, account], name, function() {
             return ask("resolve", [name]).account === account
-        }, name + ".LEZ now pays to " + shorten(account) + ".")
+        }, name + ".lez now pays to " + shorten(account) + ".")
     }
 
     function receivePrivately() {
@@ -521,7 +521,7 @@ Item {
         change("clear_addresses", [name], name, function() {
             var found = ask("resolve", [name])
             return found.account === null && found.npk === null
-        }, name + ".LEZ no longer takes payments.")
+        }, name + ".lez no longer takes payments.")
     }
 
     /// Sets one entry; an empty value removes it.
@@ -531,7 +531,7 @@ Item {
         change("set_text", [name, key, value], name, function() {
             var texts = ask("resolve", [name]).texts
             return value === "" ? texts[key] === undefined : texts[key] === value
-        }, value === "" ? "Removed " + key + " from " + name + ".LEZ." : "Saved " + key + " on " + name + ".LEZ.")
+        }, value === "" ? "Removed " + key + " from " + name + ".lez." : "Saved " + key + " on " + name + ".lez.")
     }
 
     /// The Profile fields, with the text-entry key each one sets.
@@ -571,7 +571,7 @@ Item {
                 if (entries[key] === "" ? texts[key] !== undefined : texts[key] !== entries[key])
                     return false
             return true
-        }, "Saved the profile of " + name + ".LEZ.")
+        }, "Saved the profile of " + name + ".lez.")
     }
 
     /// Publishes the page; an empty body removes it. A body that opens with a
@@ -582,7 +582,7 @@ Item {
         change("set_page", [name, kind, body], name, function() {
             var published = ask("page", [name])
             return body === "" ? published === null : published !== null && published.text === body
-        }, body === "" ? "Removed the page of " + name + ".LEZ." : "Published the page of " + name + ".LEZ.")
+        }, body === "" ? "Removed the page of " + name + ".lez." : "Published the page of " + name + ".lez.")
     }
 
     function showAccountAsName() {
@@ -591,7 +591,7 @@ Item {
         change("set_primary", [account, name], name, function() {
             var shown = ask("reverse", [account])
             return shown !== null && shown.name === name
-        }, shorten(account) + " is now shown as " + name + ".LEZ.")
+        }, shorten(account) + " is now shown as " + name + ".lez.")
     }
 
     function transferName() {
@@ -600,7 +600,7 @@ Item {
         var before = record.owner_tag
         change("transfer", [name, newOwner], name, function() {
             return ask("resolve", [name]).owner_tag !== before
-        }, name + ".LEZ now belongs to " + shorten(newOwner) + ".")
+        }, name + ".lez now belongs to " + shorten(newOwner) + ".")
     }
 
     function releaseName() {
@@ -608,7 +608,7 @@ Item {
         change("release", [name], name, function() {
             return ask("resolve", [name]) === null
         }, function(result) {
-            return result && result.refund ? "Released " + name + ".LEZ. " + grouped(result.refund) + " returned to you." : "Released " + name + ".LEZ."
+            return result && result.refund ? "Released " + name + ".lez. " + grouped(result.refund) + " returned to you." : "Released " + name + ".lez."
         })
     }
 
@@ -745,9 +745,9 @@ Item {
         say(what + " copied.", false)
     }
 
-    /// A name as people read it: `jef.LEZ`.
+    /// A name as people read it: `jef.lez`.
     function shown(name) {
-        return name + ".LEZ"
+        return name + ".lez"
     }
 
     function shorten(id) {
@@ -755,7 +755,7 @@ Item {
     }
 
     function linkFor(name) {
-        return "basecamp://intent/names.open?p=" + Qt.btoa(JSON.stringify({ name: name + ".LEZ" })).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
+        return "basecamp://intent/names.open?p=" + Qt.btoa(JSON.stringify({ name: name + ".lez" })).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
     }
 
     /// Digits grouped in threes, so a balance can be read at a glance.
@@ -1022,7 +1022,7 @@ Item {
         }
     }
 
-    /// A name with its suffix. The name leads; `.LEZ` follows in smaller,
+    /// A name with its suffix. The name leads; `.lez` follows in smaller,
     /// quieter capitals, so it reads as a mark rather than part of the word.
     component NameLabel: Item {
         id: label
@@ -1046,7 +1046,7 @@ Item {
             anchors.left: bare.right
             anchors.baseline: bare.baseline
             visible: label.name !== ""
-            text: ".LEZ"
+            text: ".lez"
             color: root.dim
             font.family: root.sans
             font.weight: label.weight
@@ -1252,7 +1252,7 @@ Item {
                     }
                     Text {
                         visible: !!accountRow.modelData.name
-                        text: accountRow.modelData.name ? accountRow.modelData.name + ".LEZ" : ""
+                        text: accountRow.modelData.name ? accountRow.modelData.name + ".lez" : ""
                         color: root.dim
                         font.family: root.sans
                         font.pixelSize: 17
@@ -1430,7 +1430,7 @@ Item {
                     }
                     Hint {
                         visible: root.registry !== "" && root.wallet.length === 0
-                        text: /not running/.test(root.walletProblem) ? "The LEZ wallet is not running. Opening the LEZ Wallet app starts it; the names you hold appear here after that." : "Open your wallet in the LEZ Wallet app to see the .LEZ names you hold."
+                        text: /not running/.test(root.walletProblem) ? "The LEZ wallet is not running. Opening the LEZ Wallet app starts it; the names you hold appear here after that." : "Open your wallet in the LEZ Wallet app to see the .lez names you hold."
                     }
                     Link {
                         visible: root.registry !== "" && root.wallet.length === 0
@@ -1478,7 +1478,7 @@ Item {
                     }
                     Hint {
                         font.pixelSize: 17
-                        text: "A registry is one program on the Logos Execution Zone. Everyone who uses the same program ID resolves the same .LEZ names."
+                        text: "A registry is one program on the Logos Execution Zone. Everyone who uses the same program ID resolves the same .lez names."
                     }
                     Field {
                         id: registryField
@@ -1546,7 +1546,7 @@ Item {
                     Layout.topMargin: 60
                     spacing: 10
                     Text {
-                        text: !root.configKnown ? "Starting" : root.registry === "" ? "Choose a registry to begin" : "Look up a .LEZ name"
+                        text: !root.configKnown ? "Starting" : root.registry === "" ? "Choose a registry to begin" : "Look up a .lez name"
                         color: root.ink
                         font.family: root.sans
                         font.weight: Font.DemiBold
@@ -1555,7 +1555,7 @@ Item {
                     Hint {
                         font.pixelSize: 18
                         color: root.ink
-                        text: !root.configKnown ? "Waiting for the names module to answer." : root.registry === "" ? "Open App settings and enter the registry's program ID." : "Type a name you know to see where it pays and how to reach its holder. If nobody holds it, you can register it. There is no list to browse: a .LEZ name is found only by someone who knows it."
+                        text: !root.configKnown ? "Waiting for the names module to answer." : root.registry === "" ? "Open App settings and enter the registry's program ID." : "Type a name you know to see where it pays and how to reach its holder. If nobody holds it, you can register it. There is no list to browse: a .lez name is found only by someone who knows it."
                     }
                 }
 
@@ -1594,7 +1594,7 @@ Item {
                         }
                         Hint { visible: root.deposit === null || root.deposit.mode === "deposit"; text: "The deposit stops name squatting: holding many names ties up many deposits, and nobody keeps it." }
                         Action {
-                            label: "Register " + root.missing + ".LEZ"
+                            label: "Register " + root.missing + ".lez"
                             strong: true
                             changes: true
                             enabledNow: root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode !== "unconfigured"
