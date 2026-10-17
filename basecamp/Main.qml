@@ -74,7 +74,10 @@ Item {
     property var chatConvos: []         // [{convo_id, message_count, last_activity_ms, kind}]
     property var dmNames: ({})          // convo_id → name, as this device knows it
     property string chatOpenId: ""
-    property var chatMessages: []       // [{from_self, content, timestamp_ms}]
+    property var chatMessages: []       // [{from_self, content, timestamp_ms, sender}]
+    property var chatNames: ({})        // chat address → name, as this device learned it
+    property var chatMembers: []        // [{address, pending}] of the open group
+    property bool chatNewGroup: false   // the New group form is open
     property bool anonPublic: false     // the anon name, once made, moves to its own public account
     property bool confirmingRelease: false
     property var pending: null         // a change that was sent and is not confirmed yet
@@ -1510,25 +1513,117 @@ Item {
         })
         chatAsk("get_address", [], function(address) { chatMine = address ? String(address) : "" }, function() {})
         chatAsk("list_conversations", [], function(list) {
-            var all = (list || []).filter(function(convo) { return convo.kind !== "group" })
+            var all = (list || []).slice()
             all.sort(function(a, b) { return (b.last_activity_ms || 0) - (a.last_activity_ms || 0) })
             chatConvos = all
         }, function() {})
         askLater("dm_names", [], function(value) { dmNames = value || {} }, function() {})
+        askLater("chat_names", [], function(value) { chatNames = value || {} }, function() {})
         if (mainName !== "")
             askLater("resolve", [mainName], function(found) {
                 mainChat = found && found.texts && typeof found.texts.chat === "string" ? found.texts.chat : ""
             }, function() {})
     }
 
-    function chatLabel(convo) {
-        return dmNames[convo] !== undefined ? dmNames[convo] : "New conversation"
+    function chatConvo(id) {
+        for (var i = 0; i < chatConvos.length; i++)
+            if (chatConvos[i].convo_id === id)
+                return chatConvos[i]
+        return null
+    }
+
+    function chatIsGroup(id) {
+        var convo = chatConvo(id)
+        return convo !== null && /group/.test(String(convo.kind))
+    }
+
+    function chatLabel(id) {
+        var convo = chatConvo(id)
+        if (convo !== null && convo.name)
+            return convo.name
+        if (dmNames[id] !== undefined)
+            return dmNames[id]
+        if (convo !== null && convo.nickname)
+            return convo.nickname
+        return "New conversation"
+    }
+
+    /// Who a chat address is: the name this device knows for it, else short.
+    function chatWho(address) {
+        if (!address)
+            return ""
+        if (address === chatMine)
+            return mainName !== "" ? mainName : "you"
+        return chatNames[address] !== undefined ? chatNames[address] : String(address).substr(0, 8) + "…"
+    }
+
+    /// The chat address a name publishes, or "" (then `failed` has said why).
+    function chatAddressOf(typed, done) {
+        var name = ""
+        try {
+            name = String(call("names", "normalize", [typed]))
+        } catch (error) {}
+        if (name === "") {
+            say("That isn't a name.", true)
+            return
+        }
+        askLater("resolve", [name], function(found) {
+            var address = found && found.texts && typeof found.texts.chat === "string" ? found.texts.chat.trim() : ""
+            if (found === null)
+                say(name + " isn't registered.", true)
+            else if (address === "")
+                say(name + " hasn't turned on messages yet.", true)
+            else {
+                askLater("set_chat_name", [address, name], function(value) { chatNames = value || {} }, function() {})
+                done(name, address)
+            }
+        }, function(message) { say(message, true) })
+    }
+
+    function chatMakeGroup() {
+        var name = groupName.text.trim()
+        if (name === "")
+            return
+        chatAsk("create_group_conversation", [name, groupDesc.text.trim()], function(created) {
+            var convo = created && typeof created === "object" ? (created.convo_id || created.id || "") : String(created || "")
+            chatNewGroup = false
+            groupName.text = ""
+            groupDesc.text = ""
+            chatLoad()
+            if (convo !== "")
+                chatOpen(convo)
+        }, function(message) { say("Couldn't make the group: " + message, true) })
+    }
+
+    function chatAddMember() {
+        var convo = chatOpenId, typed = memberField.text
+        chatAddressOf(typed, function(name, address) {
+            chatAsk("add_group_member", [convo, address], function() {
+                memberField.text = ""
+                say(name + " added.", false)
+                chatReadMembers()
+            }, function(message) { say("Couldn't add " + name + ": " + message, true) })
+        })
+    }
+
+    function chatReadMembers() {
+        if (chatOpenId === "" || !chatIsGroup(chatOpenId)) {
+            chatMembers = []
+            return
+        }
+        var convo = chatOpenId
+        chatAsk("list_group_members", [convo], function(list) {
+            if (chatOpenId === convo)
+                chatMembers = list || []
+        }, function() {})
     }
 
     function chatOpen(convo) {
         chatOpenId = convo
         chatMessages = []
+        chatMembers = []
         chatReadMessages()
+        chatReadMembers()
     }
 
     function chatReadMessages() {
@@ -1543,24 +1638,7 @@ Item {
 
     /// Starts a DM with `typed`: its name's published chat address, if it has one.
     function chatStart(typed) {
-        var name = ""
-        try {
-            name = String(call("names", "normalize", [typed]))
-        } catch (error) {}
-        if (name === "") {
-            say("That isn't a name.", true)
-            return
-        }
-        askLater("resolve", [name], function(found) {
-            var address = found && found.texts && typeof found.texts.chat === "string" ? found.texts.chat.trim() : ""
-            if (found === null) {
-                say(name + " isn't registered.", true)
-                return
-            }
-            if (address === "") {
-                say(name + " hasn't turned on messages yet.", true)
-                return
-            }
+        chatAddressOf(typed, function(name, address) {
             chatAsk("create_conversation", [address], function(created) {
                 var convo = created && typeof created === "object" ? (created.convo_id || created.id || "") : String(created || "")
                 if (convo === "") {
@@ -1568,11 +1646,12 @@ Item {
                     return
                 }
                 askLater("set_dm_name", [convo, name], function(value) { dmNames = value || {} }, function() {})
+                chatAsk("set_conversation_nickname", [convo, name], function() {}, function() {})
                 chatLoad()
                 chatOpen(convo)
                 dmTo.text = ""
             }, function(message) { say("Couldn't start the conversation: " + message, true) })
-        }, function(message) { say(message, true) })
+        })
     }
 
     function chatSend() {
@@ -2688,6 +2767,15 @@ Item {
                             Field { id: dmTo; Layout.fillWidth: true; size: 16; hint: "Message a name"; onAccepted: root.chatStart(dmTo.text) }
                             Action { label: "Start"; enabledNow: dmTo.text.trim() !== ""; onPressed: root.chatStart(dmTo.text) }
                         }
+                        Link { text: root.chatNewGroup ? "Cancel new group" : "+ New group"; color: root.brass; font.pixelSize: 15; onPressed: root.chatNewGroup = !root.chatNewGroup }
+                        ColumnLayout {
+                            visible: root.chatNewGroup
+                            Layout.fillWidth: true
+                            spacing: 6
+                            Field { id: groupName; Layout.fillWidth: true; size: 15; hint: "Group name" }
+                            Field { id: groupDesc; Layout.fillWidth: true; size: 15; hint: "What it's about (optional)" }
+                            Action { label: "Make group"; strong: true; enabledNow: groupName.text.trim() !== ""; onPressed: root.chatMakeGroup() }
+                        }
                         Hint { visible: root.chatConvos.length === 0 && root.chatError === ""; font.pixelSize: 14; text: "No conversations yet." }
                         ListView {
                             Layout.fillWidth: true
@@ -2707,8 +2795,16 @@ Item {
                                     x: 12; y: 7
                                     width: parent.width - 24
                                     spacing: 2
-                                    Text { Layout.fillWidth: true; text: root.chatLabel(convoRow.modelData.convo_id); color: root.ink; font.family: root.sans; font.pixelSize: 16; font.weight: Font.DemiBold; elide: Text.ElideRight }
-                                    Text { text: convoRow.modelData.message_count + " messages" + (convoRow.modelData.last_activity_ms ? " · " + root.boardAgo(convoRow.modelData.last_activity_ms) : ""); color: root.faint; font.family: root.sans; font.pixelSize: 13 }
+                                    Text { Layout.fillWidth: true; text: (/group/.test(String(convoRow.modelData.kind)) ? "# " : "") + root.chatLabel(convoRow.modelData.convo_id); color: root.ink; font.family: root.sans; font.pixelSize: 16; font.weight: Font.DemiBold; elide: Text.ElideRight }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: convoRow.modelData.preview ? convoRow.modelData.preview : convoRow.modelData.message_count + " messages" + (convoRow.modelData.last_activity_ms ? " · " + root.boardAgo(convoRow.modelData.last_activity_ms) : "")
+                                        textFormat: Text.PlainText
+                                        color: root.faint
+                                        font.family: root.sans
+                                        font.pixelSize: 13
+                                        elide: Text.ElideRight
+                                    }
                                 }
                             }
                         }
@@ -2719,9 +2815,30 @@ Item {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         spacing: 10
-                        Hint { visible: root.chatOpenId === ""; text: "Pick a conversation, or message a name." }
+                        Hint { visible: root.chatOpenId === ""; text: "Pick a conversation, message a name, or start a group." }
+                        // A group: its members, and adding one.
+                        ColumnLayout {
+                            visible: root.chatOpenId !== "" && root.chatIsGroup(root.chatOpenId)
+                            Layout.fillWidth: true
+                            spacing: 6
+                            Text {
+                                Layout.fillWidth: true
+                                text: "# " + root.chatLabel(root.chatOpenId) + "  ·  " + root.chatMembers.length + " member" + (root.chatMembers.length === 1 ? "" : "s")
+                                    + (root.chatMembers.length > 0 ? ": " + root.chatMembers.map(function(m) { return root.chatWho(m.address) + (m.pending ? " (invited)" : "") }).join(", ") : "")
+                                color: root.dim
+                                font.family: root.sans
+                                font.pixelSize: 14
+                                wrapMode: Text.Wrap
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 6
+                                Field { id: memberField; Layout.fillWidth: true; size: 15; hint: "Add someone by name"; onAccepted: root.chatAddMember() }
+                                Action { label: "Add"; enabledNow: memberField.text.trim() !== ""; onPressed: root.chatAddMember() }
+                            }
+                        }
                         RowLayout {
-                            visible: root.chatOpenId !== "" && root.dmNames[root.chatOpenId] === undefined
+                            visible: root.chatOpenId !== "" && root.dmNames[root.chatOpenId] === undefined && !root.chatIsGroup(root.chatOpenId)
                             Layout.fillWidth: true
                             spacing: 6
                             Text { text: "Who is this?"; color: root.faint; font.family: root.sans; font.pixelSize: 14 }
@@ -2748,14 +2865,25 @@ Item {
                                 height: bubble.height
                                 Rectangle {
                                     id: bubble
+                                    readonly property bool named: !bubbleRow.modelData.from_self && root.chatIsGroup(root.chatOpenId) && !!bubbleRow.modelData.sender
                                     anchors.right: bubbleRow.modelData.from_self ? parent.right : undefined
-                                    width: Math.min(bubbleText.implicitWidth + 28, parent.width * 0.75)
-                                    height: bubbleText.implicitHeight + 20
+                                    width: Math.min(Math.max(bubbleText.implicitWidth, senderText.implicitWidth) + 28, parent.width * 0.75)
+                                    height: bubbleText.implicitHeight + 20 + (named ? senderText.implicitHeight + 2 : 0)
                                     radius: 12
                                     color: bubbleRow.modelData.from_self ? "#3A3220" : root.raised
                                     Text {
+                                        id: senderText
+                                        visible: bubble.named
+                                        x: 14; y: 8
+                                        text: root.chatWho(bubbleRow.modelData.sender)
+                                        color: root.brass
+                                        font.family: root.sans
+                                        font.pixelSize: 13
+                                        font.weight: Font.DemiBold
+                                    }
+                                    Text {
                                         id: bubbleText
-                                        x: 14; y: 10
+                                        x: 14; y: bubble.named ? senderText.implicitHeight + 10 : 10
                                         width: parent.width - 28
                                         text: bubbleRow.modelData.content
                                         textFormat: Text.PlainText

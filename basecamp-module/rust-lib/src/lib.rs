@@ -347,6 +347,12 @@ pub trait NamesModule: Send + 'static {
     /// name forgets it.
     fn set_dm_name(&mut self, convo_id: String, name: String) -> String;
 
+    /// Which name each chat address belongs to: `{address: name}`.
+    fn chat_names(&mut self) -> String;
+
+    /// Remembers that chat address `address` is `name`'s.
+    fn set_chat_name(&mut self, address: String, name: String) -> String;
+
     /// The words in `text` that look misspelled, `[{word, suggestions}]`, checked
     /// on this machine against the system's word list. Names, links and CIDs are skipped.
     fn spell_check(&mut self, text: String) -> String;
@@ -418,6 +424,9 @@ struct Names {
     /// Which name each chat conversation is with, by conversation id, as this
     /// device started or labelled it. The chat module itself keeps no names.
     dm_names: std::collections::BTreeMap<String, String>,
+    /// Which name each chat address belongs to, as this device learned it (by
+    /// messaging or adding that name), so group messages show who wrote them.
+    chat_names: std::collections::BTreeMap<String, String>,
     /// Board reads, by what was asked: they take the CLI many seconds, so they
     /// run on their own thread and every call answers at once with the last result.
     board_reads: std::sync::Arc<std::sync::Mutex<HashMap<String, BoardRead>>>,
@@ -451,6 +460,7 @@ impl Default for Names {
             main_name: None,
             likes: Vec::new(),
             dm_names: Default::default(),
+            chat_names: Default::default(),
             board_reads: Default::default(),
         };
         // A missing or unreadable file just means the defaults stand.
@@ -719,6 +729,14 @@ impl Names {
                     .collect()
             })
             .unwrap_or_default();
+        self.chat_names = saved["chat_names"]
+            .as_object()
+            .map(|map| {
+                map.iter()
+                    .filter_map(|(address, name)| Some((address.clone(), registry::parse_name(name.as_str()?).ok()?)))
+                    .collect()
+            })
+            .unwrap_or_default();
         self.likes = saved["likes"]
             .as_array()
             .map(|list| list.iter().filter_map(|post| post.as_str().map(str::to_owned)).collect())
@@ -737,6 +755,7 @@ impl Names {
             "main_name": self.main_name,
             "likes": self.likes,
             "dm_names": self.dm_names,
+            "chat_names": self.chat_names,
         })
     }
 
@@ -1553,6 +1572,22 @@ impl NamesModule for Names {
         })())
     }
 
+    fn chat_names(&mut self) -> String {
+        reply(Ok(json!(self.chat_names)))
+    }
+
+    fn set_chat_name(&mut self, address: String, name: String) -> String {
+        reply((|| {
+            let address = address.trim();
+            if address.is_empty() || address.len() > 200 || !address.bytes().all(|b| b.is_ascii_graphic()) {
+                return Err("not a chat address".to_owned());
+            }
+            self.chat_names.insert(address.to_owned(), registry::parse_name(&name)?);
+            self.save();
+            Ok(json!(self.chat_names))
+        })())
+    }
+
     fn board_likes(&mut self) -> String {
         reply(Ok(json!(self.likes)))
     }
@@ -1886,6 +1921,7 @@ mod tests {
             main_name: None,
             likes: Vec::new(),
             dm_names: Default::default(),
+            chat_names: Default::default(),
             board_reads: Default::default(),
         }
     }
