@@ -37,6 +37,7 @@ mod avatar;
 mod changes;
 mod cli;
 mod page_view;
+mod spell;
 mod registry;
 mod shortlist;
 
@@ -327,6 +328,10 @@ pub trait NamesModule: Send + 'static {
 
     /// The posts this device's names have liked, `<name>/<n>`.
     fn board_likes(&mut self) -> String;
+
+    /// The words in `text` that look misspelled, `[{word, suggestions}]`, checked
+    /// on this machine against the system's word list. Names, links and CIDs are skipped.
+    fn spell_check(&mut self, text: String) -> String;
 
     /// Likes `post` as `name`, or takes the like back if this device liked it.
     /// A CLI job; the like is remembered here once it is started.
@@ -1474,6 +1479,10 @@ impl NamesModule for Names {
 
     fn make_anon(&mut self) -> String {
         self.cli_job("anon", "anon", |_, _, _| Ok((vec!["anon".to_owned()], None, Value::Null)))
+    }
+
+    fn spell_check(&mut self, text: String) -> String {
+        reply(Ok(spell::check(&text)))
     }
 
     fn board_likes(&mut self) -> String {

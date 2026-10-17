@@ -79,6 +79,7 @@ BRIDGE = r"""
             if (method === "board_follows") return ok(["ada"])
             if (method === "anon_name") return ok(root.anonMock || "")
             if (method === "board_likes") return ok(["jef/0"])
+            if (method === "spell_check") return ok(/teh|recieve/.test(args[0]) ? [{ word: "recieve", suggestions: ["receive"] }, { word: "teh", suggestions: ["the", "ten", "tea"] }] : [])
             if (method === "set_main_name") return ok(args[0])
             if (method === "board_follow") return ok(args[1] ? [] : ["ada", args[0]])
             if (method === "board_feed" || method === "board_thread") return ok({ updating: false, error: null, posts: [
@@ -123,6 +124,7 @@ SCENARIOS = {
     "home-reply": 'root.boardReply("jef/0")',
     "anon-off": 'root.anonOn = true',
     "pay": 'root.section = "pay"',
+    "spelling": 'boardComposer.text = "I recieve teh posts"; root.boardSpellCheck()',
     "profile-tab": 'root.openProfile()',
     "settings-tab": 'root.section = "settings"',
     "search-tab": 'root.section = "search"',

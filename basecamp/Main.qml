@@ -63,6 +63,7 @@ Item {
     property bool anonOn: false        // the post box posts as the anon name
     property var boardLiked: []        // posts this device has liked, <name>/<n>
     property bool cliKnown: false      // the CLI's names have been read at least once
+    property var boardSpelling: []     // [{word, suggestions}] in the post being written
     property bool confirmingRelease: false
     property var pending: null         // a change that was sent and is not confirmed yet
     property string registry: ""
@@ -1411,6 +1412,26 @@ Item {
         })
     }
 
+    /// Checks the post being written; the composer waits for typing to pause.
+    function boardSpellCheck() {
+        var text = boardComposer.text
+        if (text.trim() === "") {
+            boardSpelling = []
+            return
+        }
+        askLater("spell_check", [text], function(value) {
+            if (boardComposer.text === text)
+                boardSpelling = value || []
+        }, function() { boardSpelling = [] })
+    }
+
+    /// Replaces each whole-word `word` in the post with `fix`.
+    function boardFixWord(word, fix) {
+        var escaped = word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+        boardComposer.text = boardComposer.text.replace(new RegExp("\\b" + escaped + "\\b", "g"), fix)
+        boardSpellCheck()
+    }
+
     function boardReply(post) {
         if (boardAs === "") {
             say("Register a name privately to reply.", true)
@@ -1889,6 +1910,8 @@ Item {
         id: tab
         property string label: ""
         property bool current: false
+        /// Labels sit at the left in a tab that fills its row (the sidebar).
+        property bool alignLeft: false
         signal pressed()
         implicitHeight: 44
         implicitWidth: tabText.implicitWidth + 32
@@ -1896,7 +1919,10 @@ Item {
         color: tab.current ? root.raised : tabArea.containsMouse ? root.hover : "transparent"
         Text {
             id: tabText
-            anchors.centerIn: parent
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.horizontalCenter: tab.alignLeft ? undefined : parent.horizontalCenter
+            anchors.left: tab.alignLeft ? parent.left : undefined
+            anchors.leftMargin: 14
             text: tab.label
             color: tab.current ? root.ink : root.dim
             font.family: root.sans
@@ -2254,11 +2280,11 @@ Item {
                     }
                 }
 
-                Tab { Layout.fillWidth: true; label: "Posts"; current: root.section === "posts"; onPressed: root.boardShow(root.boardView === "thread" ? "all" : root.boardView) }
-                Tab { Layout.fillWidth: true; label: "Pay"; current: root.section === "pay"; onPressed: { root.section = "pay"; root.loadCliBalance() } }
-                Tab { Layout.fillWidth: true; label: "Profile"; current: root.section === "profile"; onPressed: root.openProfile() }
-                Tab { Layout.fillWidth: true; label: "Search"; current: root.section === "search"; onPressed: { root.section = "search"; searchField.forceActiveFocus() } }
-                Tab { Layout.fillWidth: true; label: "Settings"; current: root.section === "settings"; onPressed: { root.section = "settings"; root.registering = false; root.record = null; root.missing = "" } }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Posts"; current: root.section === "posts"; onPressed: root.boardShow(root.boardView === "thread" ? "all" : root.boardView) }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Pay"; current: root.section === "pay"; onPressed: { root.section = "pay"; root.loadCliBalance() } }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Profile"; current: root.section === "profile"; onPressed: root.openProfile() }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Search"; current: root.section === "search"; onPressed: { root.section = "search"; searchField.forceActiveFocus() } }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Settings"; current: root.section === "settings"; onPressed: { root.section = "settings"; root.registering = false; root.record = null; root.missing = "" } }
 
                 Item { Layout.fillHeight: true }
 
@@ -2506,7 +2532,39 @@ Item {
                         Layout.fillWidth: true
                         implicitHeight: 96
                         code: false
+                        onTextChanged: spellTimer.restart()
                         hint: root.boardAs !== "" ? "What's happening, " + root.boardAs + "?" : "Register a name to post"
+                    }
+                    Timer { id: spellTimer; interval: 600; onTriggered: root.boardSpellCheck() }
+                    Flow {
+                        visible: root.boardSpelling.length > 0
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Text { text: "Spelling:"; color: root.faint; font.family: root.sans; font.pixelSize: 14; height: 34; verticalAlignment: Text.AlignVCenter }
+                        Repeater {
+                            model: root.boardSpelling
+                            Row {
+                                required property var modelData
+                                spacing: 4
+                                Text {
+                                    text: modelData.word + (modelData.suggestions.length > 0 ? " →" : " (no suggestion)")
+                                    color: root.alarm
+                                    font.family: root.sans
+                                    font.pixelSize: 14
+                                    height: 34
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+                                Repeater {
+                                    model: modelData.suggestions
+                                    Chip {
+                                        required property string modelData
+                                        label: modelData
+                                        link: true
+                                        onPressed: root.boardFixWord(parent.modelData.word, modelData)
+                                    }
+                                }
+                            }
+                        }
                     }
                     RowLayout {
                         Layout.fillWidth: true
