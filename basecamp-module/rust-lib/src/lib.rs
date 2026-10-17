@@ -328,6 +328,10 @@ pub trait NamesModule: Send + 'static {
     /// finishes in the background.
     fn make_anon(&mut self, public: bool) -> String;
 
+    /// The CLI jobs still running, `[{id, name, kind, state, started}]`, so an app
+    /// opened mid-change can show it and wait for it.
+    fn running_jobs(&mut self) -> String;
+
     /// Moves `name` from the CLI wallet's private account to a new public account
     /// in it (`names make-public`), so its posts take one block and pay gas. A CLI
     /// job of about 9 minutes; the name keeps its profile, page and receiving keys.
@@ -1482,6 +1486,10 @@ impl NamesModule for Names {
                 .unwrap_or(Value::Null);
             Ok(saved["anon"].as_str().and_then(|name| registry::parse_name(name).ok()).map_or(Value::Null, Value::from))
         })())
+    }
+
+    fn running_jobs(&mut self) -> String {
+        reply((|| Ok(Value::from(self.jobs()?.running())))())
     }
 
     fn make_anon(&mut self, public: bool) -> String {

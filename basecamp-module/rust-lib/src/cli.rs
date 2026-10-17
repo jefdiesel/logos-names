@@ -541,6 +541,15 @@ impl Jobs {
         })
     }
 
+    /// Every job still running: `{id, name, kind, state, started}` each.
+    pub fn running(&self) -> Vec<Value> {
+        self.ids()
+            .into_iter()
+            .filter_map(|id| self.state(&id).ok())
+            .filter(|state| state["state"] == "running")
+            .collect()
+    }
+
     fn forget_old(&self) {
         let now = now_ms();
         for id in self.ids() {

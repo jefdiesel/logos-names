@@ -250,6 +250,7 @@ Item {
             loadCliMine()
             loadCliBalance()
             boardLoad()
+            loadRunningJobs()
             return true
         }
         if (bridgeReady && logos.callModuleAsync) {
@@ -1239,6 +1240,9 @@ Item {
     readonly property bool anonReady: anonName !== "" && cliHolds(anonName)
     /// Who the post box posts as.
     readonly property string boardAs: anonOn && anonReady ? anonName : mainName
+    /// The posting name is being made public: its holder changes and its profile
+    /// is put back, so it can't post until that's done.
+    readonly property bool boardAsMoving: boardJob !== null && boardJob.kind === "make_public" && boardJob.name === boardAs
     /// First run: no names CLI yet, or no name to post as.
     readonly property bool needsWelcome: configKnown && registry !== "" && (cliPath === "" || (cliKnown && mainName === "" && cliPending.length === 0))
 
@@ -1366,11 +1370,11 @@ Item {
     }
 
     /// Starts a board change as a CLI job and follows it until it ends.
-    function boardStart(method, args, label, after) {
+    function boardStart(method, args, label, after, name) {
         if (boardJob !== null)
             return
         say("", false)
-        var job = { id: "", label: label, started: Date.now(), after: after }
+        var job = { id: "", label: label, started: Date.now(), after: after, kind: method, name: name || "" }
         boardJob = job
         askLater(method, args, function(value) {
             job.id = value.id
@@ -1401,6 +1405,21 @@ Item {
                 say("It didn't go through: " + lastLogLine(value.log_tail), true)
             }
         }, function() { job.asking = false })
+    }
+
+    /// Picks up a change already running (the app was closed mid-way), so it
+    /// shows and blocks what it should until it ends.
+    function loadRunningJobs() {
+        askLater("running_jobs", [], function(value) {
+            var running = value || []
+            if (boardJob !== null || running.length === 0)
+                return
+            var job = running[0]
+            var labels = { make_public: "Making " + job.name + " public", post: "Your post", like: "Your like", hide: "Taking it down",
+                           anon: "Setting up your anon name", pay: "Your payment", register: "Registering " + job.name }
+            boardJob = { id: job.id, label: labels[job.kind] || "A change to " + job.name, started: job.started || Date.now(),
+                         kind: job.kind, name: job.name, after: function() { loadCliMine() } }
+        }, function() {})
     }
 
     function boardPost() {
@@ -2486,6 +2505,25 @@ Item {
                             onPressed: root.anonOn = !root.anonOn
                         }
                     }
+                    Rectangle {
+                        visible: root.boardAsMoving
+                        Layout.fillWidth: true
+                        implicitHeight: movingNote.implicitHeight + 20
+                        radius: 8
+                        color: "#2A2418"
+                        Text {
+                            id: movingNote
+                            x: 14
+                            y: 10
+                            width: parent.width - 28
+                            text: root.boardAs + " is being made public: it moves to its own public account, then gets its profile and page back. You can post as soon as that's done, about "
+                                + Math.max(1, 10 - Math.floor((Math.max(root.clockTick, Date.now()) - (root.boardJob ? root.boardJob.started : Date.now())) / 60000)) + " min."
+                            color: root.brass
+                            font.family: root.sans
+                            font.pixelSize: 15
+                            wrapMode: Text.Wrap
+                        }
+                    }
                     // A private name posts by a proof: say so before anyone presses Post.
                     Rectangle {
                         visible: root.boardAs !== "" && !(root.anonOn && !root.anonReady) && root.cliNames.some(function(entry) { return entry.name === root.boardAs && entry.private !== false })
@@ -2596,7 +2634,7 @@ Item {
                         Action {
                             label: root.boardReplyTo !== "" ? "Reply" : "Post"
                             strong: true
-                            enabledNow: root.boardJob === null && root.boardAs !== "" && !(root.anonOn && !root.anonReady) && boardComposer.text.length <= 1024 && (boardComposer.text.trim() !== "" || boardCid.text.trim() !== "")
+                            enabledNow: root.boardJob === null && !root.boardAsMoving && root.boardAs !== "" && !(root.anonOn && !root.anonReady) && boardComposer.text.length <= 1024 && (boardComposer.text.trim() !== "" || boardCid.text.trim() !== "")
                             onPressed: root.boardPost()
                         }
                     }
@@ -2837,7 +2875,8 @@ Item {
                                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.show(nameRow.modelData.name) }
                                 }
                                 Text {
-                                    text: (nameRow.privateCli ? "Private" : "Public") + (nameRow.isAnon ? " · anon" : nameRow.modelData.name === root.mainName ? " · main" : "")
+                                    text: (root.boardJob !== null && root.boardJob.kind === "make_public" && root.boardJob.name === nameRow.modelData.name ? "Becoming public…"
+                                        : nameRow.privateCli ? "Private" : "Public") + (nameRow.isAnon ? " · anon" : nameRow.modelData.name === root.mainName ? " · main" : "")
                                     color: root.faint
                                     font.family: root.sans
                                     font.pixelSize: 15
@@ -2856,7 +2895,7 @@ Item {
                                     onPressed: {
                                         var name = nameRow.modelData.name
                                         root.publicAsk = ""
-                                        root.boardStart("make_public", [name], "Making " + name + " public", function() { root.loadCliMine() })
+                                        root.boardStart("make_public", [name], "Making " + name + " public", function() { root.loadCliMine() }, name)
                                     }
                                 }
                                 Action {
