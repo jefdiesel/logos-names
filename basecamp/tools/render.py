@@ -75,6 +75,7 @@ BRIDGE = r"""
                 [{ name: "knuth", display: "knuth.lez", signer: "cli", state: "registering, ready in 12 min", lapsed: false, registering: true, failed: false }]))
             if (method === "cli_set_text" || method === "cli_profile" || method === "cli_set_page" || method === "cli_register")
                 return ok({ id: args[0] + "-1792000000000", name: args[0], kind: method.substr(4), state: "running", started: Date.now() - 125000 })
+            if (method === "cli_balance") return ok({ account: "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", balance: root.missing === "pauper" ? "5000" : "250000000" })
             if (method === "job") return ok(%(job)s)
             if (method === "set_cli" || method === "set_cli_wallet") return true
             if (method === "settings") return ok({ mode: "deposit", deposits: { normal: "100000000", three: "2000000000" }, admin: "%(bob)s", treasury: "%(bob)s", prices: null })
@@ -128,6 +129,7 @@ SCENARIOS = {
     "edit-page": 'root.manage("jef"); root.editTab = "page"',
     "edit-giveup": 'root.manage("grace"); root.editTab = "giveup"',
     "register-public": 'root.show("satoshi"); root.publicRegisterOpen = true',
+    "register-poor": 'root.show("pauper")',
     "lapsed": 'root.manage("grace")',
     "waiting": 'root.manage("grace"); root.releaseName()',
     "register-settings": 'root.show("jef"); root.settingsOpen = true',

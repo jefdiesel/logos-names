@@ -26,6 +26,8 @@ use std::time::{Duration, Instant};
 pub const STORAGE_FILE: &str = "storage.json";
 /// `names mine` is answered while the caller waits, so it gives up early.
 const MINE_PATIENCE: Duration = Duration::from_secs(15);
+/// `names balance` first catches the wallet up with the chain.
+const BALANCE_PATIENCE: Duration = Duration::from_secs(90);
 /// A change that takes longer than this is stopped.
 const JOB_PATIENCE: Duration = Duration::from_secs(45 * 60);
 /// How much of a job's log `state` returns.
@@ -267,6 +269,15 @@ pub fn parse_mine(output: &str) -> Vec<Value> {
         };
         // The log path the CLI adds is of no use to an app.
         let state = state.split(" (log: ").next().unwrap_or(state);
+        // Newer CLIs say what holds the name; older ones don't (null).
+        let private = if state.ends_with("; held privately") {
+            json!(true)
+        } else if state.ends_with("; held by a public account") {
+            json!(false)
+        } else {
+            Value::Null
+        };
+        let state = state.split("; held ").next().unwrap_or(state);
         if seen.insert(name.clone()) {
             names.push(json!({
                 "name": name,
@@ -276,6 +287,7 @@ pub fn parse_mine(output: &str) -> Vec<Value> {
                 "lapsed": lapsed,
                 "registering": registering,
                 "failed": failed,
+                "private": private,
             }));
         }
     }
@@ -310,8 +322,39 @@ pub fn run_mine(setup: &Setup) -> Result<Vec<Value>, String> {
     if setup.wallet_ready().is_err() {
         return Ok(Vec::new());
     }
+    Ok(parse_mine(&run_text(setup, mine_args(), MINE_PATIENCE)?))
+}
+
+/// Runs `names balance` and returns the default private account and its
+/// balance: `{account, balance}` (decimal text), or null if there is none.
+pub fn run_balance(setup: &Setup) -> Result<Value, String> {
+    setup.wallet_ready()?;
+    Ok(parse_balance(&run_text(setup, vec!["balance".to_owned()], BALANCE_PATIENCE)?))
+}
+
+/// The default private account in `names balance` output:
+/// `  Private/<id>  <balance>  (default)`.
+pub fn parse_balance(output: &str) -> Value {
+    for line in output.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("Private/") else { continue };
+        if !line.ends_with("(default)") {
+            continue;
+        }
+        let mut parts = rest.split_whitespace();
+        let (Some(account), Some(balance)) = (parts.next(), parts.next()) else { continue };
+        if registry::parse_account(account).is_err() || !balance.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        return json!({ "account": account, "balance": balance });
+    }
+    Value::Null
+}
+
+/// Runs the CLI with `command` and returns what it printed, or why it failed.
+fn run_text(setup: &Setup, command: Vec<String>, patience: Duration) -> Result<String, String> {
     let mut child = setup
-        .command(mine_args())
+        .command(command)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -327,13 +370,13 @@ pub fn run_mine(setup: &Setup) -> Result<Vec<Value>, String> {
     };
     let out = drain(child.stdout.take().map(|s| Box::new(s) as Box<dyn Read + Send>));
     let err = drain(child.stderr.take().map(|s| Box::new(s) as Box<dyn Read + Send>));
-    let code = wait(&mut child, MINE_PATIENCE)?;
+    let code = wait(&mut child, patience)?;
     let (out, err) = (out.join().unwrap_or_default(), err.join().unwrap_or_default());
     if code != Some(0) {
         let why = if last_line(&err).is_empty() { last_line(&out) } else { last_line(&err) };
-        return Err(format!("names mine failed: {why}"));
+        return Err(format!("the names CLI failed: {why}"));
     }
-    Ok(parse_mine(&out))
+    Ok(out)
 }
 
 // ── Jobs ────────────────────────────────────────────────────────────────
@@ -711,6 +754,13 @@ mod tests {
         assert_eq!(names[2]["registering"], false);
         assert_eq!(names[3]["lapsed"], true);
         assert_eq!(register_args("Jef.LEZ").unwrap(), strings(&["register", "--", "jef"]));
+        let newer = parse_mine("a.lez  held by a deposit (no expiry); held privately\nb.lez  held by a deposit (no expiry); held by a public account\n");
+        assert_eq!((newer[0]["private"].clone(), newer[1]["private"].clone()), (json!(true), json!(false)));
+        assert_eq!(newer[0]["state"], "held by a deposit (no expiry)");
+        assert_eq!(names[2]["private"], Value::Null);
+        let balance = "public accounts (seen on chain):\n  Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk  5\nprivate accounts (only this wallet sees them):\n  Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z  250000000  (default)\nprivate total: 250000000\n";
+        assert_eq!(parse_balance(balance), json!({ "account": "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", "balance": "250000000" }));
+        assert_eq!(parse_balance("private total: 0\n"), Value::Null);
         assert!(register_args("--help").is_err());
         assert!(parse_mine("no names yet; register one with `names register <name>`\n").is_empty());
     }

@@ -280,6 +280,12 @@ pub trait NamesModule: Send + 'static {
     /// later. `cli_mine` lists it with `registering` true until then.
     fn cli_register(&mut self, name: String) -> String;
 
+    /// The names CLI's default private account and its balance:
+    /// `{account, balance}` (decimal text), or null if it has none. Runs
+    /// `names balance`, which first catches up with the chain (seconds to a
+    /// minute), so ask with a long timeout.
+    fn cli_balance(&mut self) -> String;
+
     /// How job `id` is going: `{id, name, kind, state, started, finished,
     /// exit, log_tail}`. `state` is `running`, `done` (the CLI exited 0: the
     /// change was sent and included; `resolve` shows it) or `failed`;
@@ -1255,6 +1261,10 @@ impl NamesModule for Names {
         self.cli_job(&name, "set_text", |_, _, _| Ok((command, None, Value::Null)))
     }
 
+    fn cli_balance(&mut self) -> String {
+        reply((|| cli::run_balance(&self.cli_setup()?))())
+    }
+
     fn cli_register(&mut self, name: String) -> String {
         let command = match cli::register_args(&name) {
             Ok(command) => command,
@@ -1827,7 +1837,7 @@ mod tests {
     #[test]
     fn an_empty_cli_wallet_holds_nothing_and_takes_no_changes() {
         let (mut names, dir) = with_fake_cli("empty", "echo 'jef.lez  held by a deposit (no expiry)'");
-        assert_eq!(parsed(&names.cli_mine())["value"], json!([{ "name": "jef", "display": "jef.lez", "signer": "cli", "state": "held by a deposit (no expiry)", "lapsed": false, "registering": false, "failed": false }]));
+        assert_eq!(parsed(&names.cli_mine())["value"], json!([{ "name": "jef", "display": "jef.lez", "signer": "cli", "state": "held by a deposit (no expiry)", "lapsed": false, "registering": false, "failed": false, "private": null }]));
         let empty = dir.join("empty-wallet");
         std::fs::create_dir_all(&empty).expect("a dir");
         names.cli_wallet = Some(empty.to_string_lossy().into_owned());

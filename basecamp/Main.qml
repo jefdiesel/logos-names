@@ -32,7 +32,8 @@ Item {
     property var record: null          // the name on the plate
     property var page: null
     property string editTab: "profile"   // the Edit screen's tab: profile, page or giveup
-    property bool publicRegisterOpen: false // the public-account way to register is shown
+    property bool publicRegisterOpen: false
+    property var cliBalance: undefined   // the names CLI's private account {account, balance}; undefined while asking, null if none // the public-account way to register is shown
     property bool entriesOpen: false     // the Entries part of a name's settings is shown
     property var pagePreview: null       // the page being written, as page_view would show it
     property string missing: ""        // a looked-up name that is not registered
@@ -150,7 +151,7 @@ Item {
     /// Asks the names module without holding the screen still, for anything
     /// that waits on the wallet. Exactly one of `done(value)` and
     /// `failed(message)` runs, later.
-    function askLater(method, args, done, failed) {
+    function askLater(method, args, done, failed, patience) {
         function settle(reply) {
             lastReply = "names." + method + " → " + String(reply).substr(0, 400)
             reply = parsed(reply)
@@ -162,7 +163,7 @@ Item {
                 done(reply.value)
         }
         if (bridgeReady && logos.callModuleAsync)
-            logos.callModuleAsync("names", method, args, settle, 30000)
+            logos.callModuleAsync("names", method, args, settle, patience || 30000)
         else
             Qt.callLater(function() {
                 try {
@@ -321,6 +322,30 @@ Item {
             cliPending = []
             console.log("names_ui: CLI names:", message)
         })
+    }
+
+    /// Asks how much the names CLI's private account holds, for registering.
+    function loadCliBalance() {
+        if (cliPath === "")
+            return
+        cliBalance = undefined
+        askLater("cli_balance", [], function(value) {
+            cliBalance = value
+        }, function(message) {
+            cliBalance = null
+            console.log("names_ui: CLI balance:", message)
+        }, 120000)
+    }
+
+    /// Whether the CLI's private account can pay the deposit, as far as is known.
+    function cliCanPay() {
+        if (cliBalance === undefined || cliBalance === null || deposit === null)
+            return cliBalance === undefined
+        var need = deposit.deposit !== null && deposit.deposit !== undefined ? deposit.deposit : deposit.fee
+        if (need === undefined || need === null)
+            return true
+        var have = String(cliBalance.balance), want = String(need)
+        return have.length !== want.length ? have.length > want.length : have >= want
     }
 
     /// The CLI's registration of `name` still finishing (or stopped), or null.
@@ -516,8 +541,10 @@ Item {
                 tool = ""
                 missing = String(call("names", "normalize", [name]))
                 deposit = null
-                if (missing !== "")
+                if (missing !== "") {
                     loadDeposit(missing)
+                    loadCliBalance()
+                }
                 else
                     say("A name is 1 to 32 characters of a-z, 0-9 or a hyphen, such as jef.lez.", true)
                 return
@@ -1026,6 +1053,7 @@ Item {
     }
 
     /// The accent the profile being edited would show.
+    readonly property string draftFont: draftText("font") === "serif" ? "Georgia" : draftText("font") === "mono" ? mono : draftText("font") === "rounded" ? "Arial Rounded MT Bold" : sans
     readonly property color draftAccent: /^#[0-9a-fA-F]{6}$/.test(draftText("color")) ? readable(draftText("color")) : brass
 
     /// Who holds the name, in a few words.
@@ -1036,7 +1064,7 @@ Item {
             return "Yours · held privately"
         if (mine)
             return "Yours · public account " + shorten(holder)
-        return "Holder not stored on chain"
+        return "Holder not shown"
     }
 
     /// How the name is paid, in a few words.
@@ -1902,7 +1930,7 @@ Item {
                                     weight: Font.Medium
                                 }
                                 Text {
-                                    text: myRow.modelData.signer === "cli" ? "Private" : "Public"
+                                    text: myRow.modelData.signer !== "cli" ? "Public" : myRow.modelData.private === true ? "Private" : myRow.modelData.private === false ? "Public" : "CLI"
                                     color: root.faint
                                     font.family: root.sans
                                     font.pixelSize: 13
@@ -2134,7 +2162,7 @@ Item {
                         }
                         Hint {
                             visible: root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode === "deposit"
-                            text: (root.deposit !== null && root.deposit.tier === "three" ? "Three-character names take a larger deposit. " : "") + "Refunded in full when you release the name. Testnet: names don't expire here. Network fee extra."
+                            text: (root.deposit !== null && root.deposit.tier === "three" ? "Three-character names take a larger deposit. " : "") + "Refunded in full when you release the name. Testnet: names don't expire here, but to keep one on mainnet you claim it within 30 days of launch. Network fee extra."
                         }
                     }
                     Card {
@@ -2165,19 +2193,37 @@ Item {
                                 Layout.alignment: Qt.AlignTop
                                 label: "Time"
                                 value: "About 20 min"
-                                note: "A few minutes proving, then it finishes by itself"
+                                note: "A few minutes proving, then about 15 minutes more. Keep this computer on until it's done."
                             }
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            text: root.cliBalance === undefined ? "Checking your private account…"
+                                : root.cliBalance === null ? "No private account found. Run names setup in a terminal first."
+                                : "Pays from your private account " + root.shorten(root.cliBalance.account) + " · balance " + root.grouped(root.cliBalance.balance)
+                            color: root.cliBalance === null || !root.cliCanPay() ? root.alarm : root.dim
+                            font.family: root.sans
+                            font.pixelSize: 15
+                            wrapMode: Text.Wrap
+                        }
+                        Hint {
+                            visible: root.cliBalance !== undefined && root.cliBalance !== null && !root.cliCanPay()
+                            color: root.alarm
+                            font.pixelSize: 15
+                            text: "That's less than the deposit. Add funds to this private account first."
                         }
                         Action {
                             Layout.topMargin: 6
                             label: "Register " + root.missing + ".lez"
                             strong: true
                             changes: true
-                            enabledNow: root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode !== "unconfigured"
+                            enabledNow: root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode !== "unconfigured" && root.cliBalance !== null && root.cliBalance !== undefined && root.cliCanPay()
                             onPressed: root.registerPrivately()
                         }
                         Text {
-                            text: "Testnet: names don't expire here. Network fee extra."
+                            text: "Testnet. Names don't expire here, but to keep one on mainnet you claim it within 30 days of launch. Network fee extra."
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
                             color: root.faint
                             font.family: root.sans
                             font.pixelSize: 14
@@ -2440,9 +2486,34 @@ Item {
                                         }
                                     }
                                 }
+                                RowLayout {
+                                    readonly property bool shows: profileRow.modelData.key === "avatar" && !root.cliHeld && /^data:/.test(root.draftText("avatar"))
+                                    visible: shows
+                                    Layout.fillWidth: true
+                                    spacing: 12
+                                    Text { text: "Picture set"; color: root.ink; font.family: root.sans; font.pixelSize: 17 }
+                                    Link {
+                                        text: "Remove"
+                                        font.pixelSize: 16
+                                        onPressed: profileField.text = ""
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                }
+                                RowLayout {
+                                    visible: profileRow.modelData.key === "avatar" && !root.cliHeld && root.draftText("avatar") === "" && root.profileText("avatar") !== ""
+                                    Layout.fillWidth: true
+                                    spacing: 12
+                                    Text { text: "Picture removed when you save"; color: root.alarm; font.family: root.sans; font.pixelSize: 17 }
+                                    Link {
+                                        text: "Undo"
+                                        font.pixelSize: 16
+                                        onPressed: profileField.text = root.profileText("avatar")
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                }
                                 Field {
                                     id: profileField
-                                    visible: profileRow.modelData.lines !== true && profileRow.modelData.choices === undefined
+                                    visible: profileRow.modelData.lines !== true && profileRow.modelData.choices === undefined && !(profileRow.modelData.key === "avatar" && !root.cliHeld && (/^data:/.test(root.draftText("avatar")) || root.profileText("avatar") !== ""))
                                     Layout.fillWidth: true
                                     Layout.maximumWidth: profileRow.modelData.swatches !== undefined ? 130 : 100000
                                     size: 19
@@ -2596,7 +2667,7 @@ Item {
                                             text: root.draftText("display") !== "" ? root.draftText("display") : (root.record !== null ? root.shown(root.record.name) : "")
                                             textFormat: Text.PlainText
                                             color: root.ink
-                                            font.family: root.sans
+                                            font.family: root.draftFont
                                             font.pixelSize: 24
                                             font.weight: Font.DemiBold
                                             elide: Text.ElideRight
@@ -2616,7 +2687,7 @@ Item {
                                     text: root.draftText("bio")
                                     textFormat: Text.PlainText
                                     color: root.dim
-                                    font.family: root.sans
+                                    font.family: root.draftFont
                                     font.pixelSize: 16
                                     lineHeight: 1.2
                                     wrapMode: Text.Wrap
@@ -2648,14 +2719,14 @@ Item {
                                     hint: "<h1>Hi</h1>\n<p>About me…</p>"
                                     onTextChanged: previewTimer.restart()
                                 }
-                                Text { text: "Scripts, styles and images are left out."; color: root.faint; font.family: root.sans; font.pixelSize: 14 }
+                                Text { Layout.fillWidth: true; wrapMode: Text.Wrap; text: "This app leaves out scripts, styles and images. In a browser, the page runs as written."; color: root.faint; font.family: root.sans; font.pixelSize: 14 }
                             }
                             ColumnLayout {
                                 Layout.fillWidth: true
                                 Layout.preferredWidth: 1
                                 Layout.alignment: Qt.AlignTop
                                 spacing: 8
-                                Text { text: "Preview · what readers see"; color: root.faint; font.family: root.sans; font.pixelSize: 15 }
+                                Text { text: "Preview · how this app shows it"; color: root.faint; font.family: root.sans; font.pixelSize: 15 }
                                 Rectangle {
                                     Layout.fillWidth: true
                                     implicitHeight: 420

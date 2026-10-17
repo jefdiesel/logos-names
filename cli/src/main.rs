@@ -2200,11 +2200,16 @@ async fn main() -> Result<()> {
             for name in defaults.names {
                 match client.lookup(&name).await {
                     Ok((Derived { id, .. }, record, _)) if client.holder(&name, &id, &record).is_ok() => {
+                        // Apps read this suffix to tell a private holder from a public one.
+                        let by = match client.holder(&name, &id, &record) {
+                            Ok(account) if client.is_private(account) => "; held privately",
+                            _ => "; held by a public account",
+                        };
                         if record.expires == u64::MAX {
-                            println!("{name}{NAME_SUFFIX}  held by a deposit (no expiry)");
+                            println!("{name}{NAME_SUFFIX}  held by a deposit (no expiry){by}");
                         } else {
                             let state = if local_now() >= record.expires { "lapsed" } else { "held" };
-                            println!("{name}{NAME_SUFFIX}  {state} until {}", readable(record.expires));
+                            println!("{name}{NAME_SUFFIX}  {state} until {}{by}", readable(record.expires));
                         }
                     }
                     _ => println!("{name}{NAME_SUFFIX}  no longer held by this wallet"),
