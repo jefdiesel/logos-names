@@ -442,6 +442,58 @@ enum Command {
     /// Write the man pages (`names.1`, `names-register.1`, ...) into a directory.
     #[command(hide = true)]
     Man { dir: PathBuf },
+    /// Post on the LNS board as one of your names, privately: the chain sees the
+    /// name, never the account that holds it. Prints the post as `<name>/<n>`.
+    Post {
+        /// The name to post as; this wallet must hold it privately.
+        #[arg(long = "as", value_parser = parse_name)]
+        as_name: String,
+        /// What to say (at most 1,024 bytes).
+        text: String,
+        /// A Logos Storage CID to attach, such as an image; up to four.
+        #[arg(long = "cid")]
+        cids: Vec<String>,
+        /// Reply to this post, written `<name>/<n>`.
+        #[arg(long, value_parser = board::parse_post)]
+        reply: Option<(String, u64)>,
+    },
+    /// Like a post on the board, written `<name>/<n>`, as one of your names.
+    Like {
+        #[arg(long = "as", value_parser = parse_name)]
+        as_name: String,
+        #[arg(value_parser = board::parse_post)]
+        post: (String, u64),
+        /// Take the like back.
+        #[arg(long)]
+        undo: bool,
+    },
+    /// The board's recent posts, newest first.
+    Feed {
+        /// Only posts by these names (the Following feed).
+        #[arg(long, value_delimiter = ',', value_parser = parse_name)]
+        following: Vec<String>,
+        /// How many recent blocks to read (a block is about 10 seconds).
+        #[arg(long, default_value_t = 2000)]
+        blocks: u64,
+        /// Print JSON, for apps.
+        #[arg(long)]
+        json: bool,
+    },
+    /// A post and its replies, written `<name>/<n>`, oldest first.
+    Thread {
+        #[arg(value_parser = board::parse_post)]
+        post: (String, u64),
+        #[arg(long, default_value_t = 20000)]
+        blocks: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Take down one of your posts, written `<name>/<n>`. Its text stays in the
+    /// chain's history; apps stop showing it.
+    Hide {
+        #[arg(value_parser = board::parse_post)]
+        post: (String, u64),
+    },
 }
 
 /// Renders a page for `names` and one for each command, leaving out this one.
@@ -456,6 +508,8 @@ fn write_man_pages(dir: &std::path::Path) -> Result<()> {
 }
 
 /// Accepts a name as people write it (`jef`, `@jef`, `lns:jef` or `jef.lez`, any case) and returns the bare name.
+mod board;
+
 fn parse_name(input: &str) -> Result<String, String> {
     let name = normalize_name(input);
     validate_name(&name).map_err(str::to_owned)?;
@@ -580,16 +634,22 @@ impl Client {
     /// is checked against the header's image ID, and cached next to the wallet.
     /// `LOGOS_NAMES_PROGRAM_ELF` overrides it with a local file.
     async fn program(&self) -> Result<Program> {
-        if let Some(path) = std::env::var_os("LOGOS_NAMES_PROGRAM_ELF") {
+        self.program_at(self.program, "LOGOS_NAMES_PROGRAM_ELF", "logos-names", "the registry").await
+    }
+
+    /// The bytecode of the program deployed at `id`, as [`Self::program`] reads the
+    /// registry's: `env` names a local file that overrides it, `cache` prefixes the
+    /// cached copy next to the wallet, `what` names it in messages.
+    async fn program_at(&self, id: AccountId, env: &str, cache: &str, what: &str) -> Result<Program> {
+        if let Some(path) = std::env::var_os(env) {
             let bytes = std::fs::read(&path)
                 .with_context(|| format!("cannot read {}", PathBuf::from(path).display()))?;
             return Program::new(bytes.into())
-                .map_err(|error| anyhow!("the registry's bytecode does not load: {error}"));
+                .map_err(|error| anyhow!("{what}'s bytecode does not load: {error}"));
         }
-        let header = ProgramHeader::from_bytes(&self.loader_shard(self.program).await?)
-            .ok_or_else(|| anyhow!("{} is not a deployed program", self.program))?;
-        let cache = fetch_persistent_storage_path()?
-            .with_file_name(format!("logos-names-{}.bin", self.program));
+        let header = ProgramHeader::from_bytes(&self.loader_shard(id).await?)
+            .ok_or_else(|| anyhow!("{id} is not a deployed program"))?;
+        let cache = fetch_persistent_storage_path()?.with_file_name(format!("{cache}-{id}.bin"));
         if let Ok(bytes) = std::fs::read(&cache) {
             if let Ok(program) = Program::new(bytes.into()) {
                 if program.id() == header.image_id {
@@ -597,7 +657,7 @@ impl Client {
                 }
             }
         }
-        println!("reading the registry's bytecode from the chain");
+        println!("reading {what}'s bytecode from the chain");
         let mut user_elf = Vec::new();
         let mut next = Some(header.program_first_segment);
         for _ in 0..MAX_PROGRAM_SEGMENTS {
@@ -614,7 +674,7 @@ impl Client {
         let bytes =
             risc0_binfmt::ProgramBinary::new(&user_elf, risc0_zkos_v1compat::V1COMPAT_ELF).encode();
         let program = Program::new(bytes.clone().into())
-            .map_err(|error| anyhow!("the registry's bytecode does not load: {error}"))?;
+            .map_err(|error| anyhow!("{what}'s bytecode does not load: {error}"))?;
         if program.id() != header.image_id {
             bail!("the bytecode read from the chain does not match the program's image ID");
         }
@@ -2480,6 +2540,13 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&client.resolve(&name).await?)?);
             Ok(())
         }
+        Command::Post { as_name, text, cids, reply } => client.post(&as_name, text, cids, reply).await,
+        Command::Like { as_name, post, undo } => client.like(&as_name, post, undo).await,
+        Command::Hide { post } => client.hide(post).await,
+        Command::Feed { following, blocks, json } => {
+            board::print_posts(&client.feed(blocks, &following).await?, json)
+        }
+        Command::Thread { post, blocks, json } => board::print_posts(&client.thread(post, blocks).await?, json),
         Command::Address { .. }
         | Command::AccountLogEntry { .. }
         | Command::Wallet { .. }

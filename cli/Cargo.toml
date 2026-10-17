@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 names_core.workspace = true
+board_core.workspace = true
 names_seal.workspace = true
 names_accountlog.workspace = true
 lee_core.workspace = true
@@ -32,4 +33,5 @@ getrandom = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
 ureq = "3"
+futures = "0.3"
 tokio = { version = "1.50", features = ["macros", "rt-multi-thread"] }

@@ -5290,11 +5290,13 @@ name = "names_cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "board_core",
  "borsh",
  "clap",
  "clap_mangen",
  "clock_core",
  "common",
+ "futures",
  "getrandom 0.3.4",
  "hex",
  "lee",
