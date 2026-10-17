@@ -120,7 +120,7 @@ test("names are restricted to a safe charset", () => {
 });
 
 test("typed names are normalised to the bare name", () => {
-  for (const typed of ["jef", "jef.lez", "Jef.LEZ", "  jef.lez  "]) assert.equal(normalizeName(typed), "jef");
+  for (const typed of ["jef", "jef.lez", "Jef.LEZ", "  jef.lez  ", "@jef", "lns:jef", "LNS:@Jef.lez"]) assert.equal(normalizeName(typed), "jef");
   assert.equal(normalizeName("jef.lez.lez"), "jef.lez");
   assert.ok(!isValidName(normalizeName("jef.eth")));
   assert.ok(!isValidName(normalizeName(".lez")));

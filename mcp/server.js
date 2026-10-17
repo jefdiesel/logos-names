@@ -31,7 +31,7 @@ const MAX_PAGE_CHARS = 20_000;
 const nameArgument = {
   type: "object",
   properties: {
-    name: { type: "string", description: "A Logos name such as `jef.lez` or `jef`." },
+    name: { type: "string", description: "A Logos name such as `jef` (`@jef`, `lns:jef` and the old `jef.lez` are accepted too)." },
   },
   required: ["name"],
 };
@@ -83,11 +83,11 @@ const tools = [
   },
 ];
 
-/** Accepts a name as people write it (`jef.lez`) and returns the bare on-chain name. */
+/** Accepts a name as people write it (`jef`, `@jef`, `lns:jef`, `jef.lez`) and returns the bare name. */
 function requireName(input) {
   const name = normalizeName(input ?? "");
   if (!isValidName(name)) {
-    throw new Error("invalid name: use 1-32 chars of a-z, 0-9 or '-', optionally ending in .lez");
+    throw new Error("invalid name: use 1-32 chars of a-z, 0-9 or '-', such as jef");
   }
   return name;
 }

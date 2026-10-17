@@ -24,7 +24,7 @@ use lee_core::{
 use lee::{privacy_preserving_transaction::circuit::ProgramWithDependencies, program::Program};
 use names_core::{
     Effect, GRACE_MS, Instruction, LengthProof, MAX_COMMIT_AGE_MS, MIN_COMMIT_AGE_MS, MODE_DEPOSIT, MODE_FEE,
-    NAME_SUFFIX, TIER_LOCKED, TIER_THREE, TIME_WINDOW_MS, NameId, deposit_address, shortlist,
+    LEGACY_SUFFIX, NAME_SUFFIX, TIER_LOCKED, TIER_THREE, TIME_WINDOW_MS, NameId, deposit_address, shortlist,
     NameRecord, Page, Settings, commitment, commitment_address,
     normalize_name, owner_tag, page_address, record_address, settings_address,
     validate_name,
@@ -147,7 +147,7 @@ const DEFAULT_RPC: &str = "https://testnet.lez.logos.co";
         through the LEZ wallet, built in as `names wallet`, whose keys live in \
         LEE_WALLET_HOME_DIR (default ~/.lee/wallet).\n\n\
         Getting started, holding a name anonymously:\n  \
-        names resolve jef.lez\n  \
+        names resolve jef\n  \
         names setup                                (makes a public and a private account)\n  \
         fund the public account with testnet tokens from your LEZ wallet (or `names bridge`)\n  \
         names setup                                (again: moves some to the private account)\n  \
@@ -455,10 +455,15 @@ fn write_man_pages(dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// Accepts a name as people write it (`jef.lez`, any case) and returns the bare name.
+/// Accepts a name as people write it (`jef`, `@jef`, `lns:jef` or `jef.lez`, any case) and returns the bare name.
 fn parse_name(input: &str) -> Result<String, String> {
     let name = normalize_name(input);
-    validate_name(&name).map(|()| name).map_err(str::to_owned)
+    validate_name(&name).map_err(str::to_owned)?;
+    // A name that is also an account ID would be ambiguous in a "send to" field (SPEC 2).
+    if name.parse::<AccountId>().is_ok() {
+        return Err(format!("{name} is also an account ID, so it can't be a name"));
+    }
+    Ok(name)
 }
 
 /// Accepts an account as the wallet prints it (`Public/<id>`, `Private/<id>`) or bare.
@@ -1995,7 +2000,7 @@ async fn setup(client: &mut Client, shield: u128) -> Result<()> {
         client.wallet.sync_to_latest_block().await?;
         quietly(|| client.wallet.store_persistent_data())?;
     }
-    println!("ready: `names register <name>` holds a name privately, `names pay <name>.lez <amount>` pays one");
+    println!("ready: `names register <name>` holds a name privately, `names pay <name> <amount>` pays one");
     Ok(())
 }
 
@@ -2153,7 +2158,7 @@ async fn main() -> Result<()> {
     };
 
     if let Command::AccountLogEntry { name } = &cli.command {
-        println!("{}", hex::encode(names_accountlog::name_entry(&format!("{name}{NAME_SUFFIX}"))));
+        println!("{}", hex::encode(names_accountlog::name_entry(&format!("{name}{LEGACY_SUFFIX}"))));
         return Ok(());
     }
     if let Command::Address { name } = &cli.command {
@@ -2362,8 +2367,9 @@ async fn main() -> Result<()> {
             let account = names_accountlog::parse_address(&address).map_err(|e| anyhow!(e))?;
             let live = names_accountlog::verify(&account, &signed)
                 .map_err(|e| anyhow!("the account log is not valid for {address}: {e}"))?;
-            let full_name = format!("{name}{NAME_SUFFIX}");
-            let endorsed = names_accountlog::endorses_name(&live, &full_name);
+            // Log entries carry the name in its long form, `jef.lez` (SPEC 7); a bare one counts too.
+            let full_name = format!("{name}{LEGACY_SUFFIX}");
+            let endorsed = names_accountlog::endorses_name(&live, &full_name) || names_accountlog::endorses_name(&live, &name);
             let entries: Vec<_> = live
                 .iter()
                 .map(|entry| {

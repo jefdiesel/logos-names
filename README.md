@@ -3,7 +3,7 @@
 Names for the Logos Execution Zone (LEZ v0.3), **private by default and public
 by choice**. Suggested as a Logos RFP:
 [forum post](https://forum.logos.co/t/lns-lez-name-service-lez-names-private-by-default/2016),
-[draft](docs/RFP-private-naming.md). A name such as `jef.lez` resolves to:
+[draft](docs/RFP-private-naming.md). A name such as `jef` resolves to:
 
 - **private receiving keys**, made when it is registered: anyone can pay the name,
   and nobody, the payer included, learns the account behind it,
@@ -59,7 +59,7 @@ a separate LEZ install: `names wallet …` is the LEZ wallet's own command line,
 built in, and the public LEZ testnet is the default. Lookups work with no setup;
 `names setup` makes a wallet with a public and a private account and, once the public
 one holds testnet tokens, moves some to the private account; then `names register <name>`
-and `names pay <name>.lez <amount>` need no account arguments. `names open <name>` shows a
+and `names pay <name> <amount>` need no account arguments. `names open <name>` shows a
 name's page in the browser, served from this machine only. `--rpc` and `--program` point it at another chain and registry. `names --help`
 and `man names` (installed alongside) cover every command. The guide is the website's
 front page (`gateway/public/index.html`). `scripts/publish-cli.sh` builds both
@@ -80,8 +80,8 @@ Key fingerprint: `SHA256:dAQbSDw6smVMxkwJdQ2104U3Xem+cDOldUmpW+wQzcE`.
 ## Status
 
 The CLI uses the **public LEZ testnet** (testnet v0.3), registry
-`38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq` (registry v5: refundable deposits, locked one- and two-character names, Argon2id names; deployed 2026-10-16 from CI build `322dda10…c4ce`), with `jef.lez` and
-`logos.lez` held by a private account. The deposit is 1,000,000 for any name of three
+`38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq` (registry v5: refundable deposits, locked one- and two-character names, Argon2id names; deployed 2026-10-16 from CI build `322dda10…c4ce`), with `jef` and
+`logos` held by a private account. The deposit is 1,000,000 for any name of three
 or more characters (lowered from 100,000,000 on 2026-10-17; names registered before
 keep their deposit until released). There is no faucet: testnet users fund their own
 accounts, by bridging from a Logos Blockchain node (`names bridge`). The Names test chain ([chain/](chain/README.md)) was the default while
@@ -118,8 +118,11 @@ key    = SHA-256("logos-names/v5/key" ‖ master)     opens and seals what it re
 The record lives at `PDA(program, SHA-256("logos-names/v5/name/" ‖ id))` and
 holds `{version, owner tag, expires, sealed}`; the page lives at a second derived account.
 `sealed` is AES-256-GCM over the profile, which the program stores and cannot
-read. Names are 1-32 characters of `a-z`, `0-9` and `-`, written with a `.lez`
-suffix; clients strip the suffix and lower the case before deriving.
+read. Names are 1-32 characters of `a-z`, `0-9` and `-`, written bare, as
+`jef` (no suffix, no `@`); clients lower the case, and still strip an old `.lez`
+suffix, an `@` or an `lns:` prefix if one is typed, before deriving. A name that
+would also read as an account ID is refused, so a client can tell names and
+addresses apart.
 
 The slow derivation makes scanning for names expensive. It does not protect a
 short or obvious name from someone who guesses it.
@@ -176,11 +179,11 @@ names set-page jef index.html
 names set-account jef <account>           # optional: also payable publicly, at a visible account
 names clear-account jef
 names resolve jef                         # expiry, payable privately, public account if set, entries, page
-names pay jef.lez 1000 --from <account>   # private, to the name's receiving keys
-names pay jef.lez 1000 --from <account> --public   # to its public account, if it has one
+names pay jef 1000 --from <account>       # private, to the name's receiving keys
+names pay jef 1000 --from <account> --public   # to its public account, if it has one
 names receive-privately jef               # fresh receiving keys (after a transfer, or to rotate)
 names set-logos-account jef <address>     # link to a Logos account (AccountLog address, 64 hex)
-names account-log-entry jef               # the AccountLog entry the account appends to endorse jef.lez
+names account-log-entry jef               # the AccountLog entry the account appends to endorse jef
 names verify-account jef --log <file>     # both ways: name -> account, and the signed log -> name
 names transfer jef <account>              # new holder; keys, profile and page are emptied
 names release jef                         # give it up: nothing of it remains
@@ -212,7 +215,7 @@ cd gateway && npm install && cf deploy
 ## Logos apps
 
 `basecamp-module/` builds `names`, a Logos core module any Basecamp app can
-call: `recipient("jef.lez")` returns where to send, `resolve`, `page_view` (a page
+call: `recipient("jef")` returns where to send, `resolve`, `page_view` (a page
 rewritten to a safe allowlist) and `avatar` read a name, and `register`,
 `set_profile`, `set_page`, `transfer`, `release` and the rest change one. The
 module holds no keys. Changes from a public account are signed by the LEZ wallet
@@ -227,7 +230,7 @@ cd basecamp-module
 nix build '.#lgx-portable'                        # result/*.lgx
 logosctl package install -y result/*.lgx && logosctl module load names
 logosctl call names set_registry str:<program id>
-logosctl call names recipient jef.lez
+logosctl call names recipient jef
 ```
 
 Tested in `logosctl` 0.3.1 against a local chain;

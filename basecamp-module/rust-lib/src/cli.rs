@@ -249,7 +249,8 @@ pub fn parse_mine(output: &str) -> Vec<Value> {
     let mut names = Vec::new();
     for line in output.lines() {
         let Some((shown, state)) = line.trim().split_once("  ") else { continue };
-        let Some(bare) = shown.strip_suffix(registry::NAME_SUFFIX) else { continue };
+        // Older CLIs write `jef.lez`, newer ones `jef`.
+        let bare = shown.strip_suffix(registry::LEGACY_SUFFIX).unwrap_or(shown);
         // The CLI's output is checked like anything typed.
         let Ok(name) = registry::parse_name(bare) else { continue };
         if name != bare {

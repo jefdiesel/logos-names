@@ -65,13 +65,20 @@ What this does not hide:
 
 - A name is 1 to 32 bytes of `a-z`, `0-9` and `-`, and does not start or end
   with `-`.
-- People write a name with the suffix `.lez`: `jef.lez`. The suffix is not part
-  of the name.
+- **A name is written bare: `jef`.** No suffix and no `@`, in apps, wallets,
+  chat and posts alike, the way a handle is written. LNS (the Logos Name Service)
+  is the service, not part of the name.
+- **Name or address.** Wherever a field takes either (a wallet's "send to"), a
+  client first tries the input as a LEZ account ID (base58, 32 bytes) and
+  otherwise treats it as a name. A name that also decodes as an account ID is
+  refused, so `jef` or `sammy123` can never be an address and the two never clash.
+- **Links:** `lns:jef` names a name unambiguously where it leaves Logos (a URI, a
+  QR code).
 - **Normalisation.** Before using input as a name, a client trims surrounding
-  whitespace, lowers ASCII case, and removes one trailing `.lez`. It then
-  rejects the result unless it is a valid name. `Jef.LEZ` becomes `jef`;
-  `jef.eth` is rejected.
-- A client displays names with the suffix.
+  whitespace, lowers ASCII case, removes one leading `lns:`, then one leading `@`,
+  then one trailing `.lez` (the old suffix, still accepted when typed or pasted).
+  It then rejects the result unless it is a valid name and not an account ID.
+  `Jef`, `@jef`, `lns:jef` and `Jef.LEZ` all become `jef`; `jef.eth` is rejected.
 
 Because the chain cannot check a name it never sees, these rules are enforced
 by clients. Two clients that normalise differently would disagree about which
@@ -270,8 +277,9 @@ whose it is. An LNS name fills that in, with a link each way:
 
 - **Name to account:** the name's `logos.account` entry holds the address.
 - **Account to name:** the account's log has a live `Add(Text)` entry under the
-  context `lns.name` whose value is the name with its suffix, such as
-  `jef.lez`. Its bytes are `01 <len u16 LE> 08 "lns.name" 02 <name>`.
+  context `lns.name` whose value is the name in its long form, such as
+  `jef.lez` (this stored form keeps the old suffix; a client also accepts a bare
+  `jef`). Its bytes are `01 <len u16 LE> 08 "lns.name" 02 <name>`.
 
 A client treats a name as belonging to an account only when both hold: it
 verifies the log under the address from `logos.account` (strictly, as the
@@ -583,7 +591,7 @@ cross-origin requests (CORS: it answers the `OPTIONS` preflight and sends
 `Access-Control-Allow-Origin`). The LEZ testnet does not yet. When a sequencer
 does, a static page resolves names entirely in the visitor's browser:
 
-- the name is carried after `#` (`https://<site>/#jef.lez`), which browsers
+- the name is carried after `#` (`https://<site>/#jef`), which browsers
   never send to the server, so the host of the static files cannot see it;
 - the page derives the identifier and key (section 3), reads the record and page
   accounts from the sequencer's JSON-RPC itself, and opens them;
@@ -662,17 +670,18 @@ with JSON text in the envelope Logos modules use:
 
 | Method | `value` |
 |---|---|
-| `recipient("jef.lez")` | `{"name", "display", "public", "public_hex", "private"}`, or `null` if unregistered. `public` is a base58 account ID or `null`; `private` is `{"nullifier_public_key", "viewing_public_key"}` in hex, or `null`. Prefer `private` when it is there. |
-| `resolve("jef.lez")` | `{"name", "display", "owner_tag", "expires", "never", "lapsed", "deposit", "account", "npk", "vpk", "texts"}`, or `null`. A name held by a deposit never expires: `expires` is `null`, `never` true and `lapsed` false; `deposit` is what its deposit account holds (decimal text), which a release refunds. In fee mode `expires` is in milliseconds and `lapsed` is true once it has passed. `owner_tag` is the holder's tag in hex: the chain never names the holder. `null` also covers a fee-mode name that lapsed more than 30 days ago. |
-| `page("jef.lez")` | `{"content_type", "bytes", "text"}`, or `null`. `text` is the body if it is UTF-8. The page is written by the name's owner: treat it as untrusted content. |
-| `page_view("jef.lez")` | `{"content_type", "bytes", "kind", "title", "html", "text", "truncated"}`, or `null`: the page made safe to show in an app. For an HTML page (`kind` `html`), `html` is its body rewritten to an allowlist that Qt rich text draws (h1–h4, p, br, hr, lists, tables, b/strong/i/em/u/small, code, pre, blockquote, span, div, and `a` with only an absolute `http:`/`https:` `href`; no other tags, attributes, scripts, styles, images or comments; every tag closed), and `title` is its `<title>` as plain text. `kind` `text` or `file` leaves both `null`. `text` is the source, as in `page`, to show as plain text only. At most 64 KB is read; `truncated` says a page was cut. |
-| `avatar("jef.lez")` | `{"width", "height", "pixels"}`, or `null`: the `avatar` entry decoded, for an app that cannot load a `data:` URL. `pixels` is base64 of RGBA8 bytes, row by row from the top left, at most 128 pixels a side (a larger picture is scaled down, nearest neighbour). Only PNG is decoded. |
+| `recipient("jef")` | `{"name", "display", "public", "public_hex", "private"}`, or `null` if unregistered. `public` is a base58 account ID or `null`; `private` is `{"nullifier_public_key", "viewing_public_key"}` in hex, or `null`. Prefer `private` when it is there. |
+| `resolve("jef")` | `{"name", "display", "owner_tag", "expires", "never", "lapsed", "deposit", "account", "npk", "vpk", "texts"}`, or `null`. A name held by a deposit never expires: `expires` is `null`, `never` true and `lapsed` false; `deposit` is what its deposit account holds (decimal text), which a release refunds. In fee mode `expires` is in milliseconds and `lapsed` is true once it has passed. `owner_tag` is the holder's tag in hex: the chain never names the holder. `null` also covers a fee-mode name that lapsed more than 30 days ago. |
+| `page("jef")` | `{"content_type", "bytes", "text"}`, or `null`. `text` is the body if it is UTF-8. The page is written by the name's owner: treat it as untrusted content. |
+| `page_view("jef")` | `{"content_type", "bytes", "kind", "title", "html", "text", "truncated"}`, or `null`: the page made safe to show in an app. For an HTML page (`kind` `html`), `html` is its body rewritten to an allowlist that Qt rich text draws (h1–h4, p, br, hr, lists, tables, b/strong/i/em/u/small, code, pre, blockquote, span, div, and `a` with only an absolute `http:`/`https:` `href`; no other tags, attributes, scripts, styles, images or comments; every tag closed), and `title` is its `<title>` as plain text. `kind` `text` or `file` leaves both `null`. `text` is the source, as in `page`, to show as plain text only. At most 64 KB is read; `truncated` says a page was cut. |
+| `avatar("jef")` | `{"width", "height", "pixels"}`, or `null`: the `avatar` entry decoded, for an app that cannot load a `data:` URL. `pixels` is base64 of RGBA8 bytes, row by row from the top left, at most 128 pixels a side (a larger picture is scaled down, nearest neighbour). Only PNG is decoded. |
 | `reverse(account)` | The name the account has published for itself, or `null`. It is checked against the name's own record, so it cannot be spoofed. |
-| `deposit("jef.lez")` | `{"name", "display", "tier", "deposit", "mode"}`: what registering takes. `tier` is `normal`, `three` (three characters, at the higher deposit) or `locked` (one or two characters: only the registry's admin may register it, and `deposit` is `null`). `deposit` is decimal text in the native token's base units, held while the name is and refunded on release. `mode` is `deposit`, `fee` or `unconfigured`; in fee mode `deposit` is 0 and `fee` gives the price of a one-year term. One network read. |
+| `deposit("jef")` | `{"name", "display", "tier", "deposit", "mode"}`: what registering takes. `tier` is `normal`, `three` (three characters, at the higher deposit) or `locked` (one or two characters: only the registry's admin may register it, and `deposit` is `null`). `deposit` is decimal text in the native token's base units, held while the name is and refunded on release. `mode` is `deposit`, `fee` or `unconfigured`; in fee mode `deposit` is 0 and `fee` gives the price of a one-year term. One network read. |
 | `settings()` | `{"mode", "deposits": {"normal", "three"}, "admin", "treasury", "prices": {"30d", "1y", "5y"}}`, amounts as decimal text, or `null` if the registry has no settings yet (it charges nothing, and locks one- and two-character names). |
-| `normalize(input)` | The bare name for what a person typed (`Jef.LEZ` gives `jef`), or an empty string if it is not a valid name. Makes no network call. |
+| `normalize(input)` | The bare name for what a person typed (`Jef`, `@jef`, `lns:jef` and `Jef.LEZ` give `jef`), or an empty string if it is not a valid name. Makes no network call. |
 
-A wallet's send field calls `recipient` when the input ends in `.lez`, then
+A wallet's send field calls `recipient` when the input is not an account ID
+(section 2), then
 sends to the `private` keys if there are any, otherwise to `public_hex`. Both
 are in the form the LEZ wallet module's `transfer_shielded`, `transfer_private`
 and `transfer_public` take.
@@ -698,7 +707,7 @@ owner for everything else.
 |---|---|
 | `wallet()` | `{"accounts": [{"account", "balance", "funded", "name"}], "private_accounts": ["account"]}`: the open wallet's public accounts, funded ones first, and its private accounts. `balance` is decimal text; `name` is the name the account has published, or `null`. Fails if the LEZ wallet is not installed or not open. |
 | `mine()` | `{"names": [{"name", "display", "owner", "expires", "never", "lapsed"}], "pending": [{"name", "display", "owner", "stage", "ready_at", "tx"}]}`: the names this device remembers that the open wallet holds (`owner` is the wallet account that holds the name), and the registrations under way. A pending `stage` is `committed` (call `register` again from `ready_at`, in milliseconds) or `revealed` (sent; it shows in `names` once it lands). |
-| `keep("jef.lez")` | The bare name: remembered on this device if the open wallet holds it, so `mine` keeps returning it. Fails for a name the wallet does not hold. |
+| `keep("jef")` | The bare name: remembered on this device if the open wallet holds it, so `mine` keeps returning it. Fails for a name the wallet does not hold. |
 | `set_profile(name, entries_json, replace)` | Writes many text entries in one transaction, as the CLI's `names profile` does. `entries_json` is a JSON object of key to text; an empty value (or null) removes that key. Card keys: `display`, `bio`, `avatar` (a `data:image/...` URL), `theme` (`light`, `dark` or `auto`), `color` (`#rrggbb`), `font` (`sans`, `serif`, `mono` or `rounded`) and `cid` (a Logos Storage content ID); any other key of 1-32 characters of a-z, 0-9, `-`, `_` or `.` works too. With `replace`, every existing entry is dropped first; the account and payment keys stay either way. At most 16 entries and 12 KiB of sealed profile. |
 | `transfer(name, new_owner)` | Hands the name to `new_owner` (base58); only a tag of it reaches the chain. The addresses, entries and page the current owner set are emptied. The deposit stays with the name, for whoever releases it. |
 | `release(name)` | Gives the name up: its record and page are emptied, anyone may register it again, and the deposit comes back to the holder. Also has `refund`, the deposit account's whole balance (decimal text). |

@@ -15,7 +15,10 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
-pub const NAME_SUFFIX: &str = ".lez";
+/// How names are shown: bare, `jef` (SPEC 2).
+pub const NAME_SUFFIX: &str = "";
+/// The old suffix, still accepted and removed when typed or pasted.
+pub const LEGACY_SUFFIX: &str = ".lez";
 const MAX_NAME_LEN: usize = 32;
 const PDA_PREFIX: &[u8] = b"/LEE/v0.2/AccountId/PDA/";
 /// One fixed salt for every network, on purpose: a name keeps its identifier
@@ -76,13 +79,13 @@ pub type NameId = [u8; 32];
 /// What a record keeps in place of its holder's account: [`owner_tag`].
 pub type OwnerTag = [u8; 32];
 
-/// Turns what a person typed, such as `Jef.lez`, into the bare name.
+/// Turns what a person typed, such as `Jef`, `@jef`, `lns:jef` or `jef.lez`,
+/// into the bare name.
 pub fn normalize_name(input: &str) -> String {
     let lowered = input.trim().to_ascii_lowercase();
-    match lowered.strip_suffix(NAME_SUFFIX) {
-        Some(bare) => bare.to_owned(),
-        None => lowered,
-    }
+    let bare = lowered.strip_prefix("lns:").unwrap_or(&lowered);
+    let bare = bare.strip_prefix('@').unwrap_or(bare);
+    bare.strip_suffix(LEGACY_SUFFIX).unwrap_or(bare).to_owned()
 }
 
 pub fn is_valid_name(name: &str) -> bool {
@@ -100,10 +103,13 @@ pub fn is_valid_name(name: &str) -> bool {
 /// The chain never sees a name, so this check is the only one there is.
 pub fn parse_name(input: &str) -> Result<String, String> {
     let name = normalize_name(input);
-    if is_valid_name(&name) {
+    if is_valid_name(&name) && parse_account(&name).is_err() {
+        // A name that is also an account ID would be ambiguous in a "send to" field (SPEC 2).
         Ok(name)
+    } else if is_valid_name(&name) {
+        Err(format!("{name} is also an account ID, so it can't be a name"))
     } else {
-        Err("a name is 1-32 characters of a-z, 0-9 or '-', such as jef.lez".to_owned())
+        Err("a name is 1-32 characters of a-z, 0-9 or '-', such as jef".to_owned())
     }
 }
 
@@ -843,6 +849,15 @@ mod tests {
     /// Addresses as `core` computes them (SPEC.md section 10, and the rest from
     /// `names_core` itself).
     #[test]
+    fn a_name_that_is_also_an_account_id_is_refused() {
+        for typed in ["Jef.LEZ", "jef", "@jef", "lns:jef", " LNS:@Jef.lez "] {
+            assert_eq!(parse_name(typed).unwrap(), "jef", "{typed}");
+        }
+        assert!(parse_name(&"1".repeat(32)).unwrap_err().contains("account ID"));
+        assert!(parse_name(&"1".repeat(31)).is_ok());
+    }
+
+    #[test]
     fn addresses_match_core() {
         let jef = derive("jef").id;
         assert_eq!(account_text(&PROGRAM), "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx");
@@ -948,7 +963,7 @@ mod tests {
         assert_eq!(resolved.to_json()["never"], false);
 
         let recipient = resolved.recipient_json();
-        assert_eq!(recipient["display"], "jef.lez");
+        assert_eq!(recipient["display"], "jef");
         assert_eq!(recipient["public"], account_text(&[2; 32]));
         assert_eq!(recipient["public_hex"], "02".repeat(32));
         assert_eq!(recipient["private"]["nullifier_public_key"], "03".repeat(32));

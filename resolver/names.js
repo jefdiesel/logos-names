@@ -94,8 +94,10 @@ function fromHex(text) {
   return Uint8Array.from(text.match(/../g) ?? [], (pair) => parseInt(pair, 16));
 }
 
-/** How names are written for people: `jef.lez`. The suffix is not part of the name. */
-export const NAME_SUFFIX = ".lez";
+/** How names are written for people: bare, `jef` (SPEC 2). */
+export const NAME_SUFFIX = "";
+/** The old suffix, still accepted and removed when typed or pasted. */
+export const LEGACY_SUFFIX = ".lez";
 
 /**
  * Turns what a person typed, such as `Jef.lez`, into the bare name `jef`. Only
@@ -106,7 +108,9 @@ export function normalizeName(input) {
   const lowered = String(input)
     .trim()
     .replace(/[A-Z]/g, (letter) => letter.toLowerCase());
-  return lowered.endsWith(NAME_SUFFIX) ? lowered.slice(0, -NAME_SUFFIX.length) : lowered;
+  let bare = lowered.startsWith("lns:") ? lowered.slice(4) : lowered;
+  if (bare.startsWith("@")) bare = bare.slice(1);
+  return bare.endsWith(LEGACY_SUFFIX) ? bare.slice(0, -LEGACY_SUFFIX.length) : bare;
 }
 
 export function isValidName(name) {

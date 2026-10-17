@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Logos Names</title>
-<meta name="description" content="Private names for the Logos Execution Zone: jef.lez instead of a 32-byte account. Install the names command line.">
+<meta name="description" content="Private names for the Logos Execution Zone: jef instead of a 32-byte account. Install the names command line.">
 <style>
   :root {
     --bg: #fbfaf7; --fg: #16150f; --muted: #55524a; --line: #dedad0;
@@ -42,7 +42,7 @@
 <body>
 <main>
   <h1>Logos Names</h1>
-  <p class="lede">Names like <code>jef.lez</code> for the Logos Execution Zone. Pay a name instead
+  <p class="lede">Names like <code>jef</code> for the Logos Execution Zone. Pay a name instead
   of a 32-byte account. The chain never sees the name, so nobody can list or browse them.</p>
   <p class="note">This runs on the <strong>public LEZ testnet</strong> (testnet v0.3). Its
   tokens are test tokens and worth nothing. Names won't carry over
@@ -58,8 +58,8 @@
 
   <h2>Look names up</h2>
   <p>No wallet or setup needed:</p>
-<pre><code>names resolve jef.lez        <span class="c"># expiry, whether it can be paid, text entries, page</span>
-names open jef.lez           <span class="c"># show its page in your browser, served from your own machine</span>
+<pre><code>names resolve jef            <span class="c"># expiry, whether it can be paid, text entries, page</span>
+names open jef               <span class="c"># show its page in your browser, served from your own machine</span>
 names settings               <span class="c"># the registry's deposits</span></code></pre>
 
   <h2>Get a name</h2>
@@ -87,8 +87,8 @@ names set-account myname &lt;account&gt;        <span class="c"># also payable p
 names set-logos-account myname &lt;address&gt;  <span class="c"># link a Logos account (AccountLog)</span></code></pre>
 
   <h2>Pay a name</h2>
-<pre><code>names pay jef.lez 1000              <span class="c"># from your private account: nobody sees payer, recipient or amount</span>
-names pay shop.lez 1000 --public    <span class="c"># to a public account the holder published</span></code></pre>
+<pre><code>names pay jef 1000                  <span class="c"># from your private account: nobody sees payer, recipient or amount</span>
+names pay shop 1000 --public        <span class="c"># to a public account the holder published</span></code></pre>
   <p>Names are private by default. Each carries private receiving keys, made when it is
   registered, and payments go to them: the chain shows neither the recipient nor the
   amount, and nobody, the payer included, learns the account behind the name. A holder can
@@ -116,7 +116,7 @@ claude mcp add --scope user logos-names -- node ~/.logos-names-mcp.js</code></pr
   release, clear-page and more.
   <code>names wallet help</code> lists the wallet's own commands. The wallet lives in
   <code>~/.lee/wallet</code>; set <code>LEE_WALLET_HOME_DIR</code> to use another one.</p>
-  <p>To see a name's page, run <code>names open jef.lez</code>: the page is read from the chain on
+  <p>To see a name's page, run <code>names open jef</code>: the page is read from the chain on
   your machine and shown in your browser from <code>127.0.0.1</code>, so no server learns which name
   you opened, and the page can't load anything from the internet. This website never looks names up.
   <code>names</code> and the MCP server talk to the LEZ sequencer directly (<code>https://testnet.lez.logos.co</code>) and read the registry's program

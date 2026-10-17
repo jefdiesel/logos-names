@@ -1,4 +1,4 @@
-// Logos Names for Basecamp: find, register and manage .lez names.
+// Logos Names for Basecamp: find, register and manage names.
 //
 // A front end on the `names` module. The module reads the chain itself, so
 // browsing needs no wallet. Registering a name, changing it, transferring it
@@ -183,9 +183,24 @@ Item {
         var text = String(message).trim()
         if (text === "")
             return ""
-        if (!/^\S+\.lez\b/i.test(text))
+        var first = text.split(" ")[0]
+        if (!/\.lez\b/i.test(first) && !isKnownName(first))
             text = text.charAt(0).toUpperCase() + text.substr(1)
         return /[.?!]$/.test(text) ? text : text + "."
+    }
+
+    /// Whether `word` is a name on screen or in My names, so a sentence
+    /// that opens with it keeps its lower case.
+    function isKnownName(word) {
+        if ((record !== null && record.name === word) || missing === word || registerTaken === word)
+            return true
+        for (var i = 0; i < allMine.length; i++)
+            if (allMine[i].name === word)
+                return true
+        for (var j = 0; j < cliPending.length; j++)
+            if (cliPending[j].name === word)
+                return true
+        return false
     }
 
     function say(message, isError) {
@@ -412,7 +427,7 @@ Item {
             askLater("register", [item.name, item.owner, "auto"], function(value) {
                 revealing = false
                 if (value && value.stage === "registered") {
-                    say(item.name + ".lez is yours.", false)
+                    say(item.name + " is yours.", false)
                     loadMine()
                     if (record !== null && record.name === item.name)
                         read(item.name)
@@ -557,7 +572,7 @@ Item {
         try {
             var name = String(call("names", "normalize", [text]))
             if (name === "") {
-                say("A name is 1 to 32 characters of a-z, 0-9 or a hyphen, such as jef.lez.", true)
+                say("A name is 1 to 32 characters of a-z, 0-9 or a hyphen, such as jef.", true)
                 return
             }
             if (ask("resolve", [name]) !== null) {
@@ -594,7 +609,7 @@ Item {
                     loadCliBalance()
                 }
                 else
-                    say("A name is 1 to 32 characters of a-z, 0-9 or a hyphen, such as jef.lez.", true)
+                    say("A name is 1 to 32 characters of a-z, 0-9 or a hyphen, such as jef.", true)
                 return
             }
             missing = ""
@@ -773,7 +788,7 @@ Item {
         // The job ending is the answer: the commitment is made.
         cliChange("register", [name], name, function() {
             return true
-        }, "Committed privately. " + name + ".lez finishes registering in about 15 to 20 minutes, in the background.")
+        }, "Committed privately. " + name + " finishes registering in about 15 to 20 minutes, in the background.")
     }
 
     /// Sends the commitment. The reveal follows by itself (see revealDue).
@@ -829,7 +844,7 @@ Item {
         change("clear_addresses", [name], name, function() {
             var found = ask("resolve", [name])
             return found.account === null && found.npk === null
-        }, name + ".lez no longer takes payments.")
+        }, name + " no longer takes payments.")
     }
 
     /// Sets one entry; an empty value removes it.
@@ -839,7 +854,7 @@ Item {
         change("set_text", [name, key, value], name, function() {
             var texts = ask("resolve", [name]).texts
             return value === "" ? texts[key] === undefined : texts[key] === value
-        }, value === "" ? "Removed " + key + " from " + name + ".lez." : "Saved " + key + " on " + name + ".lez.")
+        }, value === "" ? "Removed " + key + " from " + name + "." : "Saved " + key + " on " + name + ".")
     }
 
     /// The Profile fields, with the text-entry key each one sets.
@@ -879,7 +894,7 @@ Item {
                 if (entries[key] === "" ? texts[key] !== undefined : texts[key] !== entries[key])
                     return false
             return true
-        }, "Saved the profile of " + name + ".lez.")
+        }, "Saved the profile of " + name + ".")
     }
 
     /// Publishes the page; an empty body removes it. A body that opens with a
@@ -890,7 +905,7 @@ Item {
         change("set_page", [name, kind, body], name, function() {
             var published = ask("page", [name])
             return body === "" ? published === null : published !== null && published.text === body
-        }, body === "" ? "Removed the page of " + name + ".lez." : "Published the page of " + name + ".lez.")
+        }, body === "" ? "Removed the page of " + name + "." : "Published the page of " + name + ".")
     }
 
     function transferName() {
@@ -899,7 +914,7 @@ Item {
         var before = record.owner_tag
         change("transfer", [name, newOwner], name, function() {
             return ask("resolve", [name]).owner_tag !== before
-        }, name + ".lez now belongs to " + shorten(newOwner) + ".")
+        }, name + " now belongs to " + shorten(newOwner) + ".")
     }
 
     function releaseName() {
@@ -907,7 +922,7 @@ Item {
         change("release", [name], name, function() {
             return ask("resolve", [name]) === null
         }, function(result) {
-            return result && result.refund ? "Released " + name + ".lez. " + grouped(result.refund) + " returned to you." : "Released " + name + ".lez."
+            return result && result.refund ? "Released " + name + ". " + grouped(result.refund) + " returned to you." : "Released " + name + "."
         })
     }
 
@@ -930,9 +945,9 @@ Item {
         say(what + " copied.", false)
     }
 
-    /// A name as people read it: `jef.lez`.
+    /// A name as people read it in this app: bare, `jef` (SPEC 2).
     function shown(name) {
-        return name + ".lez"
+        return name
     }
 
     function shorten(id) {
@@ -1415,7 +1430,8 @@ Item {
         }
     }
 
-    /// A name with its suffix: `.lez` follows at the same size, in a quieter
+    /// A name, bare (SPEC 2). The `.lez` suffix is kept here, hidden, for the
+    /// long form; it follows at the same size, in a quieter
     /// colour.
     component NameLabel: Item {
         id: label
@@ -1438,7 +1454,7 @@ Item {
             id: suffix
             anchors.left: bare.right
             anchors.baseline: bare.baseline
-            visible: label.name !== ""
+            visible: false
             text: ".lez"
             color: root.dim
             font.family: root.sans
@@ -1789,7 +1805,7 @@ Item {
                     }
                     Text {
                         visible: !!accountRow.modelData.name
-                        text: accountRow.modelData.name ? accountRow.modelData.name + ".lez" : ""
+                        text: accountRow.modelData.name ? accountRow.modelData.name : ""
                         color: root.dim
                         font.family: root.sans
                         font.pixelSize: 17
@@ -2033,7 +2049,7 @@ Item {
                             required property var modelData
                             Layout.fillWidth: true
                             Layout.leftMargin: 8
-                            text: (modelData.display ? modelData.display : modelData.name + ".lez") + ": registering" + (modelData.ready_at ? ", ready at " + root.clock(modelData.ready_at) : "")
+                            text: (modelData.name) + ": registering" + (modelData.ready_at ? ", ready at " + root.clock(modelData.ready_at) : "")
                             color: root.dim
                             font.family: root.sans
                             font.pixelSize: 17
@@ -2154,7 +2170,7 @@ Item {
                         font.pixelSize: 28
                     }
                     Part { text: "Registry" }
-                    Hint { text: "Everyone using the same registry sees the same .lez names." }
+                    Hint { text: "Everyone using the same registry sees the same names." }
                     Field {
                         id: registryField
                         Layout.fillWidth: true
@@ -2250,7 +2266,7 @@ Item {
                     Layout.topMargin: 60
                     spacing: 10
                     Text {
-                        text: !root.configKnown ? "Starting" : root.registry === "" ? "Choose a registry to begin" : "Look up a .lez name"
+                        text: !root.configKnown ? "Starting" : root.registry === "" ? "Choose a registry to begin" : "Look up a name"
                         color: root.ink
                         font.family: root.sans
                         font.weight: Font.DemiBold
@@ -2298,12 +2314,6 @@ Item {
                             hint: "yourname"
                             onAccepted: root.checkRegister(registerField.text)
                         }
-                        Text {
-                            text: ".lez"
-                            color: root.dim
-                            font.family: root.sans
-                            font.pixelSize: 22
-                        }
                         Action {
                             label: "Check"
                             strong: true
@@ -2316,7 +2326,7 @@ Item {
                         spacing: 12
                         Rectangle { width: 10; height: 10; radius: 5; color: root.alarm }
                         Text {
-                            text: root.registerTaken + ".lez is taken. Try another."
+                            text: root.registerTaken + " is taken. Try another."
                             color: root.alarm
                             font.family: root.sans
                             font.pixelSize: 18
@@ -2368,7 +2378,7 @@ Item {
                         visible: root.registerStepOf(root.missing) > 0
                         Layout.fillWidth: true
                         Text {
-                            text: "Registering " + root.missing + ".lez privately"
+                            text: "Registering " + root.missing + " privately"
                             color: root.ink
                             font.family: root.sans
                             font.pixelSize: 22
@@ -2463,7 +2473,7 @@ Item {
                         }
                         Action {
                             Layout.topMargin: 6
-                            label: "Register " + root.missing + ".lez"
+                            label: "Register " + root.missing
                             strong: true
                             changes: true
                             enabledNow: root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode !== "unconfigured" && root.cliBalance !== null && root.cliBalance !== undefined && root.cliCanPay()
@@ -2494,7 +2504,7 @@ Item {
                             text: "Anyone who knows the name can find this account, and so its balance and history." + (root.cliPath !== "" ? "" : " To hide it, install the names CLI and register privately.") + " Payments to the name still go to your private account."
                         }
                         Action {
-                            label: "Register " + root.missing + ".lez publicly"
+                            label: "Register " + root.missing + " publicly"
                             strong: root.cliPath === ""
                             changes: true
                             enabledNow: root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode !== "unconfigured"

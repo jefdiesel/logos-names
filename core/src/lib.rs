@@ -58,9 +58,12 @@ use lee_core::{
 /// mode never lapses (`expires` is `u64::MAX`).
 pub const VERSION: u8 = 5;
 pub const MAX_NAME_LEN: usize = 32;
-/// How names are written for people: `jef.lez`. The suffix is a display
-/// convention only; it is removed before a name is turned into an identifier.
-pub const NAME_SUFFIX: &str = ".lez";
+/// How names are written for people: bare, `jef` (SPEC 2). Kept as a constant
+/// so every message that shows a name shows it the same way.
+pub const NAME_SUFFIX: &str = "";
+/// The suffix names used to be written with. Typed or pasted, it is still
+/// accepted and removed, as are a leading `@` and an `lns:` prefix.
+pub const LEGACY_SUFFIX: &str = ".lez";
 /// Room for a sealed profile with private receiving keys and sixteen entries.
 pub const MAX_SEALED_RECORD_LEN: usize = 12 * 1024;
 /// LEZ caps shard data at 100 KiB, but a page that large does not fit one
@@ -469,14 +472,14 @@ pub fn validate_name(name: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Turns what a person typed, such as `Jef.lez`, into the bare name. The
-/// result still has to pass [`validate_name`].
+/// Turns what a person typed, such as `Jef`, `@jef`, `lns:jef` or `jef.lez`,
+/// into the bare name. The result still has to pass [`validate_name`].
 #[must_use]
 pub fn normalize_name(input: &str) -> String {
     let lowered = input.trim().to_ascii_lowercase();
-    lowered
-        .strip_suffix(NAME_SUFFIX)
-        .map_or(lowered.clone(), str::to_owned)
+    let bare = lowered.strip_prefix("lns:").unwrap_or(&lowered);
+    let bare = bare.strip_prefix('@').unwrap_or(bare);
+    bare.strip_suffix(LEGACY_SUFFIX).unwrap_or(bare).to_owned()
 }
 
 fn checked<T>(result: Result<T, &'static str>) -> T {

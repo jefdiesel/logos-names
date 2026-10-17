@@ -1632,7 +1632,7 @@ mod tests {
         assert_eq!(normal["tier"], "normal");
         assert_eq!(normal["deposit"], "100");
         assert_eq!(normal["mode"], "deposit");
-        assert_eq!(normal["display"], "logos.lez");
+        assert_eq!(normal["display"], "logos");
         assert_eq!(deposit_json("jef", shortlist::TIER_THREE, Some(&deposits))["deposit"], "2000");
         let locked = deposit_json("ab", shortlist::TIER_LOCKED, Some(&deposits));
         assert_eq!((locked["tier"].clone(), locked["deposit"].clone()), (json!("locked"), Value::Null));
@@ -1837,7 +1837,7 @@ mod tests {
     #[test]
     fn an_empty_cli_wallet_holds_nothing_and_takes_no_changes() {
         let (mut names, dir) = with_fake_cli("empty", "echo 'jef.lez  held by a deposit (no expiry)'");
-        assert_eq!(parsed(&names.cli_mine())["value"], json!([{ "name": "jef", "display": "jef.lez", "signer": "cli", "state": "held by a deposit (no expiry)", "lapsed": false, "registering": false, "failed": false, "private": null }]));
+        assert_eq!(parsed(&names.cli_mine())["value"], json!([{ "name": "jef", "display": "jef", "signer": "cli", "state": "held by a deposit (no expiry)", "lapsed": false, "registering": false, "failed": false, "private": null }]));
         let empty = dir.join("empty-wallet");
         std::fs::create_dir_all(&empty).expect("a dir");
         names.cli_wallet = Some(empty.to_string_lossy().into_owned());
