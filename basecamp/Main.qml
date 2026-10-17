@@ -368,7 +368,7 @@ Item {
                 logos.callModuleAsync("lez_core", "list_accounts", [], function() { root.loadWallet(false) }, 20000)
             }
             if (announce)
-                say(walletProblem, true)
+                say(/not running/.test(message) ? "Open the LEZ Wallet app first." : walletProblem, !/not running/.test(message))
         })
     }
 
