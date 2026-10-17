@@ -839,6 +839,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "board_core"
+version = "0.1.0"
+dependencies = [
+ "borsh",
+ "lee_core",
+ "names_core",
+ "risc0-zkvm",
+]
+
+[[package]]
+name = "board_methods"
+version = "0.1.0"
+dependencies = [
+ "risc0-build",
+]
+
+[[package]]
 name = "borsh"
 version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4990,6 +5007,15 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tracing",
+]
+
+[[package]]
+name = "logos_board"
+version = "0.1.0"
+dependencies = [
+ "board_core",
+ "lee_core",
+ "risc0-zkvm",
 ]
 
 [[package]]
