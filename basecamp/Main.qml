@@ -30,6 +30,7 @@ Item {
     property bool revealing: false     // a pending registration is being asked about
     property var record: null          // the name on the plate
     property var page: null
+    property var pagePreview: null       // the page being written, as page_view would show it
     property string missing: ""        // a looked-up name that is not registered
     property var wallet: []            // the wallet's funded public accounts: [{account, balance, name}]
     property var privateWallet: []     // its funded private accounts: [{account, balance}]
@@ -656,6 +657,7 @@ Item {
         say("", false)
         accountField.text = record.account !== null ? record.account : ""
         pageArea.text = page !== null && page.text !== null ? page.text : ""
+        previewPage()
         newKeyField.text = ""
         newValueField.text = ""
         newOwnerField.text = ""
@@ -700,7 +702,7 @@ Item {
     /// The Profile fields, with the text-entry key each one sets.
     readonly property var profileFields: [
         { key: "display", label: "Display name", hint: "How you want to be shown" },
-        { key: "bio", label: "Bio", hint: "A line about you" },
+        { key: "bio", label: "Bio", hint: "A few lines about you", lines: true },
         { key: "avatar", label: "Avatar", hint: "data:image/png;base64,… (names profile --avatar)" },
         { key: "theme", label: "Theme", hint: "light, dark or auto" },
         { key: "color", label: "Color", hint: "#rrggbb, such as #96d678" },
@@ -948,15 +950,36 @@ Item {
     /// stylesheet; for a plain-text page, its text, drawn as plain text; for
     /// anything else, nothing. The page's raw source is never rendered.
     function pageBody() {
-        if (page === null)
+        return viewBody(page)
+    }
+
+    /// What a page card draws for `view`, a page_view answer.
+    function viewBody(view) {
+        if (view === null)
             return ""
-        if (page.kind === "html")
+        if (view.kind === "html")
             // A span right before another tag gets a gap after it: pages lay
             // out "label, value" pairs with CSS this app does not apply.
-            return typeof page.html === "string" && page.html !== "" ? pageStyle() + page.html.replace(/<\/span>(?=<)/g, "</span>&nbsp;&nbsp;") : ""
-        if (page.kind === "text")
-            return typeof page.text === "string" ? page.text.substr(0, 65536).replace(/\s+$/, "") : ""
+            return typeof view.html === "string" && view.html !== "" ? pageStyle() + view.html.replace(/<\/span>(?=<)/g, "</span>&nbsp;&nbsp;") : ""
+        if (view.kind === "text")
+            return typeof view.text === "string" ? view.text.substr(0, 65536).replace(/\s+$/, "") : ""
         return ""
+    }
+
+    /// Asks the module how the page being written will show; the preview
+    /// waits for typing to pause.
+    function previewPage() {
+        var body = pageArea.text
+        if (body === "") {
+            pagePreview = null
+            return
+        }
+        askLater("page_preview", [body], function(value) {
+            if (pageArea.text === body)
+                pagePreview = value
+        }, function(message) {
+            pagePreview = null
+        })
     }
 
     /// The app's stylesheet for a page, so it reads in the app's type and
@@ -1440,6 +1463,7 @@ Item {
         id: area
         property alias text: areaInput.text
         property string hint: ""
+        property bool code: true
         implicitHeight: 150
         radius: 6
         color: root.slate
@@ -1458,8 +1482,8 @@ Item {
                 color: root.ink
                 selectionColor: root.brass
                 selectedTextColor: root.slate
-                font.family: root.mono
-                font.pixelSize: 16
+                font.family: area.code ? root.mono : root.sans
+                font.pixelSize: area.code ? 16 : 18
                 wrapMode: TextEdit.Wrap
                 textFormat: TextEdit.PlainText
                 selectByMouse: true
@@ -2104,7 +2128,7 @@ Item {
                                 font.pixelSize: 18
                                 lineHeight: 1.25
                                 wrapMode: Text.Wrap
-                                maximumLineCount: 4
+                                maximumLineCount: 8
                                 elide: Text.ElideRight
                             }
                         }
@@ -2200,18 +2224,34 @@ Item {
                                 spacing: 8
                                 Text {
                                     Layout.preferredWidth: 110
+                                    Layout.alignment: profileRow.modelData.lines ? Qt.AlignTop : Qt.AlignVCenter
+                                    Layout.topMargin: profileRow.modelData.lines ? 12 : 0
                                     text: profileRow.modelData.label
                                     color: root.dim
                                     font.family: root.sans
                                     font.pixelSize: 17
                                     elide: Text.ElideRight
                                 }
+                                Area {
+                                    visible: profileRow.modelData.lines === true
+                                    Layout.fillWidth: true
+                                    implicitHeight: 110
+                                    code: false
+                                    hint: profileRow.modelData.hint
+                                    text: root.record !== null && root.record.texts && root.record.texts[profileRow.modelData.key] !== undefined ? root.record.texts[profileRow.modelData.key] : ""
+                                    onTextChanged: if (profileRow.modelData.lines === true) {
+                                        var draft = Object.assign({}, root.profileDraft)
+                                        draft[profileRow.modelData.key] = text
+                                        root.profileDraft = draft
+                                    }
+                                }
                                 Field {
+                                    visible: profileRow.modelData.lines !== true
                                     Layout.fillWidth: true
                                     size: 19
                                     hint: root.cliHeld && profileRow.modelData.key === "avatar" ? "Full path of a PNG file, such as /Users/you/me.png" : profileRow.modelData.hint
                                     text: root.record !== null && root.record.texts && root.record.texts[profileRow.modelData.key] !== undefined ? root.record.texts[profileRow.modelData.key] : ""
-                                    onTextChanged: {
+                                    onTextChanged: if (profileRow.modelData.lines !== true) {
                                         var draft = Object.assign({}, root.profileDraft)
                                         draft[profileRow.modelData.key] = text
                                         root.profileDraft = draft
@@ -2339,10 +2379,52 @@ Item {
                         Hint { text: "Read by other apps: chat (Logos Chat address), inbox, agent." }
 
                         Part { text: "Page" }
+                        Hint { text: "Paste your page's HTML. Anyone can read it." }
                         Area {
                             id: pageArea
                             Layout.fillWidth: true
-                            hint: "Plain text or HTML, public to anyone"
+                            implicitHeight: 200
+                            hint: "Paste HTML here, such as <h1>Hi</h1><p>About me…</p>"
+                            onTextChanged: previewTimer.restart()
+                        }
+                        Timer {
+                            id: previewTimer
+                            interval: 400
+                            onTriggered: root.previewPage()
+                        }
+                        Text {
+                            visible: pageArea.text !== ""
+                            text: "Preview"
+                            color: root.dim
+                            font.family: root.sans
+                            font.pixelSize: 15
+                        }
+                        Rectangle {
+                            visible: pageArea.text !== ""
+                            Layout.fillWidth: true
+                            implicitHeight: Math.min(previewText.implicitHeight, 420) + 32
+                            radius: 6
+                            color: "transparent"
+                            border.width: 1
+                            border.color: root.line
+                            clip: true
+                            Flickable {
+                                anchors.fill: parent
+                                anchors.margins: 16
+                                contentHeight: previewText.implicitHeight
+                                clip: true
+                                Text {
+                                    id: previewText
+                                    width: parent.width
+                                    text: root.pagePreview !== null ? root.viewBody(root.pagePreview) : "…"
+                                    textFormat: root.pagePreview !== null && root.pagePreview.kind === "html" ? Text.RichText : Text.PlainText
+                                    color: root.ink
+                                    linkColor: root.accent
+                                    font.family: root.pagePreview !== null && root.pagePreview.kind === "html" ? root.sans : root.mono
+                                    font.pixelSize: root.pagePreview !== null && root.pagePreview.kind === "html" ? 17 : 15
+                                    wrapMode: Text.Wrap
+                                }
+                            }
                         }
                         RowLayout {
                             Layout.fillWidth: true

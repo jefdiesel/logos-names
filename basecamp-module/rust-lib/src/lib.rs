@@ -93,6 +93,11 @@ pub trait NamesModule: Send + 'static {
     /// of a page is read; `truncated` says it was cut. A null value means no page.
     fn page_view(&mut self, name: String) -> String;
 
+    /// `body`, a page not yet published, as `page_view` would show it: an
+    /// HTML body (one that opens with a tag) sanitized the same way, anything
+    /// else as plain text. For previewing a page while it is written.
+    fn page_preview(&mut self, body: String) -> String;
+
     /// The picture in `name`'s `avatar` entry, decoded, for an app that can't
     /// load a `data:` URL: `{width, height, pixels}`, where `pixels` is base64
     /// of RGBA8 bytes, row by row from the top left. At most 128 pixels a side
@@ -941,6 +946,11 @@ impl NamesModule for Names {
         self.about(&name, |registry, name, derived| {
             Ok(registry.page(name, derived)?.map_or(Value::Null, |page| page_view::view(&page)))
         })
+    }
+
+    fn page_preview(&mut self, body: String) -> String {
+        let content_type = if body.trim_start().starts_with('<') { "text/html; charset=utf-8" } else { "text/plain; charset=utf-8" };
+        reply(Ok(page_view::view(&json!({ "content_type": content_type, "bytes": body.len(), "text": body }))))
     }
 
     fn avatar(&mut self, name: String) -> String {

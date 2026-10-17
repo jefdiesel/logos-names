@@ -23,7 +23,7 @@ RECORDS = {
             "owner_tag": "1f7a805e9c3d41b2a07e55c1d2f3e4a5b6c7d8e9f0a1b2c3d4e5f60718ab992",
             "texts": {"avatar": JEF_AVATAR, "color": "#96d678", "theme": "dark"}},
     "hopper": {"deposit": "100000000", "account": CAROL, "npk": "b2f49d03", "vpk": "5976",
-               "texts": {"display": "Grace Hopper", "bio": "Compilers, COBOL and nanoseconds. Ask me about the moth.",
+               "texts": {"display": "Grace Hopper", "bio": "Compilers, COBOL and nanoseconds.\nAsk me about the moth.",
                          "color": "#4a6cf7", "font": "serif",
                          "chat": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
                          "agent": "https://agents.example/hopper", "inbox": "/logos/1/hopper/proto"}},
@@ -83,6 +83,7 @@ BRIDGE = r"""
                 return ok({ name: typed, display: typed + ".lez", tier: tier, deposit: tier === "locked" ? null : tier === "three" ? "2000000000" : "100000000", mode: "deposit" })
             }
             if (method === "avatar") return ok(args[0] === "jef" ? %(avatar)s : null)
+            if (method === "page_preview") { var drafts = %(pages)s; return ok(drafts["jef"]) }
             if (method === "page_view" || method === "page") { var pages = %(pages)s; return ok(pages[args[0]] || null) }
             if (method === "resolve") {
                 var name = String(args[0]).toLowerCase().replace(/\.lez$/, "")
@@ -150,7 +151,7 @@ def main():
                                "log_tail": "proving the change on this machine...\nError: the transaction was refused: out of gas"} if scenario == "cli-failed"
                               else {"id": "hopper-1792000000000", "name": "hopper", "kind": "set_text", "started": 1792000000000, "finished": None, "exit": None, "state": "running", "log_tail": "proving the change on this machine..."}), "records": json.dumps(RECORDS),
             "registry": "null" if scenario == "unset" else json.dumps("DbYLkKwd2b13bQhceVj351mpPw7QmRzEjRT2EfU56CKH"),
-            "scenario": SCENARIOS[scenario], "out": out, "height": 2000 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
+            "scenario": SCENARIOS[scenario], "out": out, "height": 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
         }
         with tempfile.NamedTemporaryFile("w", suffix=".qml", delete=False) as handle:
             handle.write(source.replace(marker, marker + bridge, 1))
