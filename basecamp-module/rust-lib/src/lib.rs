@@ -340,6 +340,13 @@ pub trait NamesModule: Send + 'static {
     /// The posts this device's names have liked, `<name>/<n>`.
     fn board_likes(&mut self) -> String;
 
+    /// Which name each chat conversation is with: `{convo_id: name}`.
+    fn dm_names(&mut self) -> String;
+
+    /// Remembers that chat conversation `convo_id` is with `name`; an empty
+    /// name forgets it.
+    fn set_dm_name(&mut self, convo_id: String, name: String) -> String;
+
     /// The words in `text` that look misspelled, `[{word, suggestions}]`, checked
     /// on this machine against the system's word list. Names, links and CIDs are skipped.
     fn spell_check(&mut self, text: String) -> String;
@@ -408,6 +415,9 @@ struct Names {
     main_name: Option<String>,
     /// The posts this device's names have liked, `<name>/<n>`, so a like toggles.
     likes: Vec<String>,
+    /// Which name each chat conversation is with, by conversation id, as this
+    /// device started or labelled it. The chat module itself keeps no names.
+    dm_names: std::collections::BTreeMap<String, String>,
     /// Board reads, by what was asked: they take the CLI many seconds, so they
     /// run on their own thread and every call answers at once with the last result.
     board_reads: std::sync::Arc<std::sync::Mutex<HashMap<String, BoardRead>>>,
@@ -440,6 +450,7 @@ impl Default for Names {
             follows: Vec::new(),
             main_name: None,
             likes: Vec::new(),
+            dm_names: Default::default(),
             board_reads: Default::default(),
         };
         // A missing or unreadable file just means the defaults stand.
@@ -700,6 +711,14 @@ impl Names {
             .map(|list| list.iter().filter_map(|name| registry::parse_name(name.as_str()?).ok()).collect())
             .unwrap_or_default();
         self.main_name = saved["main_name"].as_str().and_then(|name| registry::parse_name(name).ok());
+        self.dm_names = saved["dm_names"]
+            .as_object()
+            .map(|map| {
+                map.iter()
+                    .filter_map(|(convo, name)| Some((convo.clone(), registry::parse_name(name.as_str()?).ok()?)))
+                    .collect()
+            })
+            .unwrap_or_default();
         self.likes = saved["likes"]
             .as_array()
             .map(|list| list.iter().filter_map(|post| post.as_str().map(str::to_owned)).collect())
@@ -717,6 +736,7 @@ impl Names {
             "follows": self.follows,
             "main_name": self.main_name,
             "likes": self.likes,
+            "dm_names": self.dm_names,
         })
     }
 
@@ -1513,6 +1533,26 @@ impl NamesModule for Names {
         self.cli_job(&name, "make_public", |_, _, _| Ok((command, None, Value::Null)))
     }
 
+    fn dm_names(&mut self) -> String {
+        reply(Ok(json!(self.dm_names)))
+    }
+
+    fn set_dm_name(&mut self, convo_id: String, name: String) -> String {
+        reply((|| {
+            let convo = convo_id.trim();
+            if convo.is_empty() || convo.len() > 200 || !convo.bytes().all(|b| b.is_ascii_graphic()) {
+                return Err("not a conversation id".to_owned());
+            }
+            if name.trim().is_empty() {
+                self.dm_names.remove(convo);
+            } else {
+                self.dm_names.insert(convo.to_owned(), registry::parse_name(&name)?);
+            }
+            self.save();
+            Ok(json!(self.dm_names))
+        })())
+    }
+
     fn board_likes(&mut self) -> String {
         reply(Ok(json!(self.likes)))
     }
@@ -1845,6 +1885,7 @@ mod tests {
             follows: Vec::new(),
             main_name: None,
             likes: Vec::new(),
+            dm_names: Default::default(),
             board_reads: Default::default(),
         }
     }

@@ -66,6 +66,15 @@ Item {
     property var boardSpelling: []     // [{word, suggestions}] in the post being written
     property string publicAsk: ""      // the name Settings is asking to confirm making public
     property bool registerPublic: false // a new registration then moves to its own public account
+    // Messages: name-to-name DMs through Basecamp's chat module.
+    property string chatState: ""       // the chat module's delivery state, "" until known
+    property string chatError: ""
+    property string chatMine: ""        // this installation's chat address
+    property string mainChat: ""        // the chat address the main name publishes
+    property var chatConvos: []         // [{convo_id, message_count, last_activity_ms, kind}]
+    property var dmNames: ({})          // convo_id → name, as this device knows it
+    property string chatOpenId: ""
+    property var chatMessages: []       // [{from_self, content, timestamp_ms}]
     property bool anonPublic: false     // the anon name, once made, moves to its own public account
     property bool confirmingRelease: false
     property var pending: null         // a change that was sent and is not confirmed yet
@@ -1276,7 +1285,7 @@ Item {
             return
         }
         var liked = boardLiked.indexOf(post) >= 0
-        boardStart("board_toggle_like", [boardAs, post], liked ? "Your unlike" : "Your like")
+        boardStart("board_toggle_like", [boardAs, post], liked ? "Your unlike" : "Your like", null, boardAs)
         var next = boardLiked.filter(function(item) { return item !== post })
         if (!liked)
             next.push(post)
@@ -1300,6 +1309,19 @@ Item {
         if (seconds < 3600) return Math.floor(seconds / 60) + "m"
         if (seconds < 86400) return Math.floor(seconds / 3600) + "h"
         return dated(time)
+    }
+
+    /// Whether the names CLI holds `name` from a public account (posts in a block).
+    function heldPublicly(name) {
+        return cliNames.some(function(entry) { return entry.name === name && entry.private === false })
+    }
+
+    /// What the running board change is doing, in a line.
+    function boardJobLine(job) {
+        var seconds = Math.max(0, Math.floor((Math.max(clockTick, Date.now()) - job.started) / 1000))
+        if (heldPublicly(job.name) && (job.kind === "board_post" || job.kind === "board_toggle_like" || job.kind === "board_hide"))
+            return job.label + ": sending it publicly, one block (about 30 seconds), " + seconds + "s so far."
+        return job.label + ": proving it on this computer, so the chain never learns your account. About 4 min, " + Math.floor(seconds / 60) + " so far."
     }
 
     function boardFollowing(name) {
@@ -1407,6 +1429,134 @@ Item {
         }, function() { job.asking = false })
     }
 
+    // ── Messages ────────────────────────────────────────────────────────
+
+    /// Asks the chat module; `done(value)` or `failed(message)` runs later.
+    function chatAsk(method, args, done, failed) {
+        if (!(bridgeReady && logos.callModuleAsync)) {
+            failed("Messages need Basecamp's chat module.")
+            return
+        }
+        logos.callModuleAsync("chat_module", method, args, function(reply) {
+            var value = parsed(reply)
+            if (value && typeof value === "object" && value.success === false)
+                failed(value.error ? String(value.error) : "the chat module said no")
+            else if (value && typeof value === "object" && "value" in value && "success" in value)
+                done(value.value)
+            else
+                done(value)
+        }, 20000)
+    }
+
+    function chatLoad() {
+        chatAsk("status", [], function(status) {
+            chatState = status && status.delivery_state ? String(status.delivery_state) : "unknown"
+            chatError = ""
+        }, function(message) {
+            chatState = ""
+            chatError = message
+        })
+        chatAsk("get_address", [], function(address) { chatMine = address ? String(address) : "" }, function() {})
+        chatAsk("list_conversations", [], function(list) {
+            var all = (list || []).filter(function(convo) { return convo.kind !== "group" })
+            all.sort(function(a, b) { return (b.last_activity_ms || 0) - (a.last_activity_ms || 0) })
+            chatConvos = all
+        }, function() {})
+        askLater("dm_names", [], function(value) { dmNames = value || {} }, function() {})
+        if (mainName !== "")
+            askLater("resolve", [mainName], function(found) {
+                mainChat = found && found.texts && typeof found.texts.chat === "string" ? found.texts.chat : ""
+            }, function() {})
+    }
+
+    function chatLabel(convo) {
+        return dmNames[convo] !== undefined ? dmNames[convo] : "New conversation"
+    }
+
+    function chatOpen(convo) {
+        chatOpenId = convo
+        chatMessages = []
+        chatReadMessages()
+    }
+
+    function chatReadMessages() {
+        if (chatOpenId === "")
+            return
+        var convo = chatOpenId
+        chatAsk("get_messages", [convo], function(list) {
+            if (chatOpenId === convo)
+                chatMessages = list || []
+        }, function(message) { say(message, true) })
+    }
+
+    /// Starts a DM with `typed`: its name's published chat address, if it has one.
+    function chatStart(typed) {
+        var name = ""
+        try {
+            name = String(call("names", "normalize", [typed]))
+        } catch (error) {}
+        if (name === "") {
+            say("That isn't a name.", true)
+            return
+        }
+        askLater("resolve", [name], function(found) {
+            var address = found && found.texts && typeof found.texts.chat === "string" ? found.texts.chat.trim() : ""
+            if (found === null) {
+                say(name + " isn't registered.", true)
+                return
+            }
+            if (address === "") {
+                say(name + " hasn't turned on messages yet.", true)
+                return
+            }
+            chatAsk("create_conversation", [address], function(created) {
+                var convo = created && typeof created === "object" ? (created.convo_id || created.id || "") : String(created || "")
+                if (convo === "") {
+                    chatLoad()
+                    return
+                }
+                askLater("set_dm_name", [convo, name], function(value) { dmNames = value || {} }, function() {})
+                chatLoad()
+                chatOpen(convo)
+                dmTo.text = ""
+            }, function(message) { say("Couldn't start the conversation: " + message, true) })
+        }, function(message) { say(message, true) })
+    }
+
+    function chatSend() {
+        var text = dmText.text.trim()
+        if (chatOpenId === "" || text === "")
+            return
+        chatAsk("send_message", [chatOpenId, text], function() {
+            dmText.text = ""
+            chatReadMessages()
+        }, function(message) { say("Not sent: " + message, true) })
+    }
+
+    /// Publishes this installation's chat address on the main name, so others can DM it.
+    function chatPublish() {
+        if (mainName === "" || chatMine === "")
+            return
+        var name = mainName, address = chatMine
+        cliChange("set_text", [name, "chat", address], name, function() {
+            var found = ask("resolve", [name])
+            return found !== null && found.texts && found.texts.chat === address
+        }, "People can now message " + name + ".")
+    }
+
+    Timer {
+        interval: 10000
+        repeat: true
+        running: root.section === "messages"
+        onTriggered: root.chatLoad()
+    }
+    Timer {
+        interval: 3000
+        repeat: true
+        running: root.section === "messages" && root.chatOpenId !== ""
+        onTriggered: root.chatReadMessages()
+    }
+
     /// Picks up a change already running (the app was closed mid-way), so it
     /// shows and blocks what it should until it ends.
     function loadRunningJobs() {
@@ -1433,7 +1583,7 @@ Item {
             boardComposer.text = ""
             boardCid.text = ""
             boardReplyTo = ""
-        })
+        }, boardAs)
     }
 
     /// Checks the post being written; the composer waits for typing to pause.
@@ -2305,6 +2455,7 @@ Item {
                 }
 
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Posts"; current: root.section === "posts"; onPressed: root.boardShow(root.boardView === "thread" ? "all" : root.boardView) }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Messages"; current: root.section === "messages"; onPressed: { root.section = "messages"; root.chatLoad() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Pay"; current: root.section === "pay"; onPressed: { root.section = "pay"; root.loadCliBalance() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Profile"; current: root.section === "profile"; onPressed: root.openProfile() }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Search"; current: root.section === "search"; onPressed: { root.section = "search"; searchField.forceActiveFocus() } }
@@ -2401,6 +2552,177 @@ Item {
                         strong: true
                         enabledNow: root.cliPath !== ""
                         onPressed: root.openRegister()
+                    }
+                }
+            }
+        }
+
+        // Messages: name-to-name DMs.
+        Item {
+            visible: root.section === "messages" && !root.needsWelcome
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 32
+                spacing: 14
+                RowLayout {
+                    Layout.fillWidth: true
+                    Text { text: "Messages"; color: root.ink; font.family: root.sans; font.pixelSize: 28; font.weight: Font.DemiBold }
+                    Item { Layout.fillWidth: true }
+                    Text {
+                        text: root.chatState === "" ? "" : "Network: " + root.chatState
+                        color: root.faint
+                        font.family: root.sans
+                        font.pixelSize: 14
+                    }
+                }
+                // Not connected: the Chat app starts the chat module.
+                Rectangle {
+                    visible: root.chatError !== ""
+                    Layout.fillWidth: true
+                    implicitHeight: chatDown.implicitHeight + 24
+                    radius: 8
+                    color: "#2A2418"
+                    RowLayout {
+                        id: chatDown
+                        x: 14; y: 12
+                        width: parent.width - 28
+                        Text { Layout.fillWidth: true; text: "Messaging isn't running yet. Open the Chat app once, then come back."; color: root.brass; font.family: root.sans; font.pixelSize: 15; wrapMode: Text.Wrap }
+                        Action { label: "Open Chat"; onPressed: if (logos.request) logos.request("basecamp.apps.launch", { app: "chat_ui" }, function() { root.chatLoad() }) }
+                    }
+                }
+                // Let people message your name.
+                Rectangle {
+                    visible: root.chatError === "" && root.chatMine !== "" && root.mainName !== "" && root.mainChat !== root.chatMine
+                    Layout.fillWidth: true
+                    implicitHeight: chatOff.implicitHeight + 24
+                    radius: 8
+                    color: root.panel
+                    border.width: 1
+                    border.color: root.line
+                    RowLayout {
+                        id: chatOff
+                        x: 14; y: 12
+                        width: parent.width - 28
+                        Text {
+                            Layout.fillWidth: true
+                            text: "People can't message " + root.mainName + " yet. Turning it on adds this computer's chat address to " + root.mainName + "'s profile, so anyone who looks the name up can start a DM."
+                            color: root.dim
+                            font.family: root.sans
+                            font.pixelSize: 15
+                            wrapMode: Text.Wrap
+                        }
+                        Action { label: "Turn on messages"; strong: true; changes: true; onPressed: root.chatPublish() }
+                    }
+                }
+                Hint {
+                    visible: root.notice !== "" && root.section === "messages"
+                    color: root.noticeIsError ? root.alarm : root.dim
+                    text: root.notice
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    spacing: 20
+                    // Conversations.
+                    ColumnLayout {
+                        Layout.preferredWidth: 280
+                        Layout.fillHeight: true
+                        spacing: 10
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 6
+                            Field { id: dmTo; Layout.fillWidth: true; size: 16; hint: "Message a name"; onAccepted: root.chatStart(dmTo.text) }
+                            Action { label: "Start"; enabledNow: dmTo.text.trim() !== ""; onPressed: root.chatStart(dmTo.text) }
+                        }
+                        Hint { visible: root.chatConvos.length === 0 && root.chatError === ""; font.pixelSize: 14; text: "No conversations yet." }
+                        ListView {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            clip: true
+                            spacing: 4
+                            model: root.chatConvos
+                            delegate: Rectangle {
+                                id: convoRow
+                                required property var modelData
+                                width: ListView.view.width
+                                height: 54
+                                radius: 8
+                                color: root.chatOpenId === modelData.convo_id ? root.raised : convoArea.containsMouse ? root.hover : "transparent"
+                                MouseArea { id: convoArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.chatOpen(convoRow.modelData.convo_id) }
+                                ColumnLayout {
+                                    x: 12; y: 7
+                                    width: parent.width - 24
+                                    spacing: 2
+                                    Text { Layout.fillWidth: true; text: root.chatLabel(convoRow.modelData.convo_id); color: root.ink; font.family: root.sans; font.pixelSize: 16; font.weight: Font.DemiBold; elide: Text.ElideRight }
+                                    Text { text: convoRow.modelData.message_count + " messages" + (convoRow.modelData.last_activity_ms ? " · " + root.boardAgo(convoRow.modelData.last_activity_ms) : ""); color: root.faint; font.family: root.sans; font.pixelSize: 13 }
+                                }
+                            }
+                        }
+                    }
+                    Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: root.line }
+                    // The open conversation.
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        spacing: 10
+                        Hint { visible: root.chatOpenId === ""; text: "Pick a conversation, or message a name." }
+                        RowLayout {
+                            visible: root.chatOpenId !== "" && root.dmNames[root.chatOpenId] === undefined
+                            Layout.fillWidth: true
+                            spacing: 6
+                            Text { text: "Who is this?"; color: root.faint; font.family: root.sans; font.pixelSize: 14 }
+                            Field { id: dmLabel; Layout.fillWidth: true; size: 15; hint: "Their name, if you know it" }
+                            Action {
+                                label: "Save"
+                                enabledNow: dmLabel.text.trim() !== ""
+                                onPressed: askLater("set_dm_name", [root.chatOpenId, dmLabel.text], function(value) { root.dmNames = value || {}; dmLabel.text = "" }, function(message) { root.say(message, true) })
+                            }
+                        }
+                        ListView {
+                            id: messageList
+                            visible: root.chatOpenId !== ""
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            clip: true
+                            spacing: 8
+                            model: root.chatMessages
+                            onCountChanged: positionViewAtEnd()
+                            delegate: Item {
+                                id: bubbleRow
+                                required property var modelData
+                                width: ListView.view.width
+                                height: bubble.height
+                                Rectangle {
+                                    id: bubble
+                                    anchors.right: bubbleRow.modelData.from_self ? parent.right : undefined
+                                    width: Math.min(bubbleText.implicitWidth + 28, parent.width * 0.75)
+                                    height: bubbleText.implicitHeight + 20
+                                    radius: 12
+                                    color: bubbleRow.modelData.from_self ? "#3A3220" : root.raised
+                                    Text {
+                                        id: bubbleText
+                                        x: 14; y: 10
+                                        width: parent.width - 28
+                                        text: bubbleRow.modelData.content
+                                        textFormat: Text.PlainText
+                                        color: root.ink
+                                        font.family: root.sans
+                                        font.pixelSize: 16
+                                        wrapMode: Text.Wrap
+                                    }
+                                }
+                            }
+                        }
+                        RowLayout {
+                            visible: root.chatOpenId !== ""
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Field { id: dmText; Layout.fillWidth: true; size: 16; hint: "Write a message"; onAccepted: root.chatSend() }
+                            Action { label: "Send"; strong: true; enabledNow: dmText.text.trim() !== ""; onPressed: root.chatSend() }
+                        }
+                        Hint { visible: root.chatOpenId !== ""; font.pixelSize: 13; text: "End-to-end encrypted over Logos messaging. Sent at once, no proof needed." }
                     }
                 }
             }
@@ -2560,7 +2882,7 @@ Item {
                             visible: root.anonName === "" || root.cliPendingFor(root.anonName) === null
                             spacing: 6
                             Tab { label: "Private anon (4 min posts)"; current: !root.anonPublic; onPressed: root.anonPublic = false }
-                            Tab { label: "Public anon (15 s posts)"; current: root.anonPublic; onPressed: root.anonPublic = true }
+                            Tab { label: "Public anon (30 s posts)"; current: root.anonPublic; onPressed: root.anonPublic = true }
                         }
                         Action {
                             visible: root.anonName === "" || root.cliPendingFor(root.anonName) === null
@@ -2645,8 +2967,7 @@ Item {
                     visible: root.boardJob !== null
                     color: root.brass
                     font.pixelSize: 16
-                    text: root.boardJob === null ? "" : root.boardJob.label + ": proving it on this computer, so the chain never learns your account. About 4 min, "
-                        + Math.max(0, Math.floor((Math.max(root.clockTick, Date.now()) - root.boardJob.started) / 60000)) + " so far."
+                    text: root.boardJob === null ? "" : root.boardJobLine(root.boardJob)
                 }
                 Hint {
                     visible: root.boardJob === null && root.notice !== "" && root.section === "posts"
@@ -2841,7 +3162,7 @@ Item {
                     }
                     Hint { visible: root.anonName !== ""; text: "Anon name: " + root.anonName + (root.anonReady ? "" : " (being set up)") + ". Only your wallet links it to your main name." }
                     Part { text: "Your names" }
-                    Hint { text: "Held privately: posts take about 4 minutes, free, and nobody can find which account holds the name. Public: posts take about 15 seconds and a little gas, and anyone who knows the name can find the account that holds it. Payments to a name stay private either way." }
+                    Hint { text: "Held privately: posts take about 4 minutes, free, and nobody can find which account holds the name. Public: posts take about 30 seconds and a little gas, and anyone who knows the name can find the account that holds it. Payments to a name stay private either way." }
                     Repeater {
                         model: root.cliPending
                         RowLayout {
@@ -3256,7 +3577,7 @@ Item {
                         Hint {
                             font.pixelSize: 14
                             text: root.registerPublic
-                                ? "Registered privately first, so nobody sees who registered it, then moved to a new public account funded privately with 10,000,000 for gas. Posts take about 15 seconds; nothing links that account to you. About 10 more minutes."
+                                ? "Registered privately first, so nobody sees who registered it, then moved to a new public account funded privately with 10,000,000 for gas. Posts take about 30 seconds; nothing links that account to you. About 10 more minutes."
                                 : "Posts take about 4 minutes each, free, and nobody can find which account holds it. You can make it public later in Settings."
                         }
                         Action {

@@ -52,6 +52,13 @@ BRIDGE = r"""
             Qt.callLater(function() { callback(reply) })
         }
         function callModule(module, method, args) {
+            if (module === "chat_module") {
+                if (method === "status") return JSON.stringify({ convo_count: 2, delivery_state: "online", detail: "", delivery_adopted: true })
+                if (method === "get_address") return JSON.stringify("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
+                if (method === "list_conversations") return JSON.stringify([{ convo_id: "c1", message_count: 3, last_activity_ms: Date.now() - 120000, kind: "private_v1", history_only: false }, { convo_id: "c2", message_count: 1, last_activity_ms: Date.now() - 7200000, kind: "private_v1", history_only: false }])
+                if (method === "get_messages") return JSON.stringify([{ from_self: false, content: "hey, saw your post on the board", timestamp_ms: 1 }, { from_self: true, content: "thanks! it's all made privately as a name", timestamp_ms: 2 }, { from_self: false, content: "nice. how long did the post take?", timestamp_ms: 3 }])
+                return JSON.stringify(null)
+            }
             var names = %(names)s
             if (module === "lez_core")
                 return method === "account_id_from_base58" ? "15145aee" : ""
@@ -79,6 +86,7 @@ BRIDGE = r"""
             if (method === "board_follows") return ok(["ada"])
             if (method === "anon_name") return ok(root.anonMock || "")
             if (method === "board_likes") return ok(["jef/0"])
+            if (method === "dm_names") return ok({ c1: "ada" })
             if (method === "spell_check") return ok(/teh|recieve/.test(args[0]) ? [{ word: "recieve", suggestions: ["receive"] }, { word: "teh", suggestions: ["the", "ten", "tea"] }] : [])
             if (method === "set_main_name") return ok(args[0])
             if (method === "board_follow") return ok(args[1] ? [] : ["ada", args[0]])
@@ -124,6 +132,7 @@ SCENARIOS = {
     "home-reply": 'root.boardReply("jef/0")',
     "anon-off": 'root.anonOn = true',
     "pay": 'root.section = "pay"',
+    "messages": 'root.section = "messages"; root.chatLoad(); root.chatOpen("c1")',
     "spelling": 'boardComposer.text = "I recieve teh posts"; root.boardSpellCheck()',
     "profile-tab": 'root.openProfile()',
     "settings-tab": 'root.section = "settings"',
