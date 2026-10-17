@@ -1,0 +1,11 @@
+[package]
+name = "board_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+borsh.workspace = true
+lee_core.workspace = true
+names_core.workspace = true
+risc0-zkvm.workspace = true

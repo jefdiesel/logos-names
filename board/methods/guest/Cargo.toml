@@ -1,0 +1,10 @@
+[package]
+name = "logos_board"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+board_core.workspace = true
+lee_core.workspace = true
+risc0-zkvm.workspace = true
