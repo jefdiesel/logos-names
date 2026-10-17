@@ -2792,44 +2792,75 @@ Item {
                         }
                     }
                     Hint { visible: root.anonName !== ""; text: "Anon name: " + root.anonName + (root.anonReady ? "" : " (being set up)") + ". Only your wallet links it to your main name." }
-                    Part { text: "Private or public" }
-                    Hint { text: "A name held privately posts in about 4 minutes, free, and nobody can find which account holds it. Make it public and its posts take about 15 seconds and a little gas, but anyone who knows the name can find the account that holds it. Payments to it stay private either way." }
+                    Part { text: "Your names" }
+                    Hint { text: "Held privately: posts take about 4 minutes, free, and nobody can find which account holds the name. Public: posts take about 15 seconds and a little gas, and anyone who knows the name can find the account that holds it. Payments to a name stay private either way." }
                     Repeater {
-                        model: root.cliNames.filter(function(entry) { return entry.name !== root.anonName })
+                        model: root.cliPending
                         RowLayout {
                             required property var modelData
                             Layout.fillWidth: true
                             spacing: 12
-                            Text { Layout.preferredWidth: 160; text: modelData.name; color: root.ink; font.family: root.sans; font.pixelSize: 17; elide: Text.ElideRight }
-                            Text { text: modelData.private === false ? "Public" : "Private"; color: root.faint; font.family: root.sans; font.pixelSize: 15 }
-                            Item { Layout.fillWidth: true }
-                            Action {
-                                visible: modelData.private !== false && root.publicAsk !== modelData.name
-                                label: "Make public"
-                                enabledNow: root.boardJob === null
-                                onPressed: root.publicAsk = modelData.name
-                            }
-                            Text {
-                                visible: root.publicAsk === modelData.name
-                                text: "About 9 min; funds it with 10,000,000 for gas."
-                                color: root.brass
-                                font.family: root.sans
-                                font.pixelSize: 14
-                            }
-                            Action {
-                                visible: root.publicAsk === modelData.name
-                                label: "Make it public"
-                                strong: true
-                                onPressed: {
-                                    var name = modelData.name
-                                    root.publicAsk = ""
-                                    root.boardStart("make_public", [name], "Making " + name + " public", function() { root.loadCliMine() })
+                            Text { Layout.preferredWidth: 200; text: modelData.name; color: root.ink; font.family: root.sans; font.pixelSize: 17; elide: Text.ElideRight }
+                            Text { Layout.fillWidth: true; text: root.pendingLine(modelData); color: modelData.failed ? root.alarm : root.brass; font.family: root.sans; font.pixelSize: 14; elide: Text.ElideRight }
+                        }
+                    }
+                    Repeater {
+                        model: root.allMine
+                        ColumnLayout {
+                            id: nameRow
+                            required property var modelData
+                            readonly property bool privateCli: modelData.signer === "cli" && modelData.private !== false
+                            readonly property bool isAnon: modelData.name === root.anonName
+                            Layout.fillWidth: true
+                            spacing: 4
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 44
+                                spacing: 12
+                                Text {
+                                    Layout.preferredWidth: 200
+                                    text: nameRow.modelData.name
+                                    color: root.ink
+                                    font.family: root.sans
+                                    font.pixelSize: 17
+                                    elide: Text.ElideRight
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.show(nameRow.modelData.name) }
+                                }
+                                Text {
+                                    text: (nameRow.privateCli ? "Private" : "Public") + (nameRow.isAnon ? " · anon" : nameRow.modelData.name === root.mainName ? " · main" : "")
+                                    color: root.faint
+                                    font.family: root.sans
+                                    font.pixelSize: 15
+                                }
+                                Item { Layout.fillWidth: true }
+                                Action {
+                                    visible: nameRow.privateCli && root.publicAsk !== nameRow.modelData.name
+                                    label: "Make public"
+                                    enabledNow: root.boardJob === null
+                                    onPressed: root.publicAsk = nameRow.modelData.name
+                                }
+                                Action {
+                                    visible: root.publicAsk === nameRow.modelData.name
+                                    label: "Make it public"
+                                    strong: true
+                                    onPressed: {
+                                        var name = nameRow.modelData.name
+                                        root.publicAsk = ""
+                                        root.boardStart("make_public", [name], "Making " + name + " public", function() { root.loadCliMine() })
+                                    }
+                                }
+                                Action {
+                                    visible: root.publicAsk === nameRow.modelData.name
+                                    label: "Cancel"
+                                    onPressed: root.publicAsk = ""
                                 }
                             }
-                            Action {
-                                visible: root.publicAsk === modelData.name
-                                label: "Cancel"
-                                onPressed: root.publicAsk = ""
+                            Hint {
+                                visible: root.publicAsk === nameRow.modelData.name
+                                color: root.brass
+                                font.pixelSize: 14
+                                text: "About 9 minutes. It moves the name to a new public account and funds that with 10,000,000 for gas from your private account, so the chain can't see where the money came from."
+                                    + (nameRow.isAnon ? " Keep the anon private in practice: never send between its account and your other public accounts, and don't make it public right after your main name." : "")
                             }
                         }
                     }
@@ -2837,153 +2868,6 @@ Item {
                         visible: root.boardJob !== null && root.section === "settings"
                         color: root.brass
                         text: root.boardJob === null ? "" : root.boardJob.label + ": about 9 min, " + Math.max(0, Math.floor((Math.max(root.clockTick, Date.now()) - root.boardJob.started) / 60000)) + " so far."
-                    }
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 6
-                // The names this wallet holds.
-                ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: 6
-                    Hint {
-                        visible: root.configKnown && root.registry === ""
-                        text: "No registry chosen. Open Advanced."
-                    }
-                    ListHead {
-                        visible: root.registry !== ""
-                        label: "My names"
-                        count: root.allMine.length + root.pendingNames.length + root.cliPending.length > 0 ? root.allMine.length + root.pendingNames.length + root.cliPending.length : ""
-                    }
-                    Repeater {
-                        model: root.cliPending
-                        Rectangle {
-                            id: pendingRow
-                            required property var modelData
-                            Layout.fillWidth: true
-                            implicitHeight: pendingColumn.implicitHeight + 20
-                            radius: 8
-                            color: pendingArea.containsMouse ? root.hover : "transparent"
-                            border.width: 1
-                            border.color: root.line
-                            MouseArea {
-                                id: pendingArea
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: root.show(pendingRow.modelData.name)
-                            }
-                            ColumnLayout {
-                                id: pendingColumn
-                                x: 10
-                                y: 10
-                                width: parent.width - 20
-                                spacing: 4
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    NameLabel {
-                                        Layout.fillWidth: true
-                                        name: pendingRow.modelData.name
-                                        size: 18
-                                    }
-                                    Text {
-                                        text: pendingRow.modelData.failed ? "Not registered" : "Registering"
-                                        color: pendingRow.modelData.failed ? root.alarm : root.brass
-                                        font.family: root.sans
-                                        font.pixelSize: 13
-                                    }
-                                }
-                                Text {
-                                    Layout.fillWidth: true
-                                    text: root.pendingLine(pendingRow.modelData)
-                                    color: root.faint
-                                    font.family: root.sans
-                                    font.pixelSize: 13
-                                    elide: Text.ElideRight
-                                }
-                            }
-                        }
-                    }
-                    Repeater {
-                        model: root.pendingNames
-                        Text {
-                            required property var modelData
-                            Layout.fillWidth: true
-                            Layout.leftMargin: 8
-                            text: (modelData.name) + ": registering" + (modelData.ready_at ? ", ready at " + root.clock(modelData.ready_at) : "")
-                            color: root.dim
-                            font.family: root.sans
-                            font.pixelSize: 17
-                            elide: Text.ElideRight
-                        }
-                    }
-                    ListView {
-                        id: myList
-                        visible: root.allMine.length > 0
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: Math.min(root.allMine.length, 12) * 42
-                        clip: true
-                        spacing: 2
-                        model: root.allMine
-                        delegate: Rectangle {
-                            id: myRow
-                            required property var modelData
-                            readonly property bool current: root.record !== null && root.record.name === modelData.name
-                            width: myList.width
-                            height: 40
-                            radius: 6
-                            color: current ? root.raised : myRowArea.containsMouse ? root.hover : "transparent"
-                            MouseArea {
-                                id: myRowArea
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    root.say("", false)
-                                    root.show(myRow.modelData.name)
-                                }
-                            }
-                            RowLayout {
-                                anchors.fill: parent
-                                anchors.leftMargin: 8
-                                anchors.rightMargin: 4
-                                spacing: 4
-                                NameLabel {
-                                    Layout.fillWidth: true
-                                    name: myRow.modelData.name
-                                    size: 19
-                                    weight: Font.Medium
-                                }
-                                Text {
-                                    text: myRow.modelData.signer !== "cli" ? "Public" : myRow.modelData.private === true ? "Private" : myRow.modelData.private === false ? "Public" : "CLI"
-                                    color: root.faint
-                                    font.family: root.sans
-                                    font.pixelSize: 13
-                                }
-                                Text {
-                                    visible: !!myRow.modelData.lapsed && !myRow.modelData.never
-                                    text: "Lapsed"
-                                    color: root.alarm
-                                    font.family: root.sans
-                                    font.pixelSize: 16
-                                }
-                            }
-                        }
-                    }
-                    Hint {
-                        visible: root.allMine.length === 0 && root.pendingNames.length === 0 && root.cliPending.length === 0 && (root.wallet.length > 0 || root.cliPath !== "")
-                        text: "None yet. Look one up to register it."
-                    }
-                    Hint {
-                        visible: root.registry !== "" && root.wallet.length === 0
-                        text: /not running/.test(root.walletProblem) ? "Wallet not open" : /funds/.test(root.walletProblem) ? "No funded account in the wallet" : "Wallet not connected"
-                    }
-                    Link {
-                        visible: root.registry !== "" && root.wallet.length === 0
-                        text: /not running/.test(root.walletProblem) ? "Open LEZ Wallet" : "Connect wallet"
-                        onPressed: root.connectWallet()
-                    }
-                }
-
                     }
                     Action {
                         Layout.topMargin: 6
