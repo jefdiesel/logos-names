@@ -1,0 +1,505 @@
+// LNS Board for Basecamp: posts, replies, likes and follows, made as names.
+//
+// A front end on the `names` module's board_* calls. Every post, reply and
+// like is made from the private account that holds one of your names, through
+// your names CLI, so it is proved on this machine and the chain sees the
+// name, never the account. Reading the board needs no wallet.
+//
+// Main.qml is generated: edit Main.qml.in, then run tools/shared.py, which
+// copies the parts shared with the Names app (palette, buttons, avatars).
+
+import QtQuick
+import QtQuick.Layouts
+
+Item {
+    id: root
+
+    // ── State ───────────────────────────────────────────────────────────
+
+    property var mine: []              // names the CLI's wallet holds privately: [{name}]
+    property string me: ""             // the name posts are made as
+    property string view: "all"        // all, following or thread
+    property string threadOf: ""       // the post a thread view shows, <name>/<n>
+    property var posts: []             // what the view shows, from board_feed / board_thread
+    property bool loading: false
+    property string loadError: ""
+    property var follows: []           // names this device follows
+    property var people: ({})          // name → {display, color, pixels}, as looked up
+    property string replyTo: ""        // the post the composer answers, <name>/<n>
+    property var job: null             // the change being proved: {id, kind, started, label}
+    property real clockTick: Date.now()
+    property string notice: ""
+    property bool noticeIsError: false
+    property string lastReply: ""
+
+    readonly property bool busy: job !== null
+
+    //@SHARED@
+
+    // ── Small helpers ───────────────────────────────────────────────────
+
+    function say(message, isError) {
+        notice = String(message)
+        noticeIsError = !!isError
+    }
+
+    /// How long ago `time` (milliseconds) was, in a few characters.
+    function ago(time) {
+        var seconds = Math.max(0, Math.floor((clockTick - time) / 1000))
+        if (seconds < 60) return seconds + "s"
+        if (seconds < 3600) return Math.floor(seconds / 60) + "m"
+        if (seconds < 86400) return Math.floor(seconds / 3600) + "h"
+        return dated(time)
+    }
+
+    function nameOf(post) {
+        return String(post).split("/")[0]
+    }
+
+    function follows_(name) {
+        return follows.indexOf(name) >= 0
+    }
+
+    // ── Loading ─────────────────────────────────────────────────────────
+
+    function load() {
+        loading = true
+        loadError = ""
+        var method = view === "thread" ? "board_thread" : "board_feed"
+        var args = view === "thread" ? [threadOf] : [view === "following"]
+        askLater(method, args, function(value) {
+            loading = false
+            posts = value || []
+            for (var i = 0; i < posts.length; i++)
+                lookUp(posts[i].name)
+        }, function(message) {
+            loading = false
+            loadError = message
+        }, 150000)
+    }
+
+    /// Fetches a name's display name, colour and avatar once, for its posts.
+    function lookUp(name) {
+        if (people[name] !== undefined)
+            return
+        var known = Object.assign({}, people)
+        known[name] = { display: "", color: "", pixels: null }
+        people = known
+        askLater("resolve", [name], function(found) {
+            if (found === null)
+                return
+            var texts = found.texts || {}
+            var next = Object.assign({}, people)
+            next[name] = Object.assign({}, next[name], {
+                display: typeof texts.display === "string" ? texts.display.trim() : "",
+                color: /^#[0-9a-fA-F]{6}$/.test(texts.color || "") ? readable(texts.color) : ""
+            })
+            people = next
+            if (typeof texts.avatar === "string" && texts.avatar.trim() !== "")
+                askLater("avatar", [name], function(value) {
+                    var ok = value && value.width > 0 && value.height > 0 && value.width <= 128 && value.height <= 128
+                    if (!ok) return
+                    var more = Object.assign({}, people)
+                    more[name] = Object.assign({}, more[name], { pixels: { width: value.width, height: value.height, pixels: value.pixels } })
+                    people = more
+                }, function() {})
+        }, function() {})
+    }
+
+    function loadMine() {
+        askLater("cli_mine", [], function(value) {
+            var held = (value || []).filter(function(entry) { return !entry.registering && !entry.failed && entry.private !== false })
+            mine = held
+            if (me === "" || !held.some(function(entry) { return entry.name === me }))
+                me = held.length > 0 ? held[0].name : ""
+        }, function(message) {
+            mine = []
+            console.log("board_ui: names:", message)
+        }, 30000)
+    }
+
+    function loadFollows() {
+        askLater("board_follows", [], function(value) { follows = value || [] }, function() {})
+    }
+
+    function show(which, post) {
+        view = which
+        threadOf = post || ""
+        posts = []
+        load()
+    }
+
+    // ── Changes ─────────────────────────────────────────────────────────
+
+    /// Starts a change as a CLI job, and polls it until it ends.
+    function start(method, args, label, after) {
+        if (busy)
+            return
+        say("", false)
+        job = { id: "", label: label, started: Date.now(), after: after }
+        askLater(method, args, function(value) {
+            job.id = value.id
+            job.started = value.started || Date.now()
+            clockTick = Date.now()
+        }, function(message) {
+            job = null
+            say(message, true)
+        })
+    }
+
+    function checkJob() {
+        if (job === null || job.id === "" || job.asking)
+            return
+        var current = job
+        current.asking = true
+        askLater("job", [current.id], function(value) {
+            current.asking = false
+            if (job !== current || value.state === "running")
+                return
+            job = null
+            if (value.state === "done") {
+                say(current.label + " done.", false)
+                if (current.after)
+                    current.after()
+                load()
+            } else {
+                say("It didn't go through: " + lastLogLine(value.log_tail), true)
+            }
+        }, function() { current.asking = false })
+    }
+
+    function post() {
+        var text = composer.text.trim()
+        var cid = cidField.text.trim()
+        if (me === "" || (text === "" && cid === ""))
+            return
+        var reply = replyTo
+        start("board_post", [me, text, JSON.stringify(cid === "" ? [] : [cid]), reply],
+              reply !== "" ? "Your reply" : "Your post", function() {
+            composer.text = ""
+            cidField.text = ""
+            replyTo = ""
+        })
+    }
+
+    function like(target, undo) {
+        start("board_like", [me, target, undo], undo ? "Unlike" : "Like")
+    }
+
+    function follow(name, undo) {
+        askLater("board_follow", [name, undo], function(value) {
+            follows = value || []
+            if (view === "following")
+                load()
+        }, function(message) { say(message, true) })
+    }
+
+    function hide(target) {
+        start("board_hide", [target], "Taking it down")
+    }
+
+    Timer {
+        interval: 5000
+        repeat: true
+        running: root.job !== null
+        onTriggered: { root.clockTick = Date.now(); root.checkJob() }
+    }
+    Timer {
+        interval: 60000
+        repeat: true
+        running: root.job === null && root.view !== "thread"
+        onTriggered: { root.clockTick = Date.now(); root.load() }
+    }
+    Component.onCompleted: {
+        loadMine()
+        loadFollows()
+        load()
+    }
+
+    TextEdit { id: clipboard; visible: false }
+
+    // ── Layout ──────────────────────────────────────────────────────────
+
+    Rectangle { anchors.fill: parent; color: root.slate }
+
+    RowLayout {
+        anchors.fill: parent
+        spacing: 0
+
+        // Who you post as, and which feed.
+        Rectangle {
+            Layout.preferredWidth: 280
+            Layout.fillHeight: true
+            color: root.panel
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 18
+                spacing: 14
+
+                Text { text: "Board"; color: root.ink; font.family: root.sans; font.pixelSize: 28; font.weight: Font.DemiBold }
+
+                Text { text: "POSTING AS"; color: root.faint; font.family: root.sans; font.pixelSize: 13; font.weight: Font.DemiBold; font.letterSpacing: 1 }
+                Repeater {
+                    model: root.mine
+                    Tab {
+                        required property var modelData
+                        Layout.fillWidth: true
+                        label: modelData.name
+                        current: root.me === modelData.name
+                        onPressed: root.me = modelData.name
+                    }
+                }
+                Hint {
+                    visible: root.mine.length === 0
+                    font.pixelSize: 15
+                    text: "No names to post as. Register one privately in the Names app first."
+                }
+
+                Rectangle { Layout.fillWidth: true; height: 1; color: root.line }
+
+                Tab { Layout.fillWidth: true; label: "All"; current: root.view === "all"; onPressed: root.show("all") }
+                Tab { Layout.fillWidth: true; label: "Following" + (root.follows.length > 0 ? "  " + root.follows.length : ""); current: root.view === "following"; onPressed: root.show("following") }
+
+                Repeater {
+                    model: root.follows
+                    RowLayout {
+                        required property string modelData
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 12
+                        Text { Layout.fillWidth: true; text: modelData; color: root.dim; font.family: root.sans; font.pixelSize: 15; elide: Text.ElideRight }
+                        Link { text: "Unfollow"; color: root.faint; font.pixelSize: 13; onPressed: root.follow(modelData, true) }
+                    }
+                }
+
+                Item { Layout.fillHeight: true }
+                Hint {
+                    font.pixelSize: 13
+                    text: "Posts are public. Posting proves on this computer (about 4 min), so the chain sees your name, never your account."
+                }
+            }
+        }
+
+        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: root.line }
+
+        Flickable {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            contentHeight: page.implicitHeight + 72
+            clip: true
+
+            ColumnLayout {
+                id: page
+                x: 40
+                y: 32
+                width: Math.min(parent.width - 80, 720)
+                spacing: 16
+
+                // The composer.
+                Card {
+                    visible: root.mine.length > 0 && root.view !== "thread" || root.replyTo !== ""
+                    Layout.fillWidth: true
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: root.replyTo !== ""
+                        Text { Layout.fillWidth: true; text: "Replying to " + root.replyTo; color: root.brass; font.family: root.sans; font.pixelSize: 15 }
+                        Link { text: "Cancel"; color: root.faint; font.pixelSize: 14; onPressed: root.replyTo = "" }
+                    }
+                    Area {
+                        id: composer
+                        Layout.fillWidth: true
+                        implicitHeight: 96
+                        code: false
+                        hint: root.me !== "" ? "What's happening, " + root.me + "?" : "Pick a name to post as"
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Field {
+                            id: cidField
+                            Layout.fillWidth: true
+                            size: 15
+                            code: true
+                            hint: "Attach a file: its Logos Storage CID (optional)"
+                        }
+                        Text {
+                            text: composer.text.length + " / 1024"
+                            color: composer.text.length > 1024 ? root.alarm : root.faint
+                            font.family: root.sans
+                            font.pixelSize: 13
+                        }
+                        Action {
+                            label: root.replyTo !== "" ? "Reply" : "Post"
+                            strong: true
+                            enabledNow: !root.busy && root.me !== "" && composer.text.length <= 1024 && (composer.text.trim() !== "" || cidField.text.trim() !== "")
+                            onPressed: root.post()
+                        }
+                    }
+                }
+
+                // The change being proved, and anything to report.
+                Hint {
+                    visible: root.job !== null
+                    color: root.brass
+                    font.pixelSize: 16
+                    text: root.job === null ? "" : root.job.label + ": proving it on this computer, so the chain never learns your account. About 4 min, "
+                        + Math.max(0, Math.floor((Math.max(root.clockTick, Date.now()) - root.job.started) / 60000)) + " so far."
+                }
+                Hint {
+                    visible: root.job === null && root.notice !== ""
+                    color: root.noticeIsError ? root.alarm : root.dim
+                    text: root.notice
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Link {
+                        visible: root.view === "thread"
+                        text: "← Back"
+                        color: root.faint
+                        font.underline: false
+                        onPressed: root.show("all")
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: root.view === "thread" ? "Thread" : root.view === "following" ? "Following" : "All posts"
+                        color: root.ink
+                        font.family: root.sans
+                        font.pixelSize: 22
+                        font.weight: Font.DemiBold
+                    }
+                    Link { text: root.loading ? "Loading…" : "Refresh"; color: root.faint; font.pixelSize: 15; onPressed: root.load() }
+                }
+
+                Hint {
+                    visible: !root.loading && root.posts.length === 0
+                    font.pixelSize: 17
+                    text: root.loadError !== "" ? "Couldn't load the board: " + root.loadError
+                        : root.view === "following" && root.follows.length === 0 ? "You don't follow anyone yet. Press Follow on a post."
+                        : "No posts yet."
+                }
+
+                Repeater {
+                    model: root.posts
+                    Card {
+                        id: card
+                        required property var modelData
+                        readonly property var who: root.people[modelData.name] || ({ display: "", color: "", pixels: null })
+                        readonly property bool isMine: root.mine.some(function(entry) { return entry.name === card.modelData.name })
+                        visible: !modelData.hidden
+                        Layout.fillWidth: true
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 14
+                            Avatar {
+                                Layout.preferredWidth: 44
+                                Layout.preferredHeight: 44
+                                Layout.alignment: Qt.AlignTop
+                                pixels: card.who.pixels
+                                owner: card.modelData.name
+                                letter: card.modelData.name.charAt(0)
+                                ring: card.who.color !== "" ? card.who.color : root.brass
+                            }
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 6
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    Text {
+                                        visible: card.who.display !== ""
+                                        text: card.who.display
+                                        textFormat: Text.PlainText
+                                        color: root.ink
+                                        font.family: root.sans
+                                        font.pixelSize: 17
+                                        font.weight: Font.DemiBold
+                                    }
+                                    Text {
+                                        text: card.modelData.name
+                                        color: card.who.display !== "" ? root.faint : root.ink
+                                        font.family: root.sans
+                                        font.pixelSize: card.who.display !== "" ? 15 : 17
+                                        font.weight: card.who.display !== "" ? Font.Normal : Font.DemiBold
+                                    }
+                                    Text { text: "· " + root.ago(card.modelData.time); color: root.faint; font.family: root.sans; font.pixelSize: 14 }
+                                    Item { Layout.fillWidth: true }
+                                    Link {
+                                        visible: !card.isMine
+                                        text: root.follows_(card.modelData.name) ? "Following" : "Follow"
+                                        color: root.follows_(card.modelData.name) ? root.faint : root.brass
+                                        font.pixelSize: 14
+                                        onPressed: root.follow(card.modelData.name, root.follows_(card.modelData.name))
+                                    }
+                                }
+                                Text {
+                                    visible: card.modelData.parent !== null && card.modelData.parent !== undefined
+                                    text: "replying to " + (card.modelData.parent ? root.nameOf(card.modelData.parent) : "")
+                                    color: root.faint
+                                    font.family: root.sans
+                                    font.pixelSize: 13
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    visible: card.modelData.text !== ""
+                                    text: card.modelData.text
+                                    textFormat: Text.PlainText
+                                    color: root.dim
+                                    font.family: root.sans
+                                    font.pixelSize: 17
+                                    lineHeight: 1.2
+                                    wrapMode: Text.Wrap
+                                }
+                                Flow {
+                                    Layout.fillWidth: true
+                                    visible: card.modelData.cids.length > 0
+                                    spacing: 8
+                                    Repeater {
+                                        model: card.modelData.cids
+                                        Chip {
+                                            required property string modelData
+                                            label: "File " + modelData.substr(0, 10) + "… · Copy CID"
+                                            link: true
+                                            onPressed: root.copy(modelData, "The CID")
+                                        }
+                                    }
+                                }
+                                RowLayout {
+                                    spacing: 18
+                                    Link {
+                                        text: "Reply"
+                                        color: root.faint
+                                        font.pixelSize: 14
+                                        visible: root.mine.length > 0
+                                        onPressed: { root.replyTo = card.modelData.post; composer.forceActiveFocus() }
+                                    }
+                                    Link {
+                                        text: "♥ " + Math.max(0, card.modelData.likes)
+                                        color: root.faint
+                                        font.pixelSize: 14
+                                        font.underline: false
+                                        onPressed: if (root.mine.length > 0) root.like(card.modelData.post, false)
+                                    }
+                                    Link {
+                                        visible: root.view !== "thread"
+                                        text: "Thread"
+                                        color: root.faint
+                                        font.pixelSize: 14
+                                        onPressed: root.show("thread", card.modelData.parent ? card.modelData.parent : card.modelData.post)
+                                    }
+                                    Link {
+                                        visible: card.isMine
+                                        text: "Take down"
+                                        color: root.faint
+                                        font.pixelSize: 14
+                                        onPressed: root.hide(card.modelData.post)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
