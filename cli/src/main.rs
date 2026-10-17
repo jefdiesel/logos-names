@@ -881,10 +881,15 @@ impl Client {
         if !wait {
             let log = self.finish_in_background(name, owner, term, rpc)?;
             println!(
-                "{name}{NAME_SUFFIX} is committed; it registers in the background from {} (about {} minutes)",
-                readable(ready),
-                MIN_COMMIT_AGE_MS / 60_000 + 5
+                "{name}{NAME_SUFFIX} is committed; it finishes by itself in about {} minutes, from {}",
+                MIN_COMMIT_AGE_MS / 60_000 + 5,
+                readable(ready)
             );
+            println!(
+                "  it waits until the commitment is {} minutes old, so nobody who saw it can take the name first,",
+                MIN_COMMIT_AGE_MS / 60_000
+            );
+            println!("  then proves the last step on this computer (about 4 minutes); keep this computer on and awake");
             println!("check with `names mine`; the log is {}", log.display());
             return Ok(false);
         }
@@ -1267,7 +1272,7 @@ impl Client {
             }
             let program = self.program().await?;
             let program = ProgramWithDependencies::new(program, self.program, Default::default());
-            println!("acting privately; generating the proof (this takes minutes)");
+            println!("acting privately; proving it on this computer (about 4 minutes), so the chain never learns your account");
             let (hash, shared) = self
                 .wallet
                 .send_privacy_preserving_tx(mentions, borsh::to_vec(instruction)?, &program)
@@ -1417,7 +1422,7 @@ impl Client {
         // From a private account this is a deshielded transfer: the chain sees the
         // public account credited, but not who paid.
         let (hash, sender_secret) = if self.is_private(from) {
-            println!("from a private account; generating the proof (this takes minutes)");
+            println!("from a private account; proving it on this computer (about 4 minutes), so the chain never learns your account");
             NativeTokenTransfer(&self.wallet)
                 .send_deshielded_transfer(from, to, amount)
                 .await

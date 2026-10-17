@@ -72,7 +72,7 @@ BRIDGE = r"""
             // hopper.lez and ada.lez are held privately by the names CLI's wallet.
             if (method === "cli_mine") return ok(["hopper", "ada"].map(function(name) {
                 return { name: name, display: name + ".lez", signer: "cli", state: "held by a deposit (no expiry)", lapsed: false, registering: false, failed: false } }).concat(
-                [{ name: "knuth", display: "knuth.lez", signer: "cli", state: "registering, ready in 12 min", lapsed: false, registering: true, failed: false }]))
+                [{ name: "knuth", display: "knuth.lez", signer: "cli", state: "registering, the last step starts in about 9 minutes", lapsed: false, registering: true, failed: false }]))
             if (method === "cli_set_text" || method === "cli_profile" || method === "cli_set_page" || method === "cli_register")
                 return ok({ id: args[0] + "-1792000000000", name: args[0], kind: method.substr(4), state: "running", started: Date.now() - 125000 })
             if (method === "cli_balance") return ok({ account: "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", balance: root.missing === "pauper" ? "5000" : "250000000" })
@@ -131,6 +131,7 @@ SCENARIOS = {
     "register-public": 'root.show("satoshi"); root.publicRegisterOpen = true',
     "register-new": 'root.openRegister()',
     "register-taken": 'root.openRegister(); root.checkRegister("jef")',
+    "register-step1": 'root.show("satoshi"); root.registerPrivately()',
     "register-poor": 'root.show("pauper")',
     "lapsed": 'root.manage("grace")',
     "waiting": 'root.manage("grace"); root.releaseName()',

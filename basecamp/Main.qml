@@ -24,6 +24,7 @@ Item {
 
     property var myNames: []           // [{name, display, owner, expires, never, lapsed}]: names the wallet holds; owner is the wallet account
     property var pendingNames: []      // [{name, display, owner, stage, ready_at, tx}]: registrations still finishing
+    property real clockTick: Date.now()  // now, updated every few seconds for elapsed times
     property var cliPending: []        // [{name, display, state, registering, failed}]: the CLI's registrations still finishing, or stopped
     property var cliNames: []          // [{name, display, signer: "cli", state, lapsed}]: names the names CLI's wallet holds
     property string cliPath: ""        // the names CLI the module runs, and its wallet folder
@@ -434,6 +435,13 @@ Item {
         onTriggered: root.revealDue()
     }
 
+    Timer {
+        interval: 5000
+        repeat: true
+        running: root.pending !== null
+        onTriggered: root.clockTick = Date.now()
+    }
+
     // The names CLI finishes a private registration by itself; this notices
     // when it has, and shows the name once it is registered.
     Timer {
@@ -640,7 +648,7 @@ Item {
             say("For a name the names CLI holds, only its profile, entries and page can be changed here.", true)
             return
         }
-        var job = { name: name, settled: settled, done: done, cli: true, id: "", asking: false, started: Date.now() }
+        var job = { name: name, kind: method, settled: settled, done: done, cli: true, id: "", asking: false, started: Date.now() }
         pending = job
         say("Starting the names CLI.", false)
         askLater(cliMethod, args, function(value) {
@@ -654,9 +662,43 @@ Item {
         })
     }
 
+    /// What a CLI job is doing, with how long it has taken against how long it takes.
     function savingText(job) {
         var minutes = Math.floor((Date.now() - job.started) / 60000)
-        return "Saving… a few minutes (proving on this machine)" + (minutes > 0 ? ", " + minutes + " min so far." : ".")
+        var sofar = minutes > 0 ? ", " + minutes + " min so far" : ""
+        if (job.kind === "register")
+            return "Step 1 of 3: proving the commitment on this computer. About 4 min" + sofar + "."
+        return "Proving the change on this computer, so the chain never learns your account. About 4 min" + sofar + "."
+    }
+
+    /// The three steps of a private registration, for the register card and its progress.
+    readonly property var registerSteps: [
+        { title: "Prove the commitment", time: "about 4 min",
+          why: "Your computer builds a zero-knowledge proof. The chain checks it without learning which account is yours." },
+        { title: "Wait", time: "until 15 min after step 1",
+          why: "The commitment hides which name you picked. Waiting means nobody who sees it can rush to take the name first." },
+        { title: "Prove and register", time: "about 4 min",
+          why: "A second proof reveals the name and moves the deposit. Then it's yours." }
+    ]
+
+    /// Which step a registration of `name` is on: 1 to 3, or 0 when none is under way.
+    function registerStepOf(name) {
+        if (pending !== null && pending.cli && pending.kind === "register" && pending.name === name)
+            return 1
+        var under = cliPendingFor(name)
+        if (under === null || under.failed)
+            return 0
+        return /finishing now/.test(under.state) ? 3 : 2
+    }
+
+    /// A short line for a registration under way, from what the CLI says.
+    function pendingLine(entry) {
+        if (entry.failed)
+            return "Stopped. Open it to try again"
+        var minutes = /about (\d+) minutes/.exec(entry.state)
+        if (/finishing now/.test(entry.state))
+            return "Step 3 of 3 · about 4 min left"
+        return "Step 2 of 3 · " + (minutes ? "waiting " + minutes[1] + " min" : /about a minute/.test(entry.state) ? "waiting 1 min" : "waiting") + ", then about 4"
     }
 
     function checkCliJob() {
@@ -1611,6 +1653,65 @@ Item {
         }
     }
 
+    /// The steps of a private registration; `active` (1 to 3) marks the one
+    /// under way, the ones before it done. 0 shows them as a plan.
+    component Steps: ColumnLayout {
+        id: steps
+        property int active: 0
+        property string note: ""
+        spacing: 12
+        Repeater {
+            model: root.registerSteps
+            RowLayout {
+                id: stepRow
+                required property var modelData
+                required property int index
+                readonly property bool done: steps.active > index + 1
+                readonly property bool now: steps.active === index + 1
+                Layout.fillWidth: true
+                spacing: 14
+                Rectangle {
+                    Layout.alignment: Qt.AlignTop
+                    width: 30
+                    height: 30
+                    radius: 15
+                    color: stepRow.now ? root.brass : stepRow.done ? "#96D678" : "transparent"
+                    border.width: stepRow.now || stepRow.done ? 0 : 1
+                    border.color: root.line
+                    Text {
+                        anchors.centerIn: parent
+                        text: stepRow.done ? "✓" : String(stepRow.index + 1)
+                        color: stepRow.now || stepRow.done ? root.slate : root.dim
+                        font.family: root.sans
+                        font.pixelSize: 15
+                        font.weight: Font.DemiBold
+                    }
+                }
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 2
+                    Text {
+                        Layout.fillWidth: true
+                        text: stepRow.modelData.title + "  ·  " + (stepRow.now && steps.note !== "" ? steps.note : stepRow.modelData.time)
+                        color: stepRow.now ? root.brass : root.ink
+                        font.family: root.sans
+                        font.pixelSize: 17
+                        font.weight: Font.DemiBold
+                        wrapMode: Text.Wrap
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: stepRow.modelData.why
+                        color: root.faint
+                        font.family: root.sans
+                        font.pixelSize: 14
+                        wrapMode: Text.Wrap
+                    }
+                }
+            }
+        }
+    }
+
     /// A small label over a value.
     component Figure: ColumnLayout {
         property string label: ""
@@ -1917,7 +2018,7 @@ Item {
                                 }
                                 Text {
                                     Layout.fillWidth: true
-                                    text: pendingRow.modelData.failed ? "Open it to try again" : String(pendingRow.modelData.state).replace(/^registering, /, "").replace(/^ready/, "Ready")
+                                    text: root.pendingLine(pendingRow.modelData)
                                     color: root.faint
                                     font.family: root.sans
                                     font.pixelSize: 13
@@ -2247,7 +2348,7 @@ Item {
                     RowLayout {
                         spacing: 10
                         readonly property bool reserved: root.deposit !== null && root.deposit.tier === "locked"
-                        readonly property bool underway: root.cliPendingFor(root.missing) !== null && !root.cliPendingFor(root.missing).failed
+                        readonly property bool underway: root.registerStepOf(root.missing) > 0
                         Rectangle { width: 10; height: 10; radius: 5; color: parent.reserved ? root.alarm : parent.underway ? root.brass : "#96D678" }
                         Text {
                             text: parent.underway ? "Registering privately for you" : parent.reserved ? "Reserved: one- and two-character names are released by the registry's admin" : "Available"
@@ -2258,13 +2359,40 @@ Item {
                     }
                     // A private registration through the names CLI, under way or stopped.
                     Hint {
-                        visible: root.cliPendingFor(root.missing) !== null
+                        visible: root.cliPendingFor(root.missing) !== null && root.cliPendingFor(root.missing).failed
                         font.pixelSize: 18
-                        color: root.cliPendingFor(root.missing) !== null && root.cliPendingFor(root.missing).failed ? root.alarm : root.brass
-                        text: root.cliPendingFor(root.missing) === null ? "" : "Your names CLI: " + root.cliPendingFor(root.missing).state + "."
+                        color: root.alarm
+                        text: root.cliPendingFor(root.missing) === null ? "" : "It stopped: " + root.cliPendingFor(root.missing).state + "."
+                    }
+                    Card {
+                        visible: root.registerStepOf(root.missing) > 0
+                        Layout.fillWidth: true
+                        Text {
+                            text: "Registering " + root.missing + ".lez privately"
+                            color: root.ink
+                            font.family: root.sans
+                            font.pixelSize: 22
+                            font.weight: Font.DemiBold
+                        }
+                        Steps {
+                            Layout.fillWidth: true
+                            active: root.registerStepOf(root.missing)
+                            note: {
+                                var step = root.registerStepOf(root.missing)
+                                var under = root.cliPendingFor(root.missing)
+                                if (step === 1 && root.pending !== null)
+                                    return "about 4 min, " + Math.max(0, Math.floor((Math.max(root.clockTick, Date.now()) - root.pending.started) / 60000)) + " so far"
+                                if (step === 2 && under !== null) {
+                                    var minutes = /about (\d+) minutes/.exec(under.state)
+                                    return minutes ? minutes[1] + " min to go" : "about a minute to go"
+                                }
+                                return ""
+                            }
+                        }
+                        Hint { font.pixelSize: 15; text: "Keep this computer on and awake. You can close this screen and keep using the app; the name shows under My names when it's done." }
                     }
                     ColumnLayout {
-                        visible: root.cliPendingFor(root.missing) === null || root.cliPendingFor(root.missing).failed
+                        visible: root.registerStepOf(root.missing) === 0
                         Layout.fillWidth: true
                         spacing: 22
                     ColumnLayout {
@@ -2310,8 +2438,12 @@ Item {
                                 Layout.alignment: Qt.AlignTop
                                 label: "Time"
                                 value: "About 20 min"
-                                note: "A few minutes proving, then about 15 minutes more. Keep this computer on until it's done."
+                                note: "Three steps, below. Keep this computer on and awake until it's done."
                             }
+                        }
+                        Steps {
+                            Layout.fillWidth: true
+                            Layout.topMargin: 4
                         }
                         Text {
                             Layout.fillWidth: true
