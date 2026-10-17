@@ -294,6 +294,9 @@ pub trait NamesModule: Send + 'static {
     /// by the names this device follows.
     fn board_feed(&mut self, following: bool) -> String;
 
+    /// The recent posts by `name`, newest first, answered as `board_feed` is.
+    fn board_posts_of(&mut self, name: String) -> String;
+
     /// A post (`<name>/<n>`) and its replies, oldest first, answered as `board_feed` is.
     fn board_thread(&mut self, post: String) -> String;
 
@@ -1541,6 +1544,15 @@ impl NamesModule for Names {
             let follows = if following { self.follows.clone() } else { Vec::new() };
             let key = format!("feed:{}", follows.join(","));
             Ok(self.board_read(key, move || cli::run_feed(&setup, &follows)))
+        })())
+    }
+
+    fn board_posts_of(&mut self, name: String) -> String {
+        reply((|| {
+            let name = registry::parse_name(&name)?;
+            let setup = self.cli_setup()?;
+            let names = vec![name.clone()];
+            Ok(self.board_read(format!("feed:{name}"), move || cli::run_feed(&setup, &names)))
         })())
     }
 

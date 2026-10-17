@@ -80,6 +80,9 @@ Item {
     property bool chatNewGroup: false   // the New group form is open
     property bool boardAttach: false    // the post box shows its file field
     property bool registerHow: false    // the register card shows its three steps
+    property var authorPosts: []        // the posts of the name on the plate, newest first
+    property string authorOf: ""        // whose posts those are
+    property bool authorLoading: false
     property bool anonPublic: false     // the anon name, once made, moves to its own public account
     property bool confirmingRelease: false
     property var pending: null         // a change that was sent and is not confirmed yet
@@ -636,6 +639,26 @@ Item {
         pageAll = false
         pageLink = ""
         read(name)
+        if (record !== null)
+            loadAuthorPosts(record.name)
+    }
+
+    /// The posts of `name`, for its page. Answers at once with the last read
+    /// and looks again shortly while a newer one is on its way.
+    function loadAuthorPosts(name) {
+        if (authorOf !== name)
+            authorPosts = []
+        authorOf = name
+        authorLoading = true
+        askLater("board_posts_of", [name], function(value) {
+            if (authorOf !== name)
+                return
+            value = value || {}
+            authorPosts = value.posts || []
+            authorLoading = !!value.updating
+            if (value.updating)
+                authorRetry.start()
+        }, function() { authorLoading = false }, 150000)
     }
 
     /// Reads a name again without closing the panel the holder is working in.
@@ -1782,6 +1805,11 @@ Item {
         repeat: true
         running: root.section === "posts" && root.boardJob === null && root.boardView !== "thread"
         onTriggered: { root.clockTick = Date.now(); root.boardLoad() }
+    }
+    Timer {
+        id: authorRetry
+        interval: 3000
+        onTriggered: if (root.record !== null && root.authorOf === root.record.name) root.loadAuthorPosts(root.authorOf)
     }
     Timer {
         id: cliRetry
@@ -3209,6 +3237,7 @@ Item {
                                 Layout.alignment: Qt.AlignTop
                                 pixels: postCard.who.pixels
                                 owner: postCard.p.name
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.show(postCard.p.name) }
                                 letter: postCard.p.name.charAt(0)
                                 ring: postCard.who.color !== "" ? postCard.who.color : root.brass
                             }
@@ -3220,6 +3249,7 @@ Item {
                                     spacing: 8
                                     Text {
                                         visible: postCard.who.display !== ""
+                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.show(postCard.p.name) }
                                         text: postCard.who.display
                                         textFormat: Text.PlainText
                                         color: root.ink
@@ -4490,6 +4520,67 @@ Item {
                             }
                         }
 
+                    }
+
+                    // Their posts.
+                    ColumnLayout {
+                        visible: root.tool !== "settings" && root.record !== null
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Text { text: "Posts"; color: root.ink; font.family: root.sans; font.pixelSize: 18; font.weight: Font.Bold }
+                        Hint {
+                            visible: root.authorPosts.length === 0
+                            font.pixelSize: 15
+                            text: root.authorLoading ? "Loading posts…" : "No posts in the last few hours."
+                        }
+                        Repeater {
+                            model: root.authorPosts.filter(function(post) { return !post.hidden })
+                            Card {
+                                id: authorCard
+                                required property var modelData
+                                Layout.fillWidth: true
+                                Text {
+                                    visible: !!authorCard.modelData.parent_id
+                                    text: "Reply"
+                                    color: root.faint
+                                    font.family: root.sans
+                                    font.pixelSize: 13
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: authorCard.modelData.text
+                                    textFormat: Text.PlainText
+                                    color: root.dim
+                                    font.family: root.sans
+                                    font.pixelSize: 17
+                                    wrapMode: Text.Wrap
+                                }
+                                RowLayout {
+                                    spacing: 18
+                                    Text { text: root.boardAgo(authorCard.modelData.time); color: root.faint; font.family: root.sans; font.pixelSize: 14 }
+                                    Link {
+                                        text: "Reply"
+                                        color: root.faint
+                                        font.pixelSize: 14
+                                        onPressed: { root.boardShow("thread", authorCard.modelData.parent_id ? authorCard.modelData.parent_id : authorCard.modelData.id); root.boardReply(authorCard.modelData.id) }
+                                    }
+                                    Link {
+                                        readonly property bool liked: root.boardLiked.indexOf(authorCard.modelData.id) >= 0
+                                        text: (liked ? "♥ " : "♡ ") + Math.max(liked ? 1 : 0, authorCard.modelData.likes)
+                                        color: liked ? root.alarm : root.faint
+                                        font.pixelSize: 14
+                                        font.underline: false
+                                        onPressed: root.boardToggleLike(authorCard.modelData.id)
+                                    }
+                                    Link {
+                                        text: "Thread"
+                                        color: root.faint
+                                        font.pixelSize: 14
+                                        onPressed: root.boardShow("thread", authorCard.modelData.parent_id ? authorCard.modelData.parent_id : authorCard.modelData.id)
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // The page, drawn from the markup the module sanitized
