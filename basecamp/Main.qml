@@ -59,7 +59,11 @@ Item {
     readonly property var presentationKeys: ["display", "bio", "avatar", "color", "theme", "font"]
     readonly property string profileDisplay: profileText("display")
     readonly property string profileBio: profileText("bio")
-    readonly property string profileAvatar: /^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+\/]+=*$/.test(profileText("avatar")) ? profileText("avatar") : ""
+    // The avatar entry is a `data:` URL, which Basecamp's sandbox won't load,
+    // so the module decodes it and the app paints the pixels: `{name, width,
+    // height, pixels}` for the name on the plate, or null.
+    property var avatarPixels: null
+    readonly property var profileAvatar: record !== null && avatarPixels !== null && avatarPixels.name === record.name ? avatarPixels : null
     readonly property color accent: /^#[0-9a-fA-F]{6}$/.test(profileText("color")) ? readable(profileText("color")) : brass
     readonly property string headingFont: profileText("font") === "serif" ? "Georgia" : profileText("font") === "mono" ? mono : sans
 
@@ -419,7 +423,10 @@ Item {
                 return
             }
             missing = ""
+            if (avatarPixels !== null && avatarPixels.name !== found.name)
+                avatarPixels = null
             record = found
+            loadAvatar(found)
             page = ask("page", [found.name])
             if (!mine && tool !== "pay")
                 tool = ""
@@ -791,6 +798,45 @@ Item {
         if (page === null || page.text === null || page.text === undefined)
             return "This page is not text."
         return String(page.text).substr(0, 4000).replace(/\s+$/, "")
+    }
+
+    /// Asks the module for the pixels of `found`'s avatar, if it has one. A
+    /// reply that lands after another name is on the plate is dropped.
+    function loadAvatar(found) {
+        var name = found.name
+        if (!found.texts || typeof found.texts.avatar !== "string" || found.texts.avatar.trim() === "") {
+            avatarPixels = null
+            return
+        }
+        askLater("avatar", [name], function(value) {
+            if (record === null || record.name !== name)
+                return
+            var ok = value && value.width > 0 && value.height > 0 && value.width <= 128 && value.height <= 128
+                && typeof value.pixels === "string"
+            avatarPixels = ok ? { name: name, width: value.width, height: value.height, pixels: value.pixels } : null
+        }, function() {
+            if (record !== null && record.name === name)
+                avatarPixels = null
+        })
+    }
+
+    /// The bytes of base64 text, as numbers.
+    function base64Bytes(text) {
+        var table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        var out = []
+        var bits = 0, count = 0
+        for (var i = 0; i < text.length; i++) {
+            var value = table.indexOf(text.charAt(i))
+            if (value < 0)
+                continue
+            bits = (bits << 6) | value
+            count += 6
+            if (count >= 8) {
+                count -= 8
+                out.push((bits >> count) & 255)
+            }
+        }
+        return out
     }
 
     function profileText(key) {
@@ -1381,33 +1427,23 @@ Item {
     }
 
     /// The name's picture: the holder's own image when the profile has one,
-    /// drawn crisp so pixel art stays pixel art, otherwise the owner's seal.
-    /// The plate behind it is plain slate, so the round cut is painted over
-    /// the corners rather than masked, which needs no extra Qt module.
+    /// painted block by block from the pixels the module decoded (never from a
+    /// URL), so pixel art stays pixel art; otherwise the owner's seal. The
+    /// plate behind it is plain slate, so the round cut is painted over the
+    /// corners rather than masked, which needs no extra Qt module.
     component Avatar: Item {
         id: avatar
-        property string source: ""
+        property var pixels: null   // {width, height, pixels: base64 RGBA8}
         property string owner: ""
         property string letter: ""
         property color ring: root.brass
-        readonly property bool showsImage: picture.status === Image.Ready
+        readonly property var bytes: pixels !== null ? root.base64Bytes(pixels.pixels) : []
+        readonly property bool showsImage: pixels !== null && bytes.length === pixels.width * pixels.height * 4
         Seal {
             anchors.fill: parent
             visible: !avatar.showsImage
             owner: avatar.owner
             letter: avatar.letter
-        }
-        Image {
-            id: picture
-            anchors.fill: parent
-            visible: avatar.showsImage
-            source: avatar.source
-            sourceSize: Qt.size(256, 256)
-            fillMode: Image.PreserveAspectCrop
-            smooth: false
-            mipmap: false
-            asynchronous: false
-            cache: false
         }
         Canvas {
             id: cut
@@ -1418,6 +1454,31 @@ Item {
                 ctx.reset()
                 var size = Math.min(width, height)
                 var centre = size / 2
+                if (avatar.showsImage) {
+                    // Fill the circle as an image cropped to a square would,
+                    // each source pixel a block with whole-pixel edges, and
+                    // runs of one colour in a row drawn as one block.
+                    var w = avatar.pixels.width, h = avatar.pixels.height, data = avatar.bytes
+                    var scale = size / Math.min(w, h)
+                    var left = (size - w * scale) / 2, top = (size - h * scale) / 2
+                    for (var y = 0; y < h; y++) {
+                        var y0 = Math.round(top + y * scale), y1 = Math.round(top + (y + 1) * scale)
+                        var x = 0
+                        while (x < w) {
+                            var at = (y * w + x) * 4
+                            var run = x + 1
+                            while (run < w && data[at] === data[(y * w + run) * 4] && data[at + 1] === data[(y * w + run) * 4 + 1]
+                                   && data[at + 2] === data[(y * w + run) * 4 + 2] && data[at + 3] === data[(y * w + run) * 4 + 3])
+                                run++
+                            if (data[at + 3] > 0) {
+                                ctx.fillStyle = "rgba(" + data[at] + "," + data[at + 1] + "," + data[at + 2] + "," + (data[at + 3] / 255) + ")"
+                                var x0 = Math.round(left + x * scale), x1 = Math.round(left + run * scale)
+                                ctx.fillRect(x0, y0, x1 - x0, y1 - y0)
+                            }
+                            x = run
+                        }
+                    }
+                }
                 ctx.fillStyle = root.slate
                 ctx.beginPath()
                 ctx.rect(0, 0, size, size)
@@ -1431,6 +1492,7 @@ Item {
             }
         }
         onRingChanged: cut.requestPaint()
+        onBytesChanged: cut.requestPaint()
         onShowsImageChanged: cut.requestPaint()
         onWidthChanged: cut.requestPaint()
     }
@@ -1758,7 +1820,7 @@ Item {
                             Layout.preferredWidth: 104
                             Layout.preferredHeight: 104
                             Layout.alignment: Qt.AlignTop
-                            source: root.profileAvatar
+                            pixels: root.profileAvatar
                             owner: root.record !== null ? root.record.owner_tag : ""
                             letter: root.record !== null ? root.record.name.charAt(0) : ""
                             ring: root.accent

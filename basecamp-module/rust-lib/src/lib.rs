@@ -29,6 +29,7 @@
 //! in the wallet, and the wallet must be open. The module signs only with the
 //! wallet's public accounts.
 
+mod avatar;
 mod changes;
 mod registry;
 mod shortlist;
@@ -74,6 +75,13 @@ pub trait NamesModule: Send + 'static {
     /// `text` is the body if it is valid UTF-8. A null value means no page.
     /// The page is written by the name's owner: treat it as untrusted content.
     fn page(&mut self, name: String) -> String;
+
+    /// The picture in `name`'s `avatar` entry, decoded, for an app that can't
+    /// load a `data:` URL: `{width, height, pixels}`, where `pixels` is base64
+    /// of RGBA8 bytes, row by row from the top left. At most 128 pixels a side
+    /// (a larger picture is scaled down, nearest neighbour). Only PNG is
+    /// decoded. A null value means the name has no avatar this can decode.
+    fn avatar(&mut self, name: String) -> String;
 
     /// The name `account` (base58) has published for itself, or null. The
     /// answer is checked against the name's own record, so it cannot be spoofed.
@@ -795,6 +803,16 @@ impl NamesModule for Names {
     fn page(&mut self, name: String) -> String {
         self.about(&name, |registry, name, derived| {
             Ok(registry.page(name, derived)?.unwrap_or(Value::Null))
+        })
+    }
+
+    fn avatar(&mut self, name: String) -> String {
+        self.about(&name, |registry, name, derived| {
+            let resolved = registry.resolve(name, derived)?;
+            let entry = resolved.as_ref().and_then(|resolved| {
+                resolved.profile.texts.iter().find(|(key, _)| key == "avatar").map(|(_, value)| value.as_str())
+            });
+            Ok(entry.and_then(avatar::pixels).unwrap_or(Value::Null))
         })
     }
 

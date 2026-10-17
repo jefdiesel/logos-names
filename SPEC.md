@@ -613,6 +613,7 @@ module names {
   method recipient(name: tstr) -> tstr
   method resolve(name: tstr) -> tstr
   method page(name: tstr) -> tstr
+  method avatar(name: tstr) -> tstr
   method reverse(account: tstr) -> tstr
   method normalize(input: tstr) -> tstr
 
@@ -655,6 +656,7 @@ with JSON text in the envelope Logos modules use:
 | `recipient("jef.lez")` | `{"name", "display", "public", "public_hex", "private"}`, or `null` if unregistered. `public` is a base58 account ID or `null`; `private` is `{"nullifier_public_key", "viewing_public_key"}` in hex, or `null`. Prefer `private` when it is there. |
 | `resolve("jef.lez")` | `{"name", "display", "owner_tag", "expires", "never", "lapsed", "deposit", "account", "npk", "vpk", "texts"}`, or `null`. A name held by a deposit never expires: `expires` is `null`, `never` true and `lapsed` false; `deposit` is what its deposit account holds (decimal text), which a release refunds. In fee mode `expires` is in milliseconds and `lapsed` is true once it has passed. `owner_tag` is the holder's tag in hex: the chain never names the holder. `null` also covers a fee-mode name that lapsed more than 30 days ago. |
 | `page("jef.lez")` | `{"content_type", "bytes", "text"}`, or `null`. `text` is the body if it is UTF-8. The page is written by the name's owner: treat it as untrusted content. |
+| `avatar("jef.lez")` | `{"width", "height", "pixels"}`, or `null`: the `avatar` entry decoded, for an app that cannot load a `data:` URL. `pixels` is base64 of RGBA8 bytes, row by row from the top left, at most 128 pixels a side (a larger picture is scaled down, nearest neighbour). Only PNG is decoded. |
 | `reverse(account)` | The name the account has published for itself, or `null`. It is checked against the name's own record, so it cannot be spoofed. |
 | `deposit("jef.lez")` | `{"name", "display", "tier", "deposit", "mode"}`: what registering takes. `tier` is `normal`, `three` (three characters, at the higher deposit) or `locked` (one or two characters: only the registry's admin may register it, and `deposit` is `null`). `deposit` is decimal text in the native token's base units, held while the name is and refunded on release. `mode` is `deposit`, `fee` or `unconfigured`; in fee mode `deposit` is 0 and `fee` gives the price of a one-year term. One network read. |
 | `settings()` | `{"mode", "deposits": {"normal", "three"}, "admin", "treasury", "prices": {"30d", "1y", "5y"}}`, amounts as decimal text, or `null` if the registry has no settings yet (it charges nothing, and locks one- and two-character names). |
