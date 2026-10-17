@@ -14,10 +14,11 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use clock_core::{CLOCK_01_PROGRAM_ACCOUNT_ID, ClockAccountData, clock_account_id};
 use lee_core::{
-    account::{AccountId, ProgramShardSelector},
+    account::{AccountId, ProgramShardSelector, ShardData},
+    from_frame,
     program::{
-        AccountMeta, MAX_PROGRAM_SEGMENTS, PROGRAM_LOADER_ACCOUNT_ID, PlanInput, ProgramHeader,
-        ProgramSegment,
+        AccountMeta, ApplyInput, GuestOutput, MAX_PROGRAM_SEGMENTS, PROGRAM_LOADER_ACCOUNT_ID,
+        PlanInput, ProgramHeader, ProgramSegment,
     },
 };
 use lee::{privacy_preserving_transaction::circuit::ProgramWithDependencies, program::Program};
@@ -32,6 +33,7 @@ use names_seal::{
     Derived, PageContent, Profile, TextRecord, derive, open_page, open_profile, seal_page,
     seal_profile, validate_page, validate_profile, validate_text_key,
 };
+use risc0_zkvm::{ExecutorEnv, ExecutorEnvBuilder, default_executor};
 use wallet::{
     AccDecodeData, AccountIdentity, WalletCore,
     config::{SequencerConnectionData, WalletConfigOverrides},
@@ -763,7 +765,7 @@ impl Client {
             .context("the new private account is missing from the wallet")?
             .key_chain;
         let (npk, vpk) = (keys.nullifier_public_key.0, keys.viewing_public_key.to_bytes().to_vec());
-        self.wallet.store_persistent_data()?;
+        quietly(|| self.wallet.store_persistent_data())?;
         Ok((account, npk, vpk))
     }
 
@@ -1101,16 +1103,14 @@ impl Client {
         .await
     }
 
-    /// Runs the program's own `plan` and `apply` against current chain state, returning
-    /// the data each touched shard should hold afterwards. A transaction the program
-    /// would refuse fails here, with the program's reason, before any fee is paid.
-    async fn simulate(
+    /// What the program's `plan` is given for `instruction` over `accounts`, then `paying`.
+    fn plan_input(
         &self,
         accounts: &[(AccountId, bool)],
         paying: &[(AccountId, bool)],
         instruction: &Instruction,
-    ) -> Result<Vec<(AccountId, Vec<u8>)>> {
-        let input = PlanInput {
+    ) -> Result<PlanInput> {
+        Ok(PlanInput {
             self_account_id: self.program,
             caller_account_id: None,
             accounts: accounts
@@ -1123,7 +1123,58 @@ impl Client {
                 )
                 .collect(),
             instruction_data: borsh::to_vec(instruction)?,
+        })
+    }
+
+    /// Executor cycles of the call `input` describes, counted the way the sequencer
+    /// counts them: one run of the registry's bytecode to plan, then one to apply each
+    /// effect, against the chain's current data. The native-token transfers it chains
+    /// run outside the guest and cost no cycles. No proving, so it takes about a second.
+    async fn cycles(&self, input: &PlanInput) -> Result<u64> {
+        let guest = self.program().await?;
+        let (mut total, journal) = run_guest(&guest, |env| Ok(Program::write_plan_inputs(input, env)?))?;
+        let payload = from_frame(&journal).ok_or_else(|| anyhow!("the plan run left no journal"))?;
+        let GuestOutput::Plan(plan) = borsh::from_slice(payload)? else {
+            bail!("the plan run returned an apply journal");
         };
+        // An effect on a shard an earlier effect changed applies to the changed data.
+        let mut changed: std::collections::HashMap<ProgramShardSelector, ShardData> =
+            std::collections::HashMap::new();
+        for effect in plan.effects {
+            let pre_data = match changed.get(&effect.selector) {
+                Some(data) => data.clone(),
+                None => ShardData::try_from(self.shard(effect.selector.account_id).await?)?,
+            };
+            let apply = ApplyInput {
+                self_account_id: self.program,
+                selector: effect.selector,
+                pre_data,
+                effect_data: effect.data,
+            };
+            let (cycles, journal) =
+                run_guest(&guest, |env| Ok(Program::write_apply_inputs(&apply, env)?))?;
+            total = total.saturating_add(cycles);
+            let payload = from_frame(&journal).ok_or_else(|| anyhow!("an apply run left no journal"))?;
+            let GuestOutput::Apply(out) = borsh::from_slice(payload)? else {
+                bail!("an apply run returned a plan journal");
+            };
+            if let Some(post) = out.post_data {
+                changed.insert(effect.selector, post);
+            }
+        }
+        Ok(total)
+    }
+
+    /// Runs the program's own `plan` and `apply` against current chain state, returning
+    /// the data each touched shard should hold afterwards. A transaction the program
+    /// would refuse fails here, with the program's reason, before any fee is paid.
+    async fn simulate(
+        &self,
+        accounts: &[(AccountId, bool)],
+        paying: &[(AccountId, bool)],
+        instruction: &Instruction,
+    ) -> Result<Vec<(AccountId, Vec<u8>)>> {
+        let input = self.plan_input(accounts, paying, instruction)?;
         let effects = refusal_as_error(|| {
             names_core::plan(&input, instruction.clone())
                 .output()
@@ -1187,6 +1238,9 @@ impl Client {
             .collect();
         let mut secrets = Vec::new();
         let hash = if private {
+            if std::env::var_os("LOGOS_NAMES_DRY_RUN").is_some() {
+                bail!("LOGOS_NAMES_DRY_RUN is set, so nothing was sent (a private change pays no gas)");
+            }
             let program = self.program().await?;
             let program = ProgramWithDependencies::new(program, self.program, Default::default());
             println!("acting privately; generating the proof (this takes minutes)");
@@ -1198,10 +1252,25 @@ impl Client {
             secrets = shared;
             hash
         } else {
-            self.wallet
+            // The fee reserve, gas limit x base fee, leaves the payer before the call
+            // runs, and a call that then fails is billed its whole limit; the wallet's
+            // 2,000,000 holds about 16M. So the limit is sized from a run of the
+            // registry's own bytecode, and the payer checked to cover it.
+            let limit = self.gas_limit(&accounts, paying, instruction).await;
+            self.check_payer(&accounts, paying, instruction, limit).await?;
+            if std::env::var_os("LOGOS_NAMES_DRY_RUN").is_some() {
+                bail!("LOGOS_NAMES_DRY_RUN is set, so nothing was sent");
+            }
+            let saved = self.wallet.config().clone();
+            let mut config = saved.clone();
+            config.gas_limit = limit;
+            self.wallet.set_config(config);
+            let sent = self
+                .wallet
                 .send_pub_tx(mentions, borsh::to_vec(instruction)?, self.program)
-                .await
-                .context("the sequencer did not accept the transaction")?
+                .await;
+            self.wallet.set_config(saved);
+            sent.context("the sequencer did not accept the transaction")?
         };
         println!("submitted {hash}");
         let (tx, block) = self
@@ -1217,9 +1286,11 @@ impl Client {
                 .zip(private_accounts)
                 .map(|(secret, account)| AccDecodeData::Decode(secret, account))
                 .collect();
-            self.wallet
-                .decode_insert_privacy_preserving_transaction_results(tx, &decode)?;
-            self.wallet.store_persistent_data()?;
+            quietly(|| {
+                self.wallet
+                    .decode_insert_privacy_preserving_transaction_results(tx, &decode)
+            })?;
+            quietly(|| self.wallet.store_persistent_data())?;
         }
 
         for (account, data) in expected {
@@ -1231,6 +1302,81 @@ impl Client {
             }
         }
         println!("applied in block {block}");
+        Ok(())
+    }
+
+    /// The gas limit for a public call: 1.5 x the cycles of a run of the registry's
+    /// bytecode, at least [`MIN_GAS_LIMIT`]. If the run fails, the wallet's own limit,
+    /// with a warning: the call can still be sent, it just reserves more.
+    async fn gas_limit(
+        &self,
+        accounts: &[(AccountId, bool)],
+        paying: &[(AccountId, bool)],
+        instruction: &Instruction,
+    ) -> u64 {
+        let input = self.plan_input(accounts, paying, instruction);
+        let cycles = match input {
+            Ok(input) => self.cycles(&input).await,
+            Err(error) => Err(error),
+        };
+        match cycles {
+            Ok(cycles) => {
+                let limit = gas_limit_for(cycles);
+                if std::env::var_os("LOGOS_NAMES_DRY_RUN").is_some() {
+                    println!("gas: {cycles} cycles, limit {limit}");
+                }
+                limit
+            }
+            Err(error) => {
+                let limit = self.wallet.config().gas_limit;
+                eprintln!("could not size the gas ({error:#}); using the wallet's limit of {limit}");
+                limit
+            }
+        }
+    }
+
+    /// Checks that the account paying a public call's fee holds what the call takes
+    /// from it (a registration's or renewal's fee or deposit) plus the fee reserve at
+    /// `limit`, so a short account is told so here instead of refused by the sequencer.
+    /// The reserve is priced at the highest base fees the next block can have.
+    async fn check_payer(
+        &self,
+        accounts: &[(AccountId, bool)],
+        paying: &[(AccountId, bool)],
+        instruction: &Instruction,
+        limit: u64,
+    ) -> Result<()> {
+        // The wallet has the first signing account pay the fee.
+        let Some(&(payer, _)) = accounts.iter().chain(paying).find(|(_, signs)| *signs) else {
+            return Ok(());
+        };
+        let spent = match instruction {
+            Instruction::Register { fee, .. } | Instruction::Renew { fee, .. } if !paying.is_empty() => *fee,
+            _ => 0,
+        };
+        let rpc = self.wallet.config().sequencer.sequencer_addr.to_string();
+        // Without the fee market there is nothing to price; the sequencer still checks.
+        let Ok(quote) = rpc_call(&rpc, "getFeeState", serde_json::json!([])) else {
+            return Ok(());
+        };
+        let base_fee = |key: &str| u128::from(quote[key].as_u64().unwrap_or(64));
+        // The transaction's bytes are billed too: the instruction, plus signatures,
+        // nonces and account IDs.
+        let bytes = u128::try_from(borsh::to_vec(instruction)?.len())? + 1_000;
+        let reserve = u128::from(limit) * base_fee("next_base_fee_exec_ceiling")
+            + bytes * base_fee("next_base_fee_stor_ceiling");
+        if std::env::var_os("LOGOS_NAMES_DRY_RUN").is_some() {
+            println!("fee reserve: {reserve} from Public/{payer}, plus {spent} the call moves");
+        }
+        let balance = self.wallet.get_account_balance(payer).await?;
+        if balance < spent.saturating_add(reserve) {
+            if spent > 0 {
+                bail!(
+                    "Public/{payer} holds {balance}; this takes {spent}, and about {reserve} more is held for the fee while it runs"
+                );
+            }
+            bail!("Public/{payer} holds {balance}; about {reserve} is held for the fee while this runs");
+        }
         Ok(())
     }
 
@@ -1287,11 +1433,13 @@ impl Client {
         if let (Some(secret), common::transaction::LeeTransaction::PrivacyPreserving(tx)) =
             (sender_secret, &tx)
         {
-            self.wallet.decode_insert_privacy_preserving_transaction_results(
-                tx,
-                &[AccDecodeData::Decode(secret, from)],
-            )?;
-            self.wallet.store_persistent_data()?;
+            quietly(|| {
+                self.wallet.decode_insert_privacy_preserving_transaction_results(
+                    tx,
+                    &[AccDecodeData::Decode(secret, from)],
+                )
+            })?;
+            quietly(|| self.wallet.store_persistent_data())?;
         }
 
         // A block includes failed transactions too, so confirm the money arrived.
@@ -1333,11 +1481,13 @@ impl Client {
                 .context("the transfer was not included in a block")?;
             // The sender's note was spent and its change made into a new one: record it.
             if let common::transaction::LeeTransaction::PrivacyPreserving(tx) = &tx {
-                self.wallet.decode_insert_privacy_preserving_transaction_results(
-                    tx,
-                    &[AccDecodeData::Decode(sender_secret, from)],
-                )?;
-                self.wallet.store_persistent_data()?;
+                quietly(|| {
+                    self.wallet.decode_insert_privacy_preserving_transaction_results(
+                        tx,
+                        &[AccDecodeData::Decode(sender_secret, from)],
+                    )
+                })?;
+                quietly(|| self.wallet.store_persistent_data())?;
             }
             println!("included in block {block}; the recipient sees it after syncing their private accounts");
             return Ok(());
@@ -1357,7 +1507,7 @@ impl Client {
             )
             .await
             .context("the sequencer did not accept the transfer")?;
-        self.wallet.store_persistent_data()?;
+        quietly(|| self.wallet.store_persistent_data())?;
         println!("submitted {hash}");
         let (_, block) = self
             .wallet
@@ -1587,6 +1737,34 @@ fn serve_page(name: &str, page: Option<&PageContent>, card: &str, port: u16, no_
 }
 
 /// Runs program logic that reports refusal by panicking, turning the panic into an error.
+/// Runs `run` with this process's standard output sent nowhere. The LEZ wallet prints
+/// its internals when it saves ("Stored persistent accounts at ...") and when it takes
+/// in a private account's new state ("Received new acc Account { ... }"), which means
+/// nothing to someone using `names` and would spoil JSON printed on stdout.
+fn quietly<T>(run: impl FnOnce() -> T) -> T {
+    use std::io::Write as _;
+    use std::os::fd::AsRawFd as _;
+    let _ = std::io::stdout().flush();
+    let Ok(null) = std::fs::OpenOptions::new().write(true).open("/dev/null") else {
+        return run();
+    };
+    // SAFETY: plain descriptor calls; stdout is put back before this returns.
+    let saved = unsafe { libc::dup(libc::STDOUT_FILENO) };
+    if saved < 0 || unsafe { libc::dup2(null.as_raw_fd(), libc::STDOUT_FILENO) } < 0 {
+        if saved >= 0 {
+            unsafe { libc::close(saved) };
+        }
+        return run();
+    }
+    let result = run();
+    let _ = std::io::stdout().flush();
+    unsafe {
+        libc::dup2(saved, libc::STDOUT_FILENO);
+        libc::close(saved);
+    }
+    result
+}
+
 fn refusal_as_error<T>(run: impl FnOnce() -> T) -> Result<T> {
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
@@ -1626,7 +1804,7 @@ async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>)
             println!();
             println!("  {mnemonic}");
             println!();
-            wallet.store_persistent_data()?;
+            quietly(|| wallet.store_persistent_data())?;
             wallet
         };
         execute_subcommand(&mut wallet, command).await?;
@@ -1690,7 +1868,7 @@ async fn open_wallet(overrides: Option<WalletConfigOverrides>, save: bool) -> Re
     println!();
     println!("  {mnemonic}");
     println!();
-    wallet.store_persistent_data()?;
+    quietly(|| wallet.store_persistent_data())?;
     Ok(wallet)
 }
 
@@ -1718,6 +1896,28 @@ const REVEAL_ATTEMPTS: u32 = 4;
 
 /// How many blocks to wait for a transaction to be included before giving up.
 const TX_POLL_MAX_BLOCKS: usize = 60;
+/// The least gas limit a registry call is sent with, so a small mis-estimate (the
+/// chain changing between the run here and the sequencer's) can't fail it.
+const MIN_GAS_LIMIT: u64 = 200_000;
+
+/// The gas limit for a call measured at `cycles`: 1.5 x, rounded up, at least
+/// [`MIN_GAS_LIMIT`].
+fn gas_limit_for(cycles: u64) -> u64 {
+    cycles.saturating_add(cycles.div_ceil(2)).max(MIN_GAS_LIMIT)
+}
+
+/// Runs `guest` in the RISC Zero executor (`r0vm`) with the input `write` gives it,
+/// returning the cycles it took and its journal.
+fn run_guest(
+    guest: &Program,
+    write: impl FnOnce(&mut ExecutorEnvBuilder) -> Result<()>,
+) -> Result<(u64, Vec<u8>)> {
+    let mut builder = ExecutorEnv::builder();
+    write(&mut builder)?;
+    let info = default_executor().execute(builder.build()?, guest.elf())?;
+    Ok((info.cycles(), info.journal.bytes))
+}
+
 /// Execution gas for a public native-token transfer: the native token is a built-in
 /// that meters no cycles (only the transaction's bytes are billed, outside this), and
 /// a failed transfer is billed the whole limit, so the wallet's default 2,000,000
@@ -1736,7 +1936,7 @@ async fn setup(client: &mut Client, shield: u128) -> Result<()> {
         Some(id) => id,
         None => client.wallet.create_new_account_private(None).0,
     };
-    client.wallet.store_persistent_data()?;
+    quietly(|| client.wallet.store_persistent_data())?;
     defaults.public = Some(public.to_string());
     defaults.private = Some(private.to_string());
     save_defaults(&defaults)?;
@@ -1764,7 +1964,7 @@ async fn setup(client: &mut Client, shield: u128) -> Result<()> {
             .await
             .context("the transfer was not included in a block")?;
         client.wallet.sync_to_latest_block().await?;
-        client.wallet.store_persistent_data()?;
+        quietly(|| client.wallet.store_persistent_data())?;
     }
     println!("ready: `names register <name>` holds a name privately, `names pay <name>.lez <amount>` pays one");
     Ok(())
