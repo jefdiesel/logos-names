@@ -43,8 +43,14 @@ const DEFAULT_SEQUENCER: &str = "https://testnet.lez.logos.co";
 /// lists, registry v5 in deposit mode.
 const DEFAULT_REGISTRY: &str = "38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq";
 /// Registries a saved configuration may still name whose names use an older
-/// derivation and can't be read by this version (v4.1). They are ignored.
-const RETIRED_REGISTRIES: [&str; 1] = ["2PXg3SSmh5hvECTz4xcfV2d5YvxwyF6yVhpnjTokzCkX"];
+/// derivation and can't be read by this version (v2, v3, v4.0 and v4.1 on the
+/// public testnet). They are ignored.
+const RETIRED_REGISTRIES: [&str; 4] = [
+    "DugXYzVqYsXJumqsjaGtoZeJ742WmdRHGpByi8pNJm2z",
+    "66nUvzJtTxA729aUpTcAWDrb7cV9Heb2bDzceHQhLYad",
+    "E6oXebf6sicLtYBpEMijFdB8mqbXg3HRsWfYoJBgjvdj",
+    "2PXg3SSmh5hvECTz4xcfV2d5YvxwyF6yVhpnjTokzCkX",
+];
 
 pub trait NamesModule: Send + 'static {
     /// Where to send a payment for `name` (`jef.lez` or `jef`). The value is
