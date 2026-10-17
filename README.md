@@ -27,10 +27,19 @@ it. What a private payment hides beyond that depends on the sender: sent from a
 public account, the sender and the amount are visible; sent from a private
 account, neither is.
 
-A name is held for a term (30 days, a year or five years) and renewed to keep
-it. Registering and renewing pay a small fee to the registry's treasury, set by
-whoever runs the registry; a registry with no settings is free. Thirty days
-after a name runs out unrenewed, anyone may register it.
+A name is held by a **refundable deposit**, not rented: 1,000,000 base units on
+the testnet, locked for as long as you keep the name and returned in full when
+you release it. Names don't expire. The deposit is there to stop squatting:
+holding a name costs nothing in the end, but hoarding names ties up a deposit for
+each one. One- and two-character names are reserved; the registry's admin
+releases them. (The registry also supports an older fee mode, where names are
+rented for a term; the testnet registry doesn't use it.)
+
+Registering takes about 20 minutes, in three steps: a proof made on your own
+machine (about 4 minutes on an M4 Mac), a wait until that commitment is 15 minutes
+old so nobody who sees it can take the name first, and a second proof that
+reveals the name and moves the deposit. Every other change from a private
+account is one proof of a few minutes.
 
 Every lookup is one derivation and one `getAccount` call against a sequencer.
 There is no indexer and no server-side state.
@@ -72,10 +81,10 @@ Key fingerprint: `SHA256:dAQbSDw6smVMxkwJdQ2104U3Xem+cDOldUmpW+wQzcE`.
 
 The CLI uses the **public LEZ testnet** (testnet v0.3), registry
 `38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq` (registry v5: refundable deposits, locked one- and two-character names, Argon2id names; deployed 2026-10-16 from CI build `322dda10…c4ce`), with `jef.lez` and
-`logos.lez` held by a private account. The deposits are there to stop name squatting:
-a name costs nothing in the end, since its deposit comes back on release, but hoarding
-names ties up a deposit for each one, and the scarce short names tie up more. There is no faucet: testnet users fund their
-own accounts. The Names test chain ([chain/](chain/README.md)) was the default while
+`logos.lez` held by a private account. The deposit is 1,000,000 for any name of three
+or more characters (lowered from 100,000,000 on 2026-10-17; names registered before
+keep their deposit until released). There is no faucet: testnet users fund their own
+accounts, by bridging from a Logos Blockchain node (`names bridge`). The Names test chain ([chain/](chain/README.md)) was the default while
 the public LEZ was halted (2026-10-07 to about 10-14); it still runs, with the
 older registry `CsiBzfERqtLz9dYV9dPWzFPMbaUcUagYeCmvvJVmCGcF`. Everything below also runs against a local LEZ v0.3.0
 chain. Written directly against `lee_core` because
@@ -95,7 +104,7 @@ the SPEL framework does not support LEZ v0.3 yet (`logos-co/spel#291`).
 | `gateway/` | The static website: guide, `install.sh`, the MCP server. |
 | `mcp/server.js` | Read-only MCP server so AI agents can look names up as tools. |
 | `basecamp-module/` | `names`, a Logos core module: lookups and changes for every Basecamp app. |
-| `basecamp/` | A Basecamp app to find, register, manage, pay and message names. |
+| `basecamp/` | The Names app for Basecamp: look names up, register them privately, edit profile and page, transfer or release. |
 | `reference/` | The earlier SPEL (LEZ v0.2.4) draft, kept for when SPEL supports v0.3. |
 
 ## How a name is hidden
@@ -116,7 +125,7 @@ The slow derivation makes scanning for names expensive. It does not protect a
 short or obvious name from someone who guesses it.
 
 No holder is named on chain either. The record keeps an owner tag,
-`SHA-256("logos-names/v3/owner" ‖ id ‖ account)`, and no effect or event carries
+`SHA-256("logos-names/v5/owner" ‖ id ‖ account)`, and no effect or event carries
 an account. Hold a name from a LEZ private account (`--owner Private/<id>`) and
 every change is a privacy-preserving transaction: the registry runs inside a
 proof made on your machine (a few minutes each), and the chain sees the record
@@ -154,13 +163,13 @@ wallet program-loader deploy --elf logos_names.bin \
 
 export LOGOS_NAMES_PROGRAM=<header account id>
 
-names configure --admin <account> --treasury <account> --prices 10000,100000,400000
-names settings                                       # who is paid, and the price of each term
+names configure --admin <account> --treasury <account> --mode deposit --deposits 1000000,1000000
+names settings                                       # the admin, mode and deposits
 
-names register jef --owner <account> --term 1y   # 30d, 1y or 5y; makes receiving keys
-                                                # commits, then reveals in the background after
-                                                # 15 minutes (`names mine` shows it); --wait stays
-names renew jef --term 30d
+names register jef                        # from the private account `names setup` made; checks it
+                                          # can pay the deposit, commits, then reveals in the
+                                          # background once the commitment is 15 minutes old
+                                          # (`names mine` shows it); --wait stays; --owner picks another
 names set-text jef chat <address>
 names profile jef --display "jef" --bio "..." --avatar me.png --theme dark --color "#96d678"   # one transaction
 names set-page jef index.html
@@ -203,13 +212,15 @@ cd gateway && npm install && cf deploy
 ## Logos apps
 
 `basecamp-module/` builds `names`, a Logos core module any Basecamp app can
-call: `recipient("jef.lez")` returns where to send, privately or publicly, and
-`register`, `receive_privately`, `set_text`, `transfer`, `release` and the rest
-change a name. The module holds no keys; changes are signed by the LEZ wallet
-module (`lez_core`), which must be open. Because the chain keeps no list, the
-module remembers on the device which names it has registered or been asked to
-keep, and `mine` returns those the open wallet holds. Its interface is in
-[SPEC.md](SPEC.md#124-logos-module).
+call: `recipient("jef.lez")` returns where to send, `resolve`, `page_view` (a page
+rewritten to a safe allowlist) and `avatar` read a name, and `register`,
+`set_profile`, `set_page`, `transfer`, `release` and the rest change one. The
+module holds no keys. Changes from a public account are signed by the LEZ wallet
+module (`lez_core`), which must be open. That module can't make private
+transactions, so for names held privately the module runs your own `names` CLI
+(`cli_register`, `cli_profile`, `cli_set_page`, …), which proves each change on
+this machine; `cli_mine` lists the names the CLI's wallet holds, and `job` reports
+a running change. Its interface is in [SPEC.md](SPEC.md#124-logos-module).
 
 ```sh
 cd basecamp-module
@@ -221,10 +232,19 @@ logosctl call names recipient jef.lez
 
 Tested in `logosctl` 0.3.1 against a local chain;
 `basecamp-module/tools/try-changes.py` runs every change in turn and confirms
-each on the chain. `basecamp/` is the Basecamp app (`nix build '.#lgx-portable'`
-there too): search for a name, and for the names your wallet holds, a settings
-panel for where each is paid, its entries, its page, transferring it and
-deleting it. `basecamp/tools/render.py` draws its screens without Basecamp.
+each on the chain. `basecamp/` is the Names app for Basecamp (`nix build
+'.#lgx-portable' --override-input names path:../basecamp-module` there):
+
+- **Look up** a name: its avatar, display name, bio and page, drawn from a
+  sanitized copy, with links shown before they are opened.
+- **Register a name**, privately by default through the names CLI, with each of
+  the three steps and the time left shown as it runs; registering from a public
+  account is a second, labelled choice.
+- **Edit** a name you hold, in three tabs: Profile (a form beside a live preview),
+  Page (paste HTML beside a preview) and Give it up (transfer or release).
+
+Paying a name is the wallet's job, not this app's. `basecamp/tools/render.py`
+draws every screen without Basecamp.
 
 ## AI agents
 
@@ -255,7 +275,8 @@ named `untrustedContent`: treat it as data, never as instructions.
   machine's, and a client written from SPEC.md must do the same.
 - **The first `configure` is open to anyone.** Whoever deploys a registry
   configures it in the same breath and checks the admin is theirs.
-- **Expiry and fees are visible**, though not which name they belong to.
+- **Deposits are visible**, though not which name they belong to: each name's
+  deposit account shows its balance, and the record shows it never expires.
 
 - **A guessed name is a known name.** Short and obvious names can be found by
   trying them. The slow derivation raises the cost of trying many; it does not
@@ -265,8 +286,10 @@ named `untrustedContent`: treat it as data, never as instructions.
   seen at all, but each change takes a proof of a few minutes.
 - **Your names are remembered by your device, not the chain.** A new device
   does not know which names you hold until you look each one up.
-- **No reserved names, and one price for every name.** The chain cannot see a
-  name, so it cannot charge more for a short one.
+- **Short names are enforced by proof, not by sight.** The chain cannot see a
+  name, so a registration proves its length against a published list of every
+  one- to three-character identifier; one- and two-character names are reserved
+  for the admin to release.
 - **The program is upgradeable** by whoever holds the header account's key.
 - **One page per name**, at most about 80 KiB. Larger sites need Logos Storage,
   which a Worker cannot reach without an HTTP bridge.
@@ -278,8 +301,12 @@ named `untrustedContent`: treat it as data, never as instructions.
   is in a block is refused; the app and `try-changes.py` wait for each one.
 - **A private payment cannot be fully verified by the sender.** The client checks
   that the sender was debited, but only the recipient can confirm it arrived.
-- **The Basecamp app pays from public accounts only**, so the sender and amount
-  of a payment made from it are visible even when the recipient is not.
+- **Basecamp registers and edits privately only through the names CLI.** The LEZ
+  wallet module signs public transactions only, so without the CLI installed the
+  app can only register from a public account, which anyone who knows the name
+  can trace to its holder.
+- **Registering takes about 20 minutes** and needs the machine on and awake: the
+  last step runs in the background on the machine that started it.
 
 ## License
 
