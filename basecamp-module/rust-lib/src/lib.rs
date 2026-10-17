@@ -278,8 +278,10 @@ pub trait NamesModule: Send + 'static {
     /// the holder never appears on chain. Starts a job like `cli_set_text`;
     /// it ends once the commitment is made (a proof of a few minutes), and
     /// the CLI finishes the registration in the background about 15 minutes
-    /// later. `cli_mine` lists it with `registering` true until then.
-    fn cli_register(&mut self, name: String) -> String;
+    /// later. `cli_mine` lists it with `registering` true until then. With
+    /// `public`, the CLI then moves it to a new public account funded privately
+    /// (`names make-public`), so it posts in one block and nothing links it to you.
+    fn cli_register(&mut self, name: String, public: bool) -> String;
 
     // ── The LNS board (see board/ and docs/BOARD-PLAN.md) ──────────────
 
@@ -324,7 +326,7 @@ pub trait NamesModule: Send + 'static {
     /// Makes the wallet's anonymous name, a CLI job (`names anon`): a private
     /// transfer of a few minutes, then a registration of about 20 that the CLI
     /// finishes in the background.
-    fn make_anon(&mut self) -> String;
+    fn make_anon(&mut self, public: bool) -> String;
 
     /// Moves `name` from the CLI wallet's private account to a new public account
     /// in it (`names make-public`), so its posts take one block and pay gas. A CLI
@@ -1403,8 +1405,8 @@ impl NamesModule for Names {
         reply((|| cli::run_balance(&self.cli_setup()?))())
     }
 
-    fn cli_register(&mut self, name: String) -> String {
-        let command = match cli::register_args(&name) {
+    fn cli_register(&mut self, name: String, public: bool) -> String {
+        let command = match cli::register_args(&name, public) {
             Ok(command) => command,
             Err(error) => return reply(Err(error)),
         };
@@ -1482,8 +1484,12 @@ impl NamesModule for Names {
         })())
     }
 
-    fn make_anon(&mut self) -> String {
-        self.cli_job("anon", "anon", |_, _, _| Ok((vec!["anon".to_owned()], None, Value::Null)))
+    fn make_anon(&mut self, public: bool) -> String {
+        let mut command = vec!["anon".to_owned()];
+        if public {
+            command.push("--public".to_owned());
+        }
+        self.cli_job("anon", "anon", |_, _, _| Ok((command, None, Value::Null)))
     }
 
     fn spell_check(&mut self, text: String) -> String {
@@ -2100,7 +2106,7 @@ mod tests {
             names.cli_set_text("$(id)".into(), "chat".into(), "x".into()),
             names.cli_set_page("a|b".into(), "text/plain".into(), "x".into()),
             names.cli_profile("jef`id`".into(), r#"{"bio": "x"}"#.into(), false),
-            names.cli_register("--owner=x".into()),
+            names.cli_register("--owner=x".into(), false),
         ] {
             assert!(parsed(&answer)["error"].as_str().expect("an error").contains("1-32 characters"));
         }

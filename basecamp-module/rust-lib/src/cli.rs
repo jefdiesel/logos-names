@@ -129,8 +129,13 @@ impl Setup {
 /// `names register`: from the CLI's private account, so the holder never
 /// appears on chain. It returns once the commitment is made; the CLI reveals
 /// it in the background (`names mine` says when).
-pub fn register_args(name: &str) -> Result<Vec<String>, String> {
-    Ok(vec!["register".to_owned(), "--".to_owned(), registry::parse_name(name)?])
+pub fn register_args(name: &str, public: bool) -> Result<Vec<String>, String> {
+    let mut args = vec!["register".to_owned()];
+    if public {
+        args.push("--public".to_owned());
+    }
+    args.extend(["--".to_owned(), registry::parse_name(name)?]);
+    Ok(args)
 }
 
 /// A board post reference, `<name>/<n>`, checked like anything typed.
@@ -850,7 +855,8 @@ mod tests {
         assert_eq!(names[2]["signer"], "cli");
         assert_eq!(names[2]["registering"], false);
         assert_eq!(names[3]["lapsed"], true);
-        assert_eq!(register_args("Jef.LEZ").unwrap(), strings(&["register", "--", "jef"]));
+        assert_eq!(register_args("Jef.LEZ", false).unwrap(), strings(&["register", "--", "jef"]));
+        assert_eq!(register_args("jef", true).unwrap(), strings(&["register", "--public", "--", "jef"]));
         let newer = parse_mine("a.lez  held by a deposit (no expiry); held privately\nb.lez  held by a deposit (no expiry); held by a public account\n");
         assert_eq!((newer[0]["private"].clone(), newer[1]["private"].clone()), (json!(true), json!(false)));
         assert_eq!(newer[0]["state"], "held by a deposit (no expiry)");
@@ -858,7 +864,7 @@ mod tests {
         let balance = "public accounts (seen on chain):\n  Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk  5\nprivate accounts (only this wallet sees them):\n  Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z  250000000  (default)\nprivate total: 250000000\n";
         assert_eq!(parse_balance(balance), json!({ "account": "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", "balance": "250000000" }));
         assert_eq!(parse_balance("private total: 0\n"), Value::Null);
-        assert!(register_args("--help").is_err());
+        assert!(register_args("--help", false).is_err());
         assert!(parse_mine("no names yet; register one with `names register <name>`\n").is_empty());
     }
 

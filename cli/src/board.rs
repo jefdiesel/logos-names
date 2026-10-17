@@ -404,7 +404,7 @@ fn anon_candidate(attempt: u32) -> Result<String> {
 
 impl Client {
     /// Makes (once) and prints this wallet's anonymous name.
-    pub async fn anon(&mut self, rpc: Option<&str>) -> Result<()> {
+    pub async fn anon(&mut self, public: bool, rpc: Option<&str>) -> Result<()> {
         let defaults = load_defaults();
         if let Some(name) = defaults.anon.clone() {
             if defaults.pending.contains_key(&name) || self.lookup_held(&name).await.is_ok() {
@@ -454,6 +454,9 @@ impl Client {
         println!("funded in block {block}");
         let mut defaults = load_defaults();
         defaults.anon = Some(name.clone());
+        if public && !defaults.then_public.contains(&name) {
+            defaults.then_public.push(name.clone());
+        }
         save_defaults(&defaults)?;
         self.register(&name, account, 1, None, false, rpc).await?;
         let mut defaults = load_defaults();
@@ -483,16 +486,23 @@ impl Client {
             bail!("{name}{NAME_SUFFIX} is already held by a public account");
         }
         let page = self.page(name).await?;
+        // The gas comes from the holder if it can pay, else from the main private
+        // account (an anon's own account holds only its deposit). Either way it
+        // leaves the private pool, so the chain can't see which account paid.
+        let payer = if self.spendable(holder).await >= PUBLIC_GAS_FUND { holder } else { default_private()? };
+        if self.spendable(payer).await < PUBLIC_GAS_FUND {
+            bail!("your private account holds less than the {PUBLIC_GAS_FUND} a public name needs for gas; add funds first");
+        }
         let (public, _) = self.wallet.create_new_account_public(None);
         quietly(|| self.wallet.store_persistent_data())?;
         println!("step 1 of 3: funding Public/{public} with {PUBLIC_GAS_FUND} for gas, privately (about 4 minutes)");
         let (hash, secret) = NativeTokenTransfer(&self.wallet)
-            .send_deshielded_transfer(holder, public, PUBLIC_GAS_FUND)
+            .send_deshielded_transfer(payer, public, PUBLIC_GAS_FUND)
             .await
             .context("the sequencer did not accept the transfer")?;
         let (tx, block) = self.wallet.poll_transaction(hash).await.context("the transfer was not included in a block")?;
         if let common::transaction::LeeTransaction::PrivacyPreserving(tx) = &tx {
-            quietly(|| self.wallet.decode_insert_privacy_preserving_transaction_results(tx, &[AccDecodeData::Decode(secret, holder)]))?;
+            quietly(|| self.wallet.decode_insert_privacy_preserving_transaction_results(tx, &[AccDecodeData::Decode(secret, payer)]))?;
             quietly(|| self.wallet.store_persistent_data())?;
         }
         println!("funded in block {block}");

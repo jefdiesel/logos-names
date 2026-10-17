@@ -53,6 +53,9 @@ struct Defaults {
     /// `register` picks up where it stopped.
     #[serde(default)]
     pending: std::collections::BTreeMap<String, Pending>,
+    /// Names to make public as soon as their registration finishes (`--public`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    then_public: Vec<String>,
     /// This wallet's anonymous name, held by its own private account (`names anon`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     anon: Option<String>,
@@ -208,6 +211,11 @@ enum Command {
         /// shows when it's done).
         #[arg(long)]
         wait: bool,
+        /// Once registered (privately), move it to a new public account funded
+        /// privately for gas, as `names make-public` does: its posts then take one
+        /// block, and nothing links that account to you.
+        #[arg(long)]
+        public: bool,
     },
     /// Hold a name for longer. Anyone may pay for it.
     Renew {
@@ -495,7 +503,12 @@ enum Command {
     /// by a new private account that a private transfer funds, so nothing on chain
     /// links it to your other names. Prints the name; registering it takes about 20
     /// minutes and runs in the background (`names mine` shows it).
-    Anon,
+    Anon {
+        /// Make it a public anon: registered privately, then moved to a new public
+        /// account funded privately, so it posts in one block and nothing links it to you.
+        #[arg(long)]
+        public: bool,
+    },
     /// Move a name you hold privately to a new public account in this wallet, so
     /// its posts take one block (paying a little gas) instead of a 4-minute proof.
     /// Anyone who knows the name can then find that account; it is funded with
@@ -2334,18 +2347,33 @@ async fn main() -> Result<()> {
             term,
             now,
             wait,
+            public,
         } => {
             let owner = match owner {
                 Some(owner) => owner,
                 None => default_private()?,
             };
+            if public {
+                let mut defaults = load_defaults();
+                if !defaults.then_public.contains(&name) {
+                    defaults.then_public.push(name.clone());
+                    save_defaults(&defaults)?;
+                }
+            }
             if !client.register(&name, owner, term, now, wait, cli.rpc.as_deref()).await? {
                 return Ok(());
             }
             let mut defaults = load_defaults();
             if !defaults.names.contains(&name) {
-                defaults.names.push(name);
-                save_defaults(&defaults)?;
+                defaults.names.push(name.clone());
+            }
+            let convert = defaults.then_public.contains(&name);
+            defaults.then_public.retain(|queued| *queued != name);
+            save_defaults(&defaults)?;
+            // Registered privately first, so nothing showed who registered it; now
+            // moved to a public account that a private transfer funds.
+            if convert {
+                client.make_public(&name).await?;
             }
             Ok(())
         }
@@ -2560,7 +2588,7 @@ async fn main() -> Result<()> {
         Command::Post { as_name, text, cids, reply } => client.post(&as_name, text, cids, reply).await,
         Command::Like { as_name, post, undo } => client.like(&as_name, post, undo).await,
         Command::Hide { post } => client.hide(post).await,
-        Command::Anon => client.anon(cli.rpc.as_deref()).await,
+        Command::Anon { public } => client.anon(public, cli.rpc.as_deref()).await,
         Command::MakePublic { name } => client.make_public(&name).await,
         Command::Feed { following, blocks, json } => {
             board::print_posts(&client.feed(blocks, &following).await?, json)

@@ -65,6 +65,8 @@ Item {
     property bool cliKnown: false      // the CLI's names have been read at least once
     property var boardSpelling: []     // [{word, suggestions}] in the post being written
     property string publicAsk: ""      // the name Settings is asking to confirm making public
+    property bool registerPublic: false // a new registration then moves to its own public account
+    property bool anonPublic: false     // the anon name, once made, moves to its own public account
     property bool confirmingRelease: false
     property var pending: null         // a change that was sent and is not confirmed yet
     property string registry: ""
@@ -813,9 +815,11 @@ Item {
         if (busy)
             return
         // The job ending is the answer: the commitment is made.
-        cliChange("register", [name], name, function() {
+        var public_ = registerPublic
+        cliChange("register", [name, public_], name, function() {
             return true
-        }, "Committed privately. " + name + " finishes registering in about 15 to 20 minutes, in the background.")
+        }, "Committed privately. " + name + " finishes registering in about 15 to 20 minutes, in the background"
+           + (public_ ? ", then moves to its own public account (about 10 more minutes)." : "."))
     }
 
     /// Sends the commitment. The reveal follows by itself (see revealDue).
@@ -1256,7 +1260,7 @@ Item {
 
     /// Makes the anon name (once): a CLI job, then a registration the CLI finishes.
     function makeAnon() {
-        boardStart("make_anon", [], "Setting up your anon name", function() {
+        boardStart("make_anon", [anonPublic], "Setting up your anon name", function() {
             askLater("anon_name", [], function(value) { anonName = value || "" }, function() {})
             loadCliMine()
         })
@@ -2514,6 +2518,12 @@ Item {
                                 : "Anon posts come from a separate name, like anon-quiet-otter, held by its own private account. Nothing on chain links it to "
                                   + (root.mainName !== "" ? root.mainName : "your name") + "; only your wallet knows both. Setting it up takes about 25 minutes, once, and a 1,000,000 deposit you get back if you release it."
                         }
+                        RowLayout {
+                            visible: root.anonName === "" || root.cliPendingFor(root.anonName) === null
+                            spacing: 6
+                            Tab { label: "Private anon (4 min posts)"; current: !root.anonPublic; onPressed: root.anonPublic = false }
+                            Tab { label: "Public anon (15 s posts)"; current: root.anonPublic; onPressed: root.anonPublic = true }
+                        }
                         Action {
                             visible: root.anonName === "" || root.cliPendingFor(root.anonName) === null
                             label: "Set up my anon name"
@@ -3197,6 +3207,18 @@ Item {
                             color: root.alarm
                             font.pixelSize: 15
                             text: "That's less than the deposit. Add funds to this private account first."
+                        }
+                        Text { Layout.topMargin: 6; text: "Then"; color: root.faint; font.family: root.sans; font.pixelSize: 15 }
+                        RowLayout {
+                            spacing: 6
+                            Tab { label: "Keep it private"; current: !root.registerPublic; onPressed: root.registerPublic = false }
+                            Tab { label: "Make it public, unlinked"; current: root.registerPublic; onPressed: root.registerPublic = true }
+                        }
+                        Hint {
+                            font.pixelSize: 14
+                            text: root.registerPublic
+                                ? "Registered privately first, so nobody sees who registered it, then moved to a new public account funded privately with 10,000,000 for gas. Posts take about 15 seconds; nothing links that account to you. About 10 more minutes."
+                                : "Posts take about 4 minutes each, free, and nobody can find which account holds it. You can make it public later in Settings."
                         }
                         Action {
                             Layout.topMargin: 6
