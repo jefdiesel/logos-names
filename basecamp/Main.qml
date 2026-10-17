@@ -31,6 +31,8 @@ Item {
     property bool revealing: false     // a pending registration is being asked about
     property var record: null          // the name on the plate
     property var page: null
+    property string editTab: "profile"   // the Edit screen's tab: profile, page or giveup
+    property bool publicRegisterOpen: false // the public-account way to register is shown
     property bool entriesOpen: false     // the Entries part of a name's settings is shown
     property var pagePreview: null       // the page being written, as page_view would show it
     property string missing: ""        // a looked-up name that is not registered
@@ -701,6 +703,7 @@ Item {
         newValueField.text = ""
         newOwnerField.text = ""
         confirmingRelease = false
+        editTab = "profile"
         tool = "settings"
     }
 
@@ -735,9 +738,9 @@ Item {
         { key: "display", label: "Display name", hint: "How you want to be shown" },
         { key: "bio", label: "Bio", hint: "A few lines about you", lines: true },
         { key: "avatar", label: "Avatar", hint: "data:image/png;base64,… (names profile --avatar)" },
-        { key: "theme", label: "Theme", hint: "light, dark or auto" },
-        { key: "color", label: "Color", hint: "#rrggbb, such as #96d678" },
-        { key: "font", label: "Font", hint: "serif, mono or rounded" },
+        { key: "theme", label: "Theme", hint: "light, dark or auto", choices: [["", "Auto"], ["light", "Light"], ["dark", "Dark"]] },
+        { key: "color", label: "Colour", hint: "#rrggbb", swatches: ["#96d678", "#f0c562", "#7fa8ff", "#ff9c8c", "#c3a6ff"] },
+        { key: "font", label: "Font", hint: "serif, mono or rounded", choices: [["", "Sans"], ["serif", "Serif"], ["mono", "Mono"], ["rounded", "Rounded"]] },
         { key: "cid", label: "File (CID)", hint: "A file in Logos Storage" }
     ]
 
@@ -1015,6 +1018,39 @@ Item {
     }
 
     /// How a name can be paid, in a word or two.
+    /// A Profile field as typed in Edit, else as the name has it.
+    function draftText(key) {
+        if (profileDraft[key] !== undefined)
+            return String(profileDraft[key]).trim()
+        return profileText(key)
+    }
+
+    /// The accent the profile being edited would show.
+    readonly property color draftAccent: /^#[0-9a-fA-F]{6}$/.test(draftText("color")) ? readable(draftText("color")) : brass
+
+    /// Who holds the name, in a few words.
+    function holderChip() {
+        if (record === null)
+            return ""
+        if (cliHeld)
+            return "Yours · held privately"
+        if (mine)
+            return "Yours · public account " + shorten(holder)
+        return "Holder not stored on chain"
+    }
+
+    /// How the name is paid, in a few words.
+    function paymentsChip() {
+        if (record === null)
+            return ""
+        return record.npk !== null && record.account !== null ? "Private or public payments" : record.npk !== null ? "Takes private payments" : record.account !== null ? "Takes public payments" : "Not set up for payments"
+    }
+
+    /// The chain this app is on, from the sequencer's address.
+    function networkName() {
+        return /testnet/.test(sequencer) ? "LEZ testnet" : /127\.0\.0\.1|localhost/.test(sequencer) ? "Local chain" : "LEZ"
+    }
+
     function paymentsText() {
         if (record === null)
             return ""
@@ -1433,6 +1469,91 @@ Item {
         }
     }
 
+    /// A rounded label in a row of facts; `link` makes it a button.
+    component Chip: Rectangle {
+        id: chip
+        property string label: ""
+        property bool link: false
+        signal pressed()
+        implicitHeight: 34
+        implicitWidth: chipText.implicitWidth + 30
+        radius: 17
+        color: chip.link && chipArea.containsMouse ? root.hover : "transparent"
+        border.width: 1
+        border.color: root.line
+        Text {
+            id: chipText
+            anchors.centerIn: parent
+            text: chip.label
+            color: chip.link ? root.brass : root.dim
+            font.family: root.sans
+            font.pixelSize: 15
+        }
+        MouseArea {
+            id: chipArea
+            anchors.fill: parent
+            enabled: chip.link
+            hoverEnabled: true
+            cursorShape: chip.link ? Qt.PointingHandCursor : Qt.ArrowCursor
+            onClicked: chip.pressed()
+        }
+    }
+
+    /// One tab of the Edit screen.
+    component Tab: Rectangle {
+        id: tab
+        property string label: ""
+        property bool current: false
+        signal pressed()
+        implicitHeight: 44
+        implicitWidth: tabText.implicitWidth + 32
+        radius: 8
+        color: tab.current ? root.raised : tabArea.containsMouse ? root.hover : "transparent"
+        Text {
+            id: tabText
+            anchors.centerIn: parent
+            text: tab.label
+            color: tab.current ? root.ink : root.dim
+            font.family: root.sans
+            font.pixelSize: 17
+            font.weight: tab.current ? Font.DemiBold : Font.Normal
+        }
+        MouseArea {
+            id: tabArea
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: tab.pressed()
+        }
+    }
+
+    /// A box with no heading of its own, for side-by-side parts.
+    component Card: Rectangle {
+        default property alias content: cardColumn.data
+        implicitHeight: cardColumn.implicitHeight + 52
+        radius: 12
+        color: root.panel
+        border.width: 1
+        border.color: root.line
+        ColumnLayout {
+            id: cardColumn
+            anchors.fill: parent
+            anchors.margins: 26
+            spacing: 14
+        }
+    }
+
+    /// A small label over a value.
+    component Figure: ColumnLayout {
+        property string label: ""
+        property string value: ""
+        property string note: ""
+        spacing: 4
+        Text { text: parent.label; color: root.faint; font.family: root.sans; font.pixelSize: 15 }
+        Text { text: parent.value; color: root.ink; font.family: root.sans; font.pixelSize: 22; font.weight: Font.DemiBold }
+        Text { visible: parent.note !== ""; Layout.fillWidth: true; text: parent.note; color: root.faint; font.family: root.sans; font.pixelSize: 14; wrapMode: Text.Wrap }
+    }
+
     /// A line of explanation under a control.
     component Hint: Text {
         Layout.fillWidth: true
@@ -1683,19 +1804,50 @@ Item {
                     }
                     Repeater {
                         model: root.cliPending
-                        Text {
+                        Rectangle {
+                            id: pendingRow
                             required property var modelData
                             Layout.fillWidth: true
-                            Layout.leftMargin: 8
-                            text: modelData.display + ": " + (modelData.failed ? "not registered" : "registering privately")
-                            color: modelData.failed ? root.alarm : root.dim
-                            font.family: root.sans
-                            font.pixelSize: 17
-                            elide: Text.ElideRight
+                            implicitHeight: pendingColumn.implicitHeight + 20
+                            radius: 8
+                            color: pendingArea.containsMouse ? root.hover : "transparent"
+                            border.width: 1
+                            border.color: root.line
                             MouseArea {
+                                id: pendingArea
                                 anchors.fill: parent
+                                hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: root.show(parent.modelData.name)
+                                onClicked: root.show(pendingRow.modelData.name)
+                            }
+                            ColumnLayout {
+                                id: pendingColumn
+                                x: 10
+                                y: 10
+                                width: parent.width - 20
+                                spacing: 4
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    NameLabel {
+                                        Layout.fillWidth: true
+                                        name: pendingRow.modelData.name
+                                        size: 18
+                                    }
+                                    Text {
+                                        text: pendingRow.modelData.failed ? "Not registered" : "Registering"
+                                        color: pendingRow.modelData.failed ? root.alarm : root.brass
+                                        font.family: root.sans
+                                        font.pixelSize: 13
+                                    }
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: pendingRow.modelData.failed ? "Open it to try again" : String(pendingRow.modelData.state).replace(/^registering, /, "").replace(/^ready/, "Ready")
+                                    color: root.faint
+                                    font.family: root.sans
+                                    font.pixelSize: 13
+                                    elide: Text.ElideRight
+                                }
                             }
                         }
                     }
@@ -1750,10 +1902,9 @@ Item {
                                     weight: Font.Medium
                                 }
                                 Text {
-                                    visible: myRow.modelData.signer === "cli"
-                                    text: "CLI"
-                                    color: root.dim
-                                    font.family: root.mono
+                                    text: myRow.modelData.signer === "cli" ? "Private" : "Public"
+                                    color: root.faint
+                                    font.family: root.sans
                                     font.pixelSize: 13
                                 }
                                 Text {
@@ -1762,10 +1913,6 @@ Item {
                                     color: root.alarm
                                     font.family: root.sans
                                     font.pixelSize: 16
-                                }
-                                IconButton {
-                                    kind: "gear"
-                                    onPressed: root.manage(myRow.modelData.name)
                                 }
                             }
                         }
@@ -1787,8 +1934,16 @@ Item {
 
                 Item { Layout.fillHeight: true }
 
+                RowLayout {
+                    visible: root.sequencer !== ""
+                    spacing: 8
+                    Rectangle { width: 8; height: 8; radius: 4; color: "#96D678" }
+                    Text { text: root.networkName(); color: root.faint; font.family: root.sans; font.pixelSize: 14 }
+                }
                 Link {
                     text: root.settingsOpen ? "Close advanced" : "Advanced"
+                    color: root.faint
+                    font.pixelSize: 15
                     onPressed: root.settingsOpen = !root.settingsOpen
                 }
             }
@@ -1805,9 +1960,9 @@ Item {
 
             ColumnLayout {
                 id: plate
-                x: 40
-                y: 36
-                width: Math.min(parent.width - 80, 640)
+                x: 56
+                y: 40
+                width: Math.min(parent.width - 112, root.tool === "settings" ? 1040 : 820)
                 spacing: 22
 
                 // Settings.
@@ -1944,11 +2099,17 @@ Item {
                         size: 52
                         weight: Font.DemiBold
                     }
-                    Text {
-                        text: root.cliPendingFor(root.missing) !== null && !root.cliPendingFor(root.missing).failed ? "Registering privately for you." : "Nobody holds this name."
-                        color: root.ink
-                        font.family: root.sans
-                        font.pixelSize: 19
+                    RowLayout {
+                        spacing: 10
+                        readonly property bool reserved: root.deposit !== null && root.deposit.tier === "locked"
+                        readonly property bool underway: root.cliPendingFor(root.missing) !== null && !root.cliPendingFor(root.missing).failed
+                        Rectangle { width: 10; height: 10; radius: 5; color: parent.reserved ? root.alarm : parent.underway ? root.brass : "#96D678" }
+                        Text {
+                            text: parent.underway ? "Registering privately for you" : parent.reserved ? "Reserved: one- and two-character names are released by the registry's admin" : "Available"
+                            color: parent.reserved ? root.alarm : parent.underway ? root.brass : "#96D678"
+                            font.family: root.sans
+                            font.pixelSize: 19
+                        }
                     }
                     // A private registration through the names CLI, under way or stopped.
                     Hint {
@@ -1962,6 +2123,7 @@ Item {
                         Layout.fillWidth: true
                         spacing: 22
                     ColumnLayout {
+                        visible: root.cliPath === ""
                         Layout.fillWidth: true
                         spacing: 10
                         Part { text: "Deposit" }
@@ -1972,24 +2134,65 @@ Item {
                         }
                         Hint {
                             visible: root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode === "deposit"
-                            text: (root.deposit !== null && root.deposit.tier === "three" ? "Three-character names take a larger deposit. " : "") + "Testnet. Refunded in full when you release the name; it does not expire on this network. Network fee extra."
+                            text: (root.deposit !== null && root.deposit.tier === "three" ? "Three-character names take a larger deposit. " : "") + "Refunded in full when you release the name. Testnet: names don't expire here. Network fee extra."
                         }
                     }
-                    Panel {
-                        visible: root.cliPath !== ""
-                        title: "Register privately"
-                        Hint { text: "Your names CLI's private account holds the name and pays the deposit. That account never appears on chain, so nobody can find who holds it. Proving takes a few minutes, then the name finishes in about 15 minutes." }
+                    Card {
+                        visible: root.cliPath !== "" && !(root.deposit !== null && root.deposit.tier === "locked")
+                        Layout.fillWidth: true
+                        Text {
+                            text: "Register privately"
+                            color: root.ink
+                            font.family: root.sans
+                            font.pixelSize: 22
+                            font.weight: Font.DemiBold
+                        }
+                        Hint { text: "Held by your private account, which never appears on chain. Nobody can find who holds it." }
+                        GridLayout {
+                            Layout.fillWidth: true
+                            Layout.topMargin: 6
+                            columns: 2
+                            columnSpacing: 24
+                            Figure {
+                                Layout.fillWidth: true
+                                Layout.alignment: Qt.AlignTop
+                                label: "Deposit"
+                                value: root.deposit === null ? "…" : root.deposit.deposit !== null && root.deposit.deposit !== undefined ? root.grouped(root.deposit.deposit) : root.deposit.fee ? root.grouped(root.deposit.fee) : "Not set up"
+                                note: (root.deposit !== null && root.deposit.tier === "three" ? "Three-character names take more. " : "") + "Refunded in full when you release it"
+                            }
+                            Figure {
+                                Layout.fillWidth: true
+                                Layout.alignment: Qt.AlignTop
+                                label: "Time"
+                                value: "About 20 min"
+                                note: "A few minutes proving, then it finishes by itself"
+                            }
+                        }
                         Action {
-                            label: "Register " + root.missing + ".lez privately"
+                            Layout.topMargin: 6
+                            label: "Register " + root.missing + ".lez"
                             strong: true
                             changes: true
                             enabledNow: root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode !== "unconfigured"
                             onPressed: root.registerPrivately()
                         }
+                        Text {
+                            text: "Testnet: names don't expire here. Network fee extra."
+                            color: root.faint
+                            font.family: root.sans
+                            font.pixelSize: 14
+                        }
+                    }
+                    Link {
+                        visible: root.cliPath !== "" && root.wallet.length > 0 && !(root.deposit !== null && root.deposit.tier === "locked")
+                        text: root.publicRegisterOpen ? "Hide the public option" : "Register from a public account instead"
+                        color: root.faint
+                        font.pixelSize: 16
+                        onPressed: root.publicRegisterOpen = !root.publicRegisterOpen
                     }
                     Panel {
-                        visible: root.wallet.length > 0
-                        title: root.cliPath !== "" ? "Or from a public account" : "Register it to"
+                        visible: root.wallet.length > 0 && (root.cliPath === "" || root.publicRegisterOpen)
+                        title: root.cliPath !== "" ? "From a public account" : "Register it to"
                         Accounts {}
                         Hint {
                             color: root.cliPath !== "" ? root.dim : root.brass
@@ -2026,6 +2229,7 @@ Item {
                     spacing: 22
 
                     RowLayout {
+                        visible: root.tool !== "settings"
                         Layout.fillWidth: true
                         spacing: 22
                         Avatar {
@@ -2083,27 +2287,70 @@ Item {
                                 elide: Text.ElideRight
                             }
                         }
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
-                        Action {
-                            label: "Copy link"
-                            onPressed: root.copy(root.linkFor(root.record.name), "Link")
-                        }
-                        Item { Layout.fillWidth: true }
                         Action {
                             visible: root.mine
+                            Layout.alignment: Qt.AlignTop
                             label: "Edit"
+                            strong: true
                             onPressed: root.openSettings()
                         }
                     }
 
+                    Flow {
+                        visible: root.tool !== "settings"
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Chip { label: root.holderChip() }
+                        Chip { label: root.paymentsChip() }
+                        Chip {
+                            visible: root.record !== null && root.someAmount(root.record.deposit)
+                            label: root.record !== null && root.someAmount(root.record.deposit) ? "Deposit " + root.grouped(root.record.deposit) : ""
+                        }
+                        Chip {
+                            visible: root.record !== null && !root.record.never
+                            label: root.record === null || root.record.never ? "" : (root.record.lapsed ? "Lapsed " : "Held until ") + root.dated(root.record.expires)
+                        }
+                        Chip {
+                            label: "Copy link"
+                            link: true
+                            onPressed: root.copy(root.linkFor(root.record.name), "Link")
+                        }
+                    }
+
                     // The holder's settings for this name.
-                    Panel {
+                    ColumnLayout {
                         visible: root.tool === "settings"
-                        title: root.record !== null ? "Edit " + root.shown(root.record.name) : ""
+                        Layout.fillWidth: true
+                        spacing: 16
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 20
+                            Link {
+                                text: "← Back"
+                                color: root.faint
+                                font.underline: false
+                                onPressed: root.tool = ""
+                            }
+                            Text {
+                                text: "Edit"
+                                color: root.ink
+                                font.family: root.sans
+                                font.pixelSize: 24
+                                font.weight: Font.DemiBold
+                            }
+                            NameLabel {
+                                Layout.leftMargin: -12
+                                name: root.record !== null ? root.record.name : ""
+                                size: 24
+                                weight: Font.DemiBold
+                            }
+                            Item { Layout.preferredWidth: 8 }
+                            Tab { label: "Profile"; current: root.editTab === "profile"; onPressed: root.editTab = "profile" }
+                            Tab { label: "Page"; current: root.editTab === "page"; onPressed: root.editTab = "page" }
+                            Tab { label: "Give it up"; current: root.editTab === "giveup"; onPressed: root.editTab = "giveup" }
+                            Item { Layout.fillWidth: true }
+                        }
+                        Rectangle { Layout.fillWidth: true; height: 1; color: root.line }
 
                         Hint {
                             visible: root.cliHeld && root.busy && root.notice !== ""
@@ -2113,10 +2360,17 @@ Item {
                         Hint {
                             visible: root.cliHeld && !root.busy
                             color: root.brass
-                            text: "Held privately by the names CLI on this machine. Each save is proven here and takes a few minutes; keep Basecamp open until it is done."
+                            text: "Held privately. Each save is proven on this machine and takes a few minutes; keep Basecamp open until it is done."
                         }
-                        Part { text: "Profile" }
-                        Hint { text: "All optional. Shown wherever your name is." + (root.cliHeld ? " For the avatar, give the full path of a PNG file." : "") }
+                        RowLayout {
+                        visible: root.editTab === "profile"
+                        Layout.fillWidth: true
+                        spacing: 40
+                        ColumnLayout {
+                        Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignTop
+                        spacing: 12
+                        Hint { text: "All optional." + (root.cliHeld ? " For the avatar, give the full path of a PNG file." : "") }
                         Repeater {
                             model: root.profileFields
                             RowLayout {
@@ -2147,9 +2401,50 @@ Item {
                                         root.profileDraft = draft
                                     }
                                 }
-                                Field {
-                                    visible: profileRow.modelData.lines !== true
+                                Flow {
+                                    visible: profileRow.modelData.choices !== undefined
                                     Layout.fillWidth: true
+                                    spacing: 6
+                                    Repeater {
+                                        model: profileRow.modelData.choices || []
+                                        Tab {
+                                            required property var modelData
+                                            label: modelData[1]
+                                            current: root.draftText(profileRow.modelData.key).toLowerCase() === modelData[0]
+                                            onPressed: {
+                                                var draft = Object.assign({}, root.profileDraft)
+                                                draft[profileRow.modelData.key] = modelData[0]
+                                                root.profileDraft = draft
+                                            }
+                                        }
+                                    }
+                                }
+                                Row {
+                                    visible: profileRow.modelData.swatches !== undefined
+                                    spacing: 8
+                                    Repeater {
+                                        model: profileRow.modelData.swatches || []
+                                        Rectangle {
+                                            required property string modelData
+                                            width: 34
+                                            height: 34
+                                            radius: 17
+                                            color: modelData
+                                            border.width: root.draftText("color").toLowerCase() === modelData ? 3 : 0
+                                            border.color: root.ink
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: profileField.text = parent.modelData
+                                            }
+                                        }
+                                    }
+                                }
+                                Field {
+                                    id: profileField
+                                    visible: profileRow.modelData.lines !== true && profileRow.modelData.choices === undefined
+                                    Layout.fillWidth: true
+                                    Layout.maximumWidth: profileRow.modelData.swatches !== undefined ? 130 : 100000
                                     size: 19
                                     hint: root.cliHeld && profileRow.modelData.key === "avatar" ? "Full path of a PNG file, such as /Users/you/me.png" : profileRow.modelData.hint
                                     text: root.record !== null && root.record.texts && root.record.texts[profileRow.modelData.key] !== undefined ? root.record.texts[profileRow.modelData.key] : ""
@@ -2273,59 +2568,135 @@ Item {
                             Hint { text: "Read by other apps: chat (Logos Chat address), inbox, agent." }
                         }
 
-                        Part { text: "Page" }
-                        Hint { text: "Paste your page's HTML. Anyone can read it." }
-                        Area {
-                            id: pageArea
+                        }
+                        ColumnLayout {
+                            Layout.preferredWidth: 340
+                            Layout.maximumWidth: 340
+                            Layout.alignment: Qt.AlignTop
+                            spacing: 10
+                            Text { text: "How others see it"; color: root.faint; font.family: root.sans; font.pixelSize: 15 }
+                            Card {
+                                Layout.fillWidth: true
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 14
+                                    Avatar {
+                                        Layout.preferredWidth: 64
+                                        Layout.preferredHeight: 64
+                                        pixels: root.profileAvatar
+                                        owner: root.record !== null ? root.record.owner_tag : ""
+                                        letter: root.record !== null ? root.record.name.charAt(0) : ""
+                                        ring: root.draftAccent
+                                    }
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 2
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: root.draftText("display") !== "" ? root.draftText("display") : (root.record !== null ? root.shown(root.record.name) : "")
+                                            textFormat: Text.PlainText
+                                            color: root.ink
+                                            font.family: root.sans
+                                            font.pixelSize: 24
+                                            font.weight: Font.DemiBold
+                                            elide: Text.ElideRight
+                                        }
+                                        Text {
+                                            visible: root.draftText("display") !== ""
+                                            text: root.record !== null ? root.shown(root.record.name) : ""
+                                            color: root.draftAccent
+                                            font.family: root.sans
+                                            font.pixelSize: 15
+                                        }
+                                    }
+                                }
+                                Text {
+                                    visible: root.draftText("bio") !== ""
+                                    Layout.fillWidth: true
+                                    text: root.draftText("bio")
+                                    textFormat: Text.PlainText
+                                    color: root.dim
+                                    font.family: root.sans
+                                    font.pixelSize: 16
+                                    lineHeight: 1.2
+                                    wrapMode: Text.Wrap
+                                    maximumLineCount: 8
+                                    elide: Text.ElideRight
+                                }
+                            }
+                            Hint { font.pixelSize: 14; text: "Anyone who knows the name can read the profile." }
+                        }
+                        }
+
+                        ColumnLayout {
+                        visible: root.editTab === "page"
+                        Layout.fillWidth: true
+                        spacing: 10
+                        RowLayout {
                             Layout.fillWidth: true
-                            implicitHeight: 200
-                            hint: "Paste HTML here, such as <h1>Hi</h1><p>About me…</p>"
-                            onTextChanged: previewTimer.restart()
+                            spacing: 24
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                Layout.preferredWidth: 1
+                                Layout.alignment: Qt.AlignTop
+                                spacing: 8
+                                Text { text: "Paste your page's HTML"; color: root.faint; font.family: root.sans; font.pixelSize: 15 }
+                                Area {
+                                    id: pageArea
+                                    Layout.fillWidth: true
+                                    implicitHeight: 420
+                                    hint: "<h1>Hi</h1>\n<p>About me…</p>"
+                                    onTextChanged: previewTimer.restart()
+                                }
+                                Text { text: "Scripts, styles and images are left out."; color: root.faint; font.family: root.sans; font.pixelSize: 14 }
+                            }
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                Layout.preferredWidth: 1
+                                Layout.alignment: Qt.AlignTop
+                                spacing: 8
+                                Text { text: "Preview · what readers see"; color: root.faint; font.family: root.sans; font.pixelSize: 15 }
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    implicitHeight: 420
+                                    radius: 6
+                                    color: root.panel
+                                    border.width: 1
+                                    border.color: root.line
+                                    clip: true
+                                    Flickable {
+                                        anchors.fill: parent
+                                        anchors.margins: 20
+                                        contentHeight: previewText.implicitHeight
+                                        clip: true
+                                        Text {
+                                            id: previewText
+                                            width: parent.width
+                                            text: pageArea.text === "" ? "Paste HTML on the left to see it here." : root.pagePreview !== null ? root.viewBody(root.pagePreview) : "…"
+                                            textFormat: pageArea.text !== "" && root.pagePreview !== null && root.pagePreview.kind === "html" ? Text.RichText : Text.PlainText
+                                            color: pageArea.text === "" ? root.faint : root.ink
+                                            linkColor: root.accent
+                                            font.family: root.pagePreview !== null && root.pagePreview.kind === "html" ? root.sans : root.mono
+                                            font.pixelSize: root.pagePreview !== null && root.pagePreview.kind === "html" ? 17 : 15
+                                            wrapMode: Text.Wrap
+                                        }
+                                    }
+                                }
+                                Text { text: "Public: anyone who knows the name can read it."; color: root.faint; font.family: root.sans; font.pixelSize: 14 }
+                            }
                         }
                         Timer {
                             id: previewTimer
                             interval: 400
                             onTriggered: root.previewPage()
                         }
-                        Text {
-                            visible: pageArea.text !== ""
-                            text: "Preview"
-                            color: root.dim
-                            font.family: root.sans
-                            font.pixelSize: 15
-                        }
-                        Rectangle {
-                            visible: pageArea.text !== ""
-                            Layout.fillWidth: true
-                            implicitHeight: Math.min(previewText.implicitHeight, 420) + 32
-                            radius: 6
-                            color: "transparent"
-                            border.width: 1
-                            border.color: root.line
-                            clip: true
-                            Flickable {
-                                anchors.fill: parent
-                                anchors.margins: 16
-                                contentHeight: previewText.implicitHeight
-                                clip: true
-                                Text {
-                                    id: previewText
-                                    width: parent.width
-                                    text: root.pagePreview !== null ? root.viewBody(root.pagePreview) : "…"
-                                    textFormat: root.pagePreview !== null && root.pagePreview.kind === "html" ? Text.RichText : Text.PlainText
-                                    color: root.ink
-                                    linkColor: root.accent
-                                    font.family: root.pagePreview !== null && root.pagePreview.kind === "html" ? root.sans : root.mono
-                                    font.pixelSize: root.pagePreview !== null && root.pagePreview.kind === "html" ? 17 : 15
-                                    wrapMode: Text.Wrap
-                                }
-                            }
-                        }
                         RowLayout {
                             Layout.fillWidth: true
+                            Layout.topMargin: 6
                             spacing: 8
                             Action {
                                 label: "Publish page"
+                                strong: true
                                 changes: true
                                 enabledNow: pageArea.text !== "" && (root.page === null || pageArea.text !== root.page.text)
                                 onPressed: root.savePage(pageArea.text)
@@ -2337,102 +2708,104 @@ Item {
                                 onPressed: root.savePage("")
                             }
                         }
+                        }
 
-                        ColumnLayout {
-                        visible: !root.cliHeld
-                        Layout.fillWidth: true
-                        spacing: 10
-                        Part { text: "Transfer to another wallet" }
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 8
-                            Field {
-                                id: newOwnerField
-                                Layout.fillWidth: true
-                                code: true
-                                hint: "Account ID of the new holder"
-                            }
-                            Action {
-                                label: "Transfer"
-                                changes: true
-                                enabledNow: newOwnerField.text.trim() !== ""
-                                onPressed: root.transferName()
-                            }
-                        }
-                        Hint { text: "Your deposit goes with the name: the new holder gets it back when they release it. Payments, entries and page are cleared." }
-
-                        Part { text: "Release" }
-                        Hint { text: "Clears everything and refunds your deposit. Anyone can then register the name." }
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 8
-                            Action {
-                                visible: !root.confirmingRelease
-                                label: root.record !== null ? "Release " + root.shown(root.record.name) : ""
-                                grave: true
-                                onPressed: root.confirmingRelease = true
-                            }
-                            Text {
-                                visible: root.confirmingRelease
-                                text: "Release it?"
-                                color: root.alarm
-                                font.family: root.sans
-                                font.pixelSize: 18
-                                font.weight: Font.DemiBold
-                            }
-                            Action {
-                                visible: root.confirmingRelease
-                                label: "Yes, release it"
-                                strong: true
-                                grave: true
-                                changes: true
-                                onPressed: root.releaseName()
-                            }
-                            Action {
-                                visible: root.confirmingRelease
-                                label: "Keep it"
-                                onPressed: root.confirmingRelease = false
-                            }
-                            Item { Layout.fillWidth: true }
-                            Action { label: "Done"; onPressed: root.tool = "" }
-                        }
-                        }
                         Hint {
-                            visible: root.cliHeld
-                            text: "Payments, transfer and release for this name: use the names CLI (names receive-privately, names transfer, names release)."
+                            visible: root.editTab === "giveup" && root.cliHeld
+                            text: "For a name held privately, transfer and release it with the names CLI: names transfer, names release."
                         }
                         RowLayout {
-                            visible: root.cliHeld
+                            visible: root.editTab === "giveup" && !root.cliHeld
                             Layout.fillWidth: true
-                            Item { Layout.fillWidth: true }
-                            Action { label: "Done"; onPressed: root.tool = "" }
+                            spacing: 24
+                            Card {
+                                Layout.fillWidth: true
+                                Layout.preferredWidth: 1
+                                Layout.alignment: Qt.AlignTop
+                                Text { text: "Transfer"; color: root.ink; font.family: root.sans; font.pixelSize: 22; font.weight: Font.DemiBold }
+                                Hint { text: root.record !== null ? "Give " + root.shown(root.record.name) + " to someone else. Its profile and page are cleared for them." : "" }
+                                Text { text: "Their account"; color: root.faint; font.family: root.sans; font.pixelSize: 15 }
+                                Field {
+                                    id: newOwnerField
+                                    Layout.fillWidth: true
+                                    code: true
+                                    hint: "Account ID"
+                                }
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    implicitHeight: depositWarning.implicitHeight + 24
+                                    radius: 8
+                                    color: "#2A2418"
+                                    Text {
+                                        id: depositWarning
+                                        x: 14
+                                        y: 12
+                                        width: parent.width - 28
+                                        text: root.record !== null && root.someAmount(root.record.deposit) ? "Your deposit of " + root.grouped(root.record.deposit) + " goes with the name. They get it back when they release it, not you." : "Any deposit goes with the name."
+                                        color: root.brass
+                                        font.family: root.sans
+                                        font.pixelSize: 15
+                                        wrapMode: Text.Wrap
+                                    }
+                                }
+                                Action {
+                                    label: root.record !== null ? "Transfer " + root.shown(root.record.name) : ""
+                                    changes: true
+                                    enabledNow: newOwnerField.text.trim() !== ""
+                                    onPressed: root.transferName()
+                                }
+                            }
+                            Card {
+                                Layout.fillWidth: true
+                                Layout.preferredWidth: 1
+                                Layout.alignment: Qt.AlignTop
+                                Text { text: "Release"; color: root.ink; font.family: root.sans; font.pixelSize: 22; font.weight: Font.DemiBold }
+                                Hint { text: "Give the name up. Its profile and page are deleted and anyone can register it." }
+                                Figure {
+                                    visible: root.record !== null && root.someAmount(root.record.deposit)
+                                    label: "You get back"
+                                    value: root.record !== null && root.someAmount(root.record.deposit) ? root.grouped(root.record.deposit) : ""
+                                    note: "To the account that holds it"
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    Action {
+                                        visible: !root.confirmingRelease
+                                        label: root.record !== null ? "Release " + root.shown(root.record.name) + "…" : ""
+                                        grave: true
+                                        onPressed: root.confirmingRelease = true
+                                    }
+                                    Text {
+                                        visible: root.confirmingRelease
+                                        text: "Release it?"
+                                        color: root.alarm
+                                        font.family: root.sans
+                                        font.pixelSize: 18
+                                        font.weight: Font.DemiBold
+                                    }
+                                    Action {
+                                        visible: root.confirmingRelease
+                                        label: "Yes, release it"
+                                        strong: true
+                                        grave: true
+                                        changes: true
+                                        onPressed: root.releaseName()
+                                    }
+                                    Action {
+                                        visible: root.confirmingRelease
+                                        label: "Keep it"
+                                        onPressed: root.confirmingRelease = false
+                                    }
+                                }
+                            }
                         }
                     }
 
-                    Rectangle { Layout.fillWidth: true; height: 1; color: root.line }
-
                     ColumnLayout {
+                        visible: root.tool !== "settings" && root.textKeys().length > 0
                         Layout.fillWidth: true
                         spacing: 10
-                        Fact {
-                            label: "Holder"
-                            value: root.record === null ? "" : root.cliHeld ? "You · privately, through the names CLI" : root.mine ? "You · " + root.shorten(root.holder) : "Not stored on chain"
-                            full: root.mine && !root.cliHeld ? root.holder : ""
-                        }
-                        Fact {
-                            label: "Payments"
-                            value: root.paymentsText()
-                        }
-                        Fact {
-                            visible: root.record !== null && !root.record.never
-                            label: root.record !== null && root.record.lapsed ? "Lapsed" : "Held until"
-                            value: root.record === null || root.record.never ? "" : root.dated(root.record.expires)
-                        }
-                        Fact {
-                            visible: root.record !== null && root.someAmount(root.record.deposit)
-                            label: "Deposit"
-                            value: root.record !== null && root.someAmount(root.record.deposit) ? root.grouped(root.record.deposit) + ", refunded when released" : ""
-                        }
                         Repeater {
                             model: root.textKeys()
                             Fact {
@@ -2453,7 +2826,7 @@ Item {
                     // followed by a press: it shows its address, to copy or to
                     // open on a second, explicit press.
                     ColumnLayout {
-                        visible: root.page !== null
+                        visible: root.page !== null && root.tool !== "settings"
                         Layout.fillWidth: true
                         Layout.topMargin: 6
                         spacing: 10
