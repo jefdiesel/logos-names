@@ -71,11 +71,19 @@ BRIDGE = r"""
             if (method === "keep") return ok(String(args[0]))
             // hopper.lez and ada.lez are held privately by the names CLI's wallet.
             if (method === "cli_mine") return ok(["hopper", "ada"].map(function(name) {
-                return { name: name, display: name + ".lez", signer: "cli", state: "held by a deposit (no expiry)", lapsed: false, registering: false, failed: false } }).concat(
+                return { name: name, display: name + ".lez", signer: "cli", state: "held by a deposit (no expiry)", lapsed: false, registering: false, failed: false, private: true } }).concat(
                 [{ name: "knuth", display: "knuth.lez", signer: "cli", state: "registering, the last step starts in about 9 minutes", lapsed: false, registering: true, failed: false }]))
             if (method === "cli_set_text" || method === "cli_profile" || method === "cli_set_page" || method === "cli_register")
                 return ok({ id: args[0] + "-1792000000000", name: args[0], kind: method.substr(4), state: "running", started: Date.now() - 125000 })
             if (method === "cli_balance") return ok({ account: "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", balance: root.missing === "pauper" ? "5000" : "250000000" })
+            if (method === "board_follows") return ok(["ada"])
+            if (method === "board_follow") return ok(args[1] ? [] : ["ada", args[0]])
+            if (method === "board_feed" || method === "board_thread") return ok([
+                { post: "ada/1", name: "ada", n: 1, parent: "jef/0", time: Date.now() - 240000, text: "Welcome! First reply on the board.", cids: [], likes: 2, hidden: false, block: 30601 },
+                { post: "jef/0", name: "jef", n: 0, parent: null, time: Date.now() - 1500000, text: "First post on the LNS board. Made privately as a name: the chain sees jef, never my account.", cids: ["zDvZRwzm8K4nJ2a7q9WTqN1"], likes: 5, hidden: false, block: 30564 },
+                { post: "hopper/3", name: "hopper", n: 3, parent: null, time: Date.now() - 10800000, text: "A ship in port is safe, but that is not what ships are built for.", cids: [], likes: 0, hidden: false, block: 29800 }])
+            if (method === "board_post" || method === "board_like" || method === "board_hide")
+                return ok({ id: args[0] + "-1792000000000", state: "running", started: Date.now() - 95000 })
             if (method === "job") return ok(%(job)s)
             if (method === "set_cli" || method === "set_cli_wallet") return true
             if (method === "settings") return ok({ mode: "deposit", deposits: { normal: "100000000", three: "2000000000" }, admin: "%(bob)s", treasury: "%(bob)s", prices: null })
@@ -109,6 +117,8 @@ BRIDGE = r"""
 
 SCENARIOS = {
     "start": "",
+    "home-reply": 'root.boardReply("jef/0")',
+    "home-thread": 'root.boardShow("thread", "jef/0")',
     "name": 'root.show("jef")',
     "plain": 'root.show("linus")',
     "register": 'root.show("satoshi")',

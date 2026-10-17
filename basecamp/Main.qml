@@ -47,6 +47,18 @@ Item {
     property string walletProblem: ""  // why the wallet cannot be used, if it cannot
     property int fromIndex: 0
     property string tool: ""           // the open panel: "", "pay" or "settings"
+    property string section: "home"    // home (the board) or names (look up, register, edit)
+    // The board (Home): see board/ and the names module's board_* calls.
+    property string boardView: "all"   // all, following or thread
+    property string boardThreadOf: ""  // the post a thread view shows, <name>/<n>
+    property var boardPosts: []
+    property bool boardLoading: false
+    property string boardError: ""
+    property var boardFollows: []
+    property var boardPeople: ({})     // name → {display, color, pixels}
+    property string boardReplyTo: ""
+    property var boardJob: null        // {id, label, started, after}
+    property string boardMe: ""        // the name posts are made as
     property bool confirmingRelease: false
     property var pending: null         // a change that was sent and is not confirmed yet
     property string registry: ""
@@ -227,6 +239,7 @@ Item {
             settingsOpen = registry === ""
             loadWallet(false)
             loadCliMine()
+            boardLoad()
             return true
         }
         if (bridgeReady && logos.callModuleAsync) {
@@ -550,6 +563,7 @@ Item {
     /// Puts a name on the plate, with every panel closed.
     /// Opens the "Register a name" screen.
     function openRegister() {
+        section = "names"
         say("", false)
         record = null
         page = null
@@ -586,6 +600,7 @@ Item {
     }
 
     function show(name) {
+        section = "names"
         registering = false
         tool = ""
         pageSourceOpen = false
@@ -1190,6 +1205,171 @@ Item {
             hash = (hash * 16777619) >>> 0
         }
         return hash
+    }
+
+    // ── The board (Home) ────────────────────────────────────────────────
+
+    /// The names this wallet can post as: those the names CLI holds, not by a
+    /// public account (a public holder pays gas; offered once it is measured).
+    readonly property var boardNames: cliNames.filter(function(entry) { return entry.private !== false })
+    readonly property string boardAs: boardMe !== "" && boardNames.some(function(entry) { return entry.name === boardMe }) ? boardMe
+        : boardNames.length > 0 ? boardNames[0].name : ""
+
+    function boardAgo(time) {
+        var seconds = Math.max(0, Math.floor((clockTick - time) / 1000))
+        if (seconds < 60) return seconds + "s"
+        if (seconds < 3600) return Math.floor(seconds / 60) + "m"
+        if (seconds < 86400) return Math.floor(seconds / 3600) + "h"
+        return dated(time)
+    }
+
+    function boardFollowing(name) {
+        return boardFollows.indexOf(name) >= 0
+    }
+
+    /// Loads the open feed or thread. Until the names module answers, it asks
+    /// again every ten seconds.
+    function boardLoad() {
+        if (cliPath === "")
+            return
+        boardLoading = true
+        boardError = ""
+        var method = boardView === "thread" ? "board_thread" : "board_feed"
+        var args = boardView === "thread" ? [boardThreadOf] : [boardView === "following"]
+        askLater(method, args, function(value) {
+            boardLoading = false
+            boardPosts = value || []
+            for (var i = 0; i < boardPosts.length; i++)
+                boardLookUp(boardPosts[i].name)
+        }, function(message) {
+            boardLoading = false
+            boardError = message
+            boardRetry.start()
+        }, 150000)
+        askLater("board_follows", [], function(value) { boardFollows = value || [] }, function() {})
+    }
+
+    /// A name's display name, colour and avatar, looked up once for its posts.
+    function boardLookUp(name) {
+        if (boardPeople[name] !== undefined)
+            return
+        var known = Object.assign({}, boardPeople)
+        known[name] = { display: "", color: "", pixels: null }
+        boardPeople = known
+        askLater("resolve", [name], function(found) {
+            if (found === null)
+                return
+            var texts = found.texts || {}
+            var next = Object.assign({}, boardPeople)
+            next[name] = Object.assign({}, next[name], {
+                display: typeof texts.display === "string" ? texts.display.trim() : "",
+                color: /^#[0-9a-fA-F]{6}$/.test(texts.color || "") ? readable(texts.color) : ""
+            })
+            boardPeople = next
+            if (typeof texts.avatar === "string" && texts.avatar.trim() !== "")
+                askLater("avatar", [name], function(value) {
+                    if (!(value && value.width > 0 && value.height > 0 && value.width <= 128 && value.height <= 128))
+                        return
+                    var more = Object.assign({}, boardPeople)
+                    more[name] = Object.assign({}, more[name], { pixels: { width: value.width, height: value.height, pixels: value.pixels } })
+                    boardPeople = more
+                }, function() {})
+        }, function() {})
+    }
+
+    function boardShow(which, post) {
+        section = "home"
+        boardView = which
+        boardThreadOf = post || ""
+        boardPosts = []
+        boardLoad()
+    }
+
+    /// Starts a board change as a CLI job and follows it until it ends.
+    function boardStart(method, args, label, after) {
+        if (boardJob !== null)
+            return
+        say("", false)
+        var job = { id: "", label: label, started: Date.now(), after: after }
+        boardJob = job
+        askLater(method, args, function(value) {
+            job.id = value.id
+            job.started = value.started || Date.now()
+            clockTick = Date.now()
+        }, function(message) {
+            boardJob = null
+            say(message, true)
+        })
+    }
+
+    function boardCheckJob() {
+        var job = boardJob
+        if (job === null || job.id === "" || job.asking)
+            return
+        job.asking = true
+        askLater("job", [job.id], function(value) {
+            job.asking = false
+            if (boardJob !== job || value.state === "running")
+                return
+            boardJob = null
+            if (value.state === "done") {
+                say(job.label + " done.", false)
+                if (job.after)
+                    job.after()
+                boardLoad()
+            } else {
+                say("It didn't go through: " + lastLogLine(value.log_tail), true)
+            }
+        }, function() { job.asking = false })
+    }
+
+    function boardPost() {
+        var text = boardComposer.text.trim()
+        var cid = boardCid.text.trim()
+        if (boardAs === "" || (text === "" && cid === ""))
+            return
+        var reply = boardReplyTo
+        boardStart("board_post", [boardAs, text, JSON.stringify(cid === "" ? [] : [cid]), reply],
+                   reply !== "" ? "Your reply" : "Your post", function() {
+            boardComposer.text = ""
+            boardCid.text = ""
+            boardReplyTo = ""
+        })
+    }
+
+    function boardReply(post) {
+        if (boardAs === "") {
+            say("Register a name privately to reply.", true)
+            return
+        }
+        boardReplyTo = post
+        boardComposer.forceActiveFocus()
+    }
+
+    function boardFollow(name, undo) {
+        askLater("board_follow", [name, undo], function(value) {
+            boardFollows = value || []
+            if (boardView === "following")
+                boardLoad()
+        }, function(message) { say(message, true) })
+    }
+
+    Timer {
+        interval: 5000
+        repeat: true
+        running: root.boardJob !== null
+        onTriggered: { root.clockTick = Date.now(); root.boardCheckJob() }
+    }
+    Timer {
+        interval: 60000
+        repeat: true
+        running: root.section === "home" && root.boardJob === null && root.boardView !== "thread"
+        onTriggered: { root.clockTick = Date.now(); root.boardLoad() }
+    }
+    Timer {
+        id: boardRetry
+        interval: 10000
+        onTriggered: root.boardLoad()
     }
 
     Component.onCompleted: {
@@ -1980,6 +2160,13 @@ Item {
                     strong: true
                     onPressed: root.openRegister()
                 }
+                Tab {
+                    visible: root.registry !== ""
+                    Layout.fillWidth: true
+                    label: "Home"
+                    current: root.section === "home"
+                    onPressed: root.boardShow(root.boardView === "thread" ? "all" : root.boardView)
+                }
 
                 // The names this wallet holds.
                 ColumnLayout {
@@ -2136,15 +2323,256 @@ Item {
                     text: root.settingsOpen ? "Close advanced" : "Advanced"
                     color: root.faint
                     font.pixelSize: 15
-                    onPressed: root.settingsOpen = !root.settingsOpen
+                    onPressed: { root.settingsOpen = !root.settingsOpen; if (root.settingsOpen) root.section = "names" }
                 }
             }
         }
 
         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: root.line }
 
+        // Home: the board.
+        Flickable {
+            visible: root.section === "home"
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            contentHeight: home.implicitHeight + 72
+            clip: true
+
+            ColumnLayout {
+                id: home
+                x: 56
+                y: 40
+                width: Math.min(parent.width - 112, 760)
+                spacing: 16
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 6
+                    Link {
+                        visible: root.boardView === "thread"
+                        text: "← Back"
+                        color: root.faint
+                        font.underline: false
+                        onPressed: root.boardShow("all")
+                    }
+                    Tab { visible: root.boardView !== "thread"; label: "All"; current: root.boardView === "all"; onPressed: root.boardShow("all") }
+                    Tab { visible: root.boardView !== "thread"; label: "Following" + (root.boardFollows.length > 0 ? "  " + root.boardFollows.length : ""); current: root.boardView === "following"; onPressed: root.boardShow("following") }
+                    Text { visible: root.boardView === "thread"; text: "Thread"; color: root.ink; font.family: root.sans; font.pixelSize: 22; font.weight: Font.DemiBold }
+                    Item { Layout.fillWidth: true }
+                    Link { text: root.boardLoading ? "Loading…" : "Refresh"; color: root.faint; font.pixelSize: 15; onPressed: root.boardLoad() }
+                }
+
+                // The post box.
+                Card {
+                    Layout.fillWidth: true
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Text { text: "Posting as"; color: root.faint; font.family: root.sans; font.pixelSize: 14 }
+                        Repeater {
+                            model: root.boardNames
+                            Tab {
+                                required property var modelData
+                                label: modelData.name
+                                current: root.boardAs === modelData.name
+                                onPressed: root.boardMe = modelData.name
+                            }
+                        }
+                        Text {
+                            visible: root.boardNames.length === 0
+                            text: "no name yet. Register one privately to post."
+                            color: root.faint
+                            font.family: root.sans
+                            font.pixelSize: 14
+                        }
+                        Item { Layout.fillWidth: true }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: root.boardReplyTo !== ""
+                        Text { Layout.fillWidth: true; text: "Replying to " + root.boardReplyTo; color: root.brass; font.family: root.sans; font.pixelSize: 15 }
+                        Link { text: "Cancel"; color: root.faint; font.pixelSize: 14; onPressed: root.boardReplyTo = "" }
+                    }
+                    Area {
+                        id: boardComposer
+                        Layout.fillWidth: true
+                        implicitHeight: 96
+                        code: false
+                        hint: root.boardAs !== "" ? "What's happening, " + root.boardAs + "?" : "Register a name to post"
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Field {
+                            id: boardCid
+                            Layout.fillWidth: true
+                            size: 15
+                            code: true
+                            hint: "Attach a file: its Logos Storage CID (optional)"
+                        }
+                        Text {
+                            text: boardComposer.text.length + " / 1024"
+                            color: boardComposer.text.length > 1024 ? root.alarm : root.faint
+                            font.family: root.sans
+                            font.pixelSize: 13
+                        }
+                        Action {
+                            label: root.boardReplyTo !== "" ? "Reply" : "Post"
+                            strong: true
+                            enabledNow: root.boardJob === null && root.boardAs !== "" && boardComposer.text.length <= 1024 && (boardComposer.text.trim() !== "" || boardCid.text.trim() !== "")
+                            onPressed: root.boardPost()
+                        }
+                    }
+                    Hint { font.pixelSize: 13; text: "Posts are public. Each is proved on this computer (about 4 min), so the chain sees your name, never your account." }
+                }
+
+                Hint {
+                    visible: root.boardJob !== null
+                    color: root.brass
+                    font.pixelSize: 16
+                    text: root.boardJob === null ? "" : root.boardJob.label + ": proving it on this computer, so the chain never learns your account. About 4 min, "
+                        + Math.max(0, Math.floor((Math.max(root.clockTick, Date.now()) - root.boardJob.started) / 60000)) + " so far."
+                }
+                Hint {
+                    visible: root.boardJob === null && root.notice !== "" && root.section === "home"
+                    color: root.noticeIsError ? root.alarm : root.dim
+                    text: root.notice
+                }
+                Hint {
+                    visible: !root.boardLoading && root.boardPosts.length === 0
+                    font.pixelSize: 17
+                    text: root.cliPath === "" ? "The board needs the names CLI. Install it, then open Advanced to point at it."
+                        : root.boardError !== "" ? "Waiting for the board: " + root.boardError
+                        : root.boardView === "following" && root.boardFollows.length === 0 ? "You don't follow anyone yet. Press Follow on a post."
+                        : "No posts yet."
+                }
+
+                Repeater {
+                    model: root.boardPosts
+                    Card {
+                        id: postCard
+                        required property var modelData
+                        readonly property var who: root.boardPeople[modelData.name] || ({ display: "", color: "", pixels: null })
+                        readonly property bool isMine: root.cliNames.some(function(entry) { return entry.name === postCard.modelData.name })
+                        visible: !modelData.hidden
+                        Layout.fillWidth: true
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 14
+                            Avatar {
+                                Layout.preferredWidth: 44
+                                Layout.preferredHeight: 44
+                                Layout.alignment: Qt.AlignTop
+                                pixels: postCard.who.pixels
+                                owner: postCard.modelData.name
+                                letter: postCard.modelData.name.charAt(0)
+                                ring: postCard.who.color !== "" ? postCard.who.color : root.brass
+                            }
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 6
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    Text {
+                                        visible: postCard.who.display !== ""
+                                        text: postCard.who.display
+                                        textFormat: Text.PlainText
+                                        color: root.ink
+                                        font.family: root.sans
+                                        font.pixelSize: 17
+                                        font.weight: Font.DemiBold
+                                    }
+                                    Text {
+                                        text: postCard.modelData.name
+                                        color: postCard.who.display !== "" ? root.faint : root.ink
+                                        font.family: root.sans
+                                        font.pixelSize: postCard.who.display !== "" ? 15 : 17
+                                        font.weight: postCard.who.display !== "" ? Font.Normal : Font.DemiBold
+                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.show(postCard.modelData.name) }
+                                    }
+                                    Text { text: "· " + root.boardAgo(postCard.modelData.time); color: root.faint; font.family: root.sans; font.pixelSize: 14 }
+                                    Item { Layout.fillWidth: true }
+                                    Link {
+                                        visible: !postCard.isMine
+                                        text: root.boardFollowing(postCard.modelData.name) ? "Following" : "Follow"
+                                        color: root.boardFollowing(postCard.modelData.name) ? root.faint : root.brass
+                                        font.pixelSize: 14
+                                        onPressed: root.boardFollow(postCard.modelData.name, root.boardFollowing(postCard.modelData.name))
+                                    }
+                                }
+                                Text {
+                                    visible: !!postCard.modelData.parent
+                                    text: "replying to " + (postCard.modelData.parent ? String(postCard.modelData.parent).split("/")[0] : "")
+                                    color: root.faint
+                                    font.family: root.sans
+                                    font.pixelSize: 13
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    visible: postCard.modelData.text !== ""
+                                    text: postCard.modelData.text
+                                    textFormat: Text.PlainText
+                                    color: root.dim
+                                    font.family: root.sans
+                                    font.pixelSize: 17
+                                    lineHeight: 1.2
+                                    wrapMode: Text.Wrap
+                                }
+                                Flow {
+                                    Layout.fillWidth: true
+                                    visible: postCard.modelData.cids.length > 0
+                                    spacing: 8
+                                    Repeater {
+                                        model: postCard.modelData.cids
+                                        Chip {
+                                            required property string modelData
+                                            label: "File " + modelData.substr(0, 10) + "… · Copy CID"
+                                            link: true
+                                            onPressed: root.copy(modelData, "The CID")
+                                        }
+                                    }
+                                }
+                                RowLayout {
+                                    spacing: 18
+                                    Link { text: "Reply"; color: root.faint; font.pixelSize: 14; onPressed: root.boardReply(postCard.modelData.post) }
+                                    Link {
+                                        text: "♥ " + Math.max(0, postCard.modelData.likes)
+                                        color: root.faint
+                                        font.pixelSize: 14
+                                        font.underline: false
+                                        onPressed: {
+                                            if (root.boardAs === "")
+                                                root.say("Register a name privately to like posts.", true)
+                                            else
+                                                root.boardStart("board_like", [root.boardAs, postCard.modelData.post, false], "Your like")
+                                        }
+                                    }
+                                    Link {
+                                        visible: root.boardView !== "thread"
+                                        text: "Thread"
+                                        color: root.faint
+                                        font.pixelSize: 14
+                                        onPressed: root.boardShow("thread", postCard.modelData.parent ? postCard.modelData.parent : postCard.modelData.post)
+                                    }
+                                    Link {
+                                        visible: postCard.isMine
+                                        text: "Take down"
+                                        color: root.faint
+                                        font.pixelSize: 14
+                                        onPressed: root.boardStart("board_hide", [postCard.modelData.post], "Taking it down")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // The plate.
         Flickable {
+            visible: root.section !== "home"
             Layout.fillWidth: true
             Layout.fillHeight: true
             contentHeight: plate.implicitHeight + 72

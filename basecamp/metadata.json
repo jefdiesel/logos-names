@@ -1,10 +1,10 @@
 {
   "name": "names_ui",
   "display_name": "Names",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "type": "ui_qml",
   "category": "identity",
-  "description": "Find, register and manage private .lez names",
+  "description": "Your name on Logos: register it, post as it, edit its profile",
   "view": "Main.qml",
   "icon": "src/icons/icon.png",
   "dependencies": [
