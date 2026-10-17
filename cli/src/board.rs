@@ -372,3 +372,97 @@ pub fn print_posts(posts: &[FeedPost], json: bool) -> Result<()> {
     }
     Ok(())
 }
+
+/// Words for anonymous names: `anon-<word>-<trait>`. About 4,000 pairs; a taken
+/// one gets a short number.
+const ANON_WORDS: &[&str] = &[
+    "quiet", "amber", "brisk", "calm", "dusky", "early", "faint", "gentle", "hollow", "idle", "jade", "keen",
+    "lunar", "misty", "noble", "olive", "pale", "quick", "rusty", "silent", "tidal", "umber", "vivid", "wild",
+    "young", "zesty", "azure", "bold", "coral", "dawn", "ember", "frost", "golden", "hazel", "ivory", "jolly",
+    "kind", "lucky", "mellow", "night", "opal", "plain", "rapid", "sly", "tame", "upper", "velvet", "warm",
+    "blue", "crisp", "deep", "far", "grey", "high", "inky", "low", "mild", "north", "odd", "proud", "red", "soft",
+];
+const ANON_TRAITS: &[&str] = &[
+    "otter", "heron", "lynx", "moth", "raven", "fox", "wren", "pike", "hare", "owl", "stag", "newt", "crane",
+    "bison", "finch", "gecko", "ibis", "koala", "lemur", "marten", "narwhal", "orca", "panda", "quail", "robin",
+    "seal", "tapir", "urchin", "vole", "walrus", "yak", "zebra", "badger", "crow", "dingo", "egret", "ferret",
+    "gull", "hyena", "jackal", "kiwi", "lark", "mole", "nightjar", "oriole", "puffin", "rook", "skink", "toad",
+    "viper", "weasel", "swift", "tern", "eel", "ant", "bee", "carp", "dove", "elk", "frog", "goat", "hawk", "ram",
+];
+
+fn anon_candidate(attempt: u32) -> Result<String> {
+    let mut random = [0u8; 4];
+    getrandom::fill(&mut random).map_err(|e| anyhow!("no randomness: {e}"))?;
+    let word = ANON_WORDS[usize::from(random[0]) % ANON_WORDS.len()];
+    let trait_ = ANON_TRAITS[usize::from(random[1]) % ANON_TRAITS.len()];
+    Ok(if attempt < 3 {
+        format!("anon-{word}-{trait_}")
+    } else {
+        format!("anon-{word}-{trait_}-{}", u16::from_le_bytes([random[2], random[3]]) % 100)
+    })
+}
+
+impl Client {
+    /// Makes (once) and prints this wallet's anonymous name.
+    pub async fn anon(&mut self, rpc: Option<&str>) -> Result<()> {
+        let defaults = load_defaults();
+        if let Some(name) = defaults.anon.clone() {
+            if defaults.pending.contains_key(&name) || self.lookup_held(&name).await.is_ok() {
+                println!("{name}");
+                return Ok(());
+            }
+        }
+        // A free name, not one already held.
+        let mut name = String::new();
+        for attempt in 0..8 {
+            let candidate = anon_candidate(attempt)?;
+            if self.record(&derive(&candidate).id).await?.is_none() {
+                name = candidate;
+                break;
+            }
+        }
+        if name.is_empty() {
+            bail!("could not find a free anonymous name; try again");
+        }
+        let from = default_private()?;
+        let id = derive(&name).id;
+        let tier = length_proof(&id)?.1;
+        let (fee, _, _) = self.registration_cost(&id, tier, from, 1).await?;
+        let have = self.spendable(from).await;
+        if have < fee {
+            bail!("your private account holds {have}, less than the {fee} deposit an anonymous name takes; add funds first");
+        }
+        // A fresh private account holds the name, funded privately: the chain shows no
+        // link between it and the account that paid.
+        let (account, _) = self.wallet.create_new_account_private(None);
+        quietly(|| self.wallet.store_persistent_data())?;
+        println!("{name}: making its private account and funding it privately (about 4 minutes)");
+        let (hash, [from_secret, to_secret]) = NativeTokenTransfer(&self.wallet)
+            .send_private_transfer_to_owned_account(from, account, fee)
+            .await
+            .context("the sequencer did not accept the transfer")?;
+        let (tx, block) = self.wallet.poll_transaction(hash).await.context("the transfer was not included in a block")?;
+        if let common::transaction::LeeTransaction::PrivacyPreserving(tx) = &tx {
+            quietly(|| {
+                self.wallet.decode_insert_privacy_preserving_transaction_results(
+                    tx,
+                    &[AccDecodeData::Decode(from_secret, from), AccDecodeData::Decode(to_secret, account)],
+                )
+            })?;
+            quietly(|| self.wallet.store_persistent_data())?;
+        }
+        println!("funded in block {block}");
+        let mut defaults = load_defaults();
+        defaults.anon = Some(name.clone());
+        save_defaults(&defaults)?;
+        self.register(&name, account, 1, None, false, rpc).await?;
+        let mut defaults = load_defaults();
+        if !defaults.names.contains(&name) {
+            defaults.names.push(name.clone());
+        }
+        defaults.anon = Some(name.clone());
+        save_defaults(&defaults)?;
+        println!("{name}");
+        Ok(())
+    }
+}

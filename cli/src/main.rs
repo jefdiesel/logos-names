@@ -53,6 +53,9 @@ struct Defaults {
     /// `register` picks up where it stopped.
     #[serde(default)]
     pending: std::collections::BTreeMap<String, Pending>,
+    /// This wallet's anonymous name, held by its own private account (`names anon`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    anon: Option<String>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -488,6 +491,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Your anonymous name: made the first time, as `anon-<word>-<trait>`, and held
+    /// by a new private account that a private transfer funds, so nothing on chain
+    /// links it to your other names. Prints the name; registering it takes about 20
+    /// minutes and runs in the background (`names mine` shows it).
+    Anon,
     /// Take down one of your posts, written `<name>/<n>`. Its text stays in the
     /// chain's history; apps stop showing it.
     Hide {
@@ -2543,6 +2551,7 @@ async fn main() -> Result<()> {
         Command::Post { as_name, text, cids, reply } => client.post(&as_name, text, cids, reply).await,
         Command::Like { as_name, post, undo } => client.like(&as_name, post, undo).await,
         Command::Hide { post } => client.hide(post).await,
+        Command::Anon => client.anon(cli.rpc.as_deref()).await,
         Command::Feed { following, blocks, json } => {
             board::print_posts(&client.feed(blocks, &following).await?, json)
         }
