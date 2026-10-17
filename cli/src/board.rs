@@ -6,8 +6,11 @@
 use super::*;
 use board_core::{Instruction as BoardInstruction, PostId, REGISTRY};
 
+/// The gas limit of a public board call.
+const BOARD_GAS_LIMIT: u64 = 200_000;
+
 /// The board on the LEZ testnet. `LOGOS_BOARD_PROGRAM` points at another.
-const DEFAULT_BOARD: Option<&str> = None;
+const DEFAULT_BOARD: Option<&str> = Some("8PwnCKStKQtoBxJCgopCG6CPPMJCUWba1SDG1SXtXYTf");
 
 pub fn board_program() -> Result<AccountId> {
     let text = std::env::var("LOGOS_BOARD_PROGRAM")
@@ -33,17 +36,12 @@ struct Row {
 }
 
 impl Client {
-    /// The private account in this wallet that holds `name`.
+    /// The account in this wallet that holds `name`. A private one posts by a
+    /// proof (no gas, about 4 minutes); a public one by a signed transaction
+    /// (one block, and it pays LEZ gas).
     async fn private_holder(&self, name: &str) -> Result<(NameId, AccountId)> {
         let (Derived { id, .. }, record, _) = self.lookup_held(name).await?;
-        let holder = self.holder(name, &id, &record)?;
-        if !self.is_private(holder) {
-            bail!(
-                "{name}{NAME_SUFFIX} is held by a public account; the board takes changes from \
-                 private holders only, so the chain never sees who posts"
-            );
-        }
-        Ok((id, holder))
+        Ok((id, self.holder(name, &id, &record)?))
     }
 
     async fn board_shard(&self, board: AccountId, account: AccountId) -> Result<Vec<u8>> {
@@ -61,11 +59,14 @@ impl Client {
         let program = self
             .program_at(board, "LOGOS_BOARD_PROGRAM_ELF", "logos-board", "the board")
             .await?;
+        let public = rows.iter().any(|row| row.signs && !self.is_private(row.account));
         let mut signers = Vec::new();
         let mut mentions = Vec::new();
         for row in &rows {
             let identity = if !row.signs {
                 AccountIdentity::PublicNoSign(row.account)
+            } else if public {
+                AccountIdentity::Public(row.account)
             } else {
                 signers.push(row.account);
                 self.wallet
@@ -76,6 +77,24 @@ impl Client {
         }
         if std::env::var_os("LOGOS_NAMES_DRY_RUN").is_some() {
             bail!("LOGOS_NAMES_DRY_RUN is set, so nothing was sent");
+        }
+        if public {
+            // A board call runs about as many cycles as a registry edit; this limit
+            // covers it with room, and a failed call is billed the whole limit.
+            let saved = self.wallet.config().clone();
+            let mut config = saved.clone();
+            config.gas_limit = BOARD_GAS_LIMIT;
+            self.wallet.set_config(config);
+            println!("posting publicly; one block, paid in LEZ gas");
+            let before = self.wallet.get_account_balance(rows.iter().find(|row| row.signs).map(|row| row.account).unwrap_or(board)).await.unwrap_or(0);
+            let sent = self.wallet.send_pub_tx(mentions, borsh::to_vec(instruction)?, board).await;
+            self.wallet.set_config(saved);
+            let hash = sent.context("the sequencer did not accept the transaction")?;
+            println!("submitted {hash}");
+            let (_, block) = self.wallet.poll_transaction(hash).await.context("the transaction was not included in a block")?;
+            let after = self.wallet.get_account_balance(rows.iter().find(|row| row.signs).map(|row| row.account).unwrap_or(board)).await.unwrap_or(0);
+            println!("included in block {block}; gas paid {}", before.saturating_sub(after));
+            return Ok(());
         }
         println!("acting privately; proving it on this computer (about 4 minutes), so the chain never learns your account");
         let program = ProgramWithDependencies::new(program, board, Default::default());
