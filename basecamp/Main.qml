@@ -1258,6 +1258,12 @@ Item {
     /// First run: no names CLI yet, or no name to post as.
     readonly property bool needsWelcome: configKnown && registry !== "" && (cliPath === "" || (cliKnown && mainName === "" && cliPending.length === 0))
 
+    /// Opens a section of the sidebar; a notice from another section doesn't follow.
+    function go(which) {
+        say("", false)
+        section = which
+    }
+
     function setMain(name) {
         askLater("set_main_name", [name], function(value) { savedMain = value || "" }, function(message) { say(message, true) })
     }
@@ -1300,6 +1306,12 @@ Item {
         var amount = payAmount.text.trim()
         if (to === "" || amount === "")
             return
+        var bare = ""
+        try { bare = String(call("names", "normalize", [to])) } catch (error) {}
+        if (bare !== "" && cliHolds(bare)) {
+            say(bare + " is your own name: the payment would come back to you.", true)
+            return
+        }
         boardStart("cli_pay", [to, amount], "Your payment to " + to, function() {
             payAmount.text = ""
             loadCliBalance()
@@ -1565,6 +1577,10 @@ Item {
         } catch (error) {}
         if (name === "") {
             say("That isn't a name.", true)
+            return
+        }
+        if (cliHolds(name)) {
+            say(name + " is you. Message someone else's name.", true)
             return
         }
         askLater("resolve", [name], function(found) {
@@ -2585,12 +2601,12 @@ Item {
                     }
                 }
 
-                Tab { Layout.fillWidth: true; alignLeft: true; label: "Posts"; current: root.section === "posts"; onPressed: root.boardShow(root.boardView === "thread" ? "all" : root.boardView) }
-                Tab { Layout.fillWidth: true; alignLeft: true; label: "Messages"; current: root.section === "messages"; onPressed: { root.section = "messages"; root.chatLoad() } }
-                Tab { Layout.fillWidth: true; alignLeft: true; label: "Pay"; current: root.section === "pay"; onPressed: { root.section = "pay"; root.loadCliBalance() } }
-                Tab { Layout.fillWidth: true; alignLeft: true; label: "Profile"; current: root.section === "profile"; onPressed: root.openProfile() }
-                Tab { Layout.fillWidth: true; alignLeft: true; label: "Search"; current: root.section === "search"; onPressed: { root.section = "search"; searchField.forceActiveFocus() } }
-                Tab { Layout.fillWidth: true; alignLeft: true; label: "Settings"; current: root.section === "settings"; onPressed: { root.section = "settings"; root.registering = false; root.record = null; root.missing = "" } }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Posts"; current: root.section === "posts"; onPressed: { root.say("", false); root.boardShow(root.boardView === "thread" ? "all" : root.boardView) } }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Messages"; current: root.section === "messages"; onPressed: { root.go("messages"); root.chatLoad() } }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Pay"; current: root.section === "pay"; onPressed: { root.go("pay"); root.loadCliBalance() } }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Profile"; current: root.section === "profile"; onPressed: { root.say("", false); root.openProfile() } }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Search"; current: root.section === "search"; onPressed: { root.go("search"); searchField.forceActiveFocus() } }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Settings"; current: root.section === "settings"; onPressed: { root.go("settings"); root.registering = false; root.record = null; root.missing = "" } }
 
                 Item { Layout.fillHeight: true }
 
@@ -2746,6 +2762,16 @@ Item {
                         }
                         Action { label: "Turn on messages"; strong: true; changes: true; onPressed: root.chatPublish() }
                     }
+                }
+                Hint {
+                    visible: root.chatError === "" && root.chatMine === "" && root.chatState !== ""
+                    color: root.brass
+                    text: "Messaging is starting up (network: " + root.chatState + "). Once it's connected you can turn on messages for " + (root.mainName !== "" ? root.mainName : "your name") + "."
+                }
+                Hint {
+                    visible: root.chatError === "" && root.mainChat !== "" && root.mainChat === root.chatMine
+                    font.pixelSize: 14
+                    text: "Messages are on: anyone who looks up " + root.mainName + " can message you here."
                 }
                 Hint {
                     visible: root.notice !== "" && root.section === "messages"
