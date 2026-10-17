@@ -2228,7 +2228,7 @@ Item {
                     }
                     Hint {
                         font.pixelSize: 15
-                        text: "1 to 32 letters, digits or hyphens. Three-letter names take a larger deposit; one- and two-letter names are reserved."
+                        text: "1 to 32 letters, digits or hyphens. One- and two-letter names are reserved."
                     }
                 }
 
@@ -2279,7 +2279,7 @@ Item {
                         }
                         Hint {
                             visible: root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode === "deposit"
-                            text: (root.deposit !== null && root.deposit.tier === "three" ? "Three-character names take a larger deposit. " : "") + "Refunded in full when you release the name. Testnet: names don't expire here, but to keep one on mainnet you claim it within 30 days of launch. Network fee extra."
+                            text: "Refunded in full when you release the name. Testnet: names don't expire here, but to keep one on mainnet you claim it within 30 days of launch. Network fee extra."
                         }
                     }
                     Card {
@@ -2303,7 +2303,7 @@ Item {
                                 Layout.alignment: Qt.AlignTop
                                 label: "Deposit"
                                 value: root.deposit === null ? "…" : root.deposit.deposit !== null && root.deposit.deposit !== undefined ? root.grouped(root.deposit.deposit) : root.deposit.fee ? root.grouped(root.deposit.fee) : "Not set up"
-                                note: (root.deposit !== null && root.deposit.tier === "three" ? "Three-character names take more. " : "") + "Refunded in full when you release it"
+                                note: "Refunded in full when you release it"
                             }
                             Figure {
                                 Layout.fillWidth: true

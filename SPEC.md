@@ -526,7 +526,7 @@ registry, as they agree on one token contract.
 
 | Network | Registry program ID |
 |---|---|
-| Logos testnet v0.3 (LEZ) | `38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq` (registry v5, deployed 2026-10-16, CI build `322dda10…c4ce`, deposit mode: 100,000,000 normal, 2,000,000,000 three-character; replaces `2PXg…zCkX`, v4.1, whose names use the old PBKDF2 derivation and do not carry over) |
+| Logos testnet v0.3 (LEZ) | `38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq` (registry v5, deployed 2026-10-16, CI build `322dda10…c4ce`, deposit mode: 1,000,000 for normal and three-character names since 2026-10-17, first 100,000,000 and 2,000,000,000; replaces `2PXg…zCkX`, v4.1, whose names use the old PBKDF2 derivation and do not carry over) |
 
 The deployed program is the reproducible build produced by this repository's
 CI; its SHA-256 is recorded with each release. The program is upgradeable by

@@ -177,8 +177,8 @@ enum Command {
     /// the private account; after that, `register` and `pay` need no account arguments.
     Setup {
         /// How much of the public account's tokens to move to the private account.
-        /// The default covers one name's deposit (100,000,000 on the testnet) with room to spare.
-        #[arg(long, default_value_t = 110_000_000)]
+        /// The default covers a few names' deposits (1,000,000 each on the testnet).
+        #[arg(long, default_value_t = 5_000_000)]
         shield: u128,
     },
     /// Show this wallet's accounts and balances.
