@@ -1552,6 +1552,16 @@ Item {
         }, 20000)
     }
 
+    /// A chat address out of whatever the chat module wrapped it in: the text
+    /// itself, or an object holding it. "" if there is none.
+    function chatText(value) {
+        for (var depth = 0; depth < 3 && value !== null && typeof value === "object"; depth++)
+            value = value.address !== undefined ? value.address : value.value !== undefined ? value.value
+                  : value.result !== undefined ? value.result : null
+        var text = typeof value === "string" ? value.trim() : ""
+        return /^[0-9A-Za-z_:+\/=.-]{16,200}$/.test(text) ? text : ""
+    }
+
     function chatLoad() {
         chatAsk("status", [], function(status) {
             chatState = status && status.delivery_state ? String(status.delivery_state) : "unknown"
@@ -1560,7 +1570,7 @@ Item {
             chatState = ""
             chatError = message
         })
-        chatAsk("get_address", [], function(address) { chatMine = address ? String(address) : "" }, function() {})
+        chatAsk("get_address", [], function(address) { chatMine = chatText(address) }, function() {})
         chatAsk("list_conversations", [], function(list) {
             var all = (list || []).slice()
             all.sort(function(a, b) { return (b.last_activity_ms || 0) - (a.last_activity_ms || 0) })
@@ -1570,7 +1580,7 @@ Item {
         askLater("chat_names", [], function(value) { chatNames = value || {} }, function() {})
         if (mainName !== "")
             askLater("resolve", [mainName], function(found) {
-                mainChat = found && found.texts && typeof found.texts.chat === "string" ? found.texts.chat : ""
+                mainChat = found && found.texts ? chatText(found.texts.chat) : ""
             }, function() {})
     }
 
@@ -1621,7 +1631,7 @@ Item {
             return
         }
         askLater("resolve", [name], function(found) {
-            var address = found && found.texts && typeof found.texts.chat === "string" ? found.texts.chat.trim() : ""
+            var address = found && found.texts ? chatText(found.texts.chat) : ""
             if (found === null)
                 say(name + " isn't registered.", true)
             else if (address === "")
@@ -1719,8 +1729,10 @@ Item {
 
     /// Publishes this installation's chat address on the main name, so others can DM it.
     function chatPublish() {
-        if (mainName === "" || chatMine === "")
+        if (mainName === "" || chatText(chatMine) === "") {
+            say("Messaging hasn't given this computer an address yet; try again in a moment.", true)
             return
+        }
         var name = mainName, address = chatMine
         cliChange("set_text", [name, "chat", address], name, function() {
             var found = ask("resolve", [name])
