@@ -638,6 +638,20 @@ impl Client {
             .ok_or_else(|| anyhow!("this wallet does not hold {name}{NAME_SUFFIX}"))
     }
 
+    /// What `account` can spend: a private account's balance as this wallet
+    /// knows it after catching up with the chain, or a public one's on chain.
+    async fn spendable(&mut self, account: AccountId) -> u128 {
+        if self.is_private(account) {
+            self.wallet.sync_to_latest_block().await.ok();
+            self.wallet
+                .get_account_private(account)
+                .and_then(|found| found.data.native_balance().ok())
+                .unwrap_or(0)
+        } else {
+            self.wallet.get_account_balance(account).await.unwrap_or(0)
+        }
+    }
+
     fn is_private(&self, account: AccountId) -> bool {
         self.wallet.resolve_private_account(account).is_some()
     }
@@ -812,6 +826,16 @@ impl Client {
                 "{name}{NAME_SUFFIX} takes a deposit of {fee}, held for as long as you keep the name and refunded when you release it"
             );
             println!("(the deposit stops name squatting: holding many names ties up many deposits; nobody keeps it)");
+        }
+        // The deposit or fee is only taken at the reveal, 15 minutes on: check
+        // now, so a short account doesn't commit and fail at the end.
+        if fee > 0 {
+            let have = self.spendable(owner).await;
+            if have < fee {
+                bail!(
+                    "{owner} holds {have}, less than the {fee} that registering {name}{NAME_SUFFIX} takes; add funds to it first"
+                );
+            }
         }
         let holder = owner_tag(&id, &owner);
 
