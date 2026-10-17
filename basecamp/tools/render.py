@@ -64,11 +64,18 @@ BRIDGE = r"""
                         private_accounts: [{ account: "%(carol)s", balance: "2999000", funded: true }] })
                 return JSON.stringify({ success: false, value: null, error: "the LEZ wallet is not running; install LEZ Wallet and open it" })
             }
-            if (method === "get_config") return JSON.stringify({ registry: %(registry)s, sequencer: "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json" })
+            if (method === "get_config") return JSON.stringify({ registry: %(registry)s, sequencer: "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json", cli: "/Users/you/.local/bin/names", cli_wallet: "/Users/you/.lee/wallet" })
             if (method === "normalize") return String(args[0]).toLowerCase().replace(/\.lez$/, "")
             if (method === "mine") return ok({ names: names.filter(function(entry) { return entry.owner === "%(alice)s" }).map(function(entry) {
                 return { name: entry.name, display: entry.name + ".lez", owner: entry.owner, expires: null, never: true, lapsed: false } }), pending: [] })
             if (method === "keep") return ok(String(args[0]))
+            // hopper.lez and ada.lez are held privately by the names CLI's wallet.
+            if (method === "cli_mine") return ok(["hopper", "ada"].map(function(name) {
+                return { name: name, display: name + ".lez", signer: "cli", state: "held by a deposit (no expiry)", lapsed: false } }))
+            if (method === "cli_set_text" || method === "cli_profile" || method === "cli_set_page")
+                return ok({ id: args[0] + "-1792000000000", name: args[0], kind: method.substr(4), state: "running", started: Date.now() - 125000 })
+            if (method === "job") return ok(%(job)s)
+            if (method === "set_cli" || method === "set_cli_wallet") return true
             if (method === "settings") return ok({ mode: "deposit", deposits: { normal: "100000000", three: "2000000000" }, admin: "%(bob)s", treasury: "%(bob)s", prices: null })
             if (method === "deposit") {
                 var typed = String(args[0]).toLowerCase().replace(/\.lez$/, "")
@@ -118,6 +125,11 @@ SCENARIOS = {
     "lapsed": 'root.manage("grace")',
     "waiting": 'root.manage("grace"); root.releaseName()',
     "register-settings": 'root.show("jef"); root.settingsOpen = true',
+    # hopper.lez is held by the names CLI: the same settings, minus what only the LEZ wallet does.
+    "cli-settings": 'root.manage("hopper")',
+    "cli-saving": 'root.manage("hopper"); root.saveText("inbox", "/logos/1/hopper/new")',
+    "cli-failed": 'root.manage("hopper"); root.saveText("inbox", "/logos/1/hopper/new"); Qt.callLater(function() { Qt.callLater(function() { root.checkCliJob() }) })',
+    "cli-nowallet": 'root.manage("hopper")',
     "unset": "",
 }
 
@@ -133,9 +145,12 @@ def main():
         bridge = BRIDGE % {
             "names": json.dumps([{"name": n, "owner": o} for n, o in NAMES]),
             "alice": ALICE, "bob": BOB, "carol": CAROL, "pages": json.dumps(PAGES), "avatar": json.dumps(JEF_PIXELS),
-            "wallet": "false" if scenario.startswith("nowallet") else "true", "records": json.dumps(RECORDS),
+            "wallet": "false" if scenario.startswith("nowallet") or scenario == "cli-nowallet" else "true",
+            "job": json.dumps({"id": "hopper-1792000000000", "name": "hopper", "kind": "set_text", "started": 1792000000000, "finished": 1792000190000, "exit": 1, "state": "failed",
+                               "log_tail": "proving the change on this machine...\nError: the transaction was refused: out of gas"} if scenario == "cli-failed"
+                              else {"id": "hopper-1792000000000", "name": "hopper", "kind": "set_text", "started": 1792000000000, "finished": None, "exit": None, "state": "running", "log_tail": "proving the change on this machine..."}), "records": json.dumps(RECORDS),
             "registry": "null" if scenario == "unset" else json.dumps("DbYLkKwd2b13bQhceVj351mpPw7QmRzEjRT2EfU56CKH"),
-            "scenario": SCENARIOS[scenario], "out": out, "height": 2000 if scenario in ("settings", "release", "page-all") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
+            "scenario": SCENARIOS[scenario], "out": out, "height": 2000 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
         }
         with tempfile.NamedTemporaryFile("w", suffix=".qml", delete=False) as handle:
             handle.write(source.replace(marker, marker + bridge, 1))

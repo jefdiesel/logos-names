@@ -28,9 +28,14 @@
 //! which this module asks the LEZ wallet module (`lez_core`) for: the keys stay
 //! in the wallet, and the wallet must be open. The module signs only with the
 //! wallet's public accounts.
+//!
+//! A name held privately by the person's own `names` CLI is changed through
+//! that CLI instead, run in the background as a job (`cli_*` and `job`; see
+//! `cli.rs`): its changes are proven on this machine with the CLI's own keys.
 
 mod avatar;
 mod changes;
+mod cli;
 mod page_view;
 mod registry;
 mod shortlist;
@@ -232,6 +237,56 @@ pub trait NamesModule: Send + 'static {
     /// forget it. Returns false and changes nothing if a file does not exist.
     fn set_wallet_files(&mut self, config_path: String, storage_path: String) -> bool;
 
+    // Names held through the person's own `names` CLI. A name held by a
+    // private account is changed with a proof made on this machine, which the
+    // CLI does with the keys in its own wallet directory. Each change below
+    // runs the CLI in the background, as a job, and answers at once with
+    // `{id, name, kind, state, started}`; `job` says how it is going. Proving
+    // takes a few minutes. At most one job runs per name. The CLI is given
+    // this module's registry and sequencer, and never run through a shell.
+
+    /// The names the CLI's wallet holds, as `names mine` lists them: `[{name,
+    /// display, signer, state, lapsed}]`, `signer` being `cli`. A wallet
+    /// directory with no wallet in it holds none (and the CLI is not run, so
+    /// it makes none). Waits for the CLI, at most 15 seconds.
+    fn cli_mine(&mut self) -> String;
+
+    /// Starts `names profile` for `name`: `entries_json` is a JSON object of
+    /// key to text, as for `set_profile`. `display`, `bio`, `theme`, `color`,
+    /// `font` and `cid` go to their own options, any other key to `--set`, and
+    /// an empty value (or null) removes the key. `avatar` is passed only when
+    /// it is the full path of a PNG file on this machine; any other avatar
+    /// value is left as it is (with `replace`, a `data:image/` URL is kept),
+    /// and the answer's `skipped` lists it.
+    fn cli_profile(&mut self, name: String, entries_json: String, replace: bool) -> String;
+
+    /// Starts `names set-page` with `body` (written to a file in the jobs
+    /// directory, removed once the job ends); an empty body starts `names
+    /// clear-page`.
+    fn cli_set_page(&mut self, name: String, content_type: String, body: String) -> String;
+
+    /// Starts `names set-text`; an empty value removes the entry.
+    fn cli_set_text(&mut self, name: String, key: String, value: String) -> String;
+
+    /// How job `id` is going: `{id, name, kind, state, started, finished,
+    /// exit, log_tail}`. `state` is `running`, `done` (the CLI exited 0: the
+    /// change was sent and included; `resolve` shows it) or `failed`;
+    /// `log_tail` is the end of the CLI's output, whose last line says why it
+    /// failed. Times are in milliseconds.
+    fn job(&mut self, id: String) -> String;
+
+    /// Runs the `names` CLI at this path, and remembers it across restarts;
+    /// an empty path goes back to the default (`~/.local/bin/names`, then the
+    /// first `names` on PATH). Returns false and changes nothing if it is not
+    /// an executable file.
+    fn set_cli(&mut self, path: String) -> bool;
+
+    /// Has the CLI use the wallet in this directory (`LEE_WALLET_HOME_DIR`),
+    /// and remembers it across restarts; an empty path goes back to the
+    /// default, `~/.lee/wallet`. Returns false and changes nothing if it is
+    /// not a directory.
+    fn set_cli_wallet(&mut self, dir: String) -> bool;
+
     /// Called once the module is wired to the host.
     fn on_context_ready(&mut self, _ctx: &RustModuleContext) {}
 }
@@ -252,6 +307,11 @@ struct Names {
     derived: HashMap<String, Derived>,
     /// The wallet's configuration and storage files, if one was named.
     wallet_files: Option<(String, String)>,
+    /// The `names` CLI and its wallet directory, if set (see `set_cli`).
+    cli: Option<String>,
+    cli_wallet: Option<String>,
+    /// Where CLI jobs keep their logs; the config directory's `jobs` if unset.
+    jobs_dir: Option<std::path::PathBuf>,
 }
 
 /// Where this module keeps what it remembers between runs.
@@ -267,6 +327,9 @@ impl Default for Names {
             program: registry::parse_account(DEFAULT_REGISTRY).ok(),
             derived: HashMap::new(),
             wallet_files: None,
+            cli: None,
+            cli_wallet: None,
+            jobs_dir: None,
         };
         // A missing or unreadable file just means the defaults stand.
         let saved = config_dir()
@@ -519,6 +582,8 @@ impl Names {
         if let (Some(config), Some(storage)) = (saved["wallet_config"].as_str(), saved["wallet_storage"].as_str()) {
             self.wallet_files = Some((config.to_owned(), storage.to_owned()));
         }
+        self.cli = saved["cli"].as_str().filter(|path| !path.is_empty()).map(str::to_owned);
+        self.cli_wallet = saved["cli_wallet"].as_str().filter(|dir| !dir.is_empty()).map(str::to_owned);
     }
 
     fn config(&self) -> Value {
@@ -527,7 +592,61 @@ impl Names {
             "registry": self.program.as_ref().map(registry::account_text),
             "wallet_config": self.wallet_files.as_ref().map(|(config, _)| config),
             "wallet_storage": self.wallet_files.as_ref().map(|(_, storage)| storage),
+            "cli": self.cli,
+            "cli_wallet": self.cli_wallet,
         })
+    }
+
+    /// The configuration as `get_config` shows it: the CLI and its wallet
+    /// directory as they will be used, defaults filled in (`cli` is null if
+    /// no CLI is found).
+    fn shown_config(&self) -> Value {
+        let mut config = self.config();
+        config["cli"] = json!(cli::find_program(self.cli.as_deref()).map(|path| path.to_string_lossy().into_owned()));
+        config["cli_wallet"] = json!(cli::find_wallet(self.cli_wallet.as_deref()).map(|dir| dir.to_string_lossy().into_owned()));
+        config
+    }
+
+    /// The CLI to run for this module's registry and sequencer.
+    fn cli_setup(&self) -> Result<cli::Setup, String> {
+        let program = cli::find_program(self.cli.as_deref()).ok_or(
+            "no names CLI found at ~/.local/bin/names or on PATH; install it, or give its path in App settings",
+        )?;
+        let wallet = cli::find_wallet(self.cli_wallet.as_deref()).ok_or("no wallet directory for the names CLI")?;
+        Ok(cli::Setup {
+            program,
+            wallet,
+            registry: self.program.as_ref().map(registry::account_text),
+            sequencer: self.sequencer.clone(),
+        })
+    }
+
+    fn jobs(&self) -> Result<cli::Jobs, String> {
+        self.jobs_dir
+            .clone()
+            .or_else(|| config_dir().map(|dir| dir.join("jobs")))
+            .map(|dir| cli::Jobs { dir })
+            .ok_or_else(|| "this device has nowhere to keep a job's log".to_owned())
+    }
+
+    /// Starts a CLI job for the name a person typed. `build` makes the
+    /// command from the bare name and the job's id.
+    fn cli_job(
+        &self,
+        typed: &str,
+        kind: &str,
+        build: impl FnOnce(&cli::Jobs, &str, &str) -> Result<(Vec<String>, Option<std::path::PathBuf>, Value), String>,
+    ) -> String {
+        reply((|| {
+            let name = registry::parse_name(typed)?;
+            let setup = self.cli_setup()?;
+            setup.wallet_ready()?;
+            let jobs = self.jobs()?;
+            let id = jobs.prepare(&name)?;
+            let (command, scratch, extra) = build(&jobs, &name, &id)?;
+            let started = jobs.start(&setup, &id, &name, kind, command, scratch)?;
+            Ok(merged(started, &extra))
+        })())
     }
 
     /// The open wallet's accounts. If the wallet module is running with no
@@ -1071,7 +1190,82 @@ impl NamesModule for Names {
     }
 
     fn get_config(&mut self) -> String {
-        self.config().to_string()
+        self.shown_config().to_string()
+    }
+
+    fn cli_mine(&mut self) -> String {
+        reply((|| Ok(Value::from(cli::run_mine(&self.cli_setup()?)?)))())
+    }
+
+    fn cli_profile(&mut self, name: String, entries_json: String, replace: bool) -> String {
+        let entries = match parse_entries(&entries_json) {
+            Ok(entries) => entries,
+            Err(error) => return reply(Err(error)),
+        };
+        // Checked before anything runs, so a bad entry fails at once.
+        let made = match cli::profile_args(&name, &entries, replace) {
+            Ok(made) => made,
+            Err(error) => return reply(Err(error)),
+        };
+        self.cli_job(&name, "profile", |_, _, _| Ok((made.args, None, json!({ "skipped": made.skipped }))))
+    }
+
+    fn cli_set_page(&mut self, name: String, content_type: String, body: String) -> String {
+        if let Err(error) = cli::set_page_args(&name, &content_type, Some(std::path::Path::new("check"))) {
+            return reply(Err(error));
+        }
+        self.cli_job(&name, "set_page", |jobs, name, id| {
+            if body.is_empty() {
+                return Ok((cli::set_page_args(name, &content_type, None)?, None, Value::Null));
+            }
+            let file = jobs.scratch(id, "page");
+            std::fs::write(&file, body.as_bytes()).map_err(|error| format!("cannot write the page for the CLI: {error}"))?;
+            match cli::set_page_args(name, &content_type, Some(&file)) {
+                Ok(command) => Ok((command, Some(file), Value::Null)),
+                Err(error) => {
+                    let _ = std::fs::remove_file(&file);
+                    Err(error)
+                }
+            }
+        })
+    }
+
+    fn cli_set_text(&mut self, name: String, key: String, value: String) -> String {
+        let command = match cli::set_text_args(&name, &key, &value) {
+            Ok(command) => command,
+            Err(error) => return reply(Err(error)),
+        };
+        self.cli_job(&name, "set_text", |_, _, _| Ok((command, None, Value::Null)))
+    }
+
+    fn job(&mut self, id: String) -> String {
+        reply((|| self.jobs()?.state(id.trim()))())
+    }
+
+    fn set_cli(&mut self, path: String) -> bool {
+        let path = path.trim();
+        if path.is_empty() {
+            self.cli = None;
+        } else if std::path::Path::new(path).is_absolute() && cli::is_executable(std::path::Path::new(path)) {
+            self.cli = Some(path.to_owned());
+        } else {
+            return false;
+        }
+        self.save();
+        true
+    }
+
+    fn set_cli_wallet(&mut self, dir: String) -> bool {
+        let dir = dir.trim();
+        if dir.is_empty() {
+            self.cli_wallet = None;
+        } else if std::path::Path::new(dir).is_absolute() && std::path::Path::new(dir).is_dir() {
+            self.cli_wallet = Some(dir.to_owned());
+        } else {
+            return false;
+        }
+        self.save();
+        true
     }
 
     fn set_registry(&mut self, program_id: String) -> bool {
@@ -1321,6 +1515,9 @@ mod tests {
             program: None,
             derived: HashMap::new(),
             wallet_files: None,
+            cli: None,
+            cli_wallet: None,
+            jobs_dir: None,
         }
     }
 
@@ -1501,6 +1698,122 @@ mod tests {
         assert_eq!(base64url(b"foo"), "Zm9v");
         assert_eq!(base64url(b"foob"), "Zm9vYg");
         assert_eq!(base64url(&[0xfb, 0xff, 0xfe]), "-__-");
+    }
+
+    /// A module whose CLI is a script that prints its arguments, one `[arg]`
+    /// per line, then runs `tail`; with a wallet and jobs directory of its own.
+    fn with_fake_cli(label: &str, tail: &str) -> (Names, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("logos-names-module-{label}-{}-{}", std::process::id(), now()));
+        let wallet = dir.join("wallet");
+        std::fs::create_dir_all(&wallet).expect("a temp dir");
+        std::fs::write(wallet.join(cli::STORAGE_FILE), "{}").expect("a wallet");
+        let script = dir.join("names");
+        std::fs::write(&script, format!("#!/bin/sh\nfor arg in \"$@\"; do printf '[%s]\\n' \"$arg\"; done\n{tail}\n")).expect("a script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("executable");
+        let mut names = fresh();
+        names.program = Some([7; 32]);
+        names.cli = Some(script.to_string_lossy().into_owned());
+        names.cli_wallet = Some(wallet.to_string_lossy().into_owned());
+        names.jobs_dir = Some(dir.join("jobs"));
+        (names, dir)
+    }
+
+    fn job_end(names: &mut Names, id: &str) -> Value {
+        for _ in 0..200 {
+            let state = parsed(&names.job(id.to_owned()));
+            assert_eq!(state["success"], true, "{state}");
+            if state["value"]["state"] != "running" {
+                return state["value"].clone();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("job {id} did not finish");
+    }
+
+    #[test]
+    fn cli_changes_run_as_jobs_with_the_module_registry() {
+        let (mut names, dir) = with_fake_cli("jobs", "exit 0");
+        let started = parsed(&names.cli_set_text("Jef.lez".into(), "chat".into(), "say \"hi\"\nand $(id)".into()));
+        assert_eq!(started["success"], true, "{started}");
+        assert_eq!(started["value"]["state"], "running");
+        let id = started["value"]["id"].as_str().expect("an id").to_owned();
+        assert!(id.starts_with("jef-"));
+        let done = job_end(&mut names, &id);
+        assert_eq!(done["state"], "done");
+        let program = registry::account_text(&[7; 32]);
+        assert_eq!(
+            done["log_tail"],
+            format!("[--program={program}]\n[--rpc={DEFAULT_SEQUENCER}]\n[set-text]\n[--]\n[jef]\n[chat]\n[say \"hi\"\nand $(id)]")
+        );
+
+        let page = parsed(&names.cli_set_page("jef".into(), "text/plain; charset=utf-8".into(), "line 1\n-- line 2".into()));
+        let done = job_end(&mut names, page["value"]["id"].as_str().expect("an id"));
+        let tail = done["log_tail"].as_str().expect("a log");
+        assert!(tail.contains("[set-page]\n[--content-type=text/plain; charset=utf-8]\n[--]\n[jef]\n["), "{tail}");
+        let cleared = parsed(&names.cli_set_page("jef".into(), "text/html".into(), String::new()));
+        let done = job_end(&mut names, cleared["value"]["id"].as_str().expect("an id"));
+        assert!(done["log_tail"].as_str().expect("a log").ends_with("[clear-page]\n[--]\n[jef]"));
+
+        let profile = parsed(&names.cli_profile("jef".into(), r#"{"display": "Jef", "bio": "", "avatar": "data:image/png;base64,AA", "chat": "x=y"}"#.into(), false));
+        assert_eq!(profile["value"]["skipped"], json!(["avatar"]));
+        let done = job_end(&mut names, profile["value"]["id"].as_str().expect("an id"));
+        assert!(done["log_tail"].as_str().expect("a log").ends_with("[profile]\n[--clear=bio]\n[--set=chat=x=y]\n[--display=Jef]\n[--]\n[jef]"), "{}", done["log_tail"]);
+
+        let config = parsed(&names.get_config());
+        assert_eq!(config["cli"], names.cli.clone().expect("set"));
+        assert_eq!(config["cli_wallet"], names.cli_wallet.clone().expect("set"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_cli_refusal_ends_the_job_failed_with_its_reason() {
+        let (mut names, dir) = with_fake_cli("refusal", "echo 'Error: this wallet does not hold jef.lez' >&2; exit 1");
+        let started = parsed(&names.cli_set_text("jef".into(), "chat".into(), "x".into()));
+        let id = started["value"]["id"].as_str().expect("an id").to_owned();
+        let failed = job_end(&mut names, &id);
+        assert_eq!(failed["state"], "failed");
+        assert_eq!(cli::last_line(failed["log_tail"].as_str().expect("a log")), "Error: this wallet does not hold jef.lez");
+        assert!(parsed(&names.cli_mine())["error"].as_str().expect("an error").contains("does not hold"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cli_changes_check_their_input_before_running_anything() {
+        let (mut names, dir) = with_fake_cli("input", "exit 0");
+        for answer in [
+            names.cli_set_text("jef; rm -rf ~".into(), "chat".into(), "x".into()),
+            names.cli_set_text("$(id)".into(), "chat".into(), "x".into()),
+            names.cli_set_page("a|b".into(), "text/plain".into(), "x".into()),
+            names.cli_profile("jef`id`".into(), r#"{"bio": "x"}"#.into(), false),
+        ] {
+            assert!(parsed(&answer)["error"].as_str().expect("an error").contains("1-32 characters"));
+        }
+        assert_eq!(parsed(&names.cli_set_text("jef".into(), "Bad=Key".into(), "x".into()))["success"], false);
+        assert_eq!(parsed(&names.cli_profile("jef".into(), r#"{"theme": "neon"}"#.into(), false))["success"], false);
+        assert_eq!(parsed(&names.cli_set_page("jef".into(), "text/html\n--x".into(), "x".into()))["success"], false);
+        assert!(parsed(&names.job("../../etc/passwd".into()))["error"].as_str().expect("an error").contains("not a job id"));
+        // Nothing was started.
+        assert!(std::fs::read_dir(dir.join("jobs")).map_or(true, |entries| entries.count() == 0));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_empty_cli_wallet_holds_nothing_and_takes_no_changes() {
+        let (mut names, dir) = with_fake_cli("empty", "echo 'jef.lez  held by a deposit (no expiry)'");
+        assert_eq!(parsed(&names.cli_mine())["value"], json!([{ "name": "jef", "display": "jef.lez", "signer": "cli", "state": "held by a deposit (no expiry)", "lapsed": false }]));
+        let empty = dir.join("empty-wallet");
+        std::fs::create_dir_all(&empty).expect("a dir");
+        names.cli_wallet = Some(empty.to_string_lossy().into_owned());
+        assert_eq!(parsed(&names.cli_mine())["value"], json!([]));
+        let refused = parsed(&names.cli_set_text("jef".into(), "chat".into(), "x".into()));
+        assert!(refused["error"].as_str().expect("an error").contains("names setup"));
+        // The CLI was not run, so it made no wallet there.
+        assert_eq!(std::fs::read_dir(&empty).expect("the dir").count(), 0);
+        assert!(!names.set_cli("relative/names".into()));
+        assert!(!names.set_cli(dir.join("wallet").join(cli::STORAGE_FILE).to_string_lossy().into_owned()));
+        assert!(!names.set_cli_wallet("/no/such/dir".into()));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

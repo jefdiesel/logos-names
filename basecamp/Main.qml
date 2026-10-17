@@ -6,6 +6,11 @@
 // asks on this screen's behalf. Paying goes to `lez_core` directly and
 // messaging through `chat_module`.
 //
+// A name held privately by the person's own `names` CLI (its wallet holds the
+// key, and its changes are proven on this machine) is edited through the
+// module's cli_* methods instead: each starts the CLI in the background and
+// this screen polls the job until it ends.
+//
 // Controls are drawn here rather than taken from Qt Quick Controls so the app
 // looks the same whatever style its host applies.
 
@@ -19,6 +24,9 @@ Item {
 
     property var myNames: []           // [{name, display, owner, expires, never, lapsed}]: names the wallet holds; owner is the wallet account
     property var pendingNames: []      // [{name, display, owner, stage, ready_at, tx}]: registrations still finishing
+    property var cliNames: []          // [{name, display, signer: "cli", state, lapsed}]: names the names CLI's wallet holds
+    property string cliPath: ""        // the names CLI the module runs, and its wallet folder
+    property string cliWallet: ""
     property bool revealing: false     // a pending registration is being asked about
     property var record: null          // the name on the plate
     property var page: null
@@ -49,7 +57,17 @@ Item {
     readonly property bool bridgeReady: typeof logos !== "undefined" && !!logos.callModule
     readonly property bool busy: pending !== null
     readonly property string holder: record !== null ? holderOf(record.name) : ""
-    readonly property bool mine: holder !== ""
+    // Held by the CLI's wallet and not by the open LEZ wallet: changed through the CLI.
+    readonly property bool cliHeld: record !== null && holder === "" && cliHolds(record.name)
+    readonly property bool mine: holder !== "" || cliHeld
+    // "My names": the LEZ wallet's, then the CLI's, each with the signer that applies.
+    readonly property var allMine: {
+        var all = myNames.map(function(entry) { return Object.assign({ signer: "wallet" }, entry) })
+        for (var i = 0; i < cliNames.length; i++)
+            if (!remembers(cliNames[i].name))
+                all.push(cliNames[i])
+        return all
+    }
     readonly property string chatAddress: record !== null && record.texts && /^[0-9a-f]{64}$/.test(record.texts.chat || "") ? record.texts.chat : ""
     property bool pageSourceOpen: false  // the page's source is shown under it
     property bool pageAll: false         // a long page is shown in full, not folded
@@ -179,9 +197,12 @@ Item {
             sequencer = config.sequencer ? config.sequencer : ""
             walletConfig = config.wallet_config ? config.wallet_config : ""
             walletStorage = config.wallet_storage ? config.wallet_storage : ""
+            cliPath = config.cli ? config.cli : ""
+            cliWallet = config.cli_wallet ? config.cli_wallet : ""
             configKnown = true
             settingsOpen = registry === ""
             loadWallet(false)
+            loadCliMine()
             return true
         }
         if (bridgeReady && logos.callModuleAsync) {
@@ -257,6 +278,47 @@ Item {
         }
         loadConfig()
         loadWallet(true)
+    }
+
+    /// Names the CLI the module runs for privately held names, and its wallet
+    /// folder. Empty fields go back to the defaults.
+    function saveCliSettings(path, folder) {
+        try {
+            if (path !== cliPath && !call("names", "set_cli", [path])) {
+                say("That is not the full path of a program.", true)
+                return
+            }
+            if (folder !== cliWallet && !call("names", "set_cli_wallet", [folder])) {
+                say("That is not the full path of a folder.", true)
+                return
+            }
+        } catch (error) {
+            say(error.message, true)
+            return
+        }
+        loadConfig()
+        say("Using the names CLI at " + (path !== "" ? path : "its default place") + ".", false)
+    }
+
+    /// Reads the names the names CLI's wallet holds. They need no LEZ wallet.
+    function loadCliMine() {
+        if (registry === "") {
+            cliNames = []
+            return
+        }
+        askLater("cli_mine", [], function(value) {
+            cliNames = value || []
+        }, function(message) {
+            cliNames = []
+            console.log("names_ui: CLI names:", message)
+        })
+    }
+
+    function cliHolds(name) {
+        for (var i = 0; i < cliNames.length; i++)
+            if (cliNames[i].name === name)
+                return true
+        return false
     }
 
     /// Reads the names this device remembers that the open wallet holds. The
@@ -453,6 +515,10 @@ Item {
     function change(method, args, name, settled, done) {
         if (busy)
             return
+        if (holderOf(name) === "" && cliHolds(name)) {
+            cliChange(method, args, name, settled, done)
+            return
+        }
         var job = { name: name, settled: settled, done: done, sent: false, tries: 0 }
         pending = job
         say("Asking the wallet to sign.", false)
@@ -466,9 +532,79 @@ Item {
         })
     }
 
+    /// The same change for a name the names CLI holds: the module starts the
+    /// CLI, which proves the change on this machine (minutes), and this polls
+    /// the job until it ends, then reads the name back.
+    readonly property var cliMethods: ({ set_text: "cli_set_text", set_profile: "cli_profile", set_page: "cli_set_page" })
+    function cliChange(method, args, name, settled, done) {
+        var cliMethod = cliMethods[method]
+        if (cliMethod === undefined) {
+            say("For a name the names CLI holds, only its profile, entries and page can be changed here.", true)
+            return
+        }
+        var job = { name: name, settled: settled, done: done, cli: true, id: "", asking: false, started: Date.now() }
+        pending = job
+        say("Starting the names CLI.", false)
+        askLater(cliMethod, args, function(value) {
+            job.id = value.id
+            job.started = value.started || Date.now()
+            var skipped = value.skipped && value.skipped.length > 0 ? " (The avatar was left as it is: give the full path of a PNG file to change it.)" : ""
+            say(savingText(job) + skipped, false)
+        }, function(message) {
+            pending = null
+            say(message, true)
+        })
+    }
+
+    function savingText(job) {
+        var minutes = Math.floor((Date.now() - job.started) / 60000)
+        return "Saving… a few minutes (proving on this machine)" + (minutes > 0 ? ", " + minutes + " min so far." : ".")
+    }
+
+    function checkCliJob() {
+        var job = pending
+        if (job === null || !job.cli || job.id === "" || job.asking)
+            return
+        job.asking = true
+        askLater("job", [job.id], function(value) {
+            job.asking = false
+            if (pending !== job)
+                return
+            if (value.state === "running") {
+                say(savingText(job), false)
+                return
+            }
+            pending = null
+            loadCliMine()
+            read(job.name)
+            if (value.state === "done") {
+                var settled = false
+                try {
+                    settled = job.settled()
+                } catch (error) {
+                }
+                say(settled ? (typeof job.done === "function" ? job.done(null) : job.done)
+                    : "The names CLI finished, but the change does not show yet. Look the name up again in a moment.", !settled)
+            } else {
+                say("The names CLI could not save it: " + lastLogLine(value.log_tail), true)
+            }
+        }, function(message) {
+            job.asking = false
+            console.log("names_ui: job:", message)
+        })
+    }
+
+    function lastLogLine(text) {
+        var lines = String(text || "").split("\n")
+        for (var i = lines.length - 1; i >= 0; i--)
+            if (lines[i].trim() !== "")
+                return lines[i].trim()
+        return "it stopped without saying why"
+    }
+
     function checkPending() {
         var job = pending
-        if (!job.sent)
+        if (job.cli || !job.sent)
             return
         var settled = false
         try {
@@ -985,6 +1121,13 @@ Item {
         repeat: true
         running: root.busy
         onTriggered: root.checkPending()
+    }
+
+    Timer {
+        interval: 5000
+        repeat: true
+        running: root.busy && root.pending.cli === true
+        onTriggered: root.checkCliJob()
     }
 
     // `names.open` puts a name on screen for another app, or for a
@@ -1605,7 +1748,7 @@ Item {
                     ListHead {
                         visible: root.registry !== ""
                         label: "My names"
-                        count: root.myNames.length + root.pendingNames.length > 0 ? root.myNames.length + root.pendingNames.length : ""
+                        count: root.allMine.length + root.pendingNames.length > 0 ? root.allMine.length + root.pendingNames.length : ""
                     }
                     Repeater {
                         model: root.pendingNames
@@ -1622,12 +1765,12 @@ Item {
                     }
                     ListView {
                         id: myList
-                        visible: root.myNames.length > 0
+                        visible: root.allMine.length > 0
                         Layout.fillWidth: true
-                        Layout.preferredHeight: Math.min(root.myNames.length, 12) * 42
+                        Layout.preferredHeight: Math.min(root.allMine.length, 12) * 42
                         clip: true
                         spacing: 2
-                        model: root.myNames
+                        model: root.allMine
                         delegate: Rectangle {
                             id: myRow
                             required property var modelData
@@ -1658,6 +1801,13 @@ Item {
                                     weight: Font.Medium
                                 }
                                 Text {
+                                    visible: myRow.modelData.signer === "cli"
+                                    text: "CLI"
+                                    color: root.dim
+                                    font.family: root.mono
+                                    font.pixelSize: 13
+                                }
+                                Text {
                                     visible: !!myRow.modelData.lapsed && !myRow.modelData.never
                                     text: "Lapsed"
                                     color: root.alarm
@@ -1672,8 +1822,13 @@ Item {
                         }
                     }
                     Hint {
-                        visible: root.myNames.length === 0 && root.pendingNames.length === 0 && root.wallet.length > 0
+                        visible: root.allMine.length === 0 && root.pendingNames.length === 0 && root.wallet.length > 0
                         text: "None yet. Look one up to register it."
+                    }
+                    Hint {
+                        visible: root.cliNames.length > 0 && root.wallet.length === 0
+                        font.pixelSize: 15
+                        text: "CLI: held by the names CLI on this machine."
                     }
                     Hint {
                         visible: root.registry !== "" && root.wallet.length === 0
@@ -1761,6 +1916,26 @@ Item {
                     Action {
                         label: "Use this wallet"
                         onPressed: root.saveWalletFiles(walletConfigField.text.trim(), walletStorageField.text.trim())
+                    }
+                    Part { text: "names CLI" }
+                    Hint { text: "Names your names CLI holds privately are edited through it. Each change is proven on this machine and takes a few minutes." }
+                    Field {
+                        id: cliPathField
+                        Layout.fillWidth: true
+                        size: 17
+                        text: root.cliPath
+                        hint: "Path of the names program (~/.local/bin/names)"
+                    }
+                    Field {
+                        id: cliWalletField
+                        Layout.fillWidth: true
+                        size: 17
+                        text: root.cliWallet
+                        hint: "Its wallet folder (~/.lee/wallet)"
+                    }
+                    Action {
+                        label: "Use this CLI"
+                        onPressed: root.saveCliSettings(cliPathField.text.trim(), cliWalletField.text.trim())
                     }
                     Link {
                         visible: root.lastReply !== ""
@@ -2004,8 +2179,18 @@ Item {
                         visible: root.tool === "settings"
                         title: root.record !== null ? "Settings for " + root.shown(root.record.name) : ""
 
+                        Hint {
+                            visible: root.cliHeld && root.busy && root.notice !== ""
+                            color: root.noticeIsError ? root.alarm : root.brass
+                            text: root.notice
+                        }
+                        Hint {
+                            visible: root.cliHeld && !root.busy
+                            color: root.brass
+                            text: "Held privately by the names CLI on this machine. Each save is proven here and takes a few minutes; keep Basecamp open until it is done."
+                        }
                         Part { text: "Profile" }
-                        Hint { text: "All optional. Shown wherever your name is." }
+                        Hint { text: "All optional. Shown wherever your name is." + (root.cliHeld ? " For the avatar, give the full path of a PNG file." : "") }
                         Repeater {
                             model: root.profileFields
                             RowLayout {
@@ -2024,7 +2209,7 @@ Item {
                                 Field {
                                     Layout.fillWidth: true
                                     size: 19
-                                    hint: profileRow.modelData.hint
+                                    hint: root.cliHeld && profileRow.modelData.key === "avatar" ? "Full path of a PNG file, such as /Users/you/me.png" : profileRow.modelData.hint
                                     text: root.record !== null && root.record.texts && root.record.texts[profileRow.modelData.key] !== undefined ? root.record.texts[profileRow.modelData.key] : ""
                                     onTextChanged: {
                                         var draft = Object.assign({}, root.profileDraft)
@@ -2047,6 +2232,10 @@ Item {
                             Item { Layout.fillWidth: true }
                         }
 
+                        ColumnLayout {
+                        visible: !root.cliHeld
+                        Layout.fillWidth: true
+                        spacing: 10
                         Part { text: "Where it is paid" }
                         Hint {
                             text: root.record === null ? "" : root.record.npk !== null && root.record.account === null ? "Private payments only. Nobody can link them to your accounts."
@@ -2087,6 +2276,7 @@ Item {
                                 enabledNow: accountField.text.trim() !== "" && root.record !== null && accountField.text.trim() !== root.record.account
                                 onPressed: root.saveAccount()
                             }
+                        }
                         }
 
                         Part { text: "Entries" }
@@ -2171,6 +2361,10 @@ Item {
                             }
                         }
 
+                        ColumnLayout {
+                        visible: !root.cliHeld
+                        Layout.fillWidth: true
+                        spacing: 10
                         Part { text: "Your account's name" }
                         Hint { text: root.record !== null ? "Apps then show " + root.shorten(root.holder) + " as " + root.shown(root.record.name) + ". This links the two publicly." : "" }
                         Action {
@@ -2235,6 +2429,17 @@ Item {
                             Item { Layout.fillWidth: true }
                             Action { label: "Done"; onPressed: root.tool = "" }
                         }
+                        }
+                        Hint {
+                            visible: root.cliHeld
+                            text: "Payments, transfer and release for this name: use the names CLI (names receive-privately, names transfer, names release)."
+                        }
+                        RowLayout {
+                            visible: root.cliHeld
+                            Layout.fillWidth: true
+                            Item { Layout.fillWidth: true }
+                            Action { label: "Done"; onPressed: root.tool = "" }
+                        }
                     }
 
                     Rectangle { Layout.fillWidth: true; height: 1; color: root.line }
@@ -2244,8 +2449,8 @@ Item {
                         spacing: 10
                         Fact {
                             label: "Holder"
-                            value: root.record === null ? "" : root.mine ? "You · " + root.shorten(root.holder) : "Held privately"
-                            full: root.mine ? root.holder : ""
+                            value: root.record === null ? "" : root.cliHeld ? "You · privately, through the names CLI" : root.mine ? "You · " + root.shorten(root.holder) : "Held privately"
+                            full: root.mine && !root.cliHeld ? root.holder : ""
                         }
                         Fact {
                             label: "Payments"

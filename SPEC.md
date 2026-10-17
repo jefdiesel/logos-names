@@ -635,14 +635,22 @@ module names {
   method release(name: tstr) -> tstr
   method set_primary(account: tstr, name: tstr) -> tstr
 
+  method cli_mine() -> tstr
+  method cli_profile(name: tstr, entries_json: tstr, replace: bool) -> tstr
+  method cli_set_page(name: tstr, content_type: tstr, body: tstr) -> tstr
+  method cli_set_text(name: tstr, key: tstr, value: tstr) -> tstr
+  method job(id: tstr) -> tstr
+
   method get_config() -> tstr
   method set_registry(program_id: tstr) -> bool
   method set_sequencer(url: tstr) -> bool
   method set_wallet_files(config_path: tstr, storage_path: tstr) -> bool
+  method set_cli(path: tstr) -> bool
+  method set_cli_wallet(dir: tstr) -> bool
 }
 ```
 
-Every method except `normalize` and the four configuration methods answers
+Every method except `normalize` and the six configuration methods answers
 with JSON text in the envelope Logos modules use:
 
 ```json
@@ -676,7 +684,8 @@ forget it. It returns false and changes nothing if a file does not exist.
 `set_registry` and `set_sequencer` are also remembered across restarts, and
 return false and change nothing for a value that is not an account ID or an
 http(s) URL. `get_config` returns the sequencer URL, registry program ID and
-wallet files in use.
+wallet files in use, and `cli` and `cli_wallet` (below) as they will be used,
+defaults filled in (`cli` is `null` if no CLI is found).
 
 **Changing.** The module holds no keys. It builds the instruction, checks it
 against the chain, and asks the LEZ wallet module (`lez_core`) to sign and send
@@ -730,6 +739,38 @@ funds, a key or value is out of range. A change that is sent can still be
 refused, so the caller confirms it by calling `resolve` (or `page`, or
 `reverse`) until it shows, which normally takes one block. Send one change per
 account at a time.
+
+**Through the `names` CLI.** A name held by a private account can't be changed
+through `lez_core`: its changes are proven on the holder's machine, which the
+`names` CLI (`cli/`) does with the keys in its own wallet directory. For such
+a name the module runs the CLI as a separate process, never through a shell:
+each argument is one argv entry, options as `--key=value` and the name and
+other positionals after `--`, so a value with quotes, newlines or a leading `-`
+arrives verbatim. The name is checked as everywhere else first. The CLI is
+given the module's registry and sequencer (`--program`, `--rpc`) and
+`LEE_WALLET_HOME_DIR`. `set_cli(path)` names the program (an absolute path to
+an executable; empty for the default, `~/.local/bin/names`, then the first
+`names` on `PATH`) and `set_cli_wallet(dir)` its wallet directory (an existing
+absolute directory; empty for the default, `~/.lee/wallet`); both are
+remembered across restarts and return false and change nothing otherwise.
+While the wallet directory holds no wallet (`storage.json`), the module does
+not run the CLI at all, since the CLI would make a wallet there: `cli_mine`
+answers `[]` and the changes fail.
+
+| Method | `value` |
+|---|---|
+| `cli_mine()` | `[{"name", "display", "signer": "cli", "state", "lapsed"}]`: the names `names mine` lists as held (`state` is its text, such as `held by a deposit (no expiry)`). Waits at most 15 seconds. |
+| `cli_profile(name, entries_json, replace)` | Starts `names profile`. `entries_json` is as for `set_profile`; `display`, `bio`, `theme`, `color`, `font` and `cid` go to their own options, other keys to `--set`, an empty value to `--clear`. `avatar` is passed only as the full path of a PNG file on this machine; any other avatar value is left as it is (with `replace`, a `data:image/` URL is kept) and listed in `skipped`. |
+| `cli_set_page(name, content_type, body)` | Starts `names set-page` with the body in a file in the jobs directory (removed once the job ends); an empty body starts `names clear-page`. |
+| `cli_set_text(name, key, value)` | Starts `names set-text`; an empty value removes the entry. |
+| `job(id)` | `{"id", "name", "kind", "state", "started", "finished", "exit", "log_tail"}`: `state` is `running`, `done` (the CLI exited 0) or `failed`; `log_tail` is the end of the CLI's output, whose last line says why. A job left `running` by a module that stopped is `failed` once its process is gone. |
+
+A change through the CLI takes minutes, longer than a module call may wait, so
+each of the three starts the CLI in the background and answers at once with
+`{"id", "name", "kind", "state": "running", "started"}`; the caller polls `job`
+and then reads the name back with `resolve` or `page`. The CLI's output goes to
+`~/.config/logos-names/jobs/<id>.log`. At most one job runs per name; a job is
+stopped after 45 minutes, and finished jobs are forgotten after a week.
 
 ## 13. Versioning
 

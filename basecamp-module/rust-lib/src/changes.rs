@@ -134,7 +134,7 @@ fn is_valid_text_key(key: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_' | b'.'))
 }
 
-fn check_text(key: &str, value: &str) -> Result<(), String> {
+pub(crate) fn check_text(key: &str, value: &str) -> Result<(), String> {
     if !is_valid_text_key(key) {
         return Err(format!("an entry's key is 1-32 characters of a-z, 0-9, '-', '_' or '.', not {key:?}"));
     }
