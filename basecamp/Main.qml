@@ -33,6 +33,8 @@ Item {
     property var page: null
     property string editTab: "profile"   // the Edit screen's tab: profile, page or giveup
     property bool publicRegisterOpen: false
+    property bool registering: false       // the "Register a name" screen is open
+    property string registerTaken: ""      // the name last checked there that someone holds
     property var cliBalance: undefined   // the names CLI's private account {account, balance}; undefined while asking, null if none // the public-account way to register is shown
     property bool entriesOpen: false     // the Entries part of a name's settings is shown
     property var pagePreview: null       // the page being written, as page_view would show it
@@ -523,7 +525,45 @@ Item {
     }
 
     /// Puts a name on the plate, with every panel closed.
+    /// Opens the "Register a name" screen.
+    function openRegister() {
+        say("", false)
+        record = null
+        page = null
+        missing = ""
+        tool = ""
+        settingsOpen = false
+        registerTaken = ""
+        registering = true
+        registerField.text = ""
+        registerField.forceActiveFocus()
+    }
+
+    /// Checks the name typed on the "Register a name" screen: a free one opens
+    /// its registration, a held one is said to be taken.
+    function checkRegister(typed) {
+        var text = String(typed).trim()
+        if (text === "")
+            return
+        say("", false)
+        try {
+            var name = String(call("names", "normalize", [text]))
+            if (name === "") {
+                say("A name is 1 to 32 characters of a-z, 0-9 or a hyphen, such as jef.lez.", true)
+                return
+            }
+            if (ask("resolve", [name]) !== null) {
+                registerTaken = name
+                return
+            }
+            show(name)
+        } catch (error) {
+            say(error.message, true)
+        }
+    }
+
     function show(name) {
+        registering = false
         tool = ""
         pageSourceOpen = false
         pageAll = false
@@ -1816,6 +1856,13 @@ Item {
                         onPressed: root.find(searchField.text)
                     }
                 }
+                Action {
+                    visible: root.registry !== ""
+                    Layout.fillWidth: true
+                    label: "+  Register a name"
+                    strong: true
+                    onPressed: root.openRegister()
+                }
 
                 // The names this wallet holds.
                 ColumnLayout {
@@ -2097,7 +2144,7 @@ Item {
 
                 // Nothing chosen yet.
                 ColumnLayout {
-                    visible: root.record === null && root.missing === "" && !root.settingsOpen
+                    visible: root.record === null && root.missing === "" && !root.settingsOpen && !root.registering
                     Layout.fillWidth: true
                     Layout.topMargin: 60
                     spacing: 10
@@ -2111,7 +2158,77 @@ Item {
                     Hint {
                         font.pixelSize: 18
                         color: root.ink
-                        text: !root.configKnown ? "Waiting for the names module to answer." : root.registry === "" ? "Open Advanced and enter the registry's program ID." : "Type a name to see its profile and page. If nobody holds it, you can register it."
+                        text: !root.configKnown ? "Waiting for the names module to answer." : root.registry === "" ? "Open Advanced and enter the registry's program ID." : "Type a name in the box on the left to see its profile and page."
+                    }
+                    Action {
+                        visible: root.configKnown && root.registry !== ""
+                        Layout.topMargin: 10
+                        label: "Register a name"
+                        strong: true
+                        onPressed: root.openRegister()
+                    }
+                }
+
+                // Register a name: type one, check it.
+                ColumnLayout {
+                    visible: root.registering && root.record === null && root.missing === ""
+                    Layout.fillWidth: true
+                    Layout.topMargin: 60
+                    spacing: 14
+                    Text {
+                        text: "Register a name"
+                        color: root.ink
+                        font.family: root.sans
+                        font.weight: Font.DemiBold
+                        font.pixelSize: 36
+                    }
+                    Hint {
+                        font.pixelSize: 18
+                        text: "Pick a name people can use to find your profile and page. Held privately, with a deposit you get back when you release it."
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: 560
+                        spacing: 8
+                        Field {
+                            id: registerField
+                            Layout.fillWidth: true
+                            size: 22
+                            hint: "yourname"
+                            onAccepted: root.checkRegister(registerField.text)
+                        }
+                        Text {
+                            text: ".lez"
+                            color: root.dim
+                            font.family: root.sans
+                            font.pixelSize: 22
+                        }
+                        Action {
+                            label: "Check"
+                            strong: true
+                            enabledNow: registerField.text.trim() !== ""
+                            onPressed: root.checkRegister(registerField.text)
+                        }
+                    }
+                    RowLayout {
+                        visible: root.registerTaken !== ""
+                        spacing: 12
+                        Rectangle { width: 10; height: 10; radius: 5; color: root.alarm }
+                        Text {
+                            text: root.registerTaken + ".lez is taken. Try another."
+                            color: root.alarm
+                            font.family: root.sans
+                            font.pixelSize: 18
+                        }
+                        Link {
+                            text: "See it"
+                            font.pixelSize: 16
+                            onPressed: root.show(root.registerTaken)
+                        }
+                    }
+                    Hint {
+                        font.pixelSize: 15
+                        text: "1 to 32 letters, digits or hyphens. Three-letter names take a larger deposit; one- and two-letter names are reserved."
                     }
                 }
 

@@ -129,6 +129,8 @@ SCENARIOS = {
     "edit-page": 'root.manage("jef"); root.editTab = "page"',
     "edit-giveup": 'root.manage("grace"); root.editTab = "giveup"',
     "register-public": 'root.show("satoshi"); root.publicRegisterOpen = true',
+    "register-new": 'root.openRegister()',
+    "register-taken": 'root.openRegister(); root.checkRegister("jef")',
     "register-poor": 'root.show("pauper")',
     "lapsed": 'root.manage("grace")',
     "waiting": 'root.manage("grace"); root.releaseName()',
