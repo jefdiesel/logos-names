@@ -51,7 +51,12 @@ Item {
     readonly property string holder: record !== null ? holderOf(record.name) : ""
     readonly property bool mine: holder !== ""
     readonly property string chatAddress: record !== null && record.texts && /^[0-9a-f]{64}$/.test(record.texts.chat || "") ? record.texts.chat : ""
-    property bool pageSourceOpen: false  // the page's source is shown under its row
+    property bool pageSourceOpen: false  // the page's source is shown under it
+    property bool pageAll: false         // a long page is shown in full, not folded
+    property string pageLink: ""         // the link last pressed in the page, shown to copy or open
+    // A page folds at about 30 lines; pageMetrics measures one.
+    readonly property real pageFold: 30 * pageMetrics.height
+    readonly property bool pageIsLong: pageText.implicitHeight > pageFold + pageMetrics.height * 3
 
     // The name's profile, as the holder set it. These entries are how the name
     // is shown, so they are drawn rather than listed. Each is checked against a
@@ -403,6 +408,8 @@ Item {
     function show(name) {
         tool = ""
         pageSourceOpen = false
+        pageAll = false
+        pageLink = ""
         read(name)
     }
 
@@ -427,7 +434,7 @@ Item {
                 avatarPixels = null
             record = found
             loadAvatar(found)
-            page = ask("page", [found.name])
+            page = ask("page_view", [found.name])
             if (!mine && tool !== "pay")
                 tool = ""
             // A name the wallet holds joins "My names" once it is looked up (the module refuses others).
@@ -790,6 +797,61 @@ Item {
         var size = page.bytes !== undefined && page.bytes !== null ? page.bytes : (page.text !== null ? page.text.length : 0)
         var kind = /html/i.test(page.content_type) ? "HTML" : /^text\//i.test(page.content_type) ? "Text" : "File"
         return kind + ", " + (size < 1024 ? size + " bytes" : (size / 1024).toFixed(1) + " KB")
+    }
+
+    /// The line over the page: its title, if it has one, and what it is.
+    function pageHeading() {
+        if (page === null)
+            return ""
+        var title = typeof page.title === "string" && page.title !== "" ? page.title + " · " : ""
+        return title + pageSummary()
+    }
+
+    /// What the page card draws: for an HTML page, only the markup the names
+    /// module sanitized (`html` from page_view), under this app's own small
+    /// stylesheet; for a plain-text page, its text, drawn as plain text; for
+    /// anything else, nothing. The page's raw source is never rendered.
+    function pageBody() {
+        if (page === null)
+            return ""
+        if (page.kind === "html")
+            // A span right before another tag gets a gap after it: pages lay
+            // out "label, value" pairs with CSS this app does not apply.
+            return typeof page.html === "string" && page.html !== "" ? pageStyle() + page.html.replace(/<\/span>(?=<)/g, "</span>&nbsp;&nbsp;") : ""
+        if (page.kind === "text")
+            return typeof page.text === "string" ? page.text.substr(0, 65536).replace(/\s+$/, "") : ""
+        return ""
+    }
+
+    /// The app's stylesheet for a page, so it reads in the app's type and
+    /// colours. The page's own styles never reach it.
+    function pageStyle() {
+        return "<style>"
+            + "h1,h2,h3,h4{color:" + accent + ";font-weight:600;}"
+            + "h1{font-size:26px;} h2{font-size:22px;} h3{font-size:19px;} h4{font-size:17px;}"
+            + "code,pre{font-family:" + mono + ";color:" + dim + ";font-size:15px;}"
+            + "blockquote,span{color:" + dim + ";}"
+            + "th{color:" + dim + ";text-align:left;}"
+            + "th,td{padding:2px 18px 2px 0;}"
+            + "a{color:" + accent + ";}"
+            + "</style>"
+    }
+
+    /// Opens the link last pressed in the page in the browser, if it is an
+    /// http(s) address (the module lets no other kind through) and Basecamp
+    /// lets this app open one.
+    function openPageLink() {
+        var link = pageLink
+        if (!/^https?:\/\/[^\s"'<>]+$/i.test(link))
+            return
+        var opened = false
+        try {
+            opened = Qt.openUrlExternally(link)
+        } catch (error) {
+            opened = false
+        }
+        if (!opened)
+            say("Basecamp did not open the link. Copy it instead.", true)
     }
 
     /// The page's source as plain text. It is never rendered: a page is its
@@ -2217,42 +2279,165 @@ Item {
                             }
                         }
 
-                        // The page: what it is, and its source on request. It is
-                        // never rendered here (see pageSource).
+                    }
+
+                    // The page, drawn from the markup the module sanitized
+                    // (page_view): allowlisted tags only, links only to http(s)
+                    // addresses, no scripts, styles, images or attributes. A
+                    // plain-text page is drawn as plain text. A link is never
+                    // followed by a press: it shows its address, to copy or to
+                    // open on a second, explicit press.
+                    ColumnLayout {
+                        visible: root.page !== null
+                        Layout.fillWidth: true
+                        Layout.topMargin: 6
+                        spacing: 10
                         RowLayout {
-                            visible: root.page !== null
                             Layout.fillWidth: true
                             spacing: 12
                             Text {
-                                Layout.preferredWidth: 120
                                 text: "Page"
-                                color: root.dim
+                                color: root.ink
                                 font.family: root.sans
-                                font.weight: Font.Medium
                                 font.pixelSize: 18
+                                font.weight: Font.Bold
                             }
                             Text {
                                 Layout.fillWidth: true
-                                text: root.pageSummary() + (root.record !== null ? " · open with names open " + root.shown(root.record.name) : "")
+                                text: root.pageHeading()
                                 textFormat: Text.PlainText
-                                color: root.ink
+                                color: root.dim
                                 font.family: root.sans
                                 font.weight: Font.Medium
-                                font.pixelSize: 18
+                                font.pixelSize: 17
                                 elide: Text.ElideRight
                             }
                             Link {
+                                visible: root.page !== null && root.page.text !== null && root.page.text !== undefined
                                 text: root.pageSourceOpen ? "Hide source" : "Show source"
+                                font.pixelSize: 16
                                 onPressed: root.pageSourceOpen = !root.pageSourceOpen
                             }
                         }
                         Rectangle {
+                            visible: root.pageBody() !== ""
+                            Layout.fillWidth: true
+                            implicitHeight: pageClip.height + 36
+                            radius: 8
+                            color: root.panel
+                            border.width: 1
+                            border.color: root.line
+                            clip: true
+                            Rectangle {
+                                width: parent.width
+                                height: 3
+                                radius: 8
+                                color: root.accent
+                            }
+                            Item {
+                                id: pageClip
+                                x: 20
+                                y: 18
+                                width: parent.width - 40
+                                height: root.pageAll || !root.pageIsLong ? pageText.implicitHeight : root.pageFold
+                                clip: true
+                                Text {
+                                    id: pageText
+                                    width: parent.width
+                                    text: root.pageBody()
+                                    textFormat: root.page !== null && root.page.kind === "html" ? Text.RichText : Text.PlainText
+                                    color: root.ink
+                                    linkColor: root.accent
+                                    font.family: root.page !== null && root.page.kind === "html" ? root.sans : root.mono
+                                    font.pixelSize: root.page !== null && root.page.kind === "html" ? 17 : 15
+                                    wrapMode: Text.Wrap
+                                    onLinkActivated: (link) => root.pageLink = link
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        acceptedButtons: Qt.NoButton
+                                        cursorShape: pageText.hoveredLink !== "" ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                    }
+                                }
+                                FontMetrics {
+                                    id: pageMetrics
+                                    font: pageText.font
+                                }
+                            }
+                            // A fade over the fold, so a cut page reads as cut.
+                            Rectangle {
+                                visible: root.pageIsLong && !root.pageAll
+                                x: 1
+                                width: parent.width - 2
+                                height: 48
+                                anchors.bottom: parent.bottom
+                                anchors.bottomMargin: 1
+                                gradient: Gradient {
+                                    GradientStop { position: 0; color: "transparent" }
+                                    GradientStop { position: 1; color: root.panel }
+                                }
+                            }
+                        }
+                        Link {
+                            visible: root.pageIsLong || (root.page !== null && root.page.truncated === true)
+                            text: root.pageIsLong ? (root.pageAll ? "Show less" : "Show all") : "Only the first 64 KB is shown"
+                            font.pixelSize: 16
+                            onPressed: root.pageAll = !root.pageAll
+                        }
+
+                        // The link last pressed in the page: its address in full,
+                        // as plain text, to copy or open.
+                        Rectangle {
+                            visible: root.pageLink !== ""
+                            Layout.fillWidth: true
+                            implicitHeight: linkRow.implicitHeight + 20
+                            radius: 6
+                            color: root.raised
+                            RowLayout {
+                                id: linkRow
+                                x: 14
+                                y: 10
+                                width: parent.width - 28
+                                spacing: 14
+                                Text {
+                                    text: "Link"
+                                    color: root.dim
+                                    font.family: root.sans
+                                    font.weight: Font.Medium
+                                    font.pixelSize: 17
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: root.pageLink
+                                    textFormat: Text.PlainText
+                                    color: root.ink
+                                    font.family: root.mono
+                                    font.pixelSize: 15
+                                    elide: Text.ElideMiddle
+                                }
+                                Link {
+                                    text: "Copy"
+                                    font.pixelSize: 16
+                                    onPressed: root.copy(root.pageLink, "Link")
+                                }
+                                Link {
+                                    text: "Open in browser"
+                                    font.pixelSize: 16
+                                    onPressed: root.openPageLink()
+                                }
+                                Link {
+                                    text: "Close"
+                                    font.pixelSize: 16
+                                    onPressed: root.pageLink = ""
+                                }
+                            }
+                        }
+
+                        Rectangle {
                             visible: root.page !== null && root.pageSourceOpen
                             Layout.fillWidth: true
-                            Layout.leftMargin: 132
                             implicitHeight: sourceText.implicitHeight + 24
                             radius: 6
-                            color: root.panel
+                            color: root.slate
                             border.width: 1
                             border.color: root.line
                             clip: true

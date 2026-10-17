@@ -31,6 +31,7 @@
 
 mod avatar;
 mod changes;
+mod page_view;
 mod registry;
 mod shortlist;
 
@@ -75,6 +76,17 @@ pub trait NamesModule: Send + 'static {
     /// `text` is the body if it is valid UTF-8. A null value means no page.
     /// The page is written by the name's owner: treat it as untrusted content.
     fn page(&mut self, name: String) -> String;
+
+    /// The page published under `name`, made safe to show inside an app:
+    /// `{content_type, bytes, kind, title, html, text, truncated}`. `kind` is
+    /// `html`, `text` or `file`. For an HTML page, `html` is the body rewritten
+    /// to an allowlist Qt's rich text can draw (headings, paragraphs, lists,
+    /// tables, emphasis, code, and links to `http:`/`https:` URLs only; no
+    /// scripts, styles, images, attributes or comments), and `title` is its
+    /// `<title>` as plain text; both are null otherwise. `text` is the page's
+    /// own source, as in `page`, to be shown only as plain text. At most 64 KB
+    /// of a page is read; `truncated` says it was cut. A null value means no page.
+    fn page_view(&mut self, name: String) -> String;
 
     /// The picture in `name`'s `avatar` entry, decoded, for an app that can't
     /// load a `data:` URL: `{width, height, pixels}`, where `pixels` is base64
@@ -803,6 +815,12 @@ impl NamesModule for Names {
     fn page(&mut self, name: String) -> String {
         self.about(&name, |registry, name, derived| {
             Ok(registry.page(name, derived)?.unwrap_or(Value::Null))
+        })
+    }
+
+    fn page_view(&mut self, name: String) -> String {
+        self.about(&name, |registry, name, derived| {
+            Ok(registry.page(name, derived)?.map_or(Value::Null, |page| page_view::view(&page)))
         })
     }
 

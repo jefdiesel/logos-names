@@ -28,7 +28,20 @@ RECORDS = {
                          "chat": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
                          "agent": "https://agents.example/hopper", "inbox": "/logos/1/hopper/proto"}},
 }
-PAGE = "<!doctype html>\n<meta charset=\"utf-8\">\n<title>jef</title>\n<h1>jef</h1>\n<p>This page is stored on the Logos Execution Zone and resolved by name.</p>\n"
+# jef.lez's page is jefdiesel.html, the real page of jefdiesel.lez, and
+# JEF_PAGE_HTML is what the module's page_view makes of it (page_view.rs's
+# jefdiesel test, run with PRINT_JEF=1).
+PAGE = open(os.path.join(HERE, "..", "..", "basecamp-module", "rust-lib", "testdata", "jefdiesel.html")).read()
+JEF_PAGE_HTML = "<div>\n      <h1>Jef</h1>\n      <p>jefdiesel.lez</p>\n    </div>\n  \n  <p>Building LNS, private names for the Logos Execution Zone. No relays, no servers, nothing between you and the chain.</p>\n  <ul>\n    <li><span>pay me</span><code>names pay jefdiesel.lez &lt;amount&gt;</code></li>\n    <li><span>also</span><code>jef.lez</code></li>\n    <li><span>code</span><a href=\"https://github.com/jefdiesel\">github.com/jefdiesel</a></li>\n  </ul>\n  Stored on the Logos Execution Zone, opened on your own machine."
+# hopper.lez publishes plain text; linus.lez a page long enough to fold.
+PAGES = {
+    "jef": {"content_type": "text/html; charset=utf-8", "bytes": len(PAGE.encode()), "kind": "html", "title": "jefdiesel.lez",
+            "html": JEF_PAGE_HTML, "text": PAGE, "truncated": False},
+    "hopper": {"content_type": "text/plain; charset=utf-8", "bytes": 120, "kind": "text", "title": None, "html": None, "truncated": False,
+               "text": "Office hours: Tuesdays.\n\nA ship in port is safe, but that is not what ships are built for.\n<b>not bold</b>"},
+    "linus": {"content_type": "text/html", "bytes": 5400, "kind": "html", "title": "Changelog", "truncated": False, "text": "<title>Changelog</title>...",
+              "html": "<h2>Changelog</h2><table><thead><tr><th>Version</th><th>Date</th></tr></thead><tbody><tr><td>v0.40</td><td>2026-10-16</td></tr><tr><td>v0.39</td><td>2026-10-01</td></tr></tbody></table><pre>" + "names pay linus.lez 100 --memo " + "x" * 160 + "</pre><blockquote>Quoted <i>words</i>.</blockquote><ol><li>one</li><li>two</li></ol><hr>" + "".join("<p><b>v0.%d</b> fixed <code>thing %d</code>, see <a href=\"https://example.org/%d\">notes</a>.</p>" % (i, i, i) for i in range(40, 0, -1))},
+}
 
 BRIDGE = r"""
     width: 1180; height: %(height)s
@@ -63,7 +76,7 @@ BRIDGE = r"""
                 return ok({ name: typed, display: typed + ".lez", tier: tier, deposit: tier === "locked" ? null : tier === "three" ? "2000000000" : "100000000", mode: "deposit" })
             }
             if (method === "avatar") return ok(args[0] === "jef" ? %(avatar)s : null)
-            if (method === "page") return ok(args[0] === "jef" ? { content_type: "text/html; charset=utf-8", bytes: 148, text: %(page)s } : null)
+            if (method === "page_view" || method === "page") { var pages = %(pages)s; return ok(pages[args[0]] || null) }
             if (method === "resolve") {
                 var name = String(args[0]).toLowerCase().replace(/\.lez$/, "")
                 for (var i = 0; i < names.length; i++) {
@@ -96,6 +109,10 @@ SCENARIOS = {
     "nowallet-register": 'root.show("satoshi")',
     "profile": 'root.show("hopper")',
     "source": 'root.show("jef"); root.pageSourceOpen = true',
+    "page-link": 'root.show("jef"); root.pageLink = "https://github.com/jefdiesel"',
+    "page-text": 'root.show("hopper")',
+    "page-long": 'root.show("linus")',
+    "page-all": 'root.show("linus"); root.pageAll = true',
     "settings": 'root.manage("jef")',
     "release": 'root.manage("grace"); root.confirmingRelease = true',
     "lapsed": 'root.manage("grace")',
@@ -115,10 +132,10 @@ def main():
         out = os.path.join(out_dir, scenario + ".png")
         bridge = BRIDGE % {
             "names": json.dumps([{"name": n, "owner": o} for n, o in NAMES]),
-            "alice": ALICE, "bob": BOB, "carol": CAROL, "page": json.dumps(PAGE), "avatar": json.dumps(JEF_PIXELS),
+            "alice": ALICE, "bob": BOB, "carol": CAROL, "pages": json.dumps(PAGES), "avatar": json.dumps(JEF_PIXELS),
             "wallet": "false" if scenario.startswith("nowallet") else "true", "records": json.dumps(RECORDS),
             "registry": "null" if scenario == "unset" else json.dumps("DbYLkKwd2b13bQhceVj351mpPw7QmRzEjRT2EfU56CKH"),
-            "scenario": SCENARIOS[scenario], "out": out, "height": 2000 if scenario in ("settings", "release") else 900 if scenario in ("profile", "source") else 760,
+            "scenario": SCENARIOS[scenario], "out": out, "height": 2000 if scenario in ("settings", "release", "page-all") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
         }
         with tempfile.NamedTemporaryFile("w", suffix=".qml", delete=False) as handle:
             handle.write(source.replace(marker, marker + bridge, 1))
