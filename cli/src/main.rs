@@ -490,6 +490,18 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// A name's posts, newest first, read straight from the board (no block scan).
+    PostsOf {
+        #[arg(value_parser = parse_name)]
+        name: String,
+        /// Start below this post number (for the next page); the newest without it.
+        #[arg(long)]
+        before: Option<u64>,
+        #[arg(long, default_value_t = 10)]
+        count: u64,
+        #[arg(long)]
+        json: bool,
+    },
     /// A post and its replies, written `<name>/<n>`, oldest first.
     Thread {
         #[arg(value_parser = board::parse_post)]
@@ -2592,6 +2604,16 @@ async fn main() -> Result<()> {
         Command::MakePublic { name } => client.make_public(&name).await,
         Command::Feed { following, blocks, json } => {
             board::print_posts(&client.feed(blocks, &following).await?, json)
+        }
+        Command::PostsOf { name, before, count, json } => {
+            let (total, posts) = client.posts_of(&name, before, count.min(50)).await?;
+            if json {
+                println!("{}", serde_json::json!({ "total": total, "posts": posts }));
+                Ok(())
+            } else {
+                println!("{name} has {total} post{}", if total == 1 { "" } else { "s" });
+                board::print_posts(&posts, false)
+            }
         }
         Command::Thread { post, blocks, json } => board::print_posts(&client.thread(post, blocks).await?, json),
         Command::Address { .. }

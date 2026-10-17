@@ -210,6 +210,18 @@ pub fn run_feed(setup: &Setup, following: &[String]) -> Result<Value, String> {
     serde_json::from_str(last_line(&run_text(setup, args, FEED_PATIENCE)?)).map_err(|_| "the names CLI's feed did not decode".to_owned())
 }
 
+/// Runs `names posts-of --json`: `{total, posts}`, the name's posts newest first
+/// below post number `before` (its newest when `before` is negative).
+pub fn run_posts_of(setup: &Setup, name: &str, before: i64) -> Result<Value, String> {
+    setup.wallet_ready()?;
+    let mut args = vec!["posts-of".to_owned(), "--json".to_owned(), "--count=10".to_owned()];
+    if before >= 0 {
+        args.push(format!("--before={before}"));
+    }
+    args.extend(["--".to_owned(), registry::parse_name(name)?]);
+    serde_json::from_str(last_line(&run_text(setup, args, FEED_PATIENCE)?)).map_err(|_| "the names CLI's posts did not decode".to_owned())
+}
+
 /// Runs `names thread --json` for `post`.
 pub fn run_thread(setup: &Setup, post: &str) -> Result<Value, String> {
     setup.wallet_ready()?;

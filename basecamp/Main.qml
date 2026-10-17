@@ -83,6 +83,7 @@ Item {
     property var authorPosts: []        // the posts of the name on the plate, newest first
     property string authorOf: ""        // whose posts those are
     property bool authorLoading: false
+    property int authorTotal: 0         // how many posts that name has made
     property bool anonPublic: false     // the anon name, once made, moves to its own public account
     property bool confirmingRelease: false
     property var pending: null         // a change that was sent and is not confirmed yet
@@ -640,26 +641,38 @@ Item {
         pageLink = ""
         read(name)
         if (record !== null)
-            loadAuthorPosts(record.name)
+            loadAuthorPosts(record.name, false)
     }
 
     /// The posts of `name`, for its page. Answers at once with the last read
     /// and looks again shortly while a newer one is on its way.
-    function loadAuthorPosts(name) {
-        if (authorOf !== name)
-            authorPosts = []
+    function loadAuthorPosts(name, more) {
+        if (authorOf !== name || !more)
+            authorPosts = authorOf === name ? authorPosts : []
         authorOf = name
+        var before = more && authorPosts.length > 0 ? authorPosts[authorPosts.length - 1].n : -1
         authorLoading = true
-        askLater("board_posts_of", [name], function(value) {
-            if (authorOf !== name)
+        authorWant = { name: name, before: before, more: more }
+        askLater("board_posts_of", [name, before], function(value) {
+            if (authorOf !== name || authorWant.before !== before)
                 return
             value = value || {}
-            authorPosts = value.posts || []
+            var page = value.posts && value.posts.posts ? value.posts.posts : []
+            if (value.posts && value.posts.total !== undefined)
+                authorTotal = value.posts.total
+            if (more) {
+                var seen = {}
+                authorPosts.forEach(function(post) { seen[post.id] = true })
+                authorPosts = authorPosts.concat(page.filter(function(post) { return !seen[post.id] }))
+            } else if (page.length > 0 || !value.updating) {
+                authorPosts = page
+            }
             authorLoading = !!value.updating
             if (value.updating)
                 authorRetry.start()
         }, function() { authorLoading = false }, 150000)
     }
+    property var authorWant: ({})
 
     /// Reads a name again without closing the panel the holder is working in.
     function read(name) {
@@ -1809,7 +1822,7 @@ Item {
     Timer {
         id: authorRetry
         interval: 3000
-        onTriggered: if (root.record !== null && root.authorOf === root.record.name) root.loadAuthorPosts(root.authorOf)
+        onTriggered: if (root.record !== null && root.authorOf === root.record.name) root.loadAuthorPosts(root.authorOf, !!root.authorWant.more)
     }
     Timer {
         id: cliRetry
@@ -4527,11 +4540,11 @@ Item {
                         visible: root.tool !== "settings" && root.record !== null
                         Layout.fillWidth: true
                         spacing: 10
-                        Text { text: "Posts"; color: root.ink; font.family: root.sans; font.pixelSize: 18; font.weight: Font.Bold }
+                        Text { text: "Posts" + (root.authorTotal > 0 ? "  " + root.authorTotal : ""); color: root.ink; font.family: root.sans; font.pixelSize: 18; font.weight: Font.Bold }
                         Hint {
                             visible: root.authorPosts.length === 0
                             font.pixelSize: 15
-                            text: root.authorLoading ? "Loading posts…" : "No posts in the last few hours."
+                            text: root.authorLoading ? "Loading posts…" : "No posts yet."
                         }
                         Repeater {
                             model: root.authorPosts.filter(function(post) { return !post.hidden })
@@ -4580,6 +4593,12 @@ Item {
                                     }
                                 }
                             }
+                        }
+                        Action {
+                            visible: root.authorPosts.length > 0 && root.authorPosts[root.authorPosts.length - 1].n > 0
+                            label: root.authorLoading ? "Loading…" : "View more"
+                            enabledNow: !root.authorLoading
+                            onPressed: root.loadAuthorPosts(root.authorOf, true)
                         }
                     }
 

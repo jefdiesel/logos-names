@@ -294,8 +294,10 @@ pub trait NamesModule: Send + 'static {
     /// by the names this device follows.
     fn board_feed(&mut self, following: bool) -> String;
 
-    /// The recent posts by `name`, newest first, answered as `board_feed` is.
-    fn board_posts_of(&mut self, name: String) -> String;
+    /// Ten posts by `name`, newest first, below post number `before` (its newest
+    /// when negative), read straight from the board: answered as `board_feed`
+    /// is, with `posts` holding `{total, posts}`.
+    fn board_posts_of(&mut self, name: String, before: i64) -> String;
 
     /// A post (`<name>/<n>`) and its replies, oldest first, answered as `board_feed` is.
     fn board_thread(&mut self, post: String) -> String;
@@ -1547,12 +1549,12 @@ impl NamesModule for Names {
         })())
     }
 
-    fn board_posts_of(&mut self, name: String) -> String {
+    fn board_posts_of(&mut self, name: String, before: i64) -> String {
         reply((|| {
             let name = registry::parse_name(&name)?;
             let setup = self.cli_setup()?;
-            let names = vec![name.clone()];
-            Ok(self.board_read(format!("feed:{name}"), move || cli::run_feed(&setup, &names)))
+            let key = format!("author:{name}:{before}");
+            Ok(self.board_read(key, move || cli::run_posts_of(&setup, &name, before)))
         })())
     }
 

@@ -693,3 +693,71 @@ impl Client {
         Ok(())
     }
 }
+
+impl Client {
+    /// `count` posts by `name`, newest first, from `before` down (`None` is its
+    /// newest), read straight from their accounts: the name's post counter says
+    /// how many there are, and each post's address follows from its number.
+    /// Likes come from what earlier feeds saw. Returns (total, posts).
+    pub async fn posts_of(&self, name: &str, before: Option<u64>, count: u64) -> Result<(u64, Vec<FeedPost>)> {
+        use futures::StreamExt as _;
+        let board = board_program()?;
+        let author = derive(name).id;
+        let bytes = self.board_shard(board, board_core::author_address(&board, &author)).await?;
+        let total = if bytes.is_empty() { 0 } else { borsh::from_slice::<board_core::Author>(&bytes)?.count };
+        let top = before.map_or(total, |before| before.min(total));
+        let numbers: Vec<u64> = (top.saturating_sub(count)..top).rev().collect();
+        let read: Vec<Option<board_core::Post>> = futures::stream::iter(numbers)
+            .map(|n| async move {
+                let id = PostId { author, n };
+                let bytes = self.board_shard(board, board_core::post_address(&board, &id)).await.ok()?;
+                borsh::from_slice::<board_core::Post>(&bytes).ok()
+            })
+            .buffered(10)
+            .collect()
+            .await;
+        // Likes as the local feed cache counted them: no network for that.
+        let path = fetch_persistent_storage_path()?.with_file_name(format!("board-{board}.json"));
+        let cache: BoardCache = std::fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+        let mut likes: std::collections::BTreeMap<(NameId, u64), i64> = std::collections::BTreeMap::new();
+        let mut liked: std::collections::BTreeMap<String, (NameId, u64)> = std::collections::BTreeMap::new();
+        for event in &cache.events {
+            match event.kind.as_str() {
+                "like" => {
+                    if let Ok(like) = hex::decode(&event.data).map_err(|_| ()).and_then(|data| borsh::from_slice::<board_core::Like>(&data).map_err(|_| ())) {
+                        *likes.entry((like.post.author, like.post.n)).or_default() += 1;
+                        if let Some(account) = &event.account {
+                            liked.insert(account.clone(), (like.post.author, like.post.n));
+                        }
+                    }
+                }
+                "unlike" => {
+                    if let Some(post) = event.account.as_ref().and_then(|account| liked.get(account)) {
+                        *likes.entry(*post).or_default() -= 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let posts = read
+            .into_iter()
+            .flatten()
+            .filter(|post| post.name == name)
+            .map(|post| FeedPost {
+                id: board_core::post_address(&board, &post.id).to_string(),
+                parent_id: post.parent.map(|parent| board_core::post_address(&board, &parent).to_string()),
+                post: format!("{}/{}", post.name, post.id.n),
+                name: post.name.clone(),
+                n: post.id.n,
+                parent: post.parent.map(|parent| format!("{}/{}", hex::encode(parent.author), parent.n)),
+                time: post.time,
+                text: post.text.clone(),
+                cids: post.cids.clone(),
+                likes: likes.get(&(post.id.author, post.id.n)).copied().unwrap_or(0),
+                hidden: post.hidden,
+                block: 0,
+            })
+            .collect();
+        Ok((total, posts))
+    }
+}
