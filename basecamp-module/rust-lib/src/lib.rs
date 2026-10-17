@@ -326,6 +326,11 @@ pub trait NamesModule: Send + 'static {
     /// finishes in the background.
     fn make_anon(&mut self) -> String;
 
+    /// Moves `name` from the CLI wallet's private account to a new public account
+    /// in it (`names make-public`), so its posts take one block and pay gas. A CLI
+    /// job of about 9 minutes; the name keeps its profile, page and receiving keys.
+    fn make_public(&mut self, name: String) -> String;
+
     /// The posts this device's names have liked, `<name>/<n>`.
     fn board_likes(&mut self) -> String;
 
@@ -1483,6 +1488,15 @@ impl NamesModule for Names {
 
     fn spell_check(&mut self, text: String) -> String {
         reply(Ok(spell::check(&text)))
+    }
+
+    fn make_public(&mut self, name: String) -> String {
+        let name = match registry::parse_name(&name) {
+            Ok(name) => name,
+            Err(error) => return reply(Err(error)),
+        };
+        let command = vec!["make-public".to_owned(), "--".to_owned(), name.clone()];
+        self.cli_job(&name, "make_public", |_, _, _| Ok((command, None, Value::Null)))
     }
 
     fn board_likes(&mut self) -> String {

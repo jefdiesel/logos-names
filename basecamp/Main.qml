@@ -64,6 +64,7 @@ Item {
     property var boardLiked: []        // posts this device has liked, <name>/<n>
     property bool cliKnown: false      // the CLI's names have been read at least once
     property var boardSpelling: []     // [{word, suggestions}] in the post being written
+    property string publicAsk: ""      // the name Settings is asking to confirm making public
     property bool confirmingRelease: false
     property var pending: null         // a change that was sent and is not confirmed yet
     property string registry: ""
@@ -1220,9 +1221,9 @@ Item {
 
     // ── The board (Home) ────────────────────────────────────────────────
 
-    /// The names this wallet can post as: those the names CLI holds, not by a
-    /// public account (a public holder pays gas; offered once it is measured).
-    readonly property var boardNames: cliNames.filter(function(entry) { return entry.private !== false })
+    /// The names this wallet can post as: those the names CLI holds. A private
+    /// holder posts by a proof (~4 min, free), a public one in a block (gas).
+    readonly property var boardNames: cliNames
     /// Your main name: the one set for this device if the wallet still holds it,
     /// else the first name the CLI holds privately that isn't the anon one.
     readonly property string mainName: {
@@ -2483,7 +2484,7 @@ Item {
                     }
                     // A private name posts by a proof: say so before anyone presses Post.
                     Rectangle {
-                        visible: root.boardAs !== "" && !(root.anonOn && !root.anonReady)
+                        visible: root.boardAs !== "" && !(root.anonOn && !root.anonReady) && root.cliNames.some(function(entry) { return entry.name === root.boardAs && entry.private !== false })
                         Layout.fillWidth: true
                         implicitHeight: privateWarning.implicitHeight + 20
                         radius: 8
@@ -2791,6 +2792,52 @@ Item {
                         }
                     }
                     Hint { visible: root.anonName !== ""; text: "Anon name: " + root.anonName + (root.anonReady ? "" : " (being set up)") + ". Only your wallet links it to your main name." }
+                    Part { text: "Private or public" }
+                    Hint { text: "A name held privately posts in about 4 minutes, free, and nobody can find which account holds it. Make it public and its posts take about 15 seconds and a little gas, but anyone who knows the name can find the account that holds it. Payments to it stay private either way." }
+                    Repeater {
+                        model: root.cliNames.filter(function(entry) { return entry.name !== root.anonName })
+                        RowLayout {
+                            required property var modelData
+                            Layout.fillWidth: true
+                            spacing: 12
+                            Text { Layout.preferredWidth: 160; text: modelData.name; color: root.ink; font.family: root.sans; font.pixelSize: 17; elide: Text.ElideRight }
+                            Text { text: modelData.private === false ? "Public" : "Private"; color: root.faint; font.family: root.sans; font.pixelSize: 15 }
+                            Item { Layout.fillWidth: true }
+                            Action {
+                                visible: modelData.private !== false && root.publicAsk !== modelData.name
+                                label: "Make public"
+                                enabledNow: root.boardJob === null
+                                onPressed: root.publicAsk = modelData.name
+                            }
+                            Text {
+                                visible: root.publicAsk === modelData.name
+                                text: "About 9 min; funds it with 10,000,000 for gas."
+                                color: root.brass
+                                font.family: root.sans
+                                font.pixelSize: 14
+                            }
+                            Action {
+                                visible: root.publicAsk === modelData.name
+                                label: "Make it public"
+                                strong: true
+                                onPressed: {
+                                    var name = modelData.name
+                                    root.publicAsk = ""
+                                    root.boardStart("make_public", [name], "Making " + name + " public", function() { root.loadCliMine() })
+                                }
+                            }
+                            Action {
+                                visible: root.publicAsk === modelData.name
+                                label: "Cancel"
+                                onPressed: root.publicAsk = ""
+                            }
+                        }
+                    }
+                    Hint {
+                        visible: root.boardJob !== null && root.section === "settings"
+                        color: root.brass
+                        text: root.boardJob === null ? "" : root.boardJob.label + ": about 9 min, " + Math.max(0, Math.floor((Math.max(root.clockTick, Date.now()) - root.boardJob.started) / 60000)) + " so far."
+                    }
                     ColumnLayout {
                         Layout.fillWidth: true
                         spacing: 6

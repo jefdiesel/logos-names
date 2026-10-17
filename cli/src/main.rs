@@ -496,6 +496,15 @@ enum Command {
     /// links it to your other names. Prints the name; registering it takes about 20
     /// minutes and runs in the background (`names mine` shows it).
     Anon,
+    /// Move a name you hold privately to a new public account in this wallet, so
+    /// its posts take one block (paying a little gas) instead of a 4-minute proof.
+    /// Anyone who knows the name can then find that account; it is funded with
+    /// 10,000,000 for gas and should hold nothing else. Payments to the name stay
+    /// private. Takes about 9 minutes.
+    MakePublic {
+        #[arg(value_parser = parse_name)]
+        name: String,
+    },
     /// Take down one of your posts, written `<name>/<n>`. Its text stays in the
     /// chain's history; apps stop showing it.
     Hide {
@@ -2552,6 +2561,7 @@ async fn main() -> Result<()> {
         Command::Like { as_name, post, undo } => client.like(&as_name, post, undo).await,
         Command::Hide { post } => client.hide(post).await,
         Command::Anon => client.anon(cli.rpc.as_deref()).await,
+        Command::MakePublic { name } => client.make_public(&name).await,
         Command::Feed { following, blocks, json } => {
             board::print_posts(&client.feed(blocks, &following).await?, json)
         }

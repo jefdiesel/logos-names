@@ -466,3 +466,50 @@ impl Client {
         Ok(())
     }
 }
+
+/// How much a name made public gets for its posting gas: each public change holds
+/// about 1.8M while it runs and pays a fraction of that.
+const PUBLIC_GAS_FUND: u128 = 10_000_000;
+
+impl Client {
+    /// Moves `name` from the private account that holds it to a new public account
+    /// in this wallet, so its posts take one block (and pay gas) instead of a
+    /// proof. The new account is funded for gas from the private account; the
+    /// name keeps its profile, page and private receiving keys.
+    pub async fn make_public(&mut self, name: &str) -> Result<()> {
+        let (Derived { id, .. }, record, profile) = self.lookup_held(name).await?;
+        let holder = self.holder(name, &id, &record)?;
+        if !self.is_private(holder) {
+            bail!("{name}{NAME_SUFFIX} is already held by a public account");
+        }
+        let page = self.page(name).await?;
+        let (public, _) = self.wallet.create_new_account_public(None);
+        quietly(|| self.wallet.store_persistent_data())?;
+        println!("step 1 of 3: funding Public/{public} with {PUBLIC_GAS_FUND} for gas, privately (about 4 minutes)");
+        let (hash, secret) = NativeTokenTransfer(&self.wallet)
+            .send_deshielded_transfer(holder, public, PUBLIC_GAS_FUND)
+            .await
+            .context("the sequencer did not accept the transfer")?;
+        let (tx, block) = self.wallet.poll_transaction(hash).await.context("the transfer was not included in a block")?;
+        if let common::transaction::LeeTransaction::PrivacyPreserving(tx) = &tx {
+            quietly(|| self.wallet.decode_insert_privacy_preserving_transaction_results(tx, &[AccDecodeData::Decode(secret, holder)]))?;
+            quietly(|| self.wallet.store_persistent_data())?;
+        }
+        println!("funded in block {block}");
+        println!("step 2 of 3: moving {name}{NAME_SUFFIX} to it (about 4 minutes)");
+        self.transfer(name, public).await?;
+        // A transfer empties the profile and page; put them back as they were,
+        // receiving keys included, now signed by the public holder (one block each).
+        println!("step 3 of 3: putting back its profile and page");
+        self.edit(name, |restored| {
+            *restored = profile.clone();
+            Ok(())
+        })
+        .await?;
+        if let Some(page) = page {
+            self.set_page(name, Some(page)).await?;
+        }
+        println!("{name}{NAME_SUFFIX} is now held by Public/{public}: posts take one block and pay gas");
+        Ok(())
+    }
+}
