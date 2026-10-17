@@ -464,16 +464,16 @@ enum Command {
         /// A Logos Storage CID to attach, such as an image; up to four.
         #[arg(long = "cid")]
         cids: Vec<String>,
-        /// Reply to this post, written `<name>/<n>`.
+        /// Reply to this post: its ID, or `<name>/<n>`.
         #[arg(long, value_parser = board::parse_post)]
-        reply: Option<(String, u64)>,
+        reply: Option<board::PostRef>,
     },
     /// Like a post on the board, written `<name>/<n>`, as one of your names.
     Like {
         #[arg(long = "as", value_parser = parse_name)]
         as_name: String,
         #[arg(value_parser = board::parse_post)]
-        post: (String, u64),
+        post: board::PostRef,
         /// Take the like back.
         #[arg(long)]
         undo: bool,
@@ -493,7 +493,7 @@ enum Command {
     /// A post and its replies, written `<name>/<n>`, oldest first.
     Thread {
         #[arg(value_parser = board::parse_post)]
-        post: (String, u64),
+        post: board::PostRef,
         #[arg(long, default_value_t = 20000)]
         blocks: u64,
         #[arg(long)]
@@ -522,7 +522,7 @@ enum Command {
     /// chain's history; apps stop showing it.
     Hide {
         #[arg(value_parser = board::parse_post)]
-        post: (String, u64),
+        post: board::PostRef,
     },
 }
 

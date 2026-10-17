@@ -20,12 +20,25 @@ pub fn board_program() -> Result<AccountId> {
     text.parse().map_err(|_| anyhow!("LOGOS_BOARD_PROGRAM is not a program ID: {text}"))
 }
 
-/// `<name>/<n>`, as `names post` prints a post.
-pub fn parse_post(input: &str) -> Result<(String, u64), String> {
-    let (name, n) = input.rsplit_once('/').ok_or("a post is written <name>/<number>, such as jef/0")?;
-    let name = parse_name(name)?;
-    let n = n.parse().map_err(|_| format!("not a post number: {n}"))?;
-    Ok((name, n))
+/// A post, as people pass one: its ID (the address of its account, which is
+/// unique and what apps show), or `<name>/<n>`.
+#[derive(Clone, Debug)]
+pub enum PostRef {
+    Id(AccountId),
+    Named(String, u64),
+}
+
+pub fn parse_post(input: &str) -> Result<PostRef, String> {
+    let input = input.trim();
+    if let Some((name, n)) = input.rsplit_once('/') {
+        let name = parse_name(name)?;
+        let n = n.parse().map_err(|_| format!("not a post number: {n}"))?;
+        return Ok(PostRef::Named(name, n));
+    }
+    input
+        .parse()
+        .map(PostRef::Id)
+        .map_err(|_| format!("not a post: {input} (give its ID, or <name>/<number>)"))
 }
 
 /// One account a board change names: which program's shard of it, and whether it signs.
@@ -36,6 +49,23 @@ struct Row {
 }
 
 impl Client {
+    /// The post `post` names: its ID on the board, its author's name and its address.
+    async fn find_post(&self, board: AccountId, post: &PostRef) -> Result<(PostId, String, AccountId)> {
+        let (address, named) = match post {
+            PostRef::Id(address) => (*address, None),
+            PostRef::Named(name, n) => {
+                let id = PostId { author: derive(name).id, n: *n };
+                (board_core::post_address(&board, &id), Some(name.clone()))
+            }
+        };
+        let bytes = self.board_shard(board, address).await?;
+        if bytes.is_empty() {
+            bail!("there is no such post on the board");
+        }
+        let found: board_core::Post = borsh::from_slice(&bytes).context("that account is not a post")?;
+        Ok((found.id, named.unwrap_or(found.name), address))
+    }
+
     /// The account in this wallet that holds `name`. A private one posts by a
     /// proof (no gas, about 4 minutes); a public one by a signed transaction
     /// (one block, and it pays LEZ gas).
@@ -124,7 +154,7 @@ impl Client {
 
     /// Posts `text` as `name`, starting a thread or, with `parent`, replying.
     /// Prints the new post as `<name>/<n>`.
-    pub async fn post(&mut self, name: &str, text: String, cids: Vec<String>, parent: Option<(String, u64)>) -> Result<()> {
+    pub async fn post(&mut self, name: &str, text: String, cids: Vec<String>, parent: Option<PostRef>) -> Result<()> {
         let board = board_program()?;
         let (author, signer) = self.private_holder(name).await?;
         let counter = board_core::author_address(&board, &author);
@@ -135,13 +165,7 @@ impl Client {
             borsh::from_slice::<board_core::Author>(&bytes).context("the author account does not decode")?.count
         };
         let parent = match parent {
-            Some((parent_name, parent_n)) => {
-                let id = PostId { author: derive(&parent_name).id, n: parent_n };
-                if self.board_shard(board, board_core::post_address(&board, &id)).await?.is_empty() {
-                    bail!("there is no post {parent_name}/{parent_n} to reply to");
-                }
-                Some(id)
-            }
+            Some(parent) => Some(self.find_post(board, &parent).await?.0),
             None => None,
         };
         let id = PostId { author, n };
@@ -165,15 +189,15 @@ impl Client {
         if self.board_shard(board, post).await?.is_empty() {
             bail!("the post was included but not written; it failed on chain");
         }
-        println!("posted {name}/{n}");
+        println!("posted {name}/{n}, ID {post}");
         Ok(())
     }
 
     /// Likes (or, with `undo`, unlikes) the post `post` as `name`.
-    pub async fn like(&mut self, name: &str, post: (String, u64), undo: bool) -> Result<()> {
+    pub async fn like(&mut self, name: &str, post: PostRef, undo: bool) -> Result<()> {
         let board = board_program()?;
         let (liker, signer) = self.private_holder(name).await?;
-        let id = PostId { author: derive(&post.0).id, n: post.1 };
+        let (id, _, address) = self.find_post(board, &post).await?;
         let like = board_core::like_address(&board, &id, &liker);
         let record = Row { account: record_address(&REGISTRY, &liker), shard: REGISTRY, signs: false };
         let signer = Row { account: signer, shard: board, signs: true };
@@ -186,22 +210,23 @@ impl Client {
             self.send_board(board, vec![record, like_row, post_row, signer], &BoardInstruction::Like { liker, post: id, now })
                 .await?;
         }
-        println!("{} {}/{}", if undo { "unliked" } else { "liked" }, post.0, post.1);
+        println!("{} {address}", if undo { "unliked" } else { "liked" });
         Ok(())
     }
 
     /// Takes down the post `post`, which `post.0` must be held by this wallet.
-    pub async fn hide(&mut self, post: (String, u64)) -> Result<()> {
+    pub async fn hide(&mut self, post: PostRef) -> Result<()> {
         let board = board_program()?;
-        let (author, signer) = self.private_holder(&post.0).await?;
-        let id = PostId { author, n: post.1 };
+        let (id, name, address) = self.find_post(board, &post).await?;
+        let (author, signer) = self.private_holder(&name).await?;
+        let id = PostId { author, n: id.n };
         let rows = vec![
             Row { account: record_address(&REGISTRY, &author), shard: REGISTRY, signs: false },
             Row { account: board_core::post_address(&board, &id), shard: board, signs: false },
             Row { account: signer, shard: board, signs: true },
         ];
         self.send_board(board, rows, &BoardInstruction::Hide { post: id }).await?;
-        println!("hid {}/{}", post.0, post.1);
+        println!("hid {address}");
         Ok(())
     }
 }
@@ -209,6 +234,10 @@ impl Client {
 /// A post as the feed shows it.
 #[derive(serde::Serialize)]
 pub struct FeedPost {
+    /// The post's ID: the address of its account on the board.
+    pub id: String,
+    /// The ID of the post this answers.
+    pub parent_id: Option<String>,
     pub post: String,
     pub name: String,
     pub n: u64,
@@ -250,6 +279,33 @@ impl Client {
         for (block_id, block) in fetched {
             let Ok(Some(block)) = block else { continue };
             for tx in &block.body.transactions {
+                // A public change carries its instruction, not its effects: read
+                // what it wrote from the post's account, which also says it applied.
+                if let common::transaction::LeeTransaction::Public(tx) = tx {
+                    if tx.message.program_account_id != board {
+                        continue;
+                    }
+                    match borsh::from_slice::<BoardInstruction>(&tx.message.instruction_data) {
+                        Ok(BoardInstruction::Post { author, n, .. }) => {
+                            let id = PostId { author, n };
+                            if let Ok(bytes) = self.board_shard(board, board_core::post_address(&board, &id)).await {
+                                if let Ok(post) = borsh::from_slice::<board_core::Post>(&bytes) {
+                                    scan.posts.push((post, block_id));
+                                }
+                            }
+                        }
+                        Ok(BoardInstruction::Like { liker, post, .. }) => {
+                            *scan.likes.entry((post.author, post.n)).or_default() += 1;
+                            liked.insert(board_core::like_address(&board, &post, &liker), (post.author, post.n));
+                        }
+                        Ok(BoardInstruction::Unlike { liker, post }) => unliked.push(board_core::like_address(&board, &post, &liker)),
+                        Ok(BoardInstruction::Hide { post }) => {
+                            scan.hidden.insert((post.author, post.n));
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
                 let common::transaction::LeeTransaction::PrivacyPreserving(tx) = tx else { continue };
                 for action in &tx.message.public_actions {
                     for effect in &action.effects {
@@ -286,7 +342,7 @@ impl Client {
 
     /// Checks each post's name against its author id (the program can't), and
     /// turns the scan into feed rows, newest first.
-    fn feed_rows(&self, scan: &Scan, keep: impl Fn(&board_core::Post) -> bool) -> Vec<FeedPost> {
+    fn feed_rows(&self, board: AccountId, scan: &Scan, keep: impl Fn(&board_core::Post) -> bool) -> Vec<FeedPost> {
         let mut verified: std::collections::BTreeMap<String, NameId> = std::collections::BTreeMap::new();
         let mut names: std::collections::BTreeMap<NameId, String> = std::collections::BTreeMap::new();
         let mut rows = Vec::new();
@@ -302,6 +358,8 @@ impl Client {
             .map(|(post, block)| {
                 let key = (post.id.author, post.id.n);
                 FeedPost {
+                    id: board_core::post_address(&board, &post.id).to_string(),
+                    parent_id: post.parent.map(|parent| board_core::post_address(&board, &parent).to_string()),
                     post: format!("{}/{}", post.name, post.id.n),
                     name: post.name.clone(),
                     n: post.id.n,
@@ -326,15 +384,15 @@ impl Client {
         let board = board_program()?;
         let scan = self.scan_board(board, blocks).await?;
         let wanted: std::collections::BTreeSet<&str> = following.iter().map(String::as_str).collect();
-        Ok(self.feed_rows(&scan, |post| wanted.is_empty() || wanted.contains(post.name.as_str())))
+        Ok(self.feed_rows(board, &scan, |post| wanted.is_empty() || wanted.contains(post.name.as_str())))
     }
 
     /// The post `post` and every reply under it found in the last `blocks` blocks,
     /// oldest first, so a thread reads top to bottom.
-    pub async fn thread(&self, post: (String, u64), blocks: u64) -> Result<Vec<FeedPost>> {
+    pub async fn thread(&self, post: PostRef, blocks: u64) -> Result<Vec<FeedPost>> {
         let board = board_program()?;
+        let (root, _, _) = self.find_post(board, &post).await?;
         let scan = self.scan_board(board, blocks).await?;
-        let root = PostId { author: derive(&post.0).id, n: post.1 };
         let mut members = std::collections::BTreeSet::from([(root.author, root.n)]);
         // Replies come after their parents in chain order, so one pass in order finds them all.
         for (candidate, _) in &scan.posts {
@@ -344,7 +402,7 @@ impl Client {
                 }
             }
         }
-        let mut rows = self.feed_rows(&scan, |p| members.contains(&(p.id.author, p.id.n)));
+        let mut rows = self.feed_rows(board, &scan, |p| members.contains(&(p.id.author, p.id.n)));
         rows.reverse();
         Ok(rows)
     }
@@ -362,7 +420,7 @@ pub fn print_posts(posts: &[FeedPost], json: bool) -> Result<()> {
     for post in posts.iter().filter(|post| !post.hidden) {
         let reply = post.parent.as_ref().map(|parent| format!(" (reply to {parent})")).unwrap_or_default();
         let likes = if post.likes > 0 { format!(" · {} like{}", post.likes, if post.likes == 1 { "" } else { "s" }) } else { String::new() };
-        println!("{}  {}{reply}{likes}", post.post, readable(post.time));
+        println!("{}  {}{reply}{likes}  (ID {})", post.name, readable(post.time), post.id);
         for line in post.text.lines() {
             println!("    {line}");
         }

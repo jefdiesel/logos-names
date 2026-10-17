@@ -138,9 +138,15 @@ pub fn register_args(name: &str, public: bool) -> Result<Vec<String>, String> {
     Ok(args)
 }
 
-/// A board post reference, `<name>/<n>`, checked like anything typed.
+/// A board post reference: its ID (the address of its account) or
+/// `<name>/<n>`, checked like anything typed.
 pub fn post_ref(post: &str) -> Result<String, String> {
-    let (name, n) = post.trim().rsplit_once('/').ok_or("a post is written <name>/<number>")?;
+    let post = post.trim();
+    let Some((name, n)) = post.rsplit_once('/') else {
+        return registry::parse_account(post)
+            .map(|account| registry::account_text(&account))
+            .map_err(|_| format!("not a post: {post}"));
+    };
     let name = registry::parse_name(name)?;
     let n: u64 = n.parse().map_err(|_| format!("not a post number: {n}"))?;
     Ok(format!("{name}/{n}"))
@@ -187,10 +193,10 @@ pub fn pay_args(name: &str, amount: &str) -> Result<Vec<String>, String> {
     Ok(vec!["pay".to_owned(), "--".to_owned(), name, amount])
 }
 
-/// `names hide`, and the name whose job it is.
+/// `names hide`, and the name whose job it is (`board` for a post given by ID).
 pub fn hide_args(post: &str) -> Result<(String, Vec<String>), String> {
     let post = post_ref(post)?;
-    let name = post.rsplit_once('/').map(|(name, _)| name.to_owned()).unwrap_or_default();
+    let name = post.rsplit_once('/').map_or_else(|| "board".to_owned(), |(name, _)| name.to_owned());
     Ok((name, vec!["hide".to_owned(), "--".to_owned(), post]))
 }
 
@@ -838,6 +844,10 @@ mod tests {
         assert_eq!(like_args("jef", "@ada/0", true).unwrap(), strings(&["like", "--as=jef", "--undo", "--", "ada/0"]));
         assert_eq!(hide_args("jef/2").unwrap(), ("jef".to_owned(), strings(&["hide", "--", "jef/2"])));
         assert!(hide_args("jef/x").is_err());
+        let id = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
+        assert_eq!(like_args("jef", id, false).unwrap(), strings(&["like", "--as=jef", "--", id]));
+        assert_eq!(hide_args(id).unwrap().0, "board");
+        assert!(post_args("jef", "hi", &[], "not-a-post").is_err());
         assert_eq!(pay_args("Ada", "1,000").unwrap(), strings(&["pay", "--", "ada", "1000"]));
         assert!(pay_args("ada", "0").is_err());
         assert!(pay_args("ada", "-5").is_err());

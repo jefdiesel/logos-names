@@ -1324,6 +1324,58 @@ Item {
         return job.label + ": proving it on this computer, so the chain never learns your account. About 4 min, " + Math.floor(seconds / 60) + " so far."
     }
 
+    /// The posts as a tree: each post, then its replies under it (oldest first),
+    /// each row `{post, depth}`. A reply whose post isn't loaded stands alone.
+    readonly property var boardTree: {
+        var byId = {}, children = {}, rows = []
+        for (var i = 0; i < boardPosts.length; i++)
+            byId[boardPosts[i].id] = boardPosts[i]
+        var tops = []
+        for (var j = 0; j < boardPosts.length; j++) {
+            var p = boardPosts[j]
+            if (p.parent_id && byId[p.parent_id]) {
+                (children[p.parent_id] = children[p.parent_id] || []).push(p)
+            } else {
+                tops.push(p)
+            }
+        }
+        if (boardView === "thread")
+            tops.sort(function(a, b) { return a.time - b.time })
+        function add(post, depth) {
+            rows.push({ post: post, depth: depth })
+            var replies = (children[post.id] || []).slice().sort(function(a, b) { return a.time - b.time })
+            for (var k = 0; k < replies.length; k++)
+                add(replies[k], Math.min(depth + 1, 3))
+        }
+        for (var t = 0; t < tops.length; t++)
+            add(tops[t], 0)
+        return rows
+    }
+
+    /// The top of the thread `id` is in, as far as the loaded posts go.
+    function boardRootOf(id) {
+        var byId = {}
+        for (var i = 0; i < boardPosts.length; i++)
+            byId[boardPosts[i].id] = boardPosts[i]
+        var at = byId[id]
+        for (var hops = 0; at && at.parent_id && byId[at.parent_id] && hops < 50; hops++)
+            at = byId[at.parent_id]
+        return at ? at.id : id
+    }
+
+    /// "Jef: first words of the post", for what a reply answers.
+    function boardPreviewOf(id) {
+        for (var i = 0; i < boardPosts.length; i++) {
+            var p = boardPosts[i]
+            if (p.id === id) {
+                var who = boardPeople[p.name] && boardPeople[p.name].display !== "" ? boardPeople[p.name].display : p.name
+                var text = p.text.replace(/\s+/g, " ").trim()
+                return who + ": \u201c" + (text.length > 60 ? text.substr(0, 60) + "\u2026" : text) + "\u201d"
+            }
+        }
+        return "a post"
+    }
+
     function boardFollowing(name) {
         return boardFollows.indexOf(name) >= 0
     }
@@ -2895,7 +2947,7 @@ Item {
                     RowLayout {
                         Layout.fillWidth: true
                         visible: root.boardReplyTo !== ""
-                        Text { Layout.fillWidth: true; text: "Replying to " + root.boardReplyTo; color: root.brass; font.family: root.sans; font.pixelSize: 15 }
+                        Text { Layout.fillWidth: true; text: "Replying to " + root.boardPreviewOf(root.boardReplyTo); color: root.brass; font.family: root.sans; font.pixelSize: 15; elide: Text.ElideRight }
                         Link { text: "Cancel"; color: root.faint; font.pixelSize: 14; onPressed: root.boardReplyTo = "" }
                     }
                     Area {
@@ -2984,13 +3036,15 @@ Item {
                 }
 
                 Repeater {
-                    model: root.boardPosts
+                    model: root.boardTree
                     Card {
                         id: postCard
                         required property var modelData
-                        readonly property var who: root.boardPeople[modelData.name] || ({ display: "", color: "", pixels: null })
-                        readonly property bool isMine: root.cliNames.some(function(entry) { return entry.name === postCard.modelData.name })
-                        visible: !modelData.hidden
+                        readonly property var p: modelData.post
+                        Layout.leftMargin: modelData.depth * 40
+                        readonly property var who: root.boardPeople[modelData.post.name] || ({ display: "", color: "", pixels: null })
+                        readonly property bool isMine: root.cliNames.some(function(entry) { return entry.name === postCard.p.name })
+                        visible: !modelData.post.hidden
                         Layout.fillWidth: true
                         RowLayout {
                             Layout.fillWidth: true
@@ -3000,8 +3054,8 @@ Item {
                                 Layout.preferredHeight: 44
                                 Layout.alignment: Qt.AlignTop
                                 pixels: postCard.who.pixels
-                                owner: postCard.modelData.name
-                                letter: postCard.modelData.name.charAt(0)
+                                owner: postCard.p.name
+                                letter: postCard.p.name.charAt(0)
                                 ring: postCard.who.color !== "" ? postCard.who.color : root.brass
                             }
                             ColumnLayout {
@@ -3020,34 +3074,34 @@ Item {
                                         font.weight: Font.DemiBold
                                     }
                                     Text {
-                                        text: postCard.modelData.name
+                                        text: postCard.p.name
                                         color: postCard.who.display !== "" ? root.faint : root.ink
                                         font.family: root.sans
                                         font.pixelSize: postCard.who.display !== "" ? 15 : 17
                                         font.weight: postCard.who.display !== "" ? Font.Normal : Font.DemiBold
-                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.show(postCard.modelData.name) }
+                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.show(postCard.p.name) }
                                     }
-                                    Text { text: "· " + root.boardAgo(postCard.modelData.time); color: root.faint; font.family: root.sans; font.pixelSize: 14 }
+                                    Text { text: "· " + root.boardAgo(postCard.p.time); color: root.faint; font.family: root.sans; font.pixelSize: 14 }
                                     Item { Layout.fillWidth: true }
                                     Link {
                                         visible: !postCard.isMine
-                                        text: root.boardFollowing(postCard.modelData.name) ? "Following" : "Follow"
-                                        color: root.boardFollowing(postCard.modelData.name) ? root.faint : root.brass
+                                        text: root.boardFollowing(postCard.p.name) ? "Following" : "Follow"
+                                        color: root.boardFollowing(postCard.p.name) ? root.faint : root.brass
                                         font.pixelSize: 14
-                                        onPressed: root.boardFollow(postCard.modelData.name, root.boardFollowing(postCard.modelData.name))
+                                        onPressed: root.boardFollow(postCard.p.name, root.boardFollowing(postCard.p.name))
                                     }
                                 }
                                 Text {
-                                    visible: !!postCard.modelData.parent
-                                    text: "replying to " + (postCard.modelData.parent ? String(postCard.modelData.parent).split("/")[0] : "")
+                                    visible: !!postCard.p.parent && postCard.modelData.depth === 0
+                                    text: "replying to " + (postCard.p.parent ? String(postCard.p.parent).split("/")[0] : "")
                                     color: root.faint
                                     font.family: root.sans
                                     font.pixelSize: 13
                                 }
                                 Text {
                                     Layout.fillWidth: true
-                                    visible: postCard.modelData.text !== ""
-                                    text: postCard.modelData.text
+                                    visible: postCard.p.text !== ""
+                                    text: postCard.p.text
                                     textFormat: Text.PlainText
                                     color: root.dim
                                     font.family: root.sans
@@ -3057,10 +3111,10 @@ Item {
                                 }
                                 Flow {
                                     Layout.fillWidth: true
-                                    visible: postCard.modelData.cids.length > 0
+                                    visible: postCard.p.cids.length > 0
                                     spacing: 8
                                     Repeater {
-                                        model: postCard.modelData.cids
+                                        model: postCard.p.cids
                                         Chip {
                                             required property string modelData
                                             label: "File " + modelData.substr(0, 10) + "… · Copy CID"
@@ -3071,28 +3125,28 @@ Item {
                                 }
                                 RowLayout {
                                     spacing: 18
-                                    Link { text: "Reply"; color: root.faint; font.pixelSize: 14; onPressed: root.boardReply(postCard.modelData.post) }
+                                    Link { text: "Reply"; color: root.faint; font.pixelSize: 14; onPressed: root.boardReply(postCard.p.id) }
                                     Link {
-                                        readonly property bool liked: root.boardLiked.indexOf(postCard.modelData.post) >= 0
-                                        text: (liked ? "♥ " : "♡ ") + Math.max(liked ? 1 : 0, postCard.modelData.likes)
+                                        readonly property bool liked: root.boardLiked.indexOf(postCard.p.id) >= 0
+                                        text: (liked ? "♥ " : "♡ ") + Math.max(liked ? 1 : 0, postCard.p.likes)
                                         color: liked ? root.alarm : root.faint
                                         font.pixelSize: 14
                                         font.underline: false
-                                        onPressed: root.boardToggleLike(postCard.modelData.post)
+                                        onPressed: root.boardToggleLike(postCard.p.id)
                                     }
                                     Link {
                                         visible: root.boardView !== "thread"
                                         text: "Thread"
                                         color: root.faint
                                         font.pixelSize: 14
-                                        onPressed: root.boardShow("thread", postCard.modelData.parent ? postCard.modelData.parent : postCard.modelData.post)
+                                        onPressed: root.boardShow("thread", root.boardRootOf(postCard.p.id))
                                     }
                                     Link {
                                         visible: postCard.isMine
                                         text: "Take down"
                                         color: root.faint
                                         font.pixelSize: 14
-                                        onPressed: root.boardStart("board_hide", [postCard.modelData.post], "Taking it down")
+                                        onPressed: root.boardStart("board_hide", [postCard.p.id], "Taking it down", null, postCard.p.name)
                                     }
                                 }
                             }
