@@ -1,0 +1,44 @@
+name: Basecamp packages (Linux test)
+
+# Installs Names on Linux x86_64 the way a person would, from the published package
+# repository, into logosctl (the Logos Core runtime Basecamp runs on), then loads
+# the names module and resolves a name through it. Lookups only read the chain, so
+# this works even when the testnet isn't making blocks.
+on:
+  workflow_dispatch:
+
+jobs:
+  install:
+    name: Install from the repository and resolve a name
+    runs-on: ubuntu-latest
+    env:
+      SITE: https://logos-names.wrapit.workers.dev
+      LOGOSCTL_CONFIG_DIR: ${{ github.workspace }}/session
+    steps:
+      - name: The names command line
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq libpcsclite1
+          curl -fsSL "$SITE/install.sh" | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/names" --version
+      - name: logosctl
+        run: |
+          curl -fsSL https://github.com/logos-co/logos-logoscore-cli/releases/download/0.3.2/logosctl-x86_64-linux.tar.gz | tar xz
+          echo "LOGOSCTL=$(find "$PWD" -path '*/bin/logosctl' -type f | head -1)" >> "$GITHUB_ENV"
+      - name: Install Names from the repository
+        run: |
+          "$LOGOSCTL" -d
+          "$LOGOSCTL" catalog add "$SITE/basecamp/logos-repo.json"
+          "$LOGOSCTL" package install names_ui -y
+          "$LOGOSCTL" package install names -y || true
+          "$LOGOSCTL" module ls
+      - name: Load the names module and resolve jef
+        run: |
+          "$LOGOSCTL" module load names
+          "$LOGOSCTL" call names resolve jef | tee resolve.out
+          grep -q 'logos.account' resolve.out
+      - name: The daemon's log
+        if: always()
+        run: |
+          "$LOGOSCTL" status || true
+          find "$LOGOSCTL_CONFIG_DIR" -name '*.log' -exec tail -50 {} + || true
