@@ -70,7 +70,7 @@ notes="The Names app for Basecamp (posts, messages, pay, profile) and the names 
 In Basecamp's package manager, add the repository
 $SITE/basecamp/logos-repo.json
 and install Names. It needs the names command line: curl -fsSL $SITE/install.sh | sh"
-gh release view "$tag" --repo "$REPO" >/dev/null 2>&1 || gh release create "$tag" --repo "$REPO" --title "Names for Basecamp $app_version" --notes "$notes"
+gh release view "$tag" --repo "$REPO" >/dev/null 2>&1 || gh release create "$tag" --repo "$REPO" --latest=false --title "Names for Basecamp $app_version" --notes "$notes"
 gh release upload "$tag" --repo "$REPO" --clobber "$OUT"/*.lgx "$OUT"/*.sig "$OUT"/*.sha256
 
 echo "== repository index"
