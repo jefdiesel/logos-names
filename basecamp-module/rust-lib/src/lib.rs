@@ -1834,10 +1834,31 @@ mod wallet {
     /// One call to the wallet. It is never repeated here: a send that timed
     /// out may still have gone through.
     fn call(method: &str, arguments: Value, patience: Duration) -> Result<Value, String> {
-        let answer = LogosModuleSDK::new()
-            .plugin(MODULE)
-            .call_json_with_timeout(method, &arguments, patience)
-            .map_err(|_| "the LEZ wallet is not running; install LEZ Wallet and open it".to_owned())?;
+        const ABSENT: &str = "the LEZ wallet is not running; install LEZ Wallet and open it";
+        // Calls run one at a time, so each wait for a wallet that isn't
+        // running holds up everything else. After one goes unanswered, quick
+        // reads skip the wallet for a minute; a send always tries.
+        static ABSENT_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or_default();
+        let quick = patience <= LOOK;
+        if quick && now < ABSENT_UNTIL.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(ABSENT.to_owned());
+        }
+        let answer = match LogosModuleSDK::new().plugin(MODULE).call_json_with_timeout(method, &arguments, patience) {
+            Ok(answer) => {
+                ABSENT_UNTIL.store(0, std::sync::atomic::Ordering::Relaxed);
+                answer
+            }
+            Err(_) => {
+                if quick {
+                    ABSENT_UNTIL.store(now + 60, std::sync::atomic::Ordering::Relaxed);
+                }
+                return Err(ABSENT.to_owned());
+            }
+        };
         // Some of the wallet's methods answer with JSON as text.
         Ok(match answer.as_str().map(serde_json::from_str::<Value>) {
             Some(Ok(parsed)) => parsed,

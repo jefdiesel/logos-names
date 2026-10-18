@@ -146,6 +146,8 @@ SCENARIOS = {
     "settings-tab": 'root.section = "settings"',
     "search-tab": 'root.section = "search"',
     "welcome": 'root.cliPath = ""',
+    "welcome-register": 'root.cliNames = []; root.openRegister(); root.checkRegister("penisface")',
+    "register-check": 'root.openRegister(); root.checkRegister("penisface")',
     "home-thread": 'root.boardShow("thread", "jef/0")',
     "name": 'root.show("jef")',
     "plain": 'root.show("linus")',

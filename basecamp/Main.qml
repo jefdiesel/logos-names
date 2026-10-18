@@ -16,6 +16,7 @@
 
 import QtQuick
 import QtQuick.Layouts
+import Logos.Theme
 
 Item {
     id: root
@@ -141,16 +142,28 @@ Item {
 
     // Text is white on near-black, and even the secondary grey stays above
     // 9:1 against the background, so nothing on screen reads as faint.
-    readonly property color slate: "#0F1115"
-    readonly property color panel: "#171A20"
-    readonly property color raised: "#2B303B"
-    readonly property color hover: "#20242D"
-    readonly property color line: "#434A59"
-    readonly property color ink: "#FFFFFF"
-    readonly property color dim: "#E6EAF1"
-    readonly property color faint: "#9AA3B3"   // placeholders only
-    readonly property color brass: "#F0C562"
-    readonly property color alarm: "#FF9C8C"
+    // Colours come from the shared Logos theme, so Names follows the
+    // person's choice of dark, light or high contrast.
+    readonly property color slate: Theme.palette.background
+    readonly property color panel: Theme.palette.backgroundSecondary
+    // Boxes on the page: the panel colour at night, white paper by day.
+    readonly property color card: Theme.isDark ? Theme.palette.backgroundSecondary : Theme.palette.surfaceRaised
+    readonly property color raised: Theme.isDark ? Theme.palette.surface : Theme.palette.backgroundButton
+    readonly property color hover: Theme.palette.surfaceInteractiveHover
+    readonly property color line: Theme.palette.border
+    readonly property color ink: Theme.palette.text
+    readonly property color dim: Theme.palette.textSecondary
+    readonly property color faint: Theme.palette.textPlaceholder   // placeholders only
+    // The accent: Names' gold at night, the theme's one accent (Logos orange) by day.
+    readonly property color brass: Theme.isDark ? Theme.palette.warning : Theme.palette.primary
+    readonly property color alarm: Theme.palette.error
+    readonly property color good: Theme.palette.success
+    readonly property color noticeFill: Qt.rgba(brass.r, brass.g, brass.b, 0.14)
+    readonly property color ownBubble: Qt.rgba(brass.r, brass.g, brass.b, 0.24)
+
+    // Text sizes follow the theme's text size setting (1 where the host's
+    // theme has none).
+    function px(size) { return Math.round(size * (Theme.typography.scale || 1)) }
     readonly property string sans: "Avenir Next"
     readonly property string mono: "Menlo"
 
@@ -1281,6 +1294,10 @@ Item {
     /// Your main name: the one set for this device if the wallet still holds it,
     /// else the first name the CLI holds privately that isn't the anon one.
     readonly property string mainName: {
+        // The saved main name is known at once; it is shown while the CLI's
+        // list of names is still on its way, and checked against it after.
+        if (!cliKnown && savedMain !== "")
+            return savedMain
         var own = boardNames.filter(function(entry) { return entry.name !== anonName })
         if (savedMain !== "" && own.some(function(entry) { return entry.name === savedMain }))
             return savedMain
@@ -1294,6 +1311,9 @@ Item {
     readonly property bool boardAsMoving: boardJob !== null && boardJob.kind === "make_public" && boardJob.name === boardAs
     /// First run: no names CLI yet, or no name to post as.
     readonly property bool needsWelcome: configKnown && registry !== "" && (cliPath === "" || (cliKnown && mainName === "" && cliPending.length === 0))
+    // The Welcome screen stands in for every section but Settings (where
+    // Register is) and Search (where a name checked there opens to register).
+    readonly property bool welcomeCovers: needsWelcome && section !== "settings" && section !== "search"
 
     /// Opens a section of the sidebar; a notice from another section doesn't follow.
     function go(which) {
@@ -1977,7 +1997,7 @@ Item {
             text: action.label
             color: action.strong && action.live ? root.slate : action.grave ? root.alarm : root.ink
             font.family: root.sans
-            font.pixelSize: 18
+            font.pixelSize: root.px(18)
             font.weight: Font.DemiBold
         }
         MouseArea {
@@ -2074,14 +2094,14 @@ Item {
             text: parent.label
             color: root.ink
             font.family: root.sans
-            font.pixelSize: 18
+            font.pixelSize: root.px(18)
             font.weight: Font.Bold
         }
         Text {
             text: parent.count
             color: root.dim
             font.family: root.sans
-            font.pixelSize: 17
+            font.pixelSize: root.px(17)
         }
     }
 
@@ -2124,7 +2144,7 @@ Item {
         signal pressed()
         color: linkArea.containsMouse ? root.brass : root.ink
         font.family: root.sans
-        font.pixelSize: 17
+        font.pixelSize: root.px(17)
         font.underline: true
         MouseArea {
             id: linkArea
@@ -2220,7 +2240,7 @@ Item {
             text: area.hint
             color: root.faint
             font.family: root.sans
-            font.pixelSize: 17
+            font.pixelSize: root.px(17)
             wrapMode: Text.Wrap
         }
     }
@@ -2232,7 +2252,7 @@ Item {
         Layout.fillWidth: true
         implicitHeight: panelColumn.implicitHeight + 36
         radius: 8
-        color: root.panel
+        color: root.card
         border.width: 1
         border.color: root.line
         ColumnLayout {
@@ -2244,7 +2264,7 @@ Item {
                 text: parent.parent.title
                 color: root.ink
                 font.family: root.sans
-                font.pixelSize: 19
+                font.pixelSize: root.px(19)
                 font.weight: Font.DemiBold
             }
         }
@@ -2268,7 +2288,7 @@ Item {
             text: chip.label
             color: chip.link ? root.brass : root.dim
             font.family: root.sans
-            font.pixelSize: 15
+            font.pixelSize: root.px(15)
         }
         MouseArea {
             id: chipArea
@@ -2301,7 +2321,7 @@ Item {
             text: tab.label
             color: tab.current ? root.ink : root.dim
             font.family: root.sans
-            font.pixelSize: 17
+            font.pixelSize: root.px(17)
             font.weight: tab.current ? Font.DemiBold : Font.Normal
         }
         MouseArea {
@@ -2318,7 +2338,7 @@ Item {
         default property alias content: cardColumn.data
         implicitHeight: cardColumn.implicitHeight + 52
         radius: 12
-        color: root.panel
+        color: root.card
         border.width: 1
         border.color: root.line
         ColumnLayout {
@@ -2351,7 +2371,7 @@ Item {
                     width: 30
                     height: 30
                     radius: 15
-                    color: stepRow.now ? root.brass : stepRow.done ? "#96D678" : "transparent"
+                    color: stepRow.now ? root.brass : stepRow.done ? root.good : "transparent"
                     border.width: stepRow.now || stepRow.done ? 0 : 1
                     border.color: root.line
                     Text {
@@ -2359,7 +2379,7 @@ Item {
                         text: stepRow.done ? "✓" : String(stepRow.index + 1)
                         color: stepRow.now || stepRow.done ? root.slate : root.dim
                         font.family: root.sans
-                        font.pixelSize: 15
+                        font.pixelSize: root.px(15)
                         font.weight: Font.DemiBold
                     }
                 }
@@ -2371,7 +2391,7 @@ Item {
                         text: stepRow.modelData.title + "  ·  " + (stepRow.now && steps.note !== "" ? steps.note : stepRow.modelData.time)
                         color: stepRow.now ? root.brass : root.ink
                         font.family: root.sans
-                        font.pixelSize: 17
+                        font.pixelSize: root.px(17)
                         font.weight: Font.DemiBold
                         wrapMode: Text.Wrap
                     }
@@ -2380,7 +2400,7 @@ Item {
                         text: stepRow.modelData.why
                         color: root.faint
                         font.family: root.sans
-                        font.pixelSize: 14
+                        font.pixelSize: root.px(14)
                         wrapMode: Text.Wrap
                     }
                 }
@@ -2394,9 +2414,9 @@ Item {
         property string value: ""
         property string note: ""
         spacing: 4
-        Text { text: parent.label; color: root.faint; font.family: root.sans; font.pixelSize: 15 }
-        Text { text: parent.value; color: root.ink; font.family: root.sans; font.pixelSize: 22; font.weight: Font.DemiBold }
-        Text { visible: parent.note !== ""; Layout.fillWidth: true; text: parent.note; color: root.faint; font.family: root.sans; font.pixelSize: 14; wrapMode: Text.Wrap }
+        Text { text: parent.label; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
+        Text { text: parent.value; color: root.ink; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.DemiBold }
+        Text { visible: parent.note !== ""; Layout.fillWidth: true; text: parent.note; color: root.faint; font.family: root.sans; font.pixelSize: root.px(14); wrapMode: Text.Wrap }
     }
 
     /// A line of explanation under a control.
@@ -2405,7 +2425,7 @@ Item {
         color: root.dim
         font.family: root.sans
         font.weight: Font.Medium
-        font.pixelSize: 17
+        font.pixelSize: root.px(17)
         lineHeight: 1.25
         wrapMode: Text.Wrap
     }
@@ -2415,7 +2435,7 @@ Item {
         Layout.topMargin: 10
         color: root.ink
         font.family: root.sans
-        font.pixelSize: 18
+        font.pixelSize: root.px(18)
         font.weight: Font.Bold
     }
 
@@ -2454,28 +2474,28 @@ Item {
                         text: root.shorten(accountRow.modelData.account)
                         color: root.ink
                         font.family: root.mono
-                        font.pixelSize: 17
+                        font.pixelSize: root.px(17)
                     }
                     Text {
                         visible: !!accountRow.modelData.isPrivate
                         text: "Private"
                         color: root.brass
                         font.family: root.sans
-                        font.pixelSize: 16
+                        font.pixelSize: root.px(16)
                     }
                     Text {
                         visible: !!accountRow.modelData.name
                         text: accountRow.modelData.name ? accountRow.modelData.name : ""
                         color: root.dim
                         font.family: root.sans
-                        font.pixelSize: 17
+                        font.pixelSize: root.px(17)
                     }
                     Item { Layout.fillWidth: true }
                     Text {
                         text: root.grouped(accountRow.modelData.balance)
                         color: root.dim
                         font.family: root.sans
-                        font.pixelSize: 17
+                        font.pixelSize: root.px(17)
                     }
                 }
                 MouseArea {
@@ -2507,7 +2527,7 @@ Item {
             color: root.dim
             font.family: root.sans
             font.weight: Font.Medium
-            font.pixelSize: 18
+            font.pixelSize: root.px(18)
         }
         Text {
             Layout.fillWidth: true
@@ -2641,7 +2661,7 @@ Item {
                             textFormat: Text.PlainText
                             color: root.ink
                             font.family: root.sans
-                            font.pixelSize: 19
+                            font.pixelSize: root.px(19)
                             font.weight: Font.DemiBold
                             elide: Text.ElideRight
                         }
@@ -2650,7 +2670,7 @@ Item {
                             text: root.mainName
                             color: root.faint
                             font.family: root.sans
-                            font.pixelSize: 14
+                            font.pixelSize: root.px(14)
                         }
                     }
                 }
@@ -2667,8 +2687,8 @@ Item {
                 RowLayout {
                     visible: root.sequencer !== ""
                     spacing: 8
-                    Rectangle { width: 8; height: 8; radius: 4; color: "#96D678" }
-                    Text { text: root.networkName(); color: root.faint; font.family: root.sans; font.pixelSize: 14 }
+                    Rectangle { width: 8; height: 8; radius: 4; color: root.good }
+                    Text { text: root.networkName(); color: root.faint; font.family: root.sans; font.pixelSize: root.px(14) }
                 }
             }
         }
@@ -2677,7 +2697,7 @@ Item {
 
         // First run: install the CLI, then pick your name.
         Flickable {
-            visible: root.needsWelcome && root.section !== "settings"
+            visible: root.welcomeCovers
             Layout.fillWidth: true
             Layout.fillHeight: true
             contentHeight: welcome.implicitHeight + 72
@@ -2688,18 +2708,18 @@ Item {
                 y: 48
                 width: Math.min(parent.width - 112, 640)
                 spacing: 18
-                Text { text: "Welcome"; color: root.ink; font.family: root.sans; font.pixelSize: 36; font.weight: Font.DemiBold }
-                Hint { font.pixelSize: 18; text: "Get a name, then post, pay and be paid as it. Two steps." }
+                Text { text: "Welcome"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(36); font.weight: Font.DemiBold }
+                Hint { font.pixelSize: root.px(18); text: "Get a name, then post, pay and be paid as it. Two steps." }
                 Card {
                     Layout.fillWidth: true
                     RowLayout {
                         spacing: 12
                         Rectangle {
                             width: 30; height: 30; radius: 15
-                            color: root.cliPath !== "" ? "#96D678" : root.brass
-                            Text { anchors.centerIn: parent; text: root.cliPath !== "" ? "✓" : "1"; color: root.slate; font.family: root.sans; font.pixelSize: 15; font.weight: Font.DemiBold }
+                            color: root.cliPath !== "" ? root.good : root.brass
+                            Text { anchors.centerIn: parent; text: root.cliPath !== "" ? "✓" : "1"; color: root.slate; font.family: root.sans; font.pixelSize: root.px(15); font.weight: Font.DemiBold }
                         }
-                        Text { text: "Install the names program"; color: root.ink; font.family: root.sans; font.pixelSize: 20; font.weight: Font.DemiBold }
+                        Text { text: "Install the names program"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
                     }
                     Hint {
                         visible: root.cliPath === ""
@@ -2723,7 +2743,7 @@ Item {
                                 text: "curl -fsSL https://logos-names.wrapit.workers.dev/install.sh | sh"
                                 color: root.dim
                                 font.family: root.mono
-                                font.pixelSize: 14
+                                font.pixelSize: root.px(14)
                                 elide: Text.ElideRight
                             }
                         }
@@ -2740,9 +2760,9 @@ Item {
                         Rectangle {
                             width: 30; height: 30; radius: 15
                             color: root.brass
-                            Text { anchors.centerIn: parent; text: "2"; color: root.slate; font.family: root.sans; font.pixelSize: 15; font.weight: Font.DemiBold }
+                            Text { anchors.centerIn: parent; text: "2"; color: root.slate; font.family: root.sans; font.pixelSize: root.px(15); font.weight: Font.DemiBold }
                         }
-                        Text { text: "Pick your name"; color: root.ink; font.family: root.sans; font.pixelSize: 20; font.weight: Font.DemiBold }
+                        Text { text: "Pick your name"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
                     }
                     Hint {
                         text: "Held privately: nobody can find which account holds it. It takes a 1,000,000 deposit, returned in full if you ever give the name up, and about 20 minutes to register."
@@ -2769,13 +2789,13 @@ Item {
                 spacing: 14
                 RowLayout {
                     Layout.fillWidth: true
-                    Text { text: "Messages"; color: root.ink; font.family: root.sans; font.pixelSize: 28; font.weight: Font.DemiBold }
+                    Text { text: "Messages"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
                     Item { Layout.fillWidth: true }
                     Text {
                         text: root.chatState === "" ? "" : "Network: " + root.chatState
                         color: root.faint
                         font.family: root.sans
-                        font.pixelSize: 14
+                        font.pixelSize: root.px(14)
                     }
                 }
                 // Not connected: the Chat app starts the chat module.
@@ -2784,12 +2804,12 @@ Item {
                     Layout.fillWidth: true
                     implicitHeight: chatDown.implicitHeight + 24
                     radius: 8
-                    color: "#2A2418"
+                    color: root.noticeFill
                     RowLayout {
                         id: chatDown
                         x: 14; y: 12
                         width: parent.width - 28
-                        Text { Layout.fillWidth: true; text: "Messaging isn't running yet. Open the Chat app once, then come back."; color: root.brass; font.family: root.sans; font.pixelSize: 15; wrapMode: Text.Wrap }
+                        Text { Layout.fillWidth: true; text: "Messaging isn't running yet. Open the Chat app once, then come back."; color: root.brass; font.family: root.sans; font.pixelSize: root.px(15); wrapMode: Text.Wrap }
                         Action { label: "Open Chat"; onPressed: if (logos.request) logos.request("basecamp.apps.launch", { app: "chat_ui" }, function() { root.chatLoad() }) }
                     }
                 }
@@ -2799,7 +2819,7 @@ Item {
                     Layout.fillWidth: true
                     implicitHeight: chatOff.implicitHeight + 24
                     radius: 8
-                    color: root.panel
+                    color: root.card
                     border.width: 1
                     border.color: root.line
                     RowLayout {
@@ -2811,7 +2831,7 @@ Item {
                             text: "People can't message " + root.mainName + " yet. Turning it on adds this computer's chat address to " + root.mainName + "'s profile, so anyone who looks the name up can start a DM."
                             color: root.dim
                             font.family: root.sans
-                            font.pixelSize: 15
+                            font.pixelSize: root.px(15)
                             wrapMode: Text.Wrap
                         }
                         Action { label: "Turn on messages"; strong: true; changes: true; onPressed: root.chatPublish() }
@@ -2824,7 +2844,7 @@ Item {
                 }
                 Hint {
                     visible: root.chatError === "" && root.mainChat !== "" && root.mainChat === root.chatMine
-                    font.pixelSize: 14
+                    font.pixelSize: root.px(14)
                     text: "Messages are on: anyone who looks up " + root.mainName + " can message you here."
                 }
                 Hint {
@@ -2847,7 +2867,7 @@ Item {
                             Field { id: dmTo; Layout.fillWidth: true; size: 16; hint: "Message a name"; onAccepted: root.chatStart(dmTo.text) }
                             Action { label: "Start"; enabledNow: dmTo.text.trim() !== ""; onPressed: root.chatStart(dmTo.text) }
                         }
-                        Link { text: root.chatNewGroup ? "Cancel new group" : "+ New group"; color: root.brass; font.pixelSize: 15; onPressed: root.chatNewGroup = !root.chatNewGroup }
+                        Link { text: root.chatNewGroup ? "Cancel new group" : "+ New group"; color: root.brass; font.pixelSize: root.px(15); onPressed: root.chatNewGroup = !root.chatNewGroup }
                         ColumnLayout {
                             visible: root.chatNewGroup
                             Layout.fillWidth: true
@@ -2856,7 +2876,7 @@ Item {
                             Field { id: groupDesc; Layout.fillWidth: true; size: 15; hint: "What it's about (optional)" }
                             Action { label: "Make group"; strong: true; enabledNow: groupName.text.trim() !== ""; onPressed: root.chatMakeGroup() }
                         }
-                        Hint { visible: root.chatConvos.length === 0 && root.chatError === ""; font.pixelSize: 14; text: "No conversations yet." }
+                        Hint { visible: root.chatConvos.length === 0 && root.chatError === ""; font.pixelSize: root.px(14); text: "No conversations yet." }
                         ListView {
                             Layout.fillWidth: true
                             Layout.fillHeight: true
@@ -2875,14 +2895,14 @@ Item {
                                     x: 12; y: 7
                                     width: parent.width - 24
                                     spacing: 2
-                                    Text { Layout.fillWidth: true; text: (/group/.test(String(convoRow.modelData.kind)) ? "# " : "") + root.chatLabel(convoRow.modelData.convo_id); color: root.ink; font.family: root.sans; font.pixelSize: 16; font.weight: Font.DemiBold; elide: Text.ElideRight }
+                                    Text { Layout.fillWidth: true; text: (/group/.test(String(convoRow.modelData.kind)) ? "# " : "") + root.chatLabel(convoRow.modelData.convo_id); color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold; elide: Text.ElideRight }
                                     Text {
                                         Layout.fillWidth: true
                                         text: convoRow.modelData.preview ? convoRow.modelData.preview : convoRow.modelData.message_count + " messages" + (convoRow.modelData.last_activity_ms ? " · " + root.boardAgo(convoRow.modelData.last_activity_ms) : "")
                                         textFormat: Text.PlainText
                                         color: root.faint
                                         font.family: root.sans
-                                        font.pixelSize: 13
+                                        font.pixelSize: root.px(13)
                                         elide: Text.ElideRight
                                     }
                                 }
@@ -2907,7 +2927,7 @@ Item {
                                     + (root.chatMembers.length > 0 ? ": " + root.chatMembers.map(function(m) { return root.chatWho(m.address) + (m.pending ? " (invited)" : "") }).join(", ") : "")
                                 color: root.dim
                                 font.family: root.sans
-                                font.pixelSize: 14
+                                font.pixelSize: root.px(14)
                                 wrapMode: Text.Wrap
                             }
                             RowLayout {
@@ -2921,7 +2941,7 @@ Item {
                             visible: root.chatOpenId !== "" && root.dmNames[root.chatOpenId] === undefined && !root.chatIsGroup(root.chatOpenId)
                             Layout.fillWidth: true
                             spacing: 6
-                            Text { text: "Who is this?"; color: root.faint; font.family: root.sans; font.pixelSize: 14 }
+                            Text { text: "Who is this?"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(14) }
                             Field { id: dmLabel; Layout.fillWidth: true; size: 15; hint: "Their name, if you know it" }
                             Action {
                                 label: "Save"
@@ -2950,7 +2970,7 @@ Item {
                                     width: Math.min(Math.max(bubbleText.implicitWidth, senderText.implicitWidth) + 28, parent.width * 0.75)
                                     height: bubbleText.implicitHeight + 20 + (named ? senderText.implicitHeight + 2 : 0)
                                     radius: 12
-                                    color: bubbleRow.modelData.from_self ? "#3A3220" : root.raised
+                                    color: bubbleRow.modelData.from_self ? root.ownBubble : root.raised
                                     Text {
                                         id: senderText
                                         visible: bubble.named
@@ -2958,7 +2978,7 @@ Item {
                                         text: root.chatWho(bubbleRow.modelData.sender)
                                         color: root.brass
                                         font.family: root.sans
-                                        font.pixelSize: 13
+                                        font.pixelSize: root.px(13)
                                         font.weight: Font.DemiBold
                                     }
                                     Text {
@@ -2969,7 +2989,7 @@ Item {
                                         textFormat: Text.PlainText
                                         color: root.ink
                                         font.family: root.sans
-                                        font.pixelSize: 16
+                                        font.pixelSize: root.px(16)
                                         wrapMode: Text.Wrap
                                     }
                                 }
@@ -2982,7 +3002,7 @@ Item {
                             Field { id: dmText; Layout.fillWidth: true; size: 16; hint: "Write a message"; onAccepted: root.chatSend() }
                             Action { label: "Send"; strong: true; enabledNow: dmText.text.trim() !== ""; onPressed: root.chatSend() }
                         }
-                        Hint { visible: root.chatOpenId !== ""; font.pixelSize: 13; text: "End-to-end encrypted over Logos messaging. Sent at once, no proof needed." }
+                        Hint { visible: root.chatOpenId !== ""; font.pixelSize: root.px(13); text: "End-to-end encrypted over Logos messaging. Sent at once, no proof needed." }
                     }
                 }
             }
@@ -3001,14 +3021,14 @@ Item {
                 y: 40
                 width: Math.min(parent.width - 112, 560)
                 spacing: 16
-                Text { text: "Pay"; color: root.ink; font.family: root.sans; font.pixelSize: 28; font.weight: Font.DemiBold }
+                Text { text: "Pay"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
                 Hint { text: "Send to a name. It goes from your private account to the name's private keys: the chain doesn't show who paid whom, or how much." }
-                Text { text: "To"; color: root.faint; font.family: root.sans; font.pixelSize: 15 }
+                Text { text: "To"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
                 Field { id: payTo; Layout.fillWidth: true; size: 19; hint: "A name, such as ada" }
-                Text { text: "Amount"; color: root.faint; font.family: root.sans; font.pixelSize: 15 }
+                Text { text: "Amount"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
                 Field { id: payAmount; Layout.fillWidth: true; size: 19; numbersOnly: true; hint: "1000" }
                 Hint {
-                    font.pixelSize: 15
+                    font.pixelSize: root.px(15)
                     text: root.cliBalance === undefined ? "Checking your private account…"
                         : root.cliBalance === null ? "No private account found."
                         : "Your private account holds " + root.grouped(root.cliBalance.balance) + "."
@@ -3022,7 +3042,7 @@ Item {
                 Hint {
                     visible: root.boardJob !== null
                     color: root.brass
-                    font.pixelSize: 16
+                    font.pixelSize: root.px(16)
                     text: root.boardJob === null ? "" : root.boardJob.label + ": proving it on this computer. About 4 min, "
                         + Math.max(0, Math.floor((Math.max(root.clockTick, Date.now()) - root.boardJob.started) / 60000)) + " so far."
                 }
@@ -3031,7 +3051,7 @@ Item {
                     color: root.noticeIsError ? root.alarm : root.dim
                     text: root.notice
                 }
-                Hint { font.pixelSize: 14; text: "The other side sees the payment once their wallet catches up with the chain." }
+                Hint { font.pixelSize: root.px(14); text: "The other side sees the payment once their wallet catches up with the chain." }
             }
         }
 
@@ -3062,9 +3082,9 @@ Item {
                     }
                     Tab { visible: root.boardView !== "thread"; label: "Recent"; current: root.boardView === "all"; onPressed: root.boardShow("all") }
                     Tab { visible: root.boardView !== "thread"; label: "Following" + (root.boardFollows.length > 0 ? "  " + root.boardFollows.length : ""); current: root.boardView === "following"; onPressed: root.boardShow("following") }
-                    Text { visible: root.boardView === "thread"; text: "Thread"; color: root.ink; font.family: root.sans; font.pixelSize: 22; font.weight: Font.DemiBold }
+                    Text { visible: root.boardView === "thread"; text: "Thread"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.DemiBold }
                     Item { Layout.fillWidth: true }
-                    Link { text: root.boardLoading ? "Loading…" : "Refresh"; color: root.faint; font.pixelSize: 15; onPressed: root.boardLoad() }
+                    Link { text: root.boardLoading ? "Loading…" : "Refresh"; color: root.faint; font.pixelSize: root.px(15); onPressed: root.boardLoad() }
                 }
 
                 // The post box.
@@ -3077,7 +3097,7 @@ Item {
                             text: root.boardAs !== "" ? "Posting as " + root.boardAs : "No name to post as yet"
                             color: root.anonOn && root.anonReady ? root.brass : root.dim
                             font.family: root.sans
-                            font.pixelSize: 15
+                            font.pixelSize: root.px(15)
                             font.weight: Font.DemiBold
                         }
                         Item { Layout.fillWidth: true }
@@ -3092,7 +3112,7 @@ Item {
                         Layout.fillWidth: true
                         implicitHeight: movingNote.implicitHeight + 20
                         radius: 8
-                        color: "#2A2418"
+                        color: root.noticeFill
                         Text {
                             id: movingNote
                             x: 14
@@ -3102,7 +3122,7 @@ Item {
                                 + Math.max(1, 10 - Math.floor((Math.max(root.clockTick, Date.now()) - (root.boardJob ? root.boardJob.started : Date.now())) / 60000)) + " min."
                             color: root.brass
                             font.family: root.sans
-                            font.pixelSize: 15
+                            font.pixelSize: root.px(15)
                             wrapMode: Text.Wrap
                         }
                     }
@@ -3114,7 +3134,7 @@ Item {
                             : "Private · about 4 minutes per post, free; the chain never learns your account"
                         color: root.heldPublicly(root.boardAs) ? root.faint : root.brass
                         font.family: root.sans
-                        font.pixelSize: 14
+                        font.pixelSize: root.px(14)
                         wrapMode: Text.Wrap
                     }
                     // The anon name, before it can post.
@@ -3123,7 +3143,7 @@ Item {
                         Layout.fillWidth: true
                         spacing: 8
                         Hint {
-                            font.pixelSize: 15
+                            font.pixelSize: root.px(15)
                             text: root.anonName !== "" && root.cliPendingFor(root.anonName) !== null
                                 ? root.anonName + " is being set up: " + root.pendingLine(root.cliPendingFor(root.anonName)) + "."
                                 : "Anon posts come from a separate name, like anon-quiet-otter, held by its own private account. Nothing on chain links it to "
@@ -3146,8 +3166,8 @@ Item {
                     RowLayout {
                         Layout.fillWidth: true
                         visible: root.boardReplyTo !== ""
-                        Text { Layout.fillWidth: true; text: "Replying to " + root.boardPreviewOf(root.boardReplyTo); color: root.brass; font.family: root.sans; font.pixelSize: 15; elide: Text.ElideRight }
-                        Link { text: "Cancel"; color: root.faint; font.pixelSize: 14; onPressed: root.boardReplyTo = "" }
+                        Text { Layout.fillWidth: true; text: "Replying to " + root.boardPreviewOf(root.boardReplyTo); color: root.brass; font.family: root.sans; font.pixelSize: root.px(15); elide: Text.ElideRight }
+                        Link { text: "Cancel"; color: root.faint; font.pixelSize: root.px(14); onPressed: root.boardReplyTo = "" }
                     }
                     Area {
                         id: boardComposer
@@ -3162,7 +3182,7 @@ Item {
                         visible: root.boardSpelling.length > 0
                         Layout.fillWidth: true
                         spacing: 8
-                        Text { text: "Spelling:"; color: root.faint; font.family: root.sans; font.pixelSize: 14; height: 34; verticalAlignment: Text.AlignVCenter }
+                        Text { text: "Spelling:"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(14); height: 34; verticalAlignment: Text.AlignVCenter }
                         Repeater {
                             model: root.boardSpelling
                             Row {
@@ -3172,7 +3192,7 @@ Item {
                                     text: modelData.word + (modelData.suggestions.length > 0 ? " →" : " (no suggestion)")
                                     color: root.alarm
                                     font.family: root.sans
-                                    font.pixelSize: 14
+                                    font.pixelSize: root.px(14)
                                     height: 34
                                     verticalAlignment: Text.AlignVCenter
                                 }
@@ -3195,7 +3215,7 @@ Item {
                             visible: !root.boardAttach && boardCid.text === ""
                             text: "Attach a file"
                             color: root.faint
-                            font.pixelSize: 14
+                            font.pixelSize: root.px(14)
                             onPressed: root.boardAttach = true
                         }
                         Field {
@@ -3211,7 +3231,7 @@ Item {
                             text: boardComposer.text.length + " / 1024"
                             color: boardComposer.text.length > 1024 ? root.alarm : root.faint
                             font.family: root.sans
-                            font.pixelSize: 13
+                            font.pixelSize: root.px(13)
                         }
                         Action {
                             label: root.boardReplyTo !== "" ? "Reply" : "Post"
@@ -3225,7 +3245,7 @@ Item {
                 Hint {
                     visible: root.boardJob !== null
                     color: root.brass
-                    font.pixelSize: 16
+                    font.pixelSize: root.px(16)
                     text: root.boardJob === null ? "" : root.boardJobLine(root.boardJob)
                 }
                 Hint {
@@ -3235,7 +3255,7 @@ Item {
                 }
                 Hint {
                     visible: !root.boardLoading && root.boardPosts.length === 0
-                    font.pixelSize: 17
+                    font.pixelSize: root.px(17)
                     text: root.cliPath === "" ? "The board needs the names CLI. Install it, then open Advanced to point at it."
                         : root.boardError !== "" ? "Waiting for the board: " + root.boardError
                         : root.boardView === "following" && root.boardFollows.length === 0 ? "You don't follow anyone yet. Press Follow on a post."
@@ -3279,7 +3299,7 @@ Item {
                                         textFormat: Text.PlainText
                                         color: root.ink
                                         font.family: root.sans
-                                        font.pixelSize: 17
+                                        font.pixelSize: root.px(17)
                                         font.weight: Font.DemiBold
                                     }
                                     Text {
@@ -3290,13 +3310,13 @@ Item {
                                         font.weight: postCard.who.display !== "" ? Font.Normal : Font.DemiBold
                                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.show(postCard.p.name) }
                                     }
-                                    Text { text: "· " + root.boardAgo(postCard.p.time); color: root.faint; font.family: root.sans; font.pixelSize: 14 }
+                                    Text { text: "· " + root.boardAgo(postCard.p.time); color: root.faint; font.family: root.sans; font.pixelSize: root.px(14) }
                                     Item { Layout.fillWidth: true }
                                     Link {
                                         visible: !postCard.isMine
                                         text: root.boardFollowing(postCard.p.name) ? "Following" : "Follow"
                                         color: root.boardFollowing(postCard.p.name) ? root.faint : root.brass
-                                        font.pixelSize: 14
+                                        font.pixelSize: root.px(14)
                                         onPressed: root.boardFollow(postCard.p.name, root.boardFollowing(postCard.p.name))
                                     }
                                 }
@@ -3305,7 +3325,7 @@ Item {
                                     text: "replying to " + (postCard.p.parent ? String(postCard.p.parent).split("/")[0] : "")
                                     color: root.faint
                                     font.family: root.sans
-                                    font.pixelSize: 13
+                                    font.pixelSize: root.px(13)
                                 }
                                 Text {
                                     Layout.fillWidth: true
@@ -3314,7 +3334,7 @@ Item {
                                     textFormat: Text.PlainText
                                     color: root.dim
                                     font.family: root.sans
-                                    font.pixelSize: 17
+                                    font.pixelSize: root.px(17)
                                     lineHeight: 1.2
                                     wrapMode: Text.Wrap
                                 }
@@ -3334,12 +3354,12 @@ Item {
                                 }
                                 RowLayout {
                                     spacing: 18
-                                    Link { text: "Reply"; color: root.faint; font.pixelSize: 14; onPressed: root.boardReply(postCard.p.id) }
+                                    Link { text: "Reply"; color: root.faint; font.pixelSize: root.px(14); onPressed: root.boardReply(postCard.p.id) }
                                     Link {
                                         readonly property bool liked: root.boardLiked.indexOf(postCard.p.id) >= 0
                                         text: (liked ? "♥ " : "♡ ") + Math.max(liked ? 1 : 0, postCard.p.likes)
                                         color: liked ? root.alarm : root.faint
-                                        font.pixelSize: 14
+                                        font.pixelSize: root.px(14)
                                         font.underline: false
                                         onPressed: root.boardToggleLike(postCard.p.id)
                                     }
@@ -3347,14 +3367,14 @@ Item {
                                         visible: root.boardView !== "thread"
                                         text: "Thread"
                                         color: root.faint
-                                        font.pixelSize: 14
+                                        font.pixelSize: root.px(14)
                                         onPressed: root.boardShow("thread", root.boardRootOf(postCard.p.id))
                                     }
                                     Link {
                                         visible: postCard.isMine
                                         text: "Take down"
                                         color: root.faint
-                                        font.pixelSize: 14
+                                        font.pixelSize: root.px(14)
                                         onPressed: root.boardStart("board_hide", [postCard.p.id], "Taking it down", null, postCard.p.name)
                                     }
                                 }
@@ -3367,7 +3387,7 @@ Item {
 
         // The plate: search, profile and settings.
         Flickable {
-            visible: (root.section === "search" || root.section === "profile" || root.section === "settings") && !(root.needsWelcome && root.section !== "settings")
+            visible: (root.section === "search" || root.section === "profile" || root.section === "settings") && !root.welcomeCovers
             Layout.fillWidth: true
             Layout.fillHeight: true
             contentHeight: plate.implicitHeight + 72
@@ -3407,7 +3427,7 @@ Item {
                     visible: root.section === "settings" && !root.registering
                     Layout.fillWidth: true
                     spacing: 14
-                    Text { text: "Settings"; color: root.ink; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: 28 }
+                    Text { text: "Settings"; color: root.ink; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(28) }
                     Part { text: "Main name" }
                     Hint { text: "Your posts, likes and payments are made as this name." }
                     Flow {
@@ -3425,15 +3445,15 @@ Item {
                     }
                     Hint { visible: root.anonName !== ""; text: "Anon name: " + root.anonName + (root.anonReady ? "" : " (being set up)") + ". Only your wallet links it to your main name." }
                     Part { text: "Your names" }
-                    Hint { font.pixelSize: 14; text: "Private: posts in about 4 min, free, holder hidden. Public: about 30 s, a little gas, holder visible. Payments stay private either way." }
+                    Hint { font.pixelSize: root.px(14); text: "Private: posts in about 4 min, free, holder hidden. Public: about 30 s, a little gas, holder visible. Payments stay private either way." }
                     Repeater {
                         model: root.cliPending
                         RowLayout {
                             required property var modelData
                             Layout.fillWidth: true
                             spacing: 12
-                            Text { Layout.preferredWidth: 200; text: modelData.name; color: root.ink; font.family: root.sans; font.pixelSize: 17; elide: Text.ElideRight }
-                            Text { Layout.fillWidth: true; text: root.pendingLine(modelData); color: modelData.failed ? root.alarm : root.brass; font.family: root.sans; font.pixelSize: 14; elide: Text.ElideRight }
+                            Text { Layout.preferredWidth: 200; text: modelData.name; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); elide: Text.ElideRight }
+                            Text { Layout.fillWidth: true; text: root.pendingLine(modelData); color: modelData.failed ? root.alarm : root.brass; font.family: root.sans; font.pixelSize: root.px(14); elide: Text.ElideRight }
                         }
                     }
                     Repeater {
@@ -3454,7 +3474,7 @@ Item {
                                     text: nameRow.modelData.name
                                     color: root.ink
                                     font.family: root.sans
-                                    font.pixelSize: 17
+                                    font.pixelSize: root.px(17)
                                     elide: Text.ElideRight
                                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.show(nameRow.modelData.name) }
                                 }
@@ -3463,7 +3483,7 @@ Item {
                                         : nameRow.privateCli ? "Private" : "Public") + (nameRow.isAnon ? " · anon" : nameRow.modelData.name === root.mainName ? " · main" : "")
                                     color: root.faint
                                     font.family: root.sans
-                                    font.pixelSize: 15
+                                    font.pixelSize: root.px(15)
                                 }
                                 Item { Layout.fillWidth: true }
                                 Action {
@@ -3491,7 +3511,7 @@ Item {
                             Hint {
                                 visible: root.publicAsk === nameRow.modelData.name
                                 color: root.brass
-                                font.pixelSize: 14
+                                font.pixelSize: root.px(14)
                                 text: "About 9 minutes. It moves the name to a new public account and funds that with 10,000,000 for gas from your private account, so the chain can't see where the money came from."
                                     + (nameRow.isAnon ? " Keep the anon private in practice: never send between its account and your other public accounts, and don't make it public right after your main name." : "")
                             }
@@ -3512,7 +3532,7 @@ Item {
                         Layout.topMargin: 10
                         text: root.settingsOpen ? "Hide advanced" : "Advanced"
                         color: root.faint
-                        font.pixelSize: 15
+                        font.pixelSize: root.px(15)
                         onPressed: root.settingsOpen = !root.settingsOpen
                     }
                 }
@@ -3527,7 +3547,7 @@ Item {
                         color: root.ink
                         font.family: root.sans
                         font.weight: Font.DemiBold
-                        font.pixelSize: 28
+                        font.pixelSize: root.px(28)
                     }
                     Part { text: "Registry" }
                     Hint { text: "Everyone using the same registry sees the same names." }
@@ -3592,7 +3612,7 @@ Item {
                         visible: root.lastReply !== ""
                         Layout.topMargin: 4
                         text: root.showLastReply ? "Hide last module reply" : "Show last module reply"
-                        font.pixelSize: 15
+                        font.pixelSize: root.px(15)
                         onPressed: root.showLastReply = !root.showLastReply
                     }
                     Text {
@@ -3602,7 +3622,7 @@ Item {
                         text: root.lastReply
                         color: root.dim
                         font.family: root.mono
-                        font.pixelSize: 10
+                        font.pixelSize: root.px(10)
                         wrapMode: Text.WrapAnywhere
                     }
                     Rectangle { Layout.fillWidth: true; Layout.topMargin: 8; height: 1; color: root.line }
@@ -3615,7 +3635,7 @@ Item {
                     color: root.noticeIsError ? root.alarm : root.brass
                     font.family: root.sans
                     font.weight: Font.DemiBold
-                    font.pixelSize: 18
+                    font.pixelSize: root.px(18)
                     wrapMode: Text.Wrap
                 }
 
@@ -3630,10 +3650,10 @@ Item {
                         color: root.ink
                         font.family: root.sans
                         font.weight: Font.DemiBold
-                        font.pixelSize: 36
+                        font.pixelSize: root.px(36)
                     }
                     Hint {
-                        font.pixelSize: 18
+                        font.pixelSize: root.px(18)
                         color: root.ink
                         text: !root.configKnown ? "Waiting for the names module to answer." : root.registry === "" ? "Open Advanced and enter the registry's program ID." : "Type a name in the box on the left to see its profile and page."
                     }
@@ -3657,10 +3677,10 @@ Item {
                         color: root.ink
                         font.family: root.sans
                         font.weight: Font.DemiBold
-                        font.pixelSize: 36
+                        font.pixelSize: root.px(36)
                     }
                     Hint {
-                        font.pixelSize: 18
+                        font.pixelSize: root.px(18)
                         text: "Pick a name people can use to find your profile and page. Held privately, with a deposit you get back when you release it."
                     }
                     RowLayout {
@@ -3689,16 +3709,16 @@ Item {
                             text: root.registerTaken + " is taken. Try another."
                             color: root.alarm
                             font.family: root.sans
-                            font.pixelSize: 18
+                            font.pixelSize: root.px(18)
                         }
                         Link {
                             text: "See it"
-                            font.pixelSize: 16
+                            font.pixelSize: root.px(16)
                             onPressed: root.show(root.registerTaken)
                         }
                     }
                     Hint {
-                        font.pixelSize: 15
+                        font.pixelSize: root.px(15)
                         text: "1 to 32 letters, digits or hyphens. One- and two-letter names are reserved."
                     }
                 }
@@ -3719,18 +3739,18 @@ Item {
                         spacing: 10
                         readonly property bool reserved: root.deposit !== null && root.deposit.tier === "locked"
                         readonly property bool underway: root.registerStepOf(root.missing) > 0
-                        Rectangle { width: 10; height: 10; radius: 5; color: parent.reserved ? root.alarm : parent.underway ? root.brass : "#96D678" }
+                        Rectangle { width: 10; height: 10; radius: 5; color: parent.reserved ? root.alarm : parent.underway ? root.brass : root.good }
                         Text {
                             text: parent.underway ? "Registering privately for you" : parent.reserved ? "Reserved: one- and two-character names are released by the registry's admin" : "Available"
-                            color: parent.reserved ? root.alarm : parent.underway ? root.brass : "#96D678"
+                            color: parent.reserved ? root.alarm : parent.underway ? root.brass : root.good
                             font.family: root.sans
-                            font.pixelSize: 19
+                            font.pixelSize: root.px(19)
                         }
                     }
                     // A private registration through the names CLI, under way or stopped.
                     Hint {
                         visible: root.cliPendingFor(root.missing) !== null && root.cliPendingFor(root.missing).failed
-                        font.pixelSize: 18
+                        font.pixelSize: root.px(18)
                         color: root.alarm
                         text: root.cliPendingFor(root.missing) === null ? "" : "It stopped: " + root.cliPendingFor(root.missing).state + "."
                     }
@@ -3741,7 +3761,7 @@ Item {
                             text: "Registering " + root.missing + " privately"
                             color: root.ink
                             font.family: root.sans
-                            font.pixelSize: 22
+                            font.pixelSize: root.px(22)
                             font.weight: Font.DemiBold
                         }
                         Steps {
@@ -3759,7 +3779,7 @@ Item {
                                 return ""
                             }
                         }
-                        Hint { font.pixelSize: 15; text: "Keep this computer on and awake. You can close this screen and keep using the app; the name shows under My names when it's done." }
+                        Hint { font.pixelSize: root.px(15); text: "Keep this computer on and awake. You can close this screen and keep using the app; the name shows under My names when it's done." }
                     }
                     ColumnLayout {
                         visible: root.registerStepOf(root.missing) === 0
@@ -3771,7 +3791,7 @@ Item {
                         spacing: 10
                         Part { text: "Deposit" }
                         Hint {
-                            font.pixelSize: 20
+                            font.pixelSize: root.px(20)
                             color: root.ink
                             text: root.deposit === null ? "Checking the deposit." : root.deposit.tier === "locked" ? "One- and two-character names are reserved." : root.deposit.deposit === null || root.deposit.deposit === undefined ? (root.deposit.fee ? root.grouped(root.deposit.fee) + " to register" : "The registry is not set up for registering yet.") : root.grouped(root.deposit.deposit)
                         }
@@ -3787,7 +3807,7 @@ Item {
                             text: "Register privately"
                             color: root.ink
                             font.family: root.sans
-                            font.pixelSize: 22
+                            font.pixelSize: root.px(22)
                             font.weight: Font.DemiBold
                         }
                         Hint { text: "Held by your private account, which never appears on chain. Nobody can find who holds it." }
@@ -3814,7 +3834,7 @@ Item {
                         Link {
                             text: root.registerHow ? "Hide how it works" : "How it works: three steps"
                             color: root.faint
-                            font.pixelSize: 14
+                            font.pixelSize: root.px(14)
                             onPressed: root.registerHow = !root.registerHow
                         }
                         Steps {
@@ -3829,23 +3849,23 @@ Item {
                                 : "From your private account (balance " + root.grouped(root.cliBalance.balance) + ")"
                             color: root.cliBalance === null || !root.cliCanPay() ? root.alarm : root.dim
                             font.family: root.sans
-                            font.pixelSize: 15
+                            font.pixelSize: root.px(15)
                             wrapMode: Text.Wrap
                         }
                         Hint {
                             visible: root.cliBalance !== undefined && root.cliBalance !== null && !root.cliCanPay()
                             color: root.alarm
-                            font.pixelSize: 15
+                            font.pixelSize: root.px(15)
                             text: "That's less than the deposit. Add funds to this private account first."
                         }
-                        Text { Layout.topMargin: 6; text: "Then"; color: root.faint; font.family: root.sans; font.pixelSize: 15 }
+                        Text { Layout.topMargin: 6; text: "Then"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
                         RowLayout {
                             spacing: 6
                             Tab { label: "Keep it private"; current: !root.registerPublic; onPressed: root.registerPublic = false }
                             Tab { label: "Make it public, unlinked"; current: root.registerPublic; onPressed: root.registerPublic = true }
                         }
                         Hint {
-                            font.pixelSize: 14
+                            font.pixelSize: root.px(14)
                             text: root.registerPublic
                                 ? "Registered privately first, so nobody sees who registered it, then moved to a new public account funded privately with 10,000,000 for gas. Posts take about 30 seconds; nothing links that account to you. About 10 more minutes."
                                 : "Posts take about 4 minutes each, free, and nobody can find which account holds it. You can make it public later in Settings."
@@ -3864,14 +3884,14 @@ Item {
                             wrapMode: Text.Wrap
                             color: root.faint
                             font.family: root.sans
-                            font.pixelSize: 14
+                            font.pixelSize: root.px(14)
                         }
                     }
                     Link {
                         visible: root.cliPath !== "" && root.wallet.length > 0 && !(root.deposit !== null && root.deposit.tier === "locked")
                         text: root.publicRegisterOpen ? "Hide the public option" : "Register from a public account instead"
                         color: root.faint
-                        font.pixelSize: 16
+                        font.pixelSize: root.px(16)
                         onPressed: root.publicRegisterOpen = !root.publicRegisterOpen
                     }
                     Panel {
@@ -3896,7 +3916,7 @@ Item {
                         Layout.fillWidth: true
                         spacing: 12
                         Hint {
-                            font.pixelSize: 17
+                            font.pixelSize: root.px(17)
                             text: /not running/.test(root.walletProblem) ? "Open your wallet to register it." : root.walletProblem
                         }
                         Action {
@@ -3937,7 +3957,7 @@ Item {
                                 color: root.ink
                                 font.family: root.headingFont
                                 font.weight: Font.DemiBold
-                                font.pixelSize: 44
+                                font.pixelSize: root.px(44)
                                 elide: Text.ElideRight
                             }
                             NameLabel {
@@ -3954,7 +3974,7 @@ Item {
                                 color: root.accent
                                 font.family: root.sans
                                 font.weight: Font.DemiBold
-                                font.pixelSize: 20
+                                font.pixelSize: root.px(20)
                             }
                             Text {
                                 visible: root.profileBio !== ""
@@ -3964,7 +3984,7 @@ Item {
                                 textFormat: Text.PlainText
                                 color: root.dim
                                 font.family: root.sans
-                                font.pixelSize: 18
+                                font.pixelSize: root.px(18)
                                 lineHeight: 1.25
                                 wrapMode: Text.Wrap
                                 maximumLineCount: 8
@@ -4037,7 +4057,7 @@ Item {
                                 text: "Edit"
                                 color: root.ink
                                 font.family: root.sans
-                                font.pixelSize: 24
+                                font.pixelSize: root.px(24)
                                 font.weight: Font.DemiBold
                             }
                             NameLabel {
@@ -4088,7 +4108,7 @@ Item {
                                     text: profileRow.modelData.label
                                     color: root.dim
                                     font.family: root.sans
-                                    font.pixelSize: 17
+                                    font.pixelSize: root.px(17)
                                     elide: Text.ElideRight
                                 }
                                 Area {
@@ -4148,10 +4168,10 @@ Item {
                                     visible: shows
                                     Layout.fillWidth: true
                                     spacing: 12
-                                    Text { text: "Picture set"; color: root.ink; font.family: root.sans; font.pixelSize: 17 }
+                                    Text { text: "Picture set"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17) }
                                     Link {
                                         text: "Remove"
-                                        font.pixelSize: 16
+                                        font.pixelSize: root.px(16)
                                         onPressed: profileField.text = ""
                                     }
                                     Item { Layout.fillWidth: true }
@@ -4160,10 +4180,10 @@ Item {
                                     visible: profileRow.modelData.key === "avatar" && !root.cliHeld && root.draftText("avatar") === "" && root.profileText("avatar") !== ""
                                     Layout.fillWidth: true
                                     spacing: 12
-                                    Text { text: "Picture removed when you save"; color: root.alarm; font.family: root.sans; font.pixelSize: 17 }
+                                    Text { text: "Picture removed when you save"; color: root.alarm; font.family: root.sans; font.pixelSize: root.px(17) }
                                     Link {
                                         text: "Undo"
-                                        font.pixelSize: 16
+                                        font.pixelSize: root.px(16)
                                         onPressed: profileField.text = root.profileText("avatar")
                                     }
                                     Item { Layout.fillWidth: true }
@@ -4249,7 +4269,7 @@ Item {
                                         text: entry.modelData
                                         color: root.dim
                                         font.family: root.sans
-                                        font.pixelSize: 17
+                                        font.pixelSize: root.px(17)
                                         elide: Text.ElideRight
                                     }
                                     Field {
@@ -4302,7 +4322,7 @@ Item {
                             Layout.maximumWidth: 340
                             Layout.alignment: Qt.AlignTop
                             spacing: 10
-                            Text { text: "How others see it"; color: root.faint; font.family: root.sans; font.pixelSize: 15 }
+                            Text { text: "How others see it"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
                             Card {
                                 Layout.fillWidth: true
                                 RowLayout {
@@ -4325,7 +4345,7 @@ Item {
                                             textFormat: Text.PlainText
                                             color: root.ink
                                             font.family: root.draftFont
-                                            font.pixelSize: 24
+                                            font.pixelSize: root.px(24)
                                             font.weight: Font.DemiBold
                                             elide: Text.ElideRight
                                         }
@@ -4334,7 +4354,7 @@ Item {
                                             text: root.record !== null ? root.shown(root.record.name) : ""
                                             color: root.draftAccent
                                             font.family: root.sans
-                                            font.pixelSize: 15
+                                            font.pixelSize: root.px(15)
                                         }
                                     }
                                 }
@@ -4345,14 +4365,14 @@ Item {
                                     textFormat: Text.PlainText
                                     color: root.dim
                                     font.family: root.draftFont
-                                    font.pixelSize: 16
+                                    font.pixelSize: root.px(16)
                                     lineHeight: 1.2
                                     wrapMode: Text.Wrap
                                     maximumLineCount: 8
                                     elide: Text.ElideRight
                                 }
                             }
-                            Hint { font.pixelSize: 14; text: "Anyone who knows the name can read the profile." }
+                            Hint { font.pixelSize: root.px(14); text: "Anyone who knows the name can read the profile." }
                         }
                         }
 
@@ -4368,7 +4388,7 @@ Item {
                                 Layout.preferredWidth: 1
                                 Layout.alignment: Qt.AlignTop
                                 spacing: 8
-                                Text { text: "Paste your page's HTML"; color: root.faint; font.family: root.sans; font.pixelSize: 15 }
+                                Text { text: "Paste your page's HTML"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
                                 Area {
                                     id: pageArea
                                     Layout.fillWidth: true
@@ -4376,19 +4396,19 @@ Item {
                                     hint: "<h1>Hi</h1>\n<p>About me…</p>"
                                     onTextChanged: previewTimer.restart()
                                 }
-                                Text { Layout.fillWidth: true; wrapMode: Text.Wrap; text: "This app leaves out scripts, styles and images. In a browser, the page runs as written."; color: root.faint; font.family: root.sans; font.pixelSize: 14 }
+                                Text { Layout.fillWidth: true; wrapMode: Text.Wrap; text: "This app leaves out scripts, styles and images. In a browser, the page runs as written."; color: root.faint; font.family: root.sans; font.pixelSize: root.px(14) }
                             }
                             ColumnLayout {
                                 Layout.fillWidth: true
                                 Layout.preferredWidth: 1
                                 Layout.alignment: Qt.AlignTop
                                 spacing: 8
-                                Text { text: "Preview · how this app shows it"; color: root.faint; font.family: root.sans; font.pixelSize: 15 }
+                                Text { text: "Preview · how this app shows it"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
                                 Rectangle {
                                     Layout.fillWidth: true
                                     implicitHeight: 420
                                     radius: 6
-                                    color: root.panel
+                                    color: root.card
                                     border.width: 1
                                     border.color: root.line
                                     clip: true
@@ -4410,7 +4430,7 @@ Item {
                                         }
                                     }
                                 }
-                                Text { text: "Public: anyone who knows the name can read it."; color: root.faint; font.family: root.sans; font.pixelSize: 14 }
+                                Text { text: "Public: anyone who knows the name can read it."; color: root.faint; font.family: root.sans; font.pixelSize: root.px(14) }
                             }
                         }
                         Timer {
@@ -4450,9 +4470,9 @@ Item {
                                 Layout.fillWidth: true
                                 Layout.preferredWidth: 1
                                 Layout.alignment: Qt.AlignTop
-                                Text { text: "Transfer"; color: root.ink; font.family: root.sans; font.pixelSize: 22; font.weight: Font.DemiBold }
+                                Text { text: "Transfer"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.DemiBold }
                                 Hint { text: root.record !== null ? "Give " + root.shown(root.record.name) + " to someone else. Its profile and page are cleared for them." : "" }
-                                Text { text: "Their account"; color: root.faint; font.family: root.sans; font.pixelSize: 15 }
+                                Text { text: "Their account"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
                                 Field {
                                     id: newOwnerField
                                     Layout.fillWidth: true
@@ -4463,7 +4483,7 @@ Item {
                                     Layout.fillWidth: true
                                     implicitHeight: depositWarning.implicitHeight + 24
                                     radius: 8
-                                    color: "#2A2418"
+                                    color: root.noticeFill
                                     Text {
                                         id: depositWarning
                                         x: 14
@@ -4472,7 +4492,7 @@ Item {
                                         text: root.record !== null && root.someAmount(root.record.deposit) ? "Your deposit of " + root.grouped(root.record.deposit) + " goes with the name. They get it back when they release it, not you." : "Any deposit goes with the name."
                                         color: root.brass
                                         font.family: root.sans
-                                        font.pixelSize: 15
+                                        font.pixelSize: root.px(15)
                                         wrapMode: Text.Wrap
                                     }
                                 }
@@ -4487,7 +4507,7 @@ Item {
                                 Layout.fillWidth: true
                                 Layout.preferredWidth: 1
                                 Layout.alignment: Qt.AlignTop
-                                Text { text: "Release"; color: root.ink; font.family: root.sans; font.pixelSize: 22; font.weight: Font.DemiBold }
+                                Text { text: "Release"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.DemiBold }
                                 Hint { text: "Give the name up. Its profile and page are deleted and anyone can register it." }
                                 Figure {
                                     visible: root.record !== null && root.someAmount(root.record.deposit)
@@ -4509,7 +4529,7 @@ Item {
                                         text: "Release it?"
                                         color: root.alarm
                                         font.family: root.sans
-                                        font.pixelSize: 18
+                                        font.pixelSize: root.px(18)
                                         font.weight: Font.DemiBold
                                     }
                                     Action {
@@ -4552,10 +4572,10 @@ Item {
                         visible: root.tool !== "settings" && root.record !== null
                         Layout.fillWidth: true
                         spacing: 10
-                        Text { text: "Posts" + (root.authorTotal > 0 ? "  " + root.authorTotal : ""); color: root.ink; font.family: root.sans; font.pixelSize: 18; font.weight: Font.Bold }
+                        Text { text: "Posts" + (root.authorTotal > 0 ? "  " + root.authorTotal : ""); color: root.ink; font.family: root.sans; font.pixelSize: root.px(18); font.weight: Font.Bold }
                         Hint {
                             visible: root.authorPosts.length === 0
-                            font.pixelSize: 15
+                            font.pixelSize: root.px(15)
                             text: root.authorLoading ? "Loading posts…" : "No posts yet."
                         }
                         Repeater {
@@ -4569,7 +4589,7 @@ Item {
                                     text: "Reply"
                                     color: root.faint
                                     font.family: root.sans
-                                    font.pixelSize: 13
+                                    font.pixelSize: root.px(13)
                                 }
                                 Text {
                                     Layout.fillWidth: true
@@ -4577,30 +4597,30 @@ Item {
                                     textFormat: Text.PlainText
                                     color: root.dim
                                     font.family: root.sans
-                                    font.pixelSize: 17
+                                    font.pixelSize: root.px(17)
                                     wrapMode: Text.Wrap
                                 }
                                 RowLayout {
                                     spacing: 18
-                                    Text { text: root.boardAgo(authorCard.modelData.time); color: root.faint; font.family: root.sans; font.pixelSize: 14 }
+                                    Text { text: root.boardAgo(authorCard.modelData.time); color: root.faint; font.family: root.sans; font.pixelSize: root.px(14) }
                                     Link {
                                         text: "Reply"
                                         color: root.faint
-                                        font.pixelSize: 14
+                                        font.pixelSize: root.px(14)
                                         onPressed: { root.boardShow("thread", authorCard.modelData.parent_id ? authorCard.modelData.parent_id : authorCard.modelData.id); root.boardReply(authorCard.modelData.id) }
                                     }
                                     Link {
                                         readonly property bool liked: root.boardLiked.indexOf(authorCard.modelData.id) >= 0
                                         text: (liked ? "♥ " : "♡ ") + Math.max(liked ? 1 : 0, authorCard.modelData.likes)
                                         color: liked ? root.alarm : root.faint
-                                        font.pixelSize: 14
+                                        font.pixelSize: root.px(14)
                                         font.underline: false
                                         onPressed: root.boardToggleLike(authorCard.modelData.id)
                                     }
                                     Link {
                                         text: "Thread"
                                         color: root.faint
-                                        font.pixelSize: 14
+                                        font.pixelSize: root.px(14)
                                         onPressed: root.boardShow("thread", authorCard.modelData.parent_id ? authorCard.modelData.parent_id : authorCard.modelData.id)
                                     }
                                 }
@@ -4632,7 +4652,7 @@ Item {
                                 text: "Page"
                                 color: root.ink
                                 font.family: root.sans
-                                font.pixelSize: 18
+                                font.pixelSize: root.px(18)
                                 font.weight: Font.Bold
                             }
                             Text {
@@ -4642,13 +4662,13 @@ Item {
                                 color: root.dim
                                 font.family: root.sans
                                 font.weight: Font.Medium
-                                font.pixelSize: 17
+                                font.pixelSize: root.px(17)
                                 elide: Text.ElideRight
                             }
                             Link {
                                 visible: root.page !== null && root.page.text !== null && root.page.text !== undefined
                                 text: root.pageSourceOpen ? "Hide source" : "Show source"
-                                font.pixelSize: 16
+                                font.pixelSize: root.px(16)
                                 onPressed: root.pageSourceOpen = !root.pageSourceOpen
                             }
                         }
@@ -4657,7 +4677,7 @@ Item {
                             Layout.fillWidth: true
                             implicitHeight: pageClip.height + 36
                             radius: 8
-                            color: root.panel
+                            color: root.card
                             border.width: 1
                             border.color: root.line
                             clip: true
@@ -4706,14 +4726,14 @@ Item {
                                 anchors.bottomMargin: 1
                                 gradient: Gradient {
                                     GradientStop { position: 0; color: "transparent" }
-                                    GradientStop { position: 1; color: root.panel }
+                                    GradientStop { position: 1; color: root.card }
                                 }
                             }
                         }
                         Link {
                             visible: root.pageIsLong || (root.page !== null && root.page.truncated === true)
                             text: root.pageIsLong ? (root.pageAll ? "Show less" : "Show all") : "Only the first 64 KB is shown"
-                            font.pixelSize: 16
+                            font.pixelSize: root.px(16)
                             onPressed: root.pageAll = !root.pageAll
                         }
 
@@ -4736,7 +4756,7 @@ Item {
                                     color: root.dim
                                     font.family: root.sans
                                     font.weight: Font.Medium
-                                    font.pixelSize: 17
+                                    font.pixelSize: root.px(17)
                                 }
                                 Text {
                                     Layout.fillWidth: true
@@ -4744,22 +4764,22 @@ Item {
                                     textFormat: Text.PlainText
                                     color: root.ink
                                     font.family: root.mono
-                                    font.pixelSize: 15
+                                    font.pixelSize: root.px(15)
                                     elide: Text.ElideMiddle
                                 }
                                 Link {
                                     text: "Copy"
-                                    font.pixelSize: 16
+                                    font.pixelSize: root.px(16)
                                     onPressed: root.copy(root.pageLink, "Link")
                                 }
                                 Link {
                                     text: "Open in browser"
-                                    font.pixelSize: 16
+                                    font.pixelSize: root.px(16)
                                     onPressed: root.openPageLink()
                                 }
                                 Link {
                                     text: "Close"
-                                    font.pixelSize: 16
+                                    font.pixelSize: root.px(16)
                                     onPressed: root.pageLink = ""
                                 }
                             }
@@ -4783,7 +4803,7 @@ Item {
                                 textFormat: Text.PlainText
                                 color: root.dim
                                 font.family: root.mono
-                                font.pixelSize: 14
+                                font.pixelSize: root.px(14)
                                 wrapMode: Text.WrapAtWordBoundaryOrAnywhere
                                 maximumLineCount: 14
                                 elide: Text.ElideRight
