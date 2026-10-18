@@ -1,0 +1,39 @@
+name: Basecamp packages (Linux)
+
+# Builds the names module and the Names app as Linux x86_64 .lgx packages, the
+# same way scripts/publish-basecamp.sh builds the macOS ones on the Mac mini.
+# Run by hand; the packages are kept as the run's artifacts.
+on:
+  workflow_dispatch:
+
+jobs:
+  lgx:
+    name: Build the .lgx packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            extra-substituters = https://cache.nix.logos.co/public
+            extra-trusted-public-keys = public:l4HrXgL4nw246+LBh2SOJyhz64BoGegOYLheT/iIAPU=
+      - name: The names module
+        working-directory: basecamp-module
+        run: nix build '.#lgx-portable' -o result-portable -L
+      - name: The Names app
+        working-directory: basecamp
+        run: nix build '.#lgx-portable' --override-input names "path:$GITHUB_WORKSPACE/basecamp-module" -o result-portable -L
+      - name: Name the packages by version
+        run: |
+          mkdir -p out
+          for f in basecamp-module/result-portable/*.lgx basecamp/result-portable/*.lgx; do
+            name=$(tar xzOf "$f" manifest.json | jq -r .name)
+            version=$(tar xzOf "$f" manifest.json | jq -r .version)
+            cp "$f" "out/$name-$version-linux-x86_64.lgx"
+          done
+          ls -l out
+          tar xzOf "$(ls out/*.lgx | head -1)" manifest.json | jq .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: basecamp-linux-x86_64
+          path: out/*.lgx

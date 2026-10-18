@@ -140,8 +140,8 @@ esac
 cat <<'EOF'
 
 Try it:
-  names resolve jef.lez     look a name up (no setup needed)
-  names open jef.lez        show its page, served from this machine
+  names resolve jef         look a name up (no setup needed)
+  names open jef            show its page, served from this machine
   names setup               make a wallet; fund its public account, then run it again
   names register <name>     claim a name, held privately
 
