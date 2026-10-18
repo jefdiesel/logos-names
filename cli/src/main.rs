@@ -478,13 +478,20 @@ enum Command {
         #[arg(long)]
         undo: bool,
     },
+    /// How many names were registered, renewed or given up in recent blocks
+    /// (a count only: which names stays hidden).
+    Stats {
+        /// How many recent blocks to read (a block is about 10 seconds).
+        #[arg(long, default_value_t = 20000)]
+        blocks: u64,
+    },
     /// The board's recent posts, newest first.
     Feed {
         /// Only posts by these names (the Following feed).
         #[arg(long, value_delimiter = ',', value_parser = parse_name)]
         following: Vec<String>,
         /// How many recent blocks to read (a block is about 10 seconds).
-        #[arg(long, default_value_t = 2000)]
+        #[arg(long, default_value_t = 20000)]
         blocks: u64,
         /// Print JSON, for apps.
         #[arg(long)]
@@ -2602,6 +2609,7 @@ async fn main() -> Result<()> {
         Command::Hide { post } => client.hide(post).await,
         Command::Anon { public } => client.anon(public, cli.rpc.as_deref()).await,
         Command::MakePublic { name } => client.make_public(&name).await,
+        Command::Stats { blocks } => client.stats(blocks).await,
         Command::Feed { following, blocks, json } => {
             board::print_posts(&client.feed(blocks, &following).await?, json)
         }

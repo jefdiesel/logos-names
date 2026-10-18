@@ -257,6 +257,9 @@ pub struct FeedPost {
 struct BoardCache {
     /// The last block read.
     last: u64,
+    /// The first block read (0: unknown, from before this was kept).
+    #[serde(default)]
+    first: u64,
     events: Vec<BoardEvent>,
 }
 
@@ -309,15 +312,31 @@ impl Client {
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
-        let from = if cache.last >= first { cache.last + 1 } else { first };
-        if from <= last {
-            let found = self.board_events(board, from, last).await?;
-            cache.events.extend(found);
+        // A cache from a narrower or older scan is filled in: blocks before the
+        // first it read, then blocks since the last.
+        if cache.last < first || cache.first == 0 || cache.first > cache.last {
+            cache = BoardCache::default();
+        }
+        if cache.last == 0 {
+            cache.events = self.board_events(board, first, last).await?;
+            cache.first = first;
             cache.last = last;
+        } else {
+            if first < cache.first {
+                let found = self.board_events(board, first, cache.first - 1).await?;
+                cache.events.extend(found);
+                cache.first = first;
+            }
+            if cache.last < last {
+                let found = self.board_events(board, cache.last + 1, last).await?;
+                cache.events.extend(found);
+                cache.last = last;
+            }
         }
         // Keep a week of blocks at most.
         let keep_from = last.saturating_sub(60_000);
         cache.events.retain(|event| event.block >= keep_from);
+        cache.first = cache.first.max(keep_from);
         if let Ok(text) = serde_json::to_string(&cache) {
             std::fs::write(&path, text).ok();
         }
@@ -390,6 +409,89 @@ impl Client {
             }
         }
         Ok(events)
+    }
+
+    /// Counts the registry's changes in the last `blocks` blocks, private and
+    /// public: registrations, renewals, transfers, releases and posts.
+    pub async fn stats(&self, blocks: u64) -> Result<()> {
+        use futures::StreamExt as _;
+        let url = self.wallet.config().sequencer.sequencer_addr.to_string();
+        let last = self.wallet.get_last_block_id().await.context("cannot read the chain's height")?;
+        let first = last.saturating_sub(blocks.saturating_sub(1)).max(1);
+        let ranges: Vec<(u64, u64)> = (first..=last).step_by(200).map(|start| (start, (start + 199).min(last))).collect();
+        let fetched: Vec<Result<Vec<common::block::Block>>> = futures::stream::iter(ranges)
+            .map(|(start, end)| {
+                let url = url.clone();
+                async move { tokio::task::spawn_blocking(move || block_range(&url, start, end)).await.map_err(|error| anyhow!("{error}"))? }
+            })
+            .buffered(8)
+            .collect()
+            .await;
+        let board = board_program().ok();
+        let mut counts: std::collections::BTreeMap<&str, (u64, u64)> = std::collections::BTreeMap::new();
+        let mut txs = 0u64;
+        for blocks in fetched {
+            for block in blocks? {
+                for tx in &block.body.transactions {
+                    txs += 1;
+                    match tx {
+                        common::transaction::LeeTransaction::Public(tx) => {
+                            let kind = if tx.message.program_account_id == self.program {
+                                match borsh::from_slice::<names_core::Instruction>(&tx.message.instruction_data) {
+                                    Ok(names_core::Instruction::Register { .. }) => "register",
+                                    Ok(names_core::Instruction::Renew { .. }) => "renew",
+                                    Ok(_) => "other registry change",
+                                    Err(_) => continue,
+                                }
+                            } else if Some(tx.message.program_account_id) == board {
+                                match borsh::from_slice::<BoardInstruction>(&tx.message.instruction_data) {
+                                    Ok(BoardInstruction::Post { .. }) => "post",
+                                    Ok(BoardInstruction::Like { .. }) => "like",
+                                    _ => continue,
+                                }
+                            } else {
+                                continue;
+                            };
+                            counts.entry(kind).or_default().1 += 1;
+                        }
+                        common::transaction::LeeTransaction::PrivacyPreserving(tx) => {
+                            let mut kinds = std::collections::BTreeSet::new();
+                            for action in &tx.message.public_actions {
+                                for effect in &action.effects {
+                                    if effect.program_account_id == self.program {
+                                        if let Ok(names_core::Effect::Register { .. }) = borsh::from_slice(&effect.data) {
+                                            kinds.insert("register");
+                                        } else if let Ok(names_core::Effect::Renew { .. }) = borsh::from_slice(&effect.data) {
+                                            kinds.insert("renew");
+                                        } else {
+                                            kinds.insert("other registry change");
+                                        }
+                                    } else if Some(effect.program_account_id) == board {
+                                        match borsh::from_slice::<board_core::Effect>(&effect.data) {
+                                            Ok(board_core::Effect::CreatePost { .. }) => { kinds.insert("post"); }
+                                            Ok(board_core::Effect::CreateLike { .. }) => { kinds.insert("like"); }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                            for kind in kinds {
+                                counts.entry(kind).or_default().0 += 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        println!("blocks {first}-{last}: {txs} transactions on the chain");
+        if counts.is_empty() {
+            println!("no names changes");
+        }
+        for (kind, (private, public)) in counts {
+            println!("{kind}: {} ({private} private, {public} public)", private + public);
+        }
+        Ok(())
     }
 
     /// The board changes one transaction made.
