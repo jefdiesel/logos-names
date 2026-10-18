@@ -36,6 +36,18 @@ Item {
     property string editTab: "profile"   // the Edit screen's tab: profile, page or giveup
     property bool publicRegisterOpen: false
     property bool registering: false       // the "Register a name" screen is open
+    // Get tokens: bridging from the person's Logos Blockchain node into LEZ (`cli_bridge`).
+    property bool gettingTokens: false     // the "Get tokens" screen is open
+    property string bridgeKey: ""          // the Logos Blockchain public key last bridged from, as the module keeps it
+    property string bridgeNode: ""         // and the node, "" for Basecamp's
+    property var bridgePlan: null          // the last checked plan: {total, notes, fee, to, lines}
+    property string bridgePlanFor: ""      // what that plan was checked for: amount|key|node
+    property bool bridgeBusy: false
+    property bool bridgeConfirm: false     // "Bridge" was pressed and asks to confirm
+    property string bridgeError: ""
+    property string bridgeHash: ""         // the deposit last sent, "" if its hash wasn't readable
+    property bool bridgeSent: false        // a deposit was sent from this screen
+    property var bridgeSentLines: []       // what the CLI printed for it
     property string registerTaken: ""      // the name last checked there that someone holds
     property var cliBalance: undefined   // the names CLI's private account {account, balance}; undefined while asking, null if none // the public-account way to register is shown
     property bool entriesOpen: false     // the Entries part of a name's settings is shown
@@ -182,13 +194,21 @@ Item {
         return reply
     }
 
+    /// A reply as Advanced shows it, for finding out why something failed.
+    /// A new wallet's reply holds its recovery phrase, so it is never kept.
+    function shownReply(what, reply) {
+        if (what === "names.cli_create_wallet")
+            return what + " → (not shown: it holds your recovery phrase)"
+        return what + " → " + String(reply).substr(0, 400)
+    }
+
     /// Calls a module and waits for its reply. For quick reads only: the
     /// screen stands still until the module answers.
     function call(module, method, args) {
         if (!bridgeReady)
             throw new Error("This screen needs to run inside Basecamp.")
         var reply = logos.callModule(module, method, args)
-        lastReply = module + "." + method + " → " + String(reply).substr(0, 400)
+        lastReply = shownReply(module + "." + method, reply)
         return parsed(reply)
     }
 
@@ -207,7 +227,7 @@ Item {
     /// `failed(message)` runs, later.
     function askLater(method, args, done, failed, patience) {
         function settle(reply) {
-            lastReply = "names." + method + " → " + String(reply).substr(0, 400)
+            lastReply = shownReply("names." + method, reply)
             reply = parsed(reply)
             if (!reply || reply.success === undefined)
                 failed("The names module did not answer. Is it installed?")
@@ -277,9 +297,12 @@ Item {
             configKnown = true
             settingsOpen = registry === ""
             savedMain = config.main_name ? config.main_name : ""
+            bridgeKey = config.bridge_key ? config.bridge_key : ""
+            bridgeNode = config.bridge_node && config.bridge_node !== defaultBridgeNode ? config.bridge_node : ""
             loadWallet(false)
             loadCliMine()
             loadCliBalance()
+            loadCliStatus()
             boardLoad()
             loadRunningJobs()
             return true
@@ -412,6 +435,277 @@ Item {
             cliBalance = null
             console.log("names_ui: CLI balance:", message)
         }, 120000)
+    }
+
+    // ── Get tokens ──────────────────────────────────────────────────────
+
+    readonly property string defaultBridgeNode: "http://127.0.0.1:8080"
+    /// The CLI's default public account, which bridging credits: {account, balance}, or null.
+    readonly property var cliPublic: cliBalance !== undefined && cliBalance !== null && cliBalance.public ? cliBalance.public : null
+
+    /// Opens the "Get tokens" screen.
+    function openGetTokens() {
+        section = "settings"
+        say("", false)
+        record = null
+        page = null
+        missing = ""
+        tool = ""
+        settingsOpen = false
+        registering = false
+        gettingTokens = true
+        bridgePlan = null
+        bridgePlanFor = ""
+        bridgeConfirm = false
+        bridgeError = ""
+        bridgeSent = false
+        bridgeHash = ""
+        bridgeKeyField.text = bridgeKey
+        bridgeNodeField.text = bridgeNode
+        loadCliBalance()
+    }
+
+    /// What the fields ask for, so a plan is only sent for what it was checked for.
+    function bridgeAsked() {
+        return [bridgeAmountField.text.trim(), bridgeKeyField.text.trim().toLowerCase(), bridgeNodeField.text.trim()]
+    }
+
+    /// Checks the fields before the module sees them; "" if they look right.
+    function bridgeInputProblem(asked) {
+        if (!/^[0-9]+$/.test(asked[0]) || /^0+$/.test(asked[0]))
+            return "Enter a whole amount, such as 1000."
+        if (!/^[0-9a-f]{64}$/.test(asked[1]))
+            return "The key is 64 characters, 0-9 and a-f. Copy it from your node's wallet."
+        if (asked[2] !== "" && !/^https?:\/\/(127\.0\.0\.1|localhost):[0-9]{1,5}\/?$/.test(asked[2]))
+            return "The node is an address on this computer, such as " + defaultBridgeNode + "."
+        return ""
+    }
+
+    /// Runs `names bridge`: the plan, or with `send` the deposit itself.
+    function bridgeRun(send) {
+        var asked = bridgeAsked()
+        var problem = bridgeInputProblem(asked)
+        bridgeError = problem
+        if (!send || problem !== "")
+            bridgeConfirm = false
+        if (problem !== "")
+            return
+        if (send && bridgePlanFor !== asked.join("|")) {
+            bridgeConfirm = false
+            return
+        }
+        bridgeBusy = true
+        if (!send) {
+            bridgePlan = null
+            bridgeHash = ""
+            bridgeSent = false
+        }
+        askLater("cli_bridge", [asked[0], asked[1], asked[2], send], function(value) {
+            bridgeBusy = false
+            bridgeConfirm = false
+            bridgeKey = asked[1]
+            bridgeNode = asked[2] === defaultBridgeNode ? "" : asked[2].replace(/\/$/, "")
+            if (send) {
+                bridgePlan = null
+                bridgePlanFor = ""
+                bridgeHash = value && value.hash ? value.hash : ""
+                bridgeSent = true
+                bridgeSentLines = value && value.lines ? value.lines : []
+                bridgeAmountField.text = ""
+            } else {
+                bridgePlan = value
+                bridgePlanFor = asked.join("|")
+            }
+        }, function(message) {
+            bridgeBusy = false
+            bridgeConfirm = false
+            bridgeError = sentence(message)
+        }, 150000)
+    }
+
+    /// The checked plan in plain words.
+    function bridgePlanText() {
+        if (bridgePlan === null)
+            return ""
+        var asked = bridgeAsked()[0]
+        var whole = bridgePlan.total && bridgePlan.total !== asked
+            ? " Whole notes are used, so that's " + grouped(bridgePlan.total) + " for the " + grouped(asked) + " you asked for." : ""
+        return "Ready: " + grouped(bridgePlan.total || asked) + " from " + (bridgePlan.notes || "?") + (bridgePlan.notes === "1" ? " note" : " notes")
+            + " of that key, into your LEZ public account." + whole
+            + (bridgePlan.fee ? " Network fee at most " + grouped(bridgePlan.fee) + "." : "") + " Nothing has been sent yet."
+    }
+
+    // ── Getting started: install, wallet, move to private ───────────────
+
+    property var cliStatus: null        // cli_status: {cli, prover, installing, wallet_dir, wallet, public, private, busy}; null until known
+    property var installJob: null       // the install under way: {id, started, line}
+    property string installProblem: ""
+    property string installWarning: ""
+    property bool walletBusy: false     // "Create my wallet" is waiting on the module
+    property string walletError: ""
+    // A new wallet's recovery phrase, shown once until "I've written it down".
+    // Never logged, saved or put on the clipboard.
+    property string recoveryPhrase: ""
+    property var shieldJob: null        // the move to private under way: {id, started}
+    property string shieldProblem: ""
+    property bool shieldMoved: false
+    readonly property string shieldAmount: "5000000"
+    /// The names CLI's wallet exists and has its accounts.
+    readonly property bool hasCliWallet: cliStatus !== null && !!cliStatus.wallet && !!cliStatus.public
+    /// Your public account's ID, as far as it is known.
+    readonly property string myPublic: cliPublic !== null ? cliPublic.account : hasCliWallet ? cliStatus.public : ""
+    readonly property bool canShield: cliPublic !== null && atLeast(cliPublic.balance, shieldAmount)
+    readonly property bool hasPrivateFunds: cliBalance !== undefined && cliBalance !== null && !/^0*$/.test(String(cliBalance.balance))
+
+    /// Whether the decimal `a` is at least `b`.
+    function atLeast(a, b) {
+        a = String(a).replace(/^0+/, "")
+        b = String(b).replace(/^0+/, "")
+        return a.length !== b.length ? a.length > b.length : a >= b
+    }
+
+    /// Reads where the CLI stands (nothing is run), and picks up an install
+    /// or a move to private that was under way.
+    function loadCliStatus() {
+        askLater("cli_status", [], function(value) {
+            cliStatus = value
+            if (value && value.installing && installJob === null)
+                installJob = { id: value.installing.id, started: value.installing.started || Date.now(), line: installLine(value.installing.log_tail) }
+            if (value && value.busy && value.busy.kind === "shield" && shieldJob === null)
+                shieldJob = { id: value.busy.id, started: value.busy.started || Date.now() }
+        }, function(message) {
+            console.log("names_ui: CLI status:", message)
+        })
+    }
+
+    /// Installs the names program and its prover into the module's folder.
+    function installCli() {
+        if (installJob !== null)
+            return
+        installProblem = ""
+        installWarning = ""
+        installJob = { id: "", started: Date.now(), line: "Starting…" }
+        askLater("cli_install", [], function(value) {
+            if (value.installed) {
+                installJob = null
+                installWarning = value.prover ? "" : "The prover isn't installed, so private changes can't be made yet."
+                loadConfig()
+                return
+            }
+            installJob = { id: value.job.id, started: value.job.started || Date.now(), line: "Starting…" }
+        }, function(message) {
+            installJob = null
+            installProblem = sentence(message)
+        }, 60000)
+    }
+
+    /// What an install is doing, from the last line of its log.
+    function installLine(log) {
+        var last = lastLogLine(log)
+        if (/^Downloading names/.test(last))
+            return "Downloading names…"
+        if (/^Downloading RISC Zero/.test(last))
+            return "Downloading the prover, about 70 MB…"
+        if (/^Installed .*(names|man pages)/.test(last))
+            return "Checking the download…"
+        return "Installing…"
+    }
+
+    function checkInstall() {
+        var job = installJob
+        if (job === null || job.id === "" || job.asking)
+            return
+        job.asking = true
+        askLater("job", [job.id], function(value) {
+            job.asking = false
+            if (installJob !== job)
+                return
+            if (value.state === "running") {
+                installJob = { id: job.id, started: job.started, line: installLine(value.log_tail) }
+                return
+            }
+            installJob = null
+            if (value.state === "done") {
+                installWarning = value.warning ? value.warning : ""
+                loadConfig()
+            } else {
+                installProblem = value.problem ? value.problem : "The install stopped: " + lastLogLine(value.log_tail)
+            }
+        }, function() { job.asking = false })
+    }
+
+    /// Makes the wallet and its two accounts. A new wallet's recovery phrase
+    /// comes back once, to show.
+    function createWallet() {
+        if (walletBusy)
+            return
+        walletBusy = true
+        walletError = ""
+        askLater("cli_create_wallet", [], function(value) {
+            walletBusy = false
+            if (value && value.phrase)
+                recoveryPhrase = value.phrase
+            if (value && value.problem)
+                walletError = sentence(value.problem)
+            loadCliStatus()
+            loadCliBalance()
+            loadCliMine()
+        }, function(message) {
+            walletBusy = false
+            walletError = sentence(message)
+        }, 200000)
+    }
+
+    /// Moves tokens from the public account to the private one (a proof of a few minutes).
+    function moveToPrivate() {
+        if (shieldJob !== null)
+            return
+        shieldProblem = ""
+        shieldMoved = false
+        shieldJob = { id: "", started: Date.now() }
+        askLater("cli_shield", [shieldAmount], function(value) {
+            shieldJob = { id: value.id, started: value.started || Date.now() }
+        }, function(message) {
+            shieldJob = null
+            shieldProblem = sentence(message)
+        })
+    }
+
+    function checkShield() {
+        var job = shieldJob
+        if (job === null || job.id === "" || job.asking)
+            return
+        job.asking = true
+        askLater("job", [job.id], function(value) {
+            job.asking = false
+            if (shieldJob !== job || value.state === "running")
+                return
+            shieldJob = null
+            if (value.state === "done" && value.moved)
+                shieldMoved = true
+            else
+                shieldProblem = value.problem ? value.problem : "Moving to private didn't go through: " + lastLogLine(value.log_tail)
+            loadCliBalance()
+        }, function() { job.asking = false })
+    }
+
+    /// How the move to private is going, in a line.
+    function shieldLine() {
+        if (shieldJob === null)
+            return ""
+        var minutes = Math.max(0, Math.floor((Math.max(clockTick, Date.now()) - shieldJob.started) / 60000))
+        return "Proving it on this computer, so the chain can't link your two accounts. About 4 min" + (minutes > 0 ? ", " + minutes + " so far." : ".")
+    }
+
+    Timer {
+        interval: 3000
+        repeat: true
+        running: root.installJob !== null || root.shieldJob !== null
+        onTriggered: {
+            root.clockTick = Date.now()
+            root.checkInstall()
+            root.checkShield()
+        }
     }
 
     /// Whether the CLI's private account can pay the deposit, as far as is known.
@@ -610,6 +904,7 @@ Item {
     /// Opens the "Register a name" screen.
     function openRegister() {
         section = "settings"
+        gettingTokens = false
         say("", false)
         record = null
         page = null
@@ -648,6 +943,7 @@ Item {
     function show(name) {
         section = "search"
         registering = false
+        gettingTokens = false
         tool = ""
         pageSourceOpen = false
         pageAll = false
@@ -1358,11 +1654,56 @@ Item {
         boardLiked = next
     }
 
+    property bool terminalNoteOpen: false // Welcome shows the command-line install
+    property bool payFromPublic: false   // paying an account from the public account rather than the private one
+    property bool payingPublicly: false  // the payment under way goes from the public account (one block, no proof)
+
+    /// Whether the Pay field holds an account (`Public/<id>`) rather than a name.
+    function payIsAccount(to) {
+        return /^Public\//.test(String(to).trim())
+    }
+
+    /// Why the account in the Pay field can't be paid, or "" if it looks right.
+    function payAccountProblem(to) {
+        to = String(to).trim()
+        if (!/^Public\/[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(to))
+            return "That isn't a public account. It's Public/ and then the account ID, letters and digits."
+        if (myPublic !== "" && to === "Public/" + myPublic)
+            return "That's your own public account."
+        return ""
+    }
+
+    /// Whether paying an account goes from the public account: when asked to,
+    /// or when the private account is known not to hold enough.
+    function payGoesPublic(amount) {
+        if (payFromPublic)
+            return true
+        if (cliBalance === undefined || cliBalance === null)
+            return false
+        return /^[0-9]+$/.test(amount) && !atLeast(cliBalance.balance, amount) && cliPublic !== null && atLeast(cliPublic.balance, amount)
+    }
+
     function payName() {
         var to = payTo.text.trim()
         var amount = payAmount.text.trim()
         if (to === "" || amount === "")
             return
+        if (payIsAccount(to)) {
+            var problem = payAccountProblem(to)
+            if (problem !== "") {
+                say(problem, true)
+                return
+            }
+            if (boardJob !== null)
+                return
+            var fromPublic = payGoesPublic(amount)
+            payingPublicly = fromPublic
+            boardStart("cli_pay_account", [to, amount, !fromPublic], "Your payment to " + shorten(to.substr(7)), function() {
+                payAmount.text = ""
+                loadCliBalance()
+            }, "-wallet")
+            return
+        }
         var bare = ""
         try { bare = String(call("names", "normalize", [to])) } catch (error) {}
         if (bare !== "" && cliHolds(bare)) {
@@ -1391,6 +1732,8 @@ Item {
     /// What the running board change is doing, in a line.
     function boardJobLine(job) {
         var seconds = Math.max(0, Math.floor((Math.max(clockTick, Date.now()) - job.started) / 1000))
+        if (job.kind === "cli_pay_account" && payingPublicly)
+            return job.label + ": sending it publicly, one block (about 30 seconds), " + seconds + "s so far."
         if (heldPublicly(job.name) && (job.kind === "board_post" || job.kind === "board_toggle_like" || job.kind === "board_hide"))
             return job.label + ": sending it publicly, one block (about 30 seconds), " + seconds + "s so far."
         return job.label + ": proving it on this computer, so the chain never learns your account. About 4 min, " + Math.floor(seconds / 60) + " so far."
@@ -1777,12 +2120,13 @@ Item {
     /// shows and blocks what it should until it ends.
     function loadRunningJobs() {
         askLater("running_jobs", [], function(value) {
-            var running = value || []
+            // The install and the move to private have their own progress (Welcome).
+            var running = (value || []).filter(function(job) { return job.kind !== "install" && job.kind !== "shield" })
             if (boardJob !== null || running.length === 0)
                 return
             var job = running[0]
             var labels = { make_public: "Making " + job.name + " public", post: "Your post", like: "Your like", hide: "Taking it down",
-                           anon: "Setting up your anon name", pay: "Your payment", register: "Registering " + job.name }
+                           anon: "Setting up your anon name", pay: "Your payment", pay_account: "Your payment", register: "Registering " + job.name }
             boardJob = { id: job.id, label: labels[job.kind] || "A change to " + job.name, started: job.started || Date.now(),
                          kind: job.kind, name: job.name, after: function() { loadCliMine() } }
         }, function() {})
@@ -2334,6 +2678,23 @@ Item {
     }
 
     /// A box with no heading of its own, for side-by-side parts.
+    /// A Welcome step's heading: its number, ticked once done, and its title.
+    component StepHead: RowLayout {
+        id: stepHead
+        property int number: 1
+        property bool done: false
+        property string title: ""
+        spacing: 12
+        Rectangle {
+            implicitWidth: root.px(30)
+            implicitHeight: root.px(30)
+            radius: height / 2
+            color: stepHead.done ? root.good : root.brass
+            Text { anchors.centerIn: parent; text: stepHead.done ? "✓" : String(stepHead.number); color: root.slate; font.family: root.sans; font.pixelSize: root.px(15); font.weight: Font.DemiBold }
+        }
+        Text { text: stepHead.title; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
+    }
+
     component Card: Rectangle {
         default property alias content: cardColumn.data
         implicitHeight: cardColumn.implicitHeight + 52
@@ -2680,7 +3041,7 @@ Item {
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Pay"; current: root.section === "pay"; onPressed: { root.go("pay"); root.loadCliBalance() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Profile"; current: root.section === "profile"; onPressed: { root.say("", false); root.openProfile() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Search"; current: root.section === "search"; onPressed: { root.go("search"); searchField.forceActiveFocus() } }
-                Tab { Layout.fillWidth: true; alignLeft: true; label: "Settings"; current: root.section === "settings"; onPressed: { root.go("settings"); root.registering = false; root.record = null; root.missing = "" } }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Settings"; current: root.section === "settings"; onPressed: { root.go("settings"); root.registering = false; root.gettingTokens = false; root.record = null; root.missing = "" } }
 
                 Item { Layout.fillHeight: true }
 
@@ -2709,69 +3070,162 @@ Item {
                 width: Math.min(parent.width - 112, 640)
                 spacing: 18
                 Text { text: "Welcome"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(36); font.weight: Font.DemiBold }
-                Hint { font.pixelSize: root.px(18); text: "Get a name, then post, pay and be paid as it. Two steps." }
+                Hint { font.pixelSize: root.px(18); text: "Get a name, then post, pay and be paid as it. Four steps, all here." }
+
+                // 1. Install the names program.
                 Card {
                     Layout.fillWidth: true
-                    RowLayout {
-                        spacing: 12
-                        Rectangle {
-                            width: 30; height: 30; radius: 15
-                            color: root.cliPath !== "" ? root.good : root.brass
-                            Text { anchors.centerIn: parent; text: root.cliPath !== "" ? "✓" : "1"; color: root.slate; font.family: root.sans; font.pixelSize: root.px(15); font.weight: Font.DemiBold }
-                        }
-                        Text { text: "Install the names program"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
-                    }
+                    StepHead { number: 1; done: root.cliPath !== ""; title: "Install" }
                     Hint {
                         visible: root.cliPath === ""
-                        text: "It proves your changes on this computer, so the chain never learns your account. Paste this in Terminal, then come back:"
+                        text: "Names needs a small program that proves your changes on this computer, so the chain never learns your account. About 90 MB, checked against the release signature before it's used."
                     }
                     RowLayout {
                         visible: root.cliPath === ""
-                        Layout.fillWidth: true
-                        spacing: 8
-                        Rectangle {
+                        spacing: 12
+                        Action {
+                            label: root.installJob !== null ? "Installing…" : "Install"
+                            strong: true
+                            enabledNow: root.installJob === null
+                            onPressed: root.installCli()
+                        }
+                        Hint {
+                            visible: root.installJob !== null
                             Layout.fillWidth: true
-                            implicitHeight: 44
-                            radius: 6
-                            color: root.slate
-                            border.width: 1
-                            border.color: root.line
+                            color: root.brass
+                            font.pixelSize: root.px(16)
+                            text: root.installJob === null ? "" : root.installJob.line
+                        }
+                    }
+                    Hint { visible: root.installProblem !== ""; color: root.alarm; text: root.installProblem }
+                    Hint {
+                        visible: root.cliPath !== ""
+                        text: "Installed." + (root.cliStatus !== null && root.cliStatus.cli ? " " + root.cliStatus.cli : "")
+                        font.pixelSize: root.px(15)
+                        wrapMode: Text.WrapAnywhere
+                    }
+                    Hint { visible: root.installWarning !== ""; color: root.alarm; font.pixelSize: root.px(15); text: root.installWarning }
+                    Link {
+                        visible: root.cliPath !== "" && root.installWarning !== ""
+                        text: "Install the prover"
+                        font.pixelSize: root.px(15)
+                        onPressed: root.installCli()
+                    }
+                    // For people who already have the CLI, or want it in Terminal too.
+                    Link {
+                        visible: root.cliPath === "" && !root.terminalNoteOpen
+                        Layout.topMargin: 4
+                        text: "Already use the command line?"
+                        color: root.dim
+                        font.pixelSize: root.px(14)
+                        onPressed: root.terminalNoteOpen = true
+                    }
+                    ColumnLayout {
+                        visible: root.cliPath === "" && root.terminalNoteOpen
+                        Layout.fillWidth: true
+                        spacing: 6
+                        Hint { font.pixelSize: root.px(14); text: "Install it from Terminal instead, then come back:" }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
                             Text {
-                                anchors.fill: parent
-                                anchors.leftMargin: 12
-                                verticalAlignment: Text.AlignVCenter
-                                text: "curl -fsSL https://logos-names.wrapit.workers.dev/install.sh | sh"
+                                Layout.fillWidth: true
+                                text: "curl -fsSL https://logos-names.wrapit.workers.dev/install.sh | sh && names setup"
                                 color: root.dim
                                 font.family: root.mono
-                                font.pixelSize: root.px(14)
+                                font.pixelSize: root.px(13)
                                 elide: Text.ElideRight
                             }
+                            Link { text: "Copy"; font.pixelSize: root.px(14); onPressed: root.copy("curl -fsSL https://logos-names.wrapit.workers.dev/install.sh | sh && names setup", "The command") }
                         }
-                        Action { label: "Copy"; onPressed: root.copy("curl -fsSL https://logos-names.wrapit.workers.dev/install.sh | sh && names setup", "The command") }
+                        Link { text: "I've installed it"; font.pixelSize: root.px(14); onPressed: root.loadConfig() }
                     }
-                    Link { visible: root.cliPath === ""; text: "I've installed it"; color: root.brass; onPressed: root.loadConfig() }
-                    Hint { visible: root.cliPath !== ""; text: "Installed." }
                 }
+
+                // 2. Create the wallet.
                 Card {
                     Layout.fillWidth: true
                     opacity: root.cliPath !== "" ? 1 : 0.5
-                    RowLayout {
-                        spacing: 12
-                        Rectangle {
-                            width: 30; height: 30; radius: 15
-                            color: root.brass
-                            Text { anchors.centerIn: parent; text: "2"; color: root.slate; font.family: root.sans; font.pixelSize: root.px(15); font.weight: Font.DemiBold }
-                        }
-                        Text { text: "Pick your name"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
+                    StepHead { number: 2; done: root.hasCliWallet; title: "Create my wallet" }
+                    Hint {
+                        visible: !root.hasCliWallet
+                        text: "Your wallet lives on this computer. It has a public account, for getting tokens, and a private one, for your names."
+                    }
+                    Action {
+                        visible: !root.hasCliWallet
+                        label: root.walletBusy ? "Creating…" : "Create my wallet"
+                        strong: root.cliPath !== ""
+                        enabledNow: root.cliPath !== "" && !root.walletBusy
+                        onPressed: root.createWallet()
+                    }
+                    Hint { visible: root.walletError !== ""; color: root.alarm; text: root.walletError }
+                    Fact {
+                        visible: root.hasCliWallet
+                        label: "Public account"
+                        code: true
+                        value: root.myPublic
+                        full: root.myPublic !== "" ? "Public/" + root.myPublic : ""
+                    }
+                    Fact {
+                        visible: root.hasCliWallet && root.cliPublic !== null
+                        label: "Holds"
+                        value: root.cliPublic !== null ? root.grouped(root.cliPublic.balance) : ""
                     }
                     Hint {
+                        visible: root.hasCliWallet
+                        font.pixelSize: root.px(16)
+                        text: "To fill it, send this account to a friend so they can pay you, or bridge tokens from your Logos node."
+                    }
+                    RowLayout {
+                        visible: root.hasCliWallet
+                        spacing: 18
+                        Link { text: "Get tokens"; font.pixelSize: root.px(16); onPressed: root.openGetTokens() }
+                        Link { text: "Check again"; color: root.dim; font.pixelSize: root.px(16); onPressed: root.loadCliBalance() }
+                    }
+                }
+
+                // 3. Move tokens to the private account.
+                Card {
+                    Layout.fillWidth: true
+                    opacity: root.hasCliWallet ? 1 : 0.5
+                    StepHead { number: 3; done: root.hasPrivateFunds && root.shieldJob === null; title: "Move to private" }
+                    Hint {
+                        text: "Moves " + root.grouped(root.shieldAmount) + " from your public account to your private one, so your names and payments stay private. Your computer proves it, about 4 minutes."
+                    }
+                    Hint {
+                        visible: root.hasCliWallet && root.cliPublic !== null && !root.canShield && root.shieldJob === null && !root.hasPrivateFunds
+                        font.pixelSize: root.px(16)
+                        color: root.brass
+                        text: root.cliPublic === null ? "" : "Your public account holds " + root.grouped(root.cliPublic.balance) + ". It needs " + root.grouped(root.shieldAmount) + " first."
+                    }
+                    Action {
+                        label: root.shieldJob !== null ? "Moving…" : "Move to private"
+                        strong: root.canShield
+                        enabledNow: root.hasCliWallet && root.canShield && root.shieldJob === null
+                        onPressed: root.moveToPrivate()
+                    }
+                    Hint { visible: root.shieldJob !== null; color: root.brass; font.pixelSize: root.px(16); text: root.shieldLine() }
+                    Hint { visible: root.shieldProblem !== "" && root.shieldJob === null; color: root.alarm; text: root.shieldProblem }
+                    Hint {
+                        visible: root.hasPrivateFunds && root.shieldJob === null
+                        font.pixelSize: root.px(16)
+                        color: root.good
+                        text: root.hasPrivateFunds ? "Your private account holds " + root.grouped(root.cliBalance.balance) + "." : ""
+                    }
+                }
+
+                // 4. Pick a name.
+                Card {
+                    Layout.fillWidth: true
+                    opacity: root.hasCliWallet ? 1 : 0.5
+                    StepHead { number: 4; done: false; title: "Pick your name" }
+                    Hint {
                         text: "Held privately: nobody can find which account holds it. It takes a 1,000,000 deposit, returned in full if you ever give the name up, and about 20 minutes to register."
-                            + (root.cliBalance !== undefined && root.cliBalance !== null ? " Your private account holds " + root.grouped(root.cliBalance.balance) + "." : "")
                     }
                     Action {
                         label: "Choose my name"
-                        strong: true
-                        enabledNow: root.cliPath !== ""
+                        strong: root.hasPrivateFunds
+                        enabledNow: root.cliPath !== "" && root.hasCliWallet
                         onPressed: root.openRegister()
                     }
                 }
@@ -2803,7 +3257,7 @@ Item {
                     visible: root.chatError !== ""
                     Layout.fillWidth: true
                     implicitHeight: chatDown.implicitHeight + 24
-                    radius: 8
+                    radius: root.px(8)
                     color: root.noticeFill
                     RowLayout {
                         id: chatDown
@@ -3022,28 +3476,64 @@ Item {
                 width: Math.min(parent.width - 112, 560)
                 spacing: 16
                 Text { text: "Pay"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
-                Hint { text: "Send to a name. It goes from your private account to the name's private keys: the chain doesn't show who paid whom, or how much." }
+                Hint { text: "Send to a name. It goes from your private account to the name's private keys: the chain doesn't show who paid whom, or how much. Someone without a name yet can be paid at their public account." }
                 Text { text: "To"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
-                Field { id: payTo; Layout.fillWidth: true; size: 19; hint: "A name, such as ada" }
+                Field { id: payTo; Layout.fillWidth: true; size: 19; hint: "A name, such as ada, or Public/ and an account ID" }
                 Text { text: "Amount"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
                 Field { id: payAmount; Layout.fillWidth: true; size: 19; numbersOnly: true; hint: "1000" }
                 Hint {
                     font.pixelSize: root.px(15)
-                    text: root.cliBalance === undefined ? "Checking your private account…"
+                    text: root.cliBalance === undefined ? "Checking your accounts…"
                         : root.cliBalance === null ? "No private account found."
                         : "Your private account holds " + root.grouped(root.cliBalance.balance) + "."
+                          + (root.payIsAccount(payTo.text) && root.cliPublic !== null ? " Your public account holds " + root.grouped(root.cliPublic.balance) + "." : "")
+                }
+                // Paying an account is seen on chain: say so before the button.
+                Rectangle {
+                    visible: root.payIsAccount(payTo.text)
+                    Layout.fillWidth: true
+                    implicitHeight: payPublicColumn.implicitHeight + root.px(24)
+                    radius: root.px(8)
+                    color: root.noticeFill
+                    border.width: 1
+                    border.color: root.brass
+                    ColumnLayout {
+                        id: payPublicColumn
+                        x: root.px(14)
+                        y: root.px(12)
+                        width: parent.width - root.px(28)
+                        spacing: 6
+                        Hint {
+                            color: root.ink
+                            font.pixelSize: root.px(16)
+                            text: root.payAccountProblem(payTo.text) !== "" && payTo.text.trim().length > 7 ? root.payAccountProblem(payTo.text)
+                                : root.payGoesPublic(payAmount.text.trim())
+                                ? "Paying an account is public. From your public account, everyone can see that you paid, who got it, and how much."
+                                : "Paying an account is public: everyone can see which account got it, and how much. It goes from your private account, so it doesn't show who paid. Proving takes about 4 minutes."
+                        }
+                        Link {
+                            visible: root.cliPublic !== null && root.payAccountProblem(payTo.text) === ""
+                            text: root.payFromPublic ? "Pay from my private account" : "Pay from my public account instead (faster, shows you paid)"
+                            font.pixelSize: root.px(15)
+                            onPressed: root.payFromPublic = !root.payFromPublic
+                        }
+                    }
                 }
                 Action {
-                    label: "Pay privately"
+                    label: !root.payIsAccount(payTo.text) ? "Pay privately" : "Pay publicly"
                     strong: true
                     enabledNow: root.boardJob === null && payTo.text.trim() !== "" && payAmount.text.trim() !== ""
+                        && (!root.payIsAccount(payTo.text) || root.payAccountProblem(payTo.text) === "")
                     onPressed: root.payName()
                 }
                 Hint {
                     visible: root.boardJob !== null
                     color: root.brass
                     font.pixelSize: root.px(16)
-                    text: root.boardJob === null ? "" : root.boardJob.label + ": proving it on this computer. About 4 min, "
+                    text: root.boardJob === null ? ""
+                        : root.boardJob.kind === "cli_pay_account" && root.payingPublicly
+                        ? root.boardJob.label + ": sending it publicly, one block (about 30 seconds)."
+                        : root.boardJob.label + ": proving it on this computer. About 4 min, "
                         + Math.max(0, Math.floor((Math.max(root.clockTick, Date.now()) - root.boardJob.started) / 60000)) + " so far."
                 }
                 Hint {
@@ -3424,7 +3914,7 @@ Item {
 
                 // Settings: your names, registering another, and Advanced.
                 ColumnLayout {
-                    visible: root.section === "settings" && !root.registering
+                    visible: root.section === "settings" && !root.registering && !root.gettingTokens
                     Layout.fillWidth: true
                     spacing: 14
                     Text { text: "Settings"; color: root.ink; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(28) }
@@ -3528,12 +4018,180 @@ Item {
                         strong: true
                         onPressed: root.openRegister()
                     }
+                    Part { text: "Tokens" }
+                    Hint { text: "Bring tokens from your Logos Blockchain node into LEZ. They take about 12 hours to arrive." }
+                    Action {
+                        label: "Get tokens"
+                        enabledNow: root.cliPath !== ""
+                        onPressed: root.openGetTokens()
+                    }
                     Link {
                         Layout.topMargin: 10
                         text: root.settingsOpen ? "Hide advanced" : "Advanced"
                         color: root.faint
                         font.pixelSize: root.px(15)
                         onPressed: root.settingsOpen = !root.settingsOpen
+                    }
+                }
+
+                // Get tokens: bridge from the Logos Blockchain into LEZ.
+                ColumnLayout {
+                    visible: root.section === "settings" && root.gettingTokens
+                    Layout.fillWidth: true
+                    Layout.maximumWidth: 820
+                    spacing: 14
+                    Link {
+                        text: "‹ Settings"
+                        color: root.dim
+                        font.pixelSize: root.px(15)
+                        onPressed: root.gettingTokens = false
+                    }
+                    Text { text: "Get tokens"; color: root.ink; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(28) }
+                    Hint { text: "Tokens come from your Logos Blockchain node. Bridging them into LEZ takes about 12 hours to arrive." }
+                    Card {
+                        Layout.fillWidth: true
+                        Part { Layout.topMargin: 0; text: "Your LEZ public account" }
+                        Hint {
+                            visible: root.cliPublic === null
+                            text: root.cliPath === "" ? "Install the names program first (see Welcome)."
+                                : root.cliBalance === undefined ? "Checking your accounts…"
+                                : root.hasCliWallet ? "Couldn't read your accounts just now."
+                                : "You don't have a wallet yet. Create one first: it's where bridged tokens land."
+                            color: root.cliBalance === undefined ? root.dim : root.alarm
+                        }
+                        Action {
+                            visible: root.cliPath !== "" && root.cliBalance !== undefined && root.cliPublic === null && !root.hasCliWallet
+                            label: root.walletBusy ? "Creating…" : "Create my wallet"
+                            strong: true
+                            enabledNow: !root.walletBusy
+                            onPressed: root.createWallet()
+                        }
+                        Link {
+                            visible: root.cliPath !== "" && root.cliBalance !== undefined && root.cliPublic === null && root.hasCliWallet
+                            text: "Check again"
+                            font.pixelSize: root.px(15)
+                            onPressed: root.loadCliBalance()
+                        }
+                        Hint { visible: root.walletError !== ""; color: root.alarm; text: root.walletError }
+                        Fact {
+                            visible: root.cliPublic !== null
+                            label: "Account"
+                            code: true
+                            value: root.cliPublic !== null ? root.cliPublic.account : ""
+                            full: root.cliPublic !== null ? "Public/" + root.cliPublic.account : ""
+                        }
+                        Fact {
+                            visible: root.cliPublic !== null
+                            label: "Balance"
+                            value: root.cliPublic !== null ? root.grouped(root.cliPublic.balance) : ""
+                        }
+                        Hint {
+                            visible: root.cliPublic !== null
+                            font.pixelSize: root.px(14)
+                            text: "Bridged tokens land here. To use them for names, move " + root.grouped(root.shieldAmount) + " of them to your private account."
+                        }
+                        Action {
+                            visible: root.cliPublic !== null
+                            label: root.shieldJob !== null ? "Moving…" : "Move to private"
+                            enabledNow: root.shieldJob === null && root.canShield
+                            onPressed: root.moveToPrivate()
+                        }
+                        Hint { visible: root.shieldJob !== null; color: root.brass; font.pixelSize: root.px(15); text: root.shieldLine() }
+                        Hint { visible: root.shieldMoved && root.shieldJob === null; color: root.good; font.pixelSize: root.px(15); text: "Moved. Your private account is ready for names." }
+                        Hint { visible: root.shieldProblem !== "" && root.shieldJob === null; color: root.alarm; font.pixelSize: root.px(15); text: root.shieldProblem }
+                    }
+                    Part { text: "Your Logos Blockchain public key" }
+                    Hint { font.pixelSize: root.px(14); text: "The key your node's wallet lists, 64 characters. It's public, not a secret." }
+                    Field {
+                        id: bridgeKeyField
+                        Layout.fillWidth: true
+                        size: 17
+                        code: true
+                        hint: "64 characters, 0-9 and a-f"
+                    }
+                    Part { text: "Amount" }
+                    Field {
+                        id: bridgeAmountField
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: 360
+                        size: 17
+                        numbersOnly: true
+                        hint: "Such as 5000000"
+                        onAccepted: root.bridgeRun(false)
+                    }
+                    Part { text: "Node address (optional)" }
+                    Field {
+                        id: bridgeNodeField
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: 360
+                        size: 17
+                        code: true
+                        hint: root.defaultBridgeNode
+                    }
+                    RowLayout {
+                        Layout.topMargin: 4
+                        spacing: 8
+                        Action {
+                            label: root.bridgeBusy && !root.bridgeConfirm ? "Checking…" : "Check"
+                            enabledNow: !root.bridgeBusy && root.cliPublic !== null
+                            onPressed: root.bridgeRun(false)
+                        }
+                        Action {
+                            visible: !root.bridgeConfirm
+                            label: "Bridge"
+                            strong: true
+                            enabledNow: !root.bridgeBusy && root.bridgePlan !== null && root.bridgePlanFor === root.bridgeAsked().join("|")
+                            onPressed: root.bridgeConfirm = true
+                        }
+                    }
+                    Hint {
+                        visible: root.bridgePlan !== null
+                        color: root.bridgePlanFor === root.bridgeAsked().join("|") ? root.ink : root.faint
+                        text: root.bridgePlanFor === root.bridgeAsked().join("|") ? root.bridgePlanText() : "You changed something. Check again before you bridge."
+                    }
+                    Card {
+                        visible: root.bridgeConfirm && root.bridgePlan !== null
+                        Layout.fillWidth: true
+                        Hint {
+                            color: root.ink
+                            text: root.bridgePlan === null ? "" : "This moves " + root.grouped(root.bridgePlan.total || root.bridgeAsked()[0]) + " from your Logos Blockchain wallet into LEZ. It can't be undone. It arrives in about 12 hours."
+                        }
+                        RowLayout {
+                            spacing: 8
+                            Action {
+                                label: root.bridgeBusy ? "Sending…" : "Yes, bridge it"
+                                strong: true
+                                enabledNow: !root.bridgeBusy
+                                onPressed: root.bridgeRun(true)
+                            }
+                            Action {
+                                label: "Cancel"
+                                enabledNow: !root.bridgeBusy
+                                onPressed: root.bridgeConfirm = false
+                            }
+                        }
+                    }
+                    Hint {
+                        visible: root.bridgeError !== ""
+                        color: root.alarm
+                        text: root.bridgeError
+                    }
+                    Card {
+                        visible: root.bridgeSent
+                        Layout.fillWidth: true
+                        Hint { color: root.good; font.weight: Font.DemiBold; text: "Sent. It arrives in your public account in about 12 hours." }
+                        Fact { visible: root.bridgeHash !== ""; label: "Deposit"; code: true; value: root.bridgeHash; full: root.bridgeHash }
+                        // A reply the module couldn't read a hash from: what the CLI said.
+                        Text {
+                            visible: root.bridgeHash === ""
+                            Layout.fillWidth: true
+                            textFormat: Text.PlainText
+                            text: root.bridgeSentLines.join("\n")
+                            color: root.dim
+                            font.family: root.mono
+                            font.pixelSize: root.px(13)
+                            wrapMode: Text.WrapAnywhere
+                        }
                     }
                 }
 
@@ -3857,6 +4515,12 @@ Item {
                             color: root.alarm
                             font.pixelSize: root.px(15)
                             text: "That's less than the deposit. Add funds to this private account first."
+                        }
+                        Link {
+                            visible: root.cliBalance !== undefined && root.cliBalance !== null && !root.cliCanPay()
+                            text: "Get tokens"
+                            font.pixelSize: root.px(15)
+                            onPressed: root.openGetTokens()
                         }
                         Text { Layout.topMargin: 6; text: "Then"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
                         RowLayout {
@@ -4811,6 +5475,72 @@ Item {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // A new wallet's recovery phrase, over everything, until it's written down.
+    Rectangle {
+        visible: root.recoveryPhrase !== ""
+        anchors.fill: parent
+        color: Qt.rgba(root.slate.r, root.slate.g, root.slate.b, 0.94)
+        // Nothing behind it can be pressed while it shows.
+        MouseArea { anchors.fill: parent; hoverEnabled: true; onWheel: function(wheel) { wheel.accepted = true } }
+        Card {
+            anchors.centerIn: parent
+            width: Math.min(parent.width - root.px(64), root.px(720))
+            Text {
+                Layout.fillWidth: true
+                text: "Write down your recovery phrase"
+                color: root.ink
+                font.family: root.sans
+                font.pixelSize: root.px(26)
+                font.weight: Font.DemiBold
+                wrapMode: Text.Wrap
+            }
+            Hint {
+                color: root.ink
+                text: "Write this down on paper. It's the only way to get your wallet back if this computer is lost or breaks."
+            }
+            Hint {
+                font.pixelSize: root.px(16)
+                text: "Anyone who sees it can take your tokens and names, so don't type it anywhere or share a photo of it. It won't be shown again."
+            }
+            GridLayout {
+                Layout.fillWidth: true
+                Layout.topMargin: 6
+                columns: 4
+                columnSpacing: root.px(10)
+                rowSpacing: root.px(10)
+                Repeater {
+                    model: root.recoveryPhrase === "" ? [] : root.recoveryPhrase.split(" ")
+                    delegate: Rectangle {
+                        required property int index
+                        required property string modelData
+                        Layout.fillWidth: true
+                        implicitHeight: wordText.implicitHeight + root.px(16)
+                        radius: root.px(6)
+                        color: root.slate
+                        border.width: 1
+                        border.color: root.line
+                        Text {
+                            id: wordText
+                            anchors.verticalCenter: parent.verticalCenter
+                            x: root.px(10)
+                            text: (index + 1) + "  " + modelData
+                            textFormat: Text.PlainText
+                            color: root.ink
+                            font.family: root.mono
+                            font.pixelSize: root.px(16)
+                        }
+                    }
+                }
+            }
+            Action {
+                Layout.topMargin: 8
+                label: "I've written it down"
+                strong: true
+                onPressed: root.recoveryPhrase = ""
             }
         }
     }

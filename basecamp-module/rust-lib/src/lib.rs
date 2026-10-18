@@ -371,10 +371,81 @@ pub trait NamesModule: Send + 'static {
     fn cli_pay(&mut self, name: String, amount: String) -> String;
 
     /// The names CLI's default private account and its balance:
-    /// `{account, balance}` (decimal text), or null if it has none. Runs
+    /// `{account, balance, public}` (decimal text), or null if it has none.
+    /// `public` is its default public account the same way, `{account,
+    /// balance}`, or null: that is the account `cli_bridge` credits. Runs
     /// `names balance`, which first catches up with the chain (seconds to a
     /// minute), so ask with a long timeout.
     fn cli_balance(&mut self) -> String;
+
+    /// Bridges `amount` (base units, decimal digits) from the notes of the
+    /// Logos Blockchain public key `from_key` (64 hex characters) into LEZ,
+    /// credited to the names CLI wallet's default public account, through the
+    /// person's own Logos Blockchain node at `node` (`http(s)://127.0.0.1:<port>`
+    /// or `localhost:<port>`; empty is Basecamp's, `http://127.0.0.1:8080`).
+    /// Runs `names bridge` and waits for it (no proving; at most two minutes).
+    /// Without `send` it only shows the plan and moves nothing; with `send`
+    /// the deposit is made and cannot be undone. LEZ credits it once the Logos
+    /// Blockchain block holding it is final, about 12 hours on the testnet.
+    /// The value is `{sent, lines, hash, total, notes, fee, to}`: `lines` are
+    /// what the CLI printed, `total` what the whole notes picked add up to
+    /// (a little more than `amount`, at most 30 notes), `hash` the deposit's
+    /// (null for a plan). The key and node are remembered (`get_config`'s
+    /// `bridge_key` and `bridge_node`). Every argument is checked first.
+    fn cli_bridge(&mut self, amount: String, from_key: String, node: String, send: bool) -> String;
+
+    // ── Getting started without a terminal ─────────────────────────────
+
+    /// Where the names CLI stands, read without running it: `{cli, prover,
+    /// installing, wallet_dir, wallet, public, private, busy}`. `cli` is the
+    /// program the module would run (null if none is found), `prover` whether
+    /// RISC Zero's prover is beside it, `installing` the running `cli_install`
+    /// job or null, `wallet` whether its wallet folder holds a wallet,
+    /// `public` and `private` the accounts `names setup` made (null until
+    /// then), and `busy` the running wallet job (`cli_shield` or
+    /// `cli_pay_account`) or null. Answers at once.
+    fn cli_status(&mut self) -> String;
+
+    /// Installs the names CLI and RISC Zero's prover into the module's own
+    /// folder (`~/.config/logos-names/bin`, man pages in `.../man`), by running
+    /// the official installer built into the module: it checks every file's
+    /// signature against the release key and its SHA-256, and changes nothing
+    /// else (not the shell's startup files). A CLI that already works is left
+    /// alone. The value is `{installed, path, version, prover, job}`: with
+    /// `installed` true there is nothing to do; otherwise `job` is the install
+    /// job (`{id, name, kind: "install", state, started}`, seconds to a minute, most
+    /// of it the 70 MB prover). `job` on it says how it goes; once it is
+    /// `done`, its state carries `version` and `path` and the module uses that
+    /// CLI from then on (saved as `cli`, with `cli_wallet` the CLI's default
+    /// wallet folder if none was set). A failed one carries `problem`, in plain
+    /// words (no internet, signature check failed, unsupported computer), and a
+    /// done one whose prover didn't download carries `warning`.
+    fn cli_install(&mut self) -> String;
+
+    /// Makes the names CLI's wallet, with a public and a private account, if
+    /// it has none: `names setup` moving nothing, so it never proves. Waits
+    /// for it, a few seconds (at most three minutes if an old wallet catches
+    /// up with the chain). The value is `{public, private, phrase}`: `phrase`
+    /// is the new wallet's recovery phrase, the only way to get the wallet
+    /// back, shown here once and never logged; it is null if the wallet already
+    /// existed. If the CLI failed after making the wallet, the value also has
+    /// `problem`, so the phrase isn't lost.
+    fn cli_create_wallet(&mut self) -> String;
+
+    /// Moves `amount` (empty: 5,000,000, enough for a few names' deposits)
+    /// from the wallet's public account to its private one, so names can be
+    /// held and paid privately: `names setup` as a job that proves for a few
+    /// minutes. Once it ends, its `job` state has `moved` and `problem`: the
+    /// CLI moves nothing, and says so, when the public account holds too little.
+    fn cli_shield(&mut self, amount: String) -> String;
+
+    /// Pays `amount` to the public account `account`, written `Public/<id>`
+    /// (a name is paid with `cli_pay`), as a job: `names wallet auth-transfer
+    /// send`. From the wallet's private account with `from_private` (a proof
+    /// of a few minutes; the chain shows the account paid and the amount, not
+    /// the payer) or else its public one (one block; the chain shows the payer
+    /// too).
+    fn cli_pay_account(&mut self, account: String, amount: String, from_private: bool) -> String;
 
     /// How job `id` is going: `{id, name, kind, state, started, finished,
     /// exit, log_tail}`. `state` is `running`, `done` (the CLI exited 0: the
@@ -420,10 +491,16 @@ struct Names {
     cli_wallet: Option<String>,
     /// Where CLI jobs keep their logs; the config directory's `jobs` if unset.
     jobs_dir: Option<std::path::PathBuf>,
+    /// Where `cli_install` puts the CLI (and the man pages beside it, in
+    /// `man`); `install_dir()` if unset.
+    bin_dir: Option<std::path::PathBuf>,
     /// The names followed on the board, kept on this device only.
     follows: Vec<String>,
     /// The name this device posts, likes and pays as (see `set_main_name`).
     main_name: Option<String>,
+    /// The Logos Blockchain public key and node last bridged from (`cli_bridge`).
+    bridge_key: Option<String>,
+    bridge_node: Option<String>,
     /// The posts this device's names have liked, `<name>/<n>`, so a like toggles.
     likes: Vec<String>,
     /// Which name each chat conversation is with, by conversation id, as this
@@ -453,9 +530,43 @@ struct BoardRead {
 }
 
 /// Where this module keeps what it remembers between runs.
+#[cfg(not(test))]
 fn config_dir() -> Option<std::path::PathBuf> {
     let home = std::env::var_os("HOME")?;
     Some(std::path::Path::new(&home).join(".config/logos-names"))
+}
+
+/// Tests keep theirs in a folder of their own, never the person's.
+#[cfg(test)]
+fn config_dir() -> Option<std::path::PathBuf> {
+    Some(std::env::temp_dir().join(format!("logos-names-test-config-{}", std::process::id())))
+}
+
+/// The installer `cli_install` runs: the official one, built in.
+#[cfg(not(test))]
+fn installer_script() -> String {
+    cli::INSTALLER.to_owned()
+}
+
+/// Tests never download anything: their installer writes a stand-in CLI and
+/// prover, and records what it was given.
+#[cfg(test)]
+fn installer_script() -> String {
+    r#"#!/bin/sh
+set -eu
+env > "$NAMES_INSTALL_DIR/../installer-env"
+printf '#!/bin/sh\necho "names 9.9.9-test"\n' > "$NAMES_INSTALL_DIR/names"
+printf '#!/bin/sh\necho "r0vm 3.0.5"\n' > "$NAMES_INSTALL_DIR/r0vm"
+chmod 755 "$NAMES_INSTALL_DIR/names" "$NAMES_INSTALL_DIR/r0vm"
+echo "Installed $NAMES_INSTALL_DIR/names"
+"#
+    .to_owned()
+}
+
+/// Where `cli_install` puts the names CLI and its prover: the module's own
+/// folder, so nothing else on the computer changes.
+fn install_dir() -> Option<std::path::PathBuf> {
+    config_dir().map(|dir| dir.join("bin"))
 }
 
 impl Default for Names {
@@ -468,8 +579,11 @@ impl Default for Names {
             cli: None,
             cli_wallet: None,
             jobs_dir: None,
+            bin_dir: None,
             follows: Vec::new(),
             main_name: None,
+            bridge_key: None,
+            bridge_node: None,
             likes: Vec::new(),
             dm_names: Default::default(),
             chat_names: Default::default(),
@@ -734,6 +848,9 @@ impl Names {
             .map(|list| list.iter().filter_map(|name| registry::parse_name(name.as_str()?).ok()).collect())
             .unwrap_or_default();
         self.main_name = saved["main_name"].as_str().and_then(|name| registry::parse_name(name).ok());
+        // Checked as typed ones are, so an edited file can't point the module elsewhere.
+        self.bridge_key = saved["bridge_key"].as_str().and_then(|key| cli::bridge_key(key).ok());
+        self.bridge_node = saved["bridge_node"].as_str().filter(|node| !node.trim().is_empty()).and_then(|node| cli::bridge_node(node).ok());
         self.dm_names = saved["dm_names"]
             .as_object()
             .map(|map| {
@@ -766,6 +883,8 @@ impl Names {
             "cli_wallet": self.cli_wallet,
             "follows": self.follows,
             "main_name": self.main_name,
+            "bridge_key": self.bridge_key,
+            "bridge_node": self.bridge_node,
             "likes": self.likes,
             "dm_names": self.dm_names,
             "chat_names": self.chat_names,
@@ -912,6 +1031,95 @@ impl Names {
             .or_else(|| config_dir().map(|dir| dir.join("jobs")))
             .map(|dir| cli::Jobs { dir })
             .ok_or_else(|| "this device has nowhere to keep a job's log".to_owned())
+    }
+
+    /// Where `cli_install` puts the CLI and its man pages.
+    fn install_dirs(&self) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+        let bin = self.bin_dir.clone().or_else(install_dir).ok_or("this device has nowhere to install the names program")?;
+        let man = bin.parent().map_or_else(|| bin.join("man"), |parent| parent.join("man"));
+        Ok((bin, man))
+    }
+
+    /// Uses the CLI `cli_install` put at `program` from now on, with the CLI's
+    /// default wallet folder unless one was chosen.
+    fn adopt_cli(&mut self, program: &std::path::Path) {
+        let path = program.to_string_lossy().into_owned();
+        let wallet = self.cli_wallet.clone().or_else(|| cli::find_wallet(None).map(|dir| dir.to_string_lossy().into_owned()));
+        if self.cli.as_deref() != Some(path.as_str()) || self.cli_wallet != wallet {
+            self.cli = Some(path);
+            self.cli_wallet = wallet;
+            self.save();
+        }
+        self.forget_mine();
+    }
+
+    /// The running job called `name`, as `job` shows it, or null.
+    fn running_job(&self, name: &str) -> Value {
+        self.jobs()
+            .ok()
+            .and_then(|jobs| jobs.running_for(name).and_then(|id| jobs.state(&id).ok()))
+            .unwrap_or(Value::Null)
+    }
+
+    /// Starts a wallet job (`cli_shield`, `cli_pay_account`).
+    fn wallet_job(&self, kind: &str, build: impl FnOnce(&cli::Setup) -> Result<Vec<String>, String>) -> Result<Value, String> {
+        let setup = self.cli_setup()?;
+        setup.wallet_ready()?;
+        let command = build(&setup)?;
+        let jobs = self.jobs()?;
+        let id = jobs.prepare(cli::WALLET_JOB)?;
+        jobs.start(&setup, &id, cli::WALLET_JOB, kind, command, None)
+    }
+
+    /// Adds what a finished install or wallet job means to its `job` state:
+    /// an install that worked is put to use (`version`, `path`, `warning`),
+    /// one that didn't says why (`problem`); a move to private says whether
+    /// anything `moved`; a failed payment says why.
+    fn job_outcome(&mut self, state: &mut Value) {
+        let running = state["state"] == "running";
+        let done = state["state"] == "done";
+        let log = state["log_tail"].as_str().unwrap_or_default().to_owned();
+        match state["kind"].as_str() {
+            Some("install") if !running => {
+                let path = self.install_dirs().ok().map(|(bin, _)| bin.join("names"));
+                let version = match (&path, done) {
+                    (Some(path), true) => cli::version(path),
+                    _ => Err(String::new()),
+                };
+                match (path, version) {
+                    (Some(path), Ok(version)) => {
+                        self.adopt_cli(&path);
+                        state["path"] = json!(path);
+                        state["version"] = Value::from(version);
+                        state["prover"] = Value::from(cli::has_prover(&path));
+                        state["warning"] = cli::install_warning(&log).map_or(Value::Null, Value::from);
+                    }
+                    (_, version) => {
+                        let why = version.err().unwrap_or_default();
+                        let problem = cli::install_problem(&log);
+                        state["state"] = Value::from("failed");
+                        state["problem"] = Value::from(if done && problem.starts_with("The install stopped") && !why.is_empty() {
+                            format!("It installed, but it doesn't start: {why}")
+                        } else {
+                            problem
+                        });
+                    }
+                }
+            }
+            Some("shield") if !running => {
+                state["moved"] = Value::from(false);
+                if let Some(fields) = cli::shield_outcome(&log, done).as_object() {
+                    for (key, value) in fields {
+                        state[key.as_str()] = value.clone();
+                    }
+                }
+            }
+            Some("pay_account") if !running && !done => {
+                let first = log.lines().map(str::trim).find(|line| line.starts_with("Error:")).unwrap_or_else(|| cli::last_line(&log));
+                state["problem"] = Value::from(format!("The payment didn't go through: {}", first.trim_start_matches("Error:").trim()));
+            }
+            _ => {}
+        }
     }
 
     /// Starts a CLI job for the name a person typed. `build` makes the
@@ -1529,6 +1737,111 @@ impl NamesModule for Names {
         reply((|| cli::run_balance(&self.cli_setup()?))())
     }
 
+    fn cli_bridge(&mut self, amount: String, from_key: String, node: String, send: bool) -> String {
+        reply((|| {
+            // Everything is checked before anything is remembered or run.
+            cli::bridge_amount(&amount)?;
+            let key = cli::bridge_key(&from_key)?;
+            let node = cli::bridge_node(&node)?;
+            let setup = self.cli_setup()?;
+            if self.bridge_key.as_deref() != Some(key.as_str()) || self.bridge_node.as_deref() != Some(node.as_str()) {
+                self.bridge_key = Some(key.clone());
+                self.bridge_node = Some(node.clone());
+                self.save();
+            }
+            cli::run_bridge(&setup, &amount, &key, &node, send)
+        })())
+    }
+
+    fn cli_status(&mut self) -> String {
+        reply((|| {
+            let program = cli::find_program(self.cli.as_deref()).filter(|path| cli::is_executable(path));
+            let wallet = cli::find_wallet(self.cli_wallet.as_deref());
+            let has_wallet = wallet.as_ref().is_some_and(|dir| dir.join(cli::STORAGE_FILE).is_file());
+            let account = |which: &str| wallet.as_ref().filter(|_| has_wallet).and_then(|dir| cli::saved_account(dir, which));
+            Ok(json!({
+                "cli": program.as_ref().map(|path| path.to_string_lossy().into_owned()),
+                "prover": program.as_ref().is_some_and(|path| cli::has_prover(path)),
+                "installing": self.running_job(cli::INSTALL_JOB),
+                "wallet_dir": wallet.as_ref().map(|dir| dir.to_string_lossy().into_owned()),
+                "wallet": has_wallet,
+                "public": account("public"),
+                "private": account("private"),
+                "busy": self.running_job(cli::WALLET_JOB),
+            }))
+        })())
+    }
+
+    fn cli_install(&mut self) -> String {
+        reply((|| {
+            let jobs = self.jobs()?;
+            let (bin, man) = self.install_dirs()?;
+            let ours = bin.join("names");
+            if let Some(id) = jobs.running_for(cli::INSTALL_JOB) {
+                return Ok(json!({ "installed": false, "path": ours, "version": null, "prover": false, "job": jobs.state(&id)? }));
+            }
+            // A CLI that already works is left as it is, unless it is the one
+            // installed here and its prover is missing: then install again.
+            if let Some(program) = cli::find_program(self.cli.as_deref()) {
+                if let Ok(version) = cli::version(&program) {
+                    let prover = cli::has_prover(&program);
+                    let is_ours = program == ours;
+                    if prover || !is_ours {
+                        if is_ours {
+                            self.adopt_cli(&ours);
+                        }
+                        return Ok(json!({ "installed": true, "path": program, "version": version, "prover": prover, "job": null }));
+                    }
+                }
+            }
+            let job = jobs.start_install(&installer_script(), &bin, &man)?;
+            Ok(json!({ "installed": false, "path": ours, "version": null, "prover": false, "job": job }))
+        })())
+    }
+
+    fn cli_create_wallet(&mut self) -> String {
+        reply((|| {
+            let setup = self.cli_setup()?;
+            if let Some(id) = self.jobs().ok().and_then(|jobs| jobs.running_for(cli::WALLET_JOB)) {
+                return Err(format!("your wallet is busy with something else (job {id}); wait for it to finish"));
+            }
+            let made = cli::run_create_wallet(&setup)?;
+            // The folder it was made in is the one used from now on.
+            if self.cli_wallet.is_none() {
+                self.cli_wallet = Some(setup.wallet.to_string_lossy().into_owned());
+                self.save();
+            }
+            self.forget_mine();
+            Ok(made)
+        })())
+    }
+
+    fn cli_shield(&mut self, amount: String) -> String {
+        reply((|| {
+            let command = cli::setup_args(&amount)?;
+            if command[1] == "--shield=0" {
+                return Err("enter an amount above zero".to_owned());
+            }
+            self.wallet_job("shield", |setup| {
+                cli::default_public(setup)?;
+                Ok(command)
+            })
+        })())
+    }
+
+    fn cli_pay_account(&mut self, account: String, amount: String, from_private: bool) -> String {
+        reply((|| {
+            // Checked before the CLI is looked for, so bad input fails the same way every time.
+            if !matches!(cli::pay_to(&account)?, cli::PayTo::Account(_)) {
+                return Err("that is a name; pay it as a name".to_owned());
+            }
+            if !cli::is_amount(&amount.trim().replace(',', "")) {
+                return Err("enter a whole amount, such as 1000".to_owned());
+            }
+            self.wallet_job("pay_account", |setup| cli::pay_account_args(setup, &account, &amount, from_private))
+        })())
+    }
+
     fn cli_register(&mut self, name: String, public: bool) -> String {
         let command = match cli::register_args(&name, public) {
             Ok(command) => command,
@@ -1728,7 +2041,10 @@ impl NamesModule for Names {
     }
 
     fn job(&mut self, id: String) -> String {
-        let state = (|| self.jobs()?.state(id.trim()))();
+        let mut state = (|| self.jobs()?.state(id.trim()))();
+        if let Ok(state) = &mut state {
+            self.job_outcome(state);
+        }
         // A change that ended may have changed its name: read it fresh next time.
         if let Ok(state) = &state {
             if state["state"] != "running" {
@@ -2039,8 +2355,11 @@ mod tests {
             cli: None,
             cli_wallet: None,
             jobs_dir: None,
+            bin_dir: None,
             follows: Vec::new(),
             main_name: None,
+            bridge_key: None,
+            bridge_node: None,
             likes: Vec::new(),
             dm_names: Default::default(),
             chat_names: Default::default(),
@@ -2336,13 +2655,39 @@ mod tests {
         names.cli_wallet = Some(empty.to_string_lossy().into_owned());
         assert_eq!(parsed(&names.cli_mine())["value"], json!([]));
         let refused = parsed(&names.cli_set_text("jef".into(), "chat".into(), "x".into()));
-        assert!(refused["error"].as_str().expect("an error").contains("names setup"));
+        assert!(refused["error"].as_str().expect("an error").contains("create your wallet"));
         // The CLI was not run, so it made no wallet there.
         assert_eq!(std::fs::read_dir(&empty).expect("the dir").count(), 0);
         assert!(!names.set_cli("relative/names".into()));
         assert!(!names.set_cli(dir.join("wallet").join(cli::STORAGE_FILE).to_string_lossy().into_owned()));
         assert!(!names.set_cli_wallet("/no/such/dir".into()));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_bridge_key_and_node_are_kept_only_when_valid() {
+        let key = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+        let mut names = fresh();
+        names.apply_saved(&json!({ "bridge_key": key.to_uppercase(), "bridge_node": "http://localhost:18080/" }));
+        assert_eq!(names.bridge_key.as_deref(), Some(key));
+        assert_eq!(names.bridge_node.as_deref(), Some("http://localhost:18080"));
+        let config = parsed(&names.get_config());
+        assert_eq!((config["bridge_key"].clone(), config["bridge_node"].clone()), (json!(key), json!("http://localhost:18080")));
+        // An edited file can't smuggle in another host or a malformed key.
+        names.apply_saved(&json!({ "bridge_key": "../../etc", "bridge_node": "http://evil.example:8080" }));
+        assert_eq!((names.bridge_key.clone(), names.bridge_node.clone()), (None, None));
+        // A bad argument is refused before the CLI is looked for or anything is
+        // saved. Only the plan is asked for, and of a CLI that isn't there, so
+        // this test can never run a real deposit.
+        names.cli = Some("/no/such/names".into());
+        names.cli_wallet = Some(std::env::temp_dir().join("logos-names-no-wallet").to_string_lossy().into_owned());
+        for (amount, from_key, node) in [("0", key, ""), ("5", "nope", ""), ("5", key, "http://10.0.0.2:8080"), ("1e3", key, "")] {
+            let answer = parsed(&names.cli_bridge(amount.into(), from_key.into(), node.into(), false));
+            assert_eq!(answer["success"], false, "{amount} {from_key} {node}");
+            let error = answer["error"].as_str().unwrap_or_default().to_owned();
+            assert!(!error.contains("names CLI") && !error.contains("wallet"), "{error}");
+        }
+        assert_eq!((names.bridge_key.clone(), names.bridge_node.clone()), (None, None));
     }
 
     #[test]
@@ -2354,5 +2699,118 @@ mod tests {
         assert_eq!(parsed(&names.get_config())["registry"], Value::Null);
         assert!(is_http_url("http://127.0.0.1:3040"));
         assert!(!is_http_url("ftp://example.test"));
+    }
+
+    // ── Getting started without a terminal ──────────────────────────────
+
+    #[test]
+    fn install_puts_the_cli_in_the_modules_folder_and_uses_it() {
+        let (mut names, dir) = with_fake_cli("install", "exit 0");
+        names.bin_dir = Some(dir.join("data/bin"));
+        // A configured CLI that runs is left alone: nothing is installed.
+        std::fs::write(dir.join("names"), "#!/bin/sh\necho 'names 0.5.0'\n").unwrap();
+        let kept = parsed(&names.cli_install());
+        assert_eq!(kept["value"]["installed"], true, "{kept}");
+        assert_eq!(kept["value"]["version"], "names 0.5.0");
+        assert_eq!(kept["value"]["job"], Value::Null);
+        assert!(!dir.join("data/bin").exists());
+        // One that doesn't run is replaced by an install here.
+        names.cli = Some("/no/such/names".into());
+        let wallet = names.cli_wallet.clone();
+        let started = parsed(&names.cli_install());
+        assert_eq!(started["value"]["installed"], false, "{started}");
+        let id = started["value"]["job"]["id"].as_str().expect("a job").to_owned();
+        assert!(id.starts_with("-install-"));
+        let ended = job_end(&mut names, &id);
+        assert_eq!(ended["state"], "done", "{ended}");
+        assert_eq!(ended["version"], "names 9.9.9-test");
+        assert_eq!(ended["prover"], true);
+        assert_eq!(ended["warning"], Value::Null);
+        let ours = dir.join("data/bin/names").to_string_lossy().into_owned();
+        assert_eq!(names.cli.as_deref(), Some(ours.as_str()));
+        // The wallet folder already chosen stays.
+        assert_eq!(names.cli_wallet, wallet);
+        // The man pages go beside bin, and nothing outside its folder was given.
+        assert!(dir.join("data/man").is_dir());
+        let env = std::fs::read_to_string(dir.join("data/installer-env")).unwrap();
+        assert!(!env.contains("NAMES_DOWNLOAD_BASE="));
+        // Asked again, it's installed.
+        let again = parsed(&names.cli_install());
+        assert_eq!(again["value"]["installed"], true, "{again}");
+        assert_eq!(again["value"]["path"], json!(ours));
+        let status = parsed(&names.cli_status())["value"].clone();
+        assert_eq!((status["cli"].clone(), status["prover"].clone(), status["installing"].clone()), (json!(ours), json!(true), Value::Null));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_failed_install_says_why_and_changes_nothing() {
+        let (mut names, dir) = with_fake_cli("install-failed", "exit 0");
+        names.bin_dir = Some(dir.join("data/bin"));
+        names.cli = Some("/no/such/names".into());
+        let jobs = names.jobs().unwrap();
+        let script = "#!/bin/sh\necho 'Downloading names for macos-arm64...'\necho 'curl: (6) Could not resolve host: github.com' >&2\nexit 6\n";
+        let (bin, man) = names.install_dirs().unwrap();
+        let id = jobs.start_install(script, &bin, &man).unwrap()["id"].as_str().unwrap().to_owned();
+        let ended = job_end(&mut names, &id);
+        assert_eq!(ended["state"], "failed", "{ended}");
+        assert_eq!(ended["problem"], "Couldn't reach the internet. Check your connection, then try again.", "{ended}");
+        assert_eq!(names.cli.as_deref(), Some("/no/such/names"));
+        // A finished install whose CLI doesn't start isn't used either.
+        let script = "#!/bin/sh\nprintf '#!/bin/sh\\nexit 1\\n' > \"$NAMES_INSTALL_DIR/names\"\nchmod 755 \"$NAMES_INSTALL_DIR/names\"\necho \"Installed $NAMES_INSTALL_DIR/names, but it does not start: \" >&2\n";
+        let id = jobs.start_install(script, &bin, &man).unwrap()["id"].as_str().unwrap().to_owned();
+        let ended = job_end(&mut names, &id);
+        assert_eq!(ended["state"], "failed", "{ended}");
+        assert!(ended["problem"].as_str().unwrap().starts_with("It installed, but it doesn't start"), "{ended}");
+        assert_eq!(names.cli.as_deref(), Some("/no/such/names"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn creating_the_wallet_returns_the_phrase_once_and_logs_nothing() {
+        let phrase = "abandon ability able about above absent absorb abstract absurd abuse access accident";
+        let public = "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk";
+        let private = "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z";
+        let (mut names, dir) = with_fake_cli(
+            "create",
+            &format!("echo 'Created a new wallet. Write down its recovery phrase and keep it safe;'; echo 'it is the only way to get the wallet back:'; echo; echo '  {phrase}'; echo; echo 'public account   Public/{public}'; echo 'private account  Private/{private}'"),
+        );
+        let made = parsed(&names.cli_create_wallet());
+        assert_eq!(made["value"], json!({ "public": public, "private": private, "phrase": phrase }), "{made}");
+        // Nothing about it went to the jobs folder.
+        assert!(!dir.join("jobs").exists() || std::fs::read_dir(dir.join("jobs")).unwrap().count() == 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn moving_to_private_and_paying_an_account_are_wallet_jobs() {
+        let public = "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk";
+        let other = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
+        let (mut names, dir) = with_fake_cli("shield", "echo 'public account   Public/x'; echo 'Public/x holds 1200; send it at least 5000000 testnet tokens'");
+        let wallet = std::path::PathBuf::from(names.cli_wallet.clone().unwrap());
+        // No accounts yet: refused before anything runs.
+        assert!(parsed(&names.cli_shield(String::new()))["error"].as_str().unwrap().contains("create your wallet"));
+        std::fs::write(wallet.join("names.json"), format!("{{\"public\":\"{public}\",\"private\":\"yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z\"}}")).unwrap();
+        assert!(parsed(&names.cli_shield("0".into()))["error"].as_str().unwrap().contains("above zero"));
+        let started = parsed(&names.cli_shield(String::new()));
+        assert_eq!(started["value"]["kind"], "shield", "{started}");
+        let id = started["value"]["id"].as_str().unwrap().to_owned();
+        let ended = job_end(&mut names, &id);
+        assert_eq!(ended["state"], "done");
+        assert_eq!(ended["moved"], false);
+        assert!(ended["log_tail"].as_str().unwrap().contains("[setup]\n[--shield=5000000]"), "{ended}");
+        assert!(ended["problem"].as_str().unwrap().contains("needs at least 5,000,000"));
+        // Paying an account: checked first, then the wallet's own transfer.
+        for (to, amount) in [("jef", "5"), (other, "5"), ("Public/nope", "5"), (&format!("Public/{other}") as &str, "0")] {
+            assert_eq!(parsed(&names.cli_pay_account(to.into(), amount.into(), false))["success"], false, "{to} {amount}");
+        }
+        let paid = parsed(&names.cli_pay_account(format!("Public/{other}"), "1000".into(), false));
+        let id = paid["value"]["id"].as_str().expect("a job").to_owned();
+        let ended = job_end(&mut names, &id);
+        let log = ended["log_tail"].as_str().unwrap();
+        assert!(log.contains(&format!("[wallet]\n[auth-transfer]\n[send]\n[--from=Public/{public}]\n[--to=Public/{other}]\n[--amount=1000]")), "{log}");
+        let status = parsed(&names.cli_status())["value"].clone();
+        assert_eq!((status["wallet"].clone(), status["public"].clone(), status["busy"].clone()), (json!(true), json!(public), Value::Null));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

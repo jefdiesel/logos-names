@@ -30,6 +30,13 @@ const MINE_PATIENCE: Duration = Duration::from_secs(15);
 const FEED_PATIENCE: Duration = Duration::from_secs(120);
 /// `names balance` first catches the wallet up with the chain.
 const BALANCE_PATIENCE: Duration = Duration::from_secs(90);
+/// `names bridge` makes no proof: it asks the sequencer and the person's own
+/// node. Generous all the same, since a send stopped midway may still go through.
+const BRIDGE_PATIENCE: Duration = Duration::from_secs(120);
+/// Basecamp's Logos Blockchain node.
+pub const DEFAULT_BRIDGE_NODE: &str = "http://127.0.0.1:8080";
+/// Most notes one deposit spends (the CLI's MAX_DEPOSIT_NOTES).
+const MAX_DEPOSIT_NOTES: u64 = 30;
 /// A change that takes longer than this is stopped.
 const JOB_PATIENCE: Duration = Duration::from_secs(45 * 60);
 /// How much of a job's log `state` returns.
@@ -54,13 +61,17 @@ pub fn is_executable(path: &Path) -> bool {
 }
 
 /// The CLI to run: the configured path, else `~/.local/bin/names` (where the
-/// installer puts it), else the first `names` on `PATH`.
+/// installer puts it), else the copy `cli_install` put in the module's own
+/// folder, else the first `names` on `PATH`.
 pub fn find_program(configured: Option<&str>) -> Option<PathBuf> {
     if let Some(path) = configured {
         return Some(PathBuf::from(path));
     }
     let installed = std::env::var_os("HOME").map(|home| Path::new(&home).join(".local/bin/names"));
     if let Some(path) = installed.filter(|path| is_executable(path)) {
+        return Some(path);
+    }
+    if let Some(path) = crate::install_dir().map(|dir| dir.join("names")).filter(|path| is_executable(path)) {
         return Some(path);
     }
     let path = std::env::var_os("PATH")?;
@@ -117,7 +128,7 @@ impl Setup {
             Ok(())
         } else {
             Err(format!(
-                "there is no names CLI wallet in {}; run `names setup`, or choose the CLI's wallet folder in App settings",
+                "there is no wallet in {} yet; create your wallet first (Welcome, Create my wallet), or choose the CLI's wallet folder in App settings",
                 self.wallet.display()
             ))
         }
@@ -187,10 +198,378 @@ pub fn like_args(name: &str, post: &str, undo: bool) -> Result<Vec<String>, Stri
 pub fn pay_args(name: &str, amount: &str) -> Result<Vec<String>, String> {
     let name = registry::parse_name(name)?;
     let amount = amount.trim().replace(',', "");
-    if amount.is_empty() || amount.len() > 30 || !amount.bytes().all(|b| b.is_ascii_digit()) || amount.bytes().all(|b| b == b'0') {
+    if !is_amount(&amount) {
         return Err("enter a whole amount, such as 1000".to_owned());
     }
     Ok(vec!["pay".to_owned(), "--".to_owned(), name, amount])
+}
+
+/// A whole amount above zero, in decimal digits and nothing else.
+pub fn is_amount(amount: &str) -> bool {
+    !amount.is_empty() && amount.len() <= 30 && amount.bytes().all(|b| b.is_ascii_digit()) && !amount.bytes().all(|b| b == b'0')
+}
+
+// ── Bridging from the Logos Blockchain ──────────────────────────────────
+
+/// A Logos Blockchain public key: exactly 64 hex characters, in lower case.
+/// It is not a secret; the node's wallet lists its notes under it.
+pub fn bridge_key(key: &str) -> Result<String, String> {
+    let key = key.trim().to_ascii_lowercase();
+    if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("a Logos Blockchain public key is 64 characters, 0-9 and a-f".to_owned());
+    }
+    Ok(key)
+}
+
+/// The person's own Logos Blockchain node: `http(s)://127.0.0.1:<port>` or
+/// `http(s)://localhost:<port>`, with nothing else, so the module can't be
+/// pointed at another machine. Empty means Basecamp's node.
+pub fn bridge_node(node: &str) -> Result<String, String> {
+    let node = node.trim();
+    if node.is_empty() {
+        return Ok(DEFAULT_BRIDGE_NODE.to_owned());
+    }
+    let refuse = || Err(format!("the node is an address on this computer, such as {DEFAULT_BRIDGE_NODE}"));
+    let bare = node.strip_suffix('/').unwrap_or(node);
+    let Some((scheme, rest)) = bare.split_once("://") else { return refuse() };
+    if scheme != "http" && scheme != "https" {
+        return refuse();
+    }
+    let Some((host, port)) = rest.split_once(':') else { return refuse() };
+    if host != "127.0.0.1" && host != "localhost" {
+        return refuse();
+    }
+    if port.is_empty() || port.len() > 5 || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return refuse();
+    }
+    match port.parse::<u32>() {
+        Ok(1..=65535) => Ok(format!("{scheme}://{host}:{port}")),
+        _ => refuse(),
+    }
+}
+
+/// `names bridge`: deposit `amount` from the notes of `from_key` into LEZ,
+/// credited to the public account `to`. Without `send` the CLI only shows the
+/// plan; with it, `--yes`, and the deposit is made and cannot be undone.
+pub fn bridge_args(amount: &str, to: &str, from_key: &str, node: &str, send: bool) -> Result<Vec<String>, String> {
+    let amount = bridge_amount(amount)?;
+    let to = registry::account_text(&registry::parse_account(to)?);
+    let mut args = vec![
+        "bridge".to_owned(),
+        format!("--to=Public/{to}"),
+        format!("--from-key={}", bridge_key(from_key)?),
+        format!("--node={}", bridge_node(node)?),
+    ];
+    if send {
+        args.push("--yes".to_owned());
+    }
+    args.extend(["--".to_owned(), amount]);
+    Ok(args)
+}
+
+/// An amount to bridge: decimal digits only, above zero.
+pub fn bridge_amount(amount: &str) -> Result<String, String> {
+    let amount = amount.trim();
+    if !is_amount(amount) {
+        return Err("enter a whole amount, such as 1000".to_owned());
+    }
+    Ok(amount.to_owned())
+}
+
+/// The CLI wallet's default public account, as `names setup` saved it in the
+/// wallet's `names.json` (what `names balance` marks `(default)`).
+pub fn default_public(setup: &Setup) -> Result<String, String> {
+    saved_account(&setup.wallet, "public")
+        .ok_or_else(|| "your wallet has no public account yet; create your wallet first (Welcome, Create my wallet)".to_owned())
+}
+
+/// What `names bridge` printed: `{sent, lines, hash, total, notes, fee, to}`.
+/// `total`, `notes` and `fee` come from its plan line (`deposit <total> from
+/// <notes> note(s) of <key>` and `..., fee at most <fee>`), `hash` from
+/// `submitted deposit <hash>` (null unless it is hex).
+pub fn parse_bridge(output: &str, sent: bool) -> Value {
+    let lines: Vec<&str> = output.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    let digits = |word: Option<&str>| word.filter(|w| !w.is_empty() && w.bytes().all(|b| b.is_ascii_digit())).map(str::to_owned);
+    let (mut total, mut notes, mut fee, mut hash, mut to) = (None, None, None, None, None);
+    for line in &lines {
+        if let Some(rest) = line.strip_prefix("deposit ") {
+            let mut words = rest.split_whitespace();
+            total = digits(words.next());
+            notes = digits(words.nth(1));
+        }
+        if let Some((_, rest)) = line.split_once("fee at most ") {
+            fee = digits(rest.split_whitespace().next());
+        }
+        if let Some((_, rest)) = line.split_once("credited to Public/") {
+            to = rest.split_whitespace().next().and_then(|id| registry::parse_account(id).ok()).map(|id| registry::account_text(&id));
+        }
+        if let Some(rest) = line.strip_prefix("submitted deposit ") {
+            let rest = rest.trim();
+            let rest = rest.strip_prefix("0x").unwrap_or(rest);
+            if !rest.is_empty() && rest.len() <= 128 && rest.bytes().all(|b| b.is_ascii_hexdigit()) {
+                hash = Some(rest.to_ascii_lowercase());
+            }
+        }
+    }
+    json!({ "sent": sent, "lines": lines, "hash": hash, "total": total, "notes": notes, "fee": fee, "to": to })
+}
+
+/// Why `names bridge` failed, in plain words, from what it wrote.
+pub fn bridge_problem(output: &str, node: &str) -> String {
+    let text = output;
+    if text.contains("cannot reach your Logos Blockchain node") {
+        // The node answered, but not with the key's notes (ureq: `http status: 404`).
+        let status = text.split_once("http status: ").and_then(|(_, rest)| rest.split_whitespace().next());
+        return match status {
+            Some("404") => "Your node's wallet doesn't have that key. Use a public key your node's wallet lists.".to_owned(),
+            Some("400") => "Your node says that isn't a valid key. Copy the public key your node's wallet lists.".to_owned(),
+            Some(code) => format!("Your Logos Blockchain node at {node} answered with an error (HTTP {code})."),
+            None => format!("Your Logos Blockchain node at {node} isn't answering. Check that it's running, or check the node address."),
+        };
+    }
+    if text.contains("cannot reach the sequencer") {
+        return "LEZ isn't answering right now. Try again in a minute.".to_owned();
+    }
+    if text.contains("lists no notes") {
+        return "Your node has nothing under that key. Check the key: it's the public key your node's wallet shows.".to_owned();
+    }
+    if let Some(line) = text.lines().find(|line| line.contains("bridge in smaller steps")) {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let notes = words.iter().position(|w| *w == "note(s)").and_then(|i| i.checked_sub(1)).and_then(|i| words[i].trim_start_matches("Error:").parse::<u64>().ok());
+        let held = words.iter().position(|w| *w == "hold").and_then(|i| words.get(i + 1)).map(|w| w.trim_end_matches(','));
+        if notes == Some(MAX_DEPOSIT_NOTES) {
+            return format!("That takes more than {MAX_DEPOSIT_NOTES} notes, the most one deposit can use. Bridge in smaller steps.");
+        }
+        return match held {
+            Some(held) if held.bytes().all(|b| b.is_ascii_digit()) => format!("That key holds only {held}. Bridge {held} or less."),
+            _ => "That key doesn't hold that much.".to_owned(),
+        };
+    }
+    if let Some(line) = text.lines().find(|line| line.contains("the node refused the deposit")) {
+        return format!("Your node refused the deposit: {}", line.split_once("refused the deposit").map_or("", |(_, why)| why).trim_start_matches([':', ' ']));
+    }
+    if text.contains("did not return a channel ID") {
+        return "LEZ didn't say where deposits go. Try again later.".to_owned();
+    }
+    // The CLI's own first error line says it best.
+    let first = text.lines().map(str::trim).find(|line| line.starts_with("Error:")).or_else(|| text.lines().map(str::trim).rfind(|line| !line.is_empty()));
+    format!("the names CLI failed: {}", first.unwrap_or("no reason given").trim_start_matches("Error:").trim())
+}
+
+/// Runs `names bridge` (only the plan unless `send`) to the wallet's default
+/// public account and returns what `parse_bridge` makes of it, or why it failed.
+pub fn run_bridge(setup: &Setup, amount: &str, from_key: &str, node: &str, send: bool) -> Result<Value, String> {
+    setup.wallet_ready()?;
+    // Checked before the wallet is read, so bad input fails the same way every time.
+    let node = bridge_node(node)?;
+    bridge_amount(amount)?;
+    bridge_key(from_key)?;
+    let to = default_public(setup)?;
+    let args = bridge_args(amount, &to, from_key, &node, send)?;
+    let (code, out, err) = run_capture(setup, args, BRIDGE_PATIENCE)?;
+    if code != Some(0) {
+        return Err(bridge_problem(&format!("{err}\n{out}"), &node));
+    }
+    Ok(parse_bridge(&out, send))
+}
+
+// ── The wallet: making it, and moving tokens to its private account ─────
+
+/// The job name for work on the wallet itself (moving tokens to private,
+/// paying an account). A name never starts with `-`, so it is nobody's name.
+pub const WALLET_JOB: &str = "-wallet";
+/// `names setup --shield=0` makes the wallet and its two accounts and moves
+/// nothing, so it never proves. It may first catch up with the chain.
+const SETUP_PATIENCE: Duration = Duration::from_secs(180);
+/// What `names setup` moves to the private account unless told otherwise
+/// (its own default): a few names' deposits.
+pub const DEFAULT_SHIELD: &str = "5000000";
+
+/// `names setup --shield=<amount>`: the wallet and its accounts, and, with an
+/// amount above zero and that much in the public account, that much moved to
+/// the private account. Empty is the CLI's default, 5,000,000.
+pub fn setup_args(shield: &str) -> Result<Vec<String>, String> {
+    let shield = shield.trim().replace(',', "");
+    let shield = if shield.is_empty() { DEFAULT_SHIELD.to_owned() } else { shield };
+    if shield != "0" && !is_amount(&shield) {
+        return Err("enter a whole amount, such as 5000000".to_owned());
+    }
+    Ok(vec!["setup".to_owned(), format!("--shield={shield}")])
+}
+
+/// What `names setup` printed: `{public, private, phrase}`. `phrase` is the
+/// new wallet's recovery phrase, or null when the wallet already existed (the
+/// CLI prints it only when it makes one). Every part is checked: an account
+/// must parse, and a phrase is 12 to 24 words of a-z.
+pub fn parse_setup(output: &str) -> Value {
+    let account = |prefix: &str, kind: &str| {
+        output.lines().map(str::trim).find_map(|line| {
+            let rest = line.strip_prefix(prefix)?.trim_start();
+            let id = rest.strip_prefix(kind)?.split_whitespace().next()?;
+            registry::parse_account(id).ok().map(|id| registry::account_text(&id))
+        })
+    };
+    let mut lines = output.lines().map(str::trim);
+    let phrase = lines
+        .by_ref()
+        .find(|line| line.contains("the only way to get the wallet back"))
+        .and_then(|_| lines.find(|line| !line.is_empty()))
+        .filter(|line| {
+            let words: Vec<&str> = line.split(' ').collect();
+            (12..=24).contains(&words.len()) && words.iter().all(|word| !word.is_empty() && word.bytes().all(|b| b.is_ascii_lowercase()))
+        })
+        .map(str::to_owned);
+    json!({
+        "public": account("public account", "Public/"),
+        "private": account("private account", "Private/"),
+        "phrase": phrase,
+    })
+}
+
+/// Makes the CLI's wallet, if there is none, and its public and private
+/// accounts, moving nothing (`names setup --shield=0`). Waits for it.
+/// Returns `parse_setup`'s `{public, private, phrase}`.
+///
+/// The output is held only in memory and never written to a log: a new
+/// wallet's recovery phrase is in it. If the CLI fails after making the
+/// wallet, the phrase is still returned (with `problem` saying what went
+/// wrong), since it can't be shown again.
+pub fn run_create_wallet(setup: &Setup) -> Result<Value, String> {
+    let (code, out, err) = run_capture(setup, setup_args("0")?, SETUP_PATIENCE)?;
+    let mut made = parse_setup(&out);
+    // Only stderr explains a failure: stdout may end with the phrase.
+    let why = || {
+        let first = err.lines().map(str::trim).find(|line| line.starts_with("Error:")).unwrap_or_else(|| last_line(&err));
+        let first = first.trim_start_matches("Error:").trim();
+        if first.is_empty() { "the names CLI stopped without saying why".to_owned() } else { format!("the names CLI failed: {first}") }
+    };
+    if code != Some(0) {
+        if made["phrase"].is_string() {
+            made["problem"] = Value::from(why());
+            return Ok(made);
+        }
+        return Err(why());
+    }
+    if made["public"].is_null() || made["private"].is_null() {
+        return Err("the names CLI made the wallet but didn't say its accounts; open the wallet again in a moment".to_owned());
+    }
+    Ok(made)
+}
+
+/// How a `names setup` job that moves tokens to private ended, from its log:
+/// `{moved, problem}`. The CLI exits 0 without moving anything when the
+/// public account holds too little, and says so.
+pub fn shield_outcome(log: &str, done: bool) -> Value {
+    if let Some(line) = log.lines().find(|line| line.contains("send it at least")) {
+        let word_after = |key: &str| {
+            line.split_once(key).and_then(|(_, rest)| rest.split(|c: char| !c.is_ascii_digit()).find(|w| !w.is_empty())).map(str::to_owned)
+        };
+        let (holds, needs) = (word_after(" holds "), word_after("at least "));
+        let problem = match (holds, needs) {
+            (Some(holds), Some(needs)) => format!(
+                "Your public account holds {}, and moving to private needs at least {}. Get more tokens, then try again.",
+                group(&holds),
+                group(&needs)
+            ),
+            _ => "Your public account doesn't hold enough yet. Get more tokens, then try again.".to_owned(),
+        };
+        return json!({ "moved": false, "problem": problem });
+    }
+    if done {
+        return json!({ "moved": log.contains("moving "), "problem": null });
+    }
+    let first = log.lines().map(str::trim).find(|line| line.starts_with("Error:")).unwrap_or_else(|| last_line(log));
+    json!({ "moved": false, "problem": format!("Moving to private didn't go through: {}", first.trim_start_matches("Error:").trim()) })
+}
+
+/// Digits grouped in threes: 5000000 is 5,000,000.
+fn group(digits: &str) -> String {
+    let mut out = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+/// The CLI wallet's default private account, as `names setup` saved it.
+pub fn default_private(setup: &Setup) -> Result<String, String> {
+    saved_account(&setup.wallet, "private").ok_or_else(|| "your wallet has no private account yet; create your wallet first (Welcome, Create my wallet)".to_owned())
+}
+
+/// An account `names setup` saved in the wallet's `names.json`, checked.
+pub fn saved_account(wallet: &Path, which: &str) -> Option<String> {
+    let saved: Value = std::fs::read_to_string(wallet.join("names.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(Value::Null);
+    saved[which]
+        .as_str()
+        .and_then(|account| registry::parse_account(account).ok())
+        .map(|account| registry::account_text(&account))
+}
+
+// ── Paying an account ───────────────────────────────────────────────────
+
+/// Who a payment goes to: a name, or a public account written
+/// `Public/<account id>`. A bare ID is refused, so an ID is never taken for a
+/// name or the other way round, and so is a private account (it can't be paid
+/// by its ID; its name can be).
+#[derive(Debug, PartialEq, Eq)]
+pub enum PayTo {
+    Name(String),
+    Account(String),
+}
+
+pub fn pay_to(to: &str) -> Result<PayTo, String> {
+    let to = to.trim();
+    if let Some(id) = to.strip_prefix("Public/") {
+        return registry::parse_account(id)
+            .ok()
+            .filter(|_| !id.contains('/') && !id.contains(char::is_whitespace))
+            .map(|id| PayTo::Account(registry::account_text(&id)))
+            .ok_or_else(|| "that isn't a public account; it's Public/ and then the account ID, letters and digits".to_owned());
+    }
+    if to.starts_with("Private/") {
+        return Err("a private account can't be paid by its ID; pay its name instead".to_owned());
+    }
+    if registry::parse_account(to).is_ok() {
+        return Err("to pay an account, write it as Public/ and then its ID".to_owned());
+    }
+    registry::parse_name(to).map(PayTo::Name)
+}
+
+/// `names wallet auth-transfer send` to the public account `to` (written
+/// `Public/<id>`) from the wallet's default public account, or with
+/// `from_private` its private one. The chain shows the account paid and the
+/// amount; from the public account it shows the payer too.
+pub fn pay_account_args(setup: &Setup, to: &str, amount: &str, from_private: bool) -> Result<Vec<String>, String> {
+    let PayTo::Account(to) = pay_to(to)? else {
+        return Err("that is a name; pay it as a name".to_owned());
+    };
+    let amount = amount.trim().replace(',', "");
+    if !is_amount(&amount) {
+        return Err("enter a whole amount, such as 1000".to_owned());
+    }
+    let from = if from_private {
+        format!("Private/{}", default_private(setup)?)
+    } else {
+        let public = default_public(setup)?;
+        if public == to {
+            return Err("that's your own public account".to_owned());
+        }
+        format!("Public/{public}")
+    };
+    Ok(vec![
+        "wallet".to_owned(),
+        "auth-transfer".to_owned(),
+        "send".to_owned(),
+        format!("--from={from}"),
+        format!("--to=Public/{to}"),
+        format!("--amount={amount}"),
+    ])
 }
 
 /// `names hide`, and the name whose job it is (`board` for a post given by ID).
@@ -426,18 +805,34 @@ pub fn run_mine(setup: &Setup) -> Result<Vec<Value>, String> {
 }
 
 /// Runs `names balance` and returns the default private account and its
-/// balance: `{account, balance}` (decimal text), or null if there is none.
+/// balance: `{account, balance, public}` (decimal text), or null if there is
+/// none. `public` is the default public account the same way, or null.
 pub fn run_balance(setup: &Setup) -> Result<Value, String> {
     setup.wallet_ready()?;
-    Ok(parse_balance(&run_text(setup, vec!["balance".to_owned()], BALANCE_PATIENCE)?))
+    let output = run_text(setup, vec!["balance".to_owned()], BALANCE_PATIENCE)?;
+    let mut balance = parse_balance(&output);
+    if balance.is_object() {
+        balance["public"] = parse_public_balance(&output);
+    }
+    Ok(balance)
 }
 
 /// The default private account in `names balance` output:
 /// `  Private/<id>  <balance>  (default)`.
 pub fn parse_balance(output: &str) -> Value {
+    parse_default(output, "Private/")
+}
+
+/// The default public account in `names balance` output:
+/// `  Public/<id>  <balance>  (default)`.
+pub fn parse_public_balance(output: &str) -> Value {
+    parse_default(output, "Public/")
+}
+
+fn parse_default(output: &str, kind: &str) -> Value {
     for line in output.lines() {
         let line = line.trim();
-        let Some(rest) = line.strip_prefix("Private/") else { continue };
+        let Some(rest) = line.strip_prefix(kind) else { continue };
         if !line.ends_with("(default)") {
             continue;
         }
@@ -453,12 +848,28 @@ pub fn parse_balance(output: &str) -> Value {
 
 /// Runs the CLI with `command` and returns what it printed, or why it failed.
 fn run_text(setup: &Setup, command: Vec<String>, patience: Duration) -> Result<String, String> {
-    let mut child = setup
-        .command(command)
+    let (code, out, err) = run_capture(setup, command, patience)?;
+    if code != Some(0) {
+        let why = if last_line(&err).is_empty() { last_line(&out) } else { last_line(&err) };
+        return Err(format!("the names CLI failed: {why}"));
+    }
+    Ok(out)
+}
+
+/// Runs the CLI with `command`: its exit code, what it printed, and what it
+/// wrote to stderr.
+fn run_capture(setup: &Setup, command: Vec<String>, patience: Duration) -> Result<(Option<i32>, String, String), String> {
+    capture(setup.command(command), &setup.program, patience)
+}
+
+/// Runs `process` (the program at `program`) and waits for it, at most
+/// `patience`: its exit code, what it printed, and what it wrote to stderr.
+fn capture(mut process: Command, program: &Path, patience: Duration) -> Result<(Option<i32>, String, String), String> {
+    let mut child = process
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| format!("could not run the names CLI at {}: {error}", setup.program.display()))?;
+        .map_err(|error| format!("could not run the names CLI at {}: {error}", program.display()))?;
     let drain = |stream: Option<Box<dyn Read + Send>>| {
         std::thread::spawn(move || {
             let mut text = String::new();
@@ -472,11 +883,127 @@ fn run_text(setup: &Setup, command: Vec<String>, patience: Duration) -> Result<S
     let err = drain(child.stderr.take().map(|s| Box::new(s) as Box<dyn Read + Send>));
     let code = wait(&mut child, patience)?;
     let (out, err) = (out.join().unwrap_or_default(), err.join().unwrap_or_default());
-    if code != Some(0) {
-        let why = if last_line(&err).is_empty() { last_line(&out) } else { last_line(&err) };
-        return Err(format!("the names CLI failed: {why}"));
+    Ok((code, out, err))
+}
+
+// ── Installing the CLI ──────────────────────────────────────────────────
+
+/// The official installer, `gateway/public/install.sh`, as it was when this
+/// module was built (`rust-lib/install.sh` is a copy; a test checks they
+/// match). Running the copy built in, rather than one downloaded now, means a
+/// swapped download can't change what runs or the release key it checks
+/// against: the installer verifies each file's ed25519 signature with
+/// `ssh-keygen -Y verify` against the key embedded in it, and its SHA-256.
+pub const INSTALLER: &str = include_str!("../install.sh");
+/// The job name for installing. A name never starts with `-`.
+pub const INSTALL_JOB: &str = "-install";
+/// `names --version` answers at once.
+const VERSION_PATIENCE: Duration = Duration::from_secs(20);
+/// Settings a person's network may need, passed on to the installer's curl.
+const PROXY_VARS: [&str; 8] = ["http_proxy", "https_proxy", "all_proxy", "no_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
+
+/// `<program> --version`, if it runs and says it is the names CLI: `names 0.5.0`.
+pub fn version(program: &Path) -> Result<String, String> {
+    if !is_executable(program) {
+        return Err(format!("there is no program at {}", program.display()));
     }
-    Ok(out)
+    let mut process = Command::new(program);
+    process.arg("--version").stdin(Stdio::null());
+    let (code, out, err) = capture(process, program, VERSION_PATIENCE)?;
+    let line = last_line(&out);
+    if code == Some(0) && line.starts_with("names ") {
+        return Ok(line.to_owned());
+    }
+    let said = if last_line(&err).is_empty() { line } else { last_line(&err) };
+    Err(format!("{} does not start: {said}", program.display()))
+}
+
+/// Whether RISC Zero's prover is where the CLI looks for it: next to it, or
+/// wherever `RISC0_SERVER_PATH` says.
+pub fn has_prover(program: &Path) -> bool {
+    if std::env::var_os("RISC0_SERVER_PATH").is_some_and(|path| is_executable(Path::new(&path))) {
+        return true;
+    }
+    let program = program.canonicalize().unwrap_or_else(|_| program.to_path_buf());
+    program.parent().is_some_and(|dir| is_executable(&dir.join("r0vm")))
+}
+
+/// The installer's process: `/bin/sh <script>`, putting the CLI and the
+/// prover in `bin` and the man pages in `man`. Nothing typed reaches it: its
+/// environment is cleared and given only these folders, `HOME`, `TMPDIR` and
+/// any proxy settings, so a stray `NAMES_DOWNLOAD_BASE` can't redirect it. `bin`
+/// is put first on its `PATH`, which also keeps the installer from adding a
+/// line to the person's shell startup file (it only does that when its folder
+/// isn't on `PATH`).
+pub fn install_process(script: &Path, bin: &Path, man: &Path) -> Command {
+    let mut process = Command::new("/bin/sh");
+    process
+        .arg(script)
+        .env_clear()
+        .env("PATH", format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", bin.display()))
+        .env("NAMES_INSTALL_DIR", bin)
+        .env("NAMES_MAN_DIR", man)
+        .stdin(Stdio::null());
+    for var in ["HOME", "TMPDIR"].into_iter().chain(PROXY_VARS) {
+        if let Some(value) = std::env::var_os(var) {
+            process.env(var, value);
+        }
+    }
+    process
+}
+
+/// Why an install failed, in plain words, from its log.
+pub fn install_problem(log: &str) -> String {
+    let has = |text: &str| log.contains(text);
+    if has("no build for") {
+        return "The names program doesn't run on this computer yet. It runs on Macs with Apple silicon and on Linux (x86_64).".to_owned();
+    }
+    if has("bad signature") || has("no signature published") {
+        return "The download didn't pass the signature check, so nothing was installed. Try again later.".to_owned();
+    }
+    if has("checksum mismatch") {
+        return "The download was damaged on the way, so nothing was installed. Try again.".to_owned();
+    }
+    if has("Could not resolve host") || has("Failed to connect") || has("Couldn't connect") || has("curl: (6)") || has("curl: (7)") || has("curl: (28)") || has("curl: (35)") {
+        return "Couldn't reach the internet. Check your connection, then try again.".to_owned();
+    }
+    if has("curl: (22)") {
+        return "The download isn't available right now. Try again later.".to_owned();
+    }
+    if has("libpcsclite") {
+        return "It installed, but it needs the PC/SC library to start. On Debian or Ubuntu: sudo apt install libpcsclite1. On Fedora: sudo dnf install pcsc-lite-libs.".to_owned();
+    }
+    if let Some(line) = log.lines().find(|line| line.contains("does not start")) {
+        return format!("It installed, but it doesn't start: {}", line.split_once("does not start:").map_or("", |(_, why)| why).trim());
+    }
+    if has("No space left") {
+        return "There isn't enough free disk space. Free some up, then try again.".to_owned();
+    }
+    format!("The install stopped: {}", last_line(log))
+}
+
+/// What went wrong that the install survived, from its log: the prover
+/// couldn't be fetched, so private changes can't be made yet.
+pub fn install_warning(log: &str) -> Option<String> {
+    log.contains("Could not install r0vm")
+        .then(|| "The prover didn't download, so private changes can't be made yet. Press Install again to retry.".to_owned())
+}
+
+impl Jobs {
+    /// Starts the installer `script` as a job, putting the CLI and the prover
+    /// in `bin` and the man pages in `man`: `{id, name, kind, state, started}`.
+    /// The script is written to the jobs folder and removed once it ends.
+    pub fn start_install(&self, script: &str, bin: &Path, man: &Path) -> Result<Value, String> {
+        use std::os::unix::fs::PermissionsExt;
+        let id = self.prepare(INSTALL_JOB)?;
+        for dir in [bin, man] {
+            std::fs::create_dir_all(dir).map_err(|error| format!("cannot make {}: {error}", dir.display()))?;
+        }
+        let file = self.scratch(&id, "sh");
+        std::fs::write(&file, script).map_err(|error| format!("cannot write the installer: {error}"))?;
+        let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+        self.start_process(&id, INSTALL_JOB, "install", install_process(&file, bin, man), "the installer", Some(file))
+    }
 }
 
 // ── Jobs ────────────────────────────────────────────────────────────────
@@ -522,10 +1049,11 @@ impl Jobs {
         std::fs::create_dir_all(&self.dir)
             .map_err(|error| format!("cannot make {}: {error}", self.dir.display()))?;
         if let Some(running) = self.running_for(name) {
-            return Err(format!(
-                "a change to {name}{} is still being saved (job {running}); wait for it to finish",
-                registry::NAME_SUFFIX
-            ));
+            return Err(match name {
+                INSTALL_JOB => format!("the names program is still being installed (job {running}); wait for it to finish"),
+                WALLET_JOB => format!("your wallet is still busy with something else (job {running}); wait for it to finish"),
+                _ => format!("a change to {name}{} is still being saved (job {running}); wait for it to finish", registry::NAME_SUFFIX),
+            });
         }
         self.forget_old();
         let mut id = format!("{name}-{}", now_ms());
@@ -573,7 +1101,7 @@ impl Jobs {
         for id in self.ids() {
             let finished = self.record(&id).and_then(|record| record["finished"].as_u64());
             if finished.is_some_and(|at| now.saturating_sub(at) > KEEP_FINISHED_MS) {
-                for extension in ["json", "log", "page"] {
+                for extension in ["json", "log", "page", "sh"] {
                     let _ = std::fs::remove_file(self.path(&id, extension));
                 }
             }
@@ -591,13 +1119,27 @@ impl Jobs {
         command: Vec<String>,
         scratch: Option<PathBuf>,
     ) -> Result<Value, String> {
+        let what = format!("the names CLI at {}", setup.program.display());
+        self.start_process(id, name, kind, setup.command(command), &what, scratch)
+    }
+
+    /// Starts `process` (`what` says what it runs) as job `id` for `name`, and
+    /// returns at once, as `start` does.
+    fn start_process(
+        &self,
+        id: &str,
+        name: &str,
+        kind: &str,
+        mut process: Command,
+        what: &str,
+        scratch: Option<PathBuf>,
+    ) -> Result<Value, String> {
         if !valid_id(id) {
             return Err(format!("not a job id: {id}"));
         }
         let log = std::fs::File::create(self.path(id, "log"))
             .map_err(|error| format!("cannot write the job's log: {error}"))?;
         let log_err = log.try_clone().map_err(|error| format!("cannot write the job's log: {error}"))?;
-        let mut process = setup.command(command);
         // Its own process group: a signal meant for the host leaves it be.
         process.stdout(log).stderr(log_err).process_group(0);
         let mut child = match process.spawn() {
@@ -606,7 +1148,7 @@ impl Jobs {
                 if let Some(scratch) = &scratch {
                     let _ = std::fs::remove_file(scratch);
                 }
-                return Err(format!("could not run the names CLI at {}: {error}", setup.program.display()));
+                return Err(format!("could not run {what}: {error}"));
             }
         };
         let started = now_ms();
@@ -899,6 +1441,170 @@ mod tests {
         assert!(parse_mine("no names yet; register one with `names register <name>`\n").is_empty());
     }
 
+    const KEY: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+    const PUBLIC: &str = "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk";
+
+    #[test]
+    fn the_default_public_account_is_read_from_balance() {
+        let balance = "public accounts (seen on chain):\n  Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR  9\n  Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk  5000  (default)\nprivate accounts (only this wallet sees them):\n  Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z  250000000  (default)\nprivate total: 250000000\n";
+        assert_eq!(parse_public_balance(balance), json!({ "account": PUBLIC, "balance": "5000" }));
+        // The private one is unchanged by it.
+        assert_eq!(parse_balance(balance), json!({ "account": "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", "balance": "250000000" }));
+        // No default public account, or a malformed one: null.
+        assert_eq!(parse_public_balance("public accounts (seen on chain):\n  Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk  5\n"), Value::Null);
+        assert_eq!(parse_public_balance("  Public/not-an-id  5  (default)\n"), Value::Null);
+        assert_eq!(parse_public_balance("  Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk  -5  (default)\n"), Value::Null);
+        // A private line is never taken for the public one.
+        assert_eq!(parse_public_balance("  Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z  1  (default)\n"), Value::Null);
+    }
+
+    #[test]
+    fn balance_runs_the_cli_and_adds_the_public_account() {
+        let dir = scratch_dir("balance");
+        let setup = setup(&dir, "echo '  Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk  70  (default)'; echo '  Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z  250  (default)'");
+        assert_eq!(
+            run_balance(&setup).unwrap(),
+            json!({ "account": "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", "balance": "250", "public": { "account": PUBLIC, "balance": "70" } })
+        );
+        let none = Setup { program: fake_cli(&dir, "echo 'private total: 0'"), ..setup };
+        assert_eq!(run_balance(&none).unwrap(), Value::Null);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bridge_arguments_are_checked_strictly() {
+        let made = bridge_args("1000", &format!("Public/{PUBLIC}"), &KEY.to_uppercase(), "", false).unwrap();
+        assert_eq!(
+            made,
+            strings(&["bridge", &format!("--to=Public/{PUBLIC}"), &format!("--from-key={KEY}"), "--node=http://127.0.0.1:8080", "--", "1000"])
+        );
+        // Only a send carries --yes.
+        assert!(!made.iter().any(|arg| arg == "--yes"));
+        let sent = bridge_args(" 5 ", PUBLIC, KEY, "http://localhost:18080/", true).unwrap();
+        assert_eq!(
+            sent,
+            strings(&["bridge", &format!("--to=Public/{PUBLIC}"), &format!("--from-key={KEY}"), "--node=http://localhost:18080", "--yes", "--", "5"])
+        );
+        for amount in ["", "0", "000", "-5", "1e9", "1,000", "1.5", "5 5", "--yes", &"9".repeat(31)] {
+            assert!(bridge_args(amount, PUBLIC, KEY, "", false).is_err(), "{amount:?}");
+        }
+        for key in ["", &KEY[1..], &format!("{KEY}0"), &KEY.replace('a', "g"), &format!("{} ", &KEY[..63]), "--yes", &format!("../{}", &KEY[3..])] {
+            assert!(bridge_args("5", PUBLIC, key, "", false).is_err(), "{key:?}");
+        }
+        for to in ["", "jef", "Public/x", "--yes", "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk; id"] {
+            assert!(bridge_args("5", to, KEY, "", false).is_err(), "{to:?}");
+        }
+        for node in [
+            "http://127.0.0.1",
+            "http://127.0.0.1:",
+            "http://127.0.0.1:8080/x",
+            "http://127.0.0.1:8080//",
+            "http://127.0.0.1:8080@evil.com",
+            "http://127.0.0.1:8080?x=1",
+            "http://127.0.0.1:8080#x",
+            "http://127.0.0.1.evil.com:80",
+            "http://evil.com:8080",
+            "http://user@127.0.0.1:8080",
+            "http://[::1]:8080",
+            "http://0.0.0.0:8080",
+            "file://127.0.0.1:8080",
+            "ftp://localhost:21",
+            "127.0.0.1:8080",
+            "http://localhost:0",
+            "http://localhost:65536",
+            "http://localhost:99999",
+            "http://localhost:+80",
+            "http://LOCALHOST:8080",
+            "http://localhost:8080\n--yes",
+        ] {
+            assert!(bridge_node(node).is_err(), "{node:?}");
+        }
+        assert_eq!(bridge_node(" https://127.0.0.1:443 ").unwrap(), "https://127.0.0.1:443");
+        assert_eq!(bridge_node("http://localhost:65535").unwrap(), "http://localhost:65535");
+    }
+
+    #[test]
+    fn bridge_output_is_read_into_plain_parts() {
+        let plan = format!(
+            "deposit 1200 from 3 note(s) of {KEY}\n  into LEZ channel {}, credited to Public/{PUBLIC}\n  through http://127.0.0.1:8080, fee at most 100000\nnothing sent; run again with --yes to deposit (it cannot be undone)\n",
+            "ab".repeat(32)
+        );
+        let read = parse_bridge(&plan, false);
+        assert_eq!(read["sent"], false);
+        assert_eq!((read["total"].clone(), read["notes"].clone(), read["fee"].clone()), (json!("1200"), json!("3"), json!("100000")));
+        assert_eq!(read["to"], PUBLIC);
+        assert_eq!(read["hash"], Value::Null);
+        assert_eq!(read["lines"].as_array().unwrap().len(), 4);
+        let sent = parse_bridge(&format!("{plan}submitted deposit 9F3A00\nLEZ credits Public/{PUBLIC} once ...\n"), true);
+        assert_eq!(sent["hash"], "9f3a00");
+        assert_eq!(parse_bridge("submitted deposit 0xAB12\n", true)["hash"], "ab12");
+        // A reply that is not a hash is not shown as one.
+        assert_eq!(parse_bridge("submitted deposit {\"error\":1}\n", true)["hash"], Value::Null);
+    }
+
+    #[test]
+    fn bridge_failures_are_said_plainly() {
+        let node = "http://127.0.0.1:8080";
+        assert!(bridge_problem("Error: cannot reach your Logos Blockchain node at http://127.0.0.1:8080\n\nCaused by:\n    Connection refused (os error 61)\n", node).contains("isn't answering"));
+        // As the real CLI writes them, against a node that is up.
+        let status = |code: &str| bridge_problem(&format!("Error: cannot reach your Logos Blockchain node at {node}\n\nCaused by:\n    http status: {code}\n"), node);
+        assert!(status("404").contains("doesn't have that key"));
+        assert!(status("400").contains("isn't a valid key"));
+        assert!(status("500").contains("HTTP 500"));
+        let short = format!("Error: 30 note(s) of {KEY} hold 900, less than 5000; one deposit spends at most 30 notes, so bridge in smaller steps\n");
+        assert!(bridge_problem(&short, node).contains("smaller steps"));
+        let poor = format!("Error: 2 note(s) of {KEY} hold 900, less than 5000; one deposit spends at most 30 notes, so bridge in smaller steps\n");
+        assert_eq!(bridge_problem(&poor, node), "That key holds only 900. Bridge 900 or less.");
+        assert!(bridge_problem(&format!("Error: the node lists no notes for {KEY}\n"), node).contains("nothing under that key"));
+        assert!(bridge_problem("Error: cannot reach the sequencer at https://testnet.lez.logos.co\n", node).contains("LEZ isn't answering"));
+        assert_eq!(bridge_problem("Error: the node refused the deposit (HTTP 400): bad fee\n", node), "Your node refused the deposit: (HTTP 400): bad fee");
+        assert_eq!(bridge_problem("Error: something new\n\nCaused by:\n    deep\n", node), "the names CLI failed: something new");
+    }
+
+    #[test]
+    fn bridge_runs_the_cli_to_the_default_public_account() {
+        let dir = scratch_dir("bridge");
+        let plan = format!("echo 'deposit 1200 from 3 note(s) of {KEY}'; echo '  into LEZ channel abc, credited to Public/{PUBLIC}'; echo '  through http://127.0.0.1:8080, fee at most 100000'");
+        let setup = setup(&dir, &plan);
+        // No public account saved yet: refused before the CLI runs.
+        assert!(run_bridge(&setup, "1000", KEY, "", false).unwrap_err().contains("create your wallet"));
+        std::fs::write(setup.wallet.join("names.json"), format!("{{\"public\":\"{PUBLIC}\",\"private\":null}}")).unwrap();
+        let read = run_bridge(&setup, "1000", KEY, "", false).unwrap();
+        let lines: Vec<&str> = read["lines"].as_array().unwrap().iter().map(|line| line.as_str().unwrap()).collect();
+        let at = lines.iter().position(|line| *line == "[bridge]").expect("the bridge command");
+        assert_eq!(
+            &lines[at..at + 6],
+            [
+                "[bridge]",
+                &format!("[--to=Public/{PUBLIC}]") as &str,
+                &format!("[--from-key={KEY}]"),
+                "[--node=http://127.0.0.1:8080]",
+                "[--]",
+                "[1000]",
+            ]
+        );
+        assert!(!lines.contains(&"[--yes]"));
+        assert_eq!(read["total"], "1200");
+        assert_eq!(read["sent"], false);
+        // The stand-in CLI is the only one ever given --yes in a test.
+        let sent = Setup { program: fake_cli(&dir, "echo 'submitted deposit 00ff'"), ..setup.clone() };
+        let done = run_bridge(&sent, "1000", KEY, "http://localhost:9000", true).unwrap();
+        assert!(done["lines"].as_array().unwrap().contains(&json!("[--yes]")));
+        assert!(done["lines"].as_array().unwrap().contains(&json!("[--node=http://localhost:9000]")));
+        assert_eq!(done["hash"], "00ff");
+        let down = Setup {
+            program: fake_cli(&dir, "echo 'Error: cannot reach your Logos Blockchain node at http://127.0.0.1:8080' >&2; echo '' >&2; echo 'Caused by:' >&2; echo '    refused' >&2; exit 1"),
+            ..setup.clone()
+        };
+        assert!(run_bridge(&down, "1000", KEY, "", false).unwrap_err().contains("isn't answering"));
+        // Bad input never reaches the CLI.
+        let never = Setup { program: dir.join("not-run"), ..setup };
+        assert!(run_bridge(&never, "1000", KEY, "http://evil.com:80", false).unwrap_err().contains("this computer"));
+        assert!(run_bridge(&never, "0", KEY, "", false).is_err());
+        assert!(run_bridge(&never, "5", "zz", "", false).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn mine_runs_the_cli_and_an_empty_wallet_dir_holds_nothing() {
         let dir = scratch_dir("mine");
@@ -911,7 +1617,7 @@ mod tests {
         // No wallet in the directory: the CLI is not run, so none is made.
         let empty = Setup { wallet: dir.join("empty"), program: dir.join("not-run"), ..failing };
         assert_eq!(run_mine(&empty).unwrap(), Vec::<Value>::new());
-        assert!(empty.wallet_ready().unwrap_err().contains("names setup"));
+        assert!(empty.wallet_ready().unwrap_err().contains("create your wallet"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -994,5 +1700,232 @@ mod tests {
         assert!(!body.exists());
         assert!(jobs.running_for("jef").is_none());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ── Getting started without a terminal ──────────────────────────────
+
+    const PHRASE: &str = "abandon ability able about above absent absorb abstract absurd abuse access accident";
+    const PRIVATE: &str = "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z";
+
+    fn setup_output(phrase: bool) -> String {
+        let made = if phrase {
+            format!("Created a new wallet. Write down its recovery phrase and keep it safe;\nit is the only way to get the wallet back:\n\n  {PHRASE}\n\n")
+        } else {
+            String::new()
+        };
+        format!("{made}public account   Public/{PUBLIC}\nprivate account  Private/{PRIVATE}\nready: `names register <name>` holds a name privately\n")
+    }
+
+    #[test]
+    fn setup_output_is_read_into_accounts_and_the_phrase() {
+        assert_eq!(parse_setup(&setup_output(true)), json!({ "public": PUBLIC, "private": PRIVATE, "phrase": PHRASE }));
+        // An existing wallet prints no phrase.
+        assert_eq!(parse_setup(&setup_output(false)), json!({ "public": PUBLIC, "private": PRIVATE, "phrase": null }));
+        // Anything that isn't 12 to 24 words of a-z is not taken for one.
+        for odd in ["Error: boom", "abandon ability", "abandon Ability able about above absent absorb abstract absurd abuse access accident", "a1 b c d e f g h i j k l"] {
+            let text = format!("it is the only way to get the wallet back:\n\n  {odd}\npublic account   Public/{PUBLIC}\n");
+            assert_eq!(parse_setup(&text)["phrase"], Value::Null, "{odd}");
+        }
+        // Malformed accounts are null.
+        assert_eq!(parse_setup("public account   Public/nope\nprivate account  Public/x\n"), json!({ "public": null, "private": null, "phrase": null }));
+    }
+
+    #[test]
+    fn setup_arguments_never_shield_unless_asked() {
+        assert_eq!(setup_args("0").unwrap(), strings(&["setup", "--shield=0"]));
+        assert_eq!(setup_args("").unwrap(), strings(&["setup", "--shield=5000000"]));
+        assert_eq!(setup_args(" 7,000,000 ").unwrap(), strings(&["setup", "--shield=7000000"]));
+        for bad in ["-1", "1.5", "5 5", "--yes", "1e6", "00"] {
+            assert!(setup_args(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn creating_the_wallet_runs_setup_moving_nothing() {
+        let dir = scratch_dir("create");
+        let mut setup = setup(&dir, &format!("printf '%s' '{}'", setup_output(true).replace('\'', "'\\''")));
+        // No wallet yet: the CLI makes it, so it's not required first.
+        std::fs::remove_file(setup.wallet.join(STORAGE_FILE)).unwrap();
+        let made = run_create_wallet(&setup).unwrap();
+        assert_eq!((made["public"].clone(), made["private"].clone(), made["phrase"].clone()), (json!(PUBLIC), json!(PRIVATE), json!(PHRASE)));
+        // The phrase is written nowhere: no job, no log.
+        assert!(std::fs::read_dir(&dir).unwrap().all(|entry| !entry.unwrap().file_name().to_string_lossy().ends_with(".log")));
+        // The arguments were exactly setup --shield=0.
+        setup.program = fake_cli(&dir, "exit 0");
+        let echo = run_capture(&setup, setup_args("0").unwrap(), SETUP_PATIENCE).unwrap().1;
+        assert!(echo.contains("[setup]\n[--shield=0]\n"), "{echo}");
+        // A failure after the wallet was made still hands over the phrase.
+        setup.program = fake_cli(&dir, &format!("printf '%s' '{}'; echo 'Error: the sequencer is down' >&2; exit 1", setup_output(true).replace('\'', "'\\''")));
+        let late = run_create_wallet(&setup).unwrap();
+        assert_eq!(late["phrase"], PHRASE);
+        assert!(late["problem"].as_str().unwrap().contains("the sequencer is down"));
+        // A failure before: the reason comes from stderr only, never stdout.
+        setup.program = fake_cli(&dir, &format!("echo '  {PHRASE}'; echo 'Error: no space' >&2; exit 1"));
+        let refused = run_create_wallet(&setup).unwrap_err();
+        assert!(refused.contains("no space") && !refused.contains("abandon"), "{refused}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_move_to_private_says_whether_anything_moved() {
+        let poor = "public account   Public/x\nPublic/x holds 1200; send it at least 5000000 testnet tokens from your LEZ wallet (or with `names bridge`), then run `names setup` again.\n";
+        let read = shield_outcome(poor, true);
+        assert_eq!(read["moved"], false);
+        assert_eq!(read["problem"], "Your public account holds 1,200, and moving to private needs at least 5,000,000. Get more tokens, then try again.");
+        let moved = shield_outcome("moving 5000000 to the private account; generating the proof (a few minutes)\nready: ...\n", true);
+        assert_eq!(moved, json!({ "moved": true, "problem": null }));
+        let failed = shield_outcome("moving 5000000 to the private account\nError: the transfer was not included in a block\n", false);
+        assert_eq!(failed["moved"], false);
+        assert!(failed["problem"].as_str().unwrap().contains("not included"));
+        assert_eq!(group("1234567"), "1,234,567");
+        assert_eq!(group("100"), "100");
+    }
+
+    #[test]
+    fn a_payment_goes_to_a_name_or_a_public_account_strictly() {
+        assert_eq!(pay_to("Jef").unwrap(), PayTo::Name("jef".into()));
+        assert_eq!(pay_to(&format!(" Public/{PUBLIC} ")).unwrap(), PayTo::Account(PUBLIC.into()));
+        assert!(pay_to(PUBLIC).unwrap_err().contains("Public/"));
+        assert!(pay_to(&format!("Private/{PRIVATE}")).unwrap_err().contains("pay its name"));
+        for bad in ["Public/", "Public/nope", &format!("Public/{PUBLIC}x"), &format!("public/{PUBLIC}"), &format!("Public/{PUBLIC}/x"), &format!("Public/ {PUBLIC}"), "Public/--yes", "", "a b"] {
+            assert!(pay_to(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn paying_an_account_runs_the_wallets_transfer() {
+        let dir = scratch_dir("payacct");
+        let setup = setup(&dir, "exit 0");
+        let to = format!("Public/{}", "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR");
+        // No accounts saved yet.
+        assert!(pay_account_args(&setup, &to, "5", false).unwrap_err().contains("create your wallet"));
+        std::fs::write(setup.wallet.join("names.json"), format!("{{\"public\":\"{PUBLIC}\",\"private\":\"{PRIVATE}\"}}")).unwrap();
+        assert_eq!(
+            pay_account_args(&setup, &to, "1,000", false).unwrap(),
+            strings(&["wallet", "auth-transfer", "send", &format!("--from=Public/{PUBLIC}"), &format!("--to={to}"), "--amount=1000"])
+        );
+        assert_eq!(pay_account_args(&setup, &to, "5", true).unwrap()[3], format!("--from=Private/{PRIVATE}"));
+        assert!(pay_account_args(&setup, &format!("Public/{PUBLIC}"), "5", false).unwrap_err().contains("your own"));
+        assert!(pay_account_args(&setup, "jef", "5", false).is_err());
+        for amount in ["0", "", "-5", "1.5", "--yes", "5 5"] {
+            assert!(pay_account_args(&setup, &to, amount, false).is_err(), "{amount:?}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_built_in_installer_is_the_published_one() {
+        let published = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../gateway/public/install.sh");
+        // Only in the repository; a build from basecamp-module alone can't see it.
+        if let Ok(text) = std::fs::read_to_string(&published) {
+            assert_eq!(text, INSTALLER, "copy gateway/public/install.sh to basecamp-module/rust-lib/install.sh");
+        }
+        // It checks signatures against its own key, and honours the folders it's given.
+        assert!(INSTALLER.contains("ssh-keygen -Y verify") && INSTALLER.contains("allowed_signers"));
+        assert!(INSTALLER.contains("NAMES_INSTALL_DIR") && INSTALLER.contains("NAMES_MAN_DIR"));
+        // It edits a shell startup file only when its folder isn't on PATH,
+        // which install_process makes sure it is.
+        assert!(INSTALLER.contains("case \":$PATH:\" in\n  *\":$DIR:\"*) ;;"));
+    }
+
+    #[test]
+    fn the_installer_runs_with_only_the_folders_it_needs() {
+        let dir = scratch_dir("install");
+        let (bin, man) = (dir.join("data/bin"), dir.join("data/man"));
+        let jobs = Jobs { dir: dir.join("jobs") };
+        let script = "#!/bin/sh\nenv > \"$NAMES_INSTALL_DIR/../env\"\necho \"args=$#\"\nprintf '#!/bin/sh\\necho \"names 1.2.3\"\\n' > \"$NAMES_INSTALL_DIR/names\"\nchmod 755 \"$NAMES_INSTALL_DIR/names\"\n";
+        let started = jobs.start_install(script, &bin, &man).unwrap();
+        assert_eq!((started["name"].clone(), started["kind"].clone()), (json!(INSTALL_JOB), json!("install")));
+        let id = started["id"].as_str().unwrap().to_owned();
+        let ended = finished(&jobs, &id);
+        assert_eq!(ended["state"], "done", "{ended}");
+        assert!(ended["log_tail"].as_str().unwrap().contains("args=0"));
+        let env = std::fs::read_to_string(dir.join("data/env")).unwrap();
+        let path_line = env.lines().find(|line| line.starts_with("PATH=")).unwrap();
+        assert!(path_line.starts_with(&format!("PATH={}:", bin.display())), "{path_line}");
+        assert!(env.contains(&format!("NAMES_INSTALL_DIR={}", bin.display())) && env.contains(&format!("NAMES_MAN_DIR={}", man.display())));
+        for var in ["NAMES_DOWNLOAD_BASE", "NAMES_SKIP_PROVER", "LEE_WALLET_HOME_DIR", "SHELL"] {
+            assert!(!env.lines().any(|line| line.starts_with(&format!("{var}="))), "{var} leaked in");
+        }
+        // The script file is gone once it has run.
+        assert!(!jobs.scratch(&id, "sh").exists());
+        assert_eq!(version(&bin.join("names")).unwrap(), "names 1.2.3");
+        assert!(!has_prover(&bin.join("names")) || std::env::var_os("RISC0_SERVER_PATH").is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_program_that_isnt_the_names_cli_has_no_version() {
+        let dir = scratch_dir("version");
+        assert!(version(&dir.join("missing")).is_err());
+        let other = fake_cli(&dir, "exit 0");
+        assert!(version(&other).is_err());
+        let broken = fake_cli(&dir, "echo 'dyld: Library not loaded' >&2; exit 134");
+        assert!(version(&broken).unwrap_err().contains("Library not loaded"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn install_failures_are_said_plainly() {
+        let says = |log: &str, want: &str| assert!(install_problem(log).contains(want), "{log:?} -> {}", install_problem(log));
+        says("names: no build for Linux aarch64 yet (macOS on Apple silicon and Linux x86_64 only).", "doesn't run on this computer");
+        says("Downloading names for macos-arm64...\nnames: bad signature on names-macos-arm64; not installing.", "signature check");
+        says("names: no signature published for names-macos-arm64; not installing.", "signature check");
+        says("names: checksum mismatch (expected a, got b); not installing.", "damaged");
+        says("Downloading names for macos-arm64...\ncurl: (6) Could not resolve host: github.com", "internet");
+        says("curl: (7) Failed to connect to github.com port 443 after 3 ms: Couldn't connect to server", "internet");
+        says("curl: (22) The requested URL returned error: 404", "isn't available");
+        says("Installed /x/names, but it needs the PC/SC library (libpcsclite.so.1) to start.", "PC/SC");
+        says("Installed /x/names, but it does not start: Killed: 9", "Killed: 9");
+        says("something new", "something new");
+        assert!(install_warning("Could not install r0vm; lookups and public changes still work").is_some());
+        assert!(install_warning("Installed /x/r0vm").is_none());
+    }
+
+    /// Runs the real, built-in installer the way `cli_install` does, into
+    /// `$LOGOS_NAMES_REAL_INSTALL_DIR` (it downloads the signed release, about
+    /// 80 MB): `cargo test real_install -- --ignored`.
+    #[test]
+    #[ignore = "downloads the release"]
+    fn real_install() {
+        let root = PathBuf::from(std::env::var_os("LOGOS_NAMES_REAL_INSTALL_DIR").expect("LOGOS_NAMES_REAL_INSTALL_DIR"));
+        let (bin, man) = (root.join("bin"), root.join("man"));
+        let jobs = Jobs { dir: root.join("jobs") };
+        let id = jobs.start_install(INSTALLER, &bin, &man).unwrap()["id"].as_str().unwrap().to_owned();
+        let started = Instant::now();
+        let ended = loop {
+            let state = jobs.state(&id).unwrap();
+            if state["state"] != "running" {
+                break state;
+            }
+            assert!(started.elapsed() < Duration::from_secs(900), "too slow");
+            std::thread::sleep(Duration::from_secs(1));
+        };
+        println!("{}", ended["log_tail"].as_str().unwrap());
+        assert_eq!(ended["state"], "done", "{ended}");
+        println!("{}", version(&bin.join("names")).unwrap());
+        assert!(has_prover(&bin.join("names")));
+    }
+
+    /// Makes a throwaway wallet with the real CLI the way `cli_create_wallet`
+    /// does (`names setup --shield=0`: no transaction, nothing proven), in
+    /// `$LOGOS_NAMES_REAL_WALLET_DIR` with the CLI at `$LOGOS_NAMES_REAL_CLI`.
+    #[test]
+    #[ignore = "runs the real CLI"]
+    fn real_create_wallet() {
+        let var = |name: &str| PathBuf::from(std::env::var_os(name).expect(name));
+        let setup = Setup {
+            program: var("LOGOS_NAMES_REAL_CLI"),
+            wallet: var("LOGOS_NAMES_REAL_WALLET_DIR"),
+            registry: Some("38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq".into()),
+            sequencer: "https://testnet.lez.logos.co".into(),
+        };
+        let made = run_create_wallet(&setup).unwrap();
+        let words = made["phrase"].as_str().map_or(0, |phrase| phrase.split(' ').count());
+        println!("public {} private {} phrase words {words} problem {}", made["public"], made["private"], made["problem"]);
+        assert!(made["public"].is_string() && made["private"].is_string());
+        assert_eq!(saved_account(&setup.wallet, "public").as_deref(), made["public"].as_str());
+        let again = run_create_wallet(&setup).unwrap();
+        assert_eq!((again["public"].clone(), again["phrase"].clone()), (made["public"].clone(), Value::Null));
     }
 }

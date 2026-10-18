@@ -73,7 +73,7 @@ BRIDGE = r"""
                         private_accounts: [{ account: "%(carol)s", balance: "2999000", funded: true }] })
                 return JSON.stringify({ success: false, value: null, error: "the LEZ wallet is not running; install LEZ Wallet and open it" })
             }
-            if (method === "get_config") return JSON.stringify({ registry: %(registry)s, sequencer: "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json", cli: "/Users/you/.local/bin/names", cli_wallet: "/Users/you/.lee/wallet" })
+            if (method === "get_config") return JSON.stringify({ registry: %(registry)s, sequencer: "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json", cli: "/Users/you/.local/bin/names", cli_wallet: "/Users/you/.lee/wallet", bridge_key: "%(bridge_key)s", bridge_node: null })
             if (method === "normalize") return String(args[0]).toLowerCase().replace(/\.lez$/, "")
             if (method === "mine") return ok({ names: names.filter(function(entry) { return entry.owner === "%(alice)s" }).map(function(entry) {
                 return { name: entry.name, display: entry.name + ".lez", owner: entry.owner, expires: null, never: true, lapsed: false } }), pending: [] })
@@ -84,7 +84,31 @@ BRIDGE = r"""
                 [{ name: "knuth", display: "knuth.lez", signer: "cli", state: "registering, the last step starts in about 9 minutes", lapsed: false, registering: true, failed: false }]))
             if (method === "cli_set_text" || method === "cli_profile" || method === "cli_set_page" || method === "cli_register")
                 return ok({ id: args[0] + "-1792000000000", name: args[0], kind: method.substr(4), state: "running", started: Date.now() - 125000 })
-            if (method === "cli_balance") return ok({ account: "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", balance: root.missing === "pauper" ? "5000" : "250000000" })
+            var mock = %(mock)s
+            if (method === "cli_balance") {
+                if (mock.balance === null) return JSON.stringify({ success: false, value: null, error: "there is no wallet in /Users/you/.lee/wallet yet" })
+                return ok({ account: "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", balance: mock.private !== undefined ? mock.private : root.missing === "pauper" ? "5000" : "250000000",
+                    public: { account: "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", balance: mock.public !== undefined ? mock.public : "1250000" } })
+            }
+            // Getting started. Stand-ins only: nothing is installed, no wallet is made.
+            if (method === "cli_status") return ok(Object.assign({ cli: "/Users/you/.config/logos-names/bin/names", prover: true, installing: null, wallet_dir: "/Users/you/.lee/wallet",
+                wallet: true, public: "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", private: "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", busy: null }, mock.status || {}))
+            if (method === "cli_install") return ok({ installed: false, path: "/Users/you/.config/logos-names/bin/names", version: null, prover: false,
+                job: { id: "-install-1792000000000", name: "-install", kind: "install", state: "running", started: Date.now() - 20000 } })
+            if (method === "cli_create_wallet") return ok({ public: "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", private: "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z",
+                phrase: "abandon ability able about above absent absorb abstract absurd abuse access accident account accuse achieve acid acoustic acquire across act action actor actress actual" })
+            if (method === "cli_shield") return ok({ id: "-wallet-1792000000001", name: "-wallet", kind: "shield", state: "running", started: Date.now() - 130000 })
+            if (method === "cli_pay_account") return ok({ id: "-wallet-1792000000002", name: "-wallet", kind: "pay_account", state: "running", started: Date.now() - 10000 })
+            if (method === "job" && /^-install/.test(args[0])) return ok(mock.installJob || { id: args[0], name: "-install", kind: "install", state: "running", started: Date.now() - 20000,
+                log_tail: "Downloading names for macos-arm64...\nInstalled /Users/you/.config/logos-names/bin/names (names 0.1.0)\nDownloading RISC Zero's prover (r0vm 3.0.5, about 70 MB) for private changes..." })
+            if (method === "job" && /^-wallet/.test(args[0])) return ok(mock.walletJob || { id: args[0], name: "-wallet", kind: "shield", state: "running", started: Date.now() - 130000,
+                log_tail: "moving 5000000 to the private account; generating the proof (a few minutes)" })
+            // A stand-in only: the harness never runs the names CLI, let alone with --yes.
+            if (method === "cli_bridge") {
+                if (args[0] === "999999999") return JSON.stringify({ success: false, value: null, error: "That takes more than 30 notes, the most one deposit can use. Bridge in smaller steps." })
+                if (args[3]) return ok({ sent: true, lines: [], hash: "5d1f0c9a7be24e3f8a61c0d2b9e47f135a08c6d2e91b4f70a3c5d8e2f1b6a904", total: "5000400", notes: "2", fee: "100000", to: "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk" })
+                return ok({ sent: false, lines: [], hash: null, total: "5000400", notes: "2", fee: "100000", to: "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk" })
+            }
             if (method === "board_follows") return ok(["ada"])
             if (method === "anon_name") return ok(root.anonMock || "")
             if (method === "board_likes") return ok(["jef/0"])
@@ -182,6 +206,59 @@ SCENARIOS = {
     "cli-failed": 'root.manage("hopper"); root.saveText("inbox", "/logos/1/hopper/new"); Qt.callLater(function() { Qt.callLater(function() { root.checkCliJob() }) })',
     "cli-nowallet": 'root.manage("hopper")',
     "unset": "",
+    "welcome-tokens": 'root.cliNames = []; root.cliPending = []',
+    "get-tokens": 'root.openGetTokens()',
+    "get-tokens-plan": 'root.openGetTokens(); bridgeAmountField.text = "5000000"; root.bridgeRun(false)',
+    "get-tokens-confirm": 'root.openGetTokens(); bridgeAmountField.text = "5000000"; root.bridgeRun(false); Qt.callLater(function() { Qt.callLater(function() { root.bridgeConfirm = true }) })',
+    "get-tokens-sent": 'root.openGetTokens(); bridgeAmountField.text = "5000000"; root.bridgeRun(false); Qt.callLater(function() { Qt.callLater(function() { root.bridgeRun(true) }) })',
+    "get-tokens-error": 'root.openGetTokens(); bridgeAmountField.text = "999999999"; root.bridgeRun(false)',
+    "get-tokens-badkey": 'root.openGetTokens(); bridgeKeyField.text = "not a key"; bridgeAmountField.text = "5"; root.bridgeRun(false)',
+    "get-tokens-nowallet": 'root.openGetTokens()',
+    "get-tokens-move": 'root.openGetTokens(); Qt.callLater(function() { root.moveToPrivate() })',
+    # The Welcome steps, from nothing installed to picking a name.
+    "welcome-install": 'root.cliPath = ""; root.cliNames = []; root.cliPending = []',
+    "welcome-terminal": 'root.cliPath = ""; root.cliNames = []; root.cliPending = []; root.terminalNoteOpen = true',
+    "welcome-installing": 'root.cliPath = ""; root.cliNames = []; root.cliPending = []; root.installCli(); Qt.callLater(function() { Qt.callLater(function() { root.checkInstall() }) })',
+    "welcome-install-failed": 'root.cliPath = ""; root.cliNames = []; root.cliPending = []; root.installCli(); Qt.callLater(function() { Qt.callLater(function() { root.checkInstall() }) })',
+    "welcome-wallet": 'root.cliNames = []; root.cliPending = []',
+    "welcome-phrase": 'root.cliNames = []; root.cliPending = []; root.createWallet()',
+    "welcome-wallet-error": 'root.cliNames = []; root.cliPending = []; root.walletError = "The names CLI failed: cannot write to /Users/you/.lee/wallet."',
+    "welcome-unfunded": 'root.cliNames = []; root.cliPending = []',
+    "welcome-funded": 'root.cliNames = []; root.cliPending = []',
+    "welcome-moving": 'root.cliNames = []; root.cliPending = []; root.moveToPrivate()',
+    "welcome-move-poor": 'root.cliNames = []; root.cliPending = []; root.moveToPrivate(); Qt.callLater(function() { Qt.callLater(function() { root.checkShield() }) })',
+    "welcome-moved": 'root.cliNames = []; root.cliPending = []',
+    # Paying an account rather than a name.
+    "pay-account": 'root.section = "pay"; payTo.text = "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR"; payAmount.text = "1000"',
+    "pay-account-public": 'root.section = "pay"; payTo.text = "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR"; payAmount.text = "1000"; root.payFromPublic = true',
+    "pay-account-bad": 'root.section = "pay"; payTo.text = "Public/7wx3U7qMRWop"; payAmount.text = "1000"',
+    "pay-account-sending": 'root.section = "pay"; payTo.text = "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR"; payAmount.text = "1000"; root.payFromPublic = true; root.payName()',
+}
+
+# What the module's stand-in says in each Welcome state (see `mock` in BRIDGE).
+NO_WALLET = {"status": {"wallet": False, "public": None, "private": None}, "balance": None}
+MOCKS = {
+    "welcome-install": {"status": {"cli": None, "wallet": False, "public": None, "private": None}, "balance": None},
+    "welcome-terminal": {"status": {"cli": None, "wallet": False, "public": None, "private": None}, "balance": None},
+    "welcome-installing": {"status": {"cli": None, "wallet": False, "public": None, "private": None}, "balance": None},
+    "welcome-install-failed": {"status": {"cli": None, "wallet": False, "public": None, "private": None}, "balance": None,
+                               "installJob": {"id": "-install-1792000000000", "name": "-install", "kind": "install", "state": "failed", "exit": 6,
+                                              "started": 1792000000000, "finished": 1792000004000, "log_tail": "Downloading names for macos-arm64...\ncurl: (6) Could not resolve host: github.com",
+                                              "problem": "Couldn't reach the internet. Check your connection, then try again."}},
+    "welcome-wallet": NO_WALLET,
+    "welcome-phrase": NO_WALLET,
+    "welcome-wallet-error": NO_WALLET,
+    "get-tokens-nowallet": NO_WALLET,
+    "welcome-unfunded": {"private": "0", "public": "1250000"},
+    "welcome-funded": {"private": "0", "public": "6000000"},
+    "get-tokens-move": {"private": "0", "public": "6000000"},
+    "welcome-moving": {"private": "0", "public": "6000000"},
+    "welcome-move-poor": {"private": "0", "public": "6000000",
+                          "walletJob": {"id": "-wallet-1792000000001", "name": "-wallet", "kind": "shield", "state": "done", "exit": 0, "started": 1792000000000, "finished": 1792000003000,
+                                        "log_tail": "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk holds 1200; send it at least 5000000 testnet tokens", "moved": False,
+                                        "problem": "Your public account holds 1,200, and moving to private needs at least 5,000,000. Get more tokens, then try again."}},
+    "welcome-moved": {"private": "5000000", "public": "1000000"},
+    "pay-account": {"private": "250000000", "public": "1250000"},
 }
 
 def main():
@@ -201,7 +278,9 @@ def main():
                                "log_tail": "proving the change on this machine...\nError: the transaction was refused: out of gas"} if scenario == "cli-failed"
                               else {"id": "hopper-1792000000000", "name": "hopper", "kind": "set_text", "started": 1792000000000, "finished": None, "exit": None, "state": "running", "log_tail": "proving the change on this machine..."}), "records": json.dumps(RECORDS),
             "registry": "null" if scenario == "unset" else json.dumps("DbYLkKwd2b13bQhceVj351mpPw7QmRzEjRT2EfU56CKH"),
-            "scenario": SCENARIOS[scenario], "out": out, "height": 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "name") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
+            "mock": json.dumps(MOCKS.get(scenario, {})),
+            "bridge_key": "" if scenario == "get-tokens" else "8e3b0f4a2c71d95e6a0b4c8d2f1e7a3954c6b0d8e2f4a6c8b0d2e4f6a8c0b2d4",
+            "scenario": SCENARIOS[scenario], "out": out, "height": 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "name") else 1500 if scenario.startswith("get-tokens") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
         }
         with tempfile.NamedTemporaryFile("w", suffix=".qml", delete=False) as handle:
             handle.write(source.replace(marker, marker + bridge, 1))
