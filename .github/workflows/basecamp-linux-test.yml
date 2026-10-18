@@ -14,8 +14,6 @@ jobs:
     env:
       SITE: https://logos-names.wrapit.workers.dev
       LOGOSCTL_CONFIG_DIR: ${{ github.workspace }}/session
-      # The runner has no FUSE: run the AppImage by unpacking it each time.
-      APPIMAGE_EXTRACT_AND_RUN: "1"
     steps:
       - name: The names command line
         run: |
@@ -26,12 +24,18 @@ jobs:
       - name: logosctl
         run: |
           curl -fsSL https://github.com/logos-co/logos-logoscore-cli/releases/download/0.3.2/logosctl-x86_64-linux.tar.gz | tar xz
-          chmod +x logosctl-x86_64.AppImage
-          echo "LOGOSCTL=$PWD/logosctl-x86_64.AppImage" >> "$GITHUB_ENV"
-          ./logosctl-x86_64.AppImage --version
+          # The runner has no FUSE: unpack the AppImage once and run what's inside.
+          chmod +x logosctl-x86_64.AppImage && ./logosctl-x86_64.AppImage --appimage-extract >/dev/null
+          echo "LOGOSCTL=$PWD/squashfs-root/usr/bin/logosctl" >> "$GITHUB_ENV"
+          squashfs-root/usr/bin/logosctl --version
       - name: Install Names from the repository
         run: |
-          "$LOGOSCTL" -d
+          "$LOGOSCTL" daemon start > daemon.log 2>&1 &
+          for i in $(seq 1 60); do
+            "$LOGOSCTL" daemon status --json 2>/dev/null | grep -q '"status":"running"' && break
+            sleep 1
+          done
+          "$LOGOSCTL" daemon status
           "$LOGOSCTL" catalog add "$SITE/basecamp/logos-repo.json"
           "$LOGOSCTL" package install names_ui -y
           "$LOGOSCTL" package install names -y || true
@@ -45,4 +49,5 @@ jobs:
         if: always()
         run: |
           "$LOGOSCTL" status || true
+          tail -80 daemon.log || true
           find "$LOGOSCTL_CONFIG_DIR" -name '*.log' -exec tail -50 {} + || true
