@@ -14,6 +14,8 @@ jobs:
     env:
       SITE: https://logos-names.wrapit.workers.dev
       LOGOSCTL_CONFIG_DIR: ${{ github.workspace }}/session
+      # The runner has no FUSE: run the AppImage by unpacking it each time.
+      APPIMAGE_EXTRACT_AND_RUN: "1"
     steps:
       - name: The names command line
         run: |
@@ -24,7 +26,9 @@ jobs:
       - name: logosctl
         run: |
           curl -fsSL https://github.com/logos-co/logos-logoscore-cli/releases/download/0.3.2/logosctl-x86_64-linux.tar.gz | tar xz
-          echo "LOGOSCTL=$(find "$PWD" -path '*/bin/logosctl' -type f | head -1)" >> "$GITHUB_ENV"
+          chmod +x logosctl-x86_64.AppImage
+          echo "LOGOSCTL=$PWD/logosctl-x86_64.AppImage" >> "$GITHUB_ENV"
+          ./logosctl-x86_64.AppImage --version
       - name: Install Names from the repository
         run: |
           "$LOGOSCTL" -d
