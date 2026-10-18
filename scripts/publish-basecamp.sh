@@ -3,7 +3,9 @@
 #
 #   scripts/publish-basecamp.sh
 #
-# Builds both .lgx packages on the Mac mini (darwin-arm64), signs them with the
+# Builds both .lgx packages on the Mac mini (darwin-arm64), fetches the Linux
+# (linux-amd64) ones from the latest successful "Basecamp packages (Linux)" run
+# of this commit, merges each pair into one package for both, signs them with the
 # release key, attaches them to a GitHub release of this repository
 # (basecamp-v<app version>), and writes a Basecamp package repository as static
 # files in gateway/public/basecamp/: logos-repo.json (what people add in
@@ -35,9 +37,26 @@ scp -q "$MINI:$B/basecamp/result-portable/logos-names_ui-module.lgx" "$OUT/app.l
 
 module_version=$(tar xzOf "$OUT/module.lgx" manifest.json | python3 -c 'import sys,json;print(json.load(sys.stdin)["version"])')
 app_version=$(tar xzOf "$OUT/app.lgx" manifest.json | python3 -c 'import sys,json;print(json.load(sys.stdin)["version"])')
-mv "$OUT/module.lgx" "$OUT/names-$module_version.lgx"
-mv "$OUT/app.lgx" "$OUT/names_ui-$app_version.lgx"
 tag=basecamp-v$app_version
+
+echo "== the Linux packages (CI, commit $(git rev-parse --short HEAD))"
+run=$(gh run list --repo "$REPO" --workflow basecamp-linux.yml --commit "$(git rev-parse HEAD)" --status success --limit 1 --json databaseId -q '.[0].databaseId')
+[ -n "$run" ] || { echo "no successful Linux build of this commit: gh workflow run basecamp-linux.yml --repo $REPO, then run this again" >&2; exit 1; }
+gh run download "$run" --repo "$REPO" -n basecamp-linux-x86_64 -D "$OUT/linux"
+[ -f "$OUT/linux/names-$module_version-linux-x86_64.lgx" ] && [ -f "$OUT/linux/names_ui-$app_version-linux-x86_64.lgx" ] ||
+  { echo "the Linux build has other versions: $(ls "$OUT/linux")" >&2; exit 1; }
+
+echo "== merge into one package per name (on $MINI)"
+M=$DEV/merge
+ssh "$MINI" "rm -rf $M/in && mkdir -p $M/in"
+scp -q "$OUT/module.lgx" "$MINI:$M/in/names-mac.lgx"
+scp -q "$OUT/app.lgx" "$MINI:$M/in/names_ui-mac.lgx"
+scp -q "$OUT/linux/"*.lgx "$MINI:$M/in/"
+ssh "$MINI" "cd $M && L=$DEV/lgx-merge/lgxtool/bin/lgx &&
+  \$L merge in/names-mac.lgx in/names-$module_version-linux-x86_64.lgx -o in/names-$module_version.lgx -y >/dev/null &&
+  \$L merge in/names_ui-mac.lgx in/names_ui-$app_version-linux-x86_64.lgx -o in/names_ui-$app_version.lgx -y >/dev/null"
+scp -q "$MINI:$M/in/names-$module_version.lgx" "$MINI:$M/in/names_ui-$app_version.lgx" "$OUT/"
+rm -rf "$OUT/linux" "$OUT/module.lgx" "$OUT/app.lgx"
 
 echo "== sign"
 for f in "$OUT"/*.lgx; do
