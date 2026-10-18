@@ -24,12 +24,21 @@ import {
 } from "./names.js";
 import { postCount, postsOf } from "./board.js";
 
-const DEFAULTS = {
-  rpc: "https://lez.buggers.online",
-  registry: "38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq",
-  board: "8PwnCKStKQtoBxJCgopCG6CPPMJCUWba1SDG1SXtXYTf",
+// Each chain the app knows, with the registry and board deployed on it, so
+// picking one is a single tap. Another RPC takes typed program IDs.
+const CHAINS = {
+  "https://lez.buggers.online": {
+    registry: "m82S3dUDxdcMBtZtXpHXYcVhU68U7bS4AKqsi6NomJm",
+    board: "CKqLLZrTUNiw5KLtQCZ9oSDXWWEtCHLpKjp7pQAaP5q4",
+  },
+  "https://testnet.lez.logos.co": {
+    registry: "38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq",
+    board: "8PwnCKStKQtoBxJCgopCG6CPPMJCUWba1SDG1SXtXYTf",
+  },
 };
-const PRESETS = ["https://lez.buggers.online", "https://testnet.lez.logos.co"];
+// The test chain while it is the only one browsers can reach.
+const DEFAULTS = { rpc: "https://lez.buggers.online", ...CHAINS["https://lez.buggers.online"] };
+const PRESETS = Object.keys(CHAINS);
 const STORE_KEY = "lns-app-settings";
 const PAGE_SIZE = 10;
 // The policy of SPEC 12.2, less `sandbox` (a <meta> can't carry it; the iframe's
@@ -58,8 +67,9 @@ const el = (tag, props = {}, ...children) => {
 
 function loadSettings() {
   try {
-    const saved = JSON.parse(localStorage.getItem(STORE_KEY) || "{}");
-    return { ...DEFAULTS, ...saved };
+    const saved = { ...DEFAULTS, ...JSON.parse(localStorage.getItem(STORE_KEY) || "{}") };
+    // A known chain always uses its own programs.
+    return CHAINS[saved.rpc] ? { rpc: saved.rpc, ...CHAINS[saved.rpc] } : saved;
   } catch {
     return { ...DEFAULTS };
   }
@@ -90,6 +100,7 @@ function fillSettings() {
   $("rpc-custom").hidden = preset !== "custom";
   $("registry").value = settings.registry;
   $("board").value = settings.board;
+  $("programs").hidden = preset !== "custom";
   $("settings-error").hidden = true;
 }
 
@@ -119,8 +130,14 @@ function toggleSettings(open) {
 $("settings-button").addEventListener("click", () => toggleSettings($("settings").hidden));
 for (const radio of document.querySelectorAll('input[name="rpc-choice"]')) {
   radio.addEventListener("change", () => {
-    $("rpc-custom").hidden = radio.value !== "custom" || !radio.checked;
-    if (radio.value === "custom" && radio.checked) $("rpc-custom").focus();
+    const custom = radio.value === "custom" && radio.checked;
+    $("rpc-custom").hidden = !custom;
+    $("programs").hidden = !custom;
+    if (CHAINS[radio.value] && radio.checked) {
+      $("registry").value = CHAINS[radio.value].registry;
+      $("board").value = CHAINS[radio.value].board;
+    }
+    if (custom) $("rpc-custom").focus();
   });
 }
 $("settings-save").addEventListener("click", () => {

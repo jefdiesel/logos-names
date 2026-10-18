@@ -38,18 +38,20 @@
     <fieldset>
       <legend>Chain (RPC)</legend>
       <label class="choice"><input type="radio" name="rpc-choice" value="https://lez.buggers.online">
-        <span><b>lez.buggers.online</b><small>Test chain. Allows browsers.</small></span></label>
+        <span><b>lez.buggers.online</b><small>Names test chain. Test names only, such as testpilot.</small></span></label>
       <label class="choice"><input type="radio" name="rpc-choice" value="https://testnet.lez.logos.co">
-        <span><b>testnet.lez.logos.co</b><small>Logos testnet. Blocks browsers (CORS) for now.</small></span></label>
+        <span><b>testnet.lez.logos.co</b><small>The Logos testnet, with real names. Blocks browsers for now.</small></span></label>
       <label class="choice"><input type="radio" name="rpc-choice" value="custom">
         <span><b>Other</b><small>Any JSON-RPC URL that allows browsers.</small></span></label>
       <input id="rpc-custom" type="url" inputmode="url" autocapitalize="none" spellcheck="false"
              placeholder="https://…" aria-label="Other RPC URL">
     </fieldset>
-    <label class="field">Registry program
-      <input id="registry" type="text" autocapitalize="none" spellcheck="false"></label>
-    <label class="field">Board program
-      <input id="board" type="text" autocapitalize="none" spellcheck="false"></label>
+    <div id="programs">
+      <label class="field">Registry program
+        <input id="registry" type="text" autocapitalize="none" spellcheck="false"></label>
+      <label class="field">Board program
+        <input id="board" type="text" autocapitalize="none" spellcheck="false"></label>
+    </div>
     <p id="settings-error" class="error" role="alert" hidden></p>
     <div class="row">
       <button type="button" id="settings-save">Save</button>
