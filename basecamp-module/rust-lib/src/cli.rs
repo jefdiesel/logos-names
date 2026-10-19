@@ -501,7 +501,9 @@ pub fn shield_outcome(log: &str, done: bool) -> Value {
         return json!({ "moved": false, "problem": problem });
     }
     if done {
-        return json!({ "moved": log.contains("moving "), "problem": null });
+        // The "moving ..." line can scroll out of the log's tail behind the wallet's
+        // "Stored persistent accounts" lines; "ready:" ends a setup that moved.
+        return json!({ "moved": log.contains("moving ") || log.contains("ready: "), "problem": null });
     }
     let first = log.lines().map(str::trim).find(|line| line.starts_with("Error:")).unwrap_or_else(|| last_line(log));
     json!({ "moved": false, "problem": format!("Moving to private didn't go through: {}", first.trim_start_matches("Error:").trim()) })
@@ -1799,6 +1801,8 @@ mod tests {
         assert_eq!(read["problem"], "Your public account holds 1,200, and moving to private needs at least 5,000,000. Get more tokens, then try again.");
         let moved = shield_outcome("moving 5000000 to the private account; generating the proof (a few minutes)\nready: ...\n", true);
         assert_eq!(moved, json!({ "moved": true, "problem": null }));
+        let scrolled = "Stored persistent accounts at /w/storage.json\n".repeat(40) + "Synced to block 36710\nready: `names register <name>` holds a name privately\n";
+        assert_eq!(shield_outcome(&scrolled, true)["moved"], true);
         let failed = shield_outcome("moving 5000000 to the private account\nError: the transfer was not included in a block\n", false);
         assert_eq!(failed["moved"], false);
         assert!(failed["problem"].as_str().unwrap().contains("not included"));
