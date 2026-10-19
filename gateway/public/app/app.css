@@ -124,3 +124,18 @@ iframe { display: block; width: 100%; height: 60vh; min-height: 280px; border: 1
 .posts + #more { margin-top: 12px; }
 
 .intro { color: var(--muted); }
+
+.bar .row { gap: 8px; flex-wrap: nowrap; }
+.bar .row button { flex: 0 0 auto; padding: 0 14px; }
+.menu {
+  max-width: 40rem; margin: 0 auto 12px; padding: 0 16px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.menu a {
+  display: flex; align-items: center; justify-content: space-between; min-height: 52px; padding: 0 16px;
+  background: var(--raised); border: 1px solid var(--line); border-radius: 12px;
+  color: var(--fg); text-decoration: none; font-weight: 600;
+}
+.menu a small { color: var(--muted); font-weight: 400; }
+#about h3 { font-size: 1rem; margin: 16px 0 8px; }
+#about .facts li { margin-bottom: 10px; }

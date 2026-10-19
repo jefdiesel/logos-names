@@ -131,6 +131,21 @@ function toggleSettings(open) {
 }
 
 $("settings-button").addEventListener("click", () => toggleSettings($("settings").hidden));
+$("menu-button").addEventListener("click", () => {
+  const open = $("menu").hidden;
+  $("menu").hidden = !open;
+  $("menu-button").setAttribute("aria-expanded", String(open));
+});
+$("about-link").addEventListener("click", (event) => {
+  event.preventDefault();
+  $("about").scrollIntoView({ behavior: "smooth", block: "start" });
+});
+for (const link of document.querySelectorAll("#menu a")) {
+  link.addEventListener("click", () => {
+    $("menu").hidden = true;
+    $("menu-button").setAttribute("aria-expanded", "false");
+  });
+}
 for (const radio of document.querySelectorAll('input[name="rpc-choice"]')) {
   radio.addEventListener("change", () => {
     const custom = radio.value === "custom" && radio.checked;

@@ -21,8 +21,19 @@
 <body>
 <header class="bar">
   <a class="brand" href="./">Names</a>
-  <button type="button" id="settings-button" class="ghost" aria-expanded="false" aria-controls="settings">Settings</button>
+  <div class="row">
+    <button type="button" id="settings-button" class="ghost" aria-expanded="false" aria-controls="settings">Settings</button>
+    <button type="button" id="menu-button" class="ghost" aria-expanded="false" aria-controls="menu">Menu</button>
+  </div>
 </header>
+<nav id="menu" class="menu" hidden>
+  <a href="./">Look up a name</a>
+  <a href="../msgtest/">Messages <small>test</small></a>
+  <a href="./" id="about-link">About and privacy</a>
+  <a href="../">Get Names for your computer</a>
+  <a href="https://github.com/jefdiesel/logos-names" rel="noopener">Code on GitHub</a>
+  <a href="https://forum.logos.co/t/names-for-basecamp-posts-messages-and-pay-under-your-lez-name/2020" rel="noopener">Forum post</a>
+</nav>
 
 <main>
   <form id="lookup" class="lookup" autocomplete="off">
@@ -89,8 +100,24 @@
   </section>
 
   <section id="intro" class="intro">
-    <p>Type a name to see its card, page and posts. Everything is read straight from the chain in
-      this browser; nothing in between learns which name you looked up.</p>
+    <p>Type a name to see its card, page and posts, read from the chain in this browser.</p>
+  </section>
+
+  <section id="about" class="box">
+    <h2>About and privacy</h2>
+    <p>Names gives people a name on the Logos Execution Zone (LEZ): post, message and get paid as
+      <b>jef</b> instead of a 32-byte account. This page only reads. To register a name, post or pay,
+      use the Names app in Logos Basecamp on your computer.</p>
+    <h3>Who sees what</h3>
+    <ul class="facts">
+      <li><b>This website</b> serves the page and sees that someone opened it. It never sees the name you
+        look up: that stays after the # in the address, which browsers don't send. No cookies, no analytics.</li>
+      <li><b>The chain's RPC</b> sees your IP address and which record it is asked for. Records are stored
+        under a scrambled ID, not the name, but anyone who guesses a name can find its record.</li>
+      <li><b>The door.</b> The LEZ testnet's own RPC doesn't let browsers in yet, so this page reaches it
+        through a small relay that adds that permission and only passes ordinary chain calls.</li>
+      <li><b>Your settings</b> stay on this device.</li>
+    </ul>
   </section>
 </main>
 </body>
