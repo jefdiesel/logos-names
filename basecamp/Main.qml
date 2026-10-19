@@ -549,12 +549,20 @@ Item {
     property var shieldJob: null        // the move to private under way: {id, started}
     property string shieldProblem: ""
     property bool shieldMoved: false
-    readonly property string shieldAmount: "5000000"
+    /// What a name's deposit takes; the least worth moving to private.
+    readonly property string nameDeposit: "1000000"
+    /// Everything the public account holds moves to private: names and payments use it there.
+    readonly property string shieldAmount: cliPublic !== null && atLeast(cliPublic.balance, nameDeposit) ? String(cliPublic.balance) : nameDeposit
+    // Free tokens from the Names faucet (`cli_faucet`), for a new wallet's public account.
+    property bool faucetBusy: false
+    property string faucetError: ""
+    property bool faucetSent: false      // the faucet sent them; waiting for them to arrive
+    property double faucetAt: 0
     /// The names CLI's wallet exists and has its accounts.
     readonly property bool hasCliWallet: cliStatus !== null && !!cliStatus.wallet && !!cliStatus.public
     /// Your public account's ID, as far as it is known.
     readonly property string myPublic: cliPublic !== null ? cliPublic.account : hasCliWallet ? cliStatus.public : ""
-    readonly property bool canShield: cliPublic !== null && atLeast(cliPublic.balance, shieldAmount)
+    readonly property bool canShield: cliPublic !== null && atLeast(cliPublic.balance, nameDeposit)
     readonly property bool hasPrivateFunds: cliBalance !== undefined && cliBalance !== null && !/^0*$/.test(String(cliBalance.balance))
 
     /// Whether the decimal `a` is at least `b`.
@@ -657,6 +665,30 @@ Item {
     }
 
     /// Moves tokens from the public account to the private one (a proof of a few minutes).
+    /// Asks the faucet for free tokens, then checks the balance until they arrive.
+    function getFreeTokens() {
+        if (faucetBusy)
+            return
+        faucetBusy = true
+        faucetError = ""
+        askLater("cli_faucet", [], function(value) {
+            faucetBusy = false
+            faucetSent = true
+            faucetAt = Date.now()
+        }, function(message) {
+            faucetBusy = false
+            faucetError = sentence(message)
+        }, 90000)
+    }
+
+    Timer {
+        // While free tokens are on their way: look every 15 seconds, for up to 10 minutes.
+        interval: 15000
+        repeat: true
+        running: root.faucetSent && !root.canShield && Date.now() - root.faucetAt < 600000
+        onTriggered: root.loadCliBalance()
+    }
+
     function moveToPrivate() {
         if (shieldJob !== null)
             return
@@ -3172,14 +3204,28 @@ Item {
                         value: root.cliPublic !== null ? root.grouped(root.cliPublic.balance) : ""
                     }
                     Hint {
-                        visible: root.hasCliWallet
+                        visible: root.hasCliWallet && !root.canShield && !root.hasPrivateFunds
                         font.pixelSize: root.px(16)
-                        text: "To fill it, send this account to a friend so they can pay you, or bridge tokens from your Logos node."
+                        text: "Get " + root.grouped(root.nameDeposit) + " free test tokens to start: enough for your name's deposit."
                     }
+                    Action {
+                        visible: root.hasCliWallet && !root.canShield && !root.hasPrivateFunds && !root.faucetSent
+                        label: root.faucetBusy ? "Asking…" : "Get free tokens"
+                        strong: true
+                        enabledNow: !root.faucetBusy
+                        onPressed: root.getFreeTokens()
+                    }
+                    Hint {
+                        visible: root.faucetSent && !root.canShield
+                        font.pixelSize: root.px(16)
+                        color: root.brass
+                        text: "Sent. They arrive in a minute or two; this checks by itself."
+                    }
+                    Hint { visible: root.faucetError !== ""; color: root.alarm; font.pixelSize: root.px(16); text: root.faucetError }
                     RowLayout {
                         visible: root.hasCliWallet
                         spacing: 18
-                        Link { text: "Get tokens"; font.pixelSize: root.px(16); onPressed: root.openGetTokens() }
+                        Link { text: "Or bridge from my Logos node"; font.pixelSize: root.px(16); onPressed: root.openGetTokens() }
                         Link { text: "Check again"; color: root.dim; font.pixelSize: root.px(16); onPressed: root.loadCliBalance() }
                     }
                 }
@@ -3190,13 +3236,13 @@ Item {
                     opacity: root.hasCliWallet ? 1 : 0.5
                     StepHead { number: 3; done: root.hasPrivateFunds && root.shieldJob === null; title: "Move to private" }
                     Hint {
-                        text: "Moves " + root.grouped(root.shieldAmount) + " from your public account to your private one, so your names and payments stay private. Your computer proves it, about 4 minutes."
+                        text: "Moves " + (root.canShield ? root.grouped(root.shieldAmount) : "your tokens") + " from your public account to your private one, so your names and payments stay private. Your computer proves it, about 4 minutes."
                     }
                     Hint {
                         visible: root.hasCliWallet && root.cliPublic !== null && !root.canShield && root.shieldJob === null && !root.hasPrivateFunds
                         font.pixelSize: root.px(16)
                         color: root.brass
-                        text: root.cliPublic === null ? "" : "Your public account holds " + root.grouped(root.cliPublic.balance) + ". It needs " + root.grouped(root.shieldAmount) + " first."
+                        text: root.cliPublic === null ? "" : "Your public account holds " + root.grouped(root.cliPublic.balance) + ". It needs " + root.grouped(root.nameDeposit) + " first."
                     }
                     Action {
                         label: root.shieldJob !== null ? "Moving…" : "Move to private"

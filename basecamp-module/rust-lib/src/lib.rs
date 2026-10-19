@@ -396,6 +396,14 @@ pub trait NamesModule: Send + 'static {
 
     // ── Getting started without a terminal ─────────────────────────────
 
+    /// Asks the Names faucet to pay the wallet's default public account a
+    /// little LEZ (1,000,000 on the testnet, enough for one name's deposit),
+    /// once a day per account. `{account, amount, tx}` once the faucet has sent
+    /// it; it arrives within a minute or two (`cli_balance` shows it). The
+    /// faucet's own refusal (funded today, empty, busy) comes back as the error.
+    fn cli_faucet(&mut self) -> String;
+
+
     /// Where the names CLI stands, read without running it: `{cli, prover,
     /// installing, wallet_dir, wallet, public, private, busy}`. `cli` is the
     /// program the module would run (null if none is found), `prover` whether
@@ -1750,6 +1758,17 @@ impl NamesModule for Names {
                 self.save();
             }
             cli::run_bridge(&setup, &amount, &key, &node, send)
+        })())
+    }
+
+    fn cli_faucet(&mut self) -> String {
+        reply((|| {
+            let wallet = cli::find_wallet(self.cli_wallet.as_deref())
+                .ok_or_else(|| "create your wallet first (Welcome, Create my wallet)".to_owned())?;
+            let account = cli::saved_account(&wallet, "public")
+                .ok_or_else(|| "your wallet has no public account yet; create your wallet first (Welcome, Create my wallet)".to_owned())?;
+            let url = std::env::var("LOGOS_NAMES_FAUCET").ok().filter(|url| !url.trim().is_empty());
+            cli::request_faucet(url.as_deref().unwrap_or(cli::FAUCET_URL), &account)
         })())
     }
 

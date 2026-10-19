@@ -2,9 +2,10 @@
 """Faucet for Logos Names on the public LEZ testnet.
 
 POST /faucet {"account": "<base58 account id>"} sends DRIP base units from the
-faucet account. Listens on localhost only; the gateway forwards to it and puts
-the caller's address in X-Client-IP. Limits: each account once a day, each
-address a few times a day, and a daily total.
+faucet account. Listens on localhost only; the Cloudflare tunnel
+(lez.buggers.online/faucet) forwards to it with the caller's address in
+CF-Connecting-IP. Limits: each account once a day, each address a few times a
+day, and a daily total.
 """
 import json
 import os
@@ -21,14 +22,15 @@ WALLET = os.environ.get("FAUCET_WALLET", f"{HOME}/faucet-official")
 RPC = os.environ.get("FAUCET_RPC", "https://testnet.lez.logos.co")
 with open(f"{WALLET}/faucet-account.txt") as f:
     FAUCET = f.read().strip().removeprefix("Public/")
-# Enough to register a name: the sequencer admits a transaction only if the
-# payer covers its fee ceiling (gas limit 2,000,000 x base fee 8 = 16M).
-DRIP = int(os.environ.get("FAUCET_DRIP", 20_000_000))
-# A transfer must also cover that fee ceiling, or it is included, fails and is
-# charged anyway.
-RESERVE = 16_100_000
+# Enough for one name's deposit, held privately: moving it to private and
+# registering privately take no fee, so all of it goes to the deposit.
+DRIP = int(os.environ.get("FAUCET_DRIP", 1_000_000))
+# The faucet's own transfer must cover its fee reserve (the CLI gives a native
+# transfer a gas limit of 1,000; about 3,000 is charged), or it is included,
+# fails and is charged anyway. Kept generous.
+RESERVE = 100_000
 PER_ADDRESS = 3
-PER_DAY = 500
+PER_DAY = int(os.environ.get("FAUCET_PER_DAY", 50))
 DAY = 86400
 STATE = f"{HOME}/faucet-state.json"
 ACCOUNT = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
@@ -111,7 +113,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(400, {"error": 'send {"account": "<account id>"}'})
         if not ACCOUNT.match(account):
             return self.reply(400, {"error": "that is not a public account ID"})
-        address = self.headers.get("X-Client-IP", "local")
+        # Through the Cloudflare tunnel the caller's address is in CF-Connecting-IP;
+        # the old gateway Worker put it in X-Client-IP.
+        address = self.headers.get("CF-Connecting-IP") or self.headers.get("X-Client-IP", "local")
 
         # One send at a time: a signer gets one transaction per block, and the
         # faucet's balance must cover each transfer plus its fee ceiling.

@@ -283,6 +283,31 @@ pub fn default_public(setup: &Setup) -> Result<String, String> {
         .ok_or_else(|| "your wallet has no public account yet; create your wallet first (Welcome, Create my wallet)".to_owned())
 }
 
+/// The Names faucet: a little LEZ for a new wallet's public account, so a new
+/// person can hold a name without bridging first. It pays each account once a day.
+pub const FAUCET_URL: &str = "https://lez.buggers.online/faucet";
+
+/// Asks the faucet at `url` to pay `account` (base58): `{account, amount, tx}`,
+/// or the faucet's own reason in plain words (funded today, empty, busy).
+pub fn request_faucet(url: &str, account: &str) -> Result<Value, String> {
+    let sent = ureq::post(url)
+        .timeout(std::time::Duration::from_secs(60))
+        .send_json(json!({ "account": account }));
+    let reply = match sent {
+        Ok(reply) => reply,
+        Err(ureq::Error::Status(_, reply)) => {
+            let body: Value = reply.into_json().unwrap_or(Value::Null);
+            return Err(body["error"].as_str().unwrap_or("the faucet refused").to_owned());
+        }
+        Err(_) => return Err("could not reach the faucet; check your internet and try again".to_owned()),
+    };
+    let body: Value = reply.into_json().map_err(|_| "the faucet sent an unreadable reply".to_owned())?;
+    if body["tx"].as_str().is_none() {
+        return Err("the faucet sent an unreadable reply".to_owned());
+    }
+    Ok(body)
+}
+
 /// What `names bridge` printed: `{sent, lines, hash, total, notes, fee, to}`.
 /// `total`, `notes` and `fee` come from its plan line (`deposit <total> from
 /// <notes> note(s) of <key>` and `..., fee at most <fee>`), `hash` from

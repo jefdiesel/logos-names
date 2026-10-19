@@ -97,6 +97,8 @@ BRIDGE = r"""
                 job: { id: "-install-1792000000000", name: "-install", kind: "install", state: "running", started: Date.now() - 20000 } })
             if (method === "cli_create_wallet") return ok({ public: "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", private: "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z",
                 phrase: "abandon ability able about above absent absorb abstract absurd abuse access accident account accuse achieve acid acoustic acquire across act action actor actress actual" })
+            if (method === "cli_faucet") return mock.faucetError ? JSON.stringify({ success: false, value: null, error: mock.faucetError })
+                : ok({ account: "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", amount: "1000000", tx: "9fbe58a895319b88093420471af36f67e34d61a730a8cfc0e64d27b15c01de16" })
             if (method === "cli_shield") return ok({ id: "-wallet-1792000000001", name: "-wallet", kind: "shield", state: "running", started: Date.now() - 130000 })
             if (method === "cli_pay_account") return ok({ id: "-wallet-1792000000002", name: "-wallet", kind: "pay_account", state: "running", started: Date.now() - 10000 })
             if (method === "job" && /^-install/.test(args[0])) return ok(mock.installJob || { id: args[0], name: "-install", kind: "install", state: "running", started: Date.now() - 20000,
@@ -225,6 +227,8 @@ SCENARIOS = {
     "welcome-wallet-error": 'root.cliNames = []; root.cliPending = []; root.walletError = "The names CLI failed: cannot write to /Users/you/.lee/wallet."',
     "welcome-unfunded": 'root.cliNames = []; root.cliPending = []',
     "welcome-funded": 'root.cliNames = []; root.cliPending = []',
+    "welcome-faucet": 'root.cliNames = []; root.cliPending = []; root.getFreeTokens()',
+    "welcome-faucet-error": 'root.cliNames = []; root.cliPending = []; root.getFreeTokens()',
     "welcome-moving": 'root.cliNames = []; root.cliPending = []; root.moveToPrivate()',
     "welcome-move-poor": 'root.cliNames = []; root.cliPending = []; root.moveToPrivate(); Qt.callLater(function() { Qt.callLater(function() { root.checkShield() }) })',
     "welcome-moved": 'root.cliNames = []; root.cliPending = []',
@@ -249,7 +253,9 @@ MOCKS = {
     "welcome-phrase": NO_WALLET,
     "welcome-wallet-error": NO_WALLET,
     "get-tokens-nowallet": NO_WALLET,
-    "welcome-unfunded": {"private": "0", "public": "1250000"},
+    "welcome-unfunded": {"private": "0", "public": "0"},
+    "welcome-faucet": {"private": "0", "public": "0"},
+    "welcome-faucet-error": {"private": "0", "public": "0", "faucetError": "this account was funded in the last day"},
     "welcome-funded": {"private": "0", "public": "6000000"},
     "get-tokens-move": {"private": "0", "public": "6000000"},
     "welcome-moving": {"private": "0", "public": "6000000"},
