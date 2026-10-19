@@ -98,7 +98,7 @@ BRIDGE = r"""
             if (method === "cli_create_wallet") return ok({ public: "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", private: "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z",
                 phrase: "abandon ability able about above absent absorb abstract absurd abuse access accident account accuse achieve acid acoustic acquire across act action actor actress actual" })
             if (method === "cli_faucet") return mock.faucetError ? JSON.stringify({ success: false, value: null, error: mock.faucetError })
-                : ok({ account: "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", amount: "1000000", tx: "9fbe58a895319b88093420471af36f67e34d61a730a8cfc0e64d27b15c01de16" })
+                : ok({ account: "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", amount: "2000000", tx: "9fbe58a895319b88093420471af36f67e34d61a730a8cfc0e64d27b15c01de16" })
             if (method === "cli_shield") return ok({ id: "-wallet-1792000000001", name: "-wallet", kind: "shield", state: "running", started: Date.now() - 130000 })
             if (method === "cli_pay_account") return ok({ id: "-wallet-1792000000002", name: "-wallet", kind: "pay_account", state: "running", started: Date.now() - 10000 })
             if (method === "job" && /^-install/.test(args[0])) return ok(mock.installJob || { id: args[0], name: "-install", kind: "install", state: "running", started: Date.now() - 20000,

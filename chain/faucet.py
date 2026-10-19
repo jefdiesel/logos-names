@@ -4,8 +4,8 @@
 POST /faucet {"account": "<base58 account id>"} sends DRIP base units from the
 faucet account. Listens on localhost only; the Cloudflare tunnel
 (lez.buggers.online/faucet) forwards to it with the caller's address in
-CF-Connecting-IP. Limits: each account once a day, each address a few times a
-day, and a daily total.
+CF-Connecting-IP. Limits: each account once a day, each address once a day,
+and a daily total.
 """
 import json
 import os
@@ -22,14 +22,14 @@ WALLET = os.environ.get("FAUCET_WALLET", f"{HOME}/faucet-official")
 RPC = os.environ.get("FAUCET_RPC", "https://testnet.lez.logos.co")
 with open(f"{WALLET}/faucet-account.txt") as f:
     FAUCET = f.read().strip().removeprefix("Public/")
-# Enough for one name's deposit, held privately: moving it to private and
-# registering privately take no fee, so all of it goes to the deposit.
-DRIP = int(os.environ.get("FAUCET_DRIP", 1_000_000))
+# One name's 1M deposit and 1M to use: moving to private and private changes
+# take no fee, so none of it goes to gas.
+DRIP = int(os.environ.get("FAUCET_DRIP", 2_000_000))
 # The faucet's own transfer must cover its fee reserve (the CLI gives a native
 # transfer a gas limit of 1,000; about 3,000 is charged), or it is included,
 # fails and is charged anyway. Kept generous.
 RESERVE = 100_000
-PER_ADDRESS = 3
+PER_ADDRESS = 1
 PER_DAY = int(os.environ.get("FAUCET_PER_DAY", 50))
 DAY = 86400
 STATE = f"{HOME}/faucet-state.json"

@@ -397,8 +397,8 @@ pub trait NamesModule: Send + 'static {
     // ── Getting started without a terminal ─────────────────────────────
 
     /// Asks the Names faucet to pay the wallet's default public account a
-    /// little LEZ (1,000,000 on the testnet, enough for one name's deposit),
-    /// once a day per account. `{account, amount, tx}` once the faucet has sent
+    /// little LEZ (2,000,000 on the testnet: a name's 1,000,000 deposit and as
+    /// much to use), once a day per account and per internet address. `{account, amount, tx}` once the faucet has sent
     /// it; it arrives within a minute or two (`cli_balance` shows it). The
     /// faucet's own refusal (funded today, empty, busy) comes back as the error.
     fn cli_faucet(&mut self) -> String;

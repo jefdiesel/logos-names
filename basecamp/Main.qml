@@ -551,6 +551,8 @@ Item {
     property bool shieldMoved: false
     /// What a name's deposit takes; the least worth moving to private.
     readonly property string nameDeposit: "1000000"
+    /// What the Names faucet gives a new wallet: a name's deposit and as much again to use.
+    readonly property string faucetAmount: "2000000"
     /// Everything the public account holds moves to private: names and payments use it there.
     readonly property string shieldAmount: cliPublic !== null && atLeast(cliPublic.balance, nameDeposit) ? String(cliPublic.balance) : nameDeposit
     // Free tokens from the Names faucet (`cli_faucet`), for a new wallet's public account.
@@ -3206,7 +3208,7 @@ Item {
                     Hint {
                         visible: root.hasCliWallet && !root.canShield && !root.hasPrivateFunds
                         font.pixelSize: root.px(16)
-                        text: "Get " + root.grouped(root.nameDeposit) + " free test tokens to start: enough for your name's deposit."
+                        text: "Get " + root.grouped(root.faucetAmount) + " free test tokens to start: your name's deposit, and some to pay with."
                     }
                     Action {
                         visible: root.hasCliWallet && !root.canShield && !root.hasPrivateFunds && !root.faucetSent
