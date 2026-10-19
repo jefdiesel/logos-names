@@ -1,0 +1,12 @@
+{
+	"name": "names-app-deps",
+	"private": true,
+	"type": "module",
+	"description": "Build-time dependencies of the phone app's Messages (public/app/msg-crypto.js and public/app/waku.js). See msg-crypto.js for the build commands.",
+	"devDependencies": {
+		"@noble/ciphers": "2.4.0",
+		"@noble/curves": "2.4.0",
+		"@noble/hashes": "2.4.0",
+		"@waku/sdk": "0.0.36"
+	}
+}

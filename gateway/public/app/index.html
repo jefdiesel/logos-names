@@ -28,7 +28,7 @@
 </header>
 <nav id="menu" class="menu" hidden>
   <a href="./">Look up a name</a>
-  <a href="../msgtest/">Messages <small>test</small></a>
+  <a href="./?view=messages" id="messages-link">Messages <small>test</small></a>
   <a href="./" id="about-link">About and privacy</a>
   <a href="../">Get Names for your computer</a>
   <a href="https://github.com/jefdiesel/logos-names" rel="noopener">Code on GitHub</a>
@@ -63,6 +63,9 @@
       <label class="field">Board program
         <input id="board" type="text" autocapitalize="none" spellcheck="false"></label>
     </div>
+    <label class="field">Messaging node
+      <input id="peer" type="text" autocapitalize="none" spellcheck="false" placeholder="/dns4/…/tcp/443/wss/p2p/…">
+      <small class="muted">The Logos messaging (Waku) node Messages connects to, as a WebSocket multiaddr.</small></label>
     <p id="settings-error" class="error" role="alert" hidden></p>
     <div class="row">
       <button type="button" id="settings-save">Save</button>
@@ -103,6 +106,64 @@
     <p>Type a name to see its card, page and posts, read from the chain in this browser.</p>
   </section>
 
+  <section id="messages" class="messages" hidden>
+    <div class="msg-top">
+      <h1>Messages</h1>
+      <span id="msg-conn" class="conn" role="status" aria-live="polite">Not connected</span>
+    </div>
+    <p class="muted">End-to-end encrypted, to and from names. Messages arrive while this page is open;
+      nothing is kept for you on the network yet.</p>
+    <div id="msg-conn-error" class="status error" hidden>
+      <strong>Can't reach the messaging node.</strong>
+      <p id="msg-conn-detail"></p>
+      <button type="button" id="msg-retry" class="ghost">Try again</button>
+    </div>
+
+    <details id="msg-setup" class="box">
+      <summary id="msg-setup-summary">Set up this phone</summary>
+      <h2>This phone's messaging key</h2>
+      <p id="msg-key" class="mono key"></p>
+      <button type="button" id="msg-key-copy" class="ghost wide">Copy key</button>
+      <p id="msg-key-note" class="muted" hidden></p>
+      <label class="field">Which name is yours?
+        <span class="lookup inline">
+          <input id="msg-me" type="text" autocapitalize="none" autocorrect="off" spellcheck="false"
+                 enterkeyhint="done" placeholder="e.g. jef" maxlength="40">
+          <button type="button" id="msg-me-check">Check</button>
+        </span></label>
+      <p>To get messages for that name on this phone, publish the key on the name from your computer:</p>
+      <p id="msg-command" class="mono command"></p>
+      <button type="button" id="msg-command-copy" class="ghost wide">Copy command</button>
+      <p id="msg-me-status" class="me-status" role="status" aria-live="polite"></p>
+    </details>
+
+    <div id="msg-list-view">
+      <form id="msg-new" class="lookup" autocomplete="off">
+        <label for="msg-to" class="sr">Name to message</label>
+        <input id="msg-to" type="text" autocapitalize="none" autocorrect="off" spellcheck="false"
+               enterkeyhint="go" placeholder="Message a name, e.g. testpilot" maxlength="40">
+        <button type="submit">Open</button>
+      </form>
+      <ul id="msg-convos" class="convos"></ul>
+      <p id="msg-empty" class="muted">No conversations yet.</p>
+    </div>
+
+    <div id="msg-thread-view" hidden>
+      <div class="thread-head">
+        <button type="button" id="msg-back" class="ghost">Back</button>
+        <h2 id="msg-with"></h2>
+      </div>
+      <ol id="msg-thread" class="thread"></ol>
+      <p id="msg-thread-note" class="muted" hidden></p>
+      <form id="msg-compose" class="compose" autocomplete="off">
+        <label for="msg-text" class="sr">Message</label>
+        <textarea id="msg-text" rows="2" maxlength="2000" placeholder="Message"></textarea>
+        <button type="submit" id="msg-send">Send</button>
+      </form>
+      <p id="msg-send-error" class="error" role="alert" hidden></p>
+    </div>
+  </section>
+
   <section id="about" class="box">
     <h2>About and privacy</h2>
     <p>Names gives people a name on the Logos Execution Zone (LEZ): post, message and get paid as
@@ -117,6 +178,21 @@
       <li><b>The door.</b> The LEZ testnet's own RPC doesn't let browsers in yet, so this page reaches it
         through a small relay that adds that permission and only passes ordinary chain calls.</li>
       <li><b>Your settings</b> stay on this device.</li>
+    </ul>
+    <h3>Messages</h3>
+    <ul class="facts">
+      <li><b>End-to-end encrypted.</b> A message is sealed on your phone to the key the other name
+        published (its <code>msg</code> entry) and only their device can open it. Who sent it is inside
+        the sealed part.</li>
+      <li><b>The messaging node</b> (Logos messaging, Waku) carries messages. It sees your phone's IP address
+        and which inbox a message goes to (a short hash of the recipient's key), not what it says or who sent
+        it. Ours is a temporary relay, set under Settings.</li>
+      <li><b>Checked on chain.</b> "✓ jef" means the message was sealed with the key jef published on the
+        chain. Anything else shows as "unverified".</li>
+      <li><b>The messaging key</b> is made on this phone and only opens messages. It can't spend or move
+        money, and it isn't your name's key. Clearing this site's data deletes it.</li>
+      <li><b>Live only.</b> Messages arrive while the page is open; the network keeps nothing for you yet.
+        Conversations are kept on this device only.</li>
     </ul>
   </section>
 </main>

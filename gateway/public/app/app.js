@@ -40,7 +40,11 @@ const CHAINS = {
     board: "CKqLLZrTUNiw5KLtQCZ9oSDXWWEtCHLpKjp7pQAaP5q4",
   },
 };
-const DEFAULTS = { rpc: "https://lez.buggers.online/lez", ...CHAINS["https://lez.buggers.online/lez"] };
+// The Logos messaging (Waku) node Messages connects to. A temporary tunnel for now,
+// hence a setting. (msg-crypto.js has the same default, for scripts.)
+const DEFAULT_PEER =
+  "/dns4/west-territories-location-trek.trycloudflare.com/tcp/443/wss/p2p/16Uiu2HAmFQGCcQzKpY9QhESgVXWXUv4AHWWvR6pX6vE1qvFUpyoc";
+const DEFAULTS = { rpc: "https://lez.buggers.online/lez", ...CHAINS["https://lez.buggers.online/lez"], peer: DEFAULT_PEER };
 const PRESETS = Object.keys(CHAINS);
 const STORE_KEY = "lns-app-settings";
 const PAGE_SIZE = 10;
@@ -72,7 +76,7 @@ function loadSettings() {
   try {
     const saved = { ...DEFAULTS, ...JSON.parse(localStorage.getItem(STORE_KEY) || "{}") };
     // A known chain always uses its own programs.
-    return CHAINS[saved.rpc] ? { rpc: saved.rpc, ...CHAINS[saved.rpc] } : saved;
+    return CHAINS[saved.rpc] ? { rpc: saved.rpc, ...CHAINS[saved.rpc], peer: saved.peer } : saved;
   } catch {
     return { ...DEFAULTS };
   }
@@ -103,6 +107,7 @@ function fillSettings() {
   $("rpc-custom").hidden = preset !== "custom";
   $("registry").value = settings.registry;
   $("board").value = settings.board;
+  $("peer").value = settings.peer;
   $("programs").hidden = preset !== "custom";
   $("settings-error").hidden = true;
 }
@@ -112,6 +117,7 @@ function readSettingsForm() {
   const rpc = (choice === "custom" ? $("rpc-custom").value : choice).trim();
   const registry = $("registry").value.trim();
   const board = $("board").value.trim();
+  const peer = $("peer").value.trim() || DEFAULT_PEER;
   let url;
   try {
     url = new URL(rpc);
@@ -121,7 +127,10 @@ function readSettingsForm() {
   if (url.protocol !== "https:" && url.protocol !== "http:") return { error: "The RPC URL must start with https://." };
   if (!isProgramId(registry)) return { error: "The registry program isn't a valid program ID." };
   if (!isProgramId(board)) return { error: "The board program isn't a valid program ID." };
-  return { value: { rpc, registry, board } };
+  if (!/^\/(dns4|dns6|dns|ip4|ip6)\/[^/]+\/tcp\/\d+\/(wss|tls\/ws)\/p2p\/\w+$/.test(peer)) {
+    return { error: "The messaging node must be a WebSocket address like /dns4/…/tcp/443/wss/p2p/…" };
+  }
+  return { value: { rpc, registry, board, peer } };
 }
 
 function toggleSettings(open) {
@@ -138,7 +147,13 @@ $("menu-button").addEventListener("click", () => {
 });
 $("about-link").addEventListener("click", (event) => {
   event.preventDefault();
+  if (inMessages()) leaveMessages();
   $("about").scrollIntoView({ behavior: "smooth", block: "start" });
+});
+$("messages-link").addEventListener("click", (event) => {
+  event.preventDefault();
+  if (!inMessages()) history.pushState(null, "", "./?view=messages");
+  showView();
 });
 for (const link of document.querySelectorAll("#menu a")) {
   link.addEventListener("click", () => {
@@ -168,7 +183,8 @@ $("settings-save").addEventListener("click", () => {
   settings = value;
   saveSettings(settings);
   toggleSettings(false);
-  route();
+  if (inMessages()) showView();
+  else route();
 });
 $("settings-reset").addEventListener("click", () => {
   settings = { ...DEFAULTS };
@@ -479,5 +495,46 @@ function route() {
   showName(name);
 }
 
-window.addEventListener("hashchange", route);
-route();
+// ---------- views ----------
+// Names travel in the hash (route() above); the Messages view is `?view=messages`.
+
+const LOOKUP_PARTS = ["lookup", "intro", "about"];
+const inMessages = () => new URLSearchParams(location.search).get("view") === "messages";
+let messages = null; // messages.js, loaded the first time Messages opens
+let viewOn = null; // whether Messages is showing
+
+function leaveMessages() {
+  history.pushState(null, "", "./" + location.hash);
+  showView();
+}
+
+async function showView() {
+  const on = inMessages();
+  viewOn = on;
+  $("messages").hidden = !on;
+  if (!on) {
+    for (const id of LOOKUP_PARTS) $(id).hidden = false;
+    route();
+    return;
+  }
+  token += 1;
+  clearView();
+  for (const id of LOOKUP_PARTS) $(id).hidden = true;
+  try {
+    messages ??= await import("./messages.js");
+    messages.open({ settings: () => settings, lookUp: (name) => lookUp(settings, name), explain: explainFailure });
+  } catch (error) {
+    $("msg-conn").textContent = "Couldn't load Messages";
+    console.error(error);
+  }
+}
+
+window.addEventListener("hashchange", () => {
+  if (inMessages()) history.replaceState(null, "", "./" + location.hash);
+  showView();
+});
+// Browsers also fire popstate for a new hash; only a change of view matters here.
+window.addEventListener("popstate", () => {
+  if (inMessages() !== viewOn) showView();
+});
+showView();
