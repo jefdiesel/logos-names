@@ -2040,8 +2040,13 @@ const REVEAL_ATTEMPTS: u32 = 4;
 /// How many blocks to wait for a transaction to be included before giving up.
 const TX_POLL_MAX_BLOCKS: usize = 60;
 /// The least gas limit a registry call is sent with, so a small mis-estimate (the
-/// chain changing between the run here and the sequencer's) can't fail it.
-const MIN_GAS_LIMIT: u64 = 200_000;
+/// chain changing between the run here and the sequencer's) can't fail it. The
+/// whole limit is held from the payer while the call runs (at up to 9 a unit, so
+/// 200,000 held 1.8M even for a commit that uses 23,214), and the 1.5x margin
+/// already covers drift, so this floor is kept small. Measured on the testnet
+/// (2026-10-19): commit 23,214, release 51,322, profile change 65,590, register
+/// about 165,000.
+const MIN_GAS_LIMIT: u64 = 30_000;
 
 /// The gas limit for a call measured at `cycles`: 1.5 x, rounded up, at least
 /// [`MIN_GAS_LIMIT`].
