@@ -12,13 +12,15 @@ through a zero-knowledge proof made on your own machine. Nothing here runs a
 server: the app talks to the chain and to Logos messaging directly, and the website
 is static files.
 
-**Latest: Names 0.9 for Basecamp** (2026-10-18), macOS (Apple silicon) and Linux x86_64:
-[release](https://github.com/jefdiesel/logos-names/releases/tag/basecamp-v0.9.0),
-[announcement](https://forum.logos.co/t/names-for-basecamp-posts-messages-and-pay-under-your-lez-name/2020).
-New: one package for both systems, the register screen no longer drops back to Welcome,
-your profile shows at once from your saved main name, and the app is ready for
-Basecamp's proposed Day and High Contrast themes and text size
-([logos-basecamp#515](https://github.com/logos-co/logos-basecamp/pull/515)).
+**Latest: Names 0.10 for Basecamp** (2026-10-19), macOS (Apple silicon) and Linux x86_64:
+[release](https://github.com/jefdiesel/logos-names/releases/tag/basecamp-v0.10.0).
+New: a brand-new person can start inside Basecamp with nothing else. Welcome installs
+Names, makes the wallet, and **Get free tokens** gives it 2,000,000 testnet LEZ from the
+Names faucet (once a day): enough for a private name's 1,000,000 deposit and some to pay
+with. Move to private now moves all of it. Tested end to end on the public LEZ testnet
+from a clean setup: tokens in 39 s, a private name registered about 35 minutes later.
+Earlier: [0.9](https://github.com/jefdiesel/logos-names/releases/tag/basecamp-v0.9.0)
+([announcement](https://forum.logos.co/t/names-for-basecamp-posts-messages-and-pay-under-your-lez-name/2020)).
 
 [SPEC.md](SPEC.md) is the specification: everything a wallet, app or gateway needs
 to resolve and change names without this repository's code.
