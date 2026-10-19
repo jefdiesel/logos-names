@@ -27,17 +27,20 @@ import { postCount, postsOf } from "./board.js";
 // Each chain the app knows, with the registry and board deployed on it, so
 // picking one is a single tap. Another RPC takes typed program IDs.
 const CHAINS = {
+  // The public LEZ testnet, where real names live. Its own RPC
+  // (testnet.lez.logos.co) doesn't allow browsers yet, so this passes through a
+  // door that adds the header and only lets ordinary chain calls through.
+  "https://lez.buggers.online/lez": {
+    registry: "38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq",
+    board: "8PwnCKStKQtoBxJCgopCG6CPPMJCUWba1SDG1SXtXYTf",
+  },
+  // Our test chain: test names only.
   "https://lez.buggers.online": {
     registry: "m82S3dUDxdcMBtZtXpHXYcVhU68U7bS4AKqsi6NomJm",
     board: "CKqLLZrTUNiw5KLtQCZ9oSDXWWEtCHLpKjp7pQAaP5q4",
   },
-  "https://testnet.lez.logos.co": {
-    registry: "38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq",
-    board: "8PwnCKStKQtoBxJCgopCG6CPPMJCUWba1SDG1SXtXYTf",
-  },
 };
-// The test chain while it is the only one browsers can reach.
-const DEFAULTS = { rpc: "https://lez.buggers.online", ...CHAINS["https://lez.buggers.online"] };
+const DEFAULTS = { rpc: "https://lez.buggers.online/lez", ...CHAINS["https://lez.buggers.online/lez"] };
 const PRESETS = Object.keys(CHAINS);
 const STORE_KEY = "lns-app-settings";
 const PAGE_SIZE = 10;
