@@ -66,8 +66,9 @@ names setup
 
 macOS on Apple silicon and Linux x86_64. One binary with the LEZ wallet built in;
 the public LEZ testnet is the default. `names --help` and `man names` cover every
-command. Testnet tokens come from bridging from your own Logos Blockchain node
-(`names bridge`); there is no faucet.
+command. Testnet tokens: the app's Welcome gets them from the Names faucet
+(2,000,000 a day), or bridge from your own Logos Blockchain node with `names
+bridge`.
 
 **2. The Names app in Basecamp.** In Basecamp's package manager, add the
 repository
@@ -82,6 +83,10 @@ walks you through picking your name.
 Every download is signed with the release key (`scripts/release-signing-key.pub`,
 fingerprint `SHA256:dAQbSDw6smVMxkwJdQ2104U3Xem+cDOldUmpW+wQzcE`); the installer
 checks it with `ssh-keygen`.
+
+**Update.** CLI: re-run the install line above — it always fetches the latest
+release. App: in Basecamp's package manager, update **Names** (or re-add the
+repository). Welcome's "Get free tokens" needs both the CLI and the app on 0.10+.
 
 ## From the command line
 
