@@ -8,3 +8,4 @@ license.workspace = true
 names_core.workspace = true
 names_seal.workspace = true
 hex = "0.4.3"
+tiny_http = "0.12"

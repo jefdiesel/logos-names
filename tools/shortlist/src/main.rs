@@ -20,9 +20,10 @@ use std::{
 const ALNUM: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
 const MID: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789-";
 
-/// Every valid name of length 1 to 3, with its tier.
+/// Every valid name of length 1 to 4, all TIER_LOCKED: the minimum registerable
+/// length is 5. (v5.1 — was 1 to 3 with 3-char names TIER_THREE.)
 fn enumerate() -> Vec<(String, u8)> {
-    let mut out = Vec::with_capacity(49_284);
+    let mut out = Vec::with_capacity(1_823_508);
     for &a in ALNUM {
         out.push(((a as char).to_string(), TIER_LOCKED));
     }
@@ -34,7 +35,16 @@ fn enumerate() -> Vec<(String, u8)> {
     for &a in ALNUM {
         for &b in MID {
             for &c in ALNUM {
-                out.push((format!("{}{}{}", a as char, b as char, c as char), TIER_THREE));
+                out.push((format!("{}{}{}", a as char, b as char, c as char), TIER_LOCKED));
+            }
+        }
+    }
+    for &a in ALNUM {
+        for &b in MID {
+            for &c in MID {
+                for &d in ALNUM {
+                    out.push((format!("{}{}{}{}", a as char, b as char, c as char, d as char), TIER_LOCKED));
+                }
             }
         }
     }
@@ -74,7 +84,7 @@ fn generate(dir: &Path, threads: usize, limit: Option<usize>) -> Result<(), Stri
         let stride = (total / n.max(1)).max(1);
         names = names.into_iter().step_by(stride).take(n).collect();
     } else {
-        assert_eq!(names.len(), 49_284);
+        assert_eq!(names.len(), 1_823_508); // 1–4 chars, all locked (min length 5)
     }
     eprintln!("deriving {} ids with {threads} threads", names.len());
     let entries = derive_all(names, threads);
@@ -157,10 +167,88 @@ fn verify(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+// ---- proof endpoint: serve non-membership proofs for 5+ char names ----
+
+fn load_list(dir: &Path) -> Result<ShortList, String> {
+    let bin = fs::read(dir.join("shortlist.bin")).map_err(|e| e.to_string())?;
+    if bin.len() % 33 != 0 {
+        return Err("shortlist.bin is not a multiple of 33 bytes".into());
+    }
+    let leaves: Vec<Leaf> = bin
+        .chunks_exact(33)
+        .map(|c| {
+            let mut id = [0u8; 32];
+            id.copy_from_slice(&c[..32]);
+            Leaf { id, tier: c[32] }
+        })
+        .collect();
+    ShortList::from_sorted_leaves(leaves).map_err(|e| e.to_string())
+}
+
+fn path_json(p: &[[u8; 32]]) -> String {
+    p.iter().map(|h| format!("\"{}\"", hex::encode(h))).collect::<Vec<_>>().join(",")
+}
+
+fn proof_json(proof: &LengthProof) -> Result<String, String> {
+    match proof {
+        LengthProof::NonMembership(n) => Ok(format!(
+            r#"{{"left":{{"id":"{}","tier":{}}},"leftIndex":{},"leftPath":[{}],"right":{{"id":"{}","tier":{}}},"rightPath":[{}]}}"#,
+            hex::encode(n.left.id), n.left.tier, n.left_index, path_json(&n.left_path),
+            hex::encode(n.right.id), n.right.tier, path_json(&n.right_path),
+        )),
+        LengthProof::Membership(_) => Err("name is reserved (1–4 characters)".into()),
+    }
+}
+
+fn handle(list: &ShortList, url: &str) -> (u16, String) {
+    let id_hex = url.split("id=").nth(1).map(|s| s.split('&').next().unwrap_or(s)).unwrap_or("");
+    let bytes = match hex::decode(id_hex) {
+        Ok(b) if b.len() == 32 => b,
+        _ => return (400, r#"{"error":"id must be 64 hex characters"}"#.to_string()),
+    };
+    let mut id = [0u8; 32];
+    id.copy_from_slice(&bytes);
+    match list.prove(&id) {
+        Ok(proof) => match proof_json(&proof) {
+            Ok(j) => (200, j),
+            Err(e) => (409, format!(r#"{{"error":"{e}"}}"#)),
+        },
+        Err(e) => (400, format!(r#"{{"error":"{e}"}}"#)),
+    }
+}
+
+fn serve(dir: &Path, port: u16) -> Result<(), String> {
+    let list = load_list(dir)?;
+    eprintln!(
+        "names-proof: {} leaves, depth {}, root {}, listening on 127.0.0.1:{port}",
+        list.leaves().len(), list.depth(), hex::encode(list.root())
+    );
+    let server = tiny_http::Server::http(("127.0.0.1", port)).map_err(|e| e.to_string())?;
+    for req in server.incoming_requests() {
+        let (status, body) = handle(&list, req.url());
+        let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
+        let _ = req.respond(tiny_http::Response::from_string(body).with_status_code(status).with_header(header));
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: shortlist generate <out-dir> [--threads N] [--limit N] | shortlist verify <out-dir>";
+    let usage = "usage: shortlist generate <out-dir> [--threads N] [--limit N] | shortlist verify <out-dir> | shortlist serve <dir> [--port N]";
     match args.first().map(String::as_str) {
+        Some("serve") => {
+            let dir = args.get(1).ok_or(usage)?;
+            let mut port = 3052u16;
+            let mut it = args[2..].iter();
+            while let Some(flag) = it.next() {
+                let val = it.next().ok_or(usage)?;
+                match flag.as_str() {
+                    "--port" => port = val.parse().map_err(|e: std::num::ParseIntError| e.to_string())?,
+                    _ => return Err(usage.into()),
+                }
+            }
+            serve(Path::new(dir), port)
+        }
         Some("generate") => {
             let dir = args.get(1).ok_or(usage)?;
             let (mut threads, mut limit) = (6usize, None);
@@ -197,13 +285,13 @@ mod tests {
     #[test]
     fn counts_and_validity() {
         let names = enumerate();
-        assert_eq!(names.len(), 49_284);
-        assert_eq!(names.iter().filter(|(_, t)| *t == TIER_LOCKED).count(), 1_332);
-        assert_eq!(names.iter().filter(|(_, t)| *t == TIER_THREE).count(), 47_952);
+        assert_eq!(names.len(), 1_823_508); // 36 + 36^2 + 36*37*36 + 36*37^2*36
+        assert!(names.iter().all(|(_, t)| *t == TIER_LOCKED)); // 1–4 all locked (min length 5)
         let mut seen = std::collections::HashSet::new();
         for (n, t) in &names {
             names_core::validate_name(n).unwrap();
-            assert_eq!(*t == TIER_LOCKED, n.len() <= 2);
+            assert_eq!(*t, TIER_LOCKED);
+            assert!(n.len() >= 1 && n.len() <= 4);
             assert!(seen.insert(n.clone()));
         }
     }
