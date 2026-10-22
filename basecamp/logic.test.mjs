@@ -1,4 +1,4 @@
-// Checks the one piece of logic the view keeps for itself, since the QML engine
+// Checks the pieces of logic the view keeps for itself, since the QML engine
 // cannot run in CI. Run with: node basecamp/logic.test.mjs
 import { readFileSync } from "node:fs";
 
@@ -10,7 +10,9 @@ function grab(name) {
   for (;; i++) { if (qml[i] === "{") depth++; else if (qml[i] === "}" && --depth === 0) break; }
   return qml.slice(start, i + 1);
 }
-const { amountHex } = new Function(grab("amountHex") + "\nreturn { amountHex };")();
+const { atLeast, someAmount, entryShown } = new Function(
+  ["atLeast", "someAmount", "entryShown"].map(grab).join("\n") + "\nreturn { atLeast, someAmount, entryShown };",
+)();
 
 let failures = 0;
 const check = (label, got, want) => {
@@ -18,11 +20,18 @@ const check = (label, got, want) => {
   if (!ok) failures++;
   console.log((ok ? "ok   " : "FAIL ") + label + (ok ? "" : `\n   got  ${JSON.stringify(got)}\n   want ${JSON.stringify(want)}`));
 };
-// The wallet takes amounts as 16 bytes, little-endian, in hex.
-check("amount 1", amountHex("1"), "01" + "00".repeat(15));
-check("amount 4242", amountHex("4242"), "9210" + "00".repeat(14));
-check("amount 30000000", amountHex("30000000"), "80c3c901" + "00".repeat(12));
-check("amount 999999999999999", amountHex("999999999999999"), "ff7fc6a47e8d03" + "00".repeat(9));
-check("rejected amounts", ["0", "1.5", "", "-3", "1e3", " "].map(amountHex), ["", "", "", "", "", ""]);
+// Balances and deposits are decimal text, past what a JS number holds exactly.
+check("atLeast more digits", atLeast("10", "9"), true);
+check("atLeast fewer digits", atLeast("9", "10"), false);
+check("atLeast equal", atLeast("1000000", "1000000"), true);
+check("atLeast leading zeros", [atLeast("007", "7"), atLeast("7", "008")], [true, false]);
+check("atLeast past 2^53", atLeast("100000000000000000000", "99999999999999999999"), true);
+check("atLeast just short", atLeast("99999999999999999998", "99999999999999999999"), false);
+check("someAmount", ["1", "000", "0", "", null, undefined, "10"].map(someAmount), [true, false, false, false, false, false, true]);
+// A long unbroken value (a key, a CID) is shortened in the middle; text and links are not.
+check("entryShown key", entryShown("a".repeat(30) + "b".repeat(30)), "aaaaaaaaaaaa…bbbbbbbb");
+check("entryShown short", entryShown("short value"), "short value");
+check("entryShown sentence", entryShown("a bio that runs on for quite a while, longer than forty"), "a bio that runs on for quite a while, longer than forty");
+check("entryShown link", entryShown("https://example.com/" + "x".repeat(40)), "https://example.com/" + "x".repeat(40));
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);
