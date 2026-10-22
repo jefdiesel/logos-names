@@ -811,7 +811,7 @@ Item {
             if (item.ready_at !== null && item.ready_at !== undefined && Date.now() < item.ready_at)
                 continue
             revealing = true
-            askLater("register", [item.name, item.owner, "auto"], function(value) {
+            askLater("register_name", [item.name, item.owner, "auto"], function(value) {
                 revealing = false
                 if (value && value.stage === "registered") {
                     say(item.name + " is yours.", false)
@@ -1224,7 +1224,7 @@ Item {
             return
         pending = { name: name, sent: false }
         say("Asking the wallet to sign.", false)
-        askLater("register", [name, owner, "auto"], function(value) {
+        askLater("register_name", [name, owner, "auto"], function(value) {
             pending = null
             say("Committed. The name finishes registering in about 15 to 20 minutes; keep Basecamp open.", false)
             missing = ""

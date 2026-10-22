@@ -22,7 +22,7 @@
 //! deposit comes back to whoever releases it. One- and two-character names are
 //! locked, and three-character names take a higher deposit; the module proves a
 //! name's length tier from a built-in copy of the short-name list. Claiming a
-//! name is commit, then reveal at least 15 minutes later (see `register`).
+//! name is commit, then reveal at least 15 minutes later (see `register_name`).
 //!
 //! Reading needs nothing but the sequencer. Changing a name needs a signature,
 //! which this module asks the LEZ wallet module (`lez_core`) for: the keys stay
@@ -125,7 +125,7 @@ pub trait NamesModule: Send + 'static {
     /// registrations it has under way: `{names: [{name, display, owner,
     /// expires, never, lapsed}], pending: [{name, display, owner, stage,
     /// ready_at, tx}]}`. `owner` is the wallet's account that holds the name.
-    /// A pending `stage` is `committed` (call `register` again from
+    /// A pending `stage` is `committed` (call `register_name` again from
     /// `ready_at`, in milliseconds) or `revealed` (sent; it shows in `names`
     /// once it lands). The chain keeps no list of names, so this is the
     /// device's own memory: every name registered from here, and every name
@@ -164,7 +164,7 @@ pub trait NamesModule: Send + 'static {
     /// steps, so that nobody watching pending transactions can take the name
     /// first: the first call sends a commitment, which hides the name, and
     /// answers `stage: "committed"` with `ready_at` (milliseconds, chain time,
-    /// about 15 minutes on). Calling `register` again from then on sends the
+    /// about 15 minutes on). Calling `register_name` again from then on sends the
     /// reveal that claims the name (`stage: "revealed"`), and once that has
     /// landed, answers `stage: "registered"` without sending anything. A call
     /// before `ready_at` sends nothing. The commitment is kept on this device
@@ -174,10 +174,10 @@ pub trait NamesModule: Send + 'static {
     /// of the wallet's private accounts (base58), `auto` for its first one
     /// (made if it has none), or empty to set nothing. It is used by the
     /// reveal; given at commit time it is remembered for it.
-    fn register(&mut self, name: String, owner: String, private_account: String) -> String;
+    fn register_name(&mut self, name: String, owner: String, private_account: String) -> String;
 
     /// Makes `name` payable privately and only privately: publishes the
-    /// receiving keys of `private_account` (as for `register`, `auto` allowed)
+    /// receiving keys of `private_account` (as for `register_name`, `auto` allowed)
     /// and removes any public account from the name.
     fn receive_privately(&mut self, name: String, private_account: String) -> String;
 
@@ -281,7 +281,7 @@ pub trait NamesModule: Send + 'static {
     /// later. `cli_mine` lists it with `registering` true until then. With
     /// `public`, the CLI then moves it to a new public account funded privately
     /// (`names make-public`), so it posts in one block and nothing links it to you.
-    fn cli_register(&mut self, name: String, public: bool) -> String;
+    fn cli_register(&mut self, name: String, as_public: bool) -> String;
 
     // ── The LNS board (see board/ and docs/BOARD-PLAN.md) ──────────────
 
@@ -331,7 +331,7 @@ pub trait NamesModule: Send + 'static {
     /// Makes the wallet's anonymous name, a CLI job (`names anon`): a private
     /// transfer of a few minutes, then a registration of about 20 that the CLI
     /// finishes in the background.
-    fn make_anon(&mut self, public: bool) -> String;
+    fn make_anon(&mut self, as_public: bool) -> String;
 
     /// The CLI jobs still running, `[{id, name, kind, state, started}]`, so an app
     /// opened mid-change can show it and wait for it.
@@ -1602,7 +1602,7 @@ impl NamesModule for Names {
         reply((|| Ok(self.registry()?.settings()?.as_ref().map_or(Value::Null, settings_json)))())
     }
 
-    fn register(&mut self, name: String, owner: String, private_account: String) -> String {
+    fn register_name(&mut self, name: String, owner: String, private_account: String) -> String {
         reply(self.register_step(&name, &owner, &private_account))
     }
 
@@ -1861,8 +1861,8 @@ impl NamesModule for Names {
         })())
     }
 
-    fn cli_register(&mut self, name: String, public: bool) -> String {
-        let command = match cli::register_args(&name, public) {
+    fn cli_register(&mut self, name: String, as_public: bool) -> String {
+        let command = match cli::register_args(&name, as_public) {
             Ok(command) => command,
             Err(error) => return reply(Err(error)),
         };
@@ -1953,9 +1953,9 @@ impl NamesModule for Names {
         reply((|| Ok(Value::from(self.jobs()?.running())))())
     }
 
-    fn make_anon(&mut self, public: bool) -> String {
+    fn make_anon(&mut self, as_public: bool) -> String {
         let mut command = vec!["anon".to_owned()];
-        if public {
+        if as_public {
             command.push("--public".to_owned());
         }
         self.cli_job("anon", "anon", |_, _, _| Ok((command, None, Value::Null)))
@@ -2425,7 +2425,7 @@ mod tests {
         let mut names = fresh();
         names.program = Some([7; 32]);
         for answer in [
-            names.register("jef.eth".into(), "x".into(), String::new()),
+            names.register_name("jef.eth".into(), "x".into(), String::new()),
             names.release("-jef".into()),
             names.set_primary("x".into(), "not a name".into()),
             names.receive_privately("j f".into(), "auto".into()),

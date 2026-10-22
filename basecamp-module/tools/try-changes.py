@@ -81,11 +81,11 @@ def register(label, owner, private_account):
     global failures
     started = time.time()
     try:
-        answer = call("register", NAME + ".lez", owner, private_account)
+        answer = call("register_name", NAME + ".lez", owner, private_account)
         if answer["stage"] != "committed":
             raise RuntimeError("the first step was %s, not a commitment" % answer["stage"])
         while True:
-            answer = call("register", NAME, owner, private_account)
+            answer = call("register_name", NAME, owner, private_account)
             if answer["stage"] in ("revealed", "registered"):
                 break
             if time.time() - started > 40 * 60:
@@ -113,7 +113,7 @@ check("it never expires and holds its deposit",
       record()["never"] and record()["expires"] is None and not record()["lapsed"] and record()["deposit"] == quote["deposit"])
 check("it takes private payments from the start", record()["npk"] is not None and record()["account"] is None)
 check("this device lists it among the wallet's names", NAME in mine())
-refused("register a taken name", "register", [NAME, B, ""], "already registered")
+refused("register a taken name", "register_name", [NAME, B, ""], "already registered")
 change("add a public account", "set_account", [NAME, B], lambda: record()["account"] == B)
 check("the private keys are still there", record()["npk"] is not None)
 change("go back to private only", "receive_privately", [NAME, "auto"],
