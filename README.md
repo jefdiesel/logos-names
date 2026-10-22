@@ -126,6 +126,9 @@ Testnet names don't carry over to mainnet automatically: to keep one, claim it
 within 30 days of launch. Written directly against `lee_core` because the SPEL
 framework does not support LEZ v0.3 yet (`logos-co/spel#291`).
 
+Building a wallet or app that resolves names? Start with
+[docs/INTEGRATING.md](docs/INTEGRATING.md).
+
 ## Layout
 
 | Path | What it is |
