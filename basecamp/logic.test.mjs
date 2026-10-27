@@ -1,18 +1,6 @@
-// Checks the pieces of logic the view keeps for itself, since the QML engine
-// cannot run in CI. Run with: node basecamp/logic.test.mjs
-import { readFileSync } from "node:fs";
-
-const qml = readFileSync(new URL("./Main.qml", import.meta.url), "utf8");
-function grab(name) {
-  const start = qml.indexOf(`    function ${name}(`);
-  if (start < 0) throw new Error("missing function " + name);
-  let depth = 0, i = qml.indexOf("{", start);
-  for (;; i++) { if (qml[i] === "{") depth++; else if (qml[i] === "}" && --depth === 0) break; }
-  return qml.slice(start, i + 1);
-}
-const { atLeast, someAmount, entryShown } = new Function(
-  ["atLeast", "someAmount", "entryShown"].map(grab).join("\n") + "\nreturn { atLeast, someAmount, entryShown };",
-)();
+// Checks the view's own logic (qml/logic.mjs, which qml/Main.qml imports), since the QML
+// engine cannot run in CI. Run with: node basecamp/logic.test.mjs
+import { atLeast, someAmount, entryShown } from "./qml/logic.mjs";
 
 let failures = 0;
 const check = (label, got, want) => {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Renders Main.qml to PNG files without Basecamp, with a stand-in for the Logos bridge.
+"""Renders qml/Main.qml to PNG files without Basecamp, with a stand-in for the Logos bridge.
 
 Usage: render.py <qml binary> <output dir> [scenario ...]
 Needs QML_IMPORT_PATH and QT_PLUGIN_PATH set for a Qt 6 install, and
@@ -270,7 +270,7 @@ MOCKS = {
 def main():
     qml, out_dir = sys.argv[1], sys.argv[2]
     wanted = sys.argv[3:] or list(SCENARIOS)
-    source = open(os.path.join(HERE, "..", "Main.qml")).read()
+    source = open(os.path.join(HERE, "..", "qml", "Main.qml")).read()
     marker = "Item {\n    id: root\n"
     assert marker in source, "Main.qml no longer starts the way the harness expects"
     os.makedirs(out_dir, exist_ok=True)
@@ -288,10 +288,13 @@ def main():
             "bridge_key": "" if scenario == "get-tokens" else "8e3b0f4a2c71d95e6a0b4c8d2f1e7a3954c6b0d8e2f4a6c8b0d2e4f6a8c0b2d4",
             "scenario": SCENARIOS[scenario], "out": out, "height": 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "name") else 1500 if scenario.startswith("get-tokens") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
         }
-        with tempfile.NamedTemporaryFile("w", suffix=".qml", delete=False) as handle:
+        # Beside Main.qml, so its relative imports (logic.mjs) resolve.
+        with tempfile.NamedTemporaryFile("w", suffix=".qml", delete=False, dir=os.path.join(HERE, "..", "qml")) as handle:
             handle.write(source.replace(marker, marker + bridge, 1))
-        result = subprocess.run([qml, handle.name], capture_output=True, text=True, timeout=60)
-        os.unlink(handle.name)
+        try:
+            result = subprocess.run([qml, handle.name], capture_output=True, text=True, timeout=60)
+        finally:
+            os.unlink(handle.name)  # never leave it beside Main.qml: the package build copies qml/ whole
         problems = [line for line in result.stderr.splitlines() if "qt.qpa.fonts" not in line and line.strip()]
         print(scenario, "ok" if os.path.exists(out) else "FAILED", *problems[:6], sep="\n  " if problems else " ")
 

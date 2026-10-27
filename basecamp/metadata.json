@@ -5,7 +5,7 @@
   "type": "ui_qml",
   "category": "identity",
   "description": "Your name on Logos: register it, post as it, edit its profile",
-  "view": "Main.qml",
+  "view": "qml/Main.qml",
   "icon": "src/icons/icon.png",
   "dependencies": [
     "names"

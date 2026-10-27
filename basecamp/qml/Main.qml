@@ -17,6 +17,7 @@
 import QtQuick
 import QtQuick.Layouts
 import Logos.Theme
+import "logic.mjs" as Logic
 
 Item {
     id: root
@@ -554,7 +555,7 @@ Item {
     /// What the Names faucet gives a new wallet: a name's deposit and as much again to use.
     readonly property string faucetAmount: "2000000"
     /// Everything the public account holds moves to private: names and payments use it there.
-    readonly property string shieldAmount: cliPublic !== null && atLeast(cliPublic.balance, nameDeposit) ? String(cliPublic.balance) : nameDeposit
+    readonly property string shieldAmount: cliPublic !== null && Logic.atLeast(cliPublic.balance, nameDeposit) ? String(cliPublic.balance) : nameDeposit
     // Free tokens from the Names faucet (`cli_faucet`), for a new wallet's public account.
     property bool faucetBusy: false
     property string faucetError: ""
@@ -564,15 +565,8 @@ Item {
     readonly property bool hasCliWallet: cliStatus !== null && !!cliStatus.wallet && !!cliStatus.public
     /// Your public account's ID, as far as it is known.
     readonly property string myPublic: cliPublic !== null ? cliPublic.account : hasCliWallet ? cliStatus.public : ""
-    readonly property bool canShield: cliPublic !== null && atLeast(cliPublic.balance, nameDeposit)
+    readonly property bool canShield: cliPublic !== null && Logic.atLeast(cliPublic.balance, nameDeposit)
     readonly property bool hasPrivateFunds: cliBalance !== undefined && cliBalance !== null && !/^0*$/.test(String(cliBalance.balance))
-
-    /// Whether the decimal `a` is at least `b`.
-    function atLeast(a, b) {
-        a = String(a).replace(/^0+/, "")
-        b = String(b).replace(/^0+/, "")
-        return a.length !== b.length ? a.length > b.length : a >= b
-    }
 
     /// Reads where the CLI stands (nothing is run), and picks up an install
     /// or a move to private that was under way.
@@ -1554,17 +1548,6 @@ Item {
         return known[key] !== undefined ? known[key] : key
     }
 
-    /// An entry's value for reading: a long unbroken value is shortened in the middle.
-    function entryShown(value) {
-        var text = String(value)
-        return text.length > 40 && !/\s/.test(text) && !/^https?:/.test(text) ? text.substr(0, 12) + "…" + text.substr(text.length - 8) : text
-    }
-
-    /// Whether an amount (decimal text) is more than nothing.
-    function someAmount(digits) {
-        return digits !== null && digits !== undefined && !/^0*$/.test(String(digits))
-    }
-
     /// How a name can be paid, in a word or two.
     /// A Profile field as typed in Edit, else as the name has it.
     function draftText(key) {
@@ -1714,7 +1697,7 @@ Item {
             return true
         if (cliBalance === undefined || cliBalance === null)
             return false
-        return /^[0-9]+$/.test(amount) && !atLeast(cliBalance.balance, amount) && cliPublic !== null && atLeast(cliPublic.balance, amount)
+        return /^[0-9]+$/.test(amount) && !Logic.atLeast(cliBalance.balance, amount) && cliPublic !== null && Logic.atLeast(cliPublic.balance, amount)
     }
 
     function payName() {
@@ -4719,8 +4702,8 @@ Item {
                         Chip { label: root.holderChip() }
                         Chip { label: root.paymentsChip() }
                         Chip {
-                            visible: root.record !== null && root.someAmount(root.record.deposit)
-                            label: root.record !== null && root.someAmount(root.record.deposit) ? "Deposit " + root.grouped(root.record.deposit) : ""
+                            visible: root.record !== null && Logic.someAmount(root.record.deposit)
+                            label: root.record !== null && Logic.someAmount(root.record.deposit) ? "Deposit " + root.grouped(root.record.deposit) : ""
                         }
                         Chip {
                             visible: root.record !== null && !root.record.never
@@ -5201,7 +5184,7 @@ Item {
                                         x: 14
                                         y: 12
                                         width: parent.width - 28
-                                        text: root.record !== null && root.someAmount(root.record.deposit) ? "Your deposit of " + root.grouped(root.record.deposit) + " goes with the name. They get it back when they release it, not you." : "Any deposit goes with the name."
+                                        text: root.record !== null && Logic.someAmount(root.record.deposit) ? "Your deposit of " + root.grouped(root.record.deposit) + " goes with the name. They get it back when they release it, not you." : "Any deposit goes with the name."
                                         color: root.brass
                                         font.family: root.sans
                                         font.pixelSize: root.px(15)
@@ -5222,9 +5205,9 @@ Item {
                                 Text { text: "Release"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.DemiBold }
                                 Hint { text: "Give the name up. Its profile and page are deleted and anyone can register it." }
                                 Figure {
-                                    visible: root.record !== null && root.someAmount(root.record.deposit)
+                                    visible: root.record !== null && Logic.someAmount(root.record.deposit)
                                     label: "You get back"
-                                    value: root.record !== null && root.someAmount(root.record.deposit) ? root.grouped(root.record.deposit) : ""
+                                    value: root.record !== null && Logic.someAmount(root.record.deposit) ? root.grouped(root.record.deposit) : ""
                                     note: "To the account that holds it"
                                 }
                                 RowLayout {
@@ -5272,7 +5255,7 @@ Item {
                                 required property string modelData
                                 label: root.entryLabel(modelData)
                                 code: modelData !== "agent"
-                                value: root.record !== null && root.record.texts[modelData] !== undefined ? root.entryShown(root.record.texts[modelData]) : ""
+                                value: root.record !== null && root.record.texts[modelData] !== undefined ? Logic.entryShown(root.record.texts[modelData]) : ""
                                 full: root.record !== null && root.record.texts[modelData] !== undefined ? root.record.texts[modelData] : ""
                             }
                         }
