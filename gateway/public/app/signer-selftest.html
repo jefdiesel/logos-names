@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Wallet signer self-test</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px system-ui, sans-serif; background: #141414; color: #e5e5e5; margin: 0; padding: 20px; max-width: 640px; }
+  h1 { font-size: 20px; }
+  fieldset { border: 1px solid #333; border-radius: 10px; margin: 14px 0; }
+  label { display: block; margin: 8px 0 4px; color: #a4a4a4; }
+  input { width: 100%; box-sizing: border-box; padding: 9px; border-radius: 7px; border: 1px solid #444; background: #222; color: #eee; }
+  button { margin: 6px 6px 0 0; padding: 10px 14px; border: 0; border-radius: 8px; background: #e0a030; color: #111; font-weight: 600; cursor: pointer; }
+  pre { background: #0d0d0d; border: 1px solid #333; border-radius: 8px; padding: 12px; white-space: pre-wrap; word-break: break-all; min-height: 2em; }
+  .muted { color: #888; font-size: 13px; }
+</style>
+</head>
+<body>
+  <h1>Wallet signer self-test</h1>
+  <p class="muted">Drives <code>wallet.js</code> against the signer iframe. For a REAL cross-origin test,
+    serve the signer on a DIFFERENT origin than this page (see <code>public/signer/README.md</code>).</p>
+
+  <fieldset>
+    <legend>Signer</legend>
+    <label>Signer URL</label>
+    <input id="url">
+    <label>Signer origin (replies accepted only from here)</label>
+    <input id="origin">
+    <button id="connect">Connect</button>
+  </fieldset>
+
+  <fieldset>
+    <legend>Actions</legend>
+    <button id="get">getAccount</button>
+    <button id="create">createAccount</button>
+    <button id="lock">lock</button>
+    <label>Send to (account id)</label>
+    <input id="to" placeholder="base58 account id">
+    <label>Amount (base units)</label>
+    <input id="amount" placeholder="1000000">
+    <label>RPC</label>
+    <input id="rpc" value="https://testnet.lez.logos.co">
+    <button id="send">signAndSend</button>
+  </fieldset>
+
+  <h3>Result</h3>
+  <pre id="out">—</pre>
+
+  <script type="module">
+    import { createWallet } from "./wallet.js";
+
+    // Default assumes: this app page on :8001, the signer on :8002, both serving gateway/public.
+    const appOrigin = location.origin;
+    const defSignerOrigin = location.origin.replace(/:(\d+)$/, (_, p) => ":" + (Number(p) + 1)) || "http://localhost:8002";
+    document.getElementById("origin").value = defSignerOrigin;
+    document.getElementById("url").value = `${defSignerOrigin}/signer/index.html?parent=${encodeURIComponent(appOrigin)}`;
+
+    const out = (v) => (document.getElementById("out").textContent =
+      typeof v === "string" ? v : JSON.stringify(v, (k, x) => (typeof x === "bigint" ? x.toString() : x), 2));
+    let w = null;
+
+    document.getElementById("connect").addEventListener("click", async () => {
+      try {
+        w?.destroy();
+        w = createWallet({ url: document.getElementById("url").value, origin: document.getElementById("origin").value });
+        out("connecting…");
+        const info = await w.ready;
+        out({ connected: true, signerSays: info });
+      } catch (e) { out("ERROR: " + (e?.message ?? e)); }
+    });
+
+    const run = (fn) => async () => { try { out("…"); out(await fn()); } catch (e) { out({ error: e?.code ?? "error", message: e?.message ?? String(e) }); } };
+    document.getElementById("get").addEventListener("click", run(() => w.getAccount()));
+    document.getElementById("create").addEventListener("click", run(() => w.createAccount()));
+    document.getElementById("lock").addEventListener("click", run(() => w.lock()));
+    document.getElementById("send").addEventListener("click", run(() => w.signAndSend({
+      to: document.getElementById("to").value.trim(),
+      amount: document.getElementById("amount").value.trim(),
+      rpc: document.getElementById("rpc").value.trim(),
+    })));
+  </script>
+</body>
+</html>

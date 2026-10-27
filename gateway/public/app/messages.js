@@ -1,7 +1,7 @@
 // Messages: end-to-end encrypted messages to and from names (format in msg-crypto.js).
 // Loaded by app.js the first time Messages opens; waku.js (about 2 MB) loads after.
 //
-// This phone has one messaging key (X25519), made here and kept in localStorage. A name
+// This device has one messaging key (X25519), made here and kept in localStorage. A name
 // turns messages on by publishing that key as its `msg` text entry. A message is sealed
 // to the recipient's key and sent over Logos messaging (Waku light push) to the inbox
 // topic of that key; this page listens on its own inbox with a Waku filter subscription.
@@ -22,9 +22,10 @@ import {
   toHex,
 } from "./msg-crypto.js";
 import { isValidName, normalizeName } from "./names.js";
+import * as vault from "./vault.js";
 
-const KEY_STORE = "lns-msg-device"; // { secretKey: hex }
-const ME_STORE = "lns-msg-me:"; // + RPC: the name this phone answers to on that chain
+const KEY_STORE = "lns-msg-device"; // vault record (see vault.js); old builds stored { secretKey: hex }
+const ME_STORE = "lns-msg-me:"; // + RPC: the name this device answers to on that chain
 const CONVO_STORE = "lns-msg-convos:"; // + RPC: { name: [message] }
 const KEEP = 200; // messages kept per conversation
 const TEST_RPC = "https://lez.buggers.online";
@@ -37,10 +38,11 @@ const el = (tag, props = {}, ...children) => {
 };
 
 let ctx = null; // { settings(), lookUp(name), explain(error, rpc) } from app.js
-let device = null; // { secretKey, publicKey }
+let device = null; // { secretKey, publicKey }, only once unlocked
 let keyKept = true; // false when this browser won't store the key
 let wired = false;
 let thread = null; // the name whose thread is open
+let lockMode = null; // "unlock-passcode" | "unlock-passkey" | "migrate" | "new"
 
 // ---------- storage ----------
 
@@ -64,17 +66,146 @@ function writeStore(key, value) {
 
 const memory = {}; // what couldn't be stored lasts until the page closes
 
-function loadDevice() {
-  const saved = readStore(KEY_STORE, null);
+// ---------- the messaging key ----------
+//
+// The X25519 device secret is kept PLAINLY in localStorage ({ secretKey: hex }) and
+// generated silently the first time chat opens. It can't spend money and is rotatable,
+// so plain persistence is the right tradeoff and chat never blocks on a passkey.
+//
+// A passkey is OPTIONAL: `protectWithPasskey` wraps the same key in a vault.js record
+// (WebAuthn PRF, no password). Once protected, opening chat unlocks it with the passkey
+// (showLock). Lose that passkey and the saved key can't be recovered — fine, it's
+// rotatable: "Make a new key" starts fresh; republish it with set-text msg.
+
+const storedRecord = () => readStore(KEY_STORE, null);
+
+function lockError(text) {
+  $("msg-lock-error").textContent = text;
+  $("msg-lock-error").hidden = false;
+}
+function lockBusy(on, msg) {
+  const b = $("msg-lock-busy");
+  b.hidden = !on;
+  if (on && msg) b.textContent = msg;
+  for (const id of ["msg-passkey", "msg-skip", "msg-newkey"]) $(id).disabled = on;
+}
+
+/** Decide the lock mode from what's stored + passkey support, and render the panel. */
+function showLock() {
+  const rec = storedRecord();
+  $("msg-lock-error").hidden = true;
+  lockBusy(false);
+  $("msg-main").hidden = true;
+  $("msg-lock").hidden = false;
+  const passkey = vault.passkeySupported();
+  const show = (id, on) => ($(id).hidden = !on);
+
+  if (vault.isVaultRecord(rec)) {
+    lockMode = "unlock";
+    $("msg-lock-title").textContent = "Unlock messaging";
+    $("msg-lock-note").textContent = "Unlock this device's messaging key with your passkey.";
+    show("msg-passkey", true); $("msg-passkey").textContent = "Unlock with passkey";
+    // Lost the passkey? The saved key can't be recovered; offer a fresh start.
+    show("msg-newkey", true); $("msg-newkey").textContent = "Lost your passkey? Make a new key";
+    show("msg-skip", true); $("msg-skip").textContent = "Use without saving on this browser";
+    return;
+  }
+
+  const legacy = vault.isLegacyPlaintext(rec);
+  lockMode = legacy ? "migrate" : "new";
+  if (passkey) {
+    $("msg-lock-title").textContent = legacy ? "Protect your messaging key" : "Protect messaging on this device";
+    $("msg-lock-note").textContent = legacy
+      ? "This browser is holding your messaging key unprotected. Protect it with a passkey to keep it, or use it just for this session."
+      : "Save this device's messaging key behind a passkey, or use it just for this session.";
+    show("msg-passkey", true); $("msg-passkey").textContent = "Protect with a passkey";
+    show("msg-newkey", false);
+    show("msg-skip", true); $("msg-skip").textContent = "Use without saving on this browser";
+  } else {
+    // No WebAuthn here: never fall back to a password — session-only is the only option.
+    $("msg-lock-title").textContent = "Messaging";
+    $("msg-lock-note").textContent = legacy
+      ? "This browser can't securely save a key (no passkey support), so the key it is holding can't be protected. You can use it for this session; it won't be kept."
+      : "This browser can't securely save a key (no passkey support). You can use messaging for this session; the key won't be kept.";
+    show("msg-passkey", false);
+    show("msg-newkey", false);
+    show("msg-skip", true); $("msg-skip").textContent = "Use for this session";
+  }
+}
+
+function finishUnlock(secretKey, kept) {
+  if (!(secretKey instanceof Uint8Array) || secretKey.length !== 32) throw new Error("bad key");
+  device = { secretKey, publicKey: publicKeyOf(secretKey) };
+  keyKept = kept;
+  lockBusy(false);
+  proceed();
+}
+
+async function doPasskey() {
+  $("msg-lock-error").hidden = true;
   try {
-    if (saved?.secretKey) {
-      const secretKey = fromHex(saved.secretKey);
-      if (secretKey.length === 32) return { secretKey, publicKey: publicKeyOf(secretKey) };
+    lockBusy(true, "Waiting for your passkey\u2026");
+    if (lockMode === "unlock") {
+      finishUnlock(await vault.unlockPasskey(storedRecord()), true);
+    } else {
+      const secretKey = lockMode === "migrate" ? fromHex(storedRecord().secretKey) : newKeyPair().secretKey;
+      const record = await vault.enrollPasskey(secretKey, { rpId: location.hostname, userName: "Names Messages" });
+      finishUnlock(secretKey, writeStore(KEY_STORE, record)); // replaces any plaintext in place
     }
-  } catch {}
-  const pair = newKeyPair();
-  keyKept = writeStore(KEY_STORE, { secretKey: toHex(pair.secretKey) });
-  return pair;
+  } catch (error) {
+    lockBusy(false);
+    lockError(error?.message ?? String(error));
+  }
+}
+
+/** "Use without saving": key in memory for this session only; persist nothing. */
+function doSkip() {
+  let secretKey;
+  const rec = storedRecord();
+  if (vault.isLegacyPlaintext(rec)) { try { secretKey = fromHex(rec.secretKey); } catch {} }
+  if (!secretKey) secretKey = newKeyPair().secretKey;
+  try { localStorage.removeItem(KEY_STORE); } catch {} // drop any plaintext; nothing stored this way
+  finishUnlock(secretKey, false);
+}
+
+/** Lost-passkey recovery: discard the unrecoverable saved key and start fresh (plain). */
+function doNewKey() {
+  try { localStorage.removeItem(KEY_STORE); } catch {}
+  delete memory[KEY_STORE];
+  device = null;
+  loadPlainKey();
+  proceed();
+}
+
+/** Optional: protect the (plain) messaging key with a passkey. Off by default; a
+ * no-op unless the user asks. After this, opening chat unlocks with the passkey. */
+async function protectWithPasskey() {
+  const state = $("msg-protect-state");
+  if (!state) return;
+  if (vault.isVaultRecord(storedRecord())) { state.textContent = "Protected with a passkey ✓"; return; }
+  if (!vault.passkeySupported()) { state.textContent = "This browser has no passkey support."; return; }
+  try {
+    state.textContent = "Waiting for your passkey…";
+    const record = await vault.enrollPasskey(device.secretKey, { rpId: location.hostname, userName: "Names Messages" });
+    writeStore(KEY_STORE, record);
+    keyKept = true;
+    reflectProtect();
+  } catch (error) {
+    state.textContent = error?.message ?? "Couldn't protect the key.";
+  }
+}
+
+function reflectProtect() {
+  const btn = $("msg-protect");
+  const state = $("msg-protect-state");
+  if (!btn || !state) return;
+  if (vault.isVaultRecord(storedRecord())) {
+    btn.hidden = true;
+    state.textContent = "Protected with a passkey ✓";
+  } else {
+    btn.hidden = false;
+    state.textContent = "";
+  }
 }
 
 const rpc = () => ctx.settings().rpc;
@@ -243,7 +374,7 @@ async function receive(wakuMessage) {
 
 async function send(to, text) {
   const from = myName();
-  if (!from) throw new Error("Enter which name is yours under “Set up this phone” first.");
+  if (!from) throw new Error("Enter which name is yours under “Set up this device” first.");
   if (!node) throw new Error("Not connected to the messaging node yet.");
   let found;
   try {
@@ -293,7 +424,7 @@ async function checkMe() {
   renderSetup();
   if (!name) {
     box.textContent = "";
-    $("msg-setup-summary").textContent = "Set up this phone";
+    $("msg-setup-summary").textContent = "Set up this device";
     $("msg-setup").open = true;
     return;
   }
@@ -311,7 +442,7 @@ async function checkMe() {
       box.textContent = `${name} isn't registered on this chain.`;
       box.classList.add("bad");
     } else if (key === here) {
-      box.textContent = `✓ Messages to ${name} come to this phone.`;
+      box.textContent = `✓ Messages to ${name} come to this device.`;
       box.classList.add("ok");
       $("msg-setup-summary").textContent = `✓ You are ${name}`;
       return;
@@ -327,7 +458,7 @@ async function checkMe() {
     box.textContent = `Couldn't check: ${await chainError(error)}`;
     box.classList.add("bad");
   }
-  $("msg-setup-summary").textContent = `Set up this phone (${name}: not yet)`;
+  $("msg-setup-summary").textContent = `Set up this device (${name}: not yet)`;
   $("msg-setup").open = true;
 }
 
@@ -406,7 +537,50 @@ async function copy(text, button) {
   setTimeout(() => (button.textContent = label), 1600);
 }
 
+// Publish this device's messaging key onto the user's name (set-text msg …), signed
+// in the browser by the wallet, so replies can reach them — one tap, no CLI.
+async function publishKey() {
+  const name = normalizeName($("msg-me").value) || myName();
+  const status = $("msg-publish-status");
+  status.className = "me-status";
+  status.hidden = false;
+  if (!name || !isValidName(name)) {
+    status.textContent = "Enter which name is yours first.";
+    status.classList.add("bad");
+    return;
+  }
+  const walletMod = await import("./wallet.js");
+  const walletSecret = walletMod.walletKey();
+  if (!walletSecret) {
+    status.textContent = "Set up your wallet first (step 1), then publish.";
+    status.classList.add("bad");
+    return;
+  }
+  const reg = await import("./register.js");
+  reg.setRpc(ctx.settings().rpc);
+  const btn = $("msg-publish");
+  btn.disabled = true;
+  status.textContent = `Publishing your key on ${name}…`;
+  try {
+    await reg.setText({ privateKey: walletSecret, program: ctx.settings().registry, name, key: MSG_TEXT_KEY, value: toHex(device.publicKey) });
+    status.textContent = "✓ Published — replies can now reach you.";
+    status.classList.add("ok");
+    checkMe(); // refresh the "✓ You are <name>" state
+  } catch (error) {
+    status.textContent =
+      error?.code === "unregistered" ? `Claim ${name} first (the Name step), then publish.`
+      : error?.code === "not_owner" ? `This device's wallet doesn't hold ${name}.`
+      : `Couldn't publish: ${(error && error.message) || error}`;
+    status.classList.add("bad");
+    btn.disabled = false;
+  }
+}
+
 function wire() {
+  $("msg-publish")?.addEventListener("click", publishKey);
+  $("msg-passkey").addEventListener("click", doPasskey);
+  $("msg-skip").addEventListener("click", doSkip);
+  $("msg-newkey").addEventListener("click", doNewKey);
   $("msg-key-copy").addEventListener("click", (e) => copy(toHex(device.publicKey), e.currentTarget));
   $("msg-command-copy").addEventListener("click", (e) => copy($("msg-command").textContent, e.currentTarget));
   $("msg-me").addEventListener("input", renderSetup);
@@ -460,16 +634,13 @@ function wire() {
   $("msg-text").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) $("msg-compose").requestSubmit();
   });
+  $("msg-protect")?.addEventListener("click", protectWithPasskey);
 }
 
-/** Shows Messages; app.js calls this each time the view opens or settings change. */
-export function open(context) {
-  ctx = context;
-  device ??= loadDevice();
-  if (!wired) {
-    wire();
-    wired = true;
-  }
+/** Everything past the lock: app.js's original open() body, run once device is in memory. */
+function proceed() {
+  $("msg-lock").hidden = true;
+  $("msg-main").hidden = false;
   keyCache.clear();
   $("msg-me").value = myName();
   if (thread) openThread(thread);
@@ -477,8 +648,51 @@ export function open(context) {
   render();
   if (myName()) checkMe();
   else {
-    $("msg-setup-summary").textContent = "Set up this phone";
+    $("msg-setup-summary").textContent = "Set up this device";
     $("msg-setup").open = true;
   }
+  reflectProtect();
   if (!node || connectedPeer !== ctx.settings().peer) connect();
+}
+
+/** Default path: load the plain messaging key, or make one and keep it plainly. No gate.
+ * The chat key can't spend money and is rotatable, so plain persistence is the right
+ * tradeoff; a passkey is an optional extra (see protectWithPasskey). */
+function loadPlainKey() {
+  const rec = storedRecord() || memory[KEY_STORE] || null;
+  if (rec && typeof rec.secretKey === "string") {
+    try {
+      const sk = fromHex(rec.secretKey);
+      if (sk.length === 32) {
+        device = { secretKey: sk, publicKey: publicKeyOf(sk) };
+        keyKept = true;
+        return;
+      }
+    } catch {}
+  }
+  const sk = newKeyPair().secretKey;
+  const value = { secretKey: toHex(sk) };
+  keyKept = writeStore(KEY_STORE, value);
+  if (!keyKept) memory[KEY_STORE] = value; // private windows: keep for the session
+  device = { secretKey: sk, publicKey: publicKeyOf(sk) };
+}
+
+/** Shows Chat; app.js calls this each time the view opens or settings change. The key
+ * is frictionless: only a key the user chose to protect (a vault record) shows a lock. */
+export function open(context) {
+  ctx = context;
+  if (!wired) {
+    wire();
+    wired = true;
+  }
+  if (device) {
+    proceed();
+    return;
+  }
+  if (vault.isVaultRecord(storedRecord())) {
+    showLock(); // the user opted into passkey protection: unlock it
+  } else {
+    loadPlainKey();
+    proceed();
+  }
 }

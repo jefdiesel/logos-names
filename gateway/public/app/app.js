@@ -1,92 +1,83 @@
-// Names, version 1: read-only. Looks a name up straight from the chain's
-// JSON-RPC in this browser (SPEC 12.3): the name travels after `#`, never to the
-// host of these files, and no relay stands between the page and the chain.
+// Names webapp: one linear flow — set up a wallet, get tokens, choose a name,
+// then chat. Returning devices (already onboarded) land straight in chat.
 //
-// names.js is resolver/names.js bundled with @noble/hashes (Argon2id); regenerate it with
+// Reads a name straight from the chain's JSON-RPC in this browser to resolve who
+// you message. names.js is resolver/names.js bundled with @noble/hashes (Argon2id);
+// regenerate it with:
 //   cd gateway && npx rolldown ../resolver/names.js --format esm --file public/app/names.js
-// board.js reads a name's posts the way `names posts` does.
 
 import {
   GRACE_MS,
   base58Decode,
   decodeNameRecord,
-  decodePage,
-  decodePageContent,
   decodeProfile,
   deriveName,
   isValidName,
   normalizeName,
   openSealed,
-  pageAddress,
   publicView,
   readShard,
   recordAddress,
 } from "./names.js";
-import { postCount, postsOf } from "./board.js";
 
-// Each chain the app knows, with the registry and board deployed on it, so
-// picking one is a single tap. Another RPC takes typed program IDs.
+// Each chain the app knows, with the registry and board deployed on it.
 const CHAINS = {
-  // The public LEZ testnet, where real names live. Its own RPC
-  // (testnet.lez.logos.co) doesn't allow browsers yet, so this passes through a
-  // door that adds the header and only lets ordinary chain calls through.
   "https://lez.buggers.online/lez": {
     registry: "38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq",
     board: "8PwnCKStKQtoBxJCgopCG6CPPMJCUWba1SDG1SXtXYTf",
   },
-  // Our test chain: test names only.
   "https://lez.buggers.online": {
     registry: "m82S3dUDxdcMBtZtXpHXYcVhU68U7bS4AKqsi6NomJm",
     board: "CKqLLZrTUNiw5KLtQCZ9oSDXWWEtCHLpKjp7pQAaP5q4",
   },
 };
-// The Logos messaging (Waku) node Messages connects to. A temporary tunnel for now,
-// hence a setting. (msg-crypto.js has the same default, for scripts.)
+// The Logos messaging (Waku) node chat connects to: the default "door" on a stable
+// named tunnel. Overridable in settings, or via ?peer= in the URL.
 const DEFAULT_PEER =
-  "/dns4/west-territories-location-trek.trycloudflare.com/tcp/443/wss/p2p/16Uiu2HAmFQGCcQzKpY9QhESgVXWXUv4AHWWvR6pX6vE1qvFUpyoc";
+  "/dns4/msg.buggers.online/tcp/443/wss/p2p/16Uiu2HAkxrwXguVQUCPqMyXrn9VuPNce2xoK9Nr7AW2zcHQeS6dg";
 const DEFAULTS = { rpc: "https://lez.buggers.online/lez", ...CHAINS["https://lez.buggers.online/lez"], peer: DEFAULT_PEER };
 const PRESETS = Object.keys(CHAINS);
 const STORE_KEY = "lns-app-settings";
-const PAGE_SIZE = 10;
-// The policy of SPEC 12.2, less `sandbox` (a <meta> can't carry it; the iframe's
-// sandbox attribute does that, without scripts). It comes first, before any byte of
-// the page, so nothing in the page can load before it applies.
-const PAGE_POLICY =
-  "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; " +
-  "media-src data:; form-action 'none'; base-uri 'none'";
-const PAGE_HEAD =
-  `<!doctype html><meta charset="utf-8">` +
-  `<meta http-equiv="Content-Security-Policy" content="${PAGE_POLICY}">` +
-  `<meta name="referrer" content="no-referrer"><base target="_blank">`;
-const AVATAR = /^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/]+={0,2}$/;
-const COLOR = /^#[0-9a-fA-F]{6}$/;
-const SHOWN_ABOVE = new Set(["display", "bio", "avatar"]);
-const MONO = new Set(["logos.account", "chat", "cid", "agent", "inbox"]);
+const ONBOARD_KEY = "lns-onboarded"; // { name } once this device has been through setup
+const WALLET_REC = "lns-wallet-device"; // wallet.js vault record (presence = a wallet exists)
 
 const $ = (id) => document.getElementById(id);
-const el = (tag, props = {}, ...children) => {
-  const node = Object.assign(document.createElement(tag), props);
-  node.append(...children);
-  return node;
-};
 
 // ---------- settings ----------
 
+const PEER_RE = /^\/(dns4|dns6|dns|ip4|ip6)\/[^/]+\/tcp\/\d+\/(wss|tls\/ws)\/p2p\/\w+$/;
+
+function urlSettings() {
+  const out = {};
+  try {
+    const q = new URLSearchParams(location.search);
+    const peer = q.get("peer");
+    if (peer && PEER_RE.test(peer)) out.peer = peer;
+    const rpc = q.get("rpc");
+    if (rpc) {
+      const u = new URL(rpc);
+      if (u.protocol === "https:" || u.protocol === "http:") out.rpc = rpc;
+    }
+  } catch {
+    // bad URL params: ignore
+  }
+  return out;
+}
+
 function loadSettings() {
   try {
-    const saved = { ...DEFAULTS, ...JSON.parse(localStorage.getItem(STORE_KEY) || "{}") };
-    // A known chain always uses its own programs.
+    const saved = { ...DEFAULTS, ...JSON.parse(localStorage.getItem(STORE_KEY) || "{}"), ...urlSettings() };
     return CHAINS[saved.rpc] ? { rpc: saved.rpc, ...CHAINS[saved.rpc], peer: saved.peer } : saved;
   } catch {
-    return { ...DEFAULTS };
+    return { ...DEFAULTS, ...urlSettings() };
   }
 }
 
-function saveSettings(settings) {
+function saveSettings(next) {
   try {
-    localStorage.setItem(STORE_KEY, JSON.stringify(settings));
+    localStorage.setItem(STORE_KEY, JSON.stringify(next));
   } catch {
-    // Private windows and blocked storage: the settings last until the page closes.
+    // private windows: settings last until the page closes
   }
 }
 
@@ -99,6 +90,7 @@ const isProgramId = (text) => {
 };
 
 let settings = loadSettings();
+if (Object.keys(urlSettings()).length) saveSettings(settings);
 
 function fillSettings() {
   const preset = PRESETS.includes(settings.rpc) ? settings.rpc : "custom";
@@ -127,78 +119,16 @@ function readSettingsForm() {
   if (url.protocol !== "https:" && url.protocol !== "http:") return { error: "The RPC URL must start with https://." };
   if (!isProgramId(registry)) return { error: "The registry program isn't a valid program ID." };
   if (!isProgramId(board)) return { error: "The board program isn't a valid program ID." };
-  if (!/^\/(dns4|dns6|dns|ip4|ip6)\/[^/]+\/tcp\/\d+\/(wss|tls\/ws)\/p2p\/\w+$/.test(peer)) {
+  if (!PEER_RE.test(peer)) {
     return { error: "The messaging node must be a WebSocket address like /dns4/…/tcp/443/wss/p2p/…" };
   }
   return { value: { rpc, registry, board, peer } };
 }
 
-function toggleSettings(open) {
-  $("settings").hidden = !open;
-  $("settings-button").setAttribute("aria-expanded", String(open));
-  if (open) fillSettings();
-}
-
-$("settings-button").addEventListener("click", () => toggleSettings($("settings").hidden));
-$("menu-button").addEventListener("click", () => {
-  const open = $("menu").hidden;
-  $("menu").hidden = !open;
-  $("menu-button").setAttribute("aria-expanded", String(open));
-});
-$("about-link").addEventListener("click", (event) => {
-  event.preventDefault();
-  if (inMessages()) leaveMessages();
-  $("about").scrollIntoView({ behavior: "smooth", block: "start" });
-});
-$("messages-link").addEventListener("click", (event) => {
-  event.preventDefault();
-  if (!inMessages()) history.pushState(null, "", "./?view=messages");
-  showView();
-});
-for (const link of document.querySelectorAll("#menu a")) {
-  link.addEventListener("click", () => {
-    $("menu").hidden = true;
-    $("menu-button").setAttribute("aria-expanded", "false");
-  });
-}
-for (const radio of document.querySelectorAll('input[name="rpc-choice"]')) {
-  radio.addEventListener("change", () => {
-    const custom = radio.value === "custom" && radio.checked;
-    $("rpc-custom").hidden = !custom;
-    $("programs").hidden = !custom;
-    if (CHAINS[radio.value] && radio.checked) {
-      $("registry").value = CHAINS[radio.value].registry;
-      $("board").value = CHAINS[radio.value].board;
-    }
-    if (custom) $("rpc-custom").focus();
-  });
-}
-$("settings-save").addEventListener("click", () => {
-  const { value, error } = readSettingsForm();
-  if (error) {
-    $("settings-error").textContent = error;
-    $("settings-error").hidden = false;
-    return;
-  }
-  settings = value;
-  saveSettings(settings);
-  toggleSettings(false);
-  if (inMessages()) showView();
-  else route();
-});
-$("settings-reset").addEventListener("click", () => {
-  settings = { ...DEFAULTS };
-  try {
-    localStorage.removeItem(STORE_KEY);
-  } catch {}
-  fillSettings();
-});
-
-// ---------- reading the chain ----------
+// ---------- reading the chain (for resolving who you message) ----------
 
 class ChainError extends Error {}
 
-/** Why a request to `rpc` failed, in words a person can act on. */
 async function explainFailure(error, rpc) {
   if (error instanceof ChainError) return error;
   if (!(error instanceof TypeError)) {
@@ -209,13 +139,8 @@ async function explainFailure(error, rpc) {
   if (location.protocol === "https:" && url.protocol === "http:" && !local) {
     return new ChainError("This RPC uses http://, which a page on https:// can't reach. Use an https:// RPC.");
   }
-  // The browser says the same for "blocked by CORS" and "nothing there". A request
-  // the page can't read (no-cors) tells them apart: it gets through only if the
-  // server answered.
   try {
     await fetch(rpc, { method: "POST", mode: "no-cors", body: "{}", cache: "no-store", referrerPolicy: "no-referrer" });
-    // A server that should allow browsers but is down behind a proxy (an error page
-    // without CORS headers) looks the same from here, hence the second sentence.
     return new ChainError(
       "This RPC doesn't allow browsers (CORS). If it normally does, it may be down. " +
         "Pick another in Settings, or use the names command on your computer.",
@@ -244,11 +169,7 @@ async function openAs(key, sealed, kind, decode) {
   }
 }
 
-/**
- * What `name` resolves to, as resolveName in names.js does it, but keeping the
- * derived identifier and key so the page and posts don't each derive again
- * (Argon2id, 64 MiB, slow on a phone). They stay in memory only.
- */
+/** What `name` resolves to (its public view, incl. the published `msg` key). */
 async function lookUp({ rpc, registry }, name, now = Date.now()) {
   const { id, key } = await deriveName(name);
   const bytes = await shard(rpc, registry, await recordAddress(registry, id));
@@ -263,278 +184,306 @@ async function lookUp({ rpc, registry }, name, now = Date.now()) {
   return { id, key, view };
 }
 
-async function readPage({ rpc, registry }, id, key) {
-  const bytes = await shard(rpc, registry, await pageAddress(registry, id));
-  if (bytes.length === 0) return null;
-  return openAs(key, decodePage(bytes).sealed, "page", decodePageContent);
-}
+// ---------- onboarding state ----------
 
-// ---------- showing it ----------
-
-function status(text, { error = false, detail = "" } = {}) {
-  const box = $("status");
-  box.replaceChildren(el("strong", { textContent: text }));
-  if (detail) box.append(el("p", { textContent: detail }));
-  box.classList.toggle("error", error);
-  box.hidden = false;
-}
-
-function clearView() {
-  for (const id of ["status", "card", "page-box", "posts-box"]) $(id).hidden = true;
-  $("page").removeAttribute("srcdoc");
-  $("posts").replaceChildren();
-}
-
-function renderCard(view) {
-  const { texts } = view;
-  const color = COLOR.test(texts.color ?? "") ? texts.color : null;
-  $("card").style.setProperty("--name", color ?? "var(--accent)");
-  $("display").textContent = texts.display?.trim() || view.name;
-  $("bare").textContent = texts.display?.trim() ? view.name : "";
-  $("bare").hidden = !texts.display?.trim();
-  const avatar = $("avatar");
-  if (AVATAR.test(texts.avatar ?? "")) {
-    avatar.src = texts.avatar;
-    avatar.alt = `${view.name}'s picture`;
-    avatar.hidden = false;
-  } else {
-    avatar.removeAttribute("src");
-    avatar.hidden = true;
-  }
-  $("bio").textContent = texts.bio ?? "";
-  $("bio").hidden = !texts.bio;
-
-  const facts = [];
-  facts.push(view.payablePrivately ? ["Can be paid privately", true] : ["No private payments", false]);
-  if (view.publicAccount) facts.push(["Has a public account", true]);
-  if (view.expires === null) facts.push(["Held by deposit", false]);
-  else if (view.lapsed) facts.push([`Lapsed on ${new Date(view.expires).toLocaleDateString()}; still in grace`, false]);
-  else facts.push([`Held until ${new Date(view.expires).toLocaleDateString()}`, false]);
-  $("facts").replaceChildren(...facts.map(([text, yes]) => el("li", { textContent: text, className: yes ? "yes" : "" })));
-
-  const rows = [];
-  if (view.publicAccount) {
-    rows.push(el("dt", { textContent: "Public account" }), el("dd", { textContent: view.publicAccount, className: "mono" }));
-  }
-  for (const [key, value] of Object.entries(texts)) {
-    if (SHOWN_ABOVE.has(key)) continue;
-    const dd = el("dd", { className: MONO.has(key) ? "mono" : "" });
-    if (key === "color" && COLOR.test(value)) {
-      const swatch = el("span", { className: "swatch" });
-      swatch.style.background = value;
-      dd.append(swatch);
-    }
-    dd.append(value);
-    rows.push(el("dt", { textContent: key }), dd);
-  }
-  $("texts").replaceChildren(...rows);
-  $("card").hidden = false;
-}
-
-function renderPage(page) {
-  const box = $("page-box");
-  const note = $("page-note");
-  const frame = $("page");
-  if (page === null) return;
-  const type = page.contentType.split(";")[0].trim().toLowerCase();
-  const text = new TextDecoder().decode(page.body);
-  box.hidden = false;
-  if (type === "text/html") {
-    frame.hidden = false;
-    note.hidden = true;
-    frame.srcdoc = PAGE_HEAD + text;
-  } else if (type === "text/plain") {
-    frame.hidden = false;
-    note.hidden = true;
-    const escaped = text.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
-    frame.srcdoc = `${PAGE_HEAD}<pre style="white-space:pre-wrap;font:15px/1.5 ui-monospace,monospace;margin:16px">${escaped}</pre>`;
-  } else {
-    frame.hidden = true;
-    note.textContent = `This name's page is ${type}, which this app doesn't show.`;
-    note.hidden = false;
-  }
-}
-
-function renderPost(post, id) {
-  const when = new Date(post.time).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
-  let meta = `#${post.id.n} · ${when}`;
-  if (post.parent) {
-    const own = post.parent.author.every((byte, i) => byte === id[i]);
-    meta += own ? ` · reply to #${post.parent.n}` : " · reply";
-  }
-  const item = el("li", {}, el("div", { className: "meta", textContent: meta }));
-  if (post.text) item.append(el("p", { className: "text", textContent: post.text }));
-  for (const cid of post.cids) item.append(el("p", { className: "cid", textContent: `file ${cid}` }));
-  return item;
-}
-
-// ---------- flow ----------
-
-let current = null; // { token, name, id, top }
-let token = 0;
-
-async function showName(name) {
-  const mine = ++token;
-  const active = () => mine === token;
-  const config = settings;
-  clearView();
-  $("intro").hidden = true;
-  $("name").value = name;
-  if (!isValidName(name)) {
-    status("That isn't a name.", { error: true, detail: "Names are 1–32 lowercase letters, digits or dashes, not starting or ending with a dash." });
-    return;
-  }
-  status(`Looking up ${name}…`, { detail: "Working out where the name lives. This takes a moment." });
-  $("go").disabled = true;
+function read(key) {
   try {
-    const { id, key, view } = await lookUp(config, name);
-    if (!active()) return;
-    if (view === null) {
-      status(`${name} isn't registered.`, { detail: "Nobody holds this name on this chain." });
-      return;
-    }
-    $("status").hidden = true;
-    renderCard(view);
-    current = { name, id, top: 0 };
-    const [page, count] = await Promise.all([
-      readPage(config, id, key).catch((error) => ({ error })),
-      shardCount(config, id).catch((error) => ({ error })),
-    ]);
-    if (!active()) return;
-    if (page?.error) {
-      $("page-box").hidden = false;
-      $("page").hidden = true;
-      $("page-note").textContent = `Couldn't read the page. ${page.error.message}`;
-      $("page-note").hidden = false;
-    } else {
-      renderPage(page);
-    }
-    $("posts-box").hidden = false;
-    if (count?.error) {
-      postsNote(`Couldn't read the posts. ${count.error.message}`);
-      return;
-    }
-    current.top = count;
-    if (count === 0) {
-      postsNote("No posts yet.");
-      return;
-    }
-    await morePosts(config, mine);
-  } catch (error) {
-    if (!active()) return;
-    status(error instanceof ChainError ? error.message : "Something went wrong reading this name.", {
-      error: true,
-      detail: error instanceof ChainError ? "" : String(error?.message ?? error),
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+const hasWallet = () => read(WALLET_REC) != null;
+const onboarded = () => read(ONBOARD_KEY) != null;
+function setOnboarded(name) {
+  try {
+    localStorage.setItem(ONBOARD_KEY, JSON.stringify({ name: name || null }));
+  } catch {}
+}
+function onboardName() {
+  try {
+    return JSON.parse(read(ONBOARD_KEY) || "{}").name || "";
+  } catch {
+    return "";
+  }
+}
+
+// ---------- the flow ----------
+
+let messages = null; // messages.js, loaded when chat opens
+let walletMod = null; // wallet.js, loaded when the wallet step opens
+let step = null;
+
+function setProgress(name) {
+  for (const li of document.querySelectorAll("#progress li")) {
+    li.classList.toggle("on", li.dataset.step === name);
+  }
+}
+
+function show(next) {
+  step = next;
+  $("onboard").hidden = next === "chat";
+  $("chat").hidden = next !== "chat";
+  $("step-wallet").hidden = next !== "wallet";
+  $("step-name").hidden = next !== "name";
+  setProgress(next);
+  if (next === "wallet") openWallet();
+  else if (next === "name") openName();
+  else if (next === "chat") openChat();
+}
+
+async function openWallet() {
+  $("wallet-continue").hidden = true;
+  try {
+    walletMod ??= await import("./wallet.js");
+    walletMod.open({
+      settings: () => settings,
+      explain: explainFailure,
+      onReady: () => {
+        $("wallet-continue").hidden = false;
+      },
     });
-  } finally {
-    if (active()) $("go").disabled = false;
-  }
-}
-
-async function shardCount({ rpc, board }, id) {
-  try {
-    return await postCount(rpc, board, id);
   } catch (error) {
-    throw await explainFailure(error, rpc);
-  }
-}
-
-function postsNote(text) {
-  $("posts-note").textContent = text;
-  $("posts-note").hidden = !text;
-}
-
-async function morePosts(config, mine) {
-  const more = $("more");
-  more.disabled = true;
-  more.textContent = "Loading…";
-  try {
-    const { name, id, top } = current;
-    let posts;
-    let next;
-    try {
-      ({ posts, next } = await postsOf(config.rpc, config.board, name, id, top, PAGE_SIZE));
-    } catch (error) {
-      throw await explainFailure(error, config.rpc);
-    }
-    if (mine !== token) return;
-    current.top = next;
-    $("posts").append(...posts.map((post) => renderPost(post, id)));
-    postsNote($("posts").children.length === 0 && next === 0 ? "No posts to show." : "");
-    more.hidden = next === 0;
-  } catch (error) {
-    if (mine !== token) return;
-    postsNote(`Couldn't read more posts. ${error.message}`);
-  } finally {
-    more.disabled = false;
-    more.textContent = "View more";
-  }
-}
-
-$("more").addEventListener("click", () => {
-  if (current) morePosts(settings, token);
-});
-
-$("lookup").addEventListener("submit", (event) => {
-  event.preventDefault();
-  const name = normalizeName($("name").value);
-  if (!name) return;
-  if (decodeURIComponent(location.hash.slice(1)) === name) route();
-  else location.hash = name;
-});
-
-function route() {
-  const name = normalizeName(decodeURIComponent(location.hash.slice(1)));
-  if (!name) {
-    token += 1;
-    clearView();
-    $("intro").hidden = false;
-    $("name").value = "";
-    return;
-  }
-  showName(name);
-}
-
-// ---------- views ----------
-// Names travel in the hash (route() above); the Messages view is `?view=messages`.
-
-const LOOKUP_PARTS = ["lookup", "intro", "about"];
-const inMessages = () => new URLSearchParams(location.search).get("view") === "messages";
-let messages = null; // messages.js, loaded the first time Messages opens
-let viewOn = null; // whether Messages is showing
-
-function leaveMessages() {
-  history.pushState(null, "", "./" + location.hash);
-  showView();
-}
-
-async function showView() {
-  const on = inMessages();
-  viewOn = on;
-  $("messages").hidden = !on;
-  if (!on) {
-    for (const id of LOOKUP_PARTS) $(id).hidden = false;
-    route();
-    return;
-  }
-  token += 1;
-  clearView();
-  for (const id of LOOKUP_PARTS) $(id).hidden = true;
-  try {
-    messages ??= await import("./messages.js");
-    messages.open({ settings: () => settings, lookUp: (name) => lookUp(settings, name), explain: explainFailure });
-  } catch (error) {
-    $("msg-conn").textContent = "Couldn't load Messages";
+    const box = $("wallet-lock-error");
+    box.textContent = "Couldn't load the wallet. Reload and try again.";
+    box.hidden = false;
     console.error(error);
   }
 }
 
-window.addEventListener("hashchange", () => {
-  if (inMessages()) history.replaceState(null, "", "./" + location.hash);
-  showView();
+function openName() {
+  const input = $("pick-name");
+  const pend = pendingRegistration();
+  if (pend && isValidName(pend.name)) {
+    // A claim was committed earlier and is mid-wait — resume it.
+    input.value = pend.name;
+    $("pick-chosen").textContent = pend.name;
+    $("pick-command").textContent = `names register ${pend.name} --public`;
+    $("pick-result").textContent = "";
+    $("pick-claim").hidden = false;
+    claimName(pend.name);
+    return;
+  }
+  if (onboardName() && !input.value) input.value = onboardName();
+  setTimeout(() => input.focus(), 50);
+}
+
+async function openChat() {
+  // Prefill who you are from the chosen name, and who to message from a #name link.
+  const me = onboardName();
+  if (me) {
+    const field = $("msg-me");
+    if (field && !field.value) field.value = me;
+  }
+  const to = normalizeName(decodeURIComponent(location.hash.slice(1)));
+  if (to) {
+    const field = $("msg-to");
+    if (field) field.value = to;
+  }
+  try {
+    messages ??= await import("./messages.js");
+    messages.open({ settings: () => settings, lookUp: (name) => lookUp(settings, name), explain: explainFailure });
+  } catch (error) {
+    $("msg-conn").textContent = "Couldn't load chat";
+    console.error(error);
+  }
+}
+
+// ---------- step wiring ----------
+
+$("wallet-continue").addEventListener("click", () => show("name"));
+$("wallet-skip-all").addEventListener("click", () => {
+  setOnboarded(null);
+  show("chat");
 });
-// Browsers also fire popstate for a new hash; only a change of view matters here.
-window.addEventListener("popstate", () => {
-  if (inMessages() !== viewOn) showView();
+
+// The step tabs (Wallet / Name / Chat) are clickable navigation.
+for (const li of document.querySelectorAll("#progress li")) {
+  li.style.cursor = "pointer";
+  li.setAttribute("role", "button");
+  li.setAttribute("tabindex", "0");
+  li.addEventListener("click", () => show(li.dataset.step));
+  li.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); show(li.dataset.step); }
+  });
+}
+
+$("pick-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const name = normalizeName($("pick-name").value);
+  const result = $("pick-result");
+  const claim = $("pick-claim");
+  claim.hidden = true;
+  result.className = "me-status";
+  if (!name || !isValidName(name)) {
+    result.textContent = "Names are lowercase letters, digits or dashes, not starting or ending with a dash.";
+    return;
+  }
+  if (name.length < 5) {
+    result.textContent = "Names must be at least 5 characters.";
+    result.classList.add("bad");
+    return;
+  }
+  result.textContent = `Checking ${name}…`;
+  try {
+    const { view } = await lookUp(settings, name);
+    if (view === null) {
+      result.textContent = `✓ ${name} is free.`;
+      result.classList.add("ok");
+      $("pick-chosen").textContent = name;
+      $("pick-command").textContent = `names register ${name} --public`;
+      claim.hidden = false;
+      setOnboarded(name); // remember the intended name so chat can prefill it
+      $("msg-me") && ($("msg-me").value = name);
+    } else {
+      result.textContent = `${name} is already taken.`;
+      result.classList.add("bad");
+    }
+  } catch (error) {
+    const why = (await explainFailure(error, settings.rpc)).message;
+    result.textContent = `Couldn't check: ${why}`;
+    result.classList.add("bad");
+  }
 });
-showView();
+
+$("pick-command-copy").addEventListener("click", (event) => copy($("pick-command").textContent, event.currentTarget));
+
+// ---------- claiming a public name (register.js, signs with the browser wallet) ----------
+
+let registerMod = null;
+let registering = false;
+const REGISTER_PENDING = "lns-register-pending"; // { name, owner, secretHex, made }
+
+function pendingRegistration() {
+  try { return JSON.parse(localStorage.getItem(REGISTER_PENDING) || "null"); } catch { return null; }
+}
+function savePending(p) { try { localStorage.setItem(REGISTER_PENDING, JSON.stringify(p)); } catch {} }
+function clearPending() { try { localStorage.removeItem(REGISTER_PENDING); } catch {} }
+
+function claimProgress(text, cls) {
+  const el = $("pick-progress");
+  el.hidden = false;
+  el.textContent = text;
+  el.className = "me-status" + (cls ? " " + cls : "");
+}
+
+async function claimName(name) {
+  if (registering) return;
+  registering = true;
+  $("pick-register").disabled = true;
+  try {
+    const walletMod = await import("./wallet.js");
+    walletMod.ensureLoaded?.(); // pull a plain saved wallet into memory if it isn't already
+    const key = walletMod.walletKey();
+    const account = walletMod.walletAccount();
+    if (!key) {
+      claimProgress("Open step 1 (Wallet) to unlock your wallet, then come back — your claim is saved.", "bad");
+      $("pick-register").disabled = false;
+      return;
+    }
+    registerMod ??= await import("./register.js");
+    registerMod.setRpc(settings.rpc);
+    const pend = pendingRegistration();
+    const resume = pend && pend.name === name && pend.owner === account ? { secretHex: pend.secretHex, made: pend.made } : null;
+    await registerMod.registerPublic({
+      privateKey: key, program: settings.registry, name, resume,
+      onStep: (stage, detail) => {
+        if (stage === "commit") claimProgress("Committing to the name…");
+        else if (stage === "committed") {
+          savePending({ name, owner: account, secretHex: detail.secretHex, made: detail.made });
+          claimProgress("Committed. Now the ~15-minute wait so nobody can take it — you can close this; it resumes when you return.");
+        } else if (stage === "waiting") {
+          const m = Math.max(1, Math.ceil(detail.remainingMs / 60000));
+          claimProgress(`Waiting ~${m} min before claiming… (safe to leave; it resumes)`);
+        } else if (stage === "register") claimProgress("Claiming the name on the chain…");
+        else if (stage === "done") claimProgress("Registered ✓");
+      },
+    });
+    clearPending();
+    setOnboarded(name);
+    claimProgress(`✓ ${name} is yours. Opening chat…`, "ok");
+    setTimeout(() => show("chat"), 1400);
+  } catch (error) {
+    const msg = error?.code === "insufficient" ? error.message : `Couldn't claim: ${(error && error.message) || error}`;
+    claimProgress(msg, "bad");
+    $("pick-register").disabled = false;
+  } finally {
+    registering = false;
+  }
+}
+
+$("pick-register")?.addEventListener("click", () => {
+  const name = normalizeName($("pick-chosen").textContent || $("pick-name").value);
+  if (name) claimName(name);
+});
+
+$("name-back").addEventListener("click", () => show("wallet"));
+$("name-continue").addEventListener("click", () => {
+  if (!onboarded()) setOnboarded($("pick-name").value ? normalizeName($("pick-name").value) : null);
+  show("chat");
+});
+
+$("redo-setup").addEventListener("click", () => show("wallet"));
+
+async function copy(text, button) {
+  const label = button.textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    button.textContent = "Copied";
+  } catch {
+    button.textContent = "Couldn't copy; select the text instead";
+  }
+  setTimeout(() => (button.textContent = label), 1600);
+}
+
+// ---------- settings drawer ----------
+
+function openDrawer(open) {
+  $("privacy").hidden = !open;
+  if (open) fillSettings();
+}
+$("privacy-open").addEventListener("click", () => openDrawer(true));
+$("privacy-close").addEventListener("click", () => openDrawer(false));
+
+for (const radio of document.querySelectorAll('input[name="rpc-choice"]')) {
+  radio.addEventListener("change", () => {
+    const custom = radio.value === "custom" && radio.checked;
+    $("rpc-custom").hidden = !custom;
+    $("programs").hidden = !custom;
+    if (CHAINS[radio.value] && radio.checked) {
+      $("registry").value = CHAINS[radio.value].registry;
+      $("board").value = CHAINS[radio.value].board;
+    }
+    if (custom) $("rpc-custom").focus();
+  });
+}
+$("settings-save").addEventListener("click", () => {
+  const { value, error } = readSettingsForm();
+  if (error) {
+    $("settings-error").textContent = error;
+    $("settings-error").hidden = false;
+    return;
+  }
+  settings = value;
+  saveSettings(settings);
+  openDrawer(false);
+  if (step === "chat") openChat();
+});
+$("settings-reset").addEventListener("click", () => {
+  settings = { ...DEFAULTS };
+  try {
+    localStorage.removeItem(STORE_KEY);
+  } catch {}
+  fillSettings();
+});
+
+// ---------- start ----------
+// Returning device (already onboarded) → straight to chat. A #name link also goes
+// straight to chat (to message that name). Otherwise, start the funnel.
+
+// Your wallet is home — it opens there so your account + balance are the first thing,
+// not a link at the bottom. A #name link opens chat to message that name.
+const deepLink = normalizeName(decodeURIComponent(location.hash.slice(1)));
+if (pendingRegistration()) show("name"); // a claim is mid-wait — resume it
+else if (deepLink) show("chat");
+else show("wallet");

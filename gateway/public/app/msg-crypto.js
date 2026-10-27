@@ -4209,7 +4209,7 @@ const hkdf = (hash, ikm, salt, info, length) => {
 const MSG_VERSION = 1;
 const MSG_TEXT_KEY = "msg";
 const MAX_TEXT = 2e3;
-const DEFAULT_PEER = "/dns4/west-territories-location-trek.trycloudflare.com/tcp/443/wss/p2p/16Uiu2HAmFQGCcQzKpY9QhESgVXWXUv4AHWWvR6pX6vE1qvFUpyoc";
+const DEFAULT_PEER = "/dns4/msg.buggers.online/tcp/443/wss/p2p/16Uiu2HAkxrwXguVQUCPqMyXrn9VuPNce2xoK9Nr7AW2zcHQeS6dg";
 const CLUSTER = {
 	clusterId: 3,
 	numShardsInCluster: 8

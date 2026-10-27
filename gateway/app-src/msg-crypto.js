@@ -35,7 +35,7 @@ export const MSG_VERSION = 1;
 export const MSG_TEXT_KEY = "msg";
 export const MAX_TEXT = 2000;
 export const DEFAULT_PEER =
-  "/dns4/west-territories-location-trek.trycloudflare.com/tcp/443/wss/p2p/16Uiu2HAmFQGCcQzKpY9QhESgVXWXUv4AHWWvR6pX6vE1qvFUpyoc";
+  "/dns4/msg.buggers.online/tcp/443/wss/p2p/16Uiu2HAkxrwXguVQUCPqMyXrn9VuPNce2xoK9Nr7AW2zcHQeS6dg";
 export const CLUSTER = { clusterId: 3, numShardsInCluster: 8 };
 
 const INFO = new TextEncoder().encode("names/msg/v1");

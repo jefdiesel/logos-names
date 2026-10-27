@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Names</title>
-<meta name="description" content="Look up a name on the Logos Execution Zone. Read in your browser, straight from the chain.">
+<meta name="description" content="Your name on the Logos Execution Zone: set up a wallet, claim a name, and chat — all in your browser.">
 <meta name="referrer" content="no-referrer">
 <meta name="theme-color" content="#171717" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#FBFAF7" media="(prefers-color-scheme: light)">
@@ -20,99 +20,135 @@
 </head>
 <body>
 <header class="bar">
-  <a class="brand" href="./">Names</a>
-  <div class="row">
-    <button type="button" id="settings-button" class="ghost" aria-expanded="false" aria-controls="settings">Settings</button>
-    <button type="button" id="menu-button" class="ghost" aria-expanded="false" aria-controls="menu">Menu</button>
-  </div>
+  <span class="brand">Names</span>
+  <button type="button" id="privacy-open" class="ghost small">About</button>
 </header>
-<nav id="menu" class="menu" hidden>
-  <a href="./">Look up a name</a>
-  <a href="./?view=messages" id="messages-link">Messages <small>test</small></a>
-  <a href="./" id="about-link">About and privacy</a>
-  <a href="../">Get Names for your computer</a>
-  <a href="https://github.com/jefdiesel/logos-names" rel="noopener">Code on GitHub</a>
-  <a href="https://forum.logos.co/t/names-for-basecamp-posts-messages-and-pay-under-your-lez-name/2020" rel="noopener">Forum post</a>
-</nav>
 
 <main>
-  <form id="lookup" class="lookup" autocomplete="off">
-    <label for="name" class="sr">Name</label>
-    <input id="name" name="name" type="text" inputmode="text" autocapitalize="none" autocorrect="off"
-           spellcheck="false" enterkeyhint="search" placeholder="Look up a name, e.g. jef" maxlength="40">
-    <button type="submit" id="go">Look up</button>
-  </form>
 
-  <section id="settings" class="panel" hidden>
-    <h2>Settings</h2>
-    <p class="muted">These stay on this device.</p>
-    <fieldset>
-      <legend>Chain (RPC)</legend>
-      <label class="choice"><input type="radio" name="rpc-choice" value="https://lez.buggers.online/lez">
-        <span><b>LEZ testnet</b><small>Real names, such as jef and jefdiesel.</small></span></label>
-      <label class="choice"><input type="radio" name="rpc-choice" value="https://lez.buggers.online">
-        <span><b>Names test chain</b><small>Test names only, such as testpilot.</small></span></label>
-      <label class="choice"><input type="radio" name="rpc-choice" value="custom">
-        <span><b>Other</b><small>Any JSON-RPC URL that allows browsers.</small></span></label>
-      <input id="rpc-custom" type="url" inputmode="url" autocapitalize="none" spellcheck="false"
-             placeholder="https://…" aria-label="Other RPC URL">
-    </fieldset>
-    <div id="programs">
-      <label class="field">Registry program
-        <input id="registry" type="text" autocapitalize="none" spellcheck="false"></label>
-      <label class="field">Board program
-        <input id="board" type="text" autocapitalize="none" spellcheck="false"></label>
-    </div>
-    <label class="field">Messaging node
-      <input id="peer" type="text" autocapitalize="none" spellcheck="false" placeholder="/dns4/…/tcp/443/wss/p2p/…">
-      <small class="muted">The Logos messaging (Waku) node Messages connects to, as a WebSocket multiaddr.</small></label>
-    <p id="settings-error" class="error" role="alert" hidden></p>
-    <div class="row">
-      <button type="button" id="settings-save">Save</button>
-      <button type="button" id="settings-reset" class="ghost">Reset</button>
-    </div>
-  </section>
+  <!-- ===================== ONBOARDING FUNNEL ===================== -->
+  <section id="onboard" class="view" hidden>
+    <ol id="progress" class="progress">
+      <li data-step="wallet">Wallet</li>
+      <li data-step="name">Name</li>
+      <li data-step="chat">Chat</li>
+    </ol>
 
-  <div id="status" class="status" role="status" aria-live="polite" hidden></div>
+    <!-- STEP 1: wallet + faucet -->
+    <section id="step-wallet" class="step" hidden>
+      <h1>Set up your wallet</h1>
+      <p class="muted">A wallet on this device for the public LEZ testnet, then free tokens to get going.
+        Testnet only — don't put real money here.</p>
 
-  <article id="card" class="card" hidden>
-    <div class="head">
-      <img id="avatar" class="avatar" alt="" width="72" height="72" hidden>
-      <div class="who">
-        <h1 id="display"></h1>
-        <p id="bare" class="muted"></p>
+      <div id="wallet-lock" class="box" hidden>
+        <h2 id="wallet-lock-title">Set up your wallet</h2>
+        <p id="wallet-lock-note" class="muted"></p>
+        <div id="wallet-choose" hidden>
+          <label for="wallet-connect-key">Connect a key you already have</label>
+          <input id="wallet-connect-key" type="text" inputmode="latin" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste your 64-character wallet key (hex)">
+          <button type="button" id="wallet-connect-go" class="wide">Connect this key</button>
+          <p class="or muted">— or —</p>
+          <button type="button" id="wallet-make" class="ghost wide">Make a new wallet</button>
+        </div>
+        <button type="button" id="wallet-passkey" class="wide" hidden>Unlock with passkey</button>
+        <button type="button" id="wallet-newkey" class="ghost wide" hidden>Make a new wallet</button>
+        <button type="button" id="wallet-skip" class="ghost wide" hidden>Make one without saving</button>
+        <p id="wallet-lock-busy" class="muted" role="status" aria-live="polite" hidden>Working…</p>
+        <p id="wallet-lock-error" class="error" role="alert" hidden></p>
       </div>
-    </div>
-    <p id="bio" class="bio" hidden></p>
-    <ul id="facts" class="facts"></ul>
-    <dl id="texts" class="texts"></dl>
-  </article>
 
-  <section id="page-box" class="box" hidden>
-    <h2>Page</h2>
-    <iframe id="page" title="The name's page" sandbox="allow-popups allow-popups-to-escape-sandbox"
-            referrerpolicy="no-referrer" loading="lazy"></iframe>
-    <p id="page-note" class="muted" hidden></p>
+      <div id="wallet-main" hidden>
+        <section class="box">
+          <h2>Your account</h2>
+          <p id="wallet-account" class="mono key"></p>
+          <button type="button" id="wallet-account-copy" class="ghost wide">Copy account</button>
+          <details id="wallet-import-wrap" class="import">
+            <summary>Connect an existing key</summary>
+            <input id="wallet-import-key" type="text" inputmode="latin" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste a 64-character wallet key (hex)">
+            <button type="button" id="wallet-import-go" class="ghost wide">Connect this key</button>
+            <p id="wallet-import-err" class="me-status bad" hidden></p>
+          </details>
+          <p id="wallet-key-note" class="muted" hidden>This browser won't keep this wallet, so it lasts only until the page closes.</p>
+          <p class="protect muted">
+            <button type="button" id="wallet-protect" class="linklike">Protect this wallet with a passkey</button>
+            <span id="wallet-protect-state"></span>
+            <br><small>Optional. Kept on this device by default; testnet only.</small>
+          </p>
+          <p class="protect muted">
+            <button type="button" id="wallet-backup" class="linklike">Back up this wallet's key</button>
+            <br><small>Save it somewhere safe — it's the only way to recover this wallet if the browser is cleared or a new key is made.</small>
+          </p>
+          <p id="wallet-backup-key" class="mono key" hidden></p>
+          <button type="button" id="wallet-backup-copy" class="ghost wide" hidden>Copy key</button>
+        </section>
+        <section class="box">
+          <h2>Balance</h2>
+          <p class="balance"><span id="wallet-balance" class="mono">…</span> <span class="muted">tokens</span>
+            <button type="button" id="wallet-refresh" class="ghost">Refresh</button></p>
+          <p id="wallet-balance-note" class="error" hidden></p>
+          <button type="button" id="wallet-faucet" class="wide" disabled>Get test tokens</button>
+          <p id="wallet-faucet-status" class="me-status" role="status" aria-live="polite" hidden></p>
+          <p class="muted">Free testnet tokens, once a day — enough for a name's deposit and some to spend.</p>
+        </section>
+      </div>
+
+      <div class="step-nav">
+        <button type="button" id="wallet-continue" class="wide" hidden>Continue →</button>
+        <button type="button" id="wallet-skip-all" class="linklike">Skip setup, just chat</button>
+      </div>
+    </section>
+
+    <!-- STEP 2: name -->
+    <section id="step-name" class="step" hidden>
+      <h1>Choose your name</h1>
+      <p class="muted">A name like <b>jef</b> that others can message and pay, instead of a 32-byte account.</p>
+      <form id="pick-form" class="lookup inline" autocomplete="off">
+        <label for="pick-name" class="sr">A name to claim</label>
+        <input id="pick-name" type="text" autocapitalize="none" autocorrect="off" spellcheck="false"
+               enterkeyhint="search" placeholder="e.g. yourname" maxlength="40">
+        <button type="submit" id="pick-go">Check</button>
+      </form>
+      <p id="pick-result" class="me-status" role="status" aria-live="polite"></p>
+      <div id="pick-claim" class="box" hidden>
+        <h2>Claim <span id="pick-chosen"></span></h2>
+        <p class="muted">A public name on the chain: a <b>1,000,000</b> refundable deposit plus a fee, paid
+          from your wallet. The chain makes you wait about 15 minutes between committing and claiming, so
+          nobody can grab it first.</p>
+        <button type="button" id="pick-register" class="wide">Claim this name</button>
+        <p id="pick-progress" class="me-status" role="status" aria-live="polite" hidden></p>
+        <details id="pick-manual" class="import">
+          <summary>Or claim it in Basecamp instead</summary>
+          <p id="pick-command" class="mono command"></p>
+          <button type="button" id="pick-command-copy" class="ghost wide">Copy command</button>
+        </details>
+      </div>
+      <div class="step-nav">
+        <button type="button" id="name-back" class="ghost">Back</button>
+        <button type="button" id="name-continue" class="wide">Continue to chat →</button>
+      </div>
+    </section>
   </section>
 
-  <section id="posts-box" class="box" hidden>
-    <h2>Posts</h2>
-    <ol id="posts" class="posts"></ol>
-    <p id="posts-note" class="muted" hidden></p>
-    <button type="button" id="more" class="ghost wide" hidden>View more</button>
-  </section>
-
-  <section id="intro" class="intro">
-    <p>Type a name to see its card, page and posts, read from the chain in this browser.</p>
-  </section>
-
-  <section id="messages" class="messages" hidden>
+  <!-- ===================== CHAT (the destination) ===================== -->
+  <section id="chat" class="view" hidden>
     <div class="msg-top">
-      <h1>Messages</h1>
+      <h1>Chat</h1>
       <span id="msg-conn" class="conn" role="status" aria-live="polite">Not connected</span>
     </div>
-    <p class="muted">End-to-end encrypted, to and from names. Messages arrive while this page is open;
+    <p class="muted">End-to-end encrypted, name to name. Messages arrive while this page is open;
       nothing is kept for you on the network yet.</p>
+
+    <div id="msg-lock" class="box" hidden>
+      <h2 id="msg-lock-title">Unlock messaging</h2>
+      <p id="msg-lock-note" class="muted"></p>
+      <button type="button" id="msg-passkey" class="wide" hidden>Use a passkey</button>
+      <button type="button" id="msg-newkey" class="ghost wide" hidden>Make a new key</button>
+      <button type="button" id="msg-skip" class="ghost wide" hidden>Use without saving on this browser</button>
+      <p id="msg-lock-busy" class="muted" role="status" aria-live="polite" hidden>Working…</p>
+      <p id="msg-lock-error" class="error" role="alert" hidden></p>
+    </div>
+
+    <div id="msg-main">
     <div id="msg-conn-error" class="status error" hidden>
       <strong>Can't reach the messaging node.</strong>
       <p id="msg-conn-detail"></p>
@@ -120,8 +156,8 @@
     </div>
 
     <details id="msg-setup" class="box">
-      <summary id="msg-setup-summary">Set up this phone</summary>
-      <h2>This phone's messaging key</h2>
+      <summary id="msg-setup-summary">Set up this device</summary>
+      <h2>This device's messaging key</h2>
       <p id="msg-key" class="mono key"></p>
       <button type="button" id="msg-key-copy" class="ghost wide">Copy key</button>
       <p id="msg-key-note" class="muted" hidden></p>
@@ -131,10 +167,20 @@
                  enterkeyhint="done" placeholder="e.g. jef" maxlength="40">
           <button type="button" id="msg-me-check">Check</button>
         </span></label>
-      <p>To get messages for that name on this phone, publish the key on the name from your computer:</p>
-      <p id="msg-command" class="mono command"></p>
-      <button type="button" id="msg-command-copy" class="ghost wide">Copy command</button>
+      <p>Publish this key on your name so replies can reach you — one tap, signed by your wallet:</p>
+      <button type="button" id="msg-publish" class="wide">Publish my messaging key on my name</button>
+      <p id="msg-publish-status" class="me-status" role="status" aria-live="polite" hidden></p>
       <p id="msg-me-status" class="me-status" role="status" aria-live="polite"></p>
+      <details id="msg-manual" class="import">
+        <summary>Or publish it from Basecamp instead</summary>
+        <p id="msg-command" class="mono command"></p>
+        <button type="button" id="msg-command-copy" class="ghost wide">Copy command</button>
+      </details>
+      <p class="protect muted">
+        <button type="button" id="msg-protect" class="linklike">Protect this key with a passkey</button>
+        <span id="msg-protect-state"></span>
+        <br><small>Optional. The chat key only opens messages, so it's kept plainly by default.</small>
+      </p>
     </details>
 
     <div id="msg-list-view">
@@ -145,7 +191,7 @@
         <button type="submit">Open</button>
       </form>
       <ul id="msg-convos" class="convos"></ul>
-      <p id="msg-empty" class="muted">No conversations yet.</p>
+      <p id="msg-empty" class="muted">No conversations yet. Enter a name above to start one.</p>
     </div>
 
     <div id="msg-thread-view" hidden>
@@ -162,39 +208,67 @@
       </form>
       <p id="msg-send-error" class="error" role="alert" hidden></p>
     </div>
+    </div><!-- /msg-main -->
+
+    <p class="chat-foot muted"><button type="button" id="redo-setup" class="linklike">Set up a wallet &amp; name</button></p>
   </section>
 
-  <section id="about" class="box">
-    <h2>About and privacy</h2>
-    <p>Names gives people a name on the Logos Execution Zone (LEZ): post, message and get paid as
-      <b>jef</b> instead of a 32-byte account. This page only reads. To register a name, post or pay,
-      use the Names app in Logos Basecamp on your computer.</p>
-    <h3>Who sees what</h3>
-    <ul class="facts">
-      <li><b>This website</b> serves the page and sees that someone opened it. It never sees the name you
-        look up: that stays after the # in the address, which browsers don't send. No cookies, no analytics.</li>
-      <li><b>The chain's RPC</b> sees your IP address and which record it is asked for. Records are stored
-        under a scrambled ID, not the name, but anyone who guesses a name can find its record.</li>
-      <li><b>The door.</b> The LEZ testnet's own RPC doesn't let browsers in yet, so this page reaches it
-        through a small relay that adds that permission and only passes ordinary chain calls.</li>
-      <li><b>Your settings</b> stay on this device.</li>
-    </ul>
-    <h3>Messages</h3>
-    <ul class="facts">
-      <li><b>End-to-end encrypted.</b> A message is sealed on your phone to the key the other name
-        published (its <code>msg</code> entry) and only their device can open it. Who sent it is inside
-        the sealed part.</li>
-      <li><b>The messaging node</b> (Logos messaging, Waku) carries messages. It sees your phone's IP address
-        and which inbox a message goes to (a short hash of the recipient's key), not what it says or who sent
-        it. Ours is a temporary relay, set under Settings.</li>
-      <li><b>Checked on chain.</b> "✓ jef" means the message was sealed with the key jef published on the
-        chain. Anything else shows as "unverified".</li>
-      <li><b>The messaging key</b> is made on this phone and only opens messages. It can't spend or move
-        money, and it isn't your name's key. Clearing this site's data deletes it.</li>
-      <li><b>Live only.</b> Messages arrive while the page is open; the network keeps nothing for you yet.
-        Conversations are kept on this device only.</li>
-    </ul>
+  <!-- ===================== PRIVACY / SETTINGS DRAWER ===================== -->
+  <section id="privacy" class="drawer" hidden>
+    <div class="drawer-head">
+      <h2>About &amp; settings</h2>
+      <button type="button" id="privacy-close" class="ghost">Close</button>
+    </div>
+
+    <section id="settings" class="panel">
+      <h3>Settings</h3>
+      <p class="muted">These stay on this device.</p>
+      <fieldset>
+        <legend>Chain (RPC)</legend>
+        <label class="choice"><input type="radio" name="rpc-choice" value="https://lez.buggers.online/lez">
+          <span><b>LEZ testnet</b><small>Real names, such as jef and jefdiesel.</small></span></label>
+        <label class="choice"><input type="radio" name="rpc-choice" value="https://lez.buggers.online">
+          <span><b>Names test chain</b><small>Test names only, such as testpilot.</small></span></label>
+        <label class="choice"><input type="radio" name="rpc-choice" value="custom">
+          <span><b>Other</b><small>Any JSON-RPC URL that allows browsers.</small></span></label>
+        <input id="rpc-custom" type="url" inputmode="url" autocapitalize="none" spellcheck="false"
+               placeholder="https://…" aria-label="Other RPC URL">
+      </fieldset>
+      <div id="programs">
+        <label class="field">Registry program
+          <input id="registry" type="text" autocapitalize="none" spellcheck="false"></label>
+        <label class="field">Board program
+          <input id="board" type="text" autocapitalize="none" spellcheck="false"></label>
+      </div>
+      <label class="field">Messaging node
+        <input id="peer" type="text" autocapitalize="none" spellcheck="false" placeholder="/dns4/…/tcp/443/wss/p2p/…">
+        <small class="muted">The Logos messaging (Waku) node chat connects to, as a WebSocket multiaddr.</small></label>
+      <p id="settings-error" class="error" role="alert" hidden></p>
+      <div class="row">
+        <button type="button" id="settings-save">Save</button>
+        <button type="button" id="settings-reset" class="ghost">Reset</button>
+      </div>
+    </section>
+
+    <section class="about">
+      <h3>Who sees what</h3>
+      <ul class="facts">
+        <li><b>This website</b> serves the page and sees that someone opened it. No cookies, no analytics.</li>
+        <li><b>The chain's RPC</b> sees your IP address and which record it is asked for. Records are stored
+          under a scrambled ID, not the name, but anyone who guesses a name can find its record.</li>
+        <li><b>The door.</b> The LEZ testnet's own RPC doesn't let browsers in yet, so this page reaches it
+          through a small relay that adds that permission and only passes ordinary chain calls.</li>
+        <li><b>End-to-end encrypted chat.</b> A message is sealed in your browser to the key the other name
+          published and only their device can open it. The messaging node sees your IP and which inbox a
+          message goes to (a short hash of the recipient's key), not what it says or who sent it.</li>
+        <li><b>Your keys</b> are made in this browser. The messaging key only opens messages; the wallet key
+          (testnet) can hold tokens. Clearing this site's data deletes them.</li>
+      </ul>
+      <p class="muted">Registering a public name and posting are coming to the browser. Private names, private
+        posts and real money stay in the Names app in Logos Basecamp.</p>
+    </section>
   </section>
+
 </main>
 </body>
 </html>

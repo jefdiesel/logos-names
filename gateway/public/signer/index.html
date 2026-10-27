@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Names wallet signer</title>
+<style>
+  :root { color-scheme: light dark; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font: 16px system-ui, sans-serif;
+    background: #171717; color: #e5e5e5;
+    display: flex; align-items: center; justify-content: center; padding: 16px; box-sizing: border-box;
+  }
+  #panel { width: 100%; max-width: 420px; background: #202020; border: 1px solid #383838; border-radius: 14px; padding: 20px; }
+  h1 { font-size: 19px; margin: 0 0 14px; }
+  .row { display: flex; gap: 12px; padding: 8px 0; border-bottom: 1px solid #2d2d2d; }
+  .row .k { color: #a4a4a4; flex: 0 0 90px; }
+  .row .v { word-break: break-all; }
+  .actions { display: flex; gap: 10px; margin-top: 18px; }
+  button { flex: 1; font-size: 16px; padding: 12px; border: 0; border-radius: 9px; font-weight: 600; cursor: pointer; }
+  #approve { background: #e0a030; color: #111; }
+  #cancel { background: #333; color: #eee; }
+  button:disabled { opacity: .5; cursor: default; }
+  #busy { color: #a4a4a4; margin: 14px 0 0; }
+  #error { color: #ff6b6b; margin: 14px 0 0; }
+  .note { color: #888; font-size: 12px; margin: 16px 0 0; }
+</style>
+</head>
+<body>
+  <div id="panel" hidden>
+    <h1 id="title">Confirm</h1>
+    <div id="lines"></div>
+    <div class="actions">
+      <button type="button" id="cancel">Cancel</button>
+      <button type="button" id="approve">Approve</button>
+    </div>
+    <p id="busy" role="status" aria-live="polite" hidden></p>
+    <p id="error" role="alert" hidden></p>
+    <p class="note">This prompt is shown by the wallet signer itself. Check the amount and recipient above before approving.</p>
+  </div>
+  <script type="module" src="./signer.js"></script>
+</body>
+</html>
