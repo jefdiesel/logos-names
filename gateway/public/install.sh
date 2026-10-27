@@ -122,7 +122,8 @@ case ":$PATH:" in
   *":$DIR:"*) ;;
   *)
     # Add it to the shell's startup file once, so new terminals find `names`.
-    case "${SHELL##*/}" in
+    login_shell="${SHELL:-}"
+    case "${login_shell##*/}" in
       zsh) RC="$HOME/.zshrc" ;;
       bash) if [ "$(uname -s)" = Darwin ]; then RC="$HOME/.bash_profile"; else RC="$HOME/.bashrc"; fi ;;
       *) RC="$HOME/.profile" ;;
