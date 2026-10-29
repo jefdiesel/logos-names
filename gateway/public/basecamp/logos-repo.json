@@ -5,5 +5,7 @@
  "description": "The Names app (posts, messages, pay, profile) and the names module, for LEZ names.",
  "homepage": "https://github.com/jefdiesel/logos-names",
  "indexUrl": "https://logos-names.wrapit.workers.dev/basecamp/index.json",
- "trustedSigners": []
+ "trustedSigners": [
+  "did:jwk:eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6IndubmsyemJEWTI3VGxMZmpWbWhyYUlqR0FscHNkbF9DY0VUTUt3Yk5xbXMifQ"
+ ]
 }

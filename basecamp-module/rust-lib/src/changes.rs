@@ -14,7 +14,7 @@
 use crate::registry::{
     account_text, commitment, commitment_address, deposit_address, is_valid_name, owner_tag, page_address,
     record_address, seal_page, settings_address, AccountId, Derived, NameId, OwnerTag, Profile, Registry, Resolved,
-    Settings, Writer, MAX_SEALED_RECORD_LEN, NAME_SUFFIX, VPK_LEN,
+    Settings, Writer, MAX_SEALED_PAGE_LEN, MAX_SEALED_RECORD_LEN, NAME_SUFFIX, VPK_LEN,
 };
 use crate::shortlist::{length_proof, LengthProof, TIER_LOCKED, TIER_THREE};
 use serde_json::{json, Value};
@@ -23,7 +23,6 @@ const MAX_TEXT_RECORDS: usize = 16;
 const MAX_TEXT_KEY_LEN: usize = 32;
 const MAX_TEXT_VALUE_LEN: usize = 512;
 const MAX_CONTENT_TYPE_LEN: usize = 64;
-const MAX_SEALED_PAGE_LEN: usize = 80 * 1024;
 /// Sealing adds a nonce, a tag and the page's own framing to the body.
 const PAGE_OVERHEAD: usize = 12 + 16 + 4 + MAX_CONTENT_TYPE_LEN + 4;
 /// The term a registration claims in fee mode: one year, the CLI's default.

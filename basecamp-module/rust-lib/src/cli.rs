@@ -60,6 +60,63 @@ pub fn is_executable(path: &Path) -> bool {
         .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
+/// Makes `dir` (and any missing parents) and leaves `dir` itself readable by this
+/// user only.
+pub fn private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
+/// Writes `bytes` to `path` so only this user can read them, in one step: a new
+/// 0600 file beside it (never an existing one, so never through a symlink), then a
+/// rename over `path`, which replaces a symlink rather than following it. A reader
+/// sees the old file or the new one, never half of one.
+pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = path.parent().ok_or_else(|| std::io::Error::other("no folder to write in"))?;
+    // A missing folder is made private; an existing one is the caller's business.
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    let temp = dir.join(format!(".{name}.{}.{}.tmp", std::process::id(), now_ms()));
+    let written = (|| {
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&temp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    written
+}
+
+/// A new file only this user can read, failing if anything (a symlink included)
+/// is already at `path`.
+pub fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)
+}
+
+/// Whether `path` is safe to run or sign with: an absolute path to a file (or, with
+/// `dir`, a directory) owned by this user (or by root, with `root_ok`, for a program
+/// installed system-wide), that nobody else can write. Otherwise another account on
+/// the machine could swap in its own program or wallet.
+pub fn is_owned_safely(path: &Path, dir: bool, root_ok: bool) -> bool {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let Some(me) = std::env::var_os("HOME").and_then(|home| std::fs::metadata(home).ok()).map(|home| home.uid()) else {
+        return false;
+    };
+    path.is_absolute()
+        && path.metadata().is_ok_and(|meta| {
+            (if dir { meta.is_dir() } else { meta.is_file() })
+                && (meta.uid() == me || (root_ok && meta.uid() == 0))
+                && meta.permissions().mode() & 0o022 == 0
+        })
+}
+
 /// The CLI to run: the configured path, else `~/.local/bin/names` (where the
 /// installer puts it), else the copy `cli_install` put in the module's own
 /// folder, else the first `names` on `PATH`.
@@ -1021,14 +1078,12 @@ impl Jobs {
     /// in `bin` and the man pages in `man`: `{id, name, kind, state, started}`.
     /// The script is written to the jobs folder and removed once it ends.
     pub fn start_install(&self, script: &str, bin: &Path, man: &Path) -> Result<Value, String> {
-        use std::os::unix::fs::PermissionsExt;
         let id = self.prepare(INSTALL_JOB)?;
         for dir in [bin, man] {
             std::fs::create_dir_all(dir).map_err(|error| format!("cannot make {}: {error}", dir.display()))?;
         }
         let file = self.scratch(&id, "sh");
-        std::fs::write(&file, script).map_err(|error| format!("cannot write the installer: {error}"))?;
-        let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+        write_private(&file, script.as_bytes()).map_err(|error| format!("cannot write the installer: {error}"))?;
         self.start_process(&id, INSTALL_JOB, "install", install_process(&file, bin, man), "the installer", Some(file))
     }
 }
@@ -1067,14 +1122,13 @@ impl Jobs {
     }
 
     fn write(&self, id: &str, record: &Value) {
-        let _ = std::fs::write(self.path(id, "json"), record.to_string());
+        let _ = write_private(&self.path(id, "json"), record.to_string().as_bytes());
     }
 
     /// Checks that no job runs for `name`, clears out old jobs, and returns a
     /// fresh job id, with the directory made.
     pub fn prepare(&self, name: &str) -> Result<String, String> {
-        std::fs::create_dir_all(&self.dir)
-            .map_err(|error| format!("cannot make {}: {error}", self.dir.display()))?;
+        private_dir(&self.dir).map_err(|error| format!("cannot make {}: {error}", self.dir.display()))?;
         if let Some(running) = self.running_for(name) {
             return Err(match name {
                 INSTALL_JOB => format!("the names program is still being installed (job {running}); wait for it to finish"),
@@ -1164,7 +1218,7 @@ impl Jobs {
         if !valid_id(id) {
             return Err(format!("not a job id: {id}"));
         }
-        let log = std::fs::File::create(self.path(id, "log"))
+        let log = create_private(&self.path(id, "log"))
             .map_err(|error| format!("cannot write the job's log: {error}"))?;
         let log_err = log.try_clone().map_err(|error| format!("cannot write the job's log: {error}"))?;
         // Its own process group: a signal meant for the host leaves it be.

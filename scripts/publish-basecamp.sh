@@ -46,7 +46,11 @@ gh run download "$run" --repo "$REPO" -n basecamp-linux-x86_64 -D "$OUT/linux"
 [ -f "$OUT/linux/names-$module_version-linux-x86_64.lgx" ] && [ -f "$OUT/linux/names_ui-$app_version-linux-x86_64.lgx" ] ||
   { echo "the Linux build has other versions: $(ls "$OUT/linux")" >&2; exit 1; }
 
-echo "== merge into one package per name (on $MINI)"
+echo "== merge into one package per name and sign it the Basecamp way (on $MINI)"
+# lgx sign puts an Ed25519 signature over the manifest (manifest.sig, did:jwk), which
+# Basecamp checks against the repository's trustedSigners. The key lives only on the
+# Mini (~/.config/logos/keys/logos-names.jwk); its DID is scripts/package-signing-key.did.
+DID=$(cat scripts/package-signing-key.did)
 M=$DEV/merge
 ssh "$MINI" "rm -rf $M/in && mkdir -p $M/in"
 scp -q "$OUT/module.lgx" "$MINI:$M/in/names-mac.lgx"
@@ -54,7 +58,11 @@ scp -q "$OUT/app.lgx" "$MINI:$M/in/names_ui-mac.lgx"
 scp -q "$OUT/linux/"*.lgx "$MINI:$M/in/"
 ssh "$MINI" "cd $M && L=$DEV/lgx-merge/lgxtool/bin/lgx &&
   \$L merge in/names-mac.lgx in/names-$module_version-linux-x86_64.lgx -o in/names-$module_version.lgx -y >/dev/null &&
-  \$L merge in/names_ui-mac.lgx in/names_ui-$app_version-linux-x86_64.lgx -o in/names_ui-$app_version.lgx -y >/dev/null"
+  \$L merge in/names_ui-mac.lgx in/names_ui-$app_version-linux-x86_64.lgx -o in/names_ui-$app_version.lgx -y >/dev/null &&
+  for p in in/names-$module_version.lgx in/names_ui-$app_version.lgx; do
+    \$L sign \$p --key logos-names --name LNS --url https://github.com/$REPO >/dev/null &&
+    \$L verify \$p | grep -q '^Signature is valid' || exit 1
+  done"
 scp -q "$MINI:$M/in/names-$module_version.lgx" "$MINI:$M/in/names_ui-$app_version.lgx" "$OUT/"
 rm -rf "$OUT/linux" "$OUT/module.lgx" "$OUT/app.lgx"
 
@@ -75,9 +83,9 @@ gh release upload "$tag" --repo "$REPO" --clobber "$OUT"/*.lgx "$OUT"/*.sig "$OU
 
 echo "== repository index"
 mkdir -p gateway/public/basecamp
-python3 - "$OUT" "$tag" "$SITE" "$REPO" <<'PY'
+python3 - "$OUT" "$tag" "$SITE" "$REPO" "$DID" <<'PY'
 import hashlib, json, os, sys, tarfile, time
-out, tag, site, repo = sys.argv[1:5]
+out, tag, site, repo, did = sys.argv[1:6]
 dest = "gateway/public/basecamp"
 packages = []
 for file in sorted(os.listdir(out)):
@@ -114,7 +122,7 @@ json.dump(index, open(os.path.join(dest, "index.json"), "w"), indent=1)
 json.dump({"schemaVersion": 1, "name": "logos-names", "displayName": "LNS",
            "description": "The Names app (posts, messages, pay, profile) and the names module, for LEZ names.",
            "homepage": f"https://github.com/{repo}", "indexUrl": f"{site}/basecamp/index.json",
-           "trustedSigners": []}, open(os.path.join(dest, "logos-repo.json"), "w"), indent=1)
+           "trustedSigners": [did]}, open(os.path.join(dest, "logos-repo.json"), "w"), indent=1)
 print("wrote", dest, [p["name"] for p in packages])
 PY
 echo "done: deploy the site to publish $SITE/basecamp/logos-repo.json"

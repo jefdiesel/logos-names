@@ -598,6 +598,11 @@ impl Default for Names {
             board_reads: Default::default(),
             read_cache: HashMap::new(),
         };
+        // Files saved by versions before 0.10 were readable by every account on the
+        // machine; this closes them up once.
+        if let Some(dir) = config_dir() {
+            tighten(&dir);
+        }
         // A missing or unreadable file just means the defaults stand.
         let saved = config_dir()
             .and_then(|dir| std::fs::read_to_string(dir.join("config.json")).ok())
@@ -609,8 +614,61 @@ impl Default for Names {
     }
 }
 
+/// A sequencer URL the module will talk to: `https://`, or `http://` only to this
+/// machine (a local dev chain). Plain http elsewhere would let anyone on the network
+/// swap name records and payment keys.
 fn is_http_url(url: &str) -> bool {
-    url.starts_with("http://") || url.starts_with("https://")
+    if url.starts_with("https://") {
+        return url.len() > "https://".len();
+    }
+    let Some(rest) = url.strip_prefix("http://") else { return false };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.rsplit_once('@').map_or(host, |(_, host)| host);
+    let host = if let Some(bracketed) = host.strip_prefix('[') {
+        bracketed.split(']').next().unwrap_or("")
+    } else {
+        host.split(':').next().unwrap_or("")
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+/// The one app that may use the methods that spend, sign, change the module's
+/// settings or read the person's own state: the Names app.
+const NAMES_APP: &str = "names_ui";
+
+/// Whether `caller` may use those methods. Basecamp gives each app its own
+/// credential, named after the app, so the module knows which app is calling.
+/// Any other app that lists `names` as a dependency can still read names, but not
+/// pay, sign, run the CLI or repoint the module. The host itself (Basecamp, or
+/// `logosctl` driving the module) is allowed; a caller that can't be named is not.
+fn may_act(caller: &logos_rust_sdk::LogosCaller) -> bool {
+    matches!(caller, logos_rust_sdk::LogosCaller::HostAnchor) || caller.is_module(NAMES_APP)
+}
+
+#[cfg(not(test))]
+fn calling() -> logos_rust_sdk::LogosCaller {
+    logos_rust_sdk::current_caller()
+}
+
+// Tests run outside any dispatch; they act as the host unless a test says otherwise.
+#[cfg(test)]
+thread_local! {
+    static TEST_CALLER: std::cell::RefCell<logos_rust_sdk::LogosCaller> =
+        const { std::cell::RefCell::new(logos_rust_sdk::LogosCaller::HostAnchor) };
+}
+
+#[cfg(test)]
+fn calling() -> logos_rust_sdk::LogosCaller {
+    TEST_CALLER.with(|caller| caller.borrow().clone())
+}
+
+fn only_the_names_app() -> Result<(), String> {
+    let caller = calling();
+    if may_act(&caller) {
+        Ok(())
+    } else {
+        Err(format!("only the Names app can do this; refused for {}", caller.describe_for_human()))
+    }
 }
 
 fn reply(outcome: Result<Value, String>) -> String {
@@ -675,11 +733,31 @@ fn load_object(path: &std::path::Path) -> Map<String, Value> {
 
 /// Failing to save is not an error for the caller: the memory still serves
 /// this run.
-fn save_object(path: &std::path::Path, object: &Map<String, Value>) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+/// Makes `dir`, and the files and folders directly in it and in its `jobs`, readable
+/// by this user only. Symlinks are left alone (and not followed).
+fn tighten(dir: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if !dir.is_dir() {
+        return;
     }
-    let _ = std::fs::write(path, Value::Object(object.clone()).to_string());
+    for folder in [dir.to_path_buf(), dir.join("jobs")] {
+        let Ok(meta) = std::fs::symlink_metadata(&folder) else { continue };
+        if !meta.is_dir() {
+            continue;
+        }
+        let _ = std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700));
+        for entry in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
+            if let Ok(meta) = entry.path().symlink_metadata() {
+                if meta.is_file() {
+                    let _ = std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(0o600));
+                }
+            }
+        }
+    }
+}
+
+fn save_object(path: &std::path::Path, object: &Map<String, Value>) {
+    let _ = cli::write_private(path, Value::Object(object.clone()).to_string().as_bytes());
 }
 
 impl Memory {
@@ -846,11 +924,19 @@ impl Names {
         if let Some(program) = saved["registry"].as_str().filter(|program| !RETIRED_REGISTRIES.contains(program)) {
             self.program = registry::parse_account(program).ok().or(self.program);
         }
+        // Paths are checked as set_* checks them, so one saved before those checks
+        // existed (or written into the file by hand) can't point the module elsewhere.
+        let own = |path: &str, dir: bool, root_ok: bool| cli::is_owned_safely(std::path::Path::new(path), dir, root_ok);
         if let (Some(config), Some(storage)) = (saved["wallet_config"].as_str(), saved["wallet_storage"].as_str()) {
-            self.wallet_files = Some((config.to_owned(), storage.to_owned()));
+            if own(config, false, false) && own(storage, false, false) {
+                self.wallet_files = Some((config.to_owned(), storage.to_owned()));
+            }
         }
-        self.cli = saved["cli"].as_str().filter(|path| !path.is_empty()).map(str::to_owned);
-        self.cli_wallet = saved["cli_wallet"].as_str().filter(|dir| !dir.is_empty()).map(str::to_owned);
+        self.cli = saved["cli"]
+            .as_str()
+            .filter(|path| !path.is_empty() && cli::is_executable(std::path::Path::new(path)) && own(path, false, true))
+            .map(str::to_owned);
+        self.cli_wallet = saved["cli_wallet"].as_str().filter(|dir| !dir.is_empty() && own(dir, true, false)).map(str::to_owned);
         self.follows = saved["follows"]
             .as_array()
             .map(|list| list.iter().filter_map(|name| registry::parse_name(name.as_str()?).ok()).collect())
@@ -956,6 +1042,12 @@ impl Names {
         })
     }
 
+    /// Drops every answer read from the chain, after the chain or registry changed.
+    fn forget_all_reads(&mut self) {
+        self.read_cache.clear();
+        self.board_reads.lock().expect("the board reads lock").clear();
+    }
+
     /// Answers a read about `typed` from the cache while it is fresh, else asks
     /// `read` and keeps a successful answer.
     fn cached_read(&mut self, kind: &str, typed: &str, read: impl FnOnce(&mut Self) -> String) -> String {
@@ -968,6 +1060,12 @@ impl Names {
         }
         let answer = read(self);
         if serde_json::from_str::<Value>(&answer).is_ok_and(|reply| reply["success"] == true) {
+            if self.read_cache.len() >= MAX_CACHED {
+                self.read_cache.retain(|_, (_, at)| at.elapsed() < READ_FRESH);
+                if self.read_cache.len() >= MAX_CACHED {
+                    self.read_cache.clear();
+                }
+            }
             self.read_cache.insert(key, (answer.clone(), std::time::Instant::now()));
         }
         answer
@@ -1166,8 +1264,7 @@ impl Names {
     /// error for the caller: the setting still applies to this run.
     fn save(&self) {
         if let Some(dir) = config_dir() {
-            let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(dir.join("config.json"), self.config().to_string());
+            let _ = cli::write_private(&dir.join("config.json"), self.config().to_string().as_bytes());
         }
     }
 
@@ -1183,6 +1280,10 @@ impl Names {
 
     /// The identifier and key of `name`, derived the first time it is asked for.
     fn derived(&mut self, name: &str) -> Derived {
+        // Bounded: an app looking up endless names can't grow this without limit.
+        if self.derived.len() >= MAX_CACHED && !self.derived.contains_key(name) {
+            self.derived.clear();
+        }
         self.derived
             .entry(name.to_owned())
             .or_insert_with(|| registry::derive(name))
@@ -1458,6 +1559,9 @@ impl NamesModule for Names {
     }
 
     fn wallet(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         reply((|| {
             let registry = self.registry()?;
             let held = self.held()?;
@@ -1492,6 +1596,9 @@ impl NamesModule for Names {
     }
 
     fn mine(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         reply((|| {
             let registry = self.registry()?;
             let held = self.held()?.public;
@@ -1573,6 +1680,9 @@ impl NamesModule for Names {
     }
 
     fn keep(&mut self, name: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         reply((|| {
             let name = registry::parse_name(&name)?;
             let registry = self.registry()?;
@@ -1603,10 +1713,16 @@ impl NamesModule for Names {
     }
 
     fn register_name(&mut self, name: String, owner: String, private_account: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         reply(self.register_step(&name, &owner, &private_account))
     }
 
     fn receive_privately(&mut self, name: String, private_account: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         self.change_name(&name, |registry, name, derived, held| {
             let (npk, vpk) = private_keys(&private_account)?;
             registry.set_private_keys(name, derived, held, &npk, &vpk, true)
@@ -1614,12 +1730,18 @@ impl NamesModule for Names {
     }
 
     fn set_account(&mut self, name: String, account: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         self.change_name(&name, |registry, name, derived, held| {
             registry.set_account(name, derived, held, &registry::parse_account(&account)?)
         })
     }
 
     fn set_private_keys(&mut self, name: String, nullifier_public_key: String, viewing_public_key: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         self.change_name(&name, |registry, name, derived, held| {
             let npk = registry::unhex(&nullifier_public_key)?;
             let vpk = registry::unhex(&viewing_public_key)?;
@@ -1628,16 +1750,25 @@ impl NamesModule for Names {
     }
 
     fn clear_addresses(&mut self, name: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         self.change_name(&name, |registry, name, derived, held| registry.clear_addresses(name, derived, held))
     }
 
     fn set_text(&mut self, name: String, key: String, value: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         self.change_name(&name, |registry, name, derived, held| {
             registry.set_text(name, derived, held, key.trim(), &value)
         })
     }
 
     fn set_profile(&mut self, name: String, entries_json: String, replace: bool) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         // The entries are checked before anything is read from the chain.
         let entries = match parse_entries(&entries_json) {
             Ok(entries) => entries,
@@ -1649,22 +1780,34 @@ impl NamesModule for Names {
     }
 
     fn set_page(&mut self, name: String, content_type: String, body: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         self.change_name(&name, |registry, name, derived, held| {
             registry.set_page(name, derived, held, content_type.trim(), body.as_bytes())
         })
     }
 
     fn transfer(&mut self, name: String, new_owner: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         self.change_name(&name, |registry, name, derived, held| {
             registry.transfer(name, derived, held, &registry::parse_account(&new_owner)?)
         })
     }
 
     fn release(&mut self, name: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         self.change_name(&name, |registry, name, derived, held| registry.release(name, derived, held))
     }
 
     fn set_primary(&mut self, account: String, name: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         let name = if name.trim().is_empty() {
             String::new()
         } else {
@@ -1684,6 +1827,9 @@ impl NamesModule for Names {
     }
 
     fn cli_mine(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         reply((|| {
             let setup = self.cli_setup()?;
             // The CLI reads every name it holds from the chain, which takes seconds:
@@ -1701,6 +1847,9 @@ impl NamesModule for Names {
     }
 
     fn cli_profile(&mut self, name: String, entries_json: String, replace: bool) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         let entries = match parse_entries(&entries_json) {
             Ok(entries) => entries,
             Err(error) => return reply(Err(error)),
@@ -1714,6 +1863,9 @@ impl NamesModule for Names {
     }
 
     fn cli_set_page(&mut self, name: String, content_type: String, body: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         if let Err(error) = cli::set_page_args(&name, &content_type, Some(std::path::Path::new("check"))) {
             return reply(Err(error));
         }
@@ -1722,7 +1874,7 @@ impl NamesModule for Names {
                 return Ok((cli::set_page_args(name, &content_type, None)?, None, Value::Null));
             }
             let file = jobs.scratch(id, "page");
-            std::fs::write(&file, body.as_bytes()).map_err(|error| format!("cannot write the page for the CLI: {error}"))?;
+            cli::write_private(&file, body.as_bytes()).map_err(|error| format!("cannot write the page for the CLI: {error}"))?;
             match cli::set_page_args(name, &content_type, Some(&file)) {
                 Ok(command) => Ok((command, Some(file), Value::Null)),
                 Err(error) => {
@@ -1734,6 +1886,9 @@ impl NamesModule for Names {
     }
 
     fn cli_set_text(&mut self, name: String, key: String, value: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         let command = match cli::set_text_args(&name, &key, &value) {
             Ok(command) => command,
             Err(error) => return reply(Err(error)),
@@ -1742,10 +1897,16 @@ impl NamesModule for Names {
     }
 
     fn cli_balance(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         reply((|| cli::run_balance(&self.cli_setup()?))())
     }
 
     fn cli_bridge(&mut self, amount: String, from_key: String, node: String, send: bool) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         reply((|| {
             // Everything is checked before anything is remembered or run.
             cli::bridge_amount(&amount)?;
@@ -1762,6 +1923,9 @@ impl NamesModule for Names {
     }
 
     fn cli_faucet(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         reply((|| {
             let wallet = cli::find_wallet(self.cli_wallet.as_deref())
                 .ok_or_else(|| "create your wallet first (Welcome, Create my wallet)".to_owned())?;
@@ -1773,6 +1937,9 @@ impl NamesModule for Names {
     }
 
     fn cli_status(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         reply((|| {
             let program = cli::find_program(self.cli.as_deref()).filter(|path| cli::is_executable(path));
             let wallet = cli::find_wallet(self.cli_wallet.as_deref());
@@ -1792,6 +1959,9 @@ impl NamesModule for Names {
     }
 
     fn cli_install(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         reply((|| {
             let jobs = self.jobs()?;
             let (bin, man) = self.install_dirs()?;
@@ -1819,6 +1989,9 @@ impl NamesModule for Names {
     }
 
     fn cli_create_wallet(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         reply((|| {
             let setup = self.cli_setup()?;
             if let Some(id) = self.jobs().ok().and_then(|jobs| jobs.running_for(cli::WALLET_JOB)) {
@@ -1836,6 +2009,9 @@ impl NamesModule for Names {
     }
 
     fn cli_shield(&mut self, amount: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         reply((|| {
             let command = cli::setup_args(&amount)?;
             if command[1] == "--shield=0" {
@@ -1849,6 +2025,9 @@ impl NamesModule for Names {
     }
 
     fn cli_pay_account(&mut self, account: String, amount: String, from_private: bool) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         reply((|| {
             // Checked before the CLI is looked for, so bad input fails the same way every time.
             if !matches!(cli::pay_to(&account)?, cli::PayTo::Account(_)) {
@@ -1862,6 +2041,9 @@ impl NamesModule for Names {
     }
 
     fn cli_register(&mut self, name: String, as_public: bool) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         let command = match cli::register_args(&name, as_public) {
             Ok(command) => command,
             Err(error) => return reply(Err(error)),
@@ -1870,6 +2052,11 @@ impl NamesModule for Names {
     }
 
     fn board_feed(&mut self, following: bool) -> String {
+        if following {
+            if let Err(refused) = only_the_names_app() {
+                return reply(Err(refused));
+            }
+        }
         reply((|| {
             let setup = self.cli_setup()?;
             if following && self.follows.is_empty() {
@@ -1898,6 +2085,9 @@ impl NamesModule for Names {
     }
 
     fn board_post(&mut self, name: String, text: String, cids_json: String, reply_to: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         let cids: Vec<String> = match serde_json::from_str::<Vec<String>>(if cids_json.trim().is_empty() { "[]" } else { &cids_json }) {
             Ok(cids) => cids,
             Err(_) => return reply(Err("cids must be a JSON list of CIDs".to_owned())),
@@ -1910,6 +2100,9 @@ impl NamesModule for Names {
     }
 
     fn board_like(&mut self, name: String, post: String, undo: bool) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         let command = match cli::like_args(&name, &post, undo) {
             Ok(command) => command,
             Err(error) => return reply(Err(error)),
@@ -1918,6 +2111,9 @@ impl NamesModule for Names {
     }
 
     fn board_hide(&mut self, post: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         let (name, command) = match cli::hide_args(&post) {
             Ok(made) => made,
             Err(error) => return reply(Err(error)),
@@ -1926,10 +2122,16 @@ impl NamesModule for Names {
     }
 
     fn main_name(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         reply(Ok(json!(self.main_name)))
     }
 
     fn set_main_name(&mut self, name: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         reply((|| {
             let name = registry::parse_name(&name)?;
             self.main_name = Some(name.clone());
@@ -1939,6 +2141,9 @@ impl NamesModule for Names {
     }
 
     fn anon_name(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         reply((|| {
             let setup = self.cli_setup()?;
             let saved: Value = std::fs::read_to_string(setup.wallet.join("names.json"))
@@ -1950,10 +2155,16 @@ impl NamesModule for Names {
     }
 
     fn running_jobs(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         reply((|| Ok(Value::from(self.jobs()?.running())))())
     }
 
     fn make_anon(&mut self, as_public: bool) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         let mut command = vec!["anon".to_owned()];
         if as_public {
             command.push("--public".to_owned());
@@ -1966,6 +2177,9 @@ impl NamesModule for Names {
     }
 
     fn make_public(&mut self, name: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         let name = match registry::parse_name(&name) {
             Ok(name) => name,
             Err(error) => return reply(Err(error)),
@@ -1975,10 +2189,16 @@ impl NamesModule for Names {
     }
 
     fn dm_names(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         reply(Ok(json!(self.dm_names)))
     }
 
     fn set_dm_name(&mut self, convo_id: String, name: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         reply((|| {
             let convo = convo_id.trim();
             if convo.is_empty() || convo.len() > 200 || !convo.bytes().all(|b| b.is_ascii_graphic()) {
@@ -1995,10 +2215,16 @@ impl NamesModule for Names {
     }
 
     fn chat_names(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         reply(Ok(json!(self.chat_names)))
     }
 
     fn set_chat_name(&mut self, address: String, name: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         reply((|| {
             let address = address.trim();
             if address.is_empty() || address.len() > 200 || !address.bytes().all(|b| b.is_ascii_graphic()) {
@@ -2011,10 +2237,16 @@ impl NamesModule for Names {
     }
 
     fn board_likes(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         reply(Ok(json!(self.likes)))
     }
 
     fn board_toggle_like(&mut self, name: String, post: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         let post = match cli::post_ref(&post) {
             Ok(post) => post,
             Err(error) => return reply(Err(error)),
@@ -2036,6 +2268,9 @@ impl NamesModule for Names {
     }
 
     fn cli_pay(&mut self, name: String, amount: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         let command = match cli::pay_args(&name, &amount) {
             Ok(command) => command,
             Err(error) => return reply(Err(error)),
@@ -2044,10 +2279,16 @@ impl NamesModule for Names {
     }
 
     fn board_follows(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         reply(Ok(json!(self.follows)))
     }
 
     fn board_follow(&mut self, name: String, undo: bool) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         reply((|| {
             let name = registry::parse_name(&name)?;
             self.follows.retain(|followed| *followed != name);
@@ -2060,6 +2301,9 @@ impl NamesModule for Names {
     }
 
     fn job(&mut self, id: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
         let mut state = (|| self.jobs()?.state(id.trim()))();
         if let Ok(state) = &mut state {
             self.job_outcome(state);
@@ -2078,10 +2322,13 @@ impl NamesModule for Names {
     }
 
     fn set_cli(&mut self, path: String) -> bool {
+        if only_the_names_app().is_err() {
+            return false;
+        }
         let path = path.trim();
         if path.is_empty() {
             self.cli = None;
-        } else if std::path::Path::new(path).is_absolute() && cli::is_executable(std::path::Path::new(path)) {
+        } else if cli::is_executable(std::path::Path::new(path)) && cli::is_owned_safely(std::path::Path::new(path), false, true) {
             self.cli = Some(path.to_owned());
         } else {
             return false;
@@ -2091,10 +2338,13 @@ impl NamesModule for Names {
     }
 
     fn set_cli_wallet(&mut self, dir: String) -> bool {
+        if only_the_names_app().is_err() {
+            return false;
+        }
         let dir = dir.trim();
         if dir.is_empty() {
             self.cli_wallet = None;
-        } else if std::path::Path::new(dir).is_absolute() && std::path::Path::new(dir).is_dir() {
+        } else if cli::is_owned_safely(std::path::Path::new(dir), true, false) {
             self.cli_wallet = Some(dir.to_owned());
         } else {
             return false;
@@ -2104,9 +2354,13 @@ impl NamesModule for Names {
     }
 
     fn set_registry(&mut self, program_id: String) -> bool {
+        if only_the_names_app().is_err() {
+            return false;
+        }
         match registry::parse_account(&program_id) {
             Ok(program) => {
                 self.program = Some(program);
+                self.forget_all_reads();
                 self.save();
                 true
             }
@@ -2115,10 +2369,13 @@ impl NamesModule for Names {
     }
 
     fn set_wallet_files(&mut self, config_path: String, storage_path: String) -> bool {
+        if only_the_names_app().is_err() {
+            return false;
+        }
         let (config, storage) = (config_path.trim(), storage_path.trim());
         if config.is_empty() && storage.is_empty() {
             self.wallet_files = None;
-        } else if std::path::Path::new(config).is_file() && std::path::Path::new(storage).is_file() {
+        } else if cli::is_owned_safely(std::path::Path::new(config), false, false) && cli::is_owned_safely(std::path::Path::new(storage), false, false) {
             self.wallet_files = Some((config.to_owned(), storage.to_owned()));
         } else {
             return false;
@@ -2128,9 +2385,13 @@ impl NamesModule for Names {
     }
 
     fn set_sequencer(&mut self, url: String) -> bool {
+        if only_the_names_app().is_err() {
+            return false;
+        }
         let url = url.trim();
         if is_http_url(url) {
             self.sequencer = url.to_owned();
+            self.forget_all_reads();
             self.save();
             true
         } else {
@@ -2138,6 +2399,9 @@ impl NamesModule for Names {
         }
     }
 }
+
+/// The most names, and the most answers, the module keeps in memory at once.
+const MAX_CACHED: usize = 512;
 
 /// A wallet can hold many accounts and each costs a read, so `wallet` stops here.
 const MAX_WALLET_ACCOUNTS: usize = 64;
@@ -2718,6 +2982,125 @@ mod tests {
         assert_eq!(parsed(&names.get_config())["registry"], Value::Null);
         assert!(is_http_url("http://127.0.0.1:3040"));
         assert!(!is_http_url("ftp://example.test"));
+    }
+
+    // ── Who may change things (open-review FR-1, FR-3, FR-6) ────────────
+
+    #[test]
+    fn plain_http_is_only_for_this_machine() {
+        for local in ["http://localhost:3040", "http://127.0.0.1", "http://[::1]:3040/rpc"] {
+            assert!(is_http_url(local), "{local}");
+        }
+        for remote in ["http://testnet.lez.logos.co", "http://evil.test/", "http://localhost.evil.test", "http://127.0.0.1@evil.test", "https://"] {
+            assert!(!is_http_url(remote), "{remote}");
+        }
+        // userinfo before the host is skipped, so it can't smuggle a local-looking prefix
+        assert!(!is_http_url("http://localhost@evil.test:3040"));
+        assert!(is_http_url("https://testnet.lez.logos.co"));
+        let mut names = fresh();
+        assert!(!names.set_sequencer("http://evil.test".into()));
+        assert_eq!(parsed(&names.get_config())["sequencer"], DEFAULT_SEQUENCER);
+    }
+
+    fn as_caller(caller: logos_rust_sdk::LogosCaller) {
+        TEST_CALLER.with(|current| *current.borrow_mut() = caller);
+    }
+
+    #[test]
+    fn only_the_names_app_and_the_host_may_act() {
+        use logos_rust_sdk::LogosCaller;
+        assert!(may_act(&LogosCaller::HostAnchor));
+        assert!(may_act(&LogosCaller::Module { name: "names_ui".into(), instance: None }));
+        assert!(may_act(&LogosCaller::Module { name: "names_ui".into(), instance: Some("a41f".into()) }));
+        assert!(!may_act(&LogosCaller::Module { name: "evil_ui".into(), instance: None }));
+        assert!(!may_act(&LogosCaller::Module { name: "whisperbox".into(), instance: None }));
+        assert!(!may_act(&LogosCaller::Unknown));
+        assert!(!may_act(&LogosCaller::Derived { parent: "names_ui".into(), leaf: "x".into() }));
+    }
+
+    #[test]
+    fn another_app_can_read_names_but_not_pay_or_repoint_the_module() {
+        let (mut names, dir) = with_fake_cli("other-app", "echo should-not-run > \"$(dirname \"$0\")/ran\"");
+        as_caller(logos_rust_sdk::LogosCaller::Module { name: "evil_ui".into(), instance: None });
+        let paid = parsed(&names.cli_pay("victim".into(), "1000000".into()));
+        assert_eq!(paid["success"], false, "{paid}");
+        assert!(paid["error"].as_str().unwrap().contains("only the Names app"), "{paid}");
+        for refused in [names.cli_create_wallet(), names.set_main_name("attacker".into()), names.set_chat_name("peer".into(), "attacker".into()),
+                        names.cli_status(), names.wallet(), names.job("victim-1".into()), names.board_feed(true)] {
+            assert_eq!(parsed(&refused)["success"], false, "{refused}");
+        }
+        assert!(!names.set_cli("/bin/sh".into()));
+        assert!(!names.set_sequencer("https://evil.test".into()));
+        assert!(!names.set_cli_wallet(dir.to_string_lossy().into_owned()));
+        assert!(!names.set_wallet_files(String::new(), String::new()));
+        assert!(!names.set_registry(registry::account_text(&[9; 32])));
+        assert_eq!(parsed(&names.get_config())["sequencer"], DEFAULT_SEQUENCER);
+        assert!(!dir.join("ran").exists(), "the CLI must not have run");
+        // Reading stays open to every app.
+        assert_eq!(names.normalize("@Jef".into()), "jef");
+        assert_eq!(parsed(&names.page_preview("<p>hi</p>".into()))["success"], true);
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+    }
+
+    #[test]
+    fn the_cli_and_wallet_must_be_this_users_own() {
+        use std::os::unix::fs::PermissionsExt;
+        let (mut names, dir) = with_fake_cli("owned", "exit 0");
+        let script = dir.join("names");
+        assert!(names.set_cli(script.to_string_lossy().into_owned()));
+        // writable by others: refused
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(!names.set_cli(script.to_string_lossy().into_owned()));
+        // a relative path: refused
+        assert!(!names.set_cli("names".into()));
+        // a system file is not a wallet
+        assert!(!names.set_wallet_files("/etc/hosts".into(), "/etc/hosts".into()));
+        // a saved path that fails the checks is dropped on load
+        names.apply_saved(&json!({ "cli": script.to_string_lossy(), "cli_wallet": "/etc" }));
+        assert_eq!(names.cli, None);
+        assert_eq!(names.cli_wallet, None);
+    }
+
+    #[test]
+    fn private_files_are_this_users_only_and_replace_symlinks() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("logos-names-private-{}-{}", std::process::id(), now()));
+        let file = dir.join("config.json");
+        cli::write_private(&file, b"{}").unwrap();
+        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        // a symlink planted where the file goes is replaced, not written through
+        let target = dir.join("elsewhere");
+        std::fs::write(&target, "untouched").unwrap();
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(&target, &file).unwrap();
+        cli::write_private(&file, b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "untouched");
+        assert!(!std::fs::symlink_metadata(&file).unwrap().file_type().is_symlink());
+        assert!(cli::create_private(&target).is_err(), "never opens an existing file");
+        // old 0644 files are closed up
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        tighten(&dir);
+        assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn oversized_records_and_pages_are_not_believed() {
+        let derived = registry::derive("jef");
+        let huge = vec![0_u8; registry::MAX_SEALED_RECORD_LEN + 1];
+        assert_eq!(registry::Profile::open(&derived.key, &huge, "jef").texts.len(), 0);
+        assert!(registry::open_page(&derived.key, &vec![0_u8; registry::MAX_SEALED_PAGE_LEN + 1]).is_none());
+    }
+
+    #[test]
+    fn caches_stay_bounded() {
+        let mut names = fresh();
+        let one = registry::derive("jef");
+        for i in 0..MAX_CACHED {
+            names.derived.insert(format!("n{i}"), one.clone());
+        }
+        names.derived("another");
+        assert!(names.derived.len() <= MAX_CACHED);
     }
 
     // ── Getting started without a terminal ──────────────────────────────

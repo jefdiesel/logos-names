@@ -71,6 +71,10 @@ const TAG_LEN: usize = 16;
 const PROFILE_PADDING: usize = 256;
 /// The most sealed bytes a record holds; the program refuses more.
 pub const MAX_SEALED_RECORD_LEN: usize = 12 * 1024;
+/// The most sealed bytes a page holds; the program refuses more.
+pub const MAX_SEALED_PAGE_LEN: usize = 80 * 1024;
+/// The largest sequencer reply read: an account's shards, a page among them, as JSON.
+const MAX_REPLY_LEN: usize = 1024 * 1024;
 /// ML-KEM-768 encapsulation key, as used for LEZ private accounts.
 pub const VPK_LEN: usize = 1184;
 
@@ -431,6 +435,10 @@ impl Profile {
     /// bytes this key does not open, and a profile of another name all mean
     /// the same thing: the name has nothing set.
     pub fn open(key: &[u8; 32], sealed: &[u8], name: &str) -> Self {
+        // The program never stores more; a reply that has more didn't come from it.
+        if sealed.len() > MAX_SEALED_RECORD_LEN {
+            return Self::bare(name);
+        }
         open(key, sealed, RECORD_SEAL)
             .and_then(|plaintext| Self::decode(&plaintext).ok())
             .filter(|profile| profile.name == name)
@@ -449,6 +457,9 @@ pub fn seal_page(key: &[u8; 32], content_type: &str, body: &[u8]) -> Result<Vec<
 /// Opens a sealed page into the JSON an app needs to show it. `text` is the
 /// body when it is valid UTF-8, and null otherwise.
 pub fn open_page(key: &[u8; 32], sealed: &[u8]) -> Option<Value> {
+    if sealed.len() > MAX_SEALED_PAGE_LEN {
+        return None;
+    }
     let plaintext = open(key, sealed, PAGE_SEAL)?;
     let mut reader = Reader { bytes: &plaintext };
     let content_type = reader.string().ok()?;
@@ -646,7 +657,7 @@ pub struct Registry {
 impl Registry {
     /// Every program's shard on `account`, keyed by program ID in base58.
     fn shards(&self, account: &AccountId) -> Result<Map<String, Value>, String> {
-        let mut reply: Value = ureq::post(&self.sequencer)
+        let response = ureq::post(&self.sequencer)
             .timeout(std::time::Duration::from_secs(15))
             .send_json(json!({
                 "jsonrpc": "2.0",
@@ -654,9 +665,16 @@ impl Registry {
                 "method": "getAccount",
                 "params": [account_text(account)],
             }))
-            .map_err(|error| format!("could not reach the sequencer: {error}"))?
-            .into_json()
-            .map_err(|error| format!("the sequencer sent an unreadable reply: {error}"))?;
+            .map_err(|error| format!("could not reach the sequencer: {error}"))?;
+        // Read at most MAX_REPLY_LEN: a sequencer that sends more is refused, not believed.
+        let mut body = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::Read::take(response.into_reader(), MAX_REPLY_LEN as u64 + 1), &mut body)
+            .map_err(|error| format!("the sequencer's reply broke off: {error}"))?;
+        if body.len() > MAX_REPLY_LEN {
+            return Err("the sequencer sent a reply larger than any account".to_owned());
+        }
+        let mut reply: Value =
+            serde_json::from_slice(&body).map_err(|error| format!("the sequencer sent an unreadable reply: {error}"))?;
         if let Some(error) = reply.get("error") {
             return Err(format!("the sequencer refused the read: {error}"));
         }

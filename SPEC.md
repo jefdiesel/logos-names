@@ -666,6 +666,25 @@ with JSON text in the envelope Logos modules use:
 { "success": false, "value": null,     "error": "why" }
 ```
 
+**Who may call what (module 0.10).** Any app that lists `names` as a dependency
+may read: `recipient`, `resolve`, `page`, `page_view`, `page_preview`, `avatar`,
+`reverse`, `normalize`, `deposit`, `settings`, `get_config`, `board_feed` (not
+`following`), `board_posts_of`, `board_thread` and `spell_check`. Every other
+method spends, signs, runs the `names` CLI, changes the module's settings or reads
+the person's own state, and answers only the Names app (`names_ui`) and the host
+itself (Basecamp, or `logosctl` driving the module). The module learns the caller
+from the runtime (`current_caller()`): Basecamp gives each app its own credential,
+named after the app. Anyone else gets `success: false` with "only the Names app
+can do this", or `false` from a configuration method. An app that wants a person
+to change their name (say, add a text entry) sends them to the Names app, where
+they confirm it themselves.
+
+`set_sequencer` takes `https://`, or `http://` only to this machine (`localhost`,
+`127.0.0.1`, `::1`). `set_cli`, `set_cli_wallet` and `set_wallet_files` take only
+absolute paths owned by this user (the CLI may also be root's) that nobody else
+can write, and a saved path that fails these checks is dropped when the module
+starts. The module's files are readable by this user only.
+
 **Reading.**
 
 | Method | `value` |

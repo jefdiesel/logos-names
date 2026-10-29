@@ -34,8 +34,9 @@ trap 'rm -rf "$tmp"' EXIT
 # the repository). The public key is embedded here as an allowed_signers line, so a
 # swapped binary on the download host cannot also swap the key. Verification needs
 # ssh-keygen -Y (OpenSSH 8.0 or newer, on stock macOS and Linux). Without it the
-# installer warns and falls back to the SHA-256 check alone, which only catches
-# corruption; with it, a missing or bad signature stops the install.
+# install stops, since the SHA-256 alone only catches corruption, not a swapped
+# binary. NAMES_ALLOW_UNSIGNED=1 installs anyway, on that checksum alone. A missing
+# or bad signature always stops the install.
 cat >"$tmp/allowed_signers" <<'EOF_KEY'
 release@logos-names namespaces="logos-names-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBTV+Zb8/xPUbSkfG5T54jmrSRyY/jBIJKAtAobvH3Q+
 EOF_KEY
@@ -43,8 +44,12 @@ have_sig=0
 if command -v ssh-keygen >/dev/null 2>&1 &&
   ! ssh-keygen -Y verify 2>&1 | grep -qiE 'illegal option|unknown option|invalid option'; then
   have_sig=1
+elif [ "${NAMES_ALLOW_UNSIGNED:-}" = 1 ]; then
+  echo "names: warning: ssh-keygen (OpenSSH 8.0 or newer) not found; NAMES_ALLOW_UNSIGNED=1, so checking only the SHA-256, not the release signature." >&2
 else
-  echo "names: warning: ssh-keygen (OpenSSH 8.0 or newer) not found; checking only the SHA-256, not the release signature." >&2
+  echo "names: ssh-keygen (OpenSSH 8.0 or newer) is needed to check the release signature; not installing." >&2
+  echo "names: install OpenSSH, or run again with NAMES_ALLOW_UNSIGNED=1 to trust the SHA-256 alone." >&2
+  exit 1
 fi
 
 # verify <file> <release asset name>: fetch <asset>.sig and check <file> against it.

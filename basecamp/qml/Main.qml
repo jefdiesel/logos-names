@@ -442,7 +442,7 @@ Item {
 
     readonly property string defaultBridgeNode: "http://127.0.0.1:8080"
     /// The CLI's default public account, which bridging credits: {account, balance}, or null.
-    readonly property var cliPublic: cliBalance !== undefined && cliBalance !== null && cliBalance.public ? cliBalance.public : null
+    readonly property var cliPublic: cliBalance !== undefined && cliBalance !== null && cliBalance["public"] ? cliBalance["public"] : null
 
     /// Opens the "Get tokens" screen.
     function openGetTokens() {
@@ -562,9 +562,9 @@ Item {
     property bool faucetSent: false      // the faucet sent them; waiting for them to arrive
     property double faucetAt: 0
     /// The names CLI's wallet exists and has its accounts.
-    readonly property bool hasCliWallet: cliStatus !== null && !!cliStatus.wallet && !!cliStatus.public
+    readonly property bool hasCliWallet: cliStatus !== null && !!cliStatus.wallet && !!cliStatus["public"]
     /// Your public account's ID, as far as it is known.
-    readonly property string myPublic: cliPublic !== null ? cliPublic.account : hasCliWallet ? cliStatus.public : ""
+    readonly property string myPublic: cliPublic !== null ? cliPublic.account : hasCliWallet ? cliStatus["public"] : ""
     readonly property bool canShield: cliPublic !== null && Logic.atLeast(cliPublic.balance, nameDeposit)
     readonly property bool hasPrivateFunds: cliBalance !== undefined && cliBalance !== null && !/^0*$/.test(String(cliBalance.balance))
 
@@ -1743,7 +1743,7 @@ Item {
 
     /// Whether the names CLI holds `name` from a public account (posts in a block).
     function heldPublicly(name) {
-        return cliNames.some(function(entry) { return entry.name === name && entry.private === false })
+        return cliNames.some(function(entry) { return entry.name === name && entry["private"] === false })
     }
 
     /// What the running board change is doing, in a line.
@@ -3982,7 +3982,7 @@ Item {
                         ColumnLayout {
                             id: nameRow
                             required property var modelData
-                            readonly property bool privateCli: modelData.signer === "cli" && modelData.private !== false
+                            readonly property bool privateCli: modelData.signer === "cli" && modelData["private"] !== false
                             readonly property bool isAnon: modelData.name === root.anonName
                             Layout.fillWidth: true
                             spacing: 4
