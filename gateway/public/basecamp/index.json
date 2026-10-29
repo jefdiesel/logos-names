@@ -1,21 +1,21 @@
 {
  "schemaVersion": 2,
  "repositoryName": "logos-names",
- "generatedAt": "2026-10-22T12:22:25Z",
+ "generatedAt": "2026-10-29T15:21:28Z",
  "packages": [
   {
    "name": "names",
    "versions": [
     {
-     "releasedAt": "2026-10-22T12:22:25Z",
-     "publisherRef": "basecamp-v0.10.1",
-     "url": "https://github.com/jefdiesel/logos-names/releases/download/basecamp-v0.10.1/names-0.9.0.lgx",
+     "releasedAt": "2026-10-29T15:21:28Z",
+     "publisherRef": "basecamp-v0.10.2",
+     "url": "https://github.com/jefdiesel/logos-names/releases/download/basecamp-v0.10.2/names-0.10.0.lgx",
      "urls": [
-      "https://github.com/jefdiesel/logos-names/releases/download/basecamp-v0.10.1/names-0.9.0.lgx"
+      "https://github.com/jefdiesel/logos-names/releases/download/basecamp-v0.10.2/names-0.10.0.lgx"
      ],
-     "size": 17249135,
-     "sha256": "0ddbb5cf97485338fd4ac8b47a1ac4121dbe2b6c85cb09b5578e063102b4f28f",
-     "rootHash": "4f174644ee0cbca191bce6285a87ad7539c3c3c27abf6368a1a4428c6a99e948",
+     "size": 17278512,
+     "sha256": "ef2c366ed1f8c811f154a2d4d87c0329f9a0696a4118e555598d4344fe2857f8",
+     "rootHash": "a34c5a06a5e640c322dd5c1d3878578f6a7d9347a51397c7c00da170212cd6a4",
      "manifest": {
       "author": "",
       "category": "identity",
@@ -23,11 +23,11 @@
       "description": "Resolve, register and manage private .lez names for any Logos app (registry v5: refundable deposits)",
       "display_name": "Names",
       "hashes": {
-       "assets": "9f5b6a32b5f0a2aa378a1eb7e65ca074455a8650cacf0432c1a3db378aaf91ab",
-       "root": "4f174644ee0cbca191bce6285a87ad7539c3c3c27abf6368a1a4428c6a99e948",
-       "variants": "aa2e89b91df737283b06cb1a195ec45cb7e5af9035fdb1d88746995b7055c799",
-       "variants/darwin-arm64": "b19f6e70367369f486383e2dae2631196b5da9c7d3fb69beb18b4a69cb934c4a",
-       "variants/linux-amd64": "dde246bbf8dbc9d8da743d93e5498c22bee5862e2d0f3b8e28321d0501cd82cb"
+       "assets": "b83a9ee773a061b0532477a7f02ae4f3e34738f89b00edcfb720f1cc649f08ba",
+       "root": "a34c5a06a5e640c322dd5c1d3878578f6a7d9347a51397c7c00da170212cd6a4",
+       "variants": "cb9557440975bdb3ddc6eeec097ec8a5c259db7722da976a5215d16b3960bc57",
+       "variants/darwin-arm64": "8fd74a3accedd8dd10841705c96fa1b51fd02b98c50302db4bd2a4c296ce0ddd",
+       "variants/linux-amd64": "756224d962a6d2602471bd11614d5ef362a4a1d3dc19df882a14e1f751df91f1"
       },
       "icon": "",
       "main": {
@@ -37,7 +37,7 @@
       "manifestVersion": "0.6.0",
       "name": "names",
       "type": "core",
-      "version": "0.9.0"
+      "version": "0.10.0"
      }
     }
    ]
@@ -46,15 +46,15 @@
    "name": "names_ui",
    "versions": [
     {
-     "releasedAt": "2026-10-22T12:22:25Z",
-     "publisherRef": "basecamp-v0.10.1",
-     "url": "https://github.com/jefdiesel/logos-names/releases/download/basecamp-v0.10.1/names_ui-0.10.1.lgx",
+     "releasedAt": "2026-10-29T15:21:28Z",
+     "publisherRef": "basecamp-v0.10.2",
+     "url": "https://github.com/jefdiesel/logos-names/releases/download/basecamp-v0.10.2/names_ui-0.10.2.lgx",
      "urls": [
-      "https://github.com/jefdiesel/logos-names/releases/download/basecamp-v0.10.1/names_ui-0.10.1.lgx"
+      "https://github.com/jefdiesel/logos-names/releases/download/basecamp-v0.10.2/names_ui-0.10.2.lgx"
      ],
-     "size": 157152,
-     "sha256": "44e764a68422c321a82ad48a0db9870ccc565648a5428b1ad2d46d851c88126f",
-     "rootHash": "25c57f9bea23df085640735d9b9bd2e9fa1d6860c220cd02146b123a495cff77",
+     "size": 157928,
+     "sha256": "2dacf40dd77f1d9d5a1880a24a54e8e0263de9aa1fddf9647bfeb30cf97b960c",
+     "rootHash": "4c7e1a4c43587969125cb40fa45117df8dd49a9bac331e1cf747f48274233efb",
      "manifest": {
       "author": "",
       "category": "identity",
@@ -64,11 +64,11 @@
       "description": "Your name on Logos: register it, post as it, edit its profile",
       "display_name": "Names",
       "hashes": {
-       "assets": "7eb443b21ff07f1c8d2d2ee02f6419b8dcccb8db9d8b409480bfbb72cd213dfe",
-       "root": "25c57f9bea23df085640735d9b9bd2e9fa1d6860c220cd02146b123a495cff77",
-       "variants": "4ef360d0e8815c9c11b3ec402d920e954773857368fba1c9a671d3c7673324aa",
-       "variants/darwin-arm64": "0ee70e84bba749a88a0623a2877fa547bc5a6814f182ef55b0c113076b0b584e",
-       "variants/linux-amd64": "0ee70e84bba749a88a0623a2877fa547bc5a6814f182ef55b0c113076b0b584e"
+       "assets": "6c3c176312ded49f1a9b72fd4b460d28c68b09196f17e376da8241c8d185ea4e",
+       "root": "4c7e1a4c43587969125cb40fa45117df8dd49a9bac331e1cf747f48274233efb",
+       "variants": "113d055ee89f964f9c5bbba84b862bee560a9c13155c3f8f7a35da1ff0c92939",
+       "variants/darwin-arm64": "8915aba6d2187be5ec442b05a48ca3dfd8340c56896b3aaf80ff41bb34a98598",
+       "variants/linux-amd64": "8915aba6d2187be5ec442b05a48ca3dfd8340c56896b3aaf80ff41bb34a98598"
       },
       "icon": "assets/icon.png",
       "main": {},
@@ -80,8 +80,8 @@
        }
       ],
       "type": "ui_qml",
-      "version": "0.10.1",
-      "view": "Main.qml"
+      "version": "0.10.2",
+      "view": "qml/Main.qml"
      },
      "icon": {
       "path": "c251f4e3be913fd3e55f14802e513dfd2368141f4f40587c1efac47a8b9746e5.png",
