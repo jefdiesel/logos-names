@@ -217,7 +217,7 @@ Item {
     function ask(method, args) {
         var reply = call("names", method, args)
         if (!reply || reply.success === undefined)
-            throw new Error("The names module did not answer. Is it installed?")
+            throw new Error("The names module is missing or out of date. In Basecamp, open Applications, click Names and press Install.")
         if (!reply.success)
             throw new Error(reply.error)
         return reply.value
@@ -231,7 +231,7 @@ Item {
             lastReply = shownReply("names." + method, reply)
             reply = parsed(reply)
             if (!reply || reply.success === undefined)
-                failed("The names module did not answer. Is it installed?")
+                failed("The names module is missing or out of date. In Basecamp, open Applications, click Names and press Install.")
             else if (!reply.success)
                 failed(reply.error)
             else

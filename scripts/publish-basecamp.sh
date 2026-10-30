@@ -81,7 +81,7 @@ Names is two packages and needs both: names_ui (the app) and names (the module t
 2. Applications (not Package Manager): search names, click Names, press Install. Both packages are listed under Required and install together.
 3. Install the names command line: curl -fsSL $SITE/install.sh | sh
 
-If the app says \"The names module did not answer. Is it installed?\", the module is missing or not running: open Applications > Names and press Install again, which adds anything missing."
+The app requires the module at the matching version, so installing or updating Names brings it along."
 gh release view "$tag" --repo "$REPO" >/dev/null 2>&1 || gh release create "$tag" --repo "$REPO" --latest=false --title "Names for Basecamp $app_version" --notes "$notes"
 gh release upload "$tag" --repo "$REPO" --clobber "$OUT"/*.lgx "$OUT"/*.sig "$OUT"/*.sha256
 

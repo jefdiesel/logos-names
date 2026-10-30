@@ -90,7 +90,7 @@ bridge`.
 **Names is two packages, and it needs both:** `names_ui` (the app you see) and
 `names` (the module that does the work). The app cannot run without the module.
 If Names shows in the sidebar but does not open, or it says **"The names module did
-not answer. Is it installed?"**, the module is missing or not running: open
+not answer"** or **"The names module is missing or out of date"**, open
 **Applications** → **Names** again and press **Install**, which adds anything
 missing. Package Manager installs everything in one request with a five-minute
 limit and can fail part way, which is why step 2 avoids it.

@@ -1,14 +1,17 @@
 {
   "name": "names_ui",
   "display_name": "Names",
-  "version": "0.10.2",
+  "version": "0.10.3",
   "type": "ui_qml",
   "category": "identity",
   "description": "Your name on Logos: register it, post as it, edit its profile",
   "view": "qml/Main.qml",
   "icon": "src/icons/icon.png",
   "dependencies": [
-    "names"
+    {
+      "name": "names",
+      "version": ">=0.10.0"
+    }
   ],
   "provides": [
     {
