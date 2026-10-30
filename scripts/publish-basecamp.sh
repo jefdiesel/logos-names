@@ -25,6 +25,16 @@ OUT=dist/basecamp
 [ -f "$KEY" ] || { echo "signing key not found at $KEY" >&2; exit 1; }
 rm -rf "$OUT" && mkdir -p "$OUT"
 
+# Copies survive a dropped connection: rsync resumes, and each try gives up on a stall.
+copy() {
+  for try in 1 2 3 4 5 6 7 8; do
+    rsync -a --partial --timeout=45 "$@" && return 0
+    echo "copy interrupted, retrying ($try)" >&2
+    sleep 5
+  done
+  return 1
+}
+
 echo "== build the module and the app (on $MINI)"
 rsync -a --delete --exclude target --exclude result-portable --exclude build.log --exclude logos-rust-sdk-src basecamp-module/ "$MINI:$DEV/names-module-v5/"
 rsync -a --delete --exclude target --exclude result-portable --exclude build.log --exclude logos-rust-sdk-src basecamp-module/ "$MINI:$B/basecamp-module/"
@@ -32,8 +42,8 @@ rsync -a --delete --exclude result-portable --exclude build.log basecamp/ "$MINI
 ssh "$MINI" "export PATH=/nix/var/nix/profiles/default/bin:/opt/homebrew/bin:\$PATH;
   cd $DEV/names-module-v5 && nix build '.#lgx-portable' -o result-portable > build.log 2>&1 &&
   cd $B/basecamp && nix build '.#lgx-portable' --override-input names path:$B/basecamp-module -o result-portable > build.log 2>&1"
-scp -q "$MINI:$DEV/names-module-v5/result-portable/logos-names-module-lib.lgx" "$OUT/module.lgx"
-scp -q "$MINI:$B/basecamp/result-portable/logos-names_ui-module.lgx" "$OUT/app.lgx"
+copy "$MINI:$DEV/names-module-v5/result-portable/logos-names-module-lib.lgx" "$OUT/module.lgx"
+copy "$MINI:$B/basecamp/result-portable/logos-names_ui-module.lgx" "$OUT/app.lgx"
 
 module_version=$(tar xzOf "$OUT/module.lgx" manifest.json | python3 -c 'import sys,json;print(json.load(sys.stdin)["version"])')
 app_version=$(tar xzOf "$OUT/app.lgx" manifest.json | python3 -c 'import sys,json;print(json.load(sys.stdin)["version"])')
@@ -53,9 +63,9 @@ echo "== merge into one package per name and sign it the Basecamp way (on $MINI)
 DID=$(cat scripts/package-signing-key.did)
 M=$DEV/merge
 ssh "$MINI" "rm -rf $M/in && mkdir -p $M/in"
-scp -q "$OUT/module.lgx" "$MINI:$M/in/names-mac.lgx"
-scp -q "$OUT/app.lgx" "$MINI:$M/in/names_ui-mac.lgx"
-scp -q "$OUT/linux/"*.lgx "$MINI:$M/in/"
+copy "$OUT/module.lgx" "$MINI:$M/in/names-mac.lgx"
+copy "$OUT/app.lgx" "$MINI:$M/in/names_ui-mac.lgx"
+copy "$OUT/linux/"*.lgx "$MINI:$M/in/"
 ssh "$MINI" "cd $M && L=$DEV/lgx-merge/lgxtool/bin/lgx &&
   \$L merge in/names-mac.lgx in/names-$module_version-linux-x86_64.lgx -o in/names-$module_version.lgx -y >/dev/null &&
   \$L merge in/names_ui-mac.lgx in/names_ui-$app_version-linux-x86_64.lgx -o in/names_ui-$app_version.lgx -y >/dev/null &&
@@ -63,7 +73,7 @@ ssh "$MINI" "cd $M && L=$DEV/lgx-merge/lgxtool/bin/lgx &&
     \$L sign \$p --key logos-names --name LNS --url https://github.com/$REPO >/dev/null &&
     \$L verify \$p | grep -q '^Signature is valid' || exit 1
   done"
-scp -q "$MINI:$M/in/names-$module_version.lgx" "$MINI:$M/in/names_ui-$app_version.lgx" "$OUT/"
+copy "$MINI:$M/in/names-$module_version.lgx" "$MINI:$M/in/names_ui-$app_version.lgx" "$OUT/"
 rm -rf "$OUT/linux" "$OUT/module.lgx" "$OUT/app.lgx"
 
 echo "== sign"
