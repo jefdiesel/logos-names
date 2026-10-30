@@ -70,23 +70,38 @@ command. Testnet tokens: the app's Welcome gets them from the Names faucet
 (2,000,000 a day), or bridge from your own Logos Blockchain node with `names
 bridge`.
 
-**2. The Names app in Basecamp.** In Basecamp's package manager, add the
-repository
+**2. The Names app in Basecamp** (0.3.2; macOS on Apple silicon or Linux x86_64).
 
-```
-https://logos-names.wrapit.workers.dev/basecamp/logos-repo.json
-```
+1. Add the repository once: **Settings** (bottom icon in the sidebar) → **Package
+   Repositories** → under **Add a repository**, paste
 
-and install **Names**. Its Welcome screen checks the command line is installed and
-walks you through picking your name.
+   ```
+   https://logos-names.wrapit.workers.dev/basecamp/logos-repo.json
+   ```
+
+   and press **Add**. An **LNS** entry appears in the list.
+2. Install from **Applications** (not Package Manager): search `names`, click
+   **Names**, and press **Install** in the dialog. It lists two packages under
+   **Required**, the Names app and the Names module. Both install together; you do
+   not install the module yourself.
+3. Press **Launch**. The Welcome screen checks the command line is installed and
+   walks you through picking your name.
+
+**Names is two packages, and it needs both:** `names_ui` (the app you see) and
+`names` (the module that does the work). The app cannot run without the module.
+If Names shows in the sidebar but does not open, or it says **"The names module did
+not answer. Is it installed?"**, the module is missing or not running: open
+**Applications** → **Names** again and press **Install**, which adds anything
+missing. Package Manager installs everything in one request with a five-minute
+limit and can fail part way, which is why step 2 avoids it.
 
 Every download is signed with the release key (`scripts/release-signing-key.pub`,
 fingerprint `SHA256:dAQbSDw6smVMxkwJdQ2104U3Xem+cDOldUmpW+wQzcE`); the installer
 checks it with `ssh-keygen`.
 
 **Update.** CLI: re-run the install line above — it always fetches the latest
-release. App: in Basecamp's package manager, update **Names** (or re-add the
-repository). Welcome's "Get free tokens" needs both the CLI and the app on 0.10+.
+release. App: **Settings** → **Package Repositories** → **Refresh** (or restart
+Basecamp), then update **Names** from **Applications**. Welcome's "Get free tokens" needs both the CLI and the app on 0.10+.
 
 ## From the command line
 

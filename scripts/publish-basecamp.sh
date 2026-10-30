@@ -75,9 +75,13 @@ done
 echo "== GitHub release $tag"
 notes="The Names app for Basecamp (posts, messages, pay, profile) and the names module.
 
-In Basecamp's package manager, add the repository
-$SITE/basecamp/logos-repo.json
-and install Names. It needs the names command line: curl -fsSL $SITE/install.sh | sh"
+Names is two packages and needs both: names_ui (the app) and names (the module that does the work).
+
+1. Settings > Package Repositories: add $SITE/basecamp/logos-repo.json
+2. Applications (not Package Manager): search names, click Names, press Install. Both packages are listed under Required and install together.
+3. Install the names command line: curl -fsSL $SITE/install.sh | sh
+
+If the app says \"The names module did not answer. Is it installed?\", the module is missing or not running: open Applications > Names and press Install again, which adds anything missing."
 gh release view "$tag" --repo "$REPO" >/dev/null 2>&1 || gh release create "$tag" --repo "$REPO" --latest=false --title "Names for Basecamp $app_version" --notes "$notes"
 gh release upload "$tag" --repo "$REPO" --clobber "$OUT"/*.lgx "$OUT"/*.sig "$OUT"/*.sha256
 
