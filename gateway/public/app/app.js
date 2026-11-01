@@ -389,7 +389,7 @@ async function claimName(name) {
       privateKey: key, program: settings.registry, name, resume,
       acceptClaimRisk: (until) => window.confirm(
         `Until ${new Date(until).toLocaleDateString()}, whoever held ${name} on the old chain can take it back. ` +
-          "If they do, you lose the name and your deposit stays locked with it. Continue?",
+          "If they do, you lose the name, and your deposit goes to them when they release it. Continue?",
       ),
       onStep: (stage, detail) => {
         if (stage === "commit") claimProgress("Committing to the name…");

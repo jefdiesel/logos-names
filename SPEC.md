@@ -116,8 +116,9 @@ SHOULD NOT derive on behalf of anonymous callers.
 ## 4. Where a name lives
 
 A registry is one LEZ program, identified by its account ID (the `program`
-below). All of a registry's data is in **that program's shard** on three kinds
-of account, and one settings account.
+below). All of a registry's data is in **that program's actor state** on three
+kinds of account, and one settings account. On LEZ 0.4 an account holds one
+state per program, and the pair of account and program is an *actor*.
 
 | Data | Account ID |
 |---|---|
@@ -125,6 +126,8 @@ of account, and one settings account.
 | Page | `PDA(program, SHA-256("logos-names/v5/page/" ‖ id))` |
 | Reverse record | the account itself |
 | Settings | `PDA(program, SHA-256("logos-names/v5/config"))` |
+| Commitment | `PDA(program, SHA-256("logos-names/v5/commit/" ‖ c))`, section 8 |
+| Deposit (the native balance is the data) | `PDA(program, SHA-256("logos-names/v5/deposit/" ‖ id))`, section 8.2 |
 
 `PDA(program, seed)` is LEZ's public program-derived address:
 
@@ -134,8 +137,23 @@ SHA-256( pad32("/LEE/v0.2/AccountId/PDA/") ‖ program (32 bytes) ‖ seed (32 b
 
 where `pad32` right-pads the ASCII string with zero bytes to 32 bytes.
 
-A shard that is absent or empty means "not set": the name is unregistered, has
-no page, or the account has no reverse record.
+An actor state that is absent or empty means "not set": the name is unregistered,
+has no page, or the account has no reverse record.
+
+`SHA-256(...)` in the table is the PDA's *seed*. A transaction lists seeds as
+evidence for accounts that may not exist yet (section 8.3).
+
+A reader gets one actor's state with the sequencer's `getAccountView`:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"getAccountView",
+ "params":[{"account_id":"<base58>","program_account_id":"<base58>"}]}
+```
+
+The result is `null` for an account that isn't on the chain. Otherwise it is
+`{ "nonce": n, "data": { "actor_states": { "<program>": [bytes] } } }`, with only
+that program's state, an empty list when it has none. A LEZ 0.3 sequencer answers the
+same call with `shards` in place of `actor_states`.
 
 ## 5. Data layouts
 
@@ -147,11 +165,16 @@ raw bytes.
 On the chain:
 
 ```rust
-struct NameRecord { version: u8, owner: [u8; 32], expires: u64, sealed: Vec<u8> }   // version 3; owner is the owner tag; sealed at most 12,288 bytes
+struct NameRecord { version: u8, owner: [u8; 32], expires: u64, sealed: Vec<u8>, claimed: bool }   // version 6; owner is the owner tag; sealed at most 12,288 bytes
 struct Page       { version: u8, sealed: Vec<u8> }                     // sealed at most 81,920 bytes
 struct PrimaryName { version: u8, name: String }                       // the reverse record, in the clear
-struct Settings   { version: u8, admin: AccountId, treasury: AccountId, prices: [u128; 3], mode: u8, deposits: [u128; 2] }   // mode 0 fee, 1 deposit; deposits: normal, three-character
+struct Settings   { version: u8, admin: AccountId, treasury: AccountId, prices: [u128; 3], mode: u8, deposits: [u128; 2],
+                    claims_root: [u8; 32], claims_until: u64, claims_program: AccountId }   // mode 0 fee, 1 deposit; deposits: normal, three-character
 ```
+
+Records and settings before version 6 end at `sealed` and `deposits`, and a reader
+treats them as never claimed and taking no claims. `claimed` marks a name carried over
+from an earlier chain (section 8.4), and stays true through a transfer.
 
 `expires` is a time in milliseconds since the Unix epoch, as LEZ block
 timestamps are. `prices` are in the native token's base units, one per term:
@@ -211,7 +234,7 @@ transactions contain is identifiers and sealed bytes.
 ## 6. Resolving
 
 **Forward (name to profile).** Normalise the name, derive `id` and `key`, derive
-the record account, read the registry's shard on it, decode `NameRecord`, open
+the record account, read the registry's actor state on it, decode `NameRecord`, open
 `sealed`. One derivation and one account read.
 
 **Expiry.** A name is held for a term and then lapses. With `now` the reader's
@@ -239,7 +262,7 @@ always hidden: each payment lands on a fresh private account only the holder can
 find. Sent from a public account, the sender and the amount are visible. Sent
 from a private account, neither is.
 
-**Reverse (account to name).** Read the registry's shard on the account and
+**Reverse (account to name).** Read the registry's actor state on the account and
 decode `PrimaryName`. This is only a claim, set by the account itself. A client
 MUST then resolve that name forward and accept it only if the record's `owner`
 equals the account's owner tag for that name, or the profile's `account` equals
@@ -293,48 +316,61 @@ account's log, which is public and permanent by design.
 
 ## 8. Changing a name
 
-Instructions are a borsh enum, in this order (the variant index is the first
-byte). `id` is 32 raw bytes.
+What a transaction sends the registry is a borsh `Message`, and a client only ever
+sends its first variant:
 
-| # | Instruction | Fields | Accounts, in order |
+```rust
+enum Message { Instruction(Instruction), Effect(Effect) }
+```
+
+So the bytes of a transaction's message are the tag `00`, then the `Instruction`.
+`Effect` is how the registry talks to itself, and it refuses one from anyone else.
+
+`Instruction` is a borsh enum, in this order (the variant index is its first byte).
+`id` is 32 raw bytes.
+
+| # | Instruction | Fields | Actors to declare, beyond the signer's (section 8.3) |
 |---|---|---|---|
-| 0 | `Register` | `id, sealed: Vec<u8>, term: u8, fee: u128, now: u64, secret: [u8; 32], deposit: bool, length: LengthProof` | record, page, settings, commitment, payer, then, if `fee` is not 0, the treasury (fee mode) or the name's deposit account (deposit mode) |
-| 1 | `Renew` | `id, term: u8, fee: u128, now: u64` | record, settings, payer, then treasury if `fee` is not 0 |
-| 2 | `SetRecord` | `id, sealed: Vec<u8>` | record, owner |
-| 3 | `SetPage` | `id, sealed: Vec<u8>` | record, page, owner |
-| 4 | `Transfer` | `id, new_owner: [u8; 32]` (the new holder's owner tag) | record, page, owner |
-| 5 | `Release` | `id, refund: u128` | record, page, owner, then the name's deposit account if `refund` is not 0 (owner and deposit account with the native token's shard) |
-| 6 | `SetPrimary` | `name: String` | owner |
-| 7 | `Configure` | `admin: AccountId, treasury: AccountId, prices: [u128; 3], mode: u8, deposits: [u128; 2]` | settings, signer (the program's own account the first time, then the admin) |
-| 8 | `Commit` | `commitment: [u8; 32], now: u64` | commitment, signer |
+| 0 | `Register` | `id, sealed: Vec<u8>, term: u8, fee: u128, treasury: Option<AccountId>, now: u64, secret: [u8; 32], deposit: bool, length: LengthProof` | record, page, settings, commitment, and if `fee` is not 0 the signer's balance and the balance of the treasury (fee mode) or the name's deposit account (deposit mode) |
+| 1 | `Renew` | `id, term: u8, fee: u128, treasury: Option<AccountId>, now: u64` | record, settings, and if `fee` is not 0 the signer's balance and the treasury's |
+| 2 | `SetRecord` | `id, sealed: Vec<u8>` | record |
+| 3 | `SetPage` | `id, sealed: Vec<u8>` | record, page |
+| 4 | `Transfer` | `id, new_owner: [u8; 32]` (the new holder's owner tag) | record, page |
+| 5 | `Release` | `id, refund: u128` | record, page, and if `refund` is not 0 the deposit account's balance and the signer's |
+| 6 | `SetPrimary` | `name: String` | none: it writes the signer's own actor |
+| 7 | `Configure` | `admin: AccountId, treasury: AccountId, prices: [u128; 3], mode: u8, deposits: [u128; 2], claims_root: [u8; 32], claims_until: u64, claims_program: AccountId` | settings; the signer is the program's own account the first time, then the admin |
+| 8 | `Commit` | `commitment: [u8; 32], now: u64` | commitment |
+| 9 | `Claim` | `id, sealed: Vec<u8>, now: u64, proof: Vec<[u8; 32]>` | record, page, settings |
 
 Rules:
 
-- Every account is passed with the registry's own shard selected, except
-  `payer` and `treasury`, which are passed with the native token's shard
-  selected (the all-zero program ID). `owner`, `payer` and `admin` must sign.
+- The record, page, settings and commitment actors are those accounts' states under the
+  registry. A balance is the account's state under the native token, whose program ID is
+  all zeros. The signer's own actor is the signer's account under the registry.
+  The signer pays, and is the only account that has to sign. `treasury` is `None` in
+  deposit mode and when no fee is paid.
 - **Private holders.** `owner` and `payer` may be LEZ private accounts. The
   client then sends a privacy-preserving transaction: it runs the registry's
   bytecode in the privacy-preserving circuit, with the private account as an
   authorized input, and submits the proof. The chain sees the registry's
   effects on the public accounts (record, page, settings, treasury) and the
-  fee arriving in the treasury, not the private account. Such transactions
-  carry no fee of their own on LEZ v0.3.1. The client needs the registry's
-  exact bytecode; the sequencer refuses a proof of any other.
+  fee arriving in the treasury, not the private account. On LEZ 0.4 such a
+  transaction pays its own fee inside the proof. The client needs the registry's
+  exact bytecode; the sequencer refuses a proof of any other. This path has not
+  yet been run on LEZ 0.4.
 - **Time.** `now` is the sender's claim of the current time in milliseconds. The
   program makes the transaction valid only in a block whose timestamp is at
   least `now`, so `now` is never in the future, and uses it as the time. A
   client takes `now` from the chain's clock: the timestamp, in the last 8 of 16
-  bytes, of the clock program's shard on the account whose ID is the ASCII
+  bytes, of the clock program's actor state on the account whose ID is the ASCII
   bytes `/LEZ/ClockProgramAccount/0000001`. It does not use its own clock: a
-  transaction whose `now` is ahead of the chain is rejected and is still
-  charged its whole gas limit.
+  transaction whose `now` is ahead of the chain fails and is still charged.
 - **Fees.** `fee` must equal the settings' price for `term`, and `treasury` must
-  be the settings' treasury; the program then moves `fee` from `payer` to
+  be the settings' treasury; the program then moves `fee` from the signer to
   `treasury` with a native token transfer in the same transaction. When the
-  settings account is empty, the price for the term is 0, or `payer` is the
-  treasury itself, `fee` is 0 and no treasury account is passed. A client reads
-  the settings account first.
+  settings account is empty, the price for the term is 0, or the signer is the
+  treasury itself, `fee` is 0 and no treasury is named. A client reads the
+  settings account first.
 - **Claiming is commit, then reveal** (since registry version 4), so nobody watching
   pending transactions can register an identifier first. `Commit` stores, at
   `PDA(program, SHA-256("logos-names/v5/commit/" ‖ c))`, when it was made, where
@@ -373,8 +409,8 @@ Rules:
   anyone may register it.
 - A reverse record is not touched by `Transfer` or `Release`. It stops counting
   on its own, because the forward check in section 6 no longer passes.
-- LEZ includes failed transactions in blocks. A client MUST confirm a change by
-  reading the account back, not by the transaction's inclusion.
+- LEZ includes failed transactions in blocks, and charges for them. A client MUST
+  confirm a change by reading the account back, not by the transaction's inclusion.
 - A client sends one change per signing account at a time, and waits for it to
   show before sending the next.
 
@@ -435,6 +471,87 @@ profits: the deposit always goes back to whoever holds the name.
 - Fee mode (`mode = 0`) is the v4.1 rule set (terms, renewals, fees to the treasury) and
   stays available. One- and two-character names are locked in both modes.
 
+### 8.3 Public transactions on LEZ 0.4
+
+A transaction goes to `sendTransaction` as the base64 of `00` (the `Public` variant of
+`LeeTransaction`) followed by:
+
+```rust
+struct PublicTransaction { message: TxMessage, witness_set: Vec<(Signature, PublicKey)> }   // 64 and 32 bytes (x-only)
+
+struct TxMessage {
+    public_context: PublicExecutionContext,
+    execution: PublicExecution,
+    nonces: BTreeMap<AccountId, u128>,
+    admission_evidence: Vec<PublicAccountEvidence>,
+}
+struct PublicExecutionContext {
+    actors: BTreeSet<Actor>,
+    authorized_accounts: BTreeSet<AccountId>,
+    promotions: BTreeSet<u64>,                     // empty in a public transaction
+}
+struct PublicExecution { root: RootCall, fee: Option<FeeDeclaration> }
+struct RootCall { to: Actor, message: Vec<u8> }
+struct Actor { account_id: AccountId, program_account_id: AccountId }
+struct FeeDeclaration { payer: AccountId, gas_limit: u64, tip: u64, max_fee: u128 }
+enum PublicAccountEvidence { Key(PublicKey), Pda { program: AccountId, seed: [u8; 32] } }
+```
+
+Borsh writes a `BTreeSet` as a `u32` count and the items, and a `BTreeMap` as a `u32`
+count and the pairs. Both are sorted by their bytes with no repeats, and any other
+order fails to decode.
+
+- The signature is BIP-340 over `SHA-256(pad32("/LEE/v0.3/Message/Public/") ‖
+  borsh(message))`. The prefix is LEZ's and says v0.3 on 0.4 too. The transaction's hash is
+  `SHA-256(borsh(PublicTransaction))`, without the leading `00`.
+- `root.to` is the signer's own actor, `(signer, program)`, and `root.message` is
+  `borsh(Message::Instruction(..))`.
+- `actors` holds `root.to` and every actor the transaction reaches. A credit to a
+  balance that isn't declared is refused, and declared, it lands in the same
+  transaction. A declared actor that isn't reached is harmless.
+- `authorized_accounts` and the keys of `nonces` are exactly the signers, in both
+  cases sorted. `nonces` holds each signer's current nonce.
+- **Evidence.** A public account is reached only if it is on the chain, a signer,
+  listed in `admission_evidence`, or derived by the program that sends it the message
+  with a seed attached. A transaction that reaches any other fails and is charged. So
+  a client lists `Pda { program, seed }` for every registry account it declares: the
+  name, page, deposit, commitment and settings seeds of section 4. Listing one that
+  exists changes nothing. A plain account that has never been used, such as a new
+  fee-mode treasury, can't be listed without its public key.
+- **Paying a plain account** is a transaction whose root is the sender's balance
+  actor, with the message `00 ‖ to (32 bytes) ‖ amount (u128)`, declaring both balances.
+  An account that has never been on the chain can be paid only with `Key(its public
+  key)` as evidence. A client without the key SHOULD check with `getAccountView` that
+  the recipient exists before sending, rather than lose the fee.
+- **Fees.** The payer signs; it need not be declared. The sequencer holds
+  `gas_limit × base_fee_exec + data_bytes × base_fee_stor + tip` from it, which must
+  not exceed `max_fee`, and charges for the gas used. `data_bytes` is the
+  transaction's size. A failed transaction advances the signer's nonce and pays.
+
+### 8.4 Claims
+
+LEZ 0.4 resets the chain. A holder of a name on the earlier chain can take it back
+free of deposit until `claims_until`:
+
+- The admin publishes a list of leaves, one per record of the earlier chain, and puts
+  its root in the settings with `claims_until` and `claims_program`, the earlier
+  registry. `leaf = SHA-256("logos-names/v6/claim-leaf" ‖ old record address ‖ tag)`, where
+  the address is the record's under `claims_program` and `tag` is the holder's owner
+  tag. Account IDs and tags are the same on both chains. The list holds addresses, not
+  identifiers, so it publishes no name.
+- A node is `SHA-256("logos-names/v6/claim-node" ‖ low ‖ high)` with the two children
+  in sorted order, so a path needs no directions. An odd last node at a level moves up
+  as it is. The root of an empty list is all zeros, and such a registry takes no claims.
+- `Claim` needs no commitment, because only the holder's account can use a proof. It
+  succeeds before `claims_until` if the proof holds for the signer's tag and the record
+  isn't already `claimed`. The record becomes the signer's, with `expires` at `u64::MAX`
+  and `claimed` true, and the page is emptied. The window on `now` is the same as for
+  `Commit`.
+- **A claim overwrites a registration that wasn't itself claimed.** The registrant's
+  deposit stays in the name's deposit account, and goes to the claimant on release. A
+  client MUST warn anyone registering before `claims_until`.
+- A holder who released a name after the snapshot can still claim it.
+
 ## 9. Events
 
 The registry emits LEZ program events. The selector is the first 8 bytes of
@@ -443,6 +560,7 @@ The registry emits LEZ program events. The selector is the first 8 bytes of
 | Event | Selector (hex) | Data |
 |---|---|---|
 | `logos_names::Registered` | `e87848390f741b1a` | `id, expires: u64` |
+| `logos_names::Claimed` | `b04995efabf61acb` | `id` |
 | `logos_names::Renewed` | `c0a35e0e73dbcc59` | `id, expires: u64` (`now` plus the term: the earliest the new expiry can be) |
 | `logos_names::Transferred` | `b78a6f5ae756bf67` | `id` |
 | `logos_names::Released` | `3d2e60d8d0ed2a9a` | `id` |
@@ -488,6 +606,17 @@ With `program` = 32 bytes of `0x07` (base58 `US517G5965aydkZ46HS38QLi7UQiSojurfb
 | Page of `jef` | `HEES9BpNxrAtwxFkyEQTEnjUcSr7usgbefeqiYJsG9mY` |
 | Record of the identifier `00 01 02 … 1f` | `7bwwvMLtxqqNYiXsd5bYaq8e31E1odYf6jAK5z7tmUdd` |
 | Page of the identifier `00 01 02 … 1f` | `8M4vmdxCXL4eS8QXiHSdbeUUPt5Vbx1UVjLcv2cPk9Y5` |
+| Deposit of the identifier `00 01 02 … 1f` | `Aeashx4hpVpTN6h9PWPg4d5riRWVhVEMZCnAJWHE6wqy` |
+| Settings | `2aXkMrPG771Scj8LWBMyUGjJRou8Ls9kotSbnBfvoVfV` |
+
+For that identifier and the account `B1UN3hPgxacgHKBRoThcAmsPajGcUf6YXUhgB36x4DAd` (the public key of the private key
+`01` × 32), with `secret` = `5a` × 32:
+
+| Value | |
+|---|---|
+| Owner tag | `663f31bd3c64e9f17fbd399d3b6224f60b298e95dfca4ee8a4cf8db28b3c7a55` |
+| `c` | `8128f5b8ae374b8186e9ba7cfc47f0f2e95bf34cf7f4c5108d4aaaa160413ac4` |
+| Commitment account | `7GrDTgkTQqDNeFVEpiRkLx67BR9C8VDzJxAqnRnKFVW2` |
 
 Sealing, under the key of `jef` above, with the nonce `00 01 02 … 0b` (a real
 client uses a random one). The profile is `{ name: "jef", account: 32 bytes of
@@ -513,19 +642,47 @@ The page `{ content_type: "text/plain", body: "hi" }`, same nonce:
 ```
 
 Instructions, with `id` = `00 01 02 … 1f`. `term` is one byte, `fee` 16 bytes
-and `now` 8 bytes, little-endian:
+and `now` 8 bytes, little-endian. These are `Instruction` alone, as the test
+`addresses_and_instructions_match_the_specification` in `core/src/lib.rs` pins them. A
+transaction's message is `00` followed by the encoding:
 
 | Instruction | Encoding |
 |---|---|
-| `Register { id, sealed: [ee, ff], term: 1, fee: 100000, now: 1700000000000, secret: 32 × 0x5a }` | `00` ‖ id ‖ `02000000eeff` ‖ `01` ‖ `a0860100000000000000000000000000` ‖ `0068e5cf8b010000` ‖ `5a` 32 times |
-| `Renew { id, term: 2, fee: 0, now: 1700000000000 }` | `01` ‖ id ‖ `02` ‖ `00` 16 times ‖ `0068e5cf8b010000` |
+| `Register { id, sealed: [ee, ff], term: 1, fee: 100000, treasury: None, now: 1700000000000, secret: 32 × 0x5a, deposit: false, length: Membership { index: 7, tier: 3, path: [] } }` | `00` ‖ id ‖ `02000000eeff` ‖ `01` ‖ `a0860100000000000000000000000000` ‖ `00` ‖ `0068e5cf8b010000` ‖ `5a` 32 times ‖ `00` ‖ `00` ‖ `07000000` ‖ `03` ‖ `00000000` |
+| `Renew { id, term: 2, fee: 0, treasury: None, now: 1700000000000 }` | `01` ‖ id ‖ `02` ‖ `00` 16 times ‖ `00` ‖ `0068e5cf8b010000` |
 | `SetRecord { id, sealed: [ee] }` | `02` ‖ id ‖ `01000000ee` |
 | `SetPage { id, sealed: [] }` | `03` ‖ id ‖ `00000000` |
 | `Transfer { id, new_owner: 32 bytes of 0x02 }` | `04` ‖ id ‖ `02` 32 times |
-| `Release { id }` | `05` ‖ id |
+| `Release { id, refund: 0 }` | `05` ‖ id ‖ `00` 16 times |
 | `SetPrimary { name: "jef" }` | `06030000006a6566` |
-| `Configure { admin: 32 × 0x01, treasury: 32 × 0x02, prices: [1, 2, 3] }` | `07` ‖ `01` 32 times ‖ `02` 32 times ‖ three 16-byte little-endian numbers |
+| `Configure { admin: 32 × 0x01, treasury: 32 × 0x02, prices: [1, 2, 3], mode: 0, deposits: [0, 0], claims_root: 32 × 0x00, claims_until: 0, claims_program: 32 × 0x07 }` | `07` ‖ `01` 32 times ‖ `02` 32 times ‖ three 16-byte little-endian numbers ‖ `00` ‖ `00` 72 times ‖ `07` 32 times |
 | `Commit { commitment: 32 × 0xc0, now: 1700000000000 }` | `08` ‖ `c0` 32 times ‖ `0068e5cf8b010000` |
+| `Claim { id, sealed: [ee], now: 1700000000000, proof: [32 × 0x01, 32 × 0x02] }` | `09` ‖ id ‖ `01000000ee` ‖ `0068e5cf8b010000` ‖ `02000000` ‖ `01` 32 times ‖ `02` 32 times |
+
+`claim_leaf(32 × 0x07, 32 × 0x08)` is `0ec9619438b0876b837235e0b00766a9244925d4fb7071f59221da38b98c9aff`.
+
+A public message (section 8.3), from LEZ's own test: one actor `(42 × 32, 0 × 32)`, which is
+also the root and the one authorized account, message `[0]`, no fee, nonce 1, no evidence:
+
+```
+010000002a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a0000000000000000000000000000000000000000000000000000000000000000010000002a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a000000002a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a0000000000000000000000000000000000000000000000000000000000000000010000000000010000002a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a0100000000000000000000000000000000000000
+```
+
+Its hash is `5f4bcfd6315ad390ebc7600a1be27963c1ee4c7afa93e4b8246613e53afef54a`.
+
+A native transfer of 1337 from `B1UN3hPgxacgHKBRoThcAmsPajGcUf6YXUhgB36x4DAd` to `34Kqgek6R7N1zU5FSJz8ziXwSPEPCuWGcn1T7GCVrfib`, nonce 3, gas limit 1000,
+tip 0, maximum fee 6,464,000:
+
+```
+020000001e916b03cf49c0e6a03feecf124536d867f45c5e7cf82a108d1377120ee28ccc000000000000000000000000000000000000000000000000000000000000000094b3cefdc7335256e802987a50f336cfed7053992c3bcc318054a0e3d895616600000000000000000000000000000000000000000000000000000000000000000100000094b3cefdc7335256e802987a50f336cfed7053992c3bcc318054a0e3d89561660000000094b3cefdc7335256e802987a50f336cfed7053992c3bcc318054a0e3d8956166000000000000000000000000000000000000000000000000000000000000000031000000001e916b03cf49c0e6a03feecf124536d867f45c5e7cf82a108d1377120ee28ccc390500000000000000000000000000000194b3cefdc7335256e802987a50f336cfed7053992c3bcc318054a0e3d8956166e803000000000000000000000000000000a262000000000000000000000000000100000094b3cefdc7335256e802987a50f336cfed7053992c3bcc318054a0e3d89561660300000000000000000000000000000000000000
+```
+
+Its hash is `f205af5c6b6d221d67021d118038aaed8a6533238d3b017d0f0088b0a10ef42c`. The signing key is `01` × 32. BIP-340
+signatures use fresh auxiliary randomness, so a transaction's bytes are not fixed
+beyond its message.
+
+The JavaScript client's vectors and its run through the real engine are in
+`gateway/app-src/vectors`.
 
 ## 11. Canonical registries
 
@@ -534,6 +691,7 @@ registry, as they agree on one token contract.
 
 | Network | Registry program ID |
 |---|---|
+| Logos testnet v0.4 (LEZ) | Not deployed: no public 0.4 testnet exists yet |
 | Logos testnet v0.3 (LEZ) | `38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq` (registry v5, deployed 2026-10-16, CI build `322dda10…c4ce`, deposit mode: 1,000,000 for normal and three-character names since 2026-10-17, first 100,000,000 and 2,000,000,000; replaces `2PXg…zCkX`, v4.1, whose names use the old PBKDF2 derivation and do not carry over) |
 
 The deployed program is the reproducible build produced by this repository's
@@ -805,3 +963,8 @@ stopped after 45 minutes, and finished jobs are forgotten after a week.
 The `version` byte in each structure and the `v5` in each derivation string
 identify this version. A future version uses new strings, so its identifiers
 and accounts never collide with this one's, and a client can support both.
+
+Record version 6 and the LEZ 0.4 transaction format keep every `v5` string, on
+purpose: a name keeps its identifier, key and record address across the chains,
+which is what lets a claim (section 8.4) find it. The `v6` strings are new values
+used only for claims.

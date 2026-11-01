@@ -138,8 +138,8 @@ export async function estimateNeed(privateKey, resume = null) {
 
 /**
  * When claims of names from the earlier chain close, or null once they have. Until then a
- * holder's claim overwrites a registration, and its deposit stays locked until the holder
- * releases the name, so someone registering should know first.
+ * holder's claim overwrites a registration, and the deposit goes to the holder when they
+ * release the name, so someone registering should know first.
  */
 export async function claimsOpenUntil(program, now = Date.now()) {
   const account = formatAccountId(settingsAddress(accountBytes(program)));

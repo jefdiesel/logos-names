@@ -23,4 +23,7 @@ lns_js_vectors run scenario.json engine-report.json
 ```
 
 This runs the state machine with no sequencer, so the fee market, the mempool and the
-RPC server aren't exercised.
+RPC server aren't exercised. For those, `../../public/app/lez-tx-send.mjs` sends a native
+transfer to any sequencer. It was run against a local `v0.4.0-rc1` sequencer
+(`sequencer_service` with the `standalone` feature and `networks/local.json`, with the
+key's public key added to the genesis accounts).
