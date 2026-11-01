@@ -1900,7 +1900,7 @@ async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>)
     if let Some(command) = command {
         let mut wallet = if storage_path.exists() {
             let password = read_password(&storage_path)?;
-            WalletCore::new_update_chain(config_path, storage_path, overrides, &password)?
+            WalletCore::new_update_chain(config_path, storage_path, overrides, &password).context(OLD_WALLET)?
         } else {
             let (mut wallet, mnemonic) =
                 WalletCore::new_init_storage(config_path, storage_path, overrides, &new_wallet_password())?;
@@ -1925,7 +1925,7 @@ async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>)
         }
     } else if continuous_run {
         let password = read_password(&storage_path)?;
-        let mut wallet = WalletCore::new_update_chain(config_path, storage_path, overrides, &password)?;
+        let mut wallet = WalletCore::new_update_chain(config_path, storage_path, overrides, &password).context(OLD_WALLET)?;
         execute_continuous_run(&mut wallet).await?;
     } else {
         let mut help = Args::command().name("names wallet");
@@ -1933,6 +1933,10 @@ async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>)
     }
     Ok(())
 }
+
+/// Why an existing wallet may not open: LEZ 0.4 cannot read a 0.3 wallet's file.
+const OLD_WALLET: &str = "cannot open the wallet; a wallet from LEZ 0.3 does not load on 0.4: move it aside and bring its \
+    public accounts back from its recovery phrase with `names wallet restore-keys`";
 
 /// The password of a new wallet: `LEE_WALLET_PASSWORD` if set, else none, which leaves
 /// its storage unencrypted. Nothing prompts, because apps run `names` without a terminal.
@@ -1974,7 +1978,7 @@ async fn open_wallet(overrides: Option<WalletConfigOverrides>, save: bool) -> Re
     let storage_path = fetch_persistent_storage_path()?;
     if storage_path.exists() {
         let password = read_password(&storage_path)?;
-        return WalletCore::new_update_chain(fetch_config_path()?, storage_path, overrides, &password);
+        return WalletCore::new_update_chain(fetch_config_path()?, storage_path, overrides, &password).context(OLD_WALLET);
     }
     let (mut wallet, mnemonic) =
         WalletCore::new_init_storage(fetch_config_path()?, storage_path, overrides, &new_wallet_password())?;
