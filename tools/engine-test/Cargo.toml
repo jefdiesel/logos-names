@@ -1,0 +1,13 @@
+[package]
+name = "names_engine_test"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Runs the real guest through LEZ's real state machine, with no chain or network.
+[dependencies]
+names_core.workspace = true
+names_methods = { path = "../../methods" }
+lee_core.workspace = true
+lee.workspace = true
+borsh.workspace = true

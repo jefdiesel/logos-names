@@ -437,6 +437,26 @@ fn seed(domain: &[u8], id: &NameId) -> PdaSeed {
     PdaSeed::new(sha256(&bytes))
 }
 
+/// The seeds behind a name's accounts. LEZ 0.4 admits a new public account only
+/// with evidence of where it comes from, so a client lists the seed of every
+/// account a transaction may create.
+#[must_use]
+pub fn name_seeds(id: &NameId) -> [PdaSeed; 3] {
+    [seed(NAME_SEED_DOMAIN, id), seed(PAGE_SEED_DOMAIN, id), seed(DEPOSIT_SEED_DOMAIN, id)]
+}
+
+/// The seed behind [`commitment_address`].
+#[must_use]
+pub fn commitment_seed(commitment: &[u8; 32]) -> PdaSeed {
+    seed(COMMITMENT_SEED_DOMAIN, commitment)
+}
+
+/// The seed behind [`settings_address`].
+#[must_use]
+pub fn settings_seed() -> PdaSeed {
+    PdaSeed::new(sha256(SETTINGS_SEED_DOMAIN))
+}
+
 /// The tag that stands for `account` as the holder of the name `id`. Anyone who
 /// knows both can compute it; from the tag alone neither can be recovered, and
 /// the same account holding two names gets two unrelated tags.
