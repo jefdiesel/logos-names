@@ -191,8 +191,10 @@ enum Command {
     /// the private account; after that, `register` and `pay` need no account arguments.
     Setup {
         /// How much of the public account's tokens to move to the private account.
-        /// The default covers a few names' deposits (1,000,000 each on the testnet).
-        #[arg(long, default_value_t = 5_000_000)]
+        /// The default covers a few names' deposits and private changes: on LEZ 0.4 each
+        /// private transaction reserves its fee in the proof, about 5,400,000 at the
+        /// lowest base fees.
+        #[arg(long, default_value_t = 50_000_000)]
         shield: u128,
     },
     /// Show this wallet's accounts and balances.
