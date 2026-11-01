@@ -68,4 +68,8 @@ The module keeps building a name's transactions, but the `names` CLI signs them,
 - [ ] Not yet run on chain: `transfer`, `clear-page`, `bridge`, `register` without `--wait`, and others listed in the port report.
 - [ ] The faucet must send a new account's public key as evidence, and pay at least 12,000,000: the app now needs that much to register privately, and the faucet gave 2,000,000. It lives outside this repo.
 - [ ] Before deploying: `DEFAULT_PROGRAM`, `DEFAULT_BOARD`, `REGISTRY`, `CHAINS`, `register.js`, MCP and `lez-tx-send.mjs` defaults still point at 0.3, as do the module's `DEFAULT_REGISTRY`, `DEFAULT_SEQUENCER` and `FAUCET_URL`.
+- [ ] Publish a 0.4 `names` release before the app: `cli_install` runs `install.sh`, which fetches the published CLI, and that one has no `names module`.
+- [ ] `names module restore` assumes 0.4 derives public accounts in the same order as 0.3. Not checked against a real 0.3 wallet.
+- [ ] `cli_status` starts the CLI twice each time it is asked; with a sequencer that doesn't answer each can wait 20 seconds. Worth caching.
+- [ ] The app offers a claim only on a name that reads as unregistered, so a holder can't yet claim over someone's 0.4 registration from Basecamp. The web form and `names claim` can.
 - [ ] Deploy on testnet 0.4 when it launches. Rerun the snapshot just before the reset.
