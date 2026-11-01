@@ -90,6 +90,36 @@ export function claimHolds({ claimsRoot, claimsProgram, id, account, proof }) {
   return compareHashes(claimRootFrom(leaf, proof), claimsRoot) === 0;
 }
 
+const claimLevel = (level) => {
+  const next = [];
+  for (let at = 0; at < level.length; at += 2) {
+    next.push(at + 1 < level.length ? claimNode(level[at], level[at + 1]) : level[at]);
+  }
+  return next;
+};
+
+/** The root of the claims list `leaves`; all zeros for an empty list. An odd last node moves up as it is. */
+export function claimRoot(leaves) {
+  if (leaves.length === 0) return new Uint8Array(32);
+  let level = leaves;
+  while (level.length > 1) level = claimLevel(level);
+  return level[0];
+}
+
+/** The proof for the leaf at `index` of `leaves`. */
+export function claimProof(leaves, index) {
+  const proof = [];
+  let level = leaves;
+  let at = index;
+  while (level.length > 1) {
+    const sibling = level[at ^ 1];
+    if (sibling) proof.push(sibling);
+    level = claimLevel(level);
+    at = Math.floor(at / 2);
+  }
+  return proof;
+}
+
 // ---------- instructions: borsh(Message::Instruction(..)) ----------
 
 const instruction = (variant) => new Writer().u8(0).u8(variant);

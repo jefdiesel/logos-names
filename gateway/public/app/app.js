@@ -291,7 +291,10 @@ async function openChat() {
 
 // ---------- step wiring ----------
 
-$("wallet-continue").addEventListener("click", () => show("name"));
+$("wallet-continue").addEventListener("click", () => {
+  show("name");
+  offerTakeback();
+});
 $("wallet-skip-all").addEventListener("click", () => {
   setOnboarded(null);
   show("chat");
@@ -415,6 +418,53 @@ async function claimName(name) {
     registering = false;
   }
 }
+
+// Names held on the earlier chain. Shown only while the registry takes claims.
+function takebackStatus(text, tone = "") {
+  const line = $("takeback-status");
+  line.textContent = text;
+  line.className = `me-status ${tone}`;
+  line.hidden = !text;
+}
+
+async function offerTakeback() {
+  try {
+    registerMod ??= await import("./register.js");
+    registerMod.setRpc(settings.rpc);
+    const until = await registerMod.claimsOpenUntil(settings.registry);
+    $("takeback").hidden = until === null;
+    if (until !== null) $("takeback-until").textContent = new Date(until).toLocaleDateString();
+  } catch {
+    $("takeback").hidden = true;
+  }
+}
+
+$("takeback-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const name = normalizeName($("takeback-name").value);
+  if (!name) return;
+  $("takeback-go").disabled = true;
+  try {
+    const walletMod = await import("./wallet.js");
+    walletMod.ensureLoaded?.();
+    const key = walletMod.walletKey();
+    if (!key) throw new Error("Open step 1 (Wallet) and unlock the wallet that held the name first.");
+    registerMod ??= await import("./register.js");
+    registerMod.setRpc(settings.rpc);
+    const { takeBack } = await import("./claims.js");
+    await takeBack({
+      privateKey: key, program: settings.registry, name, onStep: (stage) => {
+        takebackStatus({ list: "Reading the list of names…", claim: "Taking the name back…", page: "Restoring its page…" }[stage] ?? "");
+      },
+    });
+    setOnboarded(name);
+    takebackStatus(`✓ ${name} is yours again.`, "ok");
+  } catch (error) {
+    takebackStatus((error && error.message) || String(error), "bad");
+  } finally {
+    $("takeback-go").disabled = false;
+  }
+});
 
 $("pick-register")?.addEventListener("click", () => {
   const name = normalizeName($("pick-chosen").textContent || $("pick-name").value);

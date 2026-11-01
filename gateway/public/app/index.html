@@ -122,6 +122,17 @@
           <button type="button" id="pick-command-copy" class="ghost wide">Copy command</button>
         </details>
       </div>
+      <details id="takeback" class="box import" hidden>
+        <summary>Held a name before the chain reset?</summary>
+        <p class="muted">Take it back for free with the wallet that held it, until <span id="takeback-until"></span>.
+          No deposit and no wait, and its profile and page come back as they were. Names held by a private account
+          can't be taken back here.</p>
+        <form id="takeback-form" class="lookup inline" autocomplete="off">
+          <input id="takeback-name" type="text" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="your name">
+          <button type="submit" id="takeback-go">Take it back</button>
+        </form>
+        <p id="takeback-status" class="me-status" role="status" aria-live="polite" hidden></p>
+      </details>
       <div class="step-nav">
         <button type="button" id="name-back" class="ghost">Back</button>
         <button type="button" id="name-continue" class="wide">Continue to chat →</button>

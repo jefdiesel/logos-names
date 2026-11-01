@@ -2444,6 +2444,12 @@ const MAX_CACHED: usize = 512;
 /// A wallet can hold many accounts and each costs a read, so `wallet` stops here.
 const MAX_WALLET_ACCOUNTS: usize = 64;
 
+#[cfg(not(test))]
+#[no_mangle]
+pub extern "Rust" fn logos_module_install() {
+    install::<Names>();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3014,7 +3020,7 @@ mod tests {
         assert_eq!(ended["state"], "done");
         assert_eq!(ended["moved"], false);
         assert!(ended["log_tail"].as_str().unwrap().contains("[setup]\n[--shield=50000000]"), "{ended}");
-        assert!(ended["problem"].as_str().unwrap().contains("needs at least 5,000,000"));
+        assert!(ended["problem"].as_str().unwrap().contains("needs at least 50,000,000"), "{ended}");
         // Paying an account: checked first, then the wallet's own transfer.
         for (to, amount) in [("jef", "5"), (other, "5"), ("Public/nope", "5"), (&format!("Public/{other}") as &str, "0")] {
             assert_eq!(parsed(&names.cli_pay_account(to.into(), amount.into(), false))["success"], false, "{to} {amount}");
