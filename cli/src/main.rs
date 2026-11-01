@@ -1266,7 +1266,13 @@ impl Client {
             .map(|(account, _)| account)
             .chain(key_chain.private_account_ids().map(|(account, _)| account))
             .find(|account| owner_tag(&id, account) == record.owner)
-            .ok_or_else(|| anyhow!("this wallet did not hold {name}{NAME_SUFFIX} on the earlier chain"))?;
+            .ok_or_else(|| {
+                anyhow!(
+                    "no account in this wallet held {name}{NAME_SUFFIX} on the earlier chain. A public account comes back \
+                     from the old wallet's recovery phrase (`names wallet restore-keys`, then `names wallet account new \
+                     public` until its ID appears); a private one does not, because LEZ 0.4 derives other private account IDs"
+                )
+            })?;
         if let Some(held) = self.record(&id).await? {
             if held.claimed {
                 bail!("{name}{NAME_SUFFIX} was already claimed");
@@ -1485,8 +1491,10 @@ impl Client {
         let tx = PublicTransaction::new(tx, witness);
         let simulation = Simulation { public_actor_states: states, admitted_accounts: None };
         let catalog: ProgramCatalog = programs.into_iter().collect();
+        // No transaction may declare more gas than a block holds.
+        let budget = self.wallet.client().get_fee_state().await?.max_gas_exec;
         let (cycles, result) = tokio::task::spawn_blocking(move || {
-            quietly(|| simulate_public_transaction(&tx, &simulation, &catalog, MAX_SIMULATED_CYCLES))
+            quietly(|| simulate_public_transaction(&tx, &simulation, &catalog, budget))
         })
         .await?;
         result.map_err(|error| anyhow!("refused: {error}"))?;
@@ -2021,9 +2029,6 @@ const MIN_GAS_LIMIT: u64 = 30_000;
 fn gas_limit_for(cycles: u64) -> u64 {
     cycles.saturating_add(cycles.div_ceil(2)).max(MIN_GAS_LIMIT)
 }
-
-/// The most cycles a trial run may take: the chain's cap for one block.
-const MAX_SIMULATED_CYCLES: u64 = 100_000_000;
 
 /// Execution gas for a public native-token transfer: the native token is a built-in
 /// that meters no cycles (only the transaction's bytes are billed, outside this), and
