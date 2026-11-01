@@ -193,6 +193,11 @@ pub struct Settings {
 pub enum Message {
     Instruction(Instruction),
     Effect(Effect),
+    /// To a record actor, from anyone: refused unless `tag` holds the name. It
+    /// changes nothing and tells nothing the record does not already show, and it
+    /// is how another program, such as the board, checks who holds a name: an
+    /// actor sees only its own state, so it has to ask.
+    RequireHolder { tag: OwnerTag },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -733,6 +738,10 @@ pub fn handle(input: &ReceiveInput, message: Message) -> Response {
                 None => Response::keep_state(),
             }
         }
+        Message::RequireHolder { tag } => {
+            load_owned(&input.pre_state, &tag);
+            Response::keep_state()
+        }
     }
 }
 
@@ -1206,6 +1215,30 @@ mod tests {
     /// The true length proof for `id` under the test list.
     fn length_of(id: &NameId) -> LengthProof {
         test_list().prove(id).expect("a proof")
+    }
+
+    #[test]
+    fn anyone_can_ask_who_holds_a_name_and_only_the_holder_passes() {
+        let held = to_bytes(&NameRecord {
+            version: VERSION,
+            owner: [1; 32],
+            expires: u64::MAX,
+            sealed: Vec::new(),
+            claimed: false,
+        });
+        let asked = |pre_state: Vec<u8>, tag| {
+            let input = ReceiveInput {
+                receiver: Actor::new(ALICE, PROGRAM),
+                from: Some(Actor::new(BOB, AccountId::new([9; 32]))),
+                is_authorized: false,
+                pre_state: pre_state.into(),
+                message: Vec::new().into(),
+            };
+            std::panic::catch_unwind(|| handle(&input, Message::RequireHolder { tag }).post_state)
+        };
+        assert_eq!(asked(held.clone(), [1; 32]).expect("the holder passes"), None);
+        assert!(asked(held, [2; 32]).is_err(), "anyone else is refused");
+        assert!(asked(Vec::new(), [1; 32]).is_err(), "an unregistered name is refused");
     }
 
     const PROGRAM: AccountId = AccountId::new([7; 32]);

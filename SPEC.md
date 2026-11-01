@@ -552,6 +552,10 @@ free of deposit until `claims_until`:
   client MUST warn anyone registering before `claims_until`.
 - A holder who released a name after the snapshot can still claim it.
 
+
+### 8.5 Proving a holder to another program
+
+A program can't read the registry's state. `Message::RequireHolder { tag }`, sent to a name's record actor, changes nothing and refuses unless `tag` holds that record. The board uses it to check that a poster holds the name.
 ## 9. Events
 
 The registry emits LEZ program events. The selector is the first 8 bytes of
