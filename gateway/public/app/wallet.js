@@ -13,6 +13,7 @@ import {
   formatAccountId,
   fromHex,
   getAccountBalance,
+  publicKeyOf,
   toHex,
 } from "./lez-tx.js";
 import * as vault from "./vault.js";
@@ -265,11 +266,12 @@ async function getFaucet() {
   } catch {}
   try {
     // The faucet is fronted by the CORS proxy, so the response is readable: a 200 with
-    // {tx} on success, or a non-200 with {error} (e.g. the once-a-day limit).
+    // {tx} on success, or a non-200 with {error} (e.g. the once-a-day limit). LEZ 0.4 only
+    // credits a new account if the transfer shows its public key, so the faucet needs it.
     const res = await fetch(FAUCET_URL, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ account: wallet.accountB58 }),
+      body: JSON.stringify({ account: wallet.accountB58, publicKey: toHex(publicKeyOf(wallet.secretKey)) }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {

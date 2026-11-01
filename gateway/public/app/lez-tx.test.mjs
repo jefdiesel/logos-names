@@ -1,13 +1,17 @@
-// Pinned vectors from the LEZ Rust sources (dev 4fba494), reproduced byte for byte by
-// lez-tx.js (the bundle the browser loads). Run: node --test gateway/public/app/lez-tx.test.mjs
+// Pinned vectors from the LEZ Rust sources (v0.4.0-rc1), reproduced byte for byte by
+// lez-tx.js (the bundle the browser loads), and vectors.json, made by the real Rust types
+// (../../app-src/vectors). Run: node --test gateway/public/app/lez-tx.test.mjs
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
   ACCOUNT_ID_PREFIX,
   MESSAGE_PREFIX,
   NATIVE_TOKEN_PROGRAM_ID,
+  accountExists,
   accountIdOf,
+  actor,
   base58Decode,
   base58Encode,
   concat,
@@ -19,14 +23,17 @@ import {
   feeReserve,
   fromBase64,
   fromHex,
+  getAccountView,
   isValidPublicKey,
+  keyEvidence,
   maxFeeFor,
   messageHash,
   nativeBalance,
+  parseAccountId,
+  pdaEvidence,
   publicChild,
   publicKeyOf,
   publicRoot,
-  shardSelector,
   signHash,
   signPublicTransaction,
   signTransfer,
@@ -37,7 +44,10 @@ import {
   verifyHash,
   witnessSetFor,
 } from "./lez-tx.js";
+import * as lns from "./lns-tx.js";
 import { createHash } from "node:crypto";
+
+const VECTORS = JSON.parse(readFileSync(new URL("../../app-src/vectors/vectors.json", import.meta.url)));
 
 // An independent SHA-256 (Node's), not the one bundled in lez-tx.js.
 const sha256 = (data) => new Uint8Array(createHash("sha256").update(data).digest());
@@ -45,55 +55,61 @@ const sha256 = (data) => new Uint8Array(createHash("sha256").update(data).digest
 const bytes = (...parts) => Uint8Array.from(parts.flat());
 const fill = (value, length = 32) => new Uint8Array(length).fill(value);
 
-// ---------- message.rs: hash_public_pinned_* ----------
-
-const PROGRAM_ACCOUNT_ID_BYTES = bytes(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0);
-const POSITIONS_BYTES = bytes([1, 0, 0, 0], Array(32).fill(42), Array(32).fill(43));
-const BALANCE_POSITIONS_BYTES = bytes([1, 0, 0, 0], Array(32).fill(42), Array(32).fill(0));
-const NONCES_BYTES = bytes(1, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-
-const pinnedMessage = (shardSelectors, instructionData, fee) => ({
-  programAccountId: PROGRAM_ACCOUNT_ID_BYTES,
-  shardSelectors,
-  nonces: [5n],
-  instructionData: Uint8Array.from(instructionData),
-  fee,
-});
-const namedShardSelector = () => shardSelector(fill(42), fill(43));
-
-function assertHashPinned(message, shardSelectorsBytes, instructionBytes, feeBytes) {
-  const expectedBorsh = concat(PROGRAM_ACCOUNT_ID_BYTES, shardSelectorsBytes, NONCES_BYTES, bytes(instructionBytes), bytes(feeBytes));
-  assert.equal(toHex(encodeMessage(message)), toHex(expectedBorsh), "borsh order");
-  const expectedHash = sha256(concat(MESSAGE_PREFIX, expectedBorsh));
-  assert.equal(toHex(messageHash(message)), toHex(expectedHash), "prefixed hash");
-  return toHex(expectedHash);
-}
+// ---------- message.rs ----------
 
 test("message PREFIX is b\"/LEE/v0.3/Message/Public/\" + 7 zero bytes", () => {
   assert.equal(toHex(MESSAGE_PREFIX), toHex(concat(new TextEncoder().encode("/LEE/v0.3/Message/Public/"), new Uint8Array(7))));
   assert.equal(MESSAGE_PREFIX.length, 32);
 });
 
-test("message.rs hash_public_pinned_exempt", () => {
-  assertHashPinned(pinnedMessage([namedShardSelector()], [], null), POSITIONS_BYTES, [0, 0, 0, 0], [0]);
-});
-
-test("message.rs hash_public_pinned_balance_shard_selector", () => {
-  assertHashPinned(pinnedMessage([nativeBalance(fill(42))], [], null), BALANCE_POSITIONS_BYTES, [0, 0, 0, 0], [0]);
-});
-
-test("message.rs hash_public_pinned_nonempty_instruction", () => {
-  assertHashPinned(pinnedMessage([namedShardSelector()], [7, 8, 9], null), POSITIONS_BYTES, [3, 0, 0, 0, 7, 8, 9], [0]);
-});
-
-test("message.rs hash_public_pinned_charged", () => {
-  const feeBytes = [1, Array(32).fill(7), [9, 0, 0, 0, 0, 0, 0, 0], [3, 0, 0, 0, 0, 0, 0, 0], [100, ...Array(15).fill(0)]].flat();
-  assertHashPinned(
-    pinnedMessage([namedShardSelector()], [], feeDeclaration(fill(7), 9, 3, 100)),
-    POSITIONS_BYTES,
-    [0, 0, 0, 0],
-    feeBytes,
+test("message.rs a_public_message_has_a_pinned_layout_and_hash", () => {
+  const to = actor(fill(42), fill(0));
+  const message = { to, data: bytes(0), actors: [to], nonces: [{ accountId: fill(42), nonce: 1n }], fee: null };
+  const expected = concat(
+    bytes(1, 0, 0, 0), fill(42), fill(0), // public_context.actors
+    bytes(1, 0, 0, 0), fill(42), // public_context.authorized_accounts
+    bytes(0, 0, 0, 0), // public_context.promotions
+    fill(42), fill(0), // execution.root.to
+    bytes(1, 0, 0, 0, 0), // execution.root.message
+    bytes(0), // execution.fee
+    bytes(1, 0, 0, 0), fill(42), bytes(1), new Uint8Array(15), // nonces
+    bytes(0, 0, 0, 0), // admission_evidence
   );
+  assert.equal(toHex(encodeMessage(message)), toHex(expected));
+  assert.equal(toHex(messageHash(message)), toHex(sha256(concat(MESSAGE_PREFIX, expected))));
+  assert.equal(toHex(encodeMessage(message)), VECTORS.pinned.bytes);
+  assert.equal(toHex(messageHash(message)), VECTORS.pinned.hash);
+});
+
+test("everything sorted is sorted and deduplicated, as Rust's BTreeSet and BTreeMap are", () => {
+  const [high, low, program] = [fill(0xf0), fill(0x10), fill(0x77)];
+  const message = {
+    to: actor(high, program),
+    data: bytes(1, 2, 3),
+    actors: [actor(high, program), nativeBalance(high), actor(low, program), nativeBalance(low), actor(low, program)],
+    nonces: [{ accountId: high, nonce: 9n }, { accountId: low, nonce: 2n ** 64n }],
+    fee: feeDeclaration(high, 250_000n, 3n, 12_345_678_901_234n),
+    evidence: [pdaEvidence(program, fill(0x5d)), keyEvidence(publicKeyOf(fill(1)))],
+  };
+  assert.equal(toHex(encodeMessage(message)), VECTORS.sorted.bytes);
+  assert.equal(toHex(messageHash(message)), VECTORS.sorted.hash);
+});
+
+test("the wallet's native transfer, byte for byte", () => {
+  const [from, to] = [parseAccountId(VECTORS.addresses.alice), parseAccountId(VECTORS.addresses.bob)];
+  assert.equal(toHex(transferInstruction(to, 1337n)), VECTORS.transferInstruction);
+  const message = transferMessage({ from, to, nonce: 3n, amount: 1337n, gasLimit: 1000n });
+  assert.equal(toHex(encodeMessage(message)), VECTORS.walletTransfer.bytes);
+  assert.equal(toHex(messageHash(message)), VECTORS.walletTransfer.hash);
+  assert.deepEqual(VECTORS.addresses.alice, base58Encode(accountIdOf(publicKeyOf(fill(1)))));
+});
+
+test("one account can't carry two nonces, and only its signers can sign", () => {
+  const to = nativeBalance(fill(1));
+  const nonces = [{ accountId: fill(1), nonce: 0n }, { accountId: fill(1), nonce: 1n }];
+  assert.throws(() => encodeMessage({ to, data: bytes(), actors: [], nonces }), /one nonce/);
+  const message = { to, data: bytes(), actors: [], nonces: [{ accountId: fill(9), nonce: 0n }] };
+  assert.throws(() => signPublicTransaction(message, [fill(1)]), /signing keys/);
 });
 
 // ---------- public_key.rs / transaction.rs: account IDs ----------
@@ -207,13 +223,12 @@ test("public_key.rs try_new_invalid_public_key_from_bip340_test_vectors_5 / _14"
 test("witness_set.rs for_message_constructor", () => {
   const [key1, key2] = [fill(1), fill(2)];
   const [pubkey1, pubkey2] = [publicKeyOf(key1), publicKeyOf(key2)];
-  // Message::try_new(from_builtin_program([0; 8]), …, instruction: vec![1, 2, 3, 4]): the
-  // instruction is borsh(Vec<u8>), so instruction_data = [4, 0, 0, 0, 1, 2, 3, 4].
+  const [addr1, addr2] = [accountIdOf(pubkey1), accountIdOf(pubkey2)];
   const message = {
-    programAccountId: new Uint8Array(32),
-    shardSelectors: [nativeBalance(accountIdOf(pubkey1)), nativeBalance(accountIdOf(pubkey2))],
-    nonces: [1n, 2n],
-    instructionData: bytes(4, 0, 0, 0, 1, 2, 3, 4),
+    to: actor(addr1, fill(0)),
+    data: bytes(4, 0, 0, 0, 1, 2, 3, 4), // borsh(vec![1, 2, 3, 4])
+    actors: [nativeBalance(addr1), nativeBalance(addr2)],
+    nonces: [{ accountId: addr1, nonce: 1n }, { accountId: addr2, nonce: 2n }],
     fee: null,
   };
   const witnesses = witnessSetFor(message, [key1, key2]);
@@ -230,29 +245,10 @@ test("witness_set.rs for_message_constructor", () => {
   assert.equal(toHex(encoded.subarray(4 + 64, 4 + 96)), toHex(pubkey1));
 });
 
-test("transaction.rs transaction_for_tests: Transfer { amount: 1337 } layout, hash and wire", () => {
-  const [key1, key2] = [fill(1), fill(2)];
-  const [addr1, addr2] = [accountIdOf(publicKeyOf(key1)), accountIdOf(publicKeyOf(key2))];
-  // native_token::Instruction::Transfer { amount } = variant 0 ‖ u128 LE
-  assert.deepEqual([...transferInstruction(1337n)], [0, 57, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-  const message = {
-    programAccountId: NATIVE_TOKEN_PROGRAM_ID,
-    shardSelectors: [nativeBalance(addr1), nativeBalance(addr2)],
-    nonces: [0n, 0n],
-    instructionData: transferInstruction(1337n),
-    fee: null,
-  };
-  const aux = new Uint8Array(32);
-  const signed = signPublicTransaction(message, [key1, key2], aux);
-  const expectedMessage = concat(
-    new Uint8Array(32),
-    bytes(2, 0, 0, 0), addr1, new Uint8Array(32), addr2, new Uint8Array(32),
-    bytes(2, 0, 0, 0), new Uint8Array(16), new Uint8Array(16),
-    bytes(17, 0, 0, 0), transferInstruction(1337n),
-    bytes(0),
-  );
-  assert.equal(toHex(signed.messageBytes), toHex(expectedMessage));
-  assert.equal(toHex(signed.txBytes), toHex(encodePublicTransaction(expectedMessage, signed.witnesses)));
+test("a signed transaction: hash, tag and wire", () => {
+  const message = transferMessage({ from: accountIdOf(publicKeyOf(fill(1))), to: fill(9), nonce: 0n, amount: 1337n });
+  const signed = signPublicTransaction(message, [fill(1)], new Uint8Array(32));
+  assert.equal(toHex(signed.txBytes), toHex(encodePublicTransaction(signed.messageBytes, signed.witnesses)));
   // PublicTransaction::hash = sha256(borsh(tx)), without the LeeTransaction tag.
   assert.equal(signed.hash, toHex(sha256(signed.txBytes)));
   // LeeTransaction::Public = tag 0 ‖ tx; on the wire base64 (STANDARD) of that.
@@ -264,19 +260,103 @@ test("transaction.rs transaction_for_tests: Transfer { amount: 1337 } layout, ha
 
 // ---------- the wallet's public transfer (send_public_transfer) ----------
 
-test("transferMessage matches send_pub_tx_with_pre_check for a native transfer", () => {
+test("transferMessage: the sender pays, and the wallet's fee cap", () => {
   const from = accountIdOf(publicKeyOf(fill(1)));
   const to = fill(9);
   const message = transferMessage({ from, to, nonce: 3n, amount: 1000n, gasLimit: 1000n });
-  assert.equal(toHex(message.programAccountId), toHex(NATIVE_TOKEN_PROGRAM_ID));
-  assert.deepEqual(message.nonces, [3n]);
+  assert.equal(toHex(message.to.accountId), toHex(from));
+  assert.equal(toHex(message.to.programAccountId), toHex(NATIVE_TOKEN_PROGRAM_ID));
+  assert.deepEqual(message.nonces, [{ accountId: from, nonce: 3n }]);
   assert.equal(toHex(message.fee.payer), toHex(from));
   assert.equal(message.fee.maxFee, 6_464_000n);
   assert.equal(maxFeeFor(2_000_000n), 134_400_000n); // DEFAULT_MAX_FEE
   const signed = signTransfer({ privateKey: fill(1), to, nonce: 3n, amount: 1000n, gasLimit: 1000n });
-  // 32 + (4 + 2·64) + (4 + 16) + (4 + 17) + (1 + 32 + 8 + 8 + 16) + (4 + 96) = 370, plus the tag
-  assert.equal(signed.txBytes.length, 370);
-  assert.equal(signed.wire.length, 371);
+  // (4 + 2·64) + (4 + 32) + 4 + 64 + (4 + 49) + (1 + 32 + 8 + 8 + 16) + (4 + 48) + 4 + (4 + 96)
+  assert.equal(signed.txBytes.length, 510);
+  assert.equal(signed.wire.length, 511);
   const quote = { base_fee_exec: 8, base_fee_stor: 8, next_base_fee_exec_ceiling: 9, next_base_fee_stor_ceiling: 9 };
-  assert.equal(feeReserve({ gasLimit: 1000n, dataBytes: signed.wire.length, quote }), 1000n * 9n + 371n * 9n);
+  assert.equal(feeReserve({ gasLimit: 1000n, dataBytes: signed.wire.length, quote }), 1000n * 9n + 511n * 9n);
+});
+
+// ---------- the sequencer's JSON-RPC ----------
+
+function stubRpc(results) {
+  const real = globalThis.fetch;
+  globalThis.fetch = async (_url, { body }) => {
+    const { id, method, params } = JSON.parse(body);
+    return Response.json({ jsonrpc: "2.0", id, result: results(method, params) });
+  };
+  return () => { globalThis.fetch = real; };
+}
+
+test("getAccountView selects an actor; a missing account is null", async () => {
+  const seen = [];
+  const restore = stubRpc((method, params) => { seen.push([method, params]); return null; });
+  const id = fill(9);
+  assert.equal(await getAccountView("http://rpc.test", nativeBalance(id)), null);
+  assert.equal(await accountExists("http://rpc.test", id), false);
+  restore();
+  assert.deepEqual(seen[0], ["getAccountView", [{ account_id: base58Encode(id), program_account_id: base58Encode(fill(0)) }]]);
+});
+
+// ---------- the registry's instructions and addresses (core/src/lib.rs) ----------
+
+const hexOf = (text) => fromHex(text);
+const ID = Uint8Array.from({ length: 32 }, (_, i) => i);
+const NOW = 1_700_000_000_000;
+
+test("addresses and seeds match the Rust", () => {
+  const { addresses, seeds } = VECTORS;
+  const registry = fill(7);
+  const alice = parseAccountId(addresses.alice);
+  const holder = lns.ownerTag(ID, alice);
+  const promised = lns.commitmentHash(ID, holder, fill(0x5a));
+  assert.equal(toHex(holder), addresses.ownerTag);
+  assert.equal(toHex(promised), addresses.commitmentHash);
+  assert.equal(base58Encode(lns.recordAddress(registry, ID)), addresses.record);
+  assert.equal(base58Encode(lns.pageAddress(registry, ID)), addresses.page);
+  assert.equal(base58Encode(lns.depositAddress(registry, ID)), addresses.deposit);
+  assert.equal(base58Encode(lns.settingsAddress(registry)), addresses.settings);
+  assert.equal(base58Encode(lns.commitmentAddress(registry, promised)), addresses.commitment);
+  assert.equal(toHex(lns.nameSeed(ID)), seeds.name);
+  assert.equal(toHex(lns.pageSeed(ID)), seeds.page);
+  assert.equal(toHex(lns.depositSeed(ID)), seeds.deposit);
+  assert.equal(toHex(lns.settingsSeed()), seeds.settings);
+  assert.equal(toHex(lns.commitmentSeed(promised)), seeds.commitment);
+});
+
+test("every instruction matches borsh(Message::Instruction(..)) from the Rust", () => {
+  const { instructions: expected } = VECTORS;
+  const check = (name, encoded) => assert.equal(toHex(encoded), expected[name], name);
+  check("register", lns.registerInstruction({
+    id: ID, sealed: bytes(0xee, 0xff), term: 1, fee: 100_000n, treasury: fill(2), now: NOW, secret: fill(0x5a), deposit: false,
+    lengthProof: { kind: "Membership", index: 7, tier: 3, path: [fill(9)] },
+  }));
+  check("registerDeposit", lns.registerInstruction({
+    id: ID, sealed: bytes(0xee), term: 0, fee: 1_000_000n, now: NOW, secret: fill(0x5a), deposit: true,
+    lengthProof: {
+      kind: "NonMembership",
+      left: { id: fill(1), tier: 3 }, leftPath: [fill(3)],
+      right: { id: fill(2), tier: 1 }, rightPath: [fill(4), fill(5)],
+      leftIndex: 6,
+    },
+  }));
+  check("renew", lns.renewInstruction({ id: ID, term: 2, fee: 5n, treasury: fill(2), now: NOW }));
+  check("setRecord", lns.setRecordInstruction({ id: ID, sealed: bytes(0xee) }));
+  check("setPage", lns.setPageInstruction({ id: ID, sealed: bytes() }));
+  check("transfer", lns.transferInstruction({ id: ID, newOwner: fill(2) }));
+  check("release", lns.releaseInstruction({ id: ID, refund: 1_000_000n }));
+  check("setPrimary", lns.setPrimaryInstruction({ name: "jef" }));
+  check("commit", lns.commitInstruction({ commitment: fill(0xc0), now: NOW }));
+  check("claim", lns.claimInstruction({ id: ID, sealed: bytes(0xee), now: NOW, proof: [fill(1), fill(2)] }));
+});
+
+test("a claim's leaf and proof check the way claim_holds does", () => {
+  const { claims } = VECTORS;
+  assert.equal(toHex(lns.claimLeaf(fill(7), fill(8))), claims.leafExample);
+  const walk = (leafHex, proof) =>
+    toHex(lns.claimRootFrom(hexOf(leafHex), proof.map(hexOf)));
+  assert.equal(walk(claims.leaves[3], claims.proof3), claims.root);
+  assert.equal(walk(claims.leaves[4], claims.proof4), claims.root);
+  assert.notEqual(walk(claims.leaves[2], claims.proof3), claims.root);
 });

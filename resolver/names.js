@@ -207,6 +207,14 @@ class Reader {
     const high = this.u32();
     return high * 2 ** 32 + low;
   }
+  u128() {
+    return Array.from(this.take(16)).reduceRight((value, byte) => (value << 8n) | BigInt(byte), 0n);
+  }
+  bool() {
+    const value = this.u8();
+    if (value > 1) throw new Error("not a boolean");
+    return value === 1;
+  }
   byteVec() {
     return this.take(this.u32());
   }
@@ -239,14 +247,42 @@ export async function ownerTag(id, accountId) {
   return toHex(await sha256(concat(utf8.encode("logos-names/v5/owner"), id, base58Decode(accountId))));
 }
 
+/**
+ * Decodes a record. Version 6 (LEZ 0.4) adds `claimed`: the name was carried over
+ * from an earlier chain. Older records end at `sealed`, and were never claimed.
+ */
 export function decodeNameRecord(bytes) {
   const reader = new Reader(bytes);
+  const version = reader.u8();
   return {
-    version: reader.u8(),
+    version,
     ownerTag: toHex(reader.take(32)),
     expires: reader.u64(),
     sealed: reader.byteVec(),
+    claimed: version >= 6 ? reader.bool() : false,
   };
+}
+
+/** Decodes the registry's settings. Before version 6 they end at `deposits`, with no claims. */
+export function decodeSettings(bytes) {
+  const reader = new Reader(bytes);
+  const version = reader.u8();
+  const settings = {
+    version,
+    admin: base58Encode(reader.take(32)),
+    treasury: base58Encode(reader.take(32)),
+    prices: [reader.u128(), reader.u128(), reader.u128()],
+    mode: reader.u8(),
+    deposits: [reader.u128(), reader.u128()],
+  };
+  return version < 6
+    ? { ...settings, claimsRoot: null, claimsUntil: 0, claimsProgram: null }
+    : {
+        ...settings,
+        claimsRoot: toHex(reader.take(32)),
+        claimsUntil: reader.u64(),
+        claimsProgram: base58Encode(reader.take(32)),
+      };
 }
 
 export function decodePage(bytes) {
@@ -302,17 +338,28 @@ export function encodePageContent({ contentType, body }) {
   return concat(writeString(contentType), writeByteVec(body));
 }
 
-/** Reads the registry's shard on `accountId`; empty when the account holds none. */
-export async function readShard(rpcUrl, program, accountId) {
+/**
+ * Reads what `program` keeps on the account `accountId`: its actor state, empty when
+ * there is none. `getAccountView` returns null for an account that isn't on the chain,
+ * and otherwise that one actor's state, as a list of bytes keyed by the program. A LEZ
+ * 0.3 sequencer answers the same call with the state under `shards`.
+ */
+export async function readActorState(rpcUrl, program, accountId) {
   const response = await fetch(rpcUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getAccount", params: [accountId] }),
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "getAccountView",
+      params: [{ account_id: accountId, program_account_id: program }],
+    }),
   });
   if (!response.ok) throw new Error(`sequencer returned HTTP ${response.status}`);
   const { result, error } = await response.json();
   if (error) throw new Error(`sequencer error: ${error.message}`);
-  return Uint8Array.from(result?.data?.shards?.[program] ?? []);
+  const data = result?.data;
+  return Uint8Array.from(data?.actor_states?.[program] ?? data?.shards?.[program] ?? []);
 }
 
 /** Opens and decodes `sealed`, or null when it is empty, does not open or does not decode. */
@@ -329,7 +376,7 @@ async function openAs(key, sealed, kind, decode) {
 
 /** The record of the name `id`, or null when it is not registered or is past grace at `now`. */
 async function readRecord(rpcUrl, program, id, now) {
-  const bytes = await readShard(rpcUrl, program, await recordAddress(program, id));
+  const bytes = await readActorState(rpcUrl, program, await recordAddress(program, id));
   if (bytes.length === 0) return null;
   const record = decodeNameRecord(bytes);
   return now >= record.expires + GRACE_MS ? null : record;
@@ -385,7 +432,7 @@ export function publicView(record) {
 export async function resolvePage(rpcUrl, program, name, now = Date.now()) {
   const { id, key } = await deriveName(name);
   if ((await readRecord(rpcUrl, program, id, now)) === null) return null;
-  const bytes = await readShard(rpcUrl, program, await pageAddress(program, id));
+  const bytes = await readActorState(rpcUrl, program, await pageAddress(program, id));
   if (bytes.length === 0) return null;
   return openAs(key, decodePage(bytes).sealed, "page", decodePageContent);
 }
@@ -396,7 +443,7 @@ export async function resolvePage(rpcUrl, program, name, now = Date.now()) {
  * same account.
  */
 export async function reverseLookup(rpcUrl, program, accountId, now = Date.now()) {
-  const bytes = await readShard(rpcUrl, program, accountId);
+  const bytes = await readActorState(rpcUrl, program, accountId);
   if (bytes.length === 0) return null;
   const { name } = decodePrimaryName(bytes);
   if (!isValidName(name)) return null;

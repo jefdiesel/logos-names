@@ -7,10 +7,14 @@
 // (rolldown is gateway's; @noble/curves and @noble/hashes are pinned in app-src/package.json.)
 // Tests: node --test gateway/public/app/lez-tx.test.mjs
 //
-// Sources this follows (LEZ dev 4fba494):
+// Checked against the real Rust types and engine by vectors/ (see vectors/README.md).
+//
+// Sources this follows (LEZ v0.4.0-rc1):
 //   lee/state_machine/src/signature/{mod,private_key,public_key}.rs   BIP-340, tweak, account ID
 //   lee/state_machine/src/public_transaction/{message,witness_set,transaction}.rs
-//   lee/state_machine/core/src/{account.rs,native_token.rs}   Nonce, ProgramShardSelector, Transfer
+//   lee/state_machine/src/transaction_message.rs   TransactionMessage, PublicAccountEvidence
+//   lee/state_machine/core/src/execution_state.rs   PublicExecutionContext
+//   lee/state_machine/core/src/{account.rs,native_token.rs}   Nonce, Actor, Message::Transfer
 //   lee/state_machine/src/fees.rs, lez/programs/fee/core/src/assess.rs   FeeDeclaration, reserve
 //   lee/key_protocol/src/key_management/key_tree/keys_public.rs   seed -> public account keys
 //   lez/common/src/{transaction.rs,borsh_base64.rs}   LeeTransaction on the wire
@@ -20,6 +24,8 @@
 import { schnorr, secp256k1 } from "@noble/curves/secp256k1.js";
 import { hmac } from "@noble/hashes/hmac.js";
 import { sha256, sha512 } from "@noble/hashes/sha2.js";
+
+export { sha256 };
 
 const utf8 = new TextEncoder();
 const N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
@@ -37,7 +43,7 @@ export const MESSAGE_PREFIX = pad32("/LEE/v0.3/Message/Public/");
 export const ACCOUNT_ID_PREFIX = pad32("/LEE/v0.3/AccountId/Public/");
 const MASTER_PUBLIC_KEY = utf8.encode("/LEE-Keys/v1/Master/Public");
 
-/** `NATIVE_TOKEN_PROGRAM_ID`: 32 zero bytes, also the shard holding an account's balance. */
+/** `NATIVE_TOKEN_PROGRAM_ID`: 32 zero bytes; an account's balance is its actor state under this. */
 export const NATIVE_TOKEN_PROGRAM_ID = new Uint8Array(32);
 /** `LeeTransaction` borsh variant tags. */
 export const LEE_TX_PUBLIC = 0;
@@ -287,24 +293,73 @@ export const feeDeclaration = (payer, gasLimit, tip, maxFee) => ({
   maxFee: BigInt(maxFee),
 });
 
-/** `ProgramShardSelector::new(account_id, program_account_id)`. */
-export const shardSelector = (accountId, programAccountId) => ({ accountId, programAccountId });
-/** `ProgramShardSelector::native_balance(account_id)`. */
-export const nativeBalance = (accountId) => shardSelector(accountId, NATIVE_TOKEN_PROGRAM_ID);
+/** `Actor::new(account_id, program_account_id)`: one account's state under one program. */
+export const actor = (accountId, programAccountId) => ({ accountId, programAccountId });
+/** `Actor::native_balance(account_id)`. */
+export const nativeBalance = (accountId) => actor(accountId, NATIVE_TOKEN_PROGRAM_ID);
+
+/** `PublicAccountEvidence::Key(public_key)`: the x-only key behind a plain account. */
+export const keyEvidence = (publicKey) => ({ publicKey });
+/** `PublicAccountEvidence::Pda { program, seed }`: where a program-derived account comes from. */
+export const pdaEvidence = (program, seed) => ({ program, seed });
+
+function compareBytes(a, b) {
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return a[i] - b[i];
+  }
+  return 0;
+}
+
+const compareActors = (a, b) =>
+  compareBytes(a.accountId, b.accountId) || compareBytes(a.programAccountId, b.programAccountId);
+
+/** Sorted and without repeats, as borsh writes a BTreeSet. It refuses any other order on reading. */
+function sortedUnique(items, compare) {
+  const sorted = [...items].sort(compare);
+  return sorted.filter((item, i) => i === 0 || compare(sorted[i - 1], item) !== 0);
+}
+
+function writeActor(w, { accountId, programAccountId }) {
+  w.fixed(accountId, 32).fixed(programAccountId, 32);
+}
+
+function writeEvidence(w, evidence) {
+  if (evidence.publicKey) w.u8(0).fixed(evidence.publicKey, 32);
+  else w.u8(1).fixed(evidence.program, 32).fixed(evidence.seed, 32);
+}
 
 /**
- * borsh(`public_transaction::Message`): program_account_id [32] ‖ Vec<ProgramShardSelector>
- * (u32 count, then account_id [32] ‖ program_account_id [32]) ‖ Vec<Nonce> (u32 count, u128 LE
- * each) ‖ instruction_data Vec<u8> ‖ Option<FeeDeclaration> (0, or 1 ‖ payer [32] ‖ gas_limit
- * u64 ‖ tip u64 ‖ max_fee u128).
+ * borsh(`public_transaction::Message`), in field order:
+ *   public_context.actors               Vec of account_id [32] ‖ program_account_id [32], sorted
+ *   public_context.authorized_accounts  Vec of account_id [32], sorted: exactly the signers
+ *   public_context.promotions           u32 0: a public transaction promotes nothing
+ *   execution.root.to                   account_id [32] ‖ program_account_id [32]
+ *   execution.root.message              Vec<u8>
+ *   execution.fee                       0, or 1 ‖ payer [32] ‖ gas_limit u64 ‖ tip u64 ‖ max_fee u128
+ *   nonces                              Vec of account_id [32] ‖ nonce u128, sorted by account
+ *   admission_evidence                  Vec of 0 ‖ public key [32], or 1 ‖ program [32] ‖ seed [32]
+ *
+ * `to` is the actor the transaction starts at, `data` the message to it. `actors` is everything
+ * the transaction reaches; `to` joins it. `nonces` is `[{ accountId, nonce }]`, one per signer.
  */
-export function encodeMessage({ programAccountId, shardSelectors, nonces, instructionData, fee = null }) {
-  const w = new Writer().fixed(programAccountId, 32).u32(shardSelectors.length);
-  for (const selector of shardSelectors) w.fixed(selector.accountId, 32).fixed(selector.programAccountId, 32);
-  w.u32(nonces.length);
-  for (const nonce of nonces) w.u128(nonce);
-  w.vec(instructionData);
+export function encodeMessage({ to, data, actors, nonces, fee = null, evidence = [] }) {
+  const declared = sortedUnique([to, ...actors], compareActors);
+  const signers = [...nonces].sort((a, b) => compareBytes(a.accountId, b.accountId));
+  if (signers.some(({ accountId }, i) => i > 0 && compareBytes(signers[i - 1].accountId, accountId) === 0)) {
+    throw new Error("an account can only have one nonce"); // nonce_map refuses this too
+  }
+  const w = new Writer().u32(declared.length);
+  for (const declaredActor of declared) writeActor(w, declaredActor);
+  w.u32(signers.length);
+  for (const { accountId } of signers) w.fixed(accountId, 32);
+  w.u32(0);
+  writeActor(w, to);
+  w.vec(data);
   w.option(fee, (out, { payer, gasLimit, tip, maxFee }) => out.fixed(payer, 32).u64(gasLimit).u64(tip).u128(maxFee));
+  w.u32(signers.length);
+  for (const { accountId, nonce } of signers) w.fixed(accountId, 32).u128(nonce);
+  w.u32(evidence.length);
+  for (const item of evidence) writeEvidence(w, item);
   return w.done();
 }
 
@@ -338,11 +393,15 @@ export const publicTransactionHash = (txBytes) => sha256(txBytes);
 export const encodeLeeTransaction = (txBytes) => concat(Uint8Array.of(LEE_TX_PUBLIC), txBytes);
 
 /**
- * Signs `message` with `privateKeys` (in the order of `message.nonces`) and assembles it.
+ * Signs `message` with `privateKeys`, which must be exactly the accounts in `message.nonces`
+ * (`check_signers`), and assembles it.
  * Returns the message hash, the transaction bytes, the tagged wire bytes, their base64
  * (the `sendTransaction` parameter) and the hash the sequencer reports (hex).
  */
 export function signPublicTransaction(message, privateKeys, aux = null) {
+  const signing = privateKeys.map((key) => toHex(accountIdOfPrivateKey(key))).sort();
+  const expected = message.nonces.map(({ accountId }) => toHex(accountId)).sort();
+  if (signing.join() !== expected.join()) throw new Error("the signing keys are not the accounts with nonces");
   const messageBytes = encodeMessage(message);
   const witnesses = witnessSetFor(messageBytes, privateKeys, aux);
   const txBytes = encodePublicTransaction(messageBytes, witnesses);
@@ -358,27 +417,30 @@ export function signPublicTransaction(message, privateKeys, aux = null) {
   };
 }
 
-/** borsh(`native_token::Instruction::Transfer { amount }`): variant 0, u128 LE. */
-export const transferInstruction = (amount) => new Writer().u8(0).u128(amount).done();
+/** borsh(`native_token::Message::Transfer { to, amount }`): variant 0, account [32], u128 LE. */
+export const transferInstruction = (to, amount) => new Writer().u8(0).fixed(to, 32).u128(amount).done();
 
 /**
- * The message the wallet's `send_public_transfer` builds: the native token program, both
- * balances selected (sender, recipient), the sender's nonce, the sender paying the fee.
+ * The message the wallet's `NativeTokenTransfer::transfer` builds: sent to the sender's balance
+ * actor, both balances declared, the sender's nonce, the sender paying the fee. The recipient's
+ * credit runs in the same transaction because its balance is declared. An account that isn't on
+ * the chain yet is admitted only with `evidence`: `[keyEvidence(its public key)]`.
  */
-export function transferMessage({ from, to, nonce, amount, gasLimit = NATIVE_TRANSFER_GAS_LIMIT, tip = 0n, maxFee = null }) {
+export function transferMessage({ from, to, nonce, amount, gasLimit = NATIVE_TRANSFER_GAS_LIMIT, tip = 0n, maxFee = null, evidence = [] }) {
   return {
-    programAccountId: NATIVE_TOKEN_PROGRAM_ID,
-    shardSelectors: [nativeBalance(from), nativeBalance(to)],
-    nonces: [BigInt(nonce)],
-    instructionData: transferInstruction(amount),
+    to: nativeBalance(from),
+    data: transferInstruction(to, amount),
+    actors: [nativeBalance(to)],
+    nonces: [{ accountId: from, nonce: BigInt(nonce) }],
     fee: feeDeclaration(from, gasLimit, tip, maxFee ?? maxFeeFor(gasLimit)),
+    evidence,
   };
 }
 
 /** A signed public transfer from the account of `privateKey`. */
-export function signTransfer({ privateKey, to, nonce, amount, gasLimit, tip, maxFee, aux = null }) {
+export function signTransfer({ privateKey, to, nonce, amount, gasLimit, tip, maxFee, evidence, aux = null }) {
   const from = accountIdOfPrivateKey(privateKey);
-  return signPublicTransaction(transferMessage({ from, to, nonce, amount, gasLimit, tip, maxFee }), [privateKey], aux);
+  return signPublicTransaction(transferMessage({ from, to, nonce, amount, gasLimit, tip, maxFee, evidence }), [privateKey], aux);
 }
 
 /**
@@ -444,6 +506,22 @@ export async function getAccountsNonces(url, accountIds) {
 
 /** `getAccountBalance`: the account's native balance. */
 export const getAccountBalance = async (url, accountId) => BigInt(await rpc(url, "getAccountBalance", [formatAccountId(accountId)]));
+
+/**
+ * `getAccountView`: null when the account isn't on the chain, or `{ nonce, data: { actor_states } }`
+ * with only `selected`'s state, which reads as empty when that actor has none.
+ */
+export const getAccountView = (url, selected) =>
+  rpc(url, "getAccountView", [{
+    account_id: formatAccountId(selected.accountId),
+    program_account_id: formatAccountId(selected.programAccountId),
+  }]);
+
+/**
+ * Whether the account is on the chain. Only one that is can be paid without evidence; a
+ * transaction paying one that isn't fails in its block, and the fee is still charged.
+ */
+export const accountExists = async (url, accountId) => (await getAccountView(url, nativeBalance(accountId))) !== null;
 
 /** `sendTransaction`: submits base64(borsh(LeeTransaction)); resolves to the transaction hash (hex). */
 export const sendTransaction = (url, signed) =>

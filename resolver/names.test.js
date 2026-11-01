@@ -1,5 +1,6 @@
 // Run with: node --test resolver/names.test.js
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { afterEach, test } from "node:test";
 import { argon2id } from "@noble/hashes/argon2.js";
 import {
@@ -11,6 +12,7 @@ import {
   decodePageContent,
   decodePrimaryName,
   decodeProfile,
+  decodeSettings,
   deriveName,
   encodePageContent,
   encodeProfile,
@@ -19,6 +21,7 @@ import {
   ownerTag,
   openSealed,
   pageAddress,
+  readActorState,
   recordAddress,
   resolveName,
   resolvePage,
@@ -207,6 +210,7 @@ test("the on-chain layouts decode, and truncated data is refused", () => {
     ownerTag: OWNER_TAG,
     expires: EXPIRES,
     sealed,
+    claimed: false,
   });
   assert.equal(decodeNameRecord(recordShard(OWNER_TAG, sealed, 0x0102030405)).expires, 0x0102030405);
   assert.deepEqual(decodePage(borsh(2, sealed)), { version: 2, sealed });
@@ -215,20 +219,115 @@ test("the on-chain layouts decode, and truncated data is refused", () => {
   assert.throws(() => decodeNameRecord(recordShard(OWNER_TAG, sealed).subarray(0, 40)), /truncated/);
 });
 
+test("a version 6 record ends with whether it was claimed", () => {
+  const sealed = Uint8Array.of(0xee, 0xff);
+  const record = (claimed) => {
+    const bytes = recordShard(OWNER_TAG, sealed);
+    bytes[0] = 6;
+    return Uint8Array.from([...bytes, claimed]);
+  };
+  assert.equal(decodeNameRecord(record(0)).claimed, false);
+  const claimed = decodeNameRecord(record(1));
+  assert.equal(claimed.claimed, true);
+  assert.equal(claimed.version, 6);
+  assert.deepEqual(claimed.sealed, sealed);
+  assert.throws(() => decodeNameRecord(record(2)), /not a boolean/);
+  assert.throws(() => decodeNameRecord(record(1).subarray(0, 46)), /truncated/);
+});
+
+test("settings decode, with claims from version 6", () => {
+  const u128 = (value) => [value, ...new Array(15).fill(0)];
+  const base = [
+    ...new Array(32).fill(1),
+    ...new Array(32).fill(2),
+    ...u128(1),
+    ...u128(2),
+    ...u128(3),
+    1,
+    ...u128(4),
+    ...u128(5),
+  ];
+  const old = decodeSettings(Uint8Array.from([5, ...base]));
+  assert.equal(old.mode, 1);
+  assert.deepEqual(old.prices, [1n, 2n, 3n]);
+  assert.deepEqual(old.deposits, [4n, 5n]);
+  assert.equal(old.claimsUntil, 0);
+  assert.equal(old.claimsRoot, null);
+  const until = [0x05, 0x04, 0x03, 0x02, 0x01, 0, 0, 0];
+  const current = decodeSettings(
+    Uint8Array.from([6, ...base, ...new Array(32).fill(0xab), ...until, ...new Array(32).fill(7)]),
+  );
+  assert.equal(current.claimsRoot, "ab".repeat(32));
+  assert.equal(current.claimsUntil, 0x0102030405);
+  assert.equal(current.claimsProgram, PROGRAM);
+});
+
+test("what the real engine stored reads back, in the shape the RPC serves it", async () => {
+  const report = JSON.parse(readFileSync(new URL("../gateway/app-src/vectors/engine-report.json", import.meta.url)));
+  const views = report.views;
+  const [[program, state]] = Object.entries(views.claimedRecord.data.actor_states);
+  const answer = (result) => {
+    globalThis.fetch = async () => Response.json({ jsonrpc: "2.0", id: 1, result });
+  };
+
+  answer(views.claimedRecord);
+  const record = decodeNameRecord(await readActorState(RPC_URL, program, "any"));
+  assert.equal(record.version, 6);
+  assert.equal(record.claimed, true);
+  assert.equal(record.sealed.length, 284);
+  assert.ok(record.expires >= Number.MAX_SAFE_INTEGER);
+  assert.ok(state.length > 0);
+
+  answer(views.settings);
+  const settings = decodeSettings(await readActorState(RPC_URL, program, "any"));
+  assert.equal(settings.version, 6);
+  assert.equal(settings.mode, 1);
+  assert.deepEqual(settings.deposits, [1_000_000n, 1_000_000n]);
+  assert.equal(settings.claimsUntil, report.claimsUntil);
+
+  answer(views.reverse);
+  assert.equal(decodePrimaryName(await readActorState(RPC_URL, program, "any")).name, "alice");
+
+  // Registered by the app's register.js, sealed for real, stored by the real guest.
+  answer(views.namedRecord);
+  assert.deepEqual(await resolveName(RPC_URL, program, "alice-lns"), {
+    name: "alice-lns",
+    expires: null,
+    lapsed: false,
+    account: report.account,
+    npk: null,
+    vpk: null,
+    texts: {},
+  });
+
+  // The selected actor has no state on an account that exists, and an account that doesn't.
+  answer(views.emptyActor);
+  assert.equal((await readActorState(RPC_URL, program, "any")).length, 0);
+  assert.equal(views.missing, null);
+  answer(views.missing);
+  assert.equal((await readActorState(RPC_URL, program, "any")).length, 0);
+});
+
 /**
- * Stands in for the sequencer: `accounts` maps an account ID to the bytes of
- * the registry's shard on it. Returns the account IDs that were asked for.
+ * Stands in for a LEZ 0.4 sequencer: `accounts` maps an account ID to the bytes
+ * of the registry's actor state on it. `getAccountView` is null for an account
+ * that isn't on the chain, and holds only the selected actor state otherwise,
+ * empty when it has none. Returns the account IDs that were asked for.
  */
-function stubSequencer(accounts) {
+function stubSequencer(accounts, { shards = false } = {}) {
   const asked = [];
   globalThis.fetch = async (url, { body }) => {
     assert.equal(url, RPC_URL);
     const { id, method, params } = JSON.parse(body);
-    assert.equal(method, "getAccount");
-    asked.push(params[0]);
-    const shard = accounts[params[0]];
-    const data = shard ? { shards: { [PROGRAM]: [...shard] } } : { shards: {} };
-    return Response.json({ jsonrpc: "2.0", id, result: { data } });
+    assert.equal(method, "getAccountView");
+    const { account_id: accountId, program_account_id: program } = params[0];
+    assert.equal(program, PROGRAM);
+    asked.push(accountId);
+    const state = accounts[accountId];
+    if (state === undefined && !shards) return Response.json({ jsonrpc: "2.0", id, result: null });
+    const selected = { [program]: [...(state ?? [])] };
+    const data = shards ? { shards: selected } : { actor_states: selected };
+    return Response.json({ jsonrpc: "2.0", id, result: { nonce: 0, data } });
   };
   return asked;
 }
@@ -250,6 +349,15 @@ const RESOLVED = {
   texts: { chat: "hi" },
 };
 const NOTHING_SET = { ...RESOLVED, account: null, texts: {} };
+
+test("a LEZ 0.3 sequencer's shards read the same", async () => {
+  const record = recordShard(OWNER_TAG, Buffer.from(SEALED_PROFILE, "hex"));
+  const asked = stubSequencer({ [JEF_RECORD]: record }, { shards: true });
+  assert.deepEqual(await resolveName(RPC_URL, PROGRAM, "jef"), RESOLVED);
+  assert.deepEqual(asked, [JEF_RECORD]);
+  stubSequencer({}, { shards: true });
+  assert.equal(await resolveName(RPC_URL, PROGRAM, "jef"), null);
+});
 
 test("a name resolves with one read of its record account", async () => {
   const asked = stubSequencer({ [JEF_RECORD]: recordShard(OWNER_TAG, Buffer.from(SEALED_PROFILE, "hex")) });

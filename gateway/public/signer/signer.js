@@ -24,7 +24,7 @@ import * as vault from "./vault.js";
 import {
   randomPrivateKey, accountIdOfPrivateKey, publicKeyOf, parseAccountId, formatAccountId, toHex,
   signTransfer, maxFeeFor, getAccountsNonces, getAccountBalance, sendTransaction, waitForTransaction,
-  NATIVE_TRANSFER_GAS_LIMIT,
+  accountExists, NATIVE_TRANSFER_GAS_LIMIT,
 } from "./lez-tx.js";
 
 // ---------- parent-origin allowlist ----------
@@ -132,6 +132,12 @@ async function mSignAndSend(rawParams) {
   const gas = gasLimit !== null ? BigInt(gasLimit) : NATIVE_TRANSFER_GAS_LIMIT;
   const amt = BigInt(amount);
   const maxFee = maxFeeFor(gas);
+
+  // LEZ 0.4 credits a public account only if it's on the chain or the transaction shows its
+  // public key, which we don't have. Paying one that isn't would fail and still cost the fee.
+  let known;
+  try { known = await accountExists(rpc, toBytes); } catch { throw { code: "rpc_failed", message: "couldn't check the recipient" }; }
+  if (!known) throw { code: "unknown_recipient", message: "that account isn't on the chain yet, so it can't be paid" };
 
   const approved = await showUi({
     title: "Approve this payment",

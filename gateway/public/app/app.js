@@ -16,7 +16,7 @@ import {
   normalizeName,
   openSealed,
   publicView,
-  readShard,
+  readActorState,
   recordAddress,
 } from "./names.js";
 
@@ -150,9 +150,9 @@ async function explainFailure(error, rpc) {
   }
 }
 
-async function shard(rpc, program, account) {
+async function actorState(rpc, program, account) {
   try {
-    return await readShard(rpc, program, account);
+    return await readActorState(rpc, program, account);
   } catch (error) {
     throw await explainFailure(error, rpc);
   }
@@ -172,7 +172,7 @@ async function openAs(key, sealed, kind, decode) {
 /** What `name` resolves to (its public view, incl. the published `msg` key). */
 async function lookUp({ rpc, registry }, name, now = Date.now()) {
   const { id, key } = await deriveName(name);
-  const bytes = await shard(rpc, registry, await recordAddress(registry, id));
+  const bytes = await actorState(rpc, registry, await recordAddress(registry, id));
   if (bytes.length === 0) return { id, key, view: null };
   const record = decodeNameRecord(bytes);
   if (now >= record.expires + GRACE_MS) return { id, key, view: null };
@@ -387,6 +387,10 @@ async function claimName(name) {
     const resume = pend && pend.name === name && pend.owner === account ? { secretHex: pend.secretHex, made: pend.made } : null;
     await registerMod.registerPublic({
       privateKey: key, program: settings.registry, name, resume,
+      acceptClaimRisk: (until) => window.confirm(
+        `Until ${new Date(until).toLocaleDateString()}, whoever held ${name} on the old chain can take it back. ` +
+          "If they do, you lose the name and your deposit stays locked with it. Continue?",
+      ),
       onStep: (stage, detail) => {
         if (stage === "commit") claimProgress("Committing to the name…");
         else if (stage === "committed") {
@@ -404,7 +408,7 @@ async function claimName(name) {
     claimProgress(`✓ ${name} is yours. Opening chat…`, "ok");
     setTimeout(() => show("chat"), 1400);
   } catch (error) {
-    const msg = error?.code === "insufficient" ? error.message : `Couldn't claim: ${(error && error.message) || error}`;
+    const msg = error?.code === "insufficient" || error?.code === "cancelled" ? error.message : `Couldn't claim: ${(error && error.message) || error}`;
     claimProgress(msg, "bad");
     $("pick-register").disabled = false;
   } finally {

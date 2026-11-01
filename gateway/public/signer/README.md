@@ -53,6 +53,10 @@ and the signer origin to `http://localhost:8002`. Click **Connect**, then:
    this payment" with amount/recipient/fee; approve re-prompts the passkey, signs, and
    sends. Returns `{ hash, block }`.
 
+The signer checks the recipient first and refuses with `unknown_recipient` if the account
+isn't on the chain: LEZ 0.4 won't credit a new public account without its public key, and
+the failed transaction would still cost the fee.
+
 To prove isolation, point a DIFFERENT page at the signer and confirm the signer ignores
 it (origin not in the allowlist), and that no message ever contains the private key.
 
@@ -60,7 +64,8 @@ it (origin not in the allowlist), and that no message ever contains the private 
 
 - **Unit-tested in node** (`protocol.js` + `lez-tx.js` pure parts): envelope
   parse/build, origin-allowlist logic, `signAndSend` param validation, and that a signed
-  transfer round-trips (sign → the account id matches the key).
+  transfer round-trips (sign → the account id matches the key). Transactions from
+  `lez-tx.js` also run through the real LEZ 0.4 engine (`../../app-src/vectors`).
 - **Needs this live two-origin browser test** (WebAuthn/iframe can't run in node): the
   passkey create/get PRF round-trip, the cross-origin postMessage path, the overlay
   show/hide, and an actual on-chain send.

@@ -3,7 +3,7 @@
 // says how many posts it has made, and each post's address follows from its
 // number, so no block scan is needed.
 
-import { base58Decode, base58Encode, readShard } from "./names.js";
+import { base58Decode, base58Encode, readActorState } from "./names.js";
 
 const utf8 = new TextEncoder();
 const AUTHOR_DOMAIN = "logos-board/v1/author/";
@@ -105,7 +105,7 @@ const sameBytes = (a, b) => a.length === b.length && a.every((byte, i) => byte =
 
 /** How many posts the name `id` has made. */
 export async function postCount(rpcUrl, board, id) {
-  const bytes = await readShard(rpcUrl, board, await authorAddress(board, id));
+  const bytes = await readActorState(rpcUrl, board, await authorAddress(board, id));
   return bytes.length === 0 ? 0 : decodeAuthor(bytes).count;
 }
 
@@ -120,7 +120,7 @@ export async function postsOf(rpcUrl, board, name, id, top, count = 10) {
   const read = await Promise.all(
     numbers.map(async (n) => {
       const address = await postAddress(board, id, n);
-      const bytes = await readShard(rpcUrl, board, address);
+      const bytes = await readActorState(rpcUrl, board, address);
       if (bytes.length === 0) return null;
       try {
         return { ...decodePost(bytes), address };

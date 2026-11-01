@@ -5,9 +5,10 @@
 //   node lez-tx-send.mjs new <keyfile>                 make a signing key (hex, mode 600), print its account
 //   node lez-tx-send.mjs account <keyfile>             print the account of a key
 //   node lez-tx-send.mjs send <keyfile> [options]      send and confirm
-//     --to Public/<id>    recipient (default Public/BJzLuDRny4wMmMCiJg8j3oajcv4wkZP9QcRNuefFKgn8)
+//     --to Public/<id>    recipient, which must already be on the chain
+//                         (default Public/BJzLuDRny4wMmMCiJg8j3oajcv4wkZP9QcRNuefFKgn8)
 //     --amount N          default 1000
-//     --rpc URL           default https://lez.buggers.online (the Names test chain)
+//     --rpc URL           a LEZ 0.4 sequencer; the default is the Names test chain, still on 0.3
 //     --gas-limit N       default 1000, as the names CLI uses for a native transfer
 //     --preflight         send even when the balance can't cover it: expects "Incorrect fee" (the
 //                         fee screen), which the node only reaches after decoding the transaction
