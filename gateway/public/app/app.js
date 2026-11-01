@@ -282,7 +282,7 @@ async function openChat() {
   }
   try {
     messages ??= await import("./messages.js");
-    messages.open({ settings: () => settings, lookUp: (name) => lookUp(settings, name), explain: explainFailure });
+    messages.open({ claimedName: onboardName(), settings: () => settings, lookUp: (name) => lookUp(settings, name), explain: explainFailure });
   } catch (error) {
     $("msg-conn").textContent = "Couldn't load chat";
     console.error(error);

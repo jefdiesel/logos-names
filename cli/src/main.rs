@@ -1982,7 +1982,13 @@ async fn open_wallet(overrides: Option<WalletConfigOverrides>, save: bool) -> Re
     let storage_path = fetch_persistent_storage_path()?;
     if storage_path.exists() {
         let password = read_password(&storage_path)?;
-        return WalletCore::new_update_chain(fetch_config_path()?, storage_path, overrides, &password).context(OLD_WALLET);
+        match WalletCore::new_update_chain(fetch_config_path()?, storage_path.clone(), overrides.clone(), &password) {
+            Ok(wallet) => return Ok(wallet),
+            Err(error) if save => return Err(error).context(OLD_WALLET),
+            // Reading the chain signs nothing, so a wallet that won't load (one from
+            // LEZ 0.3) mustn't stop it: use a throwaway one, which is never saved.
+            Err(_) => {}
+        }
     }
     let (mut wallet, mnemonic) =
         WalletCore::new_init_storage(fetch_config_path()?, storage_path, overrides, &new_wallet_password())?;

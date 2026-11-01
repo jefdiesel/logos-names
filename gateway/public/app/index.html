@@ -167,31 +167,33 @@
     </div>
 
     <details id="msg-setup" class="box">
-      <summary id="msg-setup-summary">Set up this device</summary>
-      <h2>This device's messaging key</h2>
-      <p id="msg-key" class="mono key"></p>
-      <button type="button" id="msg-key-copy" class="ghost wide">Copy key</button>
-      <p id="msg-key-note" class="muted" hidden></p>
-      <label class="field">Which name is yours?
+      <summary id="msg-setup-summary">Turn on messages</summary>
+      <label id="msg-me-field" class="field">Which name is yours?
         <span class="lookup inline">
           <input id="msg-me" type="text" autocapitalize="none" autocorrect="off" spellcheck="false"
                  enterkeyhint="done" placeholder="e.g. jef" maxlength="40">
           <button type="button" id="msg-me-check">Check</button>
         </span></label>
-      <p>Publish this key on your name so replies can reach you — one tap, signed by your wallet:</p>
-      <button type="button" id="msg-publish" class="wide">Publish my messaging key on my name</button>
+      <p id="msg-publish-why">People can't message you until you turn this on. It's a small on-chain change, paid from your wallet.</p>
+      <button type="button" id="msg-publish" class="wide">Turn on messages</button>
       <p id="msg-publish-status" class="me-status" role="status" aria-live="polite" hidden></p>
       <p id="msg-me-status" class="me-status" role="status" aria-live="polite"></p>
-      <details id="msg-manual" class="import">
-        <summary>Or publish it from Basecamp instead</summary>
+      <details id="msg-advanced" class="import">
+        <summary>Advanced</summary>
+        <h2>This device's messaging key</h2>
+        <p id="msg-key" class="mono key"></p>
+        <button type="button" id="msg-key-copy" class="ghost wide">Copy key</button>
+        <p id="msg-key-note" class="muted" hidden></p>
+        <p><button type="button" id="msg-me-change" class="linklike">Use a different name</button></p>
+        <p class="muted">Or turn on messages from Basecamp:</p>
         <p id="msg-command" class="mono command"></p>
         <button type="button" id="msg-command-copy" class="ghost wide">Copy command</button>
+        <p class="protect muted">
+          <button type="button" id="msg-protect" class="linklike">Protect this key with a passkey</button>
+          <span id="msg-protect-state"></span>
+          <br><small>Optional. The chat key only opens messages, so it's kept plainly by default.</small>
+        </p>
       </details>
-      <p class="protect muted">
-        <button type="button" id="msg-protect" class="linklike">Protect this key with a passkey</button>
-        <span id="msg-protect-state"></span>
-        <br><small>Optional. The chat key only opens messages, so it's kept plainly by default.</small>
-      </p>
     </details>
 
     <div id="msg-list-view">
@@ -221,7 +223,7 @@
     </div>
     </div><!-- /msg-main -->
 
-    <p class="chat-foot muted"><button type="button" id="redo-setup" class="linklike">Set up a wallet &amp; name</button></p>
+    <p class="chat-foot muted"><button type="button" id="redo-setup" class="linklike">Wallet &amp; name</button></p>
   </section>
 
   <!-- ===================== PRIVACY / SETTINGS DRAWER ===================== -->

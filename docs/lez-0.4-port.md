@@ -57,11 +57,12 @@ The module keeps building a name's transactions, but the `names` CLI signs them,
 - [x] CLI and board ported; public flows, fee mode, claims and the board run on a local 0.4 sequencer.
 - [x] Resolver, encoder, signer, MCP server and SPEC.md ported; JS-built transactions run on the real engine.
 - [x] Module ported: reads, changes, `cli_claim`, `cli_restore_wallet`, signing through the CLI. Its plugin builds with nix.
-- [ ] Module's unit tests and plugin not re-run since its `logos_module_install` entry point was restored. Without that entry point the plugin died on load, so **no module call has yet run on a host or on a chain**. Next: rebuild, load in a logosctl session with Basecamp's host, run `basecamp-module/tools/try-changes.py`.
+- [x] Module: 94 unit tests pass; the plugin loads and `try-changes.py` passes in full against a local 0.4 sequencer. `cli_claim` took back a name there.
 - [ ] `names module` (`accounts`, `keys`, `send`, `restore`) compiles; not yet run.
 - [ ] App (`Main.qml`) ported: wallet restore, claim warning and claiming, raised private fees. Passes `basecamp/logic.test.mjs`; never run in Basecamp.
 - [x] Web: reading the account back, chain clock, Claim screen and proofs from a static snapshot. JS tests pass, with stubbed RPC.
-- [ ] Web not run against a sequencer or in a browser. `PAGE_GAS` in `claims.js` is an unmeasured allowance.
+- [x] Web run in a browser against a local 0.4 sequencer: wallet, register (commit, wait, claim), turning on messages, Claim screen including the page. The passkey prompt was stubbed, so a real passkey and chat between two people are still untested. `PAGE_GAS` in `claims.js` is an unmeasured allowance.
+- [ ] **Web registration has no name-proof service.** `register.js` fetches `lez.buggers.online/names-proof`, but `names-proxy.py` on the M2 answers GET with 405 and nothing runs `shortlist serve`. Every web claim fails at the last step, on the live site too. With `shortlist serve` running locally the claim succeeds. Either route it, or serve `shortlist.bin` (1.6 MB) as a static file and build the proof in the browser, which needs no service at all.
 - [ ] A snapshot must be published at `gateway/public/claims/lez-0.3.json`; the web app and `cli_claim` fetch it from there. It isn't committed, since it is rerun just before the reset.
 - [ ] A page of exactly 40 sealed bytes also parses as an empty record, so it adds a harmless extra leaf. The CLI and the web app treat it the same way, so roots agree.
 - [ ] Private flows: private board post and private pay failed on the fee payer's balance, undiagnosed. Low priority until mainnet.

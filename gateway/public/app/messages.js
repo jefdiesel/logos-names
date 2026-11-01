@@ -374,7 +374,7 @@ async function receive(wakuMessage) {
 
 async function send(to, text) {
   const from = myName();
-  if (!from) throw new Error("Enter which name is yours under “Set up this device” first.");
+  if (!from) throw new Error("Say which name is yours under “Turn on messages” first.");
   if (!node) throw new Error("Not connected to the messaging node yet.");
   let found;
   try {
@@ -411,7 +411,9 @@ function renderSetup() {
   $("msg-key").textContent = toHex(device.publicKey);
   $("msg-key-note").textContent = "This browser won't keep the key, so it lasts only until the page closes.";
   $("msg-key-note").hidden = keyKept;
-  $("msg-command").textContent = commandFor(normalizeName($("msg-me").value) || myName());
+  const name = normalizeName($("msg-me").value) || myName();
+  $("msg-command").textContent = commandFor(name);
+  $("msg-publish").textContent = name && isValidName(name) ? `Turn on messages for ${name}` : "Turn on messages";
 }
 
 let checkToken = 0;
@@ -424,7 +426,8 @@ async function checkMe() {
   renderSetup();
   if (!name) {
     box.textContent = "";
-    $("msg-setup-summary").textContent = "Set up this device";
+    $("msg-me-field").hidden = false;
+    $("msg-setup-summary").textContent = "Turn on messages";
     $("msg-setup").open = true;
     return;
   }
@@ -444,21 +447,22 @@ async function checkMe() {
     } else if (key === here) {
       box.textContent = `✓ Messages to ${name} come to this device.`;
       box.classList.add("ok");
+      $("msg-publish").hidden = $("msg-publish-why").hidden = true;
       $("msg-setup-summary").textContent = `✓ You are ${name}`;
       return;
     } else if (key) {
-      box.textContent = `Not yet: ${name}'s messages go to another key (another device). Run the command above to move them here.`;
+      box.textContent = `${name}'s messages go to another device. Turn them on here to move them to this one.`;
       box.classList.add("bad");
     } else {
-      box.textContent = "Not yet: run the command above. You can send now, but replies can't reach you until it's done.";
-      box.classList.add("bad");
+      box.textContent = "You can already send messages.";
     }
   } catch (error) {
     if (mine !== checkToken) return;
     box.textContent = `Couldn't check: ${await chainError(error)}`;
     box.classList.add("bad");
   }
-  $("msg-setup-summary").textContent = `Set up this device (${name}: not yet)`;
+  $("msg-publish").hidden = $("msg-publish-why").hidden = false;
+  $("msg-setup-summary").textContent = `Turn on messages for ${name}`;
   $("msg-setup").open = true;
 }
 
@@ -545,6 +549,7 @@ async function publishKey() {
   status.className = "me-status";
   status.hidden = false;
   if (!name || !isValidName(name)) {
+    $("msg-me-field").hidden = false;
     status.textContent = "Enter which name is yours first.";
     status.classList.add("bad");
     return;
@@ -552,7 +557,7 @@ async function publishKey() {
   const walletMod = await import("./wallet.js");
   const walletSecret = walletMod.walletKey();
   if (!walletSecret) {
-    status.textContent = "Set up your wallet first (step 1), then publish.";
+    status.textContent = "Set up your wallet first (the Wallet step).";
     status.classList.add("bad");
     return;
   }
@@ -560,17 +565,17 @@ async function publishKey() {
   reg.setRpc(ctx.settings().rpc);
   const btn = $("msg-publish");
   btn.disabled = true;
-  status.textContent = `Publishing your key on ${name}…`;
+  status.textContent = `Turning on messages for ${name}…`;
   try {
     await reg.setText({ privateKey: walletSecret, program: ctx.settings().registry, name, key: MSG_TEXT_KEY, value: toHex(device.publicKey) });
-    status.textContent = "✓ Published — replies can now reach you.";
+    status.textContent = `✓ Messages are on. People can now reach you at ${name}.`;
     status.classList.add("ok");
     checkMe(); // refresh the "✓ You are <name>" state
   } catch (error) {
     status.textContent =
-      error?.code === "unregistered" ? `Claim ${name} first (the Name step), then publish.`
+      error?.code === "unregistered" ? `Claim ${name} first (the Name step).`
       : error?.code === "not_owner" ? `This device's wallet doesn't hold ${name}.`
-      : `Couldn't publish: ${(error && error.message) || error}`;
+      : `Couldn't turn on messages: ${(error && error.message) || error}`;
     status.classList.add("bad");
     btn.disabled = false;
   }
@@ -592,6 +597,10 @@ function wire() {
     }
   });
   $("msg-me-check").addEventListener("click", checkMe);
+  $("msg-me-change").addEventListener("click", () => {
+    $("msg-me-field").hidden = false;
+    $("msg-me").focus();
+  });
   $("msg-retry").addEventListener("click", () => {
     retryDelay = 5000;
     connect();
@@ -642,15 +651,19 @@ function proceed() {
   $("msg-lock").hidden = true;
   $("msg-main").hidden = false;
   keyCache.clear();
+  // The name just claimed in the Name step, until this device has its own answer.
+  if (!myName() && ctx.claimedName && isValidName(ctx.claimedName)) setMyName(ctx.claimedName);
   $("msg-me").value = myName();
+  $("msg-me-field").hidden = !!myName();
   if (thread) openThread(thread);
   else closeThread();
   render();
   if (myName()) checkMe();
   else {
-    $("msg-setup-summary").textContent = "Set up this device";
+    $("msg-setup-summary").textContent = "Turn on messages";
     $("msg-setup").open = true;
   }
+  renderSetup();
   reflectProtect();
   if (!node || connectedPeer !== ctx.settings().peer) connect();
 }
