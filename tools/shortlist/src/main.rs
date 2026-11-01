@@ -1,14 +1,16 @@
 //! Generates and checks the registry's short-name list (see SPEC.md and
 //! `names_core::shortlist`).
 //!
-//! `shortlist generate <out-dir> [--threads N] [--limit N]`
+//! `shortlist generate <out-dir> [--threads N] [--limit N] [--reserved reserved.csv]`
 //! `shortlist verify <out-dir>`
 
 use names_core::shortlist::{
     Leaf, LengthProof, ShortList, TIER_LOCKED, TIER_NORMAL, TIER_THREE, verify_depth,
 };
 use std::{
+    collections::{HashMap, HashSet},
     fs,
+    io::Write,
     path::Path,
     process::ExitCode,
     sync::{
@@ -51,20 +53,53 @@ fn enumerate() -> Vec<(String, u8)> {
     out
 }
 
-fn derive_all(names: Vec<(String, u8)>, threads: usize) -> Vec<([u8; 32], u8)> {
+/// The names in reserved.csv (`name,list,source`) that the 1-4 list doesn't already hold.
+fn reserved(path: &Path, have: &[(String, u8)]) -> Result<Vec<(String, u8)>, String> {
+    let have: HashSet<&str> = have.iter().map(|(name, _)| name.as_str()).collect();
+    let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for line in text.lines().skip(1) {
+        let name = line.split(',').next().unwrap_or_default();
+        names_core::validate_name(name).map_err(|e| format!("{name}: {e}"))?;
+        if !have.contains(name) {
+            out.push((name.to_string(), TIER_LOCKED));
+        }
+    }
+    Ok(out)
+}
+
+/// Derives every id, adding each to `checkpoint` as it finishes (`name hex-id`), so a
+/// run of many hours that stops can pick up where it was.
+fn derive_all(names: Vec<(String, u8)>, threads: usize, checkpoint: &Path) -> Result<Vec<([u8; 32], u8)>, String> {
+    let mut done_ids: HashMap<String, [u8; 32]> = HashMap::new();
+    // A line cut off by a crash is ignored, and that name derived again.
+    for line in fs::read_to_string(checkpoint).unwrap_or_default().lines() {
+        if let Some((name, id)) = line.split_once(' ')
+            && let Ok(Ok(id)) = hex::decode(id).map(<[u8; 32]>::try_from)
+        {
+            done_ids.insert(name.to_string(), id);
+        }
+    }
+    let pending: Vec<&(String, u8)> = names.iter().filter(|(n, _)| !done_ids.contains_key(n)).collect();
+    eprintln!("{} of {} already derived", names.len() - pending.len(), names.len());
+    let file = fs::OpenOptions::new().create(true).append(true).open(checkpoint).map_err(|e| e.to_string())?;
     let next = AtomicUsize::new(0);
     let done = AtomicUsize::new(0);
-    let out = Mutex::new(Vec::with_capacity(names.len()));
-    let total = names.len();
+    let out = Mutex::new((file, done_ids));
+    let total = pending.len();
     std::thread::scope(|s| {
         for _ in 0..threads.max(1) {
             s.spawn(|| {
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some((name, tier)) = names.get(i) else { break };
+                    let Some((name, _)) = pending.get(i).copied() else { break };
                     // Each derivation may use 64 MiB (Argon2id), hence the worker cap.
                     let id = names_seal::derive(name).id;
-                    out.lock().unwrap().push((id, *tier));
+                    let mut guard = out.lock().unwrap();
+                    let (file, ids) = &mut *guard;
+                    writeln!(file, "{name} {}", hex::encode(id)).expect("write the checkpoint");
+                    ids.insert(name.clone(), id);
+                    drop(guard);
                     let d = done.fetch_add(1, Ordering::Relaxed) + 1;
                     if d % 1000 == 0 {
                         eprintln!("derived {d}/{total}");
@@ -73,10 +108,11 @@ fn derive_all(names: Vec<(String, u8)>, threads: usize) -> Vec<([u8; 32], u8)> {
             });
         }
     });
-    out.into_inner().unwrap()
+    let (_, ids) = out.into_inner().unwrap();
+    Ok(names.iter().map(|(name, tier)| (ids[name], *tier)).collect())
 }
 
-fn generate(dir: &Path, threads: usize, limit: Option<usize>) -> Result<(), String> {
+fn generate(dir: &Path, threads: usize, limit: Option<usize>, reserved_csv: Option<&Path>) -> Result<(), String> {
     let mut names = enumerate();
     if let Some(n) = limit {
         // Spread the subset over all lengths instead of taking only 1-char names.
@@ -86,10 +122,15 @@ fn generate(dir: &Path, threads: usize, limit: Option<usize>) -> Result<(), Stri
     } else {
         assert_eq!(names.len(), 1_823_508); // 1–4 chars, all locked (min length 5)
     }
-    eprintln!("deriving {} ids with {threads} threads", names.len());
-    let entries = derive_all(names, threads);
-    let list = ShortList::new(entries).map_err(|e| e.to_string())?;
+    if let Some(path) = reserved_csv {
+        let extra = reserved(path, &names)?;
+        eprintln!("{} more names from {}", extra.len(), path.display());
+        names.extend(extra);
+    }
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    eprintln!("deriving {} ids with {threads} threads", names.len());
+    let entries = derive_all(names, threads, &dir.join("ids.checkpoint"))?;
+    let list = ShortList::new(entries).map_err(|e| e.to_string())?;
     let mut bin = Vec::with_capacity(list.leaves().len() * 33);
     for l in list.leaves() {
         bin.extend_from_slice(&l.id);
@@ -234,7 +275,7 @@ fn serve(dir: &Path, port: u16) -> Result<(), String> {
 
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: shortlist generate <out-dir> [--threads N] [--limit N] | shortlist verify <out-dir> | shortlist serve <dir> [--port N]";
+    let usage = "usage: shortlist generate <out-dir> [--threads N] [--limit N] [--reserved reserved.csv] | shortlist verify <out-dir> | shortlist serve <dir> [--port N]";
     match args.first().map(String::as_str) {
         Some("serve") => {
             let dir = args.get(1).ok_or(usage)?;
@@ -251,17 +292,19 @@ fn run() -> Result<(), String> {
         }
         Some("generate") => {
             let dir = args.get(1).ok_or(usage)?;
-            let (mut threads, mut limit) = (6usize, None);
+            let (mut threads, mut limit, mut reserved_csv) = (6usize, None, None);
             let mut it = args[2..].iter();
             while let Some(flag) = it.next() {
-                let val = it.next().ok_or(usage)?.parse::<usize>().map_err(|e| e.to_string())?;
+                let val = it.next().ok_or(usage)?;
+                let number = || val.parse::<usize>().map_err(|e| e.to_string());
                 match flag.as_str() {
-                    "--threads" => threads = val,
-                    "--limit" => limit = Some(val),
+                    "--threads" => threads = number()?,
+                    "--limit" => limit = Some(number()?),
+                    "--reserved" => reserved_csv = Some(Path::new(val)),
                     _ => return Err(usage.into()),
                 }
             }
-            generate(Path::new(dir), threads, limit)
+            generate(Path::new(dir), threads, limit, reserved_csv)
         }
         Some("verify") if args.len() == 2 => verify(Path::new(&args[1])),
         _ => Err(usage.into()),
