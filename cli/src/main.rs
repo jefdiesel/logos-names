@@ -13,19 +13,24 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use clock_core::{CLOCK_01_PROGRAM_ACCOUNT_ID, ClockAccountData, clock_account_id};
-use lee_core::{
-    account::{AccountId, ProgramShardSelector, ShardData},
-    from_frame,
-    program::{
-        AccountMeta, ApplyInput, GuestOutput, MAX_PROGRAM_SEGMENTS, PROGRAM_LOADER_ACCOUNT_ID,
-        PlanInput, ProgramHeader, ProgramSegment,
-    },
+use common::{HashType, transaction::LeeTransaction};
+use lee::{
+    PublicTransaction, Simulation,
+    privacy_preserving_transaction::circuit::ProgramCatalog,
+    program::Program,
+    public_transaction::{Message as TxMessage, WitnessSet},
+    simulate_public_transaction,
 };
-use lee::{privacy_preserving_transaction::circuit::ProgramWithDependencies, program::Program};
+use lee_core::{
+    NullifierPublicKey, PrivateAccountKind,
+    account::{AccountId, Actor},
+    program::{PROGRAM_LOADER_ACCOUNT_ID, PdaSeed, ProgramHeader},
+};
 use names_core::{
-    Effect, GRACE_MS, Instruction, LengthProof, MAX_COMMIT_AGE_MS, MIN_COMMIT_AGE_MS, MODE_DEPOSIT, MODE_FEE,
-    LEGACY_SUFFIX, NAME_SUFFIX, TIER_LOCKED, TIER_THREE, TIME_WINDOW_MS, NameId, deposit_address, shortlist,
-    NameRecord, Page, Settings, commitment, commitment_address,
+    GRACE_MS, Instruction, LengthProof, MAX_COMMIT_AGE_MS, MIN_COMMIT_AGE_MS, MODE_DEPOSIT, MODE_FEE,
+    LEGACY_SUFFIX, Message as RegistryMessage, NAME_SUFFIX, TIER_LOCKED, TIER_THREE, TIME_WINDOW_MS, NameId,
+    commitment_seed, deposit_address, name_seeds, settings_seed, shortlist,
+    NameRecord, Page, Settings, commitment,
     normalize_name, owner_tag, page_address, record_address, settings_address,
     validate_name,
 };
@@ -33,12 +38,15 @@ use names_seal::{
     Derived, PageContent, Profile, TextRecord, derive, open_page, open_profile, seal_page,
     seal_profile, validate_page, validate_profile, validate_text_key,
 };
-use risc0_zkvm::{ExecutorEnv, ExecutorEnvBuilder, default_executor};
+use sequencer_service_rpc::SequencerClient;
 use wallet::{
-    AccDecodeData, AccountIdentity, WalletCore,
+    AccountIdentity, AccountMention, PASSWORD_ENV_VAR, WalletCore, WalletSequencerClient as _,
     config::{SequencerConnectionData, WalletConfigOverrides},
-    helperfunctions::{fetch_config_path, fetch_persistent_storage_path},
-    program_facades::native_token_transfer::NativeTokenTransfer,
+    max_fee_for,
+    program_facades::{
+        CreditDelivery, native_token_transfer::NativeTokenTransfer, program_loader::ProgramLoader,
+    },
+    utils::{fetch_config_path, fetch_persistent_storage_path, read_password},
 };
 
 /// This wallet's own accounts and names, kept next to the wallet so commands don't
@@ -250,6 +258,34 @@ enum Command {
         /// Sign with this account instead of the settings' admin.
         #[arg(long, hide = true)]
         signer: Option<AccountId>,
+        /// A snapshot of the earlier chain (`names snapshot`): holders may claim the
+        /// names in it. Sets the claims root and program; see `claims-root`.
+        #[arg(long, conflicts_with_all = ["claims_root", "claims_program"])]
+        claims_snapshot: Option<PathBuf>,
+        /// The claims list's root, 64 hex characters, instead of `--claims-snapshot`.
+        #[arg(long, requires = "claims_program")]
+        claims_root: Option<String>,
+        /// The registry on the earlier chain the claims list was taken from.
+        #[arg(long, requires = "claims_root")]
+        claims_program: Option<AccountId>,
+        /// Claims are accepted before this time, in milliseconds since the Unix epoch;
+        /// until then a claim overrides a registration. Without any `--claims-*`
+        /// option the current claim settings stay.
+        #[arg(long)]
+        claims_until: Option<u64>,
+    },
+    /// Print the root of the claims list a snapshot of the earlier chain makes, for
+    /// `configure`, and how many names it holds.
+    ClaimsRoot { snapshot: PathBuf },
+    /// Take back, for free, a name this wallet held on the earlier chain, with its
+    /// profile and page as they were. Until the claim period ends this overrides a
+    /// registration of the name.
+    Claim {
+        #[arg(value_parser = parse_name)]
+        name: String,
+        /// The snapshot file the registry's claims list was made from.
+        #[arg(long, env = "LOGOS_NAMES_SNAPSHOT")]
+        snapshot: PathBuf,
     },
     /// Print the registry's admin, mode, deposits, treasury and prices, as JSON.
     Settings,
@@ -556,9 +592,10 @@ fn write_man_pages(dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// Accepts a name as people write it (`jef`, `@jef`, `lns:jef` or `jef.lez`, any case) and returns the bare name.
 mod board;
+mod claims;
 
+/// Accepts a name as people write it (`jef`, `@jef`, `lns:jef` or `jef.lez`, any case) and returns the bare name.
 fn parse_name(input: &str) -> Result<String, String> {
     let name = normalize_name(input);
     validate_name(&name).map_err(str::to_owned)?;
@@ -672,16 +709,24 @@ fn readable(time: u64) -> String {
 }
 
 struct Client {
-    wallet: WalletCore,
+    wallet: WalletCore<SequencerClient>,
     program: AccountId,
 }
 
+/// What registering a name costs. `amount` leaves the payer, to the name's deposit
+/// account in deposit mode, and otherwise to `treasury`.
+struct Cost {
+    amount: u128,
+    deposit: bool,
+    treasury: Option<AccountId>,
+}
+
 impl Client {
-    /// The registry's bytecode, read from the chain itself: the program loader keeps it in a
-    /// chain of segment accounts behind the program's header. A private holder's client runs
-    /// the program inside its proof, so it needs the exact bytecode the chain has; the result
-    /// is checked against the header's image ID, and cached next to the wallet.
-    /// `LOGOS_NAMES_PROGRAM_ELF` overrides it with a local file.
+    /// The registry's bytecode, read from the chain itself. A client runs it to try a
+    /// transaction before sending it, and a private holder's client inside its proof, so
+    /// it needs the exact bytecode the chain has; the result is checked against the
+    /// header's image ID, and cached next to the wallet. `LOGOS_NAMES_PROGRAM_ELF`
+    /// overrides it with a local file.
     async fn program(&self) -> Result<Program> {
         self.program_at(self.program, "LOGOS_NAMES_PROGRAM_ELF", "logos-names", "the registry").await
     }
@@ -696,7 +741,7 @@ impl Client {
             return Program::new(bytes.into())
                 .map_err(|error| anyhow!("{what}'s bytecode does not load: {error}"));
         }
-        let header = ProgramHeader::from_bytes(&self.loader_shard(id).await?)
+        let header = ProgramHeader::from_bytes(&self.actor_state_of(id, PROGRAM_LOADER_ACCOUNT_ID).await?)
             .ok_or_else(|| anyhow!("{id} is not a deployed program"))?;
         let cache = fetch_persistent_storage_path()?.with_file_name(format!("{cache}-{id}.bin"));
         if let Ok(bytes) = std::fs::read(&cache) {
@@ -707,37 +752,23 @@ impl Client {
             }
         }
         println!("reading {what}'s bytecode from the chain");
-        let mut user_elf = Vec::new();
-        let mut next = Some(header.program_first_segment);
-        for _ in 0..MAX_PROGRAM_SEGMENTS {
-            let Some(segment) = next else { break };
-            let segment = ProgramSegment::from_bytes(&self.loader_shard(segment).await?)
-                .ok_or_else(|| anyhow!("program segment {segment} does not decode"))?;
-            user_elf.extend_from_slice(&segment.bytecode);
-            next = segment.next_segment;
-        }
-        if next.is_some() {
-            bail!("the program's segment chain is longer than {MAX_PROGRAM_SEGMENTS}");
-        }
-        // The loader stores only the user ELF; every LEZ program runs on the same kernel.
-        let bytes =
-            risc0_binfmt::ProgramBinary::new(&user_elf, risc0_zkos_v1compat::V1COMPAT_ELF).encode();
-        let program = Program::new(bytes.clone().into())
-            .map_err(|error| anyhow!("{what}'s bytecode does not load: {error}"))?;
-        if program.id() != header.image_id {
-            bail!("the bytecode read from the chain does not match the program's image ID");
-        }
-        std::fs::write(&cache, &bytes).ok();
+        let program = ProgramLoader(&self.wallet)
+            .program(id)
+            .await
+            .context("failed to read the program from the sequencer")?
+            .ok_or_else(|| anyhow!("{id} is not a deployed program"))?;
+        std::fs::write(&cache, program.elf()).ok();
         Ok(program)
     }
 
-    async fn loader_shard(&self, account: AccountId) -> Result<Vec<u8>> {
+    /// `program`'s state on `account`; empty if it has none.
+    async fn actor_state_of(&self, account: AccountId, program: AccountId) -> Result<Vec<u8>> {
         let view = self
             .wallet
-            .get_account_view(ProgramShardSelector::new(account, PROGRAM_LOADER_ACCOUNT_ID))
+            .get_account_view(Actor::new(account, program))
             .await
-            .context("failed to read the program from the sequencer")?;
-        Ok(view.data.shard(PROGRAM_LOADER_ACCOUNT_ID).to_vec())
+            .context("failed to read the account from the sequencer")?;
+        Ok(view.map_or_else(Vec::new, |found| found.data.actor_state(program).to_vec()))
     }
 
     /// The wallet's account that holds `record` as the name `id`, public or private.
@@ -770,89 +801,111 @@ impl Client {
         self.wallet.resolve_private_account(account).is_some()
     }
 
-    async fn shard(&self, account: AccountId) -> Result<Vec<u8>> {
-        let view = self
-            .wallet
-            .get_account_view(ProgramShardSelector::new(account, self.program))
-            .await
-            .context("failed to read the account from the sequencer")?;
-        Ok(view.data.shard(self.program).to_vec())
+    /// The registry's state on `account`.
+    async fn actor_state(&self, account: AccountId) -> Result<Vec<u8>> {
+        self.actor_state_of(account, self.program).await
+    }
+
+    /// How `account` takes part in a transaction: as a private account of this
+    /// wallet, or as a public one that signs.
+    fn signer(&self, account: AccountId) -> AccountIdentity {
+        self.wallet.resolve_private_account(account).unwrap_or(AccountIdentity::Public(account))
+    }
+
+    /// `account`'s own actor of the registry, which a transaction sends to.
+    fn own_actor(&self, account: AccountId) -> AccountMention {
+        self.signer(account).select_program_actor_state(self.program)
+    }
+
+    /// The registry account behind `seed`, as the actor of the registry on it. The
+    /// seed is what lets a transaction create it.
+    fn registry_actor(&self, seed: PdaSeed) -> AccountMention {
+        AccountIdentity::PublicPda { program: self.program, seed }.select_program_actor_state(self.program)
+    }
+
+    /// The native balance of the registry account behind `seed`.
+    fn registry_balance(&self, seed: PdaSeed) -> AccountMention {
+        AccountIdentity::PublicPda { program: self.program, seed }.balance()
+    }
+
+    /// The signer's actor, then the name's record and page.
+    fn on_record_and_page(&self, id: &NameId, signer: AccountId) -> Vec<AccountMention> {
+        let [record, page, _] = name_seeds(id);
+        vec![self.own_actor(signer), self.registry_actor(record), self.registry_actor(page)]
     }
 
     async fn record(&self, id: &NameId) -> Result<Option<NameRecord>> {
-        let bytes = self.shard(record_address(&self.program, id)).await?;
+        let bytes = self.actor_state(record_address(&self.program, id)).await?;
         if bytes.is_empty() {
             return Ok(None);
         }
         Ok(Some(
-            borsh::from_slice(&bytes).context("the record shard does not hold a name record")?,
+            borsh::from_slice(&bytes).context("the record does not hold a name record")?,
         ))
     }
 
     async fn settings(&self) -> Result<Option<Settings>> {
-        let bytes = self.shard(settings_address(&self.program)).await?;
+        let bytes = self.actor_state(settings_address(&self.program)).await?;
         if bytes.is_empty() {
             return Ok(None);
         }
         Ok(Some(
-            borsh::from_slice(&bytes).context("the settings shard does not hold settings")?,
+            borsh::from_slice(&bytes).context("the settings account does not hold settings")?,
         ))
     }
     /// The chain's time in milliseconds, from the clock program's account. If that
     /// cannot be read, this machine's clock set back a minute, so that it is not ahead
     /// of the next block.
     async fn now(&self) -> u64 {
-        let clock = clock_account_id();
-        let selector = ProgramShardSelector::new(CLOCK_01_PROGRAM_ACCOUNT_ID, clock);
-        match self.wallet.get_account_view(selector).await {
-            Ok(view) => borsh::from_slice::<ClockAccountData>(view.data.shard(clock)).ok(),
-            Err(_) => None,
-        }
-        .map_or_else(|| local_now().saturating_sub(60_000), |data| data.timestamp)
-    }
-    /// What `payer` owes for `term`, and the accounts that pay it: the payer, then the
-    /// treasury when there is a fee. The treasury itself pays nothing.
-    async fn price(&self, payer: AccountId, term: u8) -> Result<(u128, Vec<(AccountId, bool)>)> {
-        let mut paying = vec![(payer, true)];
-        let fee = match self.settings().await? {
-            Some(settings) if settings.mode == MODE_FEE && settings.treasury != payer => {
-                let fee = settings.prices[usize::from(term)];
-                if fee != 0 {
-                    paying.push((settings.treasury, false));
-                }
-                fee
-            }
-            _ => 0,
-        };
-        Ok((fee, paying))
+        self.actor_state_of(CLOCK_01_PROGRAM_ACCOUNT_ID, clock_account_id())
+            .await
+            .ok()
+            .and_then(|state| borsh::from_slice::<ClockAccountData>(&state).ok())
+            .map_or_else(|| local_now().saturating_sub(60_000), |data| data.timestamp)
     }
 
-    /// What registering `id` costs and where it goes: in deposit mode the deposit
-    /// for its length, paid into the name's deposit account; otherwise the fee
-    /// for `term`, paid to the treasury. Returns (amount, paying accounts, deposit mode).
-    async fn registration_cost(
-        &self,
-        id: &NameId,
-        tier: u8,
-        payer: AccountId,
-        term: u8,
-    ) -> Result<(u128, Vec<(AccountId, bool)>, bool)> {
+    /// What `payer` owes for `term`, and the treasury it goes to when there is a fee.
+    /// The treasury itself pays nothing.
+    async fn price(&self, payer: AccountId, term: u8) -> Result<(u128, Option<AccountId>)> {
+        Ok(match self.settings().await? {
+            Some(settings) if settings.mode == MODE_FEE && settings.treasury != payer => {
+                let fee = settings.prices[usize::from(term)];
+                (fee, (fee != 0).then_some(settings.treasury))
+            }
+            _ => (0, None),
+        })
+    }
+
+    /// What registering a name of tier `tier` costs `payer`: in deposit mode the deposit
+    /// for its length, otherwise the fee for `term`.
+    async fn registration_cost(&self, tier: u8, payer: AccountId, term: u8) -> Result<Cost> {
         match self.settings().await? {
             Some(settings) if settings.mode == MODE_DEPOSIT => {
                 // The admin places names without a deposit.
                 let amount = if payer == settings.admin { 0 } else { settings.deposits[usize::from(tier == TIER_THREE)] };
-                let mut paying = vec![(payer, true)];
-                if amount != 0 {
-                    paying.push((deposit_address(&self.program, id), false));
-                }
-                Ok((amount, paying, true))
+                Ok(Cost { amount, deposit: true, treasury: None })
             }
             _ => {
-                let (fee, paying) = self.price(payer, term).await?;
-                Ok((fee, paying, false))
+                let (amount, treasury) = self.price(payer, term).await?;
+                Ok(Cost { amount, deposit: false, treasury })
             }
         }
     }
+
+    /// The balance actors a registration of `id` or a renewal touches: the payer's,
+    /// and that of the account paid, which must be declared for it to be credited in
+    /// the same transaction.
+    fn paying(&self, id: &NameId, payer: AccountId, cost: &Cost) -> Vec<AccountMention> {
+        if cost.amount == 0 {
+            return Vec::new();
+        }
+        let paid = match cost.treasury {
+            Some(treasury) => AccountIdentity::PublicNoSign(treasury).balance(),
+            None => self.registry_balance(name_seeds(id)[2]),
+        };
+        vec![self.signer(payer).balance(), paid]
+    }
+
     /// The record of `name` and its opened profile, for reading: a name past its
     /// grace period is not registered.
     async fn lookup(&self, name: &str) -> Result<(Derived, NameRecord, Profile)> {
@@ -934,7 +987,16 @@ impl Client {
                 );
             }
         }
-        let (fee, paying, deposit) = self.registration_cost(&id, tier, owner, term).await?;
+        let cost = self.registration_cost(tier, owner, term).await?;
+        let (fee, deposit) = (cost.amount, cost.deposit);
+        if let Some(settings) = self.settings().await? {
+            if settings.claims_root != [0; 32] && self.now().await < settings.claims_until {
+                println!(
+                    "warning: names from the earlier chain can still be claimed, until {}. If {name}{NAME_SUFFIX} was held there, its holder's claim replaces this registration, and the deposit stays in the name's account for them",
+                    readable(settings.claims_until)
+                );
+            }
+        }
         if deposit && fee > 0 {
             println!(
                 "{name}{NAME_SUFFIX} takes a deposit of {fee}, held for as long as you keep the name and refunded when you release it"
@@ -977,8 +1039,9 @@ impl Client {
                 let promised = commitment(&id, &holder, &secret);
                 println!("step 1 of 2: committing to {name}{NAME_SUFFIX}");
                 self.send(
-                    vec![(commitment_address(&self.program, &promised), false), (owner, true)],
+                    vec![self.own_actor(owner), self.registry_actor(commitment_seed(&promised))],
                     &Instruction::Commit { commitment: promised, now: made },
+                    0,
                 )
                 .await?;
                 defaults.pending.insert(
@@ -1039,27 +1102,27 @@ impl Client {
                 Some(now) => now,
                 None => self.now().await,
             };
-            let cost = if deposit { "a deposit" } else { "a fee" };
-            println!("step 2 of 2: registering {name}{NAME_SUFFIX} at {claimed} for {cost} of {fee}");
+            let kind = if deposit { "a deposit" } else { "a fee" };
+            println!("step 2 of 2: registering {name}{NAME_SUFFIX} at {claimed} for {kind} of {fee}");
+            let mut mentions = self.on_record_and_page(&id, owner);
+            mentions.push(self.registry_actor(settings_seed()));
+            mentions.push(self.registry_actor(commitment_seed(&promised)));
+            mentions.extend(self.paying(&id, owner, &cost));
             let sent = self
-                .send_paying(
-                    vec![
-                        (record_address(&self.program, &id), false),
-                        (page_address(&self.program, &id), false),
-                        (settings_address(&self.program), false),
-                        (commitment_address(&self.program, &promised), false),
-                    ],
-                    &paying,
+                .send(
+                    mentions,
                     &Instruction::Register {
                         id,
                         sealed: sealed.clone(),
                         term,
                         fee,
+                        treasury: cost.treasury,
                         now: claimed,
                         secret,
                         deposit,
                         length: length.clone(),
                     },
+                    fee,
                 )
                 .await;
             let Err(error) = sent else { break };
@@ -1126,21 +1189,22 @@ impl Client {
             Some(payer) => payer,
             None => self.holder(name, &id, &record)?,
         };
-        let (fee, paying) = self.price(payer, term).await?;
+        let (fee, treasury) = self.price(payer, term).await?;
         let now = self.now().await;
         println!("renewing {name}{NAME_SUFFIX} at {now} for a fee of {fee}");
-        self.send_paying(
-            vec![
-                (record_address(&self.program, &id), false),
-                (settings_address(&self.program), false),
-            ],
-            &paying,
-            &Instruction::Renew { id, term, fee, now },
-        )
-        .await
+        let [record, ..] = name_seeds(&id);
+        let mut mentions = vec![
+            self.own_actor(payer),
+            self.registry_actor(record),
+            self.registry_actor(settings_seed()),
+        ];
+        mentions.extend(self.paying(&id, payer, &Cost { amount: fee, deposit: false, treasury }));
+        self.send(mentions, &Instruction::Renew { id, term, fee, treasury, now }, fee).await
     }
+
     /// Sets the registry's settings, signed by their admin or, while there are none,
     /// by the program's own account, whose key its deployer holds.
+    #[allow(clippy::too_many_arguments)]
     async fn configure(
         &mut self,
         admin: AccountId,
@@ -1149,23 +1213,88 @@ impl Client {
         mode: u8,
         deposits: [u128; 2],
         signer: Option<AccountId>,
+        claims: claims::ClaimSettings,
     ) -> Result<()> {
-        let signer = match (signer, self.settings().await?) {
+        let settings = self.settings().await?;
+        let signer = match (signer, &settings) {
             (Some(signer), _) => signer,
             (None, Some(settings)) => settings.admin,
             (None, None) => self.program,
         };
+        // A change of prices must not end a claim period.
+        let claims = claims.over(settings.as_ref());
         self.send(
-            vec![(settings_address(&self.program), false), (signer, true)],
+            vec![self.own_actor(signer), self.registry_actor(settings_seed())],
             &Instruction::Configure {
                 admin,
                 treasury,
                 prices,
                 mode,
                 deposits,
+                claims_root: claims.root,
+                claims_until: claims.until,
+                claims_program: claims.program,
             },
+            0,
         )
         .await
+    }
+
+    /// Takes back `name` from the earlier chain's snapshot, for free, with its sealed
+    /// profile and page exactly as they were: they are sealed under the name's key,
+    /// which has not changed.
+    async fn claim(&mut self, name: &str, snapshot: &std::path::Path) -> Result<()> {
+        let settings = self.settings().await?.ok_or_else(|| anyhow!("this registry has no settings"))?;
+        if settings.claims_root == [0; 32] {
+            bail!("this registry takes no claims");
+        }
+        let now = self.now().await;
+        if now >= settings.claims_until {
+            bail!("the claim period ended at {}", readable(settings.claims_until));
+        }
+        let snapshot = claims::Snapshot::load(snapshot)?;
+        if snapshot.program != settings.claims_program || snapshot.root() != settings.claims_root {
+            bail!("that snapshot is not the one this registry's claims list was made from");
+        }
+        let Derived { id, .. } = derive(name);
+        let (proof, record) = snapshot
+            .claim(&id)
+            .ok_or_else(|| anyhow!("{name}{NAME_SUFFIX} is not in the snapshot"))?;
+        let key_chain = self.wallet.storage().key_chain();
+        let holder = key_chain
+            .public_account_ids()
+            .map(|(account, _)| account)
+            .chain(key_chain.private_account_ids().map(|(account, _)| account))
+            .find(|account| owner_tag(&id, account) == record.owner)
+            .ok_or_else(|| anyhow!("this wallet did not hold {name}{NAME_SUFFIX} on the earlier chain"))?;
+        if let Some(held) = self.record(&id).await? {
+            if held.claimed {
+                bail!("{name}{NAME_SUFFIX} was already claimed");
+            }
+            println!("{name}{NAME_SUFFIX} was registered here since; this claim replaces that registration");
+        }
+        println!("claiming {name}{NAME_SUFFIX}, held by {holder} on the earlier chain");
+        let mut mentions = self.on_record_and_page(&id, holder);
+        mentions.push(self.registry_actor(settings_seed()));
+        self.send(mentions, &Instruction::Claim { id, sealed: record.sealed.clone(), now, proof }, 0).await?;
+        let mut defaults = load_defaults();
+        if !defaults.names.contains(&name.to_owned()) {
+            defaults.names.push(name.to_owned());
+            save_defaults(&defaults)?;
+        }
+        println!("{name}{NAME_SUFFIX} is yours again");
+        // The claim emptied the page; the old one goes back in a transaction of its own,
+        // since a page can be far larger than a claim.
+        if let Some(page) = snapshot.page(&id) {
+            println!("restoring its page");
+            self.send(
+                self.on_record_and_page(&id, holder),
+                &Instruction::SetPage { id, sealed: page },
+                0,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// Changes the profile of `name`: reads and opens it, applies `change`, then
@@ -1176,23 +1305,13 @@ impl Client {
         change(&mut profile)?;
         validate_profile(&profile).map_err(|reason| anyhow!(reason))?;
         let sealed = seal_profile(&key, &profile);
+        let [record, ..] = name_seeds(&id);
         self.send(
-            vec![
-                (record_address(&self.program, &id), false),
-                (holder, true),
-            ],
+            vec![self.own_actor(holder), self.registry_actor(record)],
             &Instruction::SetRecord { id, sealed },
+            0,
         )
         .await
-    }
-
-    /// The usual `[record, page, owner]` accounts of the name `id`.
-    fn page_accounts(&self, id: &NameId, owner: AccountId) -> Vec<(AccountId, bool)> {
-        vec![
-            (record_address(&self.program, id), false),
-            (page_address(&self.program, id), false),
-            (owner, true),
-        ]
     }
 
     /// Seals `page` as the page of `name`; `None` removes the page.
@@ -1206,11 +1325,7 @@ impl Client {
             }
             None => Vec::new(),
         };
-        self.send(
-            self.page_accounts(&id, holder),
-            &Instruction::SetPage { id, sealed },
-        )
-        .await
+        self.send(self.on_record_and_page(&id, holder), &Instruction::SetPage { id, sealed }, 0).await
     }
 
     /// Hands `name` to `new_owner`, clearing what the current owner set on it.
@@ -1218,11 +1333,12 @@ impl Client {
         let (Derived { id, .. }, record, _) = self.lookup_held(name).await?;
         let holder = self.holder(name, &id, &record)?;
         self.send(
-            self.page_accounts(&id, holder),
+            self.on_record_and_page(&id, holder),
             &Instruction::Transfer {
                 id,
                 new_owner: owner_tag(&id, &new_owner),
             },
+            0,
         )
         .await
     }
@@ -1234,282 +1350,170 @@ impl Client {
         // The deposit account's whole balance comes back to whoever releases.
         let held = deposit_address(&self.program, &id);
         let refund = self.wallet.get_account_balance(held).await.unwrap_or(0);
-        if refund == 0 {
-            return self.send(self.page_accounts(&id, holder), &Instruction::Release { id, refund: 0 }).await;
+        let mut mentions = self.on_record_and_page(&id, holder);
+        if refund > 0 {
+            println!("releasing {name}{NAME_SUFFIX}; its deposit of {refund} comes back to you");
+            mentions.push(self.registry_balance(name_seeds(&id)[2]));
+            mentions.push(self.signer(holder).balance());
         }
-        println!("releasing {name}{NAME_SUFFIX}; its deposit of {refund} comes back to you");
-        self.send_paying(
-            vec![(record_address(&self.program, &id), false), (page_address(&self.program, &id), false)],
-            &[(holder, true), (held, false)],
-            &Instruction::Release { id, refund },
-        )
-        .await
+        self.send(mentions, &Instruction::Release { id, refund }, 0).await
     }
 
-    /// What the program's `plan` is given for `instruction` over `accounts`, then `paying`.
-    fn plan_input(
-        &self,
-        accounts: &[(AccountId, bool)],
-        paying: &[(AccountId, bool)],
-        instruction: &Instruction,
-    ) -> Result<PlanInput> {
-        Ok(PlanInput {
-            self_account_id: self.program,
-            caller_account_id: None,
-            accounts: accounts
-                .iter()
-                .map(|(account, signs)| AccountMeta::new(*account, *signs, self.program))
-                .chain(
-                    paying
-                        .iter()
-                        .map(|(account, signs)| AccountMeta::native_balance(*account, *signs)),
-                )
-                .collect(),
-            instruction_data: borsh::to_vec(instruction)?,
-        })
+    /// Sends `instruction` from the signer whose actor is `mentions[0]`; `spent` is
+    /// what it moves out of the signer's balance besides the fee.
+    async fn send(&mut self, mentions: Vec<AccountMention>, instruction: &Instruction, spent: u128) -> Result<()> {
+        let program = self.program().await?;
+        let message = borsh::to_vec(&RegistryMessage::Instruction(instruction.clone()))?;
+        self.transact(mentions, message, vec![(self.program, program)], spent).await
     }
 
-    /// Executor cycles of the call `input` describes, counted the way the sequencer
-    /// counts them: one run of the registry's bytecode to plan, then one to apply each
-    /// effect, against the chain's current data. The native-token transfers it chains
-    /// run outside the guest and cost no cycles. No proving, so it takes about a second.
-    async fn cycles(&self, input: &PlanInput) -> Result<u64> {
-        let guest = self.program().await?;
-        let (mut total, journal) = run_guest(&guest, |env| Ok(Program::write_plan_inputs(input, env)?))?;
-        let payload = from_frame(&journal).ok_or_else(|| anyhow!("the plan run left no journal"))?;
-        let GuestOutput::Plan(plan) = borsh::from_slice(payload)? else {
-            bail!("the plan run returned an apply journal");
-        };
-        // An effect on a shard an earlier effect changed applies to the changed data.
-        let mut changed: std::collections::HashMap<ProgramShardSelector, ShardData> =
-            std::collections::HashMap::new();
-        for effect in plan.effects {
-            let pre_data = match changed.get(&effect.selector) {
-                Some(data) => data.clone(),
-                None => ShardData::try_from(self.shard(effect.selector.account_id).await?)?,
-            };
-            let apply = ApplyInput {
-                self_account_id: self.program,
-                selector: effect.selector,
-                pre_data,
-                effect_data: effect.data,
-            };
-            let (cycles, journal) =
-                run_guest(&guest, |env| Ok(Program::write_apply_inputs(&apply, env)?))?;
-            total = total.saturating_add(cycles);
-            let payload = from_frame(&journal).ok_or_else(|| anyhow!("an apply run left no journal"))?;
-            let GuestOutput::Apply(out) = borsh::from_slice(payload)? else {
-                bail!("an apply run returned a plan journal");
-            };
-            if let Some(post) = out.post_data {
-                changed.insert(effect.selector, post);
-            }
-        }
-        Ok(total)
-    }
-
-    /// Runs the program's own `plan` and `apply` against current chain state, returning
-    /// the data each touched shard should hold afterwards. A transaction the program
-    /// would refuse fails here, with the program's reason, before any fee is paid.
-    async fn simulate(
-        &self,
-        accounts: &[(AccountId, bool)],
-        paying: &[(AccountId, bool)],
-        instruction: &Instruction,
-    ) -> Result<Vec<(AccountId, Vec<u8>)>> {
-        let input = self.plan_input(accounts, paying, instruction)?;
-        let effects = refusal_as_error(|| {
-            names_core::plan(&input, instruction.clone())
-                .output()
-                .effects
-                .clone()
-        })?;
-
-        let mut expected = Vec::with_capacity(effects.len());
-        for effect in effects {
-            let account = effect.selector.account_id;
-            let pre_data = self.shard(account).await?;
-            let decoded: Effect = borsh::from_slice(&effect.data)?;
-            let post_data = refusal_as_error(|| names_core::apply(decoded, &pre_data))?;
-            expected.push((account, post_data.unwrap_or(pre_data)));
-        }
-        Ok(expected)
-    }
-
-    /// Submits `instruction` over `accounts` (each flagged with whether it signs) and
-    /// confirms its changes landed. A block includes failed transactions too, so
-    /// inclusion alone proves nothing: the touched shards are read back and compared.
-    async fn send(&mut self, accounts: Vec<(AccountId, bool)>, instruction: &Instruction) -> Result<()> {
-        self.send_paying(accounts, &[], instruction).await
-    }
-    /// As [`Self::send`], with the `paying` accounts added after `accounts`. They are
-    /// passed with the native token's shard selected, where the program moves the fee.
-    async fn send_paying(
+    /// Sends `message` to the actor `mentions[0]` and confirms it applied. `mentions`
+    /// must declare every actor the call reaches, and `programs` every program it runs.
+    /// A private signer makes the whole transaction privacy-preserving: the programs run
+    /// inside a proof made here, and the chain sees only their effects on public
+    /// accounts, never the signer.
+    async fn transact(
         &mut self,
-        accounts: Vec<(AccountId, bool)>,
-        paying: &[(AccountId, bool)],
-        instruction: &Instruction,
+        mentions: Vec<AccountMention>,
+        message: Vec<u8>,
+        programs: Vec<(AccountId, Program)>,
+        spent: u128,
     ) -> Result<()> {
-        let expected = self.simulate(&accounts, paying, instruction).await?;
-        // A private signer makes the whole transaction privacy-preserving: the
-        // program runs inside a proof made here, and the chain sees only its
-        // effects on the public accounts, never the signer.
-        let private = accounts
-            .iter()
-            .chain(paying)
-            .any(|(account, signs)| *signs && self.is_private(*account));
-        let identity = |(account, signs): &(AccountId, bool)| {
-            if !*signs {
-                AccountIdentity::PublicNoSign(*account)
-            } else if private && let Some(owned) = self.wallet.resolve_private_account(*account) {
-                owned
-            } else {
-                AccountIdentity::Public(*account)
+        let dry_run = std::env::var_os("LOGOS_NAMES_DRY_RUN").is_some();
+        let hash = if mentions.iter().any(|mention| mention.identity.is_private()) {
+            if dry_run {
+                bail!("LOGOS_NAMES_DRY_RUN is set, so nothing was sent (a private change is not tried first)");
             }
-        };
-        let mentions = accounts
-            .iter()
-            .map(|row| identity(row).select_program_shard(self.program))
-            .chain(paying.iter().map(|row| identity(row).balance()))
-            .collect();
-        // The private accounts in the order the transaction carries their notes.
-        let private_accounts: Vec<AccountId> = accounts
-            .iter()
-            .chain(paying)
-            .filter(|(account, signs)| private && *signs && self.is_private(*account))
-            .map(|(account, _)| *account)
-            .collect();
-        let mut secrets = Vec::new();
-        let hash = if private {
-            if std::env::var_os("LOGOS_NAMES_DRY_RUN").is_some() {
-                bail!("LOGOS_NAMES_DRY_RUN is set, so nothing was sent (a private change pays no gas)");
-            }
-            let program = self.program().await?;
-            let program = ProgramWithDependencies::new(program, self.program, Default::default());
             println!("acting privately; proving it on this computer (about 4 minutes), so the chain never learns your account");
-            let (hash, shared) = self
-                .wallet
-                .send_privacy_preserving_tx(mentions, borsh::to_vec(instruction)?, &program)
+            let catalog: ProgramCatalog = programs.into_iter().collect();
+            self.wallet
+                .send_privacy_preserving_tx(mentions, 0, message, &catalog)
                 .await
-                .context("the sequencer did not accept the transaction")?;
-            secrets = shared;
-            hash
+                .context("the sequencer did not accept the transaction")?
+                .0
         } else {
-            // The fee reserve, gas limit x base fee, leaves the payer before the call
-            // runs, and a call that then fails is billed its whole limit; the wallet's
-            // 2,000,000 holds about 16M. So the limit is sized from a run of the
-            // registry's own bytecode, and the payer checked to cover it.
-            let limit = self.gas_limit(&accounts, paying, instruction).await;
-            self.check_payer(&accounts, paying, instruction, limit).await?;
-            if std::env::var_os("LOGOS_NAMES_DRY_RUN").is_some() {
+            // A call that fails is billed what it ran and keeps nothing, so try it here
+            // first: the same run tells what a refused call would be refused for, and
+            // sizes the gas limit, whose whole reserve is held from the payer meanwhile.
+            let cycles = self.simulate(&mentions, &message, programs).await?;
+            let limit = gas_limit_for(cycles);
+            self.check_payer(&mentions, message.len(), spent, limit).await?;
+            if dry_run {
+                println!("gas: {cycles} cycles, limit {limit}");
                 bail!("LOGOS_NAMES_DRY_RUN is set, so nothing was sent");
             }
             let saved = self.wallet.config().clone();
             let mut config = saved.clone();
             config.gas_limit = limit;
             self.wallet.set_config(config);
-            let sent = self
-                .wallet
-                .send_pub_tx(mentions, borsh::to_vec(instruction)?, self.program)
-                .await;
+            let sent = self.wallet.send_pub_tx(mentions, 0, message).await;
             self.wallet.set_config(saved);
             sent.context("the sequencer did not accept the transaction")?
         };
         println!("submitted {hash}");
-        let (tx, block) = self
-            .wallet
-            .poll_transaction(hash)
-            .await
-            .context("the transaction was not included in a block")?;
-        // A private signer's note was spent and a new one made: record it, or the
-        // next private change would spend the old note and be refused.
-        if let common::transaction::LeeTransaction::PrivacyPreserving(tx) = &tx {
-            let decode: Vec<AccDecodeData> = secrets
-                .into_iter()
-                .zip(private_accounts)
-                .map(|(secret, account)| AccDecodeData::Decode(secret, account))
-                .collect();
-            quietly(|| {
-                self.wallet
-                    .decode_insert_privacy_preserving_transaction_results(tx, &decode)
-            })?;
-            quietly(|| self.wallet.store_persistent_data())?;
-        }
-
-        for (account, data) in expected {
-            if self.shard(account).await? != data {
-                bail!(
-                    "transaction {hash} was included in block {block} but its changes were not \
-                     applied to {account}; it failed on chain or raced with another change"
-                );
-            }
-        }
+        let block = self.finish(hash).await.context("the transaction was not applied")?;
         println!("applied in block {block}");
         Ok(())
     }
 
-    /// The gas limit for a public call: 1.5 x the cycles of a run of the registry's
-    /// bytecode, at least [`MIN_GAS_LIMIT`]. If the run fails, the wallet's own limit,
-    /// with a warning: the call can still be sent, it just reserves more.
-    async fn gas_limit(
-        &self,
-        accounts: &[(AccountId, bool)],
-        paying: &[(AccountId, bool)],
-        instruction: &Instruction,
-    ) -> u64 {
-        let input = self.plan_input(accounts, paying, instruction);
-        let cycles = match input {
-            Ok(input) => self.cycles(&input).await,
-            Err(error) => Err(error),
-        };
-        match cycles {
-            Ok(cycles) => {
-                let limit = gas_limit_for(cycles);
-                if std::env::var_os("LOGOS_NAMES_DRY_RUN").is_some() {
-                    println!("gas: {cycles} cycles, limit {limit}");
-                }
-                limit
-            }
-            Err(error) => {
-                let limit = self.wallet.config().gas_limit;
-                eprintln!("could not size the gas ({error:#}); using the wallet's limit of {limit}");
-                limit
-            }
+    /// Waits for `hash` to be included and returns its block. A block includes reverted
+    /// transactions too, so inclusion alone proves nothing. A private account's note was
+    /// spent and a new one made: it is recorded here, or the next private change would
+    /// spend the old note and be refused.
+    async fn finish(&mut self, hash: HashType) -> Result<u64> {
+        let (tx, block_id) = self
+            .wallet
+            .poll_transaction(hash)
+            .await
+            .context("the transaction was not included in a block")?;
+        let block = self
+            .wallet
+            .get_block(block_id)
+            .await?
+            .ok_or_else(|| anyhow!("block {block_id} is missing"))?;
+        let reverted = block
+            .body
+            .transactions
+            .iter()
+            .position(|included| included.hash() == hash)
+            .is_some_and(|position| block.body.is_reverted(position));
+        if let LeeTransaction::PrivacyPreserving(tx) = &tx {
+            let key_chain = self.wallet.storage_mut().key_chain_mut();
+            let mut index = key_chain.build_latest_nullifier_index();
+            key_chain.follow_transaction(&tx.message, reverted, false, &mut index);
+            quietly(|| self.wallet.store_persistent_data())?;
         }
+        if reverted {
+            bail!("{hash} was included in block {block_id} but reverted: it failed on chain or raced with another change; its fee was charged and nothing else applied");
+        }
+        Ok(block_id)
     }
 
-    /// Checks that the account paying a public call's fee holds what the call takes
-    /// from it (a registration's or renewal's fee or deposit) plus the fee reserve at
-    /// `limit`, so a short account is told so here instead of refused by the sequencer.
-    /// The reserve is priced at the highest base fees the next block can have.
-    async fn check_payer(
+    /// Runs the call against current chain state with the deployed bytecode, without
+    /// sending it, and returns the cycles it takes. A call the program would refuse
+    /// fails here, before any fee is paid. No proving, so it takes about a second.
+    async fn simulate(
         &self,
-        accounts: &[(AccountId, bool)],
-        paying: &[(AccountId, bool)],
-        instruction: &Instruction,
-        limit: u64,
-    ) -> Result<()> {
-        // The wallet has the first signing account pay the fee.
-        let Some(&(payer, _)) = accounts.iter().chain(paying).find(|(_, signs)| *signs) else {
+        mentions: &[AccountMention],
+        message: &[u8],
+        programs: Vec<(AccountId, Program)>,
+    ) -> Result<u64> {
+        let actors: Vec<Actor> = mentions.iter().map(AccountMention::actor).collect();
+        let mut states = std::collections::HashMap::new();
+        for actor in &actors {
+            let state = self.actor_state_of(actor.account_id, actor.program_account_id).await?;
+            states.insert(*actor, state.into());
+        }
+        let signers: std::collections::BTreeSet<AccountId> = mentions
+            .iter()
+            .filter(|mention| mention.authorizes && mention.identity.public_account_id().is_some())
+            .map(|mention| mention.identity.account_id())
+            .filter(|account| self.wallet.get_account_public_signing_key(*account).is_some())
+            .collect();
+        let signers: Vec<AccountId> = signers.into_iter().collect();
+        let nonces = self.wallet.get_accounts_nonces(&signers).await?;
+        let root = actors.first().copied().ok_or_else(|| anyhow!("a call needs a root actor"))?;
+        let tx = TxMessage::new(
+            root,
+            message.to_vec(),
+            actors,
+            signers.into_iter().zip(nonces).collect(),
+            None,
+            Vec::new(),
+        );
+        let witness = WitnessSet::for_message(&tx, &[]);
+        let tx = PublicTransaction::new(tx, witness);
+        let simulation = Simulation { public_actor_states: states, admitted_accounts: None };
+        let catalog: ProgramCatalog = programs.into_iter().collect();
+        let (cycles, result) = tokio::task::spawn_blocking(move || {
+            quietly(|| simulate_public_transaction(&tx, &simulation, &catalog, MAX_SIMULATED_CYCLES))
+        })
+        .await?;
+        result.map_err(|error| anyhow!("refused: {error}"))?;
+        Ok(cycles)
+    }
+
+    /// Checks that the account paying a public call's fee holds what the call takes from
+    /// it (a fee or deposit) plus the fee reserve at `limit`, so a short account is told
+    /// so here instead of refused by the sequencer. The reserve is priced at the highest
+    /// base fees the next block can have.
+    async fn check_payer(&self, mentions: &[AccountMention], bytes: usize, spent: u128, limit: u64) -> Result<()> {
+        // The wallet has the first funded signing account pay the fee.
+        let Some(payer) = mentions.iter().find(|mention| mention.authorizes).map(|mention| mention.identity.account_id())
+        else {
             return Ok(());
         };
-        let spent = match instruction {
-            Instruction::Register { fee, .. } | Instruction::Renew { fee, .. } if !paying.is_empty() => *fee,
-            _ => 0,
-        };
-        let rpc = self.wallet.config().sequencer.sequencer_addr.to_string();
-        // Without the fee market there is nothing to price; the sequencer still checks.
-        let Ok(quote) = rpc_call(&rpc, "getFeeState", serde_json::json!([])) else {
-            return Ok(());
-        };
-        let base_fee = |key: &str| u128::from(quote[key].as_u64().unwrap_or(64));
-        // The transaction's bytes are billed too: the instruction, plus signatures,
-        // nonces and account IDs.
-        let bytes = u128::try_from(borsh::to_vec(instruction)?.len())? + 1_000;
-        let reserve = u128::from(limit) * base_fee("next_base_fee_exec_ceiling")
-            + bytes * base_fee("next_base_fee_stor_ceiling");
+        let quote = self.wallet.client().get_fee_state().await?;
+        // The transaction's bytes are billed too: signatures, nonces and actors besides the message.
+        let bytes = u128::try_from(bytes)? + 1_000;
+        let reserve = u128::from(limit) * u128::from(quote.next_base_fee_exec_ceiling)
+            + bytes * u128::from(quote.next_base_fee_stor_ceiling);
         if std::env::var_os("LOGOS_NAMES_DRY_RUN").is_some() {
             println!("fee reserve: {reserve} from Public/{payer}, plus {spent} the call moves");
+        }
+        let cap = max_fee_for(limit);
+        if reserve > cap {
+            bail!("the chain's fees are too high right now: this call's fee reserve of {reserve} is above the wallet's cap of {cap}");
         }
         let balance = self.wallet.get_account_balance(payer).await?;
         if balance < spent.saturating_add(reserve) {
@@ -1535,15 +1539,14 @@ impl Client {
         println!("paying {amount} to {name}{NAME_SUFFIX} ({to})");
         // From a private account this is a deshielded transfer: the chain sees the
         // public account credited, but not who paid.
-        let (hash, sender_secret) = if self.is_private(from) {
+        let (hash, _) = if self.is_private(from) {
             println!("from a private account; proving it on this computer (about 4 minutes), so the chain never learns your account");
             NativeTokenTransfer(&self.wallet)
-                .send_deshielded_transfer(from, to, amount)
+                .transfer(self.signer(from), AccountIdentity::PublicNoSign(to), amount, CreditDelivery::Automatic)
                 .await
-                .map(|(hash, secret)| (hash, Some(secret)))
         } else {
             // The fee reserve leaves the account before the transfer runs, and a
-            // transfer that then fails is billed its whole gas limit; 64 is the
+            // transfer that then fails still pays for what it ran; 64 is the
             // wallet's assumed worst base fee.
             let balance = self.wallet.get_account_balance(from).await?;
             let reserve = u128::from(NATIVE_TRANSFER_GAS_LIMIT + 1_000) * 64;
@@ -1555,35 +1558,19 @@ impl Client {
             config.gas_limit = NATIVE_TRANSFER_GAS_LIMIT;
             self.wallet.set_config(config);
             let sent = NativeTokenTransfer(&self.wallet)
-                .send_public_transfer(
+                .transfer(
                     AccountIdentity::Public(from),
                     AccountIdentity::PublicNoSign(to),
                     amount,
+                    CreditDelivery::Automatic,
                 )
-                .await
-                .map(|hash| (hash, None));
+                .await;
             self.wallet.set_config(saved);
             sent
         }
         .context("the sequencer did not accept the transfer")?;
         println!("submitted {hash}");
-        let (tx, block) = self
-            .wallet
-            .poll_transaction(hash)
-            .await
-            .context("the transfer was not included in a block")?;
-        // A private sender's note was spent and its change made into a new one: record it.
-        if let (Some(secret), common::transaction::LeeTransaction::PrivacyPreserving(tx)) =
-            (sender_secret, &tx)
-        {
-            quietly(|| {
-                self.wallet.decode_insert_privacy_preserving_transaction_results(
-                    tx,
-                    &[AccDecodeData::Decode(secret, from)],
-                )
-            })?;
-            quietly(|| self.wallet.store_persistent_data())?;
-        }
+        let block = self.finish(hash).await.context("the transfer was not applied")?;
 
         // A block includes failed transactions too, so confirm the money arrived.
         let after = self.wallet.get_account_balance(to).await?;
@@ -1602,36 +1589,22 @@ impl Client {
             .ok_or_else(|| anyhow!("{name} has no private keys set"))?;
         let vpk = lee_core::encryption::ViewingPublicKey::from_bytes(profile.vpk)
             .map_err(|error| anyhow!("{name} publishes an invalid viewing key: {error}"))?;
+        // The credit stays pending until the recipient's wallet claims it.
+        let recipient = AccountIdentity::PrivateForeign {
+            npk: NullifierPublicKey(npk),
+            vpk,
+            kind: PrivateAccountKind::Regular,
+        };
         if self.is_private(from) {
             // From a private account neither side is seen: no sender, no recipient,
             // no amount.
             println!("paying {amount} privately to {name}{NAME_SUFFIX} from a private account; generating the proof");
-            let (hash, [sender_secret, _]) = NativeTokenTransfer(&self.wallet)
-                .send_private_transfer_to_outer_account(
-                    from,
-                    lee_core::NullifierPublicKey(npk),
-                    vpk,
-                    wallet::cli::identifier_or_random(None),
-                    amount,
-                )
+            let (hash, _) = NativeTokenTransfer(&self.wallet)
+                .transfer(self.signer(from), recipient, amount, CreditDelivery::Automatic)
                 .await
                 .context("the sequencer did not accept the transfer")?;
             println!("submitted {hash}");
-            let (tx, block) = self
-                .wallet
-                .poll_transaction(hash)
-                .await
-                .context("the transfer was not included in a block")?;
-            // The sender's note was spent and its change made into a new one: record it.
-            if let common::transaction::LeeTransaction::PrivacyPreserving(tx) = &tx {
-                quietly(|| {
-                    self.wallet.decode_insert_privacy_preserving_transaction_results(
-                        tx,
-                        &[AccDecodeData::Decode(sender_secret, from)],
-                    )
-                })?;
-                quietly(|| self.wallet.store_persistent_data())?;
-            }
+            let block = self.finish(hash).await.context("the transfer was not applied")?;
             println!("included in block {block}; the recipient sees it after syncing their private accounts");
             return Ok(());
         }
@@ -1640,23 +1613,11 @@ impl Client {
         println!("paying {amount} privately to {name}{NAME_SUFFIX}; generating the proof");
         println!("(paying from a public account shows that account as the payer; pay from a Private/ account to hide it)");
         let (hash, _) = NativeTokenTransfer(&self.wallet)
-            .send_shielded_transfer_to_outer_account(
-                AccountIdentity::Public(from),
-                lee_core::NullifierPublicKey(npk),
-                vpk,
-                // Each payment lands on a fresh private account only the recipient can link.
-                wallet::cli::identifier_or_random(None),
-                amount,
-            )
+            .transfer(AccountIdentity::Public(from), recipient, amount, CreditDelivery::Automatic)
             .await
             .context("the sequencer did not accept the transfer")?;
-        quietly(|| self.wallet.store_persistent_data())?;
         println!("submitted {hash}");
-        let (_, block) = self
-            .wallet
-            .poll_transaction(hash)
-            .await
-            .context("the transfer was not included in a block")?;
+        let block = self.finish(hash).await.context("the transfer was not applied")?;
 
         // The recipient's balance is private, so the sender's debit is all that can be
         // checked here. It is a weak check: a fee alone can exceed a small amount.
@@ -1672,22 +1633,22 @@ impl Client {
     /// The name's page, opened with its key, if it has one.
     async fn page(&self, name: &str) -> Result<Option<PageContent>> {
         let (Derived { id, key }, _, _) = self.lookup(name).await?;
-        let bytes = self.shard(page_address(&self.program, &id)).await?;
+        let bytes = self.actor_state(page_address(&self.program, &id)).await?;
         if bytes.is_empty() {
             return Ok(None);
         }
-        let page: Page = borsh::from_slice(&bytes).context("the page shard does not hold a page")?;
+        let page: Page = borsh::from_slice(&bytes).context("the page account does not hold a page")?;
         Ok(open_page(&key, &page.sealed))
     }
 
     async fn resolve(&self, name: &str) -> Result<serde_json::Value> {
         let (Derived { id, key }, record, profile) = self.lookup(name).await?;
-        let page_bytes = self.shard(page_address(&self.program, &id)).await?;
+        let page_bytes = self.actor_state(page_address(&self.program, &id)).await?;
         let page = if page_bytes.is_empty() {
             None
         } else {
             let page: Page =
-                borsh::from_slice(&page_bytes).context("the page shard does not hold a page")?;
+                borsh::from_slice(&page_bytes).context("the page account does not hold a page")?;
             open_page(&key, &page.sealed)
         };
         let page = page.map_or(serde_json::Value::Null, |page| {
@@ -1879,7 +1840,6 @@ fn serve_page(name: &str, page: Option<&PageContent>, card: &str, port: u16, no_
     Ok(())
 }
 
-/// Runs program logic that reports refusal by panicking, turning the panic into an error.
 /// Runs `run` with this process's standard output sent nowhere. The LEZ wallet prints
 /// its internals when it saves ("Stored persistent accounts at ...") and when it takes
 /// in a private account's new state ("Received new acc Account { ... }"), which means
@@ -1908,40 +1868,33 @@ fn quietly<T>(run: impl FnOnce() -> T) -> T {
     result
 }
 
-fn refusal_as_error<T>(run: impl FnOnce() -> T) -> Result<T> {
-    let previous_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
-    std::panic::set_hook(previous_hook);
-    outcome.map_err(|payload| {
-        let reason = payload
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| payload.downcast_ref::<&str>().copied())
-            .unwrap_or("the program refused the transaction");
-        anyhow!("refused: {reason}")
-    })
-}
-
-
 /// Runs the LEZ wallet's command line with `args`, as its own `wallet` binary would.
 async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>) -> Result<()> {
     use clap::{CommandFactory as _, Parser as _};
-    use wallet::cli::{Args, execute_continuous_run, execute_subcommand};
+    use wallet::{
+        ExecutionFailureKind,
+        cli::{Args, execute_continuous_run, execute_subcommand},
+    };
 
-    let Args { continuous_run, command } =
+    let Args { continuous_run, dry_run, fee_headroom, fee_payer, refund_to, command } =
         Args::parse_from(std::iter::once("names wallet".to_owned()).chain(args));
+    let mut overrides = overrides.unwrap_or_default();
+    if fee_headroom.is_some() {
+        overrides.private_fee_headroom_blocks = fee_headroom;
+    }
+    let overrides = Some(overrides);
     write_default_wallet_files()?;
     let config_path = fetch_config_path()?;
     let storage_path = fetch_persistent_storage_path()?;
 
     if let Some(command) = command {
         let mut wallet = if storage_path.exists() {
-            WalletCore::new_update_chain(config_path, storage_path, overrides)?
+            let password = read_password(&storage_path)?;
+            WalletCore::new_update_chain(config_path, storage_path, overrides, &password)?
         } else {
-            // The wallet does not encrypt its storage yet, so there is no password to ask for.
-            let (wallet, mnemonic) =
-                WalletCore::new_init_storage(config_path, storage_path, overrides, "")?;
+            let (mut wallet, mnemonic) =
+                WalletCore::new_init_storage(config_path, storage_path, overrides, &new_wallet_password())?;
+            wallet.start_at_chain_tip().await.ok();
             println!("Created a new wallet. Write down its recovery phrase and keep it safe;");
             println!("it is the only way to get the wallet back:");
             println!();
@@ -1950,15 +1903,31 @@ async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>)
             quietly(|| wallet.store_persistent_data())?;
             wallet
         };
-        execute_subcommand(&mut wallet, command).await?;
+        wallet.set_dry_run(dry_run);
+        wallet.set_private_fee_payer(fee_payer);
+        wallet.set_private_refund_target(refund_to);
+        match execute_subcommand(&mut wallet, command).await {
+            // A dry run ends the command on the error channel once it has reported.
+            Err(error) if matches!(error.root_cause().downcast_ref(), Some(ExecutionFailureKind::DryRun)) => {}
+            result => {
+                result?;
+            }
+        }
     } else if continuous_run {
-        let mut wallet = WalletCore::new_update_chain(config_path, storage_path, overrides)?;
+        let password = read_password(&storage_path)?;
+        let mut wallet = WalletCore::new_update_chain(config_path, storage_path, overrides, &password)?;
         execute_continuous_run(&mut wallet).await?;
     } else {
         let mut help = Args::command().name("names wallet");
         println!("{}", help.render_long_help());
     }
     Ok(())
+}
+
+/// The password of a new wallet: `LEE_WALLET_PASSWORD` if set, else none, which leaves
+/// its storage unencrypted. Nothing prompts, because apps run `names` without a terminal.
+fn new_wallet_password() -> String {
+    std::env::var(PASSWORD_ENV_VAR).unwrap_or_default()
 }
 
 /// Writes the wallet's default config if it is missing. The wallet would make it
@@ -1990,22 +1959,21 @@ fn write_default_wallet_files() -> Result<()> {
 /// Opens the wallet at the wallet home. Without one, makes a new wallet and saves it,
 /// or, for a lookup (`save` false), uses an empty one that is never saved or shown,
 /// so lookups need no setup and leave nothing behind.
-async fn open_wallet(overrides: Option<WalletConfigOverrides>, save: bool) -> Result<WalletCore> {
+async fn open_wallet(overrides: Option<WalletConfigOverrides>, save: bool) -> Result<WalletCore<SequencerClient>> {
     write_default_wallet_files()?;
     let storage_path = fetch_persistent_storage_path()?;
     if storage_path.exists() {
-        return WalletCore::new_update_chain(fetch_config_path()?, storage_path, overrides);
+        let password = read_password(&storage_path)?;
+        return WalletCore::new_update_chain(fetch_config_path()?, storage_path, overrides, &password);
     }
     let (mut wallet, mnemonic) =
-        WalletCore::new_init_storage(fetch_config_path()?, storage_path, overrides, "")?;
+        WalletCore::new_init_storage(fetch_config_path()?, storage_path, overrides, &new_wallet_password())?;
     if !save {
         return Ok(wallet);
     }
     // A new wallet's keys can't have anything in past blocks, so start syncing from
     // now instead of scanning the whole chain (minutes on the testnet).
-    if let Ok(latest) = wallet.get_last_block_id().await {
-        wallet.storage_mut().set_last_synced_block(latest);
-    }
+    wallet.start_at_chain_tip().await.ok();
     println!("Created a new wallet. Write down its recovery phrase and keep it safe;");
     println!("it is the only way to get the wallet back:");
     println!();
@@ -2054,22 +2022,12 @@ fn gas_limit_for(cycles: u64) -> u64 {
     cycles.saturating_add(cycles.div_ceil(2)).max(MIN_GAS_LIMIT)
 }
 
-/// Runs `guest` in the RISC Zero executor (`r0vm`) with the input `write` gives it,
-/// returning the cycles it took and its journal.
-fn run_guest(
-    guest: &Program,
-    write: impl FnOnce(&mut ExecutorEnvBuilder) -> Result<()>,
-) -> Result<(u64, Vec<u8>)> {
-    let mut builder = ExecutorEnv::builder();
-    write(&mut builder)?;
-    let info = default_executor().execute(builder.build()?, guest.elf())?;
-    Ok((info.cycles(), info.journal.bytes))
-}
+/// The most cycles a trial run may take: the chain's cap for one block.
+const MAX_SIMULATED_CYCLES: u64 = 100_000_000;
 
 /// Execution gas for a public native-token transfer: the native token is a built-in
 /// that meters no cycles (only the transaction's bytes are billed, outside this), and
-/// a failed transfer is billed the whole limit, so the wallet's default 2,000,000
-/// would cost about 16M on a failure.
+/// the whole limit is reserved from the sender while the transfer runs.
 const NATIVE_TRANSFER_GAS_LIMIT: u64 = 1_000;
 
 /// `names setup`: a public and a private account, and, once the public one is funded,
@@ -2103,14 +2061,15 @@ async fn setup(client: &mut Client, shield: u128) -> Result<()> {
     if shield > 0 {
         println!("moving {shield} to the private account; generating the proof (a few minutes)");
         let (hash, _) = NativeTokenTransfer(&client.wallet)
-            .send_shielded_transfer(AccountIdentity::Public(public), private, shield)
+            .transfer(
+                AccountIdentity::Public(public),
+                AccountIdentity::PrivateOwned(private),
+                shield,
+                CreditDelivery::Automatic,
+            )
             .await
             .context("the sequencer did not accept the transfer")?;
-        client
-            .wallet
-            .poll_transaction(hash)
-            .await
-            .context("the transfer was not included in a block")?;
+        client.finish(hash).await.context("the transfer was not applied")?;
         client.wallet.sync_to_latest_block().await?;
         quietly(|| client.wallet.store_persistent_data())?;
     }
@@ -2252,8 +2211,8 @@ async fn main() -> Result<()> {
     let overrides = sequencer_overrides(&cli)?;
     match cli.command {
         Command::Wallet { args } => {
-            // Native-token transfers meter no execution gas, but LEZ v0.3.1 bills a
-            // failed one its whole gas limit, so keep the limit tiny for them.
+            // Native-token transfers meter no execution gas, and the whole limit is
+            // reserved while one runs, so keep the limit tiny for them.
             let mut overrides = overrides.unwrap_or_default();
             if args.iter().any(|arg| arg == "auth-transfer") && overrides.gas_limit.is_none() {
                 overrides.gas_limit = Some(NATIVE_TRANSFER_GAS_LIMIT);
@@ -2271,6 +2230,14 @@ async fn main() -> Result<()> {
         None => DEFAULT_PROGRAM.parse().map_err(|_| anyhow!("bad built-in program ID"))?,
     };
 
+    if let Command::ClaimsRoot { snapshot } = &cli.command {
+        let snapshot = claims::Snapshot::load(snapshot)?;
+        println!("root    {}", hex::encode(snapshot.root()));
+        println!("program {}", snapshot.program);
+        println!("height  {}", snapshot.height);
+        println!("names   {}", snapshot.leaves().len());
+        return Ok(());
+    }
     if let Command::AccountLogEntry { name } = &cli.command {
         println!("{}", hex::encode(names_accountlog::name_entry(&format!("{name}{LEGACY_SUFFIX}"))));
         return Ok(());
@@ -2402,6 +2369,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Renew { name, term, payer } => client.renew(&name, term, payer).await,
+        Command::Claim { name, snapshot } => client.claim(&name, &snapshot).await,
         Command::Configure {
             admin,
             treasury,
@@ -2409,13 +2377,18 @@ async fn main() -> Result<()> {
             mode,
             deposits,
             signer,
+            claims_snapshot,
+            claims_root,
+            claims_program,
+            claims_until,
         } => {
+            let claims = claims::ClaimSettings::from_args(claims_snapshot, claims_root, claims_program, claims_until)?;
             let prices = <[u128; 3]>::try_from(prices)
                 .map_err(|_| anyhow!("--prices takes three prices: 30d,1y,5y"))?;
             let deposits = <[u128; 2]>::try_from(deposits)
                 .map_err(|_| anyhow!("--deposits takes two amounts: normal,three-character"))?;
             let mode = if mode == "deposit" { MODE_DEPOSIT } else { MODE_FEE };
-            client.configure(admin, treasury, prices, mode, deposits, signer).await
+            client.configure(admin, treasury, prices, mode, deposits, signer, claims).await
         }
         Command::Settings => {
             let settings = client.settings().await?.map(|settings| {
@@ -2431,6 +2404,11 @@ async fn main() -> Result<()> {
                         "30d": settings.prices[0].to_string(),
                         "1y": settings.prices[1].to_string(),
                         "5y": settings.prices[2].to_string(),
+                    },
+                    "claims": {
+                        "root": hex::encode(settings.claims_root),
+                        "until": settings.claims_until,
+                        "program": settings.claims_program.to_string(),
                     },
                 })
             });
@@ -2630,6 +2608,7 @@ async fn main() -> Result<()> {
         }
         Command::Thread { post, blocks, json } => board::print_posts(&client.thread(post, blocks).await?, json),
         Command::Address { .. }
+        | Command::ClaimsRoot { .. }
         | Command::AccountLogEntry { .. }
         | Command::Wallet { .. }
         | Command::Bridge { .. }

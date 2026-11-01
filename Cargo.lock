@@ -850,6 +850,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "board_core"
+version = "0.1.0"
+dependencies = [
+ "borsh",
+ "lee_core",
+ "names_core",
+ "risc0-zkvm",
+]
+
+[[package]]
+name = "board_methods"
+version = "0.1.0"
+dependencies = [
+ "risc0-build",
+]
+
+[[package]]
 name = "borsh"
 version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5036,6 +5053,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "logos_board"
+version = "0.1.0"
+dependencies = [
+ "board_core",
+ "lee_core",
+ "risc0-zkvm",
+]
+
+[[package]]
 name = "logos_names"
 version = "0.1.0"
 dependencies = [
@@ -5308,6 +5334,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "board_core",
  "borsh",
  "clap",
  "clap_mangen",
@@ -5322,9 +5349,7 @@ dependencies = [
  "names_accountlog",
  "names_core",
  "names_seal",
- "risc0-binfmt",
- "risc0-zkos-v1compat",
- "risc0-zkvm",
+ "sequencer_service_rpc",
  "serde",
  "serde_json",
  "tokio",

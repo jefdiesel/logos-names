@@ -12,18 +12,16 @@ path = "src/main.rs"
 names_core.workspace = true
 names_seal.workspace = true
 names_accountlog.workspace = true
+board_core.workspace = true
 lee_core.workspace = true
 lee.workspace = true
 common.workspace = true
+sequencer_service_rpc.workspace = true
 wallet.workspace = true
 clock_core.workspace = true
 
 anyhow = "1.0.98"
 borsh.workspace = true
-risc0-binfmt = "3.0.2"
-risc0-zkos-v1compat = "=2.2.2"
-# The executor, to count a call's cycles before sending it (the same feature LEZ uses).
-risc0-zkvm = { workspace = true, features = ["client"] }
 libc = "0.2"
 clap = { version = "4.5.42", features = ["derive", "env"] }
 clap_mangen = "0.2"

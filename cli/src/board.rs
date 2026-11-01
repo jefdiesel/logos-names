@@ -4,10 +4,7 @@
 //! it is proved on this machine and the chain sees the name, never the account.
 
 use super::*;
-use board_core::{Instruction as BoardInstruction, PostId, REGISTRY};
-
-/// The gas limit of a public board call.
-const BOARD_GAS_LIMIT: u64 = 200_000;
+use board_core::{Instruction as BoardInstruction, Message as BoardMessage, PostId, REGISTRY};
 
 /// The board on the LEZ testnet. `LOGOS_BOARD_PROGRAM` points at another.
 const DEFAULT_BOARD: Option<&str> = Some("8PwnCKStKQtoBxJCgopCG6CPPMJCUWba1SDG1SXtXYTf");
@@ -41,13 +38,6 @@ pub fn parse_post(input: &str) -> Result<PostRef, String> {
         .map_err(|_| format!("not a post: {input} (give its ID, or <name>/<number>)"))
 }
 
-/// One account a board change names: which program's shard of it, and whether it signs.
-struct Row {
-    account: AccountId,
-    shard: AccountId,
-    signs: bool,
-}
-
 impl Client {
     /// The post `post` names: its ID on the board, its author's name and its address.
     async fn find_post(&self, board: AccountId, post: &PostRef) -> Result<(PostId, String, AccountId)> {
@@ -58,7 +48,7 @@ impl Client {
                 (board_core::post_address(&board, &id), Some(name.clone()))
             }
         };
-        let bytes = self.board_shard(board, address).await?;
+        let bytes = self.actor_state_of(address, board).await?;
         if bytes.is_empty() {
             bail!("there is no such post on the board");
         }
@@ -70,86 +60,37 @@ impl Client {
     /// proof (no gas, about 4 minutes); a public one by a signed transaction
     /// (one block, and it pays LEZ gas).
     async fn private_holder(&self, name: &str) -> Result<(NameId, AccountId)> {
+        if self.program != REGISTRY {
+            bail!("the board trusts registry {REGISTRY}, not {}; it was built for another chain", self.program);
+        }
         let (Derived { id, .. }, record, _) = self.lookup_held(name).await?;
         Ok((id, self.holder(name, &id, &record)?))
     }
 
-    async fn board_shard(&self, board: AccountId, account: AccountId) -> Result<Vec<u8>> {
-        let view = self
-            .wallet
-            .get_account_view(ProgramShardSelector::new(account, board))
-            .await
-            .context("failed to read the board from the sequencer")?;
-        Ok(view.data.shard(board).to_vec())
+    /// The board's actor of `signer`, the transaction's root.
+    fn board_root(&self, board: AccountId, signer: AccountId) -> AccountMention {
+        self.signer(signer).select_program_actor_state(board)
     }
 
-    /// Sends `instruction` to the board as a privacy-preserving transaction signed
-    /// by the private account in `rows`, and waits for it to be applied.
-    async fn send_board(&mut self, board: AccountId, rows: Vec<Row>, instruction: &BoardInstruction) -> Result<()> {
-        let program = self
-            .program_at(board, "LOGOS_BOARD_PROGRAM_ELF", "logos-board", "the board")
-            .await?;
-        let public = rows.iter().any(|row| row.signs && !self.is_private(row.account));
-        let mut signers = Vec::new();
-        let mut mentions = Vec::new();
-        for row in &rows {
-            let identity = if !row.signs {
-                AccountIdentity::PublicNoSign(row.account)
-            } else if public {
-                AccountIdentity::Public(row.account)
-            } else {
-                signers.push(row.account);
-                self.wallet
-                    .resolve_private_account(row.account)
-                    .ok_or_else(|| anyhow!("{} is not a private account in this wallet", row.account))?
-            };
-            mentions.push(identity.select_program_shard(row.shard));
-        }
-        if std::env::var_os("LOGOS_NAMES_DRY_RUN").is_some() {
-            bail!("LOGOS_NAMES_DRY_RUN is set, so nothing was sent");
-        }
-        if public {
-            // A board call runs about as many cycles as a registry edit; this limit
-            // covers it with room, and a failed call is billed the whole limit.
-            let saved = self.wallet.config().clone();
-            let mut config = saved.clone();
-            config.gas_limit = BOARD_GAS_LIMIT;
-            self.wallet.set_config(config);
-            println!("posting publicly; one block, paid in LEZ gas");
-            let before = self.wallet.get_account_balance(rows.iter().find(|row| row.signs).map(|row| row.account).unwrap_or(board)).await.unwrap_or(0);
-            let sent = self.wallet.send_pub_tx(mentions, borsh::to_vec(instruction)?, board).await;
-            self.wallet.set_config(saved);
-            let hash = sent.context("the sequencer did not accept the transaction")?;
-            println!("submitted {hash}");
-            let (_, block) = self.wallet.poll_transaction(hash).await.context("the transaction was not included in a block")?;
-            let after = self.wallet.get_account_balance(rows.iter().find(|row| row.signs).map(|row| row.account).unwrap_or(board)).await.unwrap_or(0);
-            println!("included in block {block}; gas paid {}", before.saturating_sub(after));
-            return Ok(());
-        }
-        println!("acting privately; proving it on this computer (about 4 minutes), so the chain never learns your account");
-        let program = ProgramWithDependencies::new(program, board, Default::default());
-        let (hash, secrets) = self
-            .wallet
-            .send_privacy_preserving_tx(mentions, borsh::to_vec(instruction)?, &program)
-            .await
-            .context("the sequencer did not accept the transaction")?;
-        println!("submitted {hash}");
-        let (tx, block) = self
-            .wallet
-            .poll_transaction(hash)
-            .await
-            .context("the transaction was not included in a block")?;
-        if let common::transaction::LeeTransaction::PrivacyPreserving(tx) = &tx {
-            let decode: Vec<AccDecodeData> = secrets
-                .into_iter()
-                .zip(signers)
-                .map(|(secret, account)| AccDecodeData::Decode(secret, account))
-                .collect();
-            quietly(|| self.wallet.decode_insert_privacy_preserving_transaction_results(tx, &decode))?;
-            quietly(|| self.wallet.store_persistent_data())?;
-        }
-        println!("included in block {block}");
-        Ok(())
+    /// The board account behind `seed`. The seed lets a transaction create it.
+    fn board_actor(&self, board: AccountId, seed: PdaSeed) -> AccountMention {
+        AccountIdentity::PublicPda { program: board, seed }.select_program_actor_state(board)
+    }
+
+    /// The registry's record of `name`, which only the registry itself reads.
+    fn record_actor(&self, name: &NameId) -> AccountMention {
+        self.registry_actor(name_seeds(name)[0])
+    }
+
+    /// Sends `instruction` to the signer's actor of the board, `mentions[0]`. The
+    /// board's holder check runs the registry too, so both programs are named.
+    async fn send_board(&mut self, board: AccountId, mentions: Vec<AccountMention>, instruction: &BoardInstruction) -> Result<()> {
+        let programs = vec![
+            (board, self.program_at(board, "LOGOS_BOARD_PROGRAM_ELF", "logos-board", "the board").await?),
+            (self.program, self.program().await?),
+        ];
+        let message = borsh::to_vec(&BoardMessage::Instruction(instruction.clone()))?;
+        self.transact(mentions, message, programs, 0).await
     }
 
     /// Posts `text` as `name`, starting a thread or, with `parent`, replying.
@@ -158,7 +99,7 @@ impl Client {
         let board = board_program()?;
         let (author, signer) = self.private_holder(name).await?;
         let counter = board_core::author_address(&board, &author);
-        let bytes = self.board_shard(board, counter).await?;
+        let bytes = self.actor_state_of(counter, board).await?;
         let n = if bytes.is_empty() {
             0
         } else {
@@ -179,16 +120,13 @@ impl Client {
             cids,
             now: self.now().await,
         };
-        let rows = vec![
-            Row { account: record_address(&REGISTRY, &author), shard: REGISTRY, signs: false },
-            Row { account: counter, shard: board, signs: false },
-            Row { account: post, shard: board, signs: false },
-            Row { account: signer, shard: board, signs: true },
+        let mentions = vec![
+            self.board_root(board, signer),
+            self.record_actor(&author),
+            self.board_actor(board, board_core::author_seed(&author)),
+            self.board_actor(board, board_core::post_seed(&id)),
         ];
-        self.send_board(board, rows, &instruction).await?;
-        if self.board_shard(board, post).await?.is_empty() {
-            bail!("the post was included but not written; it failed on chain");
-        }
+        self.send_board(board, mentions, &instruction).await?;
         println!("posted {name}/{n}, ID {post}");
         Ok(())
     }
@@ -198,17 +136,17 @@ impl Client {
         let board = board_program()?;
         let (liker, signer) = self.private_holder(name).await?;
         let (id, _, address) = self.find_post(board, &post).await?;
-        let like = board_core::like_address(&board, &id, &liker);
-        let record = Row { account: record_address(&REGISTRY, &liker), shard: REGISTRY, signs: false };
-        let signer = Row { account: signer, shard: board, signs: true };
-        let like_row = Row { account: like, shard: board, signs: false };
+        let mut mentions = vec![
+            self.board_root(board, signer),
+            self.record_actor(&liker),
+            self.board_actor(board, board_core::like_seed(&id, &liker)),
+        ];
         if undo {
-            self.send_board(board, vec![record, like_row, signer], &BoardInstruction::Unlike { liker, post: id }).await?;
+            self.send_board(board, mentions, &BoardInstruction::Unlike { liker, post: id }).await?;
         } else {
-            let post_row = Row { account: board_core::post_address(&board, &id), shard: board, signs: false };
+            mentions.push(self.board_actor(board, board_core::post_seed(&id)));
             let now = self.now().await;
-            self.send_board(board, vec![record, like_row, post_row, signer], &BoardInstruction::Like { liker, post: id, now })
-                .await?;
+            self.send_board(board, mentions, &BoardInstruction::Like { liker, post: id, now }).await?;
         }
         println!("{} {address}", if undo { "unliked" } else { "liked" });
         Ok(())
@@ -220,15 +158,50 @@ impl Client {
         let (id, name, address) = self.find_post(board, &post).await?;
         let (author, signer) = self.private_holder(&name).await?;
         let id = PostId { author, n: id.n };
-        let rows = vec![
-            Row { account: record_address(&REGISTRY, &author), shard: REGISTRY, signs: false },
-            Row { account: board_core::post_address(&board, &id), shard: board, signs: false },
-            Row { account: signer, shard: board, signs: true },
+        let mentions = vec![
+            self.board_root(board, signer),
+            self.record_actor(&author),
+            self.board_actor(board, board_core::post_seed(&id)),
         ];
-        self.send_board(board, rows, &BoardInstruction::Hide { post: id }).await?;
+        self.send_board(board, mentions, &BoardInstruction::Hide { post: id }).await?;
         println!("hid {address}");
         Ok(())
     }
+}
+
+/// The messages a privacy-preserving transaction delivers to public actors.
+fn crossings(tx: &lee::PrivacyPreservingTransaction) -> impl Iterator<Item = (&Actor, &Vec<u8>)> {
+    tx.message.execution.boundary.iter().filter_map(|step| match step {
+        lee_core::execution_state::BoundaryStep::PrivateToPublic(delivery) => {
+            Some((&delivery.envelope.to, &delivery.envelope.message))
+        }
+        _ => None,
+    })
+}
+
+/// What a message to a program counts as in `names stats`, if anything.
+fn kind_of(to: AccountId, message: &[u8], registry: AccountId, board: Option<AccountId>) -> Option<&'static str> {
+    if to == registry {
+        return match borsh::from_slice::<RegistryMessage>(message).ok()? {
+            RegistryMessage::Instruction(Instruction::Register { .. })
+            | RegistryMessage::Effect(names_core::Effect::Register { .. }) => Some("register"),
+            RegistryMessage::Instruction(Instruction::Renew { .. })
+            | RegistryMessage::Effect(names_core::Effect::Renew { .. }) => Some("renew"),
+            RegistryMessage::Instruction(Instruction::Claim { .. })
+            | RegistryMessage::Effect(names_core::Effect::Claim { .. }) => Some("claim"),
+            _ => Some("other registry change"),
+        };
+    }
+    if Some(to) == board {
+        return match borsh::from_slice::<BoardMessage>(message).ok()? {
+            BoardMessage::Instruction(BoardInstruction::Post { .. })
+            | BoardMessage::Effect(board_core::Effect::CreatePost(_)) => Some("post"),
+            BoardMessage::Instruction(BoardInstruction::Like { .. })
+            | BoardMessage::Effect(board_core::Effect::CreateLike(_)) => Some("like"),
+            _ => None,
+        };
+    }
+    None
 }
 
 /// A post as the feed shows it.
@@ -273,21 +246,6 @@ struct BoardEvent {
     /// The like's account, for likes and unlikes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     account: Option<String>,
-}
-
-/// Blocks `start..=end` from the sequencer's `getBlockRange`.
-fn block_range(url: &str, start: u64, end: u64) -> Result<Vec<common::block::Block>> {
-    use base64::Engine as _;
-    let reply = super::rpc_call(url, "getBlockRange", serde_json::json!([start, end]))?;
-    let list = reply.as_array().ok_or_else(|| anyhow!("blocks {start}-{end} did not come back as a list"))?;
-    list.iter()
-        .map(|item| {
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(item.as_str().unwrap_or_default())
-                .map_err(|error| anyhow!("a block is not base64: {error}"))?;
-            borsh::from_slice::<common::block::Block>(&bytes).map_err(|error| anyhow!("a block does not decode: {error}"))
-        })
-        .collect()
 }
 
 /// What a scan of recent blocks found on the board.
@@ -381,24 +339,24 @@ impl Client {
         Ok(scan)
     }
 
-    /// The board's changes in blocks `from..=to`, read 200 blocks a call, several
-    /// calls at once.
-    async fn board_events(&self, board: AccountId, from: u64, to: u64) -> Result<Vec<BoardEvent>> {
+    /// Blocks `from..=to`, read 200 a call, several calls at once.
+    async fn blocks(&self, from: u64, to: u64) -> Vec<Result<Vec<common::block::Block>>> {
         use futures::StreamExt as _;
-        let url = self.wallet.config().sequencer.sequencer_addr.to_string();
+        let client = self.wallet.client_owned();
         let ranges: Vec<(u64, u64)> = (from..=to).step_by(200).map(|start| (start, (start + 199).min(to))).collect();
-        let fetched: Vec<Result<Vec<common::block::Block>>> = futures::stream::iter(ranges)
+        futures::stream::iter(ranges)
             .map(|(start, end)| {
-                let url = url.clone();
-                async move {
-                    tokio::task::spawn_blocking(move || block_range(&url, start, end))
-                        .await
-                        .map_err(|error| anyhow!("{error}"))?
-                }
+                let client = client.clone();
+                async move { client.get_block_range(start, end).await.map_err(|error| anyhow!("cannot read blocks {start}-{end}: {error}")) }
             })
             .buffered(8)
             .collect()
-            .await;
+            .await
+    }
+
+    /// The board's changes in blocks `from..=to`.
+    async fn board_events(&self, board: AccountId, from: u64, to: u64) -> Result<Vec<BoardEvent>> {
+        let fetched = self.blocks(from, to).await;
         let mut events = Vec::new();
         for blocks in fetched {
             for block in blocks? {
@@ -414,19 +372,9 @@ impl Client {
     /// Counts the registry's changes in the last `blocks` blocks, private and
     /// public: registrations, renewals, transfers, releases and posts.
     pub async fn stats(&self, blocks: u64) -> Result<()> {
-        use futures::StreamExt as _;
-        let url = self.wallet.config().sequencer.sequencer_addr.to_string();
         let last = self.wallet.get_last_block_id().await.context("cannot read the chain's height")?;
         let first = last.saturating_sub(blocks.saturating_sub(1)).max(1);
-        let ranges: Vec<(u64, u64)> = (first..=last).step_by(200).map(|start| (start, (start + 199).min(last))).collect();
-        let fetched: Vec<Result<Vec<common::block::Block>>> = futures::stream::iter(ranges)
-            .map(|(start, end)| {
-                let url = url.clone();
-                async move { tokio::task::spawn_blocking(move || block_range(&url, start, end)).await.map_err(|error| anyhow!("{error}"))? }
-            })
-            .buffered(8)
-            .collect()
-            .await;
+        let fetched = self.blocks(first, last).await;
         let board = board_program().ok();
         let mut counts: std::collections::BTreeMap<&str, (u64, u64)> = std::collections::BTreeMap::new();
         let mut txs = 0u64;
@@ -435,51 +383,23 @@ impl Client {
                 for tx in &block.body.transactions {
                     txs += 1;
                     match tx {
-                        common::transaction::LeeTransaction::Public(tx) => {
-                            let kind = if tx.message.program_account_id == self.program {
-                                match borsh::from_slice::<names_core::Instruction>(&tx.message.instruction_data) {
-                                    Ok(names_core::Instruction::Register { .. }) => "register",
-                                    Ok(names_core::Instruction::Renew { .. }) => "renew",
-                                    Ok(_) => "other registry change",
-                                    Err(_) => continue,
-                                }
-                            } else if Some(tx.message.program_account_id) == board {
-                                match borsh::from_slice::<BoardInstruction>(&tx.message.instruction_data) {
-                                    Ok(BoardInstruction::Post { .. }) => "post",
-                                    Ok(BoardInstruction::Like { .. }) => "like",
-                                    _ => continue,
-                                }
-                            } else {
-                                continue;
-                            };
-                            counts.entry(kind).or_default().1 += 1;
+                        LeeTransaction::Public(tx) => {
+                            let root = &tx.message().execution.root;
+                            if let Some(kind) = kind_of(root.to.program_account_id, &root.message, self.program, board) {
+                                counts.entry(kind).or_default().1 += 1;
+                            }
                         }
-                        common::transaction::LeeTransaction::PrivacyPreserving(tx) => {
+                        LeeTransaction::PrivacyPreserving(tx) => {
                             let mut kinds = std::collections::BTreeSet::new();
-                            for action in &tx.message.public_actions {
-                                for effect in &action.effects {
-                                    if effect.program_account_id == self.program {
-                                        if let Ok(names_core::Effect::Register { .. }) = borsh::from_slice(&effect.data) {
-                                            kinds.insert("register");
-                                        } else if let Ok(names_core::Effect::Renew { .. }) = borsh::from_slice(&effect.data) {
-                                            kinds.insert("renew");
-                                        } else {
-                                            kinds.insert("other registry change");
-                                        }
-                                    } else if Some(effect.program_account_id) == board {
-                                        match borsh::from_slice::<board_core::Effect>(&effect.data) {
-                                            Ok(board_core::Effect::CreatePost { .. }) => { kinds.insert("post"); }
-                                            Ok(board_core::Effect::CreateLike { .. }) => { kinds.insert("like"); }
-                                            _ => {}
-                                        }
-                                    }
+                            for (to, message) in crossings(tx) {
+                                if let Some(kind) = kind_of(to.program_account_id, message, self.program, board) {
+                                    kinds.insert(kind);
                                 }
                             }
                             for kind in kinds {
                                 counts.entry(kind).or_default().0 += 1;
                             }
                         }
-                        _ => {}
                     }
                 }
             }
@@ -495,7 +415,7 @@ impl Client {
     }
 
     /// The board changes one transaction made.
-    async fn events_of(&self, board: AccountId, block: u64, tx: &common::transaction::LeeTransaction, out: &mut Vec<BoardEvent>) {
+    async fn events_of(&self, board: AccountId, block: u64, tx: &LeeTransaction, out: &mut Vec<BoardEvent>) {
         let event = |kind: &str, data: Vec<u8>, account: Option<AccountId>| BoardEvent {
             block,
             kind: kind.to_owned(),
@@ -504,52 +424,60 @@ impl Client {
         };
         // A public change carries its instruction, not its effects: read what it
         // wrote from the post's account, which also says it applied.
-        if let common::transaction::LeeTransaction::Public(tx) = tx {
-            if tx.message.program_account_id != board {
-                return;
-            }
-            match borsh::from_slice::<BoardInstruction>(&tx.message.instruction_data) {
-                Ok(BoardInstruction::Post { author, n, .. }) => {
-                    let id = PostId { author, n };
-                    if let Ok(bytes) = self.board_shard(board, board_core::post_address(&board, &id)).await {
-                        if !bytes.is_empty() {
-                            out.push(event("post", bytes, None));
-                        }
-                    }
+        let tx = match tx {
+            LeeTransaction::Public(tx) => {
+                let root = &tx.message().execution.root;
+                if root.to.program_account_id != board {
+                    return;
                 }
-                Ok(BoardInstruction::Like { liker, post, now }) => {
-                    let like = board_core::Like { version: board_core::VERSION, post, liker, time: now };
-                    out.push(event("like", borsh::to_vec(&like).unwrap_or_default(), Some(board_core::like_address(&board, &post, &liker))));
-                }
-                Ok(BoardInstruction::Unlike { liker, post }) => {
-                    out.push(event("unlike", Vec::new(), Some(board_core::like_address(&board, &post, &liker))));
-                }
-                Ok(BoardInstruction::Hide { post }) => out.push(event("hide", borsh::to_vec(&post).unwrap_or_default(), None)),
-                _ => {}
-            }
-            return;
-        }
-        let common::transaction::LeeTransaction::PrivacyPreserving(tx) = tx else { return };
-        for action in &tx.message.public_actions {
-            for effect in &action.effects {
-                if effect.program_account_id != board || effect.shard_program_account_id != board {
-                    continue;
-                }
-                match borsh::from_slice::<board_core::Effect>(&effect.data) {
-                    Ok(board_core::Effect::CreatePost(post)) => out.push(event("post", borsh::to_vec(&post).unwrap_or_default(), None)),
-                    Ok(board_core::Effect::CreateLike(like)) => {
-                        out.push(event("like", borsh::to_vec(&like).unwrap_or_default(), Some(action.account_id)));
-                    }
-                    Ok(board_core::Effect::DeleteLike) => out.push(event("unlike", Vec::new(), Some(action.account_id))),
-                    Ok(board_core::Effect::HidePost) => {
-                        if let Ok(bytes) = self.board_shard(board, action.account_id).await {
-                            if let Ok(post) = borsh::from_slice::<board_core::Post>(&bytes) {
-                                out.push(event("hide", borsh::to_vec(&post.id).unwrap_or_default(), None));
+                match borsh::from_slice::<BoardMessage>(&root.message) {
+                    Ok(BoardMessage::Instruction(BoardInstruction::Post { author, n, .. })) => {
+                        let id = PostId { author, n };
+                        if let Ok(bytes) = self.actor_state_of(board_core::post_address(&board, &id), board).await {
+                            if !bytes.is_empty() {
+                                out.push(event("post", bytes, None));
                             }
                         }
                     }
+                    Ok(BoardMessage::Instruction(BoardInstruction::Like { liker, post, now })) => {
+                        let like = board_core::Like { version: board_core::VERSION, post, liker, time: now };
+                        out.push(event("like", borsh::to_vec(&like).unwrap_or_default(), Some(board_core::like_address(&board, &post, &liker))));
+                    }
+                    Ok(BoardMessage::Instruction(BoardInstruction::Unlike { liker, post })) => {
+                        out.push(event("unlike", Vec::new(), Some(board_core::like_address(&board, &post, &liker))));
+                    }
+                    Ok(BoardMessage::Instruction(BoardInstruction::Hide { post })) => {
+                        out.push(event("hide", borsh::to_vec(&post).unwrap_or_default(), None));
+                    }
                     _ => {}
                 }
+                return;
+            }
+            LeeTransaction::PrivacyPreserving(tx) => tx,
+        };
+        // A private change's messages to public actors cross the boundary in the clear.
+        for (to, message) in crossings(tx) {
+            if to.program_account_id != board {
+                continue;
+            }
+            match borsh::from_slice::<BoardMessage>(message) {
+                Ok(BoardMessage::Effect(board_core::Effect::CreatePost(post))) => {
+                    out.push(event("post", borsh::to_vec(&post).unwrap_or_default(), None));
+                }
+                Ok(BoardMessage::Effect(board_core::Effect::CreateLike(like))) => {
+                    out.push(event("like", borsh::to_vec(&like).unwrap_or_default(), Some(to.account_id)));
+                }
+                Ok(BoardMessage::Effect(board_core::Effect::DeleteLike)) => {
+                    out.push(event("unlike", Vec::new(), Some(to.account_id)));
+                }
+                Ok(BoardMessage::Effect(board_core::Effect::HidePost)) => {
+                    if let Ok(bytes) = self.actor_state_of(to.account_id, board).await {
+                        if let Ok(post) = borsh::from_slice::<board_core::Post>(&bytes) {
+                            out.push(event("hide", borsh::to_vec(&post.id).unwrap_or_default(), None));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -699,7 +627,7 @@ impl Client {
         let from = default_private()?;
         let id = derive(&name).id;
         let tier = length_proof(&id)?.1;
-        let (fee, _, _) = self.registration_cost(&id, tier, from, 1).await?;
+        let fee = self.registration_cost(tier, from, 1).await?.amount;
         let have = self.spendable(from).await;
         if have < fee {
             bail!("your private account holds {have}, less than the {fee} deposit an anonymous name takes; add funds first");
@@ -709,20 +637,11 @@ impl Client {
         let (account, _) = self.wallet.create_new_account_private(None);
         quietly(|| self.wallet.store_persistent_data())?;
         println!("{name}: making its private account and funding it privately (about 4 minutes)");
-        let (hash, [from_secret, to_secret]) = NativeTokenTransfer(&self.wallet)
-            .send_private_transfer_to_owned_account(from, account, fee)
+        let (hash, _) = NativeTokenTransfer(&self.wallet)
+            .transfer(self.signer(from), self.signer(account), fee, CreditDelivery::Automatic)
             .await
             .context("the sequencer did not accept the transfer")?;
-        let (tx, block) = self.wallet.poll_transaction(hash).await.context("the transfer was not included in a block")?;
-        if let common::transaction::LeeTransaction::PrivacyPreserving(tx) = &tx {
-            quietly(|| {
-                self.wallet.decode_insert_privacy_preserving_transaction_results(
-                    tx,
-                    &[AccDecodeData::Decode(from_secret, from), AccDecodeData::Decode(to_secret, account)],
-                )
-            })?;
-            quietly(|| self.wallet.store_persistent_data())?;
-        }
+        let block = self.finish(hash).await.context("the transfer was not applied")?;
         println!("funded in block {block}");
         let mut defaults = load_defaults();
         defaults.anon = Some(name.clone());
@@ -768,15 +687,11 @@ impl Client {
         let (public, _) = self.wallet.create_new_account_public(None);
         quietly(|| self.wallet.store_persistent_data())?;
         println!("step 1 of 3: funding Public/{public} with {PUBLIC_GAS_FUND} for gas, privately (about 4 minutes)");
-        let (hash, secret) = NativeTokenTransfer(&self.wallet)
-            .send_deshielded_transfer(payer, public, PUBLIC_GAS_FUND)
+        let (hash, _) = NativeTokenTransfer(&self.wallet)
+            .transfer(self.signer(payer), AccountIdentity::Public(public), PUBLIC_GAS_FUND, CreditDelivery::Automatic)
             .await
             .context("the sequencer did not accept the transfer")?;
-        let (tx, block) = self.wallet.poll_transaction(hash).await.context("the transfer was not included in a block")?;
-        if let common::transaction::LeeTransaction::PrivacyPreserving(tx) = &tx {
-            quietly(|| self.wallet.decode_insert_privacy_preserving_transaction_results(tx, &[AccDecodeData::Decode(secret, payer)]))?;
-            quietly(|| self.wallet.store_persistent_data())?;
-        }
+        let block = self.finish(hash).await.context("the transfer was not applied")?;
         println!("funded in block {block}");
         println!("step 2 of 3: moving {name}{NAME_SUFFIX} to it (about 4 minutes)");
         self.transfer(name, public).await?;
@@ -805,14 +720,14 @@ impl Client {
         use futures::StreamExt as _;
         let board = board_program()?;
         let author = derive(name).id;
-        let bytes = self.board_shard(board, board_core::author_address(&board, &author)).await?;
+        let bytes = self.actor_state_of(board_core::author_address(&board, &author), board).await?;
         let total = if bytes.is_empty() { 0 } else { borsh::from_slice::<board_core::Author>(&bytes)?.count };
         let top = before.map_or(total, |before| before.min(total));
         let numbers: Vec<u64> = (top.saturating_sub(count)..top).rev().collect();
         let read: Vec<Option<board_core::Post>> = futures::stream::iter(numbers)
             .map(|n| async move {
                 let id = PostId { author, n };
-                let bytes = self.board_shard(board, board_core::post_address(&board, &id)).await.ok()?;
+                let bytes = self.actor_state_of(board_core::post_address(&board, &id), board).await.ok()?;
                 borsh::from_slice::<board_core::Post>(&bytes).ok()
             })
             .buffered(10)
