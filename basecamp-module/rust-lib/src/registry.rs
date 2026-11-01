@@ -1,5 +1,5 @@
-//! Reads a Logos Names registry (v5), following SPEC.md. `changes.rs` builds on
-//! it to change one.
+//! Reads a Logos Names registry on LEZ 0.4, following SPEC.md. `changes.rs`
+//! builds on it to change one.
 //!
 //! This is a second implementation of what `core/` and `seal/` define, kept
 //! separate because a module build sees only its own directory and cannot take
@@ -37,6 +37,7 @@ const OWNER_TAG_DOMAIN: &[u8] = b"logos-names/v5/owner";
 const COMMITMENT_DOMAIN: &[u8] = b"logos-names/v5/commitment";
 const COMMITMENT_SEED_DOMAIN: &[u8] = b"logos-names/v5/commit/";
 const DEPOSIT_SEED_DOMAIN: &[u8] = b"logos-names/v5/deposit/";
+const CLAIM_LEAF_DOMAIN: &[u8] = b"logos-names/v6/claim-leaf";
 /// After a fee-mode name expires, only its holder can renew it for this long.
 /// Past that it reads as unregistered and anyone may register it.
 pub const GRACE_MS: u64 = 30 * 24 * 60 * 60 * 1000;
@@ -58,7 +59,7 @@ pub const TIME_WINDOW_MS: u64 = 10 * 60 * 1000;
 pub const MIN_COMMIT_AGE_MS: u64 = 15 * 60 * 1000;
 /// How long a commitment can still be revealed.
 pub const MAX_COMMIT_AGE_MS: u64 = 24 * 60 * 60 * 1000;
-/// The account the chain keeps its clock on, and the program whose shard on
+/// The account the chain keeps its clock on, and the program whose state on
 /// it holds the time: `{block_id: u64, timestamp: u64}`, in milliseconds.
 const CLOCK_ACCOUNT: &AccountId = b"/LEZ/ClockProgramAccount/0000001";
 const BUILTIN_PROGRAM_PREFIX: &[u8] = b"/LEE-BuiltinProgram/v1/AccountId";
@@ -73,7 +74,7 @@ const PROFILE_PADDING: usize = 256;
 pub const MAX_SEALED_RECORD_LEN: usize = 12 * 1024;
 /// The most sealed bytes a page holds; the program refuses more.
 pub const MAX_SEALED_PAGE_LEN: usize = 80 * 1024;
-/// The largest sequencer reply read: an account's shards, a page among them, as JSON.
+/// The largest sequencer reply read: one actor's state, a page at most, as JSON.
 const MAX_REPLY_LEN: usize = 1024 * 1024;
 /// ML-KEM-768 encapsulation key, as used for LEZ private accounts.
 pub const VPK_LEN: usize = 1184;
@@ -175,38 +176,56 @@ fn master(name: &str) -> [u8; 32] {
 }
 
 /// LEZ's public program-derived address for `seed` under `program`.
-fn pda(program: &AccountId, seed: &[u8; 32]) -> AccountId {
+pub fn pda(program: &AccountId, seed: &[u8; 32]) -> AccountId {
     let mut prefix = [0_u8; 32];
     prefix[..PDA_PREFIX.len()].copy_from_slice(PDA_PREFIX);
     sha256(&[&prefix, program, seed])
 }
 
-fn derived_address(program: &AccountId, domain: &[u8], id: &[u8; 32]) -> AccountId {
-    pda(program, &sha256(&[domain, id]))
+/// The seed of a name's record. A transaction that may create a registry account
+/// lists its seed as evidence, so each account's seed is here beside its address.
+pub fn name_seed(id: &NameId) -> [u8; 32] {
+    sha256(&[NAME_SEED_DOMAIN, id])
+}
+
+pub fn page_seed(id: &NameId) -> [u8; 32] {
+    sha256(&[PAGE_SEED_DOMAIN, id])
+}
+
+pub fn deposit_seed(id: &NameId) -> [u8; 32] {
+    sha256(&[DEPOSIT_SEED_DOMAIN, id])
+}
+
+pub fn commitment_seed(commitment: &[u8; 32]) -> [u8; 32] {
+    sha256(&[COMMITMENT_SEED_DOMAIN, commitment])
+}
+
+pub fn settings_seed() -> [u8; 32] {
+    sha256(&[SETTINGS_SEED])
 }
 
 pub fn record_address(program: &AccountId, id: &NameId) -> AccountId {
-    derived_address(program, NAME_SEED_DOMAIN, id)
+    pda(program, &name_seed(id))
 }
 
 pub fn page_address(program: &AccountId, id: &NameId) -> AccountId {
-    derived_address(program, PAGE_SEED_DOMAIN, id)
+    pda(program, &page_seed(id))
 }
 
 /// The account holding a name's deposit, as its native balance. Only the
 /// registry can move it, on release.
 pub fn deposit_address(program: &AccountId, id: &NameId) -> AccountId {
-    derived_address(program, DEPOSIT_SEED_DOMAIN, id)
+    pda(program, &deposit_seed(id))
 }
 
 /// The account holding the commitment `commitment`.
 pub fn commitment_address(program: &AccountId, commitment: &[u8; 32]) -> AccountId {
-    derived_address(program, COMMITMENT_SEED_DOMAIN, commitment)
+    pda(program, &commitment_seed(commitment))
 }
 
 /// The account holding the registry's settings.
 pub fn settings_address(program: &AccountId) -> AccountId {
-    pda(program, &sha256(&[SETTINGS_SEED]))
+    pda(program, &settings_seed())
 }
 
 /// The tag that stands for `account` as the holder of the name `id`. A record
@@ -219,6 +238,13 @@ pub fn owner_tag(id: &NameId, account: &AccountId) -> OwnerTag {
 /// that will hold it, and a secret the committer picks at random.
 pub fn commitment(id: &NameId, holder: &OwnerTag, secret: &[u8; 32]) -> [u8; 32] {
     sha256(&[COMMITMENT_DOMAIN, id, holder, secret])
+}
+
+/// The leaf of a name on the claims list: its record's address on the earlier
+/// chain, under the settings' `claims_program`, and its holder's tag.
+#[cfg(test)]
+pub fn claim_leaf(old_record: &AccountId, holder: &OwnerTag) -> [u8; 32] {
+    sha256(&[CLAIM_LEAF_DOMAIN, old_record, holder])
 }
 
 /// The ID of the chain's built-in clock program.
@@ -245,10 +271,19 @@ pub struct Settings {
     pub mode: u8,
     /// The deposit for a normal name and for a three-character name, in deposit mode.
     pub deposits: [u128; 2],
+    /// The root of the list of names that can be claimed from the earlier
+    /// chain; all zeros when there is none.
+    pub claims_root: [u8; 32],
+    /// Claims close at this time, in milliseconds. Until then a claim overrides
+    /// a registration.
+    pub claims_until: u64,
+    /// The registry on the earlier chain the list was taken from.
+    pub claims_program: AccountId,
 }
 
 impl Settings {
-    /// Decodes `{version, admin, treasury, prices: [u128; 3], mode: u8, deposits: [u128; 2]}`.
+    /// Decodes `{version, admin, treasury, prices: [u128; 3], mode: u8, deposits:
+    /// [u128; 2], claims_root, claims_until: u64, claims_program}`.
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         let mut reader = Reader { bytes };
         let _version = reader.u8()?;
@@ -263,7 +298,15 @@ impl Settings {
         for deposit in &mut deposits {
             *deposit = reader.u128()?;
         }
-        Ok(Self { admin, treasury, prices, mode, deposits })
+        let claims_root = reader.account()?;
+        let claims_until = reader.u64()?;
+        let claims_program = reader.account()?;
+        Ok(Self { admin, treasury, prices, mode, deposits, claims_root, claims_until, claims_program })
+    }
+
+    /// Whether names from the earlier chain can still be claimed at `now`.
+    pub fn claims_open(&self, now: u64) -> bool {
+        self.claims_root != [0; 32] && now < self.claims_until
     }
 
     pub fn deposit_mode(&self) -> bool {
@@ -362,7 +405,7 @@ impl Writer {
         self.bytes(text.as_bytes());
     }
 
-    fn optional(&mut self, value: Option<&[u8; 32]>) {
+    pub fn optional(&mut self, value: Option<&[u8; 32]>) {
         match value {
             None => self.0.push(0),
             Some(value) => {
@@ -510,17 +553,20 @@ pub struct Resolved {
     /// [`NEVER`] for a name held by a deposit.
     pub expires: u64,
     pub profile: Profile,
+    /// Carried over from the earlier chain, so it can't be claimed again.
+    pub claimed: bool,
 }
 
 impl Resolved {
-    /// Decodes the on-chain record `{version, owner, expires, sealed}` and opens it.
+    /// Decodes the on-chain record `{version, owner, expires, sealed, claimed}` and opens it.
     fn decode(bytes: &[u8], key: &[u8; 32], name: &str) -> Result<Self, String> {
         let mut reader = Reader { bytes };
         let _version = reader.u8()?;
         let owner = reader.account()?;
         let expires = reader.u64()?;
         let sealed = reader.byte_vec()?;
-        Ok(Self { owner, expires, profile: Profile::open(key, sealed, name) })
+        let claimed = reader.u8()? != 0;
+        Ok(Self { owner, expires, profile: Profile::open(key, sealed, name), claimed })
     }
 
     /// Whether the name is held by a deposit, and so never lapses.
@@ -569,6 +615,7 @@ impl Resolved {
             "expires": self.expires_json(),
             "never": self.never_expires(),
             "lapsed": self.lapsed(local_now()),
+            "claimed": self.claimed,
             "account": profile.account.as_ref().map(account_text),
             "npk": profile.npk.as_ref().map(|npk| hex(npk)),
             "vpk": (!profile.vpk.is_empty()).then(|| hex(&profile.vpk)),
@@ -607,12 +654,13 @@ pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// The program that holds every account's balance, as 16 little-endian bytes.
-const SYSTEM_PROGRAM: AccountId = [0; 32];
+/// The program whose state on an account is its balance, as 16 little-endian bytes.
+pub const NATIVE_TOKEN: AccountId = [0; 32];
 
-/// One program's shard out of an account's shards; empty when it has none.
-fn shard_bytes(shards: &Map<String, Value>, program: &AccountId) -> Result<Vec<u8>, String> {
-    match shards.get(&account_text(program)).and_then(Value::as_array) {
+/// The state of one actor as a sequencer's `getAccountView` reports it: a list of
+/// bytes under the program's ID, or nothing.
+fn actor_bytes(account: &Value, program: &AccountId) -> Result<Vec<u8>, String> {
+    match account["data"]["actor_states"][account_text(program)].as_array() {
         None => Ok(Vec::new()),
         Some(values) => values
             .iter()
@@ -626,12 +674,9 @@ fn shard_bytes(shards: &Map<String, Value>, program: &AccountId) -> Result<Vec<u
     }
 }
 
-/// An account's native balance, from its shards; 0 when it has none.
-fn native_balance(shards: &Map<String, Value>) -> Result<u128, String> {
-    Ok(match <[u8; 16]>::try_from(shard_bytes(shards, &SYSTEM_PROGRAM)?) {
-        Ok(bytes) => u128::from_le_bytes(bytes),
-        Err(_) => 0,
-    })
+/// An account's native balance, from its state; 0 when it has none.
+fn native_balance(state: &[u8]) -> u128 {
+    <[u8; 16]>::try_from(state).map_or(0, u128::from_le_bytes)
 }
 
 /// Reads hex, with or without a `0x` prefix.
@@ -655,15 +700,15 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// Every program's shard on `account`, keyed by program ID in base58.
-    fn shards(&self, account: &AccountId) -> Result<Map<String, Value>, String> {
+    /// `program`'s state on `account`; empty when it has none.
+    fn actor_state(&self, account: &AccountId, program: &AccountId) -> Result<Vec<u8>, String> {
         let response = ureq::post(&self.sequencer)
             .timeout(std::time::Duration::from_secs(15))
             .send_json(json!({
                 "jsonrpc": "2.0",
                 "id": 1,
-                "method": "getAccount",
-                "params": [account_text(account)],
+                "method": "getAccountView",
+                "params": [{ "account_id": account_text(account), "program_account_id": account_text(program) }],
             }))
             .map_err(|error| format!("could not reach the sequencer: {error}"))?;
         // Read at most MAX_REPLY_LEN: a sequencer that sends more is refused, not believed.
@@ -673,25 +718,22 @@ impl Registry {
         if body.len() > MAX_REPLY_LEN {
             return Err("the sequencer sent a reply larger than any account".to_owned());
         }
-        let mut reply: Value =
+        let reply: Value =
             serde_json::from_slice(&body).map_err(|error| format!("the sequencer sent an unreadable reply: {error}"))?;
         if let Some(error) = reply.get("error") {
             return Err(format!("the sequencer refused the read: {error}"));
         }
-        match reply["result"]["data"]["shards"].take() {
-            Value::Object(shards) => Ok(shards),
-            _ => Ok(Map::new()),
-        }
+        actor_bytes(&reply["result"], program)
     }
 
-    /// The registry's shard on `account`; empty when the account holds none.
-    fn shard(&self, account: &AccountId) -> Result<Vec<u8>, String> {
-        shard_bytes(&self.shards(account)?, &self.program)
+    /// The registry's state on `account`; empty when the account holds none.
+    fn state(&self, account: &AccountId) -> Result<Vec<u8>, String> {
+        self.actor_state(account, &self.program)
     }
 
     /// The native balance of `account`.
     pub fn balance(&self, account: &AccountId) -> Result<u128, String> {
-        native_balance(&self.shards(account)?)
+        Ok(native_balance(&self.actor_state(account, &NATIVE_TOKEN)?))
     }
 
     /// What the name `id`'s deposit account holds: the deposit a release refunds.
@@ -703,9 +745,8 @@ impl Registry {
     /// it is shown as if it has a confirmed one. The balance is text because it
     /// is a 128-bit number.
     pub fn account_summary(&self, account: &AccountId) -> Result<Value, String> {
-        let shards = self.shards(account)?;
-        let balance = native_balance(&shards)?;
-        let claimed = shard_bytes(&shards, &self.program)?;
+        let balance = self.balance(account)?;
+        let claimed = self.state(account)?;
         let name = if claimed.is_empty() { None } else { self.confirmed(account, &claimed)? };
         Ok(json!({
             "account": account_text(account),
@@ -724,7 +765,7 @@ impl Registry {
 
     /// The record of `name` exactly as the chain holds it, lapsed or not.
     pub fn record(&self, name: &str, derived: &Derived) -> Result<Option<Resolved>, String> {
-        let bytes = self.shard(&record_address(&self.program, &derived.id))?;
+        let bytes = self.state(&record_address(&self.program, &derived.id))?;
         if bytes.is_empty() {
             return Ok(None);
         }
@@ -735,7 +776,7 @@ impl Registry {
     /// (`{version, made}`), or `None` if there is none: it never landed, or a
     /// reveal used it up.
     pub fn commitment_made(&self, promised: &[u8; 32]) -> Result<Option<u64>, String> {
-        let bytes = self.shard(&commitment_address(&self.program, promised))?;
+        let bytes = self.state(&commitment_address(&self.program, promised))?;
         if bytes.is_empty() {
             return Ok(None);
         }
@@ -746,7 +787,7 @@ impl Registry {
 
     /// The registry's settings, or `None` while it has none and charges nothing.
     pub fn settings(&self) -> Result<Option<Settings>, String> {
-        let bytes = self.shard(&settings_address(&self.program))?;
+        let bytes = self.state(&settings_address(&self.program))?;
         if bytes.is_empty() {
             return Ok(None);
         }
@@ -758,7 +799,7 @@ impl Registry {
     /// substitute: a transaction that claims a time ahead of the chain's is
     /// rejected and still charged the whole fee ceiling.
     pub fn now(&self) -> Result<u64, String> {
-        shard_bytes(&self.shards(CLOCK_ACCOUNT)?, &clock_program())?
+        self.actor_state(CLOCK_ACCOUNT, &clock_program())?
             .get(8..16)
             .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
             .map(u64::from_le_bytes)
@@ -772,7 +813,7 @@ impl Registry {
         if self.resolve(name, derived)?.is_none() {
             return Ok(None);
         }
-        let bytes = self.shard(&page_address(&self.program, &derived.id))?;
+        let bytes = self.state(&page_address(&self.program, &derived.id))?;
         if bytes.is_empty() {
             return Ok(None);
         }
@@ -784,7 +825,7 @@ impl Registry {
     /// The name `account` is shown as. A reverse record is only a claim, so it
     /// counts only when the name's own record points back at the same account.
     pub fn reverse(&self, account: &AccountId) -> Result<Option<String>, String> {
-        let bytes = self.shard(account)?;
+        let bytes = self.state(account)?;
         if bytes.is_empty() {
             return Ok(None);
         }
@@ -941,11 +982,11 @@ mod tests {
         assert_eq!(Profile::open(&key, &unhex(SEALED_PAGE).expect("hex"), "jef"), bare);
     }
 
-    /// A record as `core` encodes `NameRecord { version: 5, owner: [1; 32],
-    /// expires: u64::MAX, sealed: [0xab] }`.
+    /// A record as `core` encodes `NameRecord { version: 6, owner: [1; 32],
+    /// expires: u64::MAX, sealed: [0xab], claimed: false }`.
     #[test]
     fn a_record_held_by_a_deposit_never_lapses() {
-        let bytes = unhex(&format!("05{}{}01000000ab", "01".repeat(32), "ff".repeat(8))).expect("hex");
+        let bytes = unhex(&format!("06{}{}01000000ab00", "01".repeat(32), "ff".repeat(8))).expect("hex");
         let resolved = Resolved::decode(&bytes, &[0; 32], "jef").expect("decodes");
         assert_eq!(resolved.owner, [1; 32]);
         assert_eq!(resolved.expires, NEVER);
@@ -963,14 +1004,16 @@ mod tests {
         let derived = derive("jef");
         let key = derived.key;
         let profile = Profile { npk: Some([3; 32]), vpk: vec![9, 9, 9, 9], ..sample_profile() };
-        let mut record = vec![5];
+        let mut record = vec![6];
         record.extend(owner_tag(&derived.id, &[1; 32]));
         record.extend(4_102_444_800_000_u64.to_le_bytes()); // the start of 2100
         let sealed = profile.seal(&key).expect("seals");
         record.extend((sealed.len() as u32).to_le_bytes());
         record.extend(&sealed);
+        record.push(1);
 
         let resolved = Resolved::decode(&record, &key, "jef").expect("decodes");
+        assert!(resolved.claimed);
         assert!(resolved.is_held_by(&derived.id, &[1; 32]));
         assert!(!resolved.is_held_by(&derived.id, &[2; 32]));
         assert_eq!(resolved.expires, 4_102_444_800_000);
@@ -991,37 +1034,45 @@ mod tests {
         assert!(Resolved::decode(&record[..20], &key, "jef").is_err(), "truncated");
     }
 
-    /// The live v5 registry's settings shard (`38jEfVV1…h2gq` on the LEZ
-    /// testnet, read 2026-10-16), and core's encoding of
-    /// `Settings { version: 5, admin: [1; 32], treasury: [2; 32], prices: [1, 2, 3],
-    /// mode: 1, deposits: [100_000_000, 2_000_000_000] }`.
+    /// core's encoding of `Settings { version: 6, admin: [1; 32], treasury: [2; 32],
+    /// prices: [1, 2, 3], mode: 1, deposits: [100_000_000, 2_000_000_000], claims_root:
+    /// [3; 32], claims_until: 7, claims_program: [4; 32] }`.
     #[test]
     fn settings_decode_as_core_writes_them() {
-        let live = unhex(&format!(
-            "05{admin}{admin}{}01{}{}",
-            "00".repeat(48),
+        let core = unhex(&format!(
+            "06{}{}{}{}{}01{}{}{}{}{}",
+            "01".repeat(32),
+            "02".repeat(32),
+            "01000000000000000000000000000000",
+            "02000000000000000000000000000000",
+            "03000000000000000000000000000000",
             "00e1f505000000000000000000000000",
             "00943577000000000000000000000000",
-            admin = "b6b80d9b12a1f9e36d60476dd4e41b4a2d5412671592f7447827728f83557808",
+            "03".repeat(32),
+            "0700000000000000",
+            "04".repeat(32),
         ))
         .expect("hex");
-        let settings = Settings::decode(&live).expect("decodes");
+        let settings = Settings::decode(&core).expect("decodes");
+        assert_eq!(
+            settings,
+            Settings {
+                admin: [1; 32],
+                treasury: [2; 32],
+                prices: [1, 2, 3],
+                mode: MODE_DEPOSIT,
+                deposits: [100_000_000, 2_000_000_000],
+                claims_root: [3; 32],
+                claims_until: 7,
+                claims_program: [4; 32],
+            }
+        );
         assert!(settings.deposit_mode());
-        assert_eq!(settings.deposits, [100_000_000, 2_000_000_000]);
-        assert_eq!(settings.prices, [0, 0, 0]);
-        assert_eq!(settings.admin, settings.treasury);
         assert_eq!(Settings::mode_text(Some(&settings)), "deposit");
         assert_eq!(Settings::mode_text(None), "unconfigured");
-
-        let core = unhex(
-            "05010101010101010101010101010101010101010101010101010101010101010102020202020202020202020202020202020202020202020202020202020202020100000000000000000000000000000002000000000000000000000000000000030000000000000000000000000000000100e1f50500000000000000000000000000943577000000000000000000000000",
-        )
-        .expect("hex");
-        assert_eq!(
-            Settings::decode(&core).expect("decodes"),
-            Settings { admin: [1; 32], treasury: [2; 32], prices: [1, 2, 3], mode: MODE_DEPOSIT, deposits: [100_000_000, 2_000_000_000] }
-        );
         assert!(Settings::decode(&core[..core.len() - 1]).is_err(), "truncated");
+        assert!(settings.claims_open(6) && !settings.claims_open(7));
+        assert!(!Settings { claims_root: [0; 32], ..settings }.claims_open(6), "no list, no claims");
         // The clock's address as the chain itself reports it.
         assert_eq!(account_text(&clock_program()), "2hwaRW8sMnyKLLRbDRw8k68tiv9bnfq98oxcdtcp157Z");
         assert_eq!(TERM_LENGTHS_MS[1], 31_536_000_000);
@@ -1041,18 +1092,21 @@ mod tests {
         assert!(parse_account("not-an-account").is_err());
     }
 
+    /// The shape `getAccountView` answers in; `gateway/app-src/vectors/engine-report.json` has real ones.
     #[test]
-    fn shards_are_picked_by_program_and_hex_reads_back() {
+    fn actor_state_is_read_by_program_and_hex_reads_back() {
         let mut balance = vec![5];
         balance.resize(16, 0);
-        let mut shards = Map::new();
-        shards.insert(account_text(&SYSTEM_PROGRAM), json!(balance));
-        shards.insert(account_text(&PROGRAM), json!([1, 2, 3]));
-        assert_eq!(account_text(&SYSTEM_PROGRAM), "1".repeat(32));
-        assert_eq!(shard_bytes(&shards, &PROGRAM), Ok(vec![1, 2, 3]));
-        assert_eq!(shard_bytes(&shards, &[9; 32]), Ok(Vec::new()));
-        assert_eq!(native_balance(&shards), Ok(5));
-        assert_eq!(native_balance(&Map::new()), Ok(0));
+        let account = json!({ "data": { "actor_states": {
+            account_text(&NATIVE_TOKEN): balance,
+            account_text(&PROGRAM): [1, 2, 3],
+        } } });
+        assert_eq!(account_text(&NATIVE_TOKEN), "1".repeat(32));
+        assert_eq!(actor_bytes(&account, &PROGRAM), Ok(vec![1, 2, 3]));
+        assert_eq!(actor_bytes(&account, &[9; 32]), Ok(Vec::new()));
+        assert_eq!(actor_bytes(&Value::Null, &PROGRAM), Ok(Vec::new()), "an account not on the chain");
+        assert_eq!(native_balance(&actor_bytes(&account, &NATIVE_TOKEN).expect("bytes")), 5);
+        assert_eq!(native_balance(&[]), 0);
 
         assert_eq!(unhex("0x0aFF"), Ok(vec![10, 255]));
         assert_eq!(unhex(&hex(&[0, 7, 255])), Ok(vec![0, 7, 255]));

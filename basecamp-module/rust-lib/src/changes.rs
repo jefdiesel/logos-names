@@ -1,20 +1,22 @@
-//! Builds the transactions that change a name, following SPEC.md section 8 and
-//! registry v5's rules (deposits, the short-name list, commit then reveal).
+//! Builds the transactions that change a name, following SPEC.md sections 8
+//! and 8.3 (commit then reveal, deposits, the short-name list).
 //!
 //! Each function reads what it needs from the registry, checks what it can,
 //! and returns a [`Change`] for a wallet to sign. The chain cannot check what
 //! is inside a sealed profile, so the limits on entries, keys and pages are
 //! enforced here. Checking first also turns a refused transaction into an
-//! explanation: LEZ includes failed transactions in blocks without saying why.
+//! explanation.
 //!
-//! The accounts each change passes, and which of them select the native
-//! token's shard, are the ones the CLI (`cli/src/main.rs`) passes on its
-//! public-account path. This module signs only with public accounts.
+//! A change is one `Message::Instruction` to the signer's own actor of the
+//! registry. It lists every actor the program reaches, and for each registry
+//! account its seed, the evidence without which a transaction that creates the
+//! account is refused and still charged. The lists are the ones the CLI
+//! (`cli/src/main.rs`) makes. This module signs only with public accounts.
 
 use crate::registry::{
-    account_text, commitment, commitment_address, deposit_address, is_valid_name, owner_tag, page_address,
-    record_address, seal_page, settings_address, AccountId, Derived, NameId, OwnerTag, Profile, Registry, Resolved,
-    Settings, Writer, MAX_SEALED_PAGE_LEN, MAX_SEALED_RECORD_LEN, NAME_SUFFIX, VPK_LEN,
+    account_text, commitment, commitment_seed, deposit_seed, is_valid_name, name_seed, owner_tag, page_seed,
+    pda, seal_page, settings_seed, AccountId, Derived, NameId, OwnerTag, Profile, Registry, Resolved, Settings,
+    Writer, MAX_SEALED_PAGE_LEN, MAX_SEALED_RECORD_LEN, NAME_SUFFIX, NATIVE_TOKEN, VPK_LEN,
 };
 use crate::shortlist::{length_proof, LengthProof, TIER_LOCKED, TIER_THREE};
 use serde_json::{json, Value};
@@ -29,19 +31,26 @@ const PAGE_OVERHEAD: usize = 12 + 16 + 4 + MAX_CONTENT_TYPE_LEN + 4;
 /// In deposit mode the program ignores it.
 pub const REGISTER_TERM: u8 = 1;
 
+/// One actor a change reaches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mention {
+    pub account: AccountId,
+    /// Whose state on `account` it is: the registry's, or the native balance.
+    pub program: AccountId,
+    /// The account's seed, when it is one of the registry's.
+    pub seed: Option<[u8; 32]>,
+    /// Whether the signer's key signs for it.
+    pub signs: bool,
+}
+
 /// One instruction for the registry, ready to sign and send.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Change {
-    /// The borsh-encoded instruction.
-    pub instruction: Vec<u8>,
-    /// The accounts the instruction runs over, in the order the program expects.
-    pub accounts: Vec<AccountId>,
-    /// How many accounts at the end of `accounts` are used for their native
-    /// token balance rather than for the registry's data: the payer and the
-    /// account paid (a deposit account or the treasury), or the owner and the
-    /// deposit account refunded.
-    pub balances: usize,
-    /// The one account that signs and pays. It is always among `accounts`.
+    /// `borsh(Message::Instruction(..))`.
+    pub message: Vec<u8>,
+    /// The signer's own actor, then every other actor the message reaches.
+    pub mentions: Vec<Mention>,
+    /// The one account that signs and pays.
     pub signer: AccountId,
     /// What the signer must hold beyond the transaction's own gas: a deposit or fee.
     pub needs: u128,
@@ -50,25 +59,54 @@ pub struct Change {
 }
 
 impl Change {
-    fn new(instruction: Vec<u8>, accounts: Vec<AccountId>, signer: AccountId) -> Self {
-        Self { instruction, accounts, balances: 0, signer, needs: 0, extra: Value::Null }
+    /// A change from `signer`'s own actor of `program` to the actors in `reached`.
+    fn new(program: &AccountId, message: Vec<u8>, signer: AccountId, reached: Vec<Mention>) -> Self {
+        let mut mentions = vec![Mention { account: signer, program: *program, seed: None, signs: true }];
+        mentions.extend(reached);
+        Self { message, mentions, signer, needs: 0, extra: Value::Null }
     }
 }
 
-/// An instruction that opens with its index and the name's identifier.
-fn on_name(index: u8, id: &NameId) -> Writer {
-    let mut writer = Writer(vec![index]);
+/// The registry's account behind `seed`.
+fn registry_actor(program: &AccountId, seed: [u8; 32]) -> Mention {
+    Mention { account: pda(program, &seed), program: *program, seed: Some(seed), signs: false }
+}
+
+/// The native balance of the registry's account behind `seed`.
+fn registry_balance(program: &AccountId, seed: [u8; 32]) -> Mention {
+    Mention { account: pda(program, &seed), program: NATIVE_TOKEN, seed: Some(seed), signs: false }
+}
+
+/// The native balance of the account that signs.
+fn signer_balance(signer: AccountId) -> Mention {
+    Mention { account: signer, program: NATIVE_TOKEN, seed: None, signs: true }
+}
+
+/// The native balance of a plain account.
+fn plain_balance(account: AccountId) -> Mention {
+    Mention { account, program: NATIVE_TOKEN, seed: None, signs: false }
+}
+
+/// An instruction, opening with `Message::Instruction`'s tag and its own.
+fn instruction(variant: u8) -> Writer {
+    Writer(vec![0, variant])
+}
+
+/// An instruction that opens with the name's identifier.
+fn on_name(variant: u8, id: &NameId) -> Writer {
+    let mut writer = instruction(variant);
     writer.0.extend(id);
     writer
 }
 
-/// `Register { id, sealed, term, fee, now, secret, deposit, length }`.
+/// `Register { id, sealed, term, fee, treasury, now, secret, deposit, length }`.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_register(
     id: &NameId,
     sealed: &[u8],
     term: u8,
     fee: u128,
+    treasury: Option<&AccountId>,
     now: u64,
     secret: &[u8; 32],
     deposit: bool,
@@ -78,6 +116,7 @@ pub fn encode_register(
     writer.bytes(sealed);
     writer.u8(term);
     writer.u128(fee);
+    writer.optional(treasury);
     writer.u64(now);
     writer.0.extend(secret);
     writer.bool(deposit);
@@ -112,14 +151,14 @@ pub fn encode_release(id: &NameId, refund: u128) -> Vec<u8> {
 }
 
 pub fn encode_set_primary(name: &str) -> Vec<u8> {
-    let mut writer = Writer(vec![6]);
+    let mut writer = instruction(6);
     writer.string(name);
     writer.0
 }
 
 /// `Commit { commitment, now }`.
 pub fn encode_commit(commitment: &[u8; 32], now: u64) -> Vec<u8> {
-    let mut writer = Writer(vec![8]);
+    let mut writer = instruction(8);
     writer.0.extend(commitment);
     writer.u64(now);
     writer.0
@@ -162,9 +201,8 @@ pub struct Charge {
     pub amount: u128,
     /// Whether it is paid as a deposit.
     pub deposit: bool,
-    /// The account paid, passed after the payer when `amount` is not 0: the
-    /// name's deposit account, or the treasury.
-    pub paid_to: Option<AccountId>,
+    /// The treasury a fee goes to, when there is a fee.
+    pub treasury: Option<AccountId>,
 }
 
 /// What `payer` owes to register the name `id` of length tier `tier`, as the
@@ -179,8 +217,6 @@ pub struct Charge {
 ///   itself owes nothing; an unconfigured registry charges nothing.
 pub fn registration_charge(
     settings: Option<&Settings>,
-    program: &AccountId,
-    id: &NameId,
     tier: u8,
     payer: &AccountId,
 ) -> Result<Charge, String> {
@@ -191,17 +227,30 @@ pub fn registration_charge(
     Ok(match settings {
         Some(settings) if settings.deposit_mode() => {
             let amount = if *payer == settings.admin { 0 } else { settings.deposits[usize::from(tier == TIER_THREE)] };
-            Charge { amount, deposit: true, paid_to: (amount != 0).then(|| deposit_address(program, id)) }
+            Charge { amount, deposit: true, treasury: None }
         }
         Some(settings) if settings.treasury != *payer => {
             let amount = settings.prices[usize::from(REGISTER_TERM)];
-            Charge { amount, deposit: false, paid_to: (amount != 0).then_some(settings.treasury) }
+            Charge { amount, deposit: false, treasury: (amount != 0).then_some(settings.treasury) }
         }
-        _ => Charge { amount: 0, deposit: false, paid_to: None },
+        _ => Charge { amount: 0, deposit: false, treasury: None },
     })
 }
 
 impl Charge {
+    /// The balances a payment of this charge touches: the payer's, and that of the
+    /// account paid, which must be declared to be credited in the same transaction.
+    fn paying(&self, program: &AccountId, id: &NameId, payer: AccountId) -> Vec<Mention> {
+        if self.amount == 0 {
+            return Vec::new();
+        }
+        let paid = match self.treasury {
+            Some(treasury) => plain_balance(treasury),
+            None => registry_balance(program, deposit_seed(id)),
+        };
+        vec![signer_balance(payer), paid]
+    }
+
     fn to_json(&self) -> Value {
         if self.deposit {
             json!({ "deposit": self.amount.to_string() })
@@ -254,19 +303,20 @@ impl Registry {
             ));
         }
         Ok(Change::new(
+            &self.program,
             encode_set_record(&derived.id, &profile.seal(&derived.key)?),
-            vec![record_address(&self.program, &derived.id), holder],
             holder,
+            vec![registry_actor(&self.program, name_seed(&derived.id))],
         ))
     }
 
-    /// A change over the `[record, page, holder]` accounts.
-    fn on_record_and_page(&self, derived: &Derived, holder: AccountId, instruction: Vec<u8>) -> Change {
-        Change::new(
-            instruction,
-            vec![record_address(&self.program, &derived.id), page_address(&self.program, &derived.id), holder],
-            holder,
-        )
+    /// A change that reaches the name's record and page.
+    fn on_record_and_page(&self, derived: &Derived, holder: AccountId, message: Vec<u8>) -> Change {
+        let reached = vec![
+            registry_actor(&self.program, name_seed(&derived.id)),
+            registry_actor(&self.program, page_seed(&derived.id)),
+        ];
+        Change::new(&self.program, message, holder, reached)
     }
 
     /// Refuses a name that is registered (a fee-mode name past its grace
@@ -276,7 +326,7 @@ impl Registry {
             return Err(format!("{} is already registered", display(name)));
         }
         let (length, tier) = length_proof(&derived.id)?;
-        let charge = registration_charge(self.settings()?.as_ref(), &self.program, &derived.id, tier, owner)
+        let charge = registration_charge(self.settings()?.as_ref(), tier, owner)
             .map_err(|reason| format!("{} is not available: {reason}", display(name)))?;
         Ok((length, tier, charge))
     }
@@ -285,29 +335,30 @@ impl Registry {
     /// without revealing the name, its identifier or `owner`. Returns the
     /// change and the time it claims; the reveal ([`Self::reveal`]) is valid
     /// from [`MIN_COMMIT_AGE_MS`](crate::registry::MIN_COMMIT_AGE_MS) after it.
-    /// Accounts: `[commitment, owner]`, both with the registry's shard.
     pub fn commit(&self, name: &str, derived: &Derived, owner: &AccountId, secret: &[u8; 32]) -> Result<(Change, u64), String> {
         let (_, tier, charge) = self.claimable(name, derived, owner)?;
         let promised = commitment(&derived.id, &owner_tag(&derived.id, owner), secret);
         let now = self.now()?;
         let mut change = Change::new(
+            &self.program,
             encode_commit(&promised, now),
-            vec![commitment_address(&self.program, &promised), *owner],
             *owner,
+            vec![registry_actor(&self.program, commitment_seed(&promised))],
         );
         // The deposit is checked now, so a commitment isn't made that can't be revealed.
         change.needs = charge.amount;
         change.extra = charge.to_json();
         change.extra["tier"] = Value::from(tier_text(tier));
+        if let Some(settings) = self.settings()?.filter(|settings| settings.claims_open(now)) {
+            change.extra["claims_until"] = Value::from(settings.claims_until);
+        }
         Ok((change, now))
     }
 
     /// Step 2 of registering: reveals the commitment made with `secret` and
     /// claims `name` for `owner`, with a first profile that holds the name and,
     /// when `private_keys` are given, where it can be paid privately. The
-    /// deposit or fee is paid from `owner`. Accounts: `[record, page, settings,
-    /// commitment]` with the registry's shard, then `owner` and, when something
-    /// is paid, the deposit account or the treasury, with the native token's.
+    /// deposit or fee is paid from `owner`.
     pub fn reveal(
         &self,
         name: &str,
@@ -323,26 +374,25 @@ impl Registry {
             profile.vpk = vpk;
         }
         let promised = commitment(&derived.id, &owner_tag(&derived.id, owner), secret);
-        let mut accounts = vec![
-            record_address(&self.program, &derived.id),
-            page_address(&self.program, &derived.id),
-            settings_address(&self.program),
-            commitment_address(&self.program, &promised),
-            *owner,
+        let mut reached = vec![
+            registry_actor(&self.program, name_seed(&derived.id)),
+            registry_actor(&self.program, page_seed(&derived.id)),
+            registry_actor(&self.program, settings_seed()),
+            registry_actor(&self.program, commitment_seed(&promised)),
         ];
-        accounts.extend(charge.paid_to);
-        let instruction = encode_register(
+        reached.extend(charge.paying(&self.program, &derived.id, *owner));
+        let message = encode_register(
             &derived.id,
             &profile.seal(&derived.key)?,
             REGISTER_TERM,
             charge.amount,
+            charge.treasury.as_ref(),
             self.now()?,
             secret,
             charge.deposit,
             &length,
         );
-        let mut change = Change::new(instruction, accounts, *owner);
-        change.balances = 1 + usize::from(charge.paid_to.is_some());
+        let mut change = Change::new(&self.program, message, *owner, reached);
         change.needs = charge.amount;
         change.extra = charge.to_json();
         change.extra["tier"] = Value::from(tier_text(tier));
@@ -468,17 +518,14 @@ impl Registry {
     }
 
     /// Gives the name up, refunding its deposit to the holder: the deposit
-    /// account's whole balance, read from the chain. With a refund the accounts
-    /// are `[record, page]` with the registry's shard, then the holder and the
-    /// deposit account with the native token's; without, `[record, page,
-    /// holder]`, all with the registry's.
+    /// account's whole balance, read from the chain.
     pub fn release(&self, name: &str, derived: &Derived, held: &[AccountId]) -> Result<Change, String> {
         let (_, holder) = self.holder(name, derived, held)?;
         let refund = self.deposit(&derived.id)?;
         let mut change = self.on_record_and_page(derived, holder, encode_release(&derived.id, refund));
         if refund != 0 {
-            change.accounts.push(deposit_address(&self.program, &derived.id));
-            change.balances = 2;
+            change.mentions.push(registry_balance(&self.program, deposit_seed(&derived.id)));
+            change.mentions.push(signer_balance(holder));
         }
         change.extra = json!({ "refund": refund.to_string() });
         Ok(change)
@@ -499,7 +546,7 @@ impl Registry {
                 return Err(format!("{} does not point at {}", display(name), account_text(account)));
             }
         }
-        Ok(Change::new(encode_set_primary(name), vec![*account], *account))
+        Ok(Change::new(&self.program, encode_set_primary(name), *account, Vec::new()))
     }
 }
 
@@ -540,125 +587,154 @@ mod tests {
         hex(&Sha256::digest(bytes))
     }
 
-    /// Bytes from `names_core`'s own borsh encoding of each instruction: the
-    /// vectors of SPEC.md and core's tests, and the rest generated from core.
+    /// Bytes from `names_core`'s own borsh encoding of each instruction, from
+    /// `gateway/app-src/vectors/vectors.json`, which the Rust types made.
     #[test]
     fn instructions_encode_as_core_does() {
+        let vectors: Value = serde_json::from_str(include_str!("../../../gateway/app-src/vectors/vectors.json")).expect("JSON");
+        let expected = |name: &str| vectors["instructions"][name].as_str().expect("a vector").to_owned();
         let id = id();
-        let id_hex = hex(&id);
-        // core: addresses_and_instructions_match_the_specification.
-        let member = LengthProof::Membership(Membership { index: 7, tier: TIER_THREE, path: Vec::new() });
+        const NOW: u64 = 1_700_000_000_000;
+        let member = LengthProof::Membership(Membership { index: 7, tier: TIER_THREE, path: vec![[9; 32]] });
         assert_eq!(
-            hex(&encode_register(&id, &[0xEE, 0xFF], 1, 100_000, 1_700_000_000_000, &[0x5A; 32], false, &member)),
-            format!(
-                "00{id_hex}02000000eeff01a08601000000000000000000000000000068e5cf8b010000{}00000700000003{}",
-                "5a".repeat(32),
-                "00".repeat(4)
-            )
+            hex(&encode_register(&id, &[0xEE, 0xFF], 1, 100_000, Some(&[2; 32]), NOW, &[0x5A; 32], false, &member)),
+            expected("register")
         );
-        // Generated from core: a deposit registration with a non-membership proof.
         let non_member = LengthProof::NonMembership(NonMembership {
-            left: Leaf { id: [0; 32], tier: 0xff },
-            left_path: vec![[0xAA; 32]],
-            right: Leaf { id: [0xff; 32], tier: 0xff },
-            right_path: vec![[0xBB; 32]],
-            left_index: 9,
+            left: Leaf { id: [1; 32], tier: 3 },
+            left_path: vec![[3; 32]],
+            right: Leaf { id: [2; 32], tier: 1 },
+            right_path: vec![[4; 32], [5; 32]],
+            left_index: 6,
         });
         assert_eq!(
-            hex(&encode_register(&id, &[0xEE], 0, 0, 1, &[0x11; 32], true, &non_member)),
-            "00000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f01000000ee00000000000000000000000000000000000100000000000000111111111111111111111111111111111111111111111111111111111111111101010000000000000000000000000000000000000000000000000000000000000000ff01000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff01000000bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb09000000"
+            hex(&encode_register(&id, &[0xEE], 0, 1_000_000, None, NOW, &[0x5A; 32], true, &non_member)),
+            expected("registerDeposit")
         );
-        assert_eq!(
-            hex(&encode_commit(&[0xC0; 32], 1_700_000_000_000)),
-            format!("08{}0068e5cf8b010000", "c0".repeat(32))
-        );
-        assert_eq!(hex(&encode_set_record(&id, &[0xEE])), format!("02{id_hex}01000000ee"));
-        assert_eq!(hex(&encode_set_page(&id, &[])), format!("03{id_hex}00000000"));
-        assert_eq!(hex(&encode_transfer(&id, &[2; 32])), format!("04{id_hex}{}", "02".repeat(32)));
-        assert_eq!(hex(&encode_release(&id, 0)), format!("05{id_hex}{}", "00".repeat(16)));
-        assert_eq!(
-            hex(&encode_release(&id, 100_000_000)),
-            "05000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f00e1f505000000000000000000000000"
-        );
-        assert_eq!(hex(&encode_set_primary("jef")), "06030000006a6566");
-        assert_eq!(hex(&encode_set_primary("")), "0600000000");
+        assert_eq!(hex(&encode_commit(&[0xC0; 32], NOW)), expected("commit"));
+        assert_eq!(hex(&encode_set_record(&id, &[0xEE])), expected("setRecord"));
+        assert_eq!(hex(&encode_set_page(&id, &[])), expected("setPage"));
+        assert_eq!(hex(&encode_transfer(&id, &[2; 32])), expected("transfer"));
+        assert_eq!(hex(&encode_release(&id, 1_000_000)), expected("release"));
+        assert_eq!(hex(&encode_set_primary("jef")), expected("setPrimary"));
+    }
+
+    /// The seeds a change lists as evidence, and the addresses they give, as core
+    /// derives them.
+    #[test]
+    fn seeds_match_core() {
+        let vectors: Value = serde_json::from_str(include_str!("../../../gateway/app-src/vectors/vectors.json")).expect("JSON");
+        let id = id();
+        let hexed = |key: &str| vectors["seeds"][key].as_str().expect("a seed").to_owned();
+        assert_eq!(hex(&name_seed(&id)), hexed("name"));
+        assert_eq!(hex(&page_seed(&id)), hexed("page"));
+        assert_eq!(hex(&deposit_seed(&id)), hexed("deposit"));
+        assert_eq!(hex(&settings_seed()), hexed("settings"));
+    }
+
+    /// Every actor a change reaches, in the shape the CLI's public path sends. Each
+    /// registry account carries its seed: without one a transaction that creates the
+    /// account is refused and still charged.
+    #[test]
+    fn a_change_declares_the_actors_it_reaches() {
+        let program = [7; 32];
+        let id = id();
+        let owner = [9; 32];
+        let charge = Charge { amount: 100, deposit: true, treasury: None };
+        let paying = charge.paying(&program, &id, owner);
+        assert_eq!(paying[0], Mention { account: owner, program: NATIVE_TOKEN, seed: None, signs: true });
+        let seed = deposit_seed(&id);
+        assert_eq!(paying[1], Mention { account: pda(&program, &seed), program: NATIVE_TOKEN, seed: Some(seed), signs: false });
+        let fee = Charge { amount: 100, deposit: false, treasury: Some([2; 32]) };
+        assert_eq!(fee.paying(&program, &id, owner)[1], Mention { account: [2; 32], program: NATIVE_TOKEN, seed: None, signs: false });
+        assert!(Charge { amount: 0, deposit: true, treasury: None }.paying(&program, &id, owner).is_empty());
+
+        let change = Change::new(&program, vec![0, 6], owner, vec![registry_actor(&program, name_seed(&id))]);
+        assert_eq!(change.mentions[0], Mention { account: owner, program, seed: None, signs: true }, "the root is the signer's own actor");
+        assert_eq!(change.mentions[1].program, program);
+        assert_eq!(change.mentions[1].seed, Some(name_seed(&id)));
+        assert_eq!(change.mentions[1].account, crate::registry::record_address(&program, &id));
     }
 
     /// Whole registrations with the real list's proofs, against the sha256 of
     /// core's encoding of `Register { id, sealed: [ee, ff], term: 1, fee:
-    /// 100_000_000, now: 1_700_000_000_000, secret: 32 × 0x5a, deposit: true,
-    /// length }`.
+    /// 100_000_000, treasury: None, now: 1_700_000_000_000, secret: 32 × 0x5a,
+    /// deposit: true, length }`, as `Message::Instruction`.
     #[test]
     fn real_registrations_encode_as_core_does() {
         for (name, length, digest) in [
-            ("qkz", 619, "7136a3002e66725e715236c2567a947e17eeb4cd2089c5c655249bf970ea9260"),
-            ("logos", 1200, "d029982f19de4ad97dbb8c40e22cd93c89b2fb718598e2f33b077c6197acb7e9"),
+            ("qkz", 621, "625b1a3e6be8d0af6848c3e2f140bf1cef7cb7a29c5804e1e0e7022dcd51ba3d"),
+            ("logos", 1202, "398990ec6e2f4be68ff15c1b17d1ad31a8b8cefa699b2ba5c47fb62e871c40af"),
         ] {
             let id = derive(name).id;
             let (proof, _) = length_proof(&id).expect("a proof");
-            let bytes = encode_register(&id, &[0xEE, 0xFF], 1, 100_000_000, 1_700_000_000_000, &[0x5A; 32], true, &proof);
+            let bytes = encode_register(&id, &[0xEE, 0xFF], 1, 100_000_000, None, 1_700_000_000_000, &[0x5A; 32], true, &proof);
             assert_eq!(bytes.len(), length, "{name}");
             assert_eq!(sha(&bytes), digest, "{name}");
         }
     }
 
     fn settings(mode: u8) -> Settings {
-        Settings { admin: [1; 32], treasury: [2; 32], prices: [10, 20, 30], mode, deposits: [100, 2_000] }
+        Settings {
+            admin: [1; 32],
+            treasury: [2; 32],
+            prices: [10, 20, 30],
+            mode,
+            deposits: [100, 2_000],
+            claims_root: [0; 32],
+            claims_until: 0,
+            claims_program: [0; 32],
+        }
     }
 
     #[test]
     fn deposits_follow_the_tier_and_the_admin_pays_nothing() {
-        let program = [7; 32];
-        let id = [0xAB; 32];
-        let deposit = deposit_address(&program, &id);
         let payer = [9; 32];
         let deposits = settings(MODE_DEPOSIT);
         assert_eq!(
-            registration_charge(Some(&deposits), &program, &id, TIER_NORMAL, &payer),
-            Ok(Charge { amount: 100, deposit: true, paid_to: Some(deposit) })
+            registration_charge(Some(&deposits), TIER_NORMAL, &payer),
+            Ok(Charge { amount: 100, deposit: true, treasury: None })
         );
         assert_eq!(
-            registration_charge(Some(&deposits), &program, &id, TIER_THREE, &payer),
-            Ok(Charge { amount: 2_000, deposit: true, paid_to: Some(deposit) })
+            registration_charge(Some(&deposits), TIER_THREE, &payer),
+            Ok(Charge { amount: 2_000, deposit: true, treasury: None })
         );
-        assert!(registration_charge(Some(&deposits), &program, &id, TIER_LOCKED, &payer).is_err());
+        assert!(registration_charge(Some(&deposits), TIER_LOCKED, &payer).is_err());
         // The admin places names, a locked one included, without a deposit.
         for tier in [TIER_NORMAL, TIER_THREE, TIER_LOCKED] {
             assert_eq!(
-                registration_charge(Some(&deposits), &program, &id, tier, &[1; 32]),
-                Ok(Charge { amount: 0, deposit: true, paid_to: None })
+                registration_charge(Some(&deposits), tier, &[1; 32]),
+                Ok(Charge { amount: 0, deposit: true, treasury: None })
             );
         }
-        // A deposit of 0 passes no deposit account.
+        // A deposit of 0 takes no balances.
         let free = Settings { deposits: [0, 0], ..settings(MODE_DEPOSIT) };
         assert_eq!(
-            registration_charge(Some(&free), &program, &id, TIER_THREE, &payer),
-            Ok(Charge { amount: 0, deposit: true, paid_to: None })
+            registration_charge(Some(&free), TIER_THREE, &payer),
+            Ok(Charge { amount: 0, deposit: true, treasury: None })
         );
     }
 
     #[test]
     fn fee_mode_charges_a_years_price_to_the_treasury() {
-        let program = [7; 32];
-        let id = [0xAB; 32];
         let payer = [9; 32];
         let fees = settings(MODE_FEE);
         assert_eq!(
-            registration_charge(Some(&fees), &program, &id, TIER_THREE, &payer),
-            Ok(Charge { amount: 20, deposit: false, paid_to: Some([2; 32]) })
+            registration_charge(Some(&fees), TIER_THREE, &payer),
+            Ok(Charge { amount: 20, deposit: false, treasury: Some([2; 32]) })
         );
         assert_eq!(
-            registration_charge(Some(&fees), &program, &id, TIER_NORMAL, &[2; 32]),
-            Ok(Charge { amount: 0, deposit: false, paid_to: None }),
+            registration_charge(Some(&fees), TIER_NORMAL, &[2; 32]),
+            Ok(Charge { amount: 0, deposit: false, treasury: None }),
             "the treasury pays nothing"
         );
-        assert!(registration_charge(Some(&fees), &program, &id, TIER_LOCKED, &payer).is_err());
+        assert!(registration_charge(Some(&fees), TIER_LOCKED, &payer).is_err());
         assert_eq!(
-            registration_charge(None, &program, &id, TIER_NORMAL, &payer),
-            Ok(Charge { amount: 0, deposit: false, paid_to: None }),
+            registration_charge(None, TIER_NORMAL, &payer),
+            Ok(Charge { amount: 0, deposit: false, treasury: None }),
             "an unconfigured registry is free"
         );
-        assert!(registration_charge(None, &program, &id, TIER_LOCKED, &payer).is_err(), "and locks short names");
+        assert!(registration_charge(None, TIER_LOCKED, &payer).is_err(), "and locks short names");
     }
 
     #[test]

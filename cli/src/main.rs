@@ -581,6 +581,9 @@ enum Command {
         #[arg(value_parser = board::parse_post)]
         post: board::PostRef,
     },
+    /// What the Basecamp module asks of this wallet: it keeps no keys and has no prover.
+    #[command(subcommand, hide = true)]
+    Module(module::Request),
 }
 
 /// Renders a page for `names` and one for each command, leaving out this one.
@@ -596,6 +599,7 @@ fn write_man_pages(dir: &std::path::Path) -> Result<()> {
 
 mod board;
 mod claims;
+mod module;
 
 /// Accepts a name as people write it (`jef`, `@jef`, `lns:jef` or `jef.lez`, any case) and returns the bare name.
 fn parse_name(input: &str) -> Result<String, String> {
@@ -2234,6 +2238,8 @@ async fn main() -> Result<()> {
             let rpc = cli.rpc.as_deref().unwrap_or(DEFAULT_RPC);
             return bridge(rpc, &node, amount, &to, &from_key, max_fee, yes);
         }
+        // Runs where the wallet does not open, so it can't wait for the client below.
+        Command::Module(module::Request::Restore { accounts }) => return module::restore(accounts, overrides).await,
         _ => {}
     }
     let program = match cli.program {
@@ -2276,6 +2282,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Setup { shield } => setup(&mut client, shield).await,
+        Command::Module(request) => client.module(request).await,
         Command::Balance => {
             client.wallet.sync_to_latest_block().await.ok();
             let defaults = load_defaults();

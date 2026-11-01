@@ -35,6 +35,8 @@ const BALANCE_PATIENCE: Duration = Duration::from_secs(90);
 const BRIDGE_PATIENCE: Duration = Duration::from_secs(120);
 /// Basecamp's Logos Blockchain node.
 pub const DEFAULT_BRIDGE_NODE: &str = "http://127.0.0.1:8080";
+/// The largest snapshot fetched: the whole registry of the earlier chain.
+const MAX_SNAPSHOT: u64 = 64 * 1024 * 1024;
 /// Most notes one deposit spends (the CLI's MAX_DEPOSIT_NOTES).
 const MAX_DEPOSIT_NOTES: u64 = 30;
 /// A change that takes longer than this is stopped.
@@ -463,18 +465,20 @@ pub const WALLET_JOB: &str = "-wallet";
 /// `names setup --shield=0` makes the wallet and its two accounts and moves
 /// nothing, so it never proves. It may first catch up with the chain.
 const SETUP_PATIENCE: Duration = Duration::from_secs(180);
-/// What `names setup` moves to the private account unless told otherwise
-/// (its own default): a few names' deposits.
-pub const DEFAULT_SHIELD: &str = "5000000";
+/// What `names setup` moves to the private account unless told otherwise (its
+/// own default): a few names' deposits and private changes. On LEZ 0.4 each
+/// private transaction reserves its fee in the proof, about 5,400,000 at the lowest
+/// base fees, and an account that can't cover it can't act.
+pub const DEFAULT_SHIELD: &str = "50000000";
 
 /// `names setup --shield=<amount>`: the wallet and its accounts, and, with an
 /// amount above zero and that much in the public account, that much moved to
-/// the private account. Empty is the CLI's default, 5,000,000.
+/// the private account. Empty is the CLI's default, 50,000,000.
 pub fn setup_args(shield: &str) -> Result<Vec<String>, String> {
     let shield = shield.trim().replace(',', "");
     let shield = if shield.is_empty() { DEFAULT_SHIELD.to_owned() } else { shield };
     if shield != "0" && !is_amount(&shield) {
-        return Err("enter a whole amount, such as 5000000".to_owned());
+        return Err("enter a whole amount, such as 50000000".to_owned());
     }
     Ok(vec!["setup".to_owned(), format!("--shield={shield}")])
 }
@@ -516,6 +520,51 @@ pub fn parse_setup(output: &str) -> Value {
 /// wallet's recovery phrase is in it. If the CLI fails after making the
 /// wallet, the phrase is still returned (with `problem` saying what went
 /// wrong), since it can't be shown again.
+/// `names claim`: takes back a name held on the earlier chain, for free. `snapshot`
+/// is the snapshot file the registry's claims list was made from; the CLI checks it
+/// against the registry's settings.
+pub fn claim_args(name: &str, snapshot: &Path) -> Result<Vec<String>, String> {
+    let snapshot = snapshot.to_str().ok_or("the snapshot's path is not text")?;
+    Ok(vec!["claim".to_owned(), format!("--snapshot={snapshot}"), "--".to_owned(), registry::parse_name(name)?])
+}
+
+/// Fetches the snapshot at `url`, a static file, at most `MAX_SNAPSHOT` bytes.
+pub fn fetch_snapshot(url: &str) -> Result<Vec<u8>, String> {
+    let reply = ureq::get(url)
+        .timeout(Duration::from_secs(30))
+        .call()
+        .map_err(|error| format!("could not fetch the list of names from the earlier chain: {error}"))?;
+    let mut body = Vec::new();
+    Read::read_to_end(&mut Read::take(reply.into_reader(), MAX_SNAPSHOT + 1), &mut body)
+        .map_err(|error| format!("the list of names broke off: {error}"))?;
+    if body.len() as u64 > MAX_SNAPSHOT {
+        return Err("the list of names is larger than any snapshot".to_owned());
+    }
+    Ok(body)
+}
+
+/// Words that say a wallet could not be read, as the CLI puts it (`OLD_WALLET`).
+const OLD_WALLET: &str = "does not load on 0.4";
+
+/// Whether the wallet is one from before LEZ 0.4, which the CLI can't open.
+pub fn wallet_is_old(setup: &Setup) -> bool {
+    run_capture(setup, vec!["module".to_owned(), "accounts".to_owned()], VERSION_PATIENCE)
+        .is_ok_and(|(code, _, err)| code != Some(0) && err.contains(OLD_WALLET))
+}
+
+/// Brings a wallet that no longer opens back from its recovery phrase: `{public:
+/// [..], private, moved: [..]}`. The old files stay beside the new ones. The phrase
+/// goes over standard input, and neither it nor anything printed reaches a log.
+pub fn run_restore_wallet(setup: &Setup, phrase: &str) -> Result<Value, String> {
+    let phrase = phrase.split_whitespace().collect::<Vec<_>>().join(" ");
+    let words = phrase.split(' ').count();
+    if !(12..=24).contains(&words) || !phrase.bytes().all(|b| b.is_ascii_lowercase() || b == b' ') {
+        return Err("a recovery phrase is 12 to 24 words".to_owned());
+    }
+    let output = run_with_input(setup, vec!["module".to_owned(), "restore".to_owned()], &format!("{phrase}\n"), SETUP_PATIENCE)?;
+    serde_json::from_str(last_line(&output)).map_err(|_| "the names CLI restored the wallet but didn't say its accounts".to_owned())
+}
+
 pub fn run_create_wallet(setup: &Setup) -> Result<Value, String> {
     let (code, out, err) = run_capture(setup, setup_args("0")?, SETUP_PATIENCE)?;
     let mut made = parse_setup(&out);
@@ -931,11 +980,10 @@ fn parse_default(output: &str, kind: &str) -> Value {
 }
 
 /// Runs the CLI with `command` and returns what it printed, or why it failed.
-fn run_text(setup: &Setup, command: Vec<String>, patience: Duration) -> Result<String, String> {
+pub fn run_text(setup: &Setup, command: Vec<String>, patience: Duration) -> Result<String, String> {
     let (code, out, err) = run_capture(setup, command, patience)?;
     if code != Some(0) {
-        let why = if last_line(&err).is_empty() { last_line(&out) } else { last_line(&err) };
-        return Err(format!("the names CLI failed: {why}"));
+        return Err(failure(&err, &out));
     }
     Ok(out)
 }
@@ -946,14 +994,46 @@ fn run_capture(setup: &Setup, command: Vec<String>, patience: Duration) -> Resul
     capture(setup.command(command), &setup.program, patience)
 }
 
+/// Runs the CLI with `command`, giving it `input` on standard input: what it
+/// printed, or why it failed. Nothing on standard input shows in the process list,
+/// or in a log.
+pub fn run_with_input(setup: &Setup, command: Vec<String>, input: &str, patience: Duration) -> Result<String, String> {
+    let (code, out, err) = feed(setup.command(command), &setup.program, input, patience)?;
+    if code != Some(0) {
+        return Err(failure(&err, &out));
+    }
+    Ok(out)
+}
+
+/// Why the CLI failed, in its own words.
+fn failure(err: &str, out: &str) -> String {
+    let why = if last_line(err).is_empty() { last_line(out) } else { last_line(err) };
+    format!("the names CLI failed: {why}")
+}
+
 /// Runs `process` (the program at `program`) and waits for it, at most
 /// `patience`: its exit code, what it printed, and what it wrote to stderr.
-fn capture(mut process: Command, program: &Path, patience: Duration) -> Result<(Option<i32>, String, String), String> {
+fn capture(process: Command, program: &Path, patience: Duration) -> Result<(Option<i32>, String, String), String> {
+    feed(process, program, "", patience)
+}
+
+/// The same, with `input` on its standard input when there is any.
+fn feed(mut process: Command, program: &Path, input: &str, patience: Duration) -> Result<(Option<i32>, String, String), String> {
+    if !input.is_empty() {
+        process.stdin(Stdio::piped());
+    }
     let mut child = process
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("could not run the names CLI at {}: {error}", program.display()))?;
+    // Written from a thread: a large page can fill the pipe before the CLI reads it.
+    if let Some(mut stdin) = child.stdin.take() {
+        let input = input.to_owned();
+        std::thread::spawn(move || {
+            let _ = std::io::Write::write_all(&mut stdin, input.as_bytes());
+        });
+    }
     let drain = |stream: Option<Box<dyn Read + Send>>| {
         std::thread::spawn(move || {
             let mut text = String::new();
@@ -1010,6 +1090,14 @@ pub fn has_prover(program: &Path) -> bool {
     }
     let program = program.canonicalize().unwrap_or_else(|_| program.to_path_buf());
     program.parent().is_some_and(|dir| is_executable(&dir.join("r0vm")))
+}
+
+/// Whether this CLI can sign for the module: one from before LEZ 0.4 can't, and
+/// can't talk to the chain either.
+pub fn speaks_module(program: &Path) -> bool {
+    let mut process = Command::new(program);
+    process.args(["module", "--help"]).stdin(Stdio::null());
+    capture(process, program, VERSION_PATIENCE).is_ok_and(|(code, _, _)| code == Some(0))
 }
 
 /// The installer's process: `/bin/sh <script>`, putting the CLI and the
@@ -1814,7 +1902,7 @@ mod tests {
     #[test]
     fn setup_arguments_never_shield_unless_asked() {
         assert_eq!(setup_args("0").unwrap(), strings(&["setup", "--shield=0"]));
-        assert_eq!(setup_args("").unwrap(), strings(&["setup", "--shield=5000000"]));
+        assert_eq!(setup_args("").unwrap(), strings(&["setup", "--shield=50000000"]));
         assert_eq!(setup_args(" 7,000,000 ").unwrap(), strings(&["setup", "--shield=7000000"]));
         for bad in ["-1", "1.5", "5 5", "--yes", "1e6", "00"] {
             assert!(setup_args(bad).is_err(), "{bad}");

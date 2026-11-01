@@ -24,14 +24,13 @@
 //! name's length tier from a built-in copy of the short-name list. Claiming a
 //! name is commit, then reveal at least 15 minutes later (see `register_name`).
 //!
-//! Reading needs nothing but the sequencer. Changing a name needs a signature,
-//! which this module asks the LEZ wallet module (`lez_core`) for: the keys stay
-//! in the wallet, and the wallet must be open. The module signs only with the
-//! wallet's public accounts.
+//! Reading needs nothing but the sequencer. Changing a name needs a signature.
+//! The keys stay in the person's own `names` CLI wallet, and this module hands
+//! the CLI each public change it builds (`wallet.rs`).
 //!
-//! A name held privately by the person's own `names` CLI is changed through
-//! that CLI instead, run in the background as a job (`cli_*` and `job`; see
-//! `cli.rs`): its changes are proven on this machine with the CLI's own keys.
+//! A name held privately is changed by that same CLI, run in the background as
+//! a job (`cli_*` and `job`; see `cli.rs`): its changes are proven on this
+//! machine with the CLI's own keys.
 
 mod avatar;
 mod changes;
@@ -40,9 +39,11 @@ mod page_view;
 mod spell;
 mod registry;
 mod shortlist;
+mod wallet;
 
 use changes::Change;
 use registry::{AccountId, Derived, Registry, Settings};
+use wallet::Held;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
@@ -50,6 +51,8 @@ const DEFAULT_SEQUENCER: &str = "https://testnet.lez.logos.co";
 /// The canonical registry on the default network: the one SPEC.md section 11
 /// lists, registry v5 in deposit mode.
 const DEFAULT_REGISTRY: &str = "38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq";
+/// The snapshot of the earlier chain, published as a static file with the web app.
+const CLAIMS_SNAPSHOT: &str = "https://logos-names.wrapit.workers.dev/claims/lez-0.3.json";
 /// Registries a saved configuration may still name whose names use an older
 /// derivation and can't be read by this version (v2, v3, v4.0 and v4.1 on the
 /// public testnet). They are ignored.
@@ -136,18 +139,24 @@ pub trait NamesModule: Send + 'static {
     /// keeps returning it. Fails for a name the wallet does not hold. The value is the bare name.
     fn keep(&mut self, name: String) -> String;
 
-    /// What registering `name` takes: `{name, display, tier, deposit, mode}`.
+    /// What registering `name` takes: `{name, display, tier, deposit, mode,
+    /// claims_until}`.
     /// `tier` is `normal`, `three` (a three-character name, at the higher
     /// deposit) or `locked` (one or two characters: only the registry's admin
     /// may register it, and `deposit` is null). `deposit` is decimal text in
     /// the native token's base units, held while the name is and refunded on
     /// release. `mode` is `deposit`, `fee` or `unconfigured`; in fee mode
     /// `deposit` is 0 and `fee` gives the price of a one-year term instead.
+    /// `claims_until` is null, or while names from the earlier chain can still be
+    /// claimed, when that ends, in milliseconds of chain time: until then a holder's
+    /// claim replaces a registration of their name, and whoever registered it loses
+    /// the deposit to them. An app must say so first (SPEC.md section 8.4).
     /// Makes one network read, besides deriving the name.
     fn deposit(&mut self, name: String) -> String;
 
     /// The registry's settings: `{mode, deposits: {normal, three}, admin,
-    /// treasury, prices: {30d, 1y, 5y}}`, amounts as decimal text. A null value
+    /// treasury, prices: {30d, 1y, 5y}, claims_until}`, amounts as decimal text,
+    /// `claims_until` as in `deposit`. A null value
     /// means the registry has no settings yet (it charges nothing, and locks
     /// one- and two-character names).
     fn settings(&mut self) -> String;
@@ -250,6 +259,21 @@ pub trait NamesModule: Send + 'static {
     // `{id, name, kind, state, started}`; `job` says how it is going. Proving
     // takes a few minutes. At most one job runs per name. The CLI is given
     // this module's registry and sequencer, and never run through a shell.
+
+    /// Takes back `name`, held on the earlier chain by an account of the CLI's wallet,
+    /// for free, with its profile and page as they were: starts `names claim` as a job.
+    /// `snapshot` is the snapshot the registry's claims list was made from: a file's full
+    /// path, an `http` or `https` URL, or empty for the one published with the web app.
+    /// Until `claims_until` this replaces a registration of the name. Only a name held by
+    /// a public account can be claimed: LEZ 0.4 derives other private account IDs.
+    fn cli_claim(&mut self, name: String, snapshot: String) -> String;
+
+    /// Brings back a wallet from before LEZ 0.4, which no longer opens, from its recovery
+    /// phrase. `cli_status` says when one is needed (`old_wallet`). The old wallet's files
+    /// stay beside the new ones. The value is `{public: [account], private, moved: [path]}`:
+    /// the first public accounts the phrase derives, since a new chain shows none of them
+    /// as used, and a new private account. Tokens are not carried over.
+    fn cli_restore_wallet(&mut self, phrase: String) -> String;
 
     /// The names the CLI's wallet holds, as `names mine` lists them: `[{name,
     /// display, signer, state, lapsed}]`, `signer` being `cli`. A wallet
@@ -1248,16 +1272,9 @@ impl Names {
         })())
     }
 
-    /// The open wallet's accounts. If the wallet module is running with no
-    /// wallet open and one has been named, it is asked to open that one first.
+    /// The wallet's accounts.
     fn held(&self) -> Result<Held, String> {
-        match (wallet::accounts(), &self.wallet_files) {
-            (Err(problem), Some((config, storage))) if problem == wallet::CLOSED => {
-                wallet::open(config, storage)?;
-                wallet::accounts()
-            }
-            (outcome, _) => outcome,
-        }
+        wallet::accounts(&self.cli_setup()?)
     }
 
     /// Writes the configuration for the next run. Failing to save is not an
@@ -1321,7 +1338,7 @@ impl Names {
                 )
             });
         }
-        let tx = wallet::send(&registry.program, change)?;
+        let tx = wallet::send(&self.cli_setup()?, change)?;
         Ok(merged(
             json!({
                 "name": name,
@@ -1415,7 +1432,7 @@ impl Names {
                     return Ok(status("revealed", saved.revealed.as_deref(), Some(saved.ready_at())));
                 }
                 let choice = if private_account.trim().is_empty() { saved.private_account.clone() } else { private_account.to_owned() };
-                let keys = if choice.trim().is_empty() { None } else { Some(private_keys(&choice)?) };
+                let keys = if choice.trim().is_empty() { None } else { Some(wallet::private_keys(&self.cli_setup()?, &choice)?) };
                 let change = registry.reveal(&name, &derived, &owner, &saved.secret, keys)?;
                 let sent = self.send(&registry, &held, &name, &change)?;
                 saved.revealed = sent["tx"].as_str().map(str::to_owned);
@@ -1454,35 +1471,14 @@ impl Names {
     }
 }
 
-/// The receiving keys of the wallet's private account `choice`: an account ID,
-/// or `auto` for its first private account, which is made if it has none.
-fn private_keys(choice: &str) -> Result<([u8; 32], Vec<u8>), String> {
-    let held = wallet::accounts()?.private;
-    let account = if choice.trim() == "auto" {
-        match held.first() {
-            Some(account) => *account,
-            None => wallet::new_private_account()?,
-        }
-    } else {
-        let account = registry::parse_account(choice)?;
-        if !held.contains(&account) {
-            return Err(format!(
-                "{} is not one of the open wallet's private accounts",
-                registry::account_text(&account)
-            ));
-        }
-        account
-    };
-    wallet::private_keys(&account)
-}
-
 /// What registering a name of `tier` takes under `settings`, for `deposit`.
-fn deposit_json(name: &str, tier: u8, settings: Option<&Settings>) -> Value {
+fn deposit_json(name: &str, tier: u8, settings: Option<&Settings>, now: u64) -> Value {
     let mut value = json!({
         "name": name,
         "display": format!("{name}{}", registry::NAME_SUFFIX),
         "tier": changes::tier_text(tier),
         "mode": Settings::mode_text(settings),
+        "claims_until": settings.filter(|settings| settings.claims_open(now)).map(|settings| settings.claims_until),
     });
     let deposit = match settings {
         _ if tier == shortlist::TIER_LOCKED => Value::Null,
@@ -1498,7 +1494,7 @@ fn deposit_json(name: &str, tier: u8, settings: Option<&Settings>) -> Value {
     value
 }
 
-fn settings_json(settings: &Settings) -> Value {
+fn settings_json(settings: &Settings, now: u64) -> Value {
     json!({
         "mode": Settings::mode_text(Some(settings)),
         "deposits": {
@@ -1512,6 +1508,7 @@ fn settings_json(settings: &Settings) -> Value {
             "1y": settings.prices[1].to_string(),
             "5y": settings.prices[2].to_string(),
         },
+        "claims_until": settings.claims_open(now).then_some(settings.claims_until),
     })
 }
 
@@ -1582,12 +1579,11 @@ impl NamesModule for Names {
             accounts.sort_by_key(|account| account["funded"] != true);
             // A private account's balance is known only to the wallet.
             let mut private = Vec::new();
-            for account in held.private.iter().take(MAX_WALLET_ACCOUNTS) {
-                let balance = wallet::private_balance(account).unwrap_or(0);
+            for (account, balance) in held.private.iter().take(MAX_WALLET_ACCOUNTS) {
                 private.push(json!({
                     "account": registry::account_text(account),
                     "balance": balance.to_string(),
-                    "funded": balance > 0,
+                    "funded": *balance > 0,
                 }));
             }
             private.sort_by_key(|account| account["funded"] != true);
@@ -1704,12 +1700,19 @@ impl NamesModule for Names {
     fn deposit(&mut self, name: String) -> String {
         self.about(&name, |registry, name, derived| {
             let tier = changes::tier_of(&derived.id)?;
-            Ok(deposit_json(name, tier, registry.settings()?.as_ref()))
+            let settings = registry.settings()?;
+            let now = registry.now()?;
+            Ok(deposit_json(name, tier, settings.as_ref(), now))
         })
     }
 
     fn settings(&mut self) -> String {
-        reply((|| Ok(self.registry()?.settings()?.as_ref().map_or(Value::Null, settings_json)))())
+        reply((|| {
+            let registry = self.registry()?;
+            let settings = registry.settings()?;
+            let now = registry.now()?;
+            Ok(settings.as_ref().map_or(Value::Null, |settings| settings_json(settings, now)))
+        })())
     }
 
     fn register_name(&mut self, name: String, owner: String, private_account: String) -> String {
@@ -1723,8 +1726,9 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
+        let setup = self.cli_setup();
         self.change_name(&name, |registry, name, derived, held| {
-            let (npk, vpk) = private_keys(&private_account)?;
+            let (npk, vpk) = wallet::private_keys(&setup?, &private_account)?;
             registry.set_private_keys(name, derived, held, &npk, &vpk, true)
         })
     }
@@ -1824,6 +1828,37 @@ impl NamesModule for Names {
 
     fn get_config(&mut self) -> String {
         self.shown_config().to_string()
+    }
+
+    fn cli_claim(&mut self, name: String, snapshot: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let snapshot = snapshot.trim().to_owned();
+        self.cli_job(&name, "claim", |jobs, name, id| {
+            if std::path::Path::new(&snapshot).is_absolute() {
+                return Ok((cli::claim_args(name, std::path::Path::new(&snapshot))?, None, Value::Null));
+            }
+            let url = if snapshot.is_empty() { CLAIMS_SNAPSHOT } else { snapshot.as_str() };
+            if !is_http_url(url) {
+                return Err("give the snapshot as a full path or a URL".to_owned());
+            }
+            let file = jobs.scratch(id, "snapshot");
+            cli::write_private(&file, &cli::fetch_snapshot(url)?).map_err(|error| format!("cannot keep the list of names: {error}"))?;
+            Ok((cli::claim_args(name, &file)?, Some(file), Value::Null))
+        })
+    }
+
+    fn cli_restore_wallet(&mut self, phrase: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let setup = self.cli_setup()?;
+            let restored = cli::run_restore_wallet(&setup, &phrase)?;
+            self.forget_mine();
+            Ok(restored)
+        })())
     }
 
     fn cli_mine(&mut self) -> String {
@@ -1945,9 +1980,12 @@ impl NamesModule for Names {
             let wallet = cli::find_wallet(self.cli_wallet.as_deref());
             let has_wallet = wallet.as_ref().is_some_and(|dir| dir.join(cli::STORAGE_FILE).is_file());
             let account = |which: &str| wallet.as_ref().filter(|_| has_wallet).and_then(|dir| cli::saved_account(dir, which));
+            let setup = self.cli_setup().ok().filter(|_| has_wallet);
             Ok(json!({
                 "cli": program.as_ref().map(|path| path.to_string_lossy().into_owned()),
                 "prover": program.as_ref().is_some_and(|path| cli::has_prover(path)),
+                "outdated": program.as_ref().is_some_and(|path| !cli::speaks_module(path)),
+                "old_wallet": setup.as_ref().is_some_and(cli::wallet_is_old),
                 "installing": self.running_job(cli::INSTALL_JOB),
                 "wallet_dir": wallet.as_ref().map(|dir| dir.to_string_lossy().into_owned()),
                 "wallet": has_wallet,
@@ -1975,7 +2013,7 @@ impl NamesModule for Names {
                 if let Ok(version) = cli::version(&program) {
                     let prover = cli::has_prover(&program);
                     let is_ours = program == ours;
-                    if prover || !is_ours {
+                    if (prover && cli::speaks_module(&program)) || !is_ours {
                         if is_ours {
                             self.adopt_cli(&ours);
                         }
@@ -2406,220 +2444,6 @@ const MAX_CACHED: usize = 512;
 /// A wallet can hold many accounts and each costs a read, so `wallet` stops here.
 const MAX_WALLET_ACCOUNTS: usize = 64;
 
-/// The accounts in the open wallet, each kind in the wallet's own order.
-#[derive(Debug, Default)]
-struct Held {
-    public: Vec<AccountId>,
-    private: Vec<AccountId>,
-}
-
-/// The LEZ wallet module, which holds the keys and signs.
-#[cfg(not(test))]
-mod wallet {
-    use super::{base64url, json, registry, AccountId, Change, Held, Value};
-    use logos_rust_sdk::LogosModuleSDK;
-    use std::time::Duration;
-
-    const MODULE: &str = "lez_core";
-    /// The native token program's ID, which is all zeros.
-    const NATIVE_TOKEN: &str = "0000000000000000000000000000000000000000000000000000000000000000";
-    /// What `accounts` answers when the wallet module runs with no wallet open.
-    pub const CLOSED: &str = "no LEZ wallet is open; open LEZ Wallet first";
-    /// Asking for the accounts is also how a missing wallet is noticed, and
-    /// the caller waits for the answer, so it gives up quickly.
-    const LOOK: Duration = Duration::from_secs(3);
-    const SEND: Duration = Duration::from_secs(15);
-
-    /// One call to the wallet. It is never repeated here: a send that timed
-    /// out may still have gone through.
-    fn call(method: &str, arguments: Value, patience: Duration) -> Result<Value, String> {
-        const ABSENT: &str = "the LEZ wallet is not running; install LEZ Wallet and open it";
-        // Calls run one at a time, so each wait for a wallet that isn't
-        // running holds up everything else. After one goes unanswered, quick
-        // reads skip the wallet for a minute; a send always tries.
-        static ABSENT_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_secs())
-            .unwrap_or_default();
-        let quick = patience <= LOOK;
-        if quick && now < ABSENT_UNTIL.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err(ABSENT.to_owned());
-        }
-        let answer = match LogosModuleSDK::new().plugin(MODULE).call_json_with_timeout(method, &arguments, patience) {
-            Ok(answer) => {
-                ABSENT_UNTIL.store(0, std::sync::atomic::Ordering::Relaxed);
-                answer
-            }
-            Err(_) => {
-                if quick {
-                    ABSENT_UNTIL.store(now + 60, std::sync::atomic::Ordering::Relaxed);
-                }
-                return Err(ABSENT.to_owned());
-            }
-        };
-        // Some of the wallet's methods answer with JSON as text.
-        Ok(match answer.as_str().map(serde_json::from_str::<Value>) {
-            Some(Ok(parsed)) => parsed,
-            _ => answer,
-        })
-    }
-
-    /// The wallet's accounts.
-    pub fn accounts() -> Result<Held, String> {
-        let listed = call("list_accounts", json!([]), LOOK)?;
-        let mut held = Held::default();
-        for entry in listed.as_array().map(Vec::as_slice).unwrap_or_default() {
-            let account = entry["account_id"]
-                .as_str()
-                .and_then(|hex| registry::unhex(hex).ok())
-                .and_then(|bytes| AccountId::try_from(bytes).ok());
-            match (account, entry["is_public"] == true) {
-                (Some(account), true) => held.public.push(account),
-                (Some(account), false) => held.private.push(account),
-                (None, _) => {}
-            }
-        }
-        if held.public.is_empty() && held.private.is_empty() {
-            return Err(CLOSED.to_owned());
-        }
-        Ok(held)
-    }
-
-    /// Asks the wallet module to open the wallet kept in these files. Its
-    /// statistics file sits beside its storage file.
-    pub fn open(config: &str, storage: &str) -> Result<(), String> {
-        let statistics = std::path::Path::new(storage).with_file_name("statistics.json");
-        let opened = call("open", json!([config, storage, statistics.to_string_lossy()]), SEND)?;
-        // 0 is success and 99 says a wallet is already open.
-        match opened.as_i64() {
-            Some(0 | 99) => Ok(()),
-            _ => Err(format!("the LEZ wallet could not open {storage}")),
-        }
-    }
-
-    /// The keys others use to pay the wallet's private account `account`:
-    /// its nullifier public key and its viewing public key.
-    pub fn private_keys(account: &AccountId) -> Result<([u8; 32], Vec<u8>), String> {
-        let keys = call("get_private_account_keys", json!([registry::hex(account)]), LOOK)?;
-        let read = |field: &str| keys[field].as_str().and_then(|hex| registry::unhex(hex).ok());
-        let npk = read("nullifier_public_key").and_then(|bytes| <[u8; 32]>::try_from(bytes).ok());
-        match (npk, read("viewing_public_key")) {
-            (Some(npk), Some(vpk)) => Ok((npk, vpk)),
-            _ => Err("the wallet did not give that account's receiving keys".to_owned()),
-        }
-    }
-
-    /// What the wallet holds on one of its private accounts.
-    pub fn private_balance(account: &AccountId) -> Result<u128, String> {
-        let answer = call("get_balance", json!([registry::hex(account), false]), LOOK)?;
-        answer
-            .as_str()
-            .and_then(|text| text.parse().ok())
-            .or_else(|| answer.as_u64().map(u128::from))
-            .ok_or_else(|| "the wallet did not give that account's balance".to_owned())
-    }
-
-    /// Makes a private account in the wallet, saves the wallet, and returns it.
-    pub fn new_private_account() -> Result<AccountId, String> {
-        let before = accounts().map(|held| held.private).unwrap_or_default();
-        call("create_account_private", json!([]), SEND)?;
-        let made = accounts()?
-            .private
-            .into_iter()
-            .find(|account| !before.contains(account))
-            .ok_or("the wallet did not make a private account")?;
-        // Unsaved, the account and whatever is paid to it would be lost when
-        // the wallet closes.
-        call("save", json!([]), SEND)?;
-        Ok(made)
-    }
-
-    /// Signs `change` with its signer, sends it, and returns the transaction hash.
-    pub fn send(program: &AccountId, change: &Change) -> Result<String, String> {
-        let program = registry::hex(program);
-        let accounts: Vec<String> = change.accounts.iter().map(|account| registry::hex(account)).collect();
-        let signs: Vec<bool> = change.accounts.iter().map(|account| *account == change.signer).collect();
-        // Accounts are used with the registry's own shard selected, except the
-        // last `balances`, which are used for their native token balance.
-        let registry_rows = accounts.len() - change.balances;
-        let shards: Vec<String> = (0..accounts.len())
-            .map(|row| if row < registry_rows { program.clone() } else { NATIVE_TOKEN.to_owned() })
-            .collect();
-        let sent = call(
-            "send_generic_public_transaction",
-            json!([
-                accounts,
-                signs,
-                { "_bytes": base64url(&change.instruction) },
-                program,
-                registry::hex(&change.signer),
-                shards,
-            ]),
-            SEND,
-        )?;
-        match sent["tx_hash"].as_str() {
-            Some(tx) if sent["success"] == true => Ok(tx.to_owned()),
-            _ => Err(match sent["error"].as_str() {
-                Some(error) if !error.is_empty() => format!("the wallet could not send it: {error}"),
-                _ => "the wallet could not send it".to_owned(),
-            }),
-        }
-    }
-}
-
-/// Stands in for the wallet in unit tests, where no module host is running.
-#[cfg(test)]
-mod wallet {
-    use super::{AccountId, Change, Held};
-
-    pub const CLOSED: &str = "no LEZ wallet is open; open LEZ Wallet first";
-
-    pub fn accounts() -> Result<Held, String> {
-        Err(CLOSED.to_owned())
-    }
-
-    pub fn open(_config: &str, _storage: &str) -> Result<(), String> {
-        Err("the LEZ wallet is not running; install LEZ Wallet and open it".to_owned())
-    }
-
-    pub fn private_keys(_account: &AccountId) -> Result<([u8; 32], Vec<u8>), String> {
-        Err(CLOSED.to_owned())
-    }
-
-    pub fn new_private_account() -> Result<AccountId, String> {
-        Err(CLOSED.to_owned())
-    }
-
-    pub fn private_balance(_account: &AccountId) -> Result<u128, String> {
-        Err(CLOSED.to_owned())
-    }
-
-    pub fn send(_program: &AccountId, _change: &Change) -> Result<String, String> {
-        Err(CLOSED.to_owned())
-    }
-}
-
-/// Unpadded URL-safe base64, the form Logos module calls carry bytes in.
-fn base64url(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut text = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let group = chunk.iter().fold(0_u32, |group, byte| (group << 8) | u32::from(*byte))
-            << (8 * (3 - chunk.len()));
-        for index in 0..=chunk.len() {
-            text.push(ALPHABET[(group >> (18 - 6 * index)) as usize & 63] as char);
-        }
-    }
-    text
-}
-
-#[cfg(not(test))]
-#[no_mangle]
-pub extern "Rust" fn logos_module_install() {
-    install::<Names>();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2722,21 +2546,32 @@ mod tests {
 
     #[test]
     fn deposits_are_reported_by_tier_and_mode() {
-        let deposits = Settings { admin: [1; 32], treasury: [2; 32], prices: [10, 20, 30], mode: registry::MODE_DEPOSIT, deposits: [100, 2_000] };
-        let normal = deposit_json("logos", shortlist::TIER_NORMAL, Some(&deposits));
+        let deposits = Settings {
+            admin: [1; 32],
+            treasury: [2; 32],
+            prices: [10, 20, 30],
+            mode: registry::MODE_DEPOSIT,
+            deposits: [100, 2_000],
+            claims_root: [7; 32],
+            claims_until: 50,
+            claims_program: [8; 32],
+        };
+        let normal = deposit_json("logos", shortlist::TIER_NORMAL, Some(&deposits), 49);
+        assert_eq!(normal["claims_until"], 50, "while claims are open");
         assert_eq!(normal["tier"], "normal");
         assert_eq!(normal["deposit"], "100");
         assert_eq!(normal["mode"], "deposit");
         assert_eq!(normal["display"], "logos");
-        assert_eq!(deposit_json("jef", shortlist::TIER_THREE, Some(&deposits))["deposit"], "2000");
-        let locked = deposit_json("ab", shortlist::TIER_LOCKED, Some(&deposits));
+        assert_eq!(deposit_json("jef", shortlist::TIER_THREE, Some(&deposits), 49)["deposit"], "2000");
+        let locked = deposit_json("ab", shortlist::TIER_LOCKED, Some(&deposits), 49);
         assert_eq!((locked["tier"].clone(), locked["deposit"].clone()), (json!("locked"), Value::Null));
         let fees = Settings { mode: registry::MODE_FEE, ..deposits.clone() };
-        let fee = deposit_json("logos", shortlist::TIER_NORMAL, Some(&fees));
+        let fee = deposit_json("logos", shortlist::TIER_NORMAL, Some(&fees), 50);
+        assert_eq!(fee["claims_until"], Value::Null, "and not after");
         assert_eq!((fee["mode"].clone(), fee["deposit"].clone(), fee["fee"].clone()), (json!("fee"), json!("0"), json!("20")));
-        assert_eq!(deposit_json("logos", shortlist::TIER_NORMAL, None)["mode"], "unconfigured");
+        assert_eq!(deposit_json("logos", shortlist::TIER_NORMAL, None, 49)["mode"], "unconfigured");
 
-        let settings = settings_json(&deposits);
+        let settings = settings_json(&deposits, 49);
         assert_eq!(settings["mode"], "deposit");
         assert_eq!(settings["deposits"]["normal"], "100");
         assert_eq!(settings["deposits"]["three"], "2000");
@@ -2806,28 +2641,6 @@ mod tests {
         assert_eq!(reloaded.names(&[8; 32]).len(), 1);
         assert!(reloaded.names(&[9; 32]).is_empty());
         let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn a_named_wallet_is_opened_when_none_is_open() {
-        let mut names = fresh();
-        names.program = Some([7; 32]);
-        // With no wallet named, the answer is that none is open.
-        assert_eq!(names.held().unwrap_err(), wallet::CLOSED);
-        // With one named, the module tries to open it; here no wallet module runs.
-        names.wallet_files = Some(("config.json".into(), "storage.json".into()));
-        assert!(names.held().unwrap_err().contains("not running"));
-        assert_eq!(parsed(&names.get_config())["wallet_storage"], "storage.json");
-    }
-
-    #[test]
-    fn bytes_travel_as_unpadded_url_safe_base64() {
-        assert_eq!(base64url(b""), "");
-        assert_eq!(base64url(b"f"), "Zg");
-        assert_eq!(base64url(b"fo"), "Zm8");
-        assert_eq!(base64url(b"foo"), "Zm9v");
-        assert_eq!(base64url(b"foob"), "Zm9vYg");
-        assert_eq!(base64url(&[0xfb, 0xff, 0xfe]), "-__-");
     }
 
     /// A module whose CLI is a script that prints its arguments, one `[arg]`
@@ -3188,7 +3001,7 @@ mod tests {
     fn moving_to_private_and_paying_an_account_are_wallet_jobs() {
         let public = "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk";
         let other = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
-        let (mut names, dir) = with_fake_cli("shield", "echo 'public account   Public/x'; echo 'Public/x holds 1200; send it at least 5000000 testnet tokens'");
+        let (mut names, dir) = with_fake_cli("shield", "echo 'public account   Public/x'; echo 'Public/x holds 1200; send it at least 50000000 testnet tokens'");
         let wallet = std::path::PathBuf::from(names.cli_wallet.clone().unwrap());
         // No accounts yet: refused before anything runs.
         assert!(parsed(&names.cli_shield(String::new()))["error"].as_str().unwrap().contains("create your wallet"));
@@ -3200,7 +3013,7 @@ mod tests {
         let ended = job_end(&mut names, &id);
         assert_eq!(ended["state"], "done");
         assert_eq!(ended["moved"], false);
-        assert!(ended["log_tail"].as_str().unwrap().contains("[setup]\n[--shield=5000000]"), "{ended}");
+        assert!(ended["log_tail"].as_str().unwrap().contains("[setup]\n[--shield=50000000]"), "{ended}");
         assert!(ended["problem"].as_str().unwrap().contains("needs at least 5,000,000"));
         // Paying an account: checked first, then the wallet's own transfer.
         for (to, amount) in [("jef", "5"), (other, "5"), ("Public/nope", "5"), (&format!("Public/{other}") as &str, "0")] {
