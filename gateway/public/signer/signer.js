@@ -133,12 +133,6 @@ async function mSignAndSend(rawParams) {
   const amt = BigInt(amount);
   const maxFee = maxFeeFor(gas);
 
-  // LEZ 0.4 credits a public account only if it's on the chain or the transaction shows its
-  // public key, which we don't have. Paying one that isn't would fail and still cost the fee.
-  let known;
-  try { known = await accountExists(rpc, toBytes); } catch { throw { code: "rpc_failed", message: "couldn't check the recipient" }; }
-  if (!known) throw { code: "unknown_recipient", message: "that account isn't on the chain yet, so it can't be paid" };
-
   const approved = await showUi({
     title: "Approve this payment",
     lines: [["Send", amount + " base units"], ["To", to], ["Max fee", maxFee.toString() + " base units"], ["From", rec.account.accountId]],
@@ -148,6 +142,14 @@ async function mSignAndSend(rawParams) {
 
   let pk;
   try {
+    // Nothing reaches the network before the user approves. LEZ 0.4 credits a public account
+    // only if it's on the chain or the transaction shows its public key, which we don't have:
+    // paying one that isn't would fail and still cost the fee.
+    uiBusy("Checking the recipient…");
+    let known;
+    try { known = await accountExists(rpc, toBytes); } catch { throw { code: "rpc_failed", message: "couldn't check the recipient" }; }
+    if (!known) throw { code: "unknown_recipient", message: "that account isn't on the chain yet, so it can't be paid" };
+
     uiBusy("Confirm with your passkey…");
     pk = await vault.unlockPasskey(rec); // re-prompt the passkey for THIS payment
     uiBusy("Preparing…");

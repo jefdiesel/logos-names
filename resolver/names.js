@@ -362,6 +362,9 @@ export async function readActorState(rpcUrl, program, accountId) {
   return Uint8Array.from(data?.actor_states?.[program] ?? data?.shards?.[program] ?? []);
 }
 
+/** The old name of `readActorState`, kept for existing callers. */
+export const readShard = readActorState;
+
 /** Opens and decodes `sealed`, or null when it is empty, does not open or does not decode. */
 async function openAs(key, sealed, kind, decode) {
   if (sealed.length === 0) return null;

@@ -53,7 +53,7 @@ and the signer origin to `http://localhost:8002`. Click **Connect**, then:
    this payment" with amount/recipient/fee; approve re-prompts the passkey, signs, and
    sends. Returns `{ hash, block }`.
 
-The signer checks the recipient first and refuses with `unknown_recipient` if the account
+Once the user approves, the signer checks the recipient and refuses with `unknown_recipient` if the account
 isn't on the chain: LEZ 0.4 won't credit a new public account without its public key, and
 the failed transaction would still cost the fee.
 

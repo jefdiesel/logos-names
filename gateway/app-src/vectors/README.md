@@ -16,7 +16,7 @@ checked against the real thing here, not by reading them.
 It needs a RISC Zero toolchain, so build it on the Mini:
 
 ```sh
-cargo build --release --offline     # needs core/, methods/, shortlist/ two levels up
+cargo build --release --offline     # needs the repo around it: core/, methods/, shortlist/
 lns_js_vectors gen > vectors.json
 node engine-run.mjs scenario.json
 lns_js_vectors run scenario.json engine-report.json
