@@ -155,9 +155,11 @@ fn main() {
     let jef: NameId = [0xAA; 32];
     let ada: NameId = [0xBB; 32];
     let held: NameId = [0xCC; 32];
+    // The registry the claims were snapshotted from, on the earlier chain.
+    let old_program = AccountId::new([0x38; 32]);
     let leaves = vec![
-        claim_leaf(&held, &owner_tag(&held, &alice.id)),
-        claim_leaf(&ada, &owner_tag(&ada, &carol.id)),
+        claim_leaf(&record_address(&old_program, &held), &owner_tag(&held, &alice.id)),
+        claim_leaf(&record_address(&old_program, &ada), &owner_tag(&ada, &carol.id)),
     ];
     let settings = run.actor(settings_address(&program));
     let secret = [5; 32];
@@ -176,6 +178,7 @@ fn main() {
         deposits: [DEPOSIT, DEPOSIT],
         claims_root: claim_root(&leaves),
         claims_until: T0 + 10 * MIN_COMMIT_AGE_MS,
+        claims_program: old_program,
     };
     run.refuse(
         "a stranger cannot configure a fresh registry",

@@ -183,6 +183,8 @@ pub struct Settings {
     pub claims_root: [u8; 32],
     /// Claims are accepted before this time, in milliseconds since the Unix epoch.
     pub claims_until: u64,
+    /// The registry on the earlier chain that the claims list was taken from.
+    pub claims_program: AccountId,
 }
 
 /// What this program receives. A transaction sends an [`Instruction`] to the
@@ -256,6 +258,7 @@ pub enum Instruction {
         deposits: [u128; 2],
         claims_root: [u8; 32],
         claims_until: u64,
+        claims_program: AccountId,
     },
     /// Commit to claiming a name: the first step of [`Instruction::Register`].
     /// `commitment` is [`commitment`]`(id, owner_tag(id, payer), secret)` for
@@ -317,11 +320,13 @@ pub enum Effect {
         deposits: [u128; 2],
         claims_root: [u8; 32],
         claims_until: u64,
+        claims_program: AccountId,
     },
-    /// On the settings: changes nothing, refused unless `proof` shows `leaf` is
-    /// in the claims root and claims are open at `now`.
+    /// On the settings: changes nothing, refused unless `proof` shows `holder`
+    /// held `id` on the earlier chain and claims are open at `now`.
     RequireClaim {
-        leaf: [u8; 32],
+        id: NameId,
+        holder: OwnerTag,
         now: u64,
         proof: ClaimProof,
     },
@@ -497,12 +502,15 @@ fn bounded_window(response: Response, now: u64) -> Response {
     response.timestamp_window(window)
 }
 
-/// The leaf of a name on the claims list: its identifier and its holder's tag.
+/// The leaf of a name on the claims list: the address of its record on the
+/// earlier chain and its holder's tag. Addresses, not identifiers, because a
+/// snapshot can see which accounts hold records but not, for a name registered
+/// privately, which identifier made them. So the list publishes no identifier.
 #[must_use]
-pub fn claim_leaf(id: &NameId, holder: &OwnerTag) -> [u8; 32] {
+pub fn claim_leaf(old_record: &AccountId, holder: &OwnerTag) -> [u8; 32] {
     let mut bytes = Vec::with_capacity(CLAIM_LEAF_DOMAIN.len() + 64);
     bytes.extend_from_slice(CLAIM_LEAF_DOMAIN);
-    bytes.extend_from_slice(id);
+    bytes.extend_from_slice(old_record.value());
     bytes.extend_from_slice(holder);
     sha256(&bytes)
 }
@@ -880,6 +888,7 @@ pub fn instruct(input: &ReceiveInput, instruction: Instruction) -> Response {
             deposits,
             claims_root,
             claims_until,
+            claims_program,
         } => {
             assert!(mode == MODE_FEE || mode == MODE_DEPOSIT, "mode must be fee (0) or deposit (1)");
             response.send(self::effect(
@@ -895,6 +904,7 @@ pub fn instruct(input: &ReceiveInput, instruction: Instruction) -> Response {
                     deposits,
                     claims_root,
                     claims_until,
+                    claims_program,
                 },
             ))
         }
@@ -914,7 +924,7 @@ pub fn instruct(input: &ReceiveInput, instruction: Instruction) -> Response {
                 .send(self::effect(
                     settings_address(program),
                     program,
-                    Effect::RequireClaim { leaf: claim_leaf(&id, &owner), now, proof },
+                    Effect::RequireClaim { id, holder: owner, now, proof },
                 ))
                 .send(self::effect(
                     record_address(program, &id),
@@ -1057,6 +1067,7 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
             deposits,
             claims_root,
             claims_until,
+            claims_program,
         } => {
             match load_settings(pre_data) {
                 Some(settings) => {
@@ -1074,12 +1085,14 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
                 deposits,
                 claims_root,
                 claims_until,
+                claims_program,
             }))
         }
-        Effect::RequireClaim { leaf, now, proof } => {
+        Effect::RequireClaim { id, holder, now, proof } => {
             let settings = load_settings(pre_data).expect("the registry has no settings");
             assert!(settings.claims_root != [0; 32], "this registry takes no claims");
             assert!(now < settings.claims_until, "the claim period has ended");
+            let leaf = claim_leaf(&record_address(&settings.claims_program, &id), &holder);
             assert!(
                 claim_holds(&settings.claims_root, leaf, &proof),
                 "this account did not hold this name"
@@ -1478,6 +1491,7 @@ mod tests {
                     deposits: [0, 0],
                     claims_root: [0; 32],
                     claims_until: 0,
+                    claims_program: PROGRAM,
                 },
             );
         }
@@ -1891,12 +1905,13 @@ mod tests {
                 deposits: [0, 0],
                 claims_root: [0; 32],
                 claims_until: 0,
+                claims_program: PROGRAM,
             }),
             format!(
                 "07{}{}01{z}02{z}03{z}00{}",
                 "01".repeat(32),
                 "02".repeat(32),
-                "00".repeat(72),
+                format!("{}{}", "00".repeat(72), "07".repeat(32)),
                 z = "00".repeat(15)
             )
         );
@@ -2161,6 +2176,7 @@ mod tests {
                 deposits: [0, 0],
                 claims_root: [0; 32],
                 claims_until: 0,
+                claims_program: PROGRAM,
             },
         );
     }
@@ -2249,6 +2265,7 @@ mod tests {
                 deposits: [0, 0],
                 claims_root: [0; 32],
                 claims_until: 0,
+                claims_program: PROGRAM,
             })
         );
     }
@@ -2274,6 +2291,7 @@ mod tests {
                 deposits: [0, 0],
                 claims_root: [0; 32],
                 claims_until: 0,
+                claims_program: PROGRAM,
             },
         );
     }
@@ -2318,6 +2336,7 @@ mod tests {
                     deposits: DEPOSITS,
                     claims_root: [0; 32],
                     claims_until: 0,
+                    claims_program: PROGRAM,
                 },
             );
         }
@@ -2521,6 +2540,7 @@ mod tests {
                 deposits: [5, 50],
                 claims_root: [0; 32],
                 claims_until: 0,
+                claims_program: PROGRAM,
             },
         );
         assert_eq!(chain.settings().expect("configured").deposits, [5, 50]);
@@ -2533,7 +2553,7 @@ mod tests {
         let mut chain = Chain::default();
         chain.run(
             vec![meta(settings_address(&PROGRAM), false), meta(PROGRAM, true)],
-            Instruction::Configure { admin: CAROL, treasury: BOB, prices: PRICES, mode: 2, deposits: DEPOSITS, claims_root: [0; 32], claims_until: 0 },
+            Instruction::Configure { admin: CAROL, treasury: BOB, prices: PRICES, mode: 2, deposits: DEPOSITS, claims_root: [0; 32], claims_until: 0, claims_program: PROGRAM },
         );
     }
 
@@ -2649,8 +2669,13 @@ mod tests {
         chain.register_with_deposit(&THREE_NAME, ALICE, 0, NOW);
     }
 
+    const OLD_PROGRAM: AccountId = AccountId::new([8; 32]);
+
     fn claims(holders: &[(NameId, AccountId)]) -> Vec<[u8; 32]> {
-        holders.iter().map(|(id, holder)| claim_leaf(id, &owner_tag(id, holder))).collect()
+        holders
+            .iter()
+            .map(|(id, holder)| claim_leaf(&record_address(&OLD_PROGRAM, id), &owner_tag(id, holder)))
+            .collect()
     }
 
     impl Chain {
@@ -2665,6 +2690,7 @@ mod tests {
                     deposits: [DEPOSITS[0], DEPOSITS[1]],
                     claims_root: claim_root(leaves),
                     claims_until: until,
+                    claims_program: OLD_PROGRAM,
                 },
             );
         }
