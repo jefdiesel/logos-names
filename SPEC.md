@@ -805,6 +805,8 @@ module names {
   method release(name: tstr) -> tstr
   method set_primary(account: tstr, name: tstr) -> tstr
 
+  method cli_claim(name: tstr, snapshot: tstr) -> tstr
+  method cli_restore_wallet(phrase: tstr) -> tstr
   method cli_mine() -> tstr
   method cli_profile(name: tstr, entries_json: tstr, replace: bool) -> tstr
   method cli_set_page(name: tstr, content_type: tstr, body: tstr) -> tstr
@@ -867,19 +869,22 @@ sends to the `private` keys if there are any, otherwise to `public_hex`. Both
 are in the form the LEZ wallet module's `transfer_shielded`, `transfer_private`
 and `transfer_public` take.
 
-`set_wallet_files` names a wallet's files for the module to hand to `lez_core`
-when that module is running with no wallet open, so a person does not have to
-open the wallet by hand first. Remembered across restarts; two empty paths
-forget it. It returns false and changes nothing if a file does not exist.
+`set_wallet_files` is kept for callers of earlier versions and has no effect on
+LEZ 0.4, where the CLI's wallet signs. Its paths are remembered across restarts;
+two empty paths forget them. It returns false and changes nothing if a file does
+not exist.
 `set_registry` and `set_sequencer` are also remembered across restarts, and
 return false and change nothing for a value that is not an account ID or an
 http(s) URL. `get_config` returns the sequencer URL, registry program ID and
 wallet files in use, and `cli` and `cli_wallet` (below) as they will be used,
 defaults filled in (`cli` is `null` if no CLI is found).
 
-**Changing.** The module holds no keys. It builds the instruction, checks it
-against the chain, and asks the LEZ wallet module (`lez_core`) to sign and send
-it with `send_generic_public_transaction`. The wallet must be open and must
+**Changing.** The module holds no keys. It builds the instruction with the actors
+and seeds of section 8.3, checks it against the chain, and hands it to the `names`
+CLI, which runs it first, sizes its gas, signs it, sends it and confirms it applied.
+It does not use the LEZ wallet module (`lez_core`), whose
+`send_generic_public_transaction` takes only account IDs, so it can't carry the
+evidence that lets a transaction create a registry account. The CLI's wallet must
 hold the account that signs, which also pays the deposit or fee: the `owner`
 passed to `register_name`, the `account` passed to `set_primary`, and the name's
 owner for everything else.
@@ -930,8 +935,8 @@ refused, so the caller confirms it by calling `resolve` (or `page`, or
 `reverse`) until it shows, which normally takes one block. Send one change per
 account at a time.
 
-**Through the `names` CLI.** A name held by a private account can't be changed
-through `lez_core`: its changes are proven on the holder's machine, which the
+**Private changes through the `names` CLI.** A name held by a private account has
+its changes proven on the holder's machine, which the
 `names` CLI (`cli/`) does with the keys in its own wallet directory. For such
 a name the module runs the CLI as a separate process, never through a shell:
 each argument is one argv entry, options as `--key=value` and the name and

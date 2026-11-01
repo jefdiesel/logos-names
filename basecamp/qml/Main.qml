@@ -2,9 +2,8 @@
 //
 // A front end on the `names` module. The module reads the chain itself, so
 // browsing needs no wallet. Registering a name, changing it, transferring it
-// and deleting it are signed by the LEZ wallet (`lez_core`), which the module
-// asks on this screen's behalf. Paying goes to `lez_core` directly and
-// messaging through `chat_module`.
+// and deleting it are signed by the person's own `names` CLI wallet, which the
+// module asks on this screen's behalf. Messaging goes through `chat_module`.
 //
 // A name held privately by the person's own `names` CLI (its wallet holds the
 // key, and its changes are proven on this machine) is edited through the
@@ -105,7 +104,6 @@ Item {
     property string sequencer: ""
     property string walletConfig: ""   // the wallet files the names module opens by itself
     property string walletStorage: ""
-    property bool wokeWallet: false
     property var deposit: null         // what the typed name would lock: {name, tier, deposit, mode}
     property var profileDraft: ({})    // the Profile fields as typed, by key
     property string notice: ""
@@ -304,6 +302,7 @@ Item {
             loadCliMine()
             loadCliBalance()
             loadCliStatus()
+            loadClaims()
             boardLoad()
             loadRunningJobs()
             return true
@@ -357,14 +356,8 @@ Item {
         return Qt.formatDate(new Date(milliseconds), "d MMMM yyyy")
     }
 
-    /// Brings the wallet module up: opening the LEZ Wallet app is what starts
-    /// it, and the names module opens the named wallet from there.
+    /// Looks at the wallet again.
     function connectWallet() {
-        if (/not running/.test(walletProblem) && logos.request) {
-            say("Starting the LEZ wallet.", false)
-            logos.request("basecamp.apps.launch", { app: "lez_wallet_ui" }, function() { root.loadWallet(true) })
-            return
-        }
         loadWallet(true)
     }
 
@@ -550,12 +543,15 @@ Item {
     property var shieldJob: null        // the move to private under way: {id, started}
     property string shieldProblem: ""
     property bool shieldMoved: false
-    /// What a name's deposit takes; the least worth moving to private.
+    /// What a name's deposit takes.
     readonly property string nameDeposit: "1000000"
-    /// What the Names faucet gives a new wallet: a name's deposit and as much again to use.
-    readonly property string faucetAmount: "2000000"
+    /// The least worth moving to private: on LEZ 0.4 each private transaction reserves its
+    /// fee in the proof, about 5,400,000, and registering takes two, plus the deposit.
+    readonly property string shieldMinimum: "12000000"
+    /// What a new wallet needs from the Names faucet: enough to register one name privately.
+    readonly property string faucetAmount: shieldMinimum
     /// Everything the public account holds moves to private: names and payments use it there.
-    readonly property string shieldAmount: cliPublic !== null && Logic.atLeast(cliPublic.balance, nameDeposit) ? String(cliPublic.balance) : nameDeposit
+    readonly property string shieldAmount: cliPublic !== null && Logic.atLeast(cliPublic.balance, shieldMinimum) ? String(cliPublic.balance) : shieldMinimum
     // Free tokens from the Names faucet (`cli_faucet`), for a new wallet's public account.
     property bool faucetBusy: false
     property string faucetError: ""
@@ -565,7 +561,19 @@ Item {
     readonly property bool hasCliWallet: cliStatus !== null && !!cliStatus.wallet && !!cliStatus["public"]
     /// Your public account's ID, as far as it is known.
     readonly property string myPublic: cliPublic !== null ? cliPublic.account : hasCliWallet ? cliStatus["public"] : ""
-    readonly property bool canShield: cliPublic !== null && Logic.atLeast(cliPublic.balance, nameDeposit)
+    readonly property bool canShield: cliPublic !== null && Logic.atLeast(cliPublic.balance, shieldMinimum)
+    /// A wallet from before LEZ 0.4, which no longer opens.
+    readonly property bool oldWallet: cliStatus !== null && !!cliStatus.old_wallet
+    /// A names program from before LEZ 0.4, which can't sign for this app.
+    readonly property bool cliOutdated: cliStatus !== null && !!cliStatus.outdated
+    property bool restoreBusy: false
+    property string restoreError: ""
+    property string restoreDone: ""
+    property bool claimBusy: false
+    property var claimJob: null         // the claim under way: {id, name}
+    property string claimLine: ""
+    /// When names from the earlier chain stop being claimable, in chain time, or null.
+    property var claimsUntil: null
     readonly property bool hasPrivateFunds: cliBalance !== undefined && cliBalance !== null && !/^0*$/.test(String(cliBalance.balance))
 
     /// Reads where the CLI stands (nothing is run), and picks up an install
@@ -658,6 +666,69 @@ Item {
             walletBusy = false
             walletError = sentence(message)
         }, 200000)
+    }
+
+    /// Brings back a wallet from before LEZ 0.4 from its recovery phrase. Tokens stay
+    /// behind with the old chain; the accounts come back, so names can be claimed.
+    function restoreWallet(phrase) {
+        if (restoreBusy)
+            return
+        restoreBusy = true
+        restoreError = ""
+        askLater("cli_restore_wallet", [phrase], function(value) {
+            restoreBusy = false
+            restoreDone = "Your wallet is back. The old files were kept beside it."
+            loadCliStatus()
+            loadCliBalance()
+            loadCliMine()
+        }, function(message) {
+            restoreBusy = false
+            restoreError = sentence(message)
+        }, 200000)
+    }
+
+    /// Learns whether names from the earlier chain can still be claimed.
+    function loadClaims() {
+        askLater("settings", [], function(value) {
+            claimsUntil = value && value.claims_until !== undefined ? value.claims_until : null
+        }, function(message) {
+            console.log("names_ui: settings:", message)
+        })
+    }
+
+    /// Takes back a name held on the earlier chain, as a job of the CLI.
+    function claimName(name) {
+        if (claimBusy)
+            return
+        claimBusy = true
+        claimLine = "Taking back " + name + "."
+        askLater("cli_claim", [name, ""], function(value) {
+            claimJob = { id: value.id, name: name }
+        }, function(message) {
+            claimBusy = false
+            claimLine = sentence(message)
+        }, 60000)
+    }
+
+    function checkClaim() {
+        var job = claimJob
+        if (job === null)
+            return
+        askLater("job", [job.id], function(value) {
+            if (claimJob !== job || value.state === "running")
+                return
+            claimJob = null
+            claimBusy = false
+            claimLine = value.state === "done" ? job.name + " is yours again." : sentence(lastLogLine(value.log_tail))
+            loadCliMine()
+        }, function() {})
+    }
+
+    Timer {
+        interval: 3000
+        repeat: true
+        running: root.claimJob !== null
+        onTriggered: root.checkClaim()
     }
 
     /// Moves tokens from the public account to the private one (a proof of a few minutes).
@@ -885,14 +956,8 @@ Item {
             fromIndex = 0
             myNames = []
             console.log("names_ui: no wallet:", message)
-            // The wallet module starts when something asks for it. Ask once,
-            // then look again: the names module can open the wallet from there.
-            if (/not running/.test(message) && !wokeWallet && logos.callModuleAsync) {
-                wokeWallet = true
-                logos.callModuleAsync("lez_core", "list_accounts", [], function() { root.loadWallet(false) }, 20000)
-            }
             if (announce)
-                say(/not running/.test(message) ? "Open the LEZ Wallet app first." : walletProblem, !/not running/.test(message))
+                say(walletProblem, true)
         })
     }
 
@@ -3163,13 +3228,38 @@ Item {
                 Card {
                     Layout.fillWidth: true
                     opacity: root.cliPath !== "" ? 1 : 0.5
-                    StepHead { number: 2; done: root.hasCliWallet; title: "Create my wallet" }
+                    StepHead { number: 2; done: root.hasCliWallet && !root.oldWallet; title: "Create my wallet" }
+                    Hint {
+                        visible: root.cliOutdated
+                        color: root.alarm
+                        text: "This names program is from before the chain's reset. Install the new one to go on."
+                    }
+                    Hint {
+                        visible: root.oldWallet
+                        color: root.alarm
+                        text: "Your wallet is from before the chain's reset and no longer opens. Enter its recovery phrase to bring its accounts back. The old files are kept. Tokens don't carry over."
+                    }
+                    Field {
+                        id: restorePhraseField
+                        visible: root.oldWallet
+                        Layout.fillWidth: true
+                        hint: "Your recovery phrase"
+                    }
+                    Action {
+                        visible: root.oldWallet
+                        label: root.restoreBusy ? "Restoring…" : "Bring my wallet back"
+                        strong: true
+                        enabledNow: !root.restoreBusy
+                        onPressed: { root.restoreWallet(restorePhraseField.text); restorePhraseField.text = "" }
+                    }
+                    Hint { visible: root.restoreError !== ""; color: root.alarm; text: root.restoreError }
+                    Hint { visible: root.restoreDone !== ""; text: root.restoreDone }
                     Hint {
                         visible: !root.hasCliWallet
                         text: "Your wallet lives on this computer. It has a public account, for getting tokens, and a private one, for your names."
                     }
                     Action {
-                        visible: !root.hasCliWallet
+                        visible: !root.hasCliWallet && !root.oldWallet
                         label: root.walletBusy ? "Creating…" : "Create my wallet"
                         strong: root.cliPath !== ""
                         enabledNow: root.cliPath !== "" && !root.walletBusy
@@ -3191,7 +3281,7 @@ Item {
                     Hint {
                         visible: root.hasCliWallet && !root.canShield && !root.hasPrivateFunds
                         font.pixelSize: root.px(16)
-                        text: "Get " + root.grouped(root.faucetAmount) + " free test tokens to start: your name's deposit, and some to pay with."
+                        text: "Get " + root.grouped(root.faucetAmount) + " free test tokens to start: your name's deposit, and the fees to hold it privately."
                     }
                     Action {
                         visible: root.hasCliWallet && !root.canShield && !root.hasPrivateFunds && !root.faucetSent
@@ -4258,7 +4348,7 @@ Item {
                         onEdited: root.saveConfig(sequencerField.text.trim(), root.registry)
                     }
                     Part { text: "Wallet files" }
-                    Hint { text: "The LEZ wallet that signs for your names. Open the LEZ Wallet app before making changes." }
+                    Hint { text: "Not used on this chain: your names program's own wallet signs for your names." }
                     Field {
                         id: walletConfigField
                         Layout.fillWidth: true
@@ -4488,6 +4578,18 @@ Item {
                             visible: root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode === "deposit"
                             text: "Refunded in full when you release the name. Testnet: names don't expire here, but to keep one on mainnet you claim it within 30 days of launch. Network fee extra."
                         }
+                        Hint {
+                            visible: root.deposit !== null && root.deposit.claims_until !== null && root.deposit.claims_until !== undefined
+                            color: root.alarm
+                            text: "Until " + (root.deposit !== null && root.deposit.claims_until ? root.dated(root.deposit.claims_until) : "") + ", whoever held this name on the earlier chain can take it back. If they do, you lose the name, and your deposit goes to them when they release it."
+                        }
+                        Link {
+                            visible: root.claimsUntil !== null && root.claimsUntil !== undefined && !root.claimBusy
+                            text: "This was my name on the earlier chain: take it back for free"
+                            font.pixelSize: root.px(16)
+                            onPressed: root.claimName(root.missing)
+                        }
+                        Hint { visible: root.claimLine !== ""; text: root.claimLine }
                     }
                     Card {
                         visible: root.cliPath !== "" && !(root.deposit !== null && root.deposit.tier === "locked")
@@ -4612,10 +4714,10 @@ Item {
                         spacing: 12
                         Hint {
                             font.pixelSize: root.px(17)
-                            text: /not running/.test(root.walletProblem) ? "Open your wallet to register it." : root.walletProblem
+                            text: root.walletProblem
                         }
                         Action {
-                            label: /not running/.test(root.walletProblem) ? "Open LEZ Wallet" : "Check the wallet again"
+                            label: "Check the wallet again"
                             onPressed: root.connectWallet()
                         }
                     }

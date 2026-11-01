@@ -38,6 +38,16 @@ Decisions to keep in mind:
 
 A 0.4 actor sees only its own state, so the board can no longer read registry records. The registry answers `Message::RequireHolder { tag }`, which refuses unless the tag holds the record. The board guest and the CLI are both built with `LOGOS_BOARD_REGISTRY` set to the registry's ID.
 
+## Basecamp
+
+The module keeps building a name's transactions, but the `names` CLI signs them, through a hidden `names module` command (`accounts`, `keys`, `send`, `restore`). This replaces `lez_core`:
+
+- No `lez_core` for 0.4 is released. Open PR #72 on `logos-execution-zone-module` adds one, but its `send_generic_public_transaction` resolves each account to `Public` or `PublicNoSign`, so it can't pass a PDA seed. `Commit`, `Register` and `Claim` create accounts, so they would fail with `UnadmittedPublicActor` and be charged.
+- The CLI also tries each change first and sizes its gas, which the module can't: it has no engine.
+- People who keep keys in the LEZ Wallet app can't sign here; the CLI's wallet is the only one used.
+
+`names module restore` exists because `names wallet restore-keys` keeps only accounts it finds on the chain, and on a new chain that is none. It moves the old `storage.json` and `names.json` aside as `*.lez-0.3`, and derives 16 public accounts and a new private one.
+
 ## Status
 
 - [x] Registry ported; 99 core tests pass.
@@ -46,10 +56,16 @@ A 0.4 actor sees only its own state, so the board can no longer read registry re
 - [x] Snapshot command; `names claim` and `names claims-root`.
 - [x] CLI and board ported; public flows, fee mode, claims and the board run on a local 0.4 sequencer.
 - [x] Resolver, encoder, signer, MCP server and SPEC.md ported; JS-built transactions run on the real engine.
-- [ ] Basecamp module and app.
-- [ ] Web: Claim screen, reading the account back after registering, trying the app in a browser.
+- [x] Module ported: reads, changes, `cli_claim`, `cli_restore_wallet`, signing through the CLI. Its plugin builds with nix.
+- [ ] Module's unit tests and plugin not re-run since its `logos_module_install` entry point was restored. Without that entry point the plugin died on load, so **no module call has yet run on a host or on a chain**. Next: rebuild, load in a logosctl session with Basecamp's host, run `basecamp-module/tools/try-changes.py`.
+- [ ] `names module` (`accounts`, `keys`, `send`, `restore`) compiles; not yet run.
+- [ ] App (`Main.qml`) ported: wallet restore, claim warning and claiming, raised private fees. Passes `basecamp/logic.test.mjs`; never run in Basecamp.
+- [x] Web: reading the account back, chain clock, Claim screen and proofs from a static snapshot. JS tests pass, with stubbed RPC.
+- [ ] Web not run against a sequencer or in a browser. `PAGE_GAS` in `claims.js` is an unmeasured allowance.
+- [ ] A snapshot must be published at `gateway/public/claims/lez-0.3.json`; the web app and `cli_claim` fetch it from there. It isn't committed, since it is rerun just before the reset.
+- [ ] A page of exactly 40 sealed bytes also parses as an empty record, so it adds a harmless extra leaf. The CLI and the web app treat it the same way, so roots agree.
 - [ ] Private flows: private board post and private pay failed on the fee payer's balance, undiagnosed. Low priority until mainnet.
 - [ ] Not yet run on chain: `transfer`, `clear-page`, `bridge`, `register` without `--wait`, and others listed in the port report.
-- [ ] The faucet must send a new account's public key as evidence. It lives outside this repo.
-- [ ] Before deploying: `DEFAULT_PROGRAM`, `DEFAULT_BOARD`, `REGISTRY`, `CHAINS`, `register.js`, MCP and `lez-tx-send.mjs` defaults still point at 0.3.
+- [ ] The faucet must send a new account's public key as evidence, and pay at least 12,000,000: the app now needs that much to register privately, and the faucet gave 2,000,000. It lives outside this repo.
+- [ ] Before deploying: `DEFAULT_PROGRAM`, `DEFAULT_BOARD`, `REGISTRY`, `CHAINS`, `register.js`, MCP and `lez-tx-send.mjs` defaults still point at 0.3, as do the module's `DEFAULT_REGISTRY`, `DEFAULT_SEQUENCER` and `FAUCET_URL`.
 - [ ] Deploy on testnet 0.4 when it launches. Rerun the snapshot just before the reset.

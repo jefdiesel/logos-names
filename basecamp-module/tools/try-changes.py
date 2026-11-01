@@ -3,9 +3,9 @@
 
 It drives the module the way an app does: send one change, then read the chain
 until the change shows, and only then send the next. Needs a logosctl session
-with `names` and `lez_core` loaded, a wallet open in `lez_core` that holds two
-public accounts each funded with more than a deposit, and a registry v5 in
-deposit mode chosen with `set_registry`. Registering waits out the commitment
+with `names` loaded, `set_cli` and `set_cli_wallet` pointing at a names CLI and
+a wallet that holds two public accounts each funded with more than a deposit,
+and a registry in deposit mode chosen with `set_registry`. Registering waits out the commitment
 (about 15 minutes), twice.
 
 Usage: try-changes.py <logosctl binary> <session dir> <account A> <account B>
