@@ -81,9 +81,8 @@ push("pay an account the transaction doesn't declare", alice, undeclared, later,
 // The app's own flow, register.js with a real name, and the RPC it would have used stubbed.
 const RPC = "http://rpc.test";
 setRpc(RPC);
-const proofUrl = "https://lez.buggers.online/names-proof";
 globalThis.fetch = async (url, options) => {
-  if (String(url).startsWith(proofUrl)) return Response.json(VECTORS.lengthProofs.named);
+  if (String(url).endsWith("/shortlist.bin")) return new Response(readFileSync(new URL(url)));
   const { id, method } = JSON.parse(options.body);
   if (method !== "getAccountsNonces") throw new Error(`unexpected ${method}`);
   return Response.json({ jsonrpc: "2.0", id, result: [Number(alice.nonce)] });

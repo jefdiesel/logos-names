@@ -46,47 +46,75 @@ const SHORTLIST_DEPTH = 16;
 export const SHORTLIST_ROOT = fromHex("66c75f76e42f1e87c80b8783c8a315dd84471041b029066bd5f8911d6c5a5e3c");
 const TIER_NORMAL = 0, TIER_LOCKED = 1, TIER_THREE = 3;
 
-// ---- shortlist Merkle non-membership proof (fetched from the names-proof endpoint) ----
-// The 1–4 list is ~60 MB, far too big to ship in the page, so the proof is served by
-// the M2 (behind the CORS proxy, like /lez). We still verify it here against
-// SHORTLIST_ROOT before signing, so a wrong or stale endpoint can't make us burn a deposit.
+// ---- shortlist Merkle non-membership proof, built here from a static file ----
+// shortlist.bin is the sorted list the registry's root commits to: 33 bytes a leaf, id
+// then tier. The tree is rebuilt the way core/src/shortlist.rs builds it and checked
+// against SHORTLIST_ROOT, so a wrong or stale file fails here and costs no deposit.
 const MIN_NAME_LENGTH = 5;
+const LEAF_SIZE = 33;
+const LIST_URL = new URL("./shortlist.bin", import.meta.url).href;
 const leafHash = (id32, tier) => sha256(concat(LEAF_DOMAIN, id32, Uint8Array.of(tier)));
 const nodeHash = (l, r) => sha256(concat(NODE_DOMAIN, l, r));
 const cmp = (a, b) => { for (let i = 0; i < 32; i++) { if (a[i] !== b[i]) return a[i] - b[i]; } return 0; };
 
-let _proofEndpoint = "https://lez.buggers.online/names-proof";
-export function setProofEndpoint(url) { _proofEndpoint = url; }
-
-function rootFromPath(leaf, index, path) {
-  let acc = leaf;
-  for (let lvl = 0; lvl < path.length; lvl++) {
-    acc = ((index >>> lvl) & 1) === 0 ? nodeHash(acc, path[lvl]) : nodeHash(path[lvl], acc);
+function buildList(bytes) {
+  if (bytes.length === 0 || bytes.length % LEAF_SIZE !== 0) throw new Error("the name list is damaged");
+  const leaves = bytes.length / LEAF_SIZE;
+  const leaf = (i) => ({ id: bytes.slice(i * LEAF_SIZE, i * LEAF_SIZE + 32), tier: bytes[i * LEAF_SIZE + 32] });
+  const width = 2 ** SHORTLIST_DEPTH;
+  if (leaves > width) throw new Error("the name list is damaged");
+  const empty = sha256(EMPTY_DOMAIN);
+  let level = Array.from({ length: width }, (_, i) => {
+    if (i >= leaves) return empty;
+    const { id, tier } = leaf(i);
+    return leafHash(id, tier);
+  });
+  const levels = [level];
+  while (level.length > 1) {
+    const next = [];
+    for (let i = 0; i < level.length; i += 2) next.push(nodeHash(level[i], level[i + 1]));
+    levels.push(next);
+    level = next;
   }
-  return acc;
+  if (toHex(level[0]) !== toHex(SHORTLIST_ROOT)) {
+    throw new Error("the name list doesn't match the registry's (a stale copy)");
+  }
+  return { leaves, leaf, levels };
 }
 
-/** NonMembership LengthProof for a 5+ char name, fetched from the endpoint and verified. */
+let _list = null;
+function loadList() {
+  _list ??= (async () => {
+    const res = await fetch(LIST_URL);
+    if (!res.ok) throw new Error(`couldn't load the name list (HTTP ${res.status})`);
+    return buildList(new Uint8Array(await res.arrayBuffer()));
+  })().catch((error) => {
+    _list = null;
+    throw error;
+  });
+  return _list;
+}
+
+const pathOf = (levels, index) =>
+  levels.slice(0, SHORTLIST_DEPTH).map((level, lvl) => level[(index >>> lvl) ^ 1]);
+
+/** NonMembership LengthProof for a 5+ char name. */
 export async function lengthProof(id32) {
-  const res = await fetch(`${_proofEndpoint}?id=${toHex(id32)}`, { cache: "no-store" });
-  if (!res.ok) {
-    const e = await res.json().catch(() => ({}));
-    throw new Error(e.error || `the name-proof service returned HTTP ${res.status}`);
+  const { leaves, leaf, levels } = await loadList();
+  let low = 0, high = leaves; // the first leaf at or above id32
+  while (low < high) {
+    const mid = (low + high) >>> 1;
+    if (cmp(leaf(mid).id, id32) < 0) low = mid + 1;
+    else high = mid;
   }
-  const p = await res.json();
-  const proof = {
+  if (low === 0 || low >= leaves) throw new Error("that id isn't a name");
+  if (cmp(leaf(low).id, id32) === 0) throw new Error("that name is reserved");
+  const left = low - 1;
+  return {
     kind: "NonMembership",
-    left: { id: fromHex(p.left.id), tier: p.left.tier }, leftIndex: p.leftIndex, leftPath: p.leftPath.map(fromHex),
-    right: { id: fromHex(p.right.id), tier: p.right.tier }, rightPath: p.rightPath.map(fromHex),
+    left: leaf(left), leftIndex: left, leftPath: pathOf(levels, left),
+    right: leaf(low), rightPath: pathOf(levels, low),
   };
-  // verify locally — a bad/stale endpoint must not make us spend on an invalid proof
-  if (!(cmp(proof.left.id, id32) < 0 && cmp(id32, proof.right.id) < 0)) throw new Error("name-proof: id not between the proof leaves");
-  const lr = rootFromPath(leafHash(proof.left.id, proof.left.tier), proof.leftIndex, proof.leftPath);
-  const rr = rootFromPath(leafHash(proof.right.id, proof.right.tier), proof.leftIndex + 1, proof.rightPath);
-  if (toHex(lr) !== toHex(SHORTLIST_ROOT) || toHex(rr) !== toHex(SHORTLIST_ROOT)) {
-    throw new Error("name-proof doesn't match the registry's name list (stale endpoint or wrong chain)");
-  }
-  return proof;
 }
 
 // ---- building the signed txs (no network) ----
