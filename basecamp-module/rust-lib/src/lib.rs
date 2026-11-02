@@ -660,6 +660,12 @@ fn is_http_url(url: &str) -> bool {
 /// settings or read the person's own state: the Names app.
 const NAMES_APP: &str = "names_ui";
 
+/// This module's package version, the one in `basecamp-module/metadata.json`.
+/// `get_config` reports it so the Names app can refuse a module from another
+/// release (the app's own metadata asks for at least this at install, but an
+/// older module can still be the one loaded).
+const MODULE_VERSION: &str = "0.11.0";
+
 /// Whether `caller` may use those methods. Basecamp gives each app its own
 /// credential, named after the app, so the module knows which app is calling.
 /// Any other app that lists `names` as a dependency can still read names, but not
@@ -1016,6 +1022,7 @@ impl Names {
         let mut config = self.config();
         config["cli"] = json!(cli::find_program(self.cli.as_deref()).map(|path| path.to_string_lossy().into_owned()));
         config["cli_wallet"] = json!(cli::find_wallet(self.cli_wallet.as_deref()).map(|dir| dir.to_string_lossy().into_owned()));
+        config["module_version"] = json!(MODULE_VERSION);
         config
     }
 
@@ -3033,5 +3040,14 @@ mod tests {
         let status = parsed(&names.cli_status())["value"].clone();
         assert_eq!((status["wallet"].clone(), status["public"].clone(), status["busy"].clone()), (json!(true), json!(public), Value::Null));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_reported_version_is_the_package_version() {
+        let metadata: Value = serde_json::from_str(include_str!("../../metadata.json")).expect("metadata.json");
+        assert_eq!(metadata["version"], MODULE_VERSION);
+        let app: Value = serde_json::from_str(include_str!("../../../basecamp/metadata.json")).expect("the app's metadata.json");
+        assert_eq!(app["dependencies"][0]["version"], format!(">={MODULE_VERSION}"));
+        assert_eq!(fresh().shown_config()["module_version"], MODULE_VERSION);
     }
 }

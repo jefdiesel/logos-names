@@ -110,6 +110,10 @@ Item {
     property bool noticeIsError: false
     property bool settingsOpen: false
     property bool configKnown: false   // the names module has answered once
+    // The names module this app needs: the same release (metadata.json asks for it
+    // at install, but an older module can still be the one Basecamp loaded).
+    readonly property string neededModule: "0.11.0"
+    property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
 
@@ -283,10 +287,32 @@ Item {
     /// Reads the module's settings. At start-up the module may not be running
     /// yet, so this asks again until it answers; only then can "no registry"
     /// mean anything.
+    /// Whether version text `have` ("0.11.2") is at least `need`.
+    function versionAtLeast(have, need) {
+        if (have === "")
+            return false
+        var a = have.split("."), b = need.split(".")
+        for (var i = 0; i < 3; i++) {
+            var x = parseInt(a[i] || "0", 10), y = parseInt(b[i] || "0", 10)
+            if (isNaN(x))
+                return false
+            if (x !== y)
+                return x > y
+        }
+        return true
+    }
+
     function loadConfig() {
         function take(config) {
             if (!config || typeof config !== "object" || !("sequencer" in config))
                 return false
+            var loaded = config.module_version ? String(config.module_version) : ""
+            if (!versionAtLeast(loaded, neededModule)) {
+                moduleOutdated = loaded === "" ? "older than 0.11" : loaded
+                say("The names module is out of date (" + moduleOutdated + "; this app needs " + neededModule + " or newer). In Basecamp, open Applications, click Names and press Install.", true)
+                return true
+            }
+            moduleOutdated = ""
             registry = config.registry ? config.registry : ""
             sequencer = config.sequencer ? config.sequencer : ""
             walletConfig = config.wallet_config ? config.wallet_config : ""
@@ -4425,7 +4451,7 @@ Item {
                     Layout.topMargin: 60
                     spacing: 10
                     Text {
-                        text: !root.configKnown ? "Starting" : root.registry === "" ? "Choose a registry to begin" : "Find someone"
+                        text: root.moduleOutdated !== "" ? "Update the names module" : !root.configKnown ? "Starting" : root.registry === "" ? "Choose a registry to begin" : "Find someone"
                         color: root.ink
                         font.family: root.sans
                         font.weight: Font.DemiBold
@@ -4434,7 +4460,7 @@ Item {
                     Hint {
                         font.pixelSize: root.px(18)
                         color: root.ink
-                        text: !root.configKnown ? "Waiting for the names module to answer." : root.registry === "" ? "Open Advanced and enter the registry's program ID." : "Type a name in the box on the left to see its profile and page."
+                        text: root.moduleOutdated !== "" ? "This app needs names module " + root.neededModule + " or newer; Basecamp loaded " + root.moduleOutdated + ". Open Applications, click Names and press Install." : !root.configKnown ? "Waiting for the names module to answer." : root.registry === "" ? "Open Advanced and enter the registry's program ID." : "Type a name in the box on the left to see its profile and page."
                     }
                     Action {
                         visible: root.configKnown && root.registry !== ""
