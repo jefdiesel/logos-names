@@ -12,9 +12,19 @@ through a zero-knowledge proof made on your own machine. Nothing here runs a
 server: the app talks to the chain and to Logos messaging directly, and the website
 is static files.
 
-**Latest: Names 0.10 for Basecamp** (2026-10-19), macOS (Apple silicon) and Linux x86_64:
-[release](https://github.com/jefdiesel/logos-names/releases/tag/basecamp-v0.10.0).
-New: a brand-new person can start inside Basecamp with nothing else. Welcome installs
+**Security update (2026-11-02):** the CLI and the Names app/module now carry every
+fix from the independent [open-review](https://or.vpavlin.xyz/logos-names-1451ec8ddc20/)
+security review (1 critical, 2 high, 3 medium, 3 low). Only the Names app can
+pay, sign or change settings, no longer any app that depends on the module;
+the Linux app loads again; private files are written for your eyes only; reads
+are size-capped; the installer refuses unsigned downloads; and the TLS libraries
+are patched (RUSTSEC-2026-0381/0382). Update both: re-run the install line below
+for the CLI, and update **Names** in Basecamp to
+[0.10.3](https://github.com/jefdiesel/logos-names/releases/tag/basecamp-v0.10.3).
+
+**Latest: Names 0.10 for Basecamp** (0.10.3, 2026-10-30), macOS (Apple silicon) and Linux x86_64:
+[release](https://github.com/jefdiesel/logos-names/releases/tag/basecamp-v0.10.3).
+New in 0.10: a brand-new person can start inside Basecamp with nothing else. Welcome installs
 Names, makes the wallet, and **Get free tokens** gives it 2,000,000 testnet LEZ from the
 Names faucet (once a day): enough for a private name's 1,000,000 deposit and some to pay
 with. Move to private now moves all of it. Tested end to end on the public LEZ testnet
