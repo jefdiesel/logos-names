@@ -13,9 +13,9 @@ unless they start with a repo name.
    a dependency bump.
 2. **That blocks the prize criterion as written.** LP-0021 lists "Designing or implementing
    the token program itself" as out of scope: "the wallet integrates with the
-   existing/reference implementation" (LP-0021.md, Scope, Out of Scope). Until Logos
-   publishes a 0.4 token program, there is nothing to integrate with, and a token program
-   of our own would not count.
+   existing/reference implementation" (LP-0021.md, Scope, Out of Scope). The criterion
+   assumes a reference 0.4 program, and none exists. Whether evaluators would accept an
+   interim program of our own is a question for the user to put to the prize maintainers.
 3. **The wallet side is not blocked.** A 0.4 token program shaped like LEZ's own native
    token lets the stock `wallet` crate move it publicly and privately with the code it
    already uses for native transfers. `wallet-tokens/` in this branch is a working
@@ -35,7 +35,8 @@ None.
   `v2.0.1` (`DEPLOYMENTS.md:12`).
 - All 231 branches, scanned for the LEZ pin in their `Cargo.toml` on 2026-11-03: 1 on
   `v0.3.0` (`chore/upgrade-to-lez-0.3.0-rc`, last commit 2026-10-12 "WIP: LEZ v0.3.0
-  upgrade"), the rest on `v0.2.x`, `v0.2.0-rc*` or an older rev. None on 0.4.
+  upgrade"), 227 on `v0.2.x`, `v0.2.0-rc*` or an older rev, and 3 with no LEZ pin in the
+  root manifest (`chore/update-idls`, `cleanup/ata-tests`, `docs/spel-command`). None on 0.4.
   (`chore/lez-core-0.4.3` is about the Basecamp `lez_core` module 0.4.3, and pins LEZ
   `v0.2.4`.)
 - No open PR in lez-programs mentions 0.4. SPEL (`logos-co/spel`), which the token program
@@ -331,7 +332,8 @@ amount and destination instead of bytes.
 
 ## 8. Blockers
 
-1. No 0.4 reference token program (section 1); the prize excludes writing our own.
+1. No 0.4 reference token program (section 1). The prize puts writing one out of scope;
+   whether an interim one is accepted is for the maintainers to say.
 2. Testnet 0.4 is not live, so nothing can be checked against the canonical zone.
 3. Private sends need a private account with native tokens to pay the in-proof fee, and
    each takes minutes to prove on a Mac mini M4 (section 5). Not a blocker, but it shapes
