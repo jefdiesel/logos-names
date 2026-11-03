@@ -288,7 +288,7 @@ receiving) does not change between them as long as the reference keeps the nativ
 shape; if it keeps per-token holding accounts instead, only the "where is the balance" and
 "which accounts to declare" parts change.
 
-CLI (all accept `--program`, defaulting per network like `DEFAULT_PROGRAM`):
+CLI (built as described in section 9, with `--token-program` and no built-in default):
 
 | command | does |
 |---|---|
@@ -338,3 +338,211 @@ amount and destination instead of bytes.
 3. Private sends need a private account with native tokens to pay the in-proof fee, and
    each takes minutes to prove on a Mac mini M4 (section 5). Not a blocker, but it shapes
    the UI.
+
+## 9. Names CLI (`names token`)
+
+Branch `names-tokens` (from `lez-0.4`). Section 6, built: `cli/src/tokens.rs`.
+
+### What is there
+
+- `TokenCodec` (trait): `transfer`, `mint`, `create` return a `Call` (the message bytes
+  and the accounts it reaches, as roles: `Signer` first, `Reached`, `Credited`);
+  `holdings`, `definition`, `credit` decode actor states and pending messages;
+  `max_name_len`, `max_holdings` give the program's limits. `PrototypeCodec` is the one
+  implementation; it uses `wallet-tokens/core`'s own types (a path dependency, so the wire
+  format cannot drift). The official program, when it exists, is a second implementation
+  and a `--token-codec` value; nothing else changes as long as it keeps the native token's
+  shape (section 2).
+- The program's account ID is never built in: `--token-program` (env
+  `NAMES_TOKEN_PROGRAM`), else `token_program` in `names.json` next to the wallet. Without
+  one, every token command stops with "no token program given … (no token program is
+  deployed on the public testnet yet)". `--token-codec` (env `NAMES_TOKEN_CODEC`) defaults
+  to `prototype`. Both are global flags, so the module's requests take them too.
+- Networks: no new rule. The sequencer is chosen as for every other command (`--rpc`, else
+  the testnet unless `--program` is given); `names token` adds no loopback check, because
+  the CLI has none. On a local chain always pass `--rpc`.
+- Commands:
+
+  | command | does |
+  |---|---|
+  | `names token list [--account A] [--json]` | every token each wallet account holds (public from the chain, private from the notes after a sync), with the definition's name; then the token credits waiting to be received |
+  | `names token info <definition> [--json]` | name, supply, mint authority |
+  | `names token send <definition> <amount> --to <to> [--from public\|private\|<account>] [--public\|--private]` | `<to>` is a name, `Public/<id>` (or a bare ID), one of this wallet's `Private/<id>`, or someone's keys `<npk hex>:<vpk hex>`. `--from` defaults to the setup's private account, as `names pay` does |
+  | `names token receive` | takes every pending token credit to this wallet's keys, one proven transaction each |
+  | `names token create <name> <supply> [--to …] [--mintable\|--authority A] [--payer A]` | demo: a new public account of the wallet becomes the definition; the payer (default: the setup's public account) pays the fee |
+  | `names token mint <definition> <amount> [--to …]` | demo: signed by the definition's mint authority, read from the chain |
+
+- A send to a name goes where `names pay` sends: `Client::payee` with the rule
+  `pays_publicly` (the name's private receiving keys by default; its public account with
+  `--public`, or when it publishes only an account). `names pay` now calls the same two
+  functions, so the two cannot diverge. The keys make a `PrivateForeign` recipient: the
+  credit is sealed (private sender) or bound to a recovery note (public sender) and stays
+  pending until the name holder runs `names token receive`.
+- Checked here before anything is proven or sent: amount is a whole number from 1 to
+  2^128 - 1 (`_` and `,` may group digits); the token exists under the program; the
+  sender's key is in the wallet and it holds the amount; the recipient is not the sender;
+  where the recipient's holdings can be read (public, or this wallet's private account), its
+  balance does not overflow and a new kind fits under `MAX_HOLDINGS`; a mint's signer is
+  the authority and the supply does not overflow; a token name is 1-64 bytes.
+- Public-only calls are run first against chain state (`Client::simulate`), sized with
+  `gas_limit_for`, and the fee payer's reserve checked (`check_payer`), as every `names`
+  change is; `LOGOS_NAMES_DRY_RUN` stops before sending. Calls with a private account or a
+  pending credit go through `send_tx_with_pre_check` with the token program's bytecode,
+  read from the chain and cached next to the wallet (`names-token-<id>.bin`, checked
+  against the header's image ID; `NAMES_TOKEN_PROGRAM_ELF` overrides it).
+- Module bridge (`names module token …`, answer as JSON on the last line, the way the
+  module already reads `names module accounts`; send and receive also print the
+  `submitted <hash>` line the module looks for):
+  `holdings [--account A]` → `[{account, private, definition, name, balance}]`;
+  `pending` → `[{position, definition, name, amount, to}]`;
+  `info <definition>` → `{definition, name, supply, authority}`;
+  `send` (stdin `{definition, amount, to, from?, public?, private?}`, amounts as decimal
+  strings) → `{tx, block}`; `receive` → `[{tx, block, definition, amount, to}]`.
+  `basecamp-module/` is not changed here.
+
+### Tests
+
+`cargo test --release -p names_cli` on the Mac mini: 13 passed, 8 of them new
+(`tokens::tests::*`: the codec's bytes and tags against `wallet_tokens_core::Message`,
+decoding holdings/definitions/credits and refusing foreign state, `--to`/`--from`/amount
+parsing including `lns:alice` staying a name and 2^128 being refused, the spend/credit/mint
+checks; `pay_tests::a_name_is_paid_privately_unless_it_has_only_a_public_account`).
+
+### Live run, 2026-11-03
+
+Throwaway rc1 sequencer on 127.0.0.1:3210 (home
+`/Volumes/exos162/logos/dev/names-tokens-run/seq`, stopped afterwards), wallet in
+`names-tokens-run/wallet`, created by `wallet-tokens wallet check-health` so no recovery
+phrase was printed. F = the imported local-test key, B = a new public account, V and W =
+new private accounts. The prototype program was deployed with the prototype's own
+`wallet-tokens deploy --payer F` (same image `382ae94c…02afab6`, 4 segments, blocks 4-8)
+at `Fy88unn2rNkPrRPw7opVgJyxEktE9HTNjwV7zCKzqXJY`; there is no `names token deploy`.
+`N` below is `names --rpc http://127.0.0.1:3210 --token-program Fy88unn2…qXJY`. The
+scripts and full logs stay on the Mac mini in `/Volumes/exos162/logos/dev/names-tokens-run/`
+(`public.sh`, `private.sh`, `extra*.sh` and their `.log`s); output below is trimmed of the
+wallet's sync lines.
+
+```
+$ N token create Demo 1000000 --payer F --mintable
+creating Demo at F3EajXDpktXjy7PU1EACcAvP672ia6hxXD2y47ycR6Lb, 1000000 to F
+reading the token program's bytecode from the chain
+submitted 2fd35ba1…9028d1
+applied in block 11
+token F3EajXDpktXjy7PU1EACcAvP672ia6hxXD2y47ycR6Lb
+
+$ N token info F3Eaj…R6Lb
+name      Demo
+supply    1000000
+authority 6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV
+
+$ N token mint F3Eaj…R6Lb 500                       # block 12; supply 1000500
+$ N token send F3Eaj…R6Lb 250 --from Public/F --to Public/B
+sending 250 Demo from Public/6iAr…2VQV to Public/GB8p…DKE
+submitted db3d91fc…406242
+applied in block 13
+
+$ N token list
+Public/6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV
+  1000250  Demo  F3EajXDpktXjy7PU1EACcAvP672ia6hxXD2y47ycR6Lb
+Public/GB8poqwyPcQBCJYisbZHcV3F1wviMDvjqEQM5QhTDKE
+  250  Demo  F3EajXDpktXjy7PU1EACcAvP672ia6hxXD2y47ycR6Lb
+
+$ N token send F3Eaj…R6Lb 251 --from Public/B --to Public/F
+Error: Public/GB8p…DKE holds 250 Demo, less than 251
+$ N token send F3Eaj…R6Lb 0 …
+error: invalid value '0' for '<AMOUNT>': the amount must be more than 0
+$ N token send F3Eaj…R6Lb 340282366920938463463374607431768211456 …
+error: invalid value '3402…456' for '<AMOUNT>': … is more than a token amount can be (2^128 - 1)
+$ N token mint F3Eaj…R6Lb 1 --to Public/B          # block 14
+$ N module token holdings
+[{"account":"Public/6iAr…2VQV","private":false,"definition":"F3Eaj…R6Lb","name":"Demo","balance":"1000250"},{"account":"Public/GB8p…DKE","private":false,"definition":"F3Eaj…R6Lb","name":"Demo","balance":"251"}]
+$ N module token info F3Eaj…R6Lb
+{"authority":"6iAr…2VQV","definition":"F3Eaj…R6Lb","name":"Demo","supply":"1000501"}
+$ names --rpc http://127.0.0.1:3210 token list      # no --token-program
+Error: no token program given: pass --token-program <account ID> or set NAMES_TOKEN_PROGRAM (no token program is deployed on the public testnet yet)
+```
+
+Private case: public F to W's receiving keys (W given only as `<npk>:<vpk>`, from
+`names module keys Private/W`, as a name's keys would be), then W receives it. V holds
+native for the in-proof fees.
+
+```
+$ N wallet auth-transfer send --from Public/F --to Private/V --amount 50000000
+                                                     # proven, 318 s, block 39
+$ N token send F3Eaj…R6Lb 200 --from Public/F --to c20e5b7c…cd762:<vpk hex>
+sending 200 Demo from Public/6iAr…2VQV to those private receiving keys
+proving it on this computer (several minutes), so the chain never learns the private side
+proved in 515s
+submitted 18322d72…2cdefc
+applied in block 74
+
+$ N token list
+Public/6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV
+  1000050  Demo  F3EajXDpktXjy7PU1EACcAvP672ia6hxXD2y47ycR6Lb
+Public/GB8poqwyPcQBCJYisbZHcV3F1wviMDvjqEQM5QhTDKE
+  251  Demo  F3EajXDpktXjy7PU1EACcAvP672ia6hxXD2y47ycR6Lb
+waiting to be received (`names token receive`):
+  200  Demo  F3EajXDpktXjy7PU1EACcAvP672ia6hxXD2y47ycR6Lb  to Private/4h41EA3hmugg4ra795b2nGzbXdVthUVutMQFKzcdXubb
+
+$ N module token pending
+[{"position":21,"definition":"F3Eaj…R6Lb","name":"Demo","amount":"200","to":"4h41EA3h…Xubb"}]
+
+$ N token receive
+receiving 200 Demo (F3EajXDpktXjy7PU1EACcAvP672ia6hxXD2y47ycR6Lb); proving it on this computer (several minutes)
+submitted 3ceec40c…798700
+applied in block 120                                 # 692 s
+
+$ N token list
+Public/6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV
+  1000050  Demo  F3EajXDpktXjy7PU1EACcAvP672ia6hxXD2y47ycR6Lb
+Public/GB8poqwyPcQBCJYisbZHcV3F1wviMDvjqEQM5QhTDKE
+  251  Demo  F3EajXDpktXjy7PU1EACcAvP672ia6hxXD2y47ycR6Lb
+Private/4h41EA3hmugg4ra795b2nGzbXdVthUVutMQFKzcdXubb
+  200  Demo  F3EajXDpktXjy7PU1EACcAvP672ia6hxXD2y47ycR6Lb
+
+$ N module token holdings --account 4h41…Xubb
+[{"account":"Private/4h41…Xubb","private":true,"definition":"F3Eaj…R6Lb","name":"Demo","balance":"200"}]
+$ N token receive
+nothing to receive
+$ N module token receive
+nothing to receive
+[]
+```
+
+The receipt was paid from V's shielded native balance (the wallet's choice of private fee
+payer); W itself held no native. Balances add up to the supply: 1,000,050 + 251 + 200 =
+1,000,501.
+
+The module's stdin send, public (B first had no native for the fee, which the client
+refused before sending; then F gave it 1,000,000 with `names wallet auth-transfer send`):
+
+```
+$ echo '{"definition":"F3Eaj…R6Lb","amount":"1","to":"Public/F","from":"Public/B"}' | N module token send
+sending 1 Demo from Public/GB8p…DKE to Public/6iAr…2VQV
+Error: Public/GB8p…DKE holds 0; about 355617 is held for the fee while this runs
+$ N wallet auth-transfer send --from Public/F --to Public/B --amount 1000000     # block 123
+$ echo '…same…' | N module token send
+sending 1 Demo from Public/GB8p…DKE to Public/6iAr…2VQV
+submitted dc8c031b…2845e7
+applied in block 124
+{"block":124,"tx":"dc8c031b1833971582c9d8cf7123c68686bf2d4e77e2024b32ad6385012845e7"}
+```
+
+Proving times on the Mac mini M4 (CPU): shield 318 s, token send to keys 515 s, receive
+692 s. The sequencer was stopped afterwards.
+
+### Not done, or not checked
+
+- `--to <name>` was not run live: the throwaway chain has no registry or names. It shares
+  `payee`/`pays_publicly`/`private_keys_of` with `names pay`, and the rule has a unit test.
+- `names module token send` ran live only for a public transfer.
+- Only one private direction was run (public sender, pending credit, receive). Private
+  senders, and a public sender to this wallet's own `Private/<id>` (credited in the same
+  transaction), use the same `token_call` path and ran in the prototype (section 5), not
+  through `names token`.
+- A public recipient the chain has never seen, whose key this wallet does not hold, cannot
+  be credited (`UnadmittedPublicActor`): there is no `--to-pk` form yet.
+- The LEZ wallet prints its sync lines ("Latest block is …") on stdout before the answer;
+  the module reads the last line, as it does for `names module accounts`.
+- The private fee payer is the wallet's choice (a private account holding native); a wallet
+  with none cannot receive. `names setup` covers that.
