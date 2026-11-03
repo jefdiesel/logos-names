@@ -1,0 +1,137 @@
+# Names Wallet end to end (LP-0021: "end-to-end integration tests run against a real sequencer
+# (standalone mode) and are included in CI"). Nothing here needs a secret: the payer is LEZ's
+# own published local-test genesis account, funded by networks/local.json on a fresh chain.
+#
+# Job `chain`: builds LEZ sequencer_service --features standalone at v0.4.0-rc1 (cached), the
+# `names` CLI, the registry and testimonial guests and the prototype token CLI from this
+# commit, then runs scripts/wallet-e2e.sh: deploy + configure the registry, register a name
+# (commit, the program's 15-minute wait, reveal), `names pay` and a transfer with balances
+# checked, `names token` create/mint/send/list and a refused overspend, and a testimonial
+# posted and listed. Private (proven) flows are left out: each takes minutes of proving.
+#
+# Job `module`: the Basecamp module's Rust tests, against the logos-rust-sdk source staged by
+# the same logos-module-builder revision basecamp-module/flake.nix pins (needs nix), and the
+# app's QML logic check (node).
+name: wallet-e2e
+
+on:
+  push:
+    branches: [main, lez-0.4, wallet-e2e]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  LEZ_TAG: v0.4.0-rc1
+  LEZ_COMMIT: "1806e873"  # quoted: unquoted YAML reads it as 1806 × 10^873
+  CARGO_TERM_COLOR: never
+
+jobs:
+  chain:
+    name: Wallet on a standalone rc1 sequencer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - name: System libraries (PC/SC for the wallet's Keycard support)
+        run: sudo apt-get update -q && sudo apt-get install -y -q libpcsclite-dev pkg-config
+      - name: Install rzup (risc0 toolchain, for the guests)
+        env:
+          # rzup looks releases up through the GitHub API; authenticate to avoid rate limits.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -L https://risczero.com/install | bash
+          echo "$HOME/.risc0/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.risc0/bin:$PATH"
+          rzup install cargo-risczero 3.0.5
+          rzup install rust
+
+      - name: Restore the standalone sequencer (per LEZ commit)
+        id: seqcache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/lez-seq
+          key: lez-seq-standalone-${{ env.LEZ_COMMIT }}
+      - name: Build sequencer_service --features standalone at ${{ env.LEZ_TAG }}
+        if: steps.seqcache.outputs.cache-hit != 'true'
+        run: |
+          git clone --quiet --depth 1 --branch "$LEZ_TAG" https://github.com/logos-blockchain/logos-execution-zone.git "$RUNNER_TEMP/lez"
+          test "$(git -C "$RUNNER_TEMP/lez" rev-parse --short=8 HEAD)" = "$LEZ_COMMIT"
+          (cd "$RUNNER_TEMP/lez" && cargo build --release --features standalone -p sequencer_service)
+          mkdir -p ~/lez-seq
+          cp "$RUNNER_TEMP/lez/target/release/sequencer_service" ~/lez-seq/
+          cp "$RUNNER_TEMP/lez/lez/sequencer/service/networks/local.json" ~/lez-seq/
+          rm -rf "$RUNNER_TEMP/lez"
+      # Saved right away, not at the end of the job: a later failing step must not throw away
+      # a 40-minute build.
+      - name: Save the standalone sequencer
+        if: steps.seqcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/lez-seq
+          key: lez-seq-standalone-${{ env.LEZ_COMMIT }}
+
+      # wallet-tokens/ is its own workspace (same toolchain, same LEZ pin): it builds into the
+      # same target directory, so the LEZ crates are compiled and cached once.
+      - uses: Swatinem/rust-cache@v2
+      - name: Build names, the registry and testimonial guests, the testimonial client
+        run: |
+          cargo build --release -p names_cli -p names_methods -p testimonial_client -p testimonial_engine_test
+          cargo run --release -p testimonial_engine_test --bin testimonial-imageid -- "$RUNNER_TEMP/testimonial.bin"
+          elf=$(find target/riscv-guest -path '*names_methods*' -name logos_names.bin | head -1)
+          test -n "$elf"
+          cp "$elf" "$RUNNER_TEMP/logos_names.bin"
+          ls -l "$RUNNER_TEMP"/*.bin
+          df -h / | tail -1
+      - name: Build the prototype token CLI (wallet-tokens/, its own workspace)
+        run: |
+          CARGO_TARGET_DIR="$PWD/target" cargo build --release --manifest-path wallet-tokens/Cargo.toml
+          df -h / | tail -1
+
+      - name: End to end (scripts/wallet-e2e.sh)
+        run: |
+          export SEQ_BIN="$HOME/lez-seq/sequencer_service"
+          export SEQ_CONFIG="$HOME/lez-seq/local.json"
+          export NAMES="$PWD/target/release/names"
+          export NAMES_ELF="$RUNNER_TEMP/logos_names.bin"
+          export WALLET_TOKENS="$PWD/target/release/wallet-tokens"
+          export TESTIMONIAL="$PWD/target/release/testimonial"
+          export TESTIMONIAL_ELF="$RUNNER_TEMP/testimonial.bin"
+          export WORK="$RUNNER_TEMP/wallet-e2e"
+          scripts/wallet-e2e.sh
+
+      - name: Logs
+        if: always()
+        run: |
+          tail -60 "$RUNNER_TEMP/wallet-e2e/sequencer.log" || true
+          echo "== register.log"; cat "$RUNNER_TEMP/wallet-e2e/register.log" || true
+
+  module:
+    name: Basecamp module tests and QML logic
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Stage logos-rust-sdk (the builder revision basecamp-module/flake.nix pins)
+        run: |
+          rev=$(sed -n 's|.*logos-module-builder.url = "github:logos-co/logos-module-builder/\([0-9a-f]*\)".*|\1|p' basecamp-module/flake.nix)
+          test -n "$rev"
+          echo "builder $rev"
+          nix build "github:logos-co/logos-module-builder/$rev#rust-sdk-src" -o basecamp-module/logos-rust-sdk-src
+          ls basecamp-module/logos-rust-sdk-src
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: basecamp-module/rust-lib -> target
+      - name: Module tests
+        working-directory: basecamp-module/rust-lib
+        run: cargo test --release --locked
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: QML logic check (no dependencies)
+        run: node basecamp/logic.test.mjs
