@@ -1,0 +1,14 @@
+// The Faucet app's backend: it talks to the faucet service for the view, because
+// Basecamp gives a ui_qml view no network (its QML engine has a deny-all network
+// access manager). It holds no key and only ever sends an account ID.
+//
+// requestFunds(url, account) POSTs {"account": "<base58>"} to the faucet at `url`.
+// describe(url) GETs the same URL (what the faucet gives and how often).
+// Both answer JSON text: {"status": <HTTP status, 0 if unreachable>, "body": <JSON
+// reply or null>, "retry_after": "<Retry-After header or empty>", "error": "<why, if
+// unreachable>"}. Only https URLs, or http to this computer, are contacted.
+class FaucetUi
+{
+    SLOT(QString requestFunds(QString url, QString account))
+    SLOT(QString describe(QString url))
+}

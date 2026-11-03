@@ -1,0 +1,35 @@
+{
+  "name": "faucet_ui",
+  "display_name": "Faucet",
+  "version": "0.1.0",
+  "type": "ui_qml",
+  "interface": "universal",
+  "category": "wallet",
+  "description": "Ask a LEZ testnet faucet for free test tokens, paid to an account you pick in your Names Wallet",
+  "main": "faucet_ui_plugin",
+  "icon": "src/icons/icon.png",
+  "view": "qml/Main.qml",
+  "dependencies": [
+    {
+      "name": "names",
+      "version": ">=0.11.0"
+    }
+  ],
+  "provides": [],
+  "uses": [],
+  "codegen": { "rep": "src/faucet_ui.rep" },
+
+  "nix": {
+    "packages": {
+      "build": [],
+      "runtime": []
+    },
+    "external_libraries": [],
+    "cmake": {
+      "find_packages": [],
+      "extra_sources": [],
+      "extra_include_dirs": [],
+      "extra_link_libraries": []
+    }
+  }
+}

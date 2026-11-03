@@ -1,0 +1,11 @@
+// The Testimonial app's backend: one plain sequencer read. Basecamp gives a ui_qml
+// view no network (its QML engine has a deny-all network access manager), so the view
+// asks this backend, which runs in its own process, to make the read.
+//
+// accountView(sequencer, account, program) posts `getAccountView` for `program`'s state
+// on `account` (both base58) to the sequencer at `sequencer` (http or https) and answers
+// JSON text: {"ok": true, "result": <the JSON-RPC result>} or {"ok": false, "error": "…"}.
+class TestimonialUi
+{
+    SLOT(QString accountView(QString sequencer, QString account, QString program))
+}

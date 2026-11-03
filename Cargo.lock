@@ -8036,6 +8036,7 @@ dependencies = [
  "borsh",
  "lee_core",
  "risc0-zkvm",
+ "serde_json",
 ]
 
 [[package]]

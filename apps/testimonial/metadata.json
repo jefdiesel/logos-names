@@ -1,0 +1,35 @@
+{
+  "name": "testimonial_ui",
+  "display_name": "Testimonial",
+  "version": "0.1.0",
+  "type": "ui_qml",
+  "interface": "universal",
+  "category": "social",
+  "description": "Post a testimonial for a λPrize submission on chain, signed with your Names Wallet, and read a submission's testimonials",
+  "main": "testimonial_ui_plugin",
+  "icon": "src/icons/icon.png",
+  "view": "qml/Main.qml",
+  "dependencies": [
+    {
+      "name": "names",
+      "version": ">=0.11.0"
+    }
+  ],
+  "provides": [],
+  "uses": [],
+  "codegen": { "rep": "src/testimonial_ui.rep" },
+
+  "nix": {
+    "packages": {
+      "build": [],
+      "runtime": []
+    },
+    "external_libraries": [],
+    "cmake": {
+      "find_packages": [],
+      "extra_sources": [],
+      "extra_include_dirs": [],
+      "extra_link_libraries": []
+    }
+  }
+}
