@@ -331,6 +331,7 @@ Item {
             loadClaims()
             boardLoad()
             loadRunningJobs()
+            loadAppGrants()
             return true
         }
         if (bridgeReady && logos.callModuleAsync) {
@@ -2365,6 +2366,160 @@ Item {
         }
     }
 
+    // ── Apps asking the wallet (Wallet Provider SDK) ────────────────────
+    //
+    // Other apps ask the names module for access, payments and program calls
+    // (docs/wallet/PROVIDER-SDK.md). Only this app can see and answer those
+    // requests: each shows here as a sheet over everything, first the account
+    // to use, then what will be signed or sent. Nothing is sent before Approve.
+
+    property var appRequests: []          // pending_requests: the oldest first
+    property var appChosen: []            // the accounts ticked on the sheet
+    property string appChosenFor: ""      // which request those ticks are for
+    property bool appUnderstood: false    // an unverified program's warning was read
+    property bool appBusy: false          // an answer is on its way to the module
+    property string appError: ""
+    property var appGrants: []            // [{app, accounts, since}]
+    readonly property var appRequest: appRequests.length > 0 ? appRequests[0] : null
+
+    /// Reads the requests waiting for the person. On the first sight of a
+    /// request, the account it already has (or the first offered) is ticked.
+    function loadAppRequests() {
+        askLater("pending_requests", [], function(value) {
+            appRequests = Array.isArray(value) ? value : []
+            var request = appRequest
+            if (request === null) {
+                appChosenFor = ""
+                appChosen = []
+                return
+            }
+            if (appChosenFor !== request.id) {
+                appChosenFor = request.id
+                appUnderstood = false
+                appError = ""
+                var choices = request.choices || []
+                var given = choices.filter(function(choice) { return choice.granted })
+                appChosen = given.length > 0 ? [given[0].account] : choices.length > 0 ? [choices[0].account] : []
+            }
+        }, function(message) {
+            console.log("names_ui: pending_requests:", message)
+        }, 20000)
+    }
+
+    function loadAppGrants() {
+        askLater("app_grants", [], function(value) {
+            appGrants = Array.isArray(value) ? value : []
+        }, function(message) {
+            console.log("names_ui: app_grants:", message)
+        })
+    }
+
+    /// Ticks `account` for the request on the sheet: one account for a
+    /// payment or call, any number for access.
+    function chooseAppAccount(account) {
+        if (appRequest === null)
+            return
+        if (appRequest.kind !== "connect") {
+            appChosen = [account]
+            return
+        }
+        var chosen = appChosen.slice()
+        var at = chosen.indexOf(account)
+        if (at >= 0)
+            chosen.splice(at, 1)
+        else
+            chosen.push(account)
+        appChosen = chosen
+    }
+
+    /// Whether the sheet's request may be approved as it stands.
+    function appCanApprove() {
+        if (appRequest === null || appBusy || appChosen.length === 0)
+            return false
+        if (appRequest.kind === "call" && appRequestRisky(appRequest) && !appUnderstood)
+            return false
+        return true
+    }
+
+    /// A program call whose source isn't verified, or that goes to the Names registry.
+    function appRequestRisky(request) {
+        return request.kind === "call" && ((request.warnings || []).length > 0)
+    }
+
+    function answerAppRequest(approve) {
+        var request = appRequest
+        if (request === null || appBusy)
+            return
+        appBusy = true
+        appError = ""
+        var method = approve ? "approve_request" : "reject_request"
+        var args = approve ? [request.id, appChosen.join(",")] : [request.id]
+        askLater(method, args, function(value) {
+            appBusy = false
+            if (approve && request.kind === "transfer")
+                say("Sending " + grouped(request.amount) + " " + request.asset + " to " + request.destination + " for " + request.app + ". It takes a few minutes.", false)
+            else if (approve && request.kind === "call")
+                say("Sent for " + request.app + ".", false)
+            else if (approve)
+                say(request.app + " can now see the accounts you chose.", false)
+            loadAppRequests()
+            loadAppGrants()
+        }, function(message) {
+            appBusy = false
+            appError = sentence(message)
+            loadAppRequests()
+        }, approve && request.kind === "call" ? 180000 : 30000)
+    }
+
+    function revokeApp(app) {
+        askLater("revoke_app", [app], function() {
+            say(app + " no longer has access to your accounts.", false)
+            loadAppGrants()
+        }, function(message) { say(message, true) })
+    }
+
+    /// The heading of a request's sheet.
+    function appRequestTitle(request) {
+        if (request === null)
+            return ""
+        if (request.kind === "connect")
+            return request.app + " wants to see your accounts"
+        if (request.kind === "transfer")
+            return request.app + " asks you to send " + grouped(request.amount) + " " + request.asset
+        return request.app + " asks you to sign a program call"
+    }
+
+    /// An account as `Public/CCVd76Tk…sapKnk`: its kind in full, its ID shortened.
+    function accountShort(account) {
+        var slash = String(account).indexOf("/")
+        return slash < 0 ? shorten(String(account)) : account.substr(0, slash + 1) + shorten(account.substr(slash + 1))
+    }
+
+    /// What the program registry says about a call's program, in words.
+    function programStatus(label) {
+        if (!label || !label.registry)
+            return "Unknown: the Program Registry isn't installed"
+        if (label.stale)
+            return "Changed: it runs other code than was registered"
+        if (label.verified)
+            return "Verified: this computer rebuilt it from its source"
+        return label.kind === "unregistered" ? "Unknown: not in the Program Registry" : "Not verified on this computer"
+    }
+
+    /// Minutes left before a request expires.
+    function appExpiresIn(request) {
+        var left = Math.max(0, Math.round((request.expires - Math.max(clockTick, Date.now())) / 60000))
+        return left <= 1 ? "Expires in about a minute." : "Expires in " + left + " minutes."
+    }
+
+    Timer {
+        interval: 3000
+        repeat: true
+        running: root.bridgeReady && root.configKnown && !root.appBusy
+        triggeredOnStart: true
+        onTriggered: { root.clockTick = Date.now(); root.loadAppRequests() }
+    }
+
     TextEdit { id: clipboard; visible: false }
 
     // ── Parts ───────────────────────────────────────────────────────────
@@ -4172,6 +4327,27 @@ Item {
                         enabledNow: root.cliPath !== ""
                         onPressed: root.openGetTokens()
                     }
+                    Part { text: "Connected apps" }
+                    Hint { text: root.appGrants.length === 0 ? "No other app can see your accounts. When one asks, you'll choose which accounts it sees, and approve each payment it asks for." : "These apps can see the accounts listed and ask you to approve payments. They can't send anything without you." }
+                    Repeater {
+                        model: root.appGrants
+                        RowLayout {
+                            id: grantRow
+                            required property var modelData
+                            Layout.fillWidth: true
+                            spacing: 12
+                            Text { Layout.preferredWidth: 200; text: grantRow.modelData.app; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); elide: Text.ElideRight }
+                            Text {
+                                Layout.fillWidth: true
+                                text: (grantRow.modelData.accounts || []).map(function(account) { return root.shorten(account) }).join(", ")
+                                color: root.dim
+                                font.family: root.mono
+                                font.pixelSize: root.px(14)
+                                elide: Text.ElideRight
+                            }
+                            Action { label: "Remove access"; onPressed: root.revokeApp(grantRow.modelData.app) }
+                        }
+                    }
                     Link {
                         Layout.topMargin: 10
                         text: root.settingsOpen ? "Hide advanced" : "Advanced"
@@ -5632,6 +5808,202 @@ Item {
                                 elide: Text.ElideRight
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // Another app's request, over everything but a recovery phrase, until the
+    // person answers it: who asks, the account to use, then what it will do.
+    Rectangle {
+        id: appSheet
+        visible: root.appRequest !== null
+        anchors.fill: parent
+        color: Qt.rgba(root.slate.r, root.slate.g, root.slate.b, 0.94)
+        readonly property var request: root.appRequest
+        readonly property string kind: request !== null ? request.kind : ""
+        // Nothing behind it can be pressed while it shows.
+        MouseArea { anchors.fill: parent; hoverEnabled: true; onWheel: function(wheel) { wheel.accepted = true } }
+        Flickable {
+            anchors.fill: parent
+            contentWidth: width
+            contentHeight: Math.max(height, requestCard.implicitHeight + root.px(64))
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            Card {
+                id: requestCard
+                width: Math.min(appSheet.width - root.px(64), root.px(760))
+                x: (appSheet.width - width) / 2
+                y: Math.max(root.px(32), (appSheet.height - implicitHeight) / 2)
+                Text {
+                    Layout.fillWidth: true
+                    text: root.appRequestTitle(appSheet.request)
+                    textFormat: Text.PlainText
+                    color: root.ink
+                    font.family: root.sans
+                    font.pixelSize: root.px(24)
+                    font.weight: Font.DemiBold
+                    wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                }
+                Hint {
+                    font.pixelSize: root.px(15)
+                    text: appSheet.request === null ? "" : "Asked by the app “" + appSheet.request.app + "”, as Basecamp names it. "
+                        + root.appExpiresIn(appSheet.request) + (root.appRequests.length > 1 ? " " + (root.appRequests.length - 1) + " more waiting." : "")
+                }
+
+                // Access: why, and what sharing means.
+                Hint {
+                    visible: appSheet.kind === "connect" && appSheet.request.reason !== ""
+                    textFormat: Text.PlainText
+                    color: root.ink
+                    text: appSheet.kind === "connect" ? "It says: “" + appSheet.request.reason + "”" : ""
+                }
+                Hint {
+                    visible: appSheet.kind === "connect"
+                    text: "Choose the accounts it may see. It will see their addresses and balances, and can then ask you to approve payments. It can't send anything without you."
+                }
+
+                // A payment: asset, amount, destination.
+                ColumnLayout {
+                    visible: appSheet.kind === "transfer"
+                    Layout.fillWidth: true
+                    spacing: 6
+                    Fact { label: "Asset"; value: appSheet.kind === "transfer" ? appSheet.request.asset + " (the native token)" : "" }
+                    Fact { label: "Amount"; value: appSheet.kind === "transfer" ? root.grouped(appSheet.request.amount) + " " + appSheet.request.asset : "" }
+                    Fact {
+                        label: "To"
+                        code: appSheet.kind === "transfer" && appSheet.request.destination_kind === "account"
+                        value: appSheet.kind !== "transfer" ? "" : appSheet.request.destination_kind === "name" ? appSheet.request.destination + " (a name)" : appSheet.request.destination
+                        full: appSheet.kind === "transfer" ? appSheet.request.destination : ""
+                    }
+                }
+
+                // A program call: what it is, what it can do, what the app says.
+                ColumnLayout {
+                    visible: appSheet.kind === "call"
+                    Layout.fillWidth: true
+                    spacing: 6
+                    Fact {
+                        label: "Program"
+                        value: appSheet.kind !== "call" ? "" : appSheet.request.program_label && appSheet.request.program_label.text ? appSheet.request.program_label.text : root.shorten(appSheet.request.program)
+                    }
+                    Fact { label: "Program ID"; code: true; value: appSheet.kind === "call" ? root.shorten(appSheet.request.program) : ""; full: appSheet.kind === "call" ? appSheet.request.program : "" }
+                    Fact {
+                        label: "Source"
+                        value: appSheet.kind === "call" ? root.programStatus(appSheet.request.program_label) : ""
+                    }
+                    Fact { label: "Data"; value: appSheet.kind === "call" ? appSheet.request.instruction_len + " bytes" : "" }
+                    Fact { label: "Gas"; value: "Sized when it's tried, just before sending; if the call would fail, nothing is sent" }
+                    Part { text: "What it can do" }
+                    Repeater {
+                        model: appSheet.kind === "call" ? (appSheet.request.effects || []) : []
+                        Hint {
+                            required property string modelData
+                            textFormat: Text.PlainText
+                            color: root.ink
+                            text: "•  " + modelData
+                        }
+                    }
+                    Repeater {
+                        model: appSheet.kind === "call" ? (appSheet.request.warnings || []) : []
+                        Hint {
+                            required property string modelData
+                            textFormat: Text.PlainText
+                            color: root.alarm
+                            text: "!  " + modelData
+                        }
+                    }
+                    Hint {
+                        visible: appSheet.kind === "call" && appSheet.request.app_summary !== ""
+                        textFormat: Text.PlainText
+                        font.pixelSize: root.px(15)
+                        text: appSheet.kind === "call" ? "The app describes it as: “" + appSheet.request.app_summary + "” (its own words, not checked)" : ""
+                    }
+                }
+
+                // The account to use.
+                Part { text: appSheet.kind === "connect" ? "Accounts it may see" : appSheet.kind === "call" ? "Sign with" : "Pay from" }
+                Repeater {
+                    model: appSheet.request !== null ? (appSheet.request.choices || []) : []
+                    Rectangle {
+                        id: choiceRow
+                        required property var modelData
+                        readonly property bool ticked: root.appChosen.indexOf(modelData.account) >= 0
+                        Layout.fillWidth: true
+                        implicitHeight: root.px(44)
+                        radius: 6
+                        color: ticked ? root.raised : "transparent"
+                        border.width: 1
+                        border.color: ticked ? root.brass : root.line
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 12
+                            anchors.rightMargin: 12
+                            spacing: 10
+                            Rectangle {
+                                Layout.preferredWidth: 18
+                                Layout.preferredHeight: 18
+                                radius: appSheet.kind === "connect" ? 4 : 9
+                                color: choiceRow.ticked ? root.brass : "transparent"
+                                border.width: 2
+                                border.color: choiceRow.ticked ? root.brass : root.dim
+                            }
+                            Text { text: root.accountShort(choiceRow.modelData.account); color: root.ink; font.family: root.mono; font.pixelSize: root.px(16) }
+                            Text { text: choiceRow.modelData.label; color: root.dim; font.family: root.sans; font.pixelSize: root.px(15); elide: Text.ElideRight; Layout.fillWidth: true }
+                            Text { visible: !!choiceRow.modelData.granted; text: "Shared with this app"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(14) }
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.chooseAppAccount(choiceRow.modelData.account)
+                        }
+                    }
+                }
+                Hint {
+                    visible: appSheet.request !== null && (appSheet.request.choices || []).length === 0
+                    color: root.alarm
+                    text: appSheet.kind === "call" ? "No account can sign this yet. Your wallet's public accounts are being read; if none shows, create your wallet first (Welcome, Create my wallet)."
+                        : "Your wallet has no accounts yet. Create your wallet first (Welcome, Create my wallet)."
+                }
+
+                // A risky call needs a second, deliberate tick.
+                RowLayout {
+                    visible: appSheet.request !== null && root.appRequestRisky(appSheet.request)
+                    Layout.fillWidth: true
+                    spacing: 10
+                    Rectangle {
+                        Layout.preferredWidth: 18
+                        Layout.preferredHeight: 18
+                        Layout.alignment: Qt.AlignTop
+                        radius: 4
+                        color: root.appUnderstood ? root.alarm : "transparent"
+                        border.width: 2
+                        border.color: root.alarm
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.appUnderstood = !root.appUnderstood }
+                    }
+                    Hint {
+                        color: root.ink
+                        text: "I've read the warnings above and trust " + (appSheet.request !== null ? appSheet.request.app : "this app") + " with this account."
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.appUnderstood = !root.appUnderstood }
+                    }
+                }
+
+                Hint { visible: root.appError !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.appError }
+                Hint { visible: root.appBusy; color: root.brass; text: appSheet.kind === "call" ? "Trying it, then signing and sending it. This waits for its block, up to two minutes…" : "One moment…" }
+                RowLayout {
+                    Layout.topMargin: 8
+                    spacing: 10
+                    Action {
+                        label: appSheet.kind === "connect" ? "Share" : appSheet.kind === "call" ? "Approve and sign" : "Approve and send"
+                        strong: true
+                        enabledNow: root.appCanApprove()
+                        onPressed: root.answerAppRequest(true)
+                    }
+                    Action {
+                        label: "Reject"
+                        enabledNow: !root.appBusy
+                        onPressed: root.answerAppRequest(false)
                     }
                 }
             }

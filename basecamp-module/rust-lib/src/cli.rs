@@ -263,6 +263,14 @@ pub fn pay_args(name: &str, amount: &str) -> Result<Vec<String>, String> {
     Ok(vec!["pay".to_owned(), "--".to_owned(), name, amount])
 }
 
+/// `names pay` from the wallet's default public account rather than its
+/// private one: the chain then shows that account paying.
+pub fn pay_from_public_args(setup: &Setup, name: &str, amount: &str) -> Result<Vec<String>, String> {
+    let mut args = pay_args(name, amount)?;
+    args.insert(1, format!("--from=Public/{}", default_public(setup)?));
+    Ok(args)
+}
+
 /// A whole amount above zero, in decimal digits and nothing else.
 pub fn is_amount(amount: &str) -> bool {
     !amount.is_empty() && amount.len() <= 30 && amount.bytes().all(|b| b.is_ascii_digit()) && !amount.bytes().all(|b| b == b'0')
