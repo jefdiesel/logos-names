@@ -5364,6 +5364,7 @@ dependencies = [
  "tokio",
  "ureq",
  "wallet",
+ "wallet_tokens_core",
 ]
 
 [[package]]
@@ -8902,6 +8903,15 @@ dependencies = [
  "tokio",
  "url",
  "zeroize",
+]
+
+[[package]]
+name = "wallet_tokens_core"
+version = "0.1.0"
+dependencies = [
+ "borsh",
+ "lee_core",
+ "risc0-zkvm",
 ]
 
 [[package]]

@@ -35,6 +35,11 @@ pub enum Request {
         #[arg(long, default_value_t = 16)]
         accounts: u32,
     },
+    /// Token requests (`holdings`, `pending`, `info`, `send`, `receive`); see `tokens.rs`.
+    /// A token send can't go through `send`: that runs only the registry, and builds no
+    /// pending credit for a private recipient.
+    #[command(subcommand)]
+    Token(crate::tokens::TokenRequest),
 }
 
 /// One actor a change reaches.
@@ -65,6 +70,7 @@ impl Client {
             Request::Keys { account } => self.module_keys(&account),
             Request::Send => self.module_send().await,
             Request::Restore { .. } => unreachable!("handled before the wallet is opened"),
+            Request::Token(_) => unreachable!("handled with the token program chosen, in main"),
         }
     }
 

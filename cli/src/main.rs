@@ -67,6 +67,9 @@ struct Defaults {
     /// This wallet's anonymous name, held by its own private account (`names anon`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     anon: Option<String>,
+    /// The token program `names token` uses when `--token-program` is not given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    token_program: Option<String>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -179,6 +182,16 @@ struct Cli {
     /// given, in which case the wallet's own config decides.
     #[arg(long, env = "LOGOS_NAMES_RPC", global = true)]
     rpc: Option<String>,
+
+    /// Account ID of the token program `names token` uses. None is built in: no token
+    /// program runs on the public LEZ testnet yet. Falls back to `token_program` in
+    /// `names.json` next to the wallet.
+    #[arg(long, env = "NAMES_TOKEN_PROGRAM", global = true, value_parser = parse_account)]
+    token_program: Option<AccountId>,
+
+    /// How to speak to the token program: `prototype` is the one in `wallet-tokens/`.
+    #[arg(long, env = "NAMES_TOKEN_CODEC", global = true, default_value = "prototype", value_parser = tokens::CODECS)]
+    token_codec: String,
 
     #[command(subcommand)]
     command: Command,
@@ -481,6 +494,10 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Fungible tokens: list what this wallet holds, send to a name or an account,
+    /// receive private credits. Needs `--token-program` (or NAMES_TOKEN_PROGRAM).
+    #[command(subcommand)]
+    Token(tokens::TokenCommand),
     /// The LEZ wallet's own commands: make accounts, check balances, sync private
     /// accounts and more. Run `names wallet help` for the list.
     #[command(disable_help_flag = true)]
@@ -600,6 +617,7 @@ fn write_man_pages(dir: &std::path::Path) -> Result<()> {
 mod board;
 mod claims;
 mod module;
+mod tokens;
 
 /// Accepts a name as people write it (`jef`, `@jef`, `lns:jef` or `jef.lez`, any case) and returns the bare name.
 fn parse_name(input: &str) -> Result<String, String> {
@@ -1598,17 +1616,7 @@ impl Client {
     /// Pays `amount` to the private receiving keys `name` publishes.
     async fn pay_private(&mut self, name: &str, amount: u128, from: AccountId) -> Result<()> {
         let (_, _, profile) = self.lookup(name).await?;
-        let npk = profile
-            .npk
-            .ok_or_else(|| anyhow!("{name} has no private keys set"))?;
-        let vpk = lee_core::encryption::ViewingPublicKey::from_bytes(profile.vpk)
-            .map_err(|error| anyhow!("{name} publishes an invalid viewing key: {error}"))?;
-        // The credit stays pending until the recipient's wallet claims it.
-        let recipient = AccountIdentity::PrivateForeign {
-            npk: NullifierPublicKey(npk),
-            vpk,
-            kind: PrivateAccountKind::Regular,
-        };
+        let recipient = private_keys_of(name, &profile)?;
         if self.is_private(from) {
             // From a private account neither side is seen: no sender, no recipient,
             // no amount.
@@ -1642,6 +1650,20 @@ impl Client {
         println!("included in block {block}; {from} was debited {debited} (the amount, plus any fee)");
         println!("the recipient sees it after syncing their private accounts");
         Ok(())
+    }
+
+    /// Where paying `name` goes, as `names pay` decides it (see [`pays_publicly`]): its
+    /// public account, or its private receiving keys.
+    async fn payee(&self, name: &str, public: bool, private: bool) -> Result<AccountIdentity> {
+        let (_, _, profile) = self.lookup(name).await?;
+        if pays_publicly(&profile, public, private) {
+            let to = profile
+                .account
+                .map(AccountId::new)
+                .ok_or_else(|| anyhow!("{name} has no public account set"))?;
+            return Ok(AccountIdentity::PublicNoSign(to));
+        }
+        private_keys_of(name, &profile)
     }
 
     /// The name's page, opened with its key, if it has one.
@@ -1695,6 +1717,23 @@ impl Client {
         }))
     }
 
+}
+
+/// Whether paying a name goes to its public account: when asked (`--public`), or when the
+/// name publishes no private receiving keys but a public account and `--private` was not
+/// asked. Otherwise payments go to its private keys.
+fn pays_publicly(profile: &Profile, public: bool, private: bool) -> bool {
+    let has_keys = profile.npk.is_some() && !profile.vpk.is_empty();
+    public || (!private && !has_keys && profile.account.is_some())
+}
+
+/// The name's private receiving keys as a payment destination. A credit to them stays
+/// pending until the holder's wallet receives it.
+fn private_keys_of(name: &str, profile: &Profile) -> Result<AccountIdentity> {
+    let npk = profile.npk.ok_or_else(|| anyhow!("{name} has no private keys set"))?;
+    let vpk = lee_core::encryption::ViewingPublicKey::from_bytes(profile.vpk.clone())
+        .map_err(|error| anyhow!("{name} publishes an invalid viewing key: {error}"))?;
+    Ok(AccountIdentity::PrivateForeign { npk: NullifierPublicKey(npk), vpk, kind: PrivateAccountKind::Regular })
 }
 
 /// What a page shown by `names open` may do: run its own inline script and style and
@@ -2279,7 +2318,11 @@ async fn main() -> Result<()> {
             overrides,
             !matches!(
                 cli.command,
-                Command::Resolve { .. } | Command::Open { .. } | Command::Settings | Command::VerifyAccount { .. }
+                Command::Resolve { .. }
+                    | Command::Open { .. }
+                    | Command::Settings
+                    | Command::VerifyAccount { .. }
+                    | Command::Token(tokens::TokenCommand::Info { .. })
             ),
         )
         .await?,
@@ -2288,6 +2331,14 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Setup { shield } => setup(&mut client, shield).await,
+        Command::Token(command) => {
+            let tokens = tokens::Tokens::select(cli.token_program, &cli.token_codec)?;
+            client.token(&tokens, command).await
+        }
+        Command::Module(module::Request::Token(request)) => {
+            let tokens = tokens::Tokens::select(cli.token_program, &cli.token_codec)?;
+            client.module_token(&tokens, request).await
+        }
         Command::Module(request) => client.module(request).await,
         Command::Balance => {
             client.wallet.sync_to_latest_block().await.ok();
@@ -2600,8 +2651,7 @@ async fn main() -> Result<()> {
                 None => default_private()?,
             };
             let (_, _, profile) = client.lookup(&name).await?;
-            let has_keys = profile.npk.is_some() && !profile.vpk.is_empty();
-            if public || (!private && !has_keys && profile.account.is_some()) {
+            if pays_publicly(&profile, public, private) {
                 client.pay(&name, amount, from).await
             } else {
                 client.pay_private(&name, amount, from).await
@@ -2654,5 +2704,24 @@ mod shortlist_tests {
             let (_, got) = super::length_proof(&names_seal::derive(name).id).expect("a proof");
             assert_eq!(got, tier, "{name}");
         }
+    }
+}
+
+#[cfg(test)]
+mod pay_tests {
+    use super::{Profile, pays_publicly, private_keys_of};
+
+    /// `names pay` and `names token send` pick a name's destination the same way.
+    #[test]
+    fn a_name_is_paid_privately_unless_it_has_only_a_public_account() {
+        let both = Profile { npk: Some([1; 32]), vpk: vec![2; 33], account: Some([3; 32]), ..Profile::default() };
+        assert!(!pays_publicly(&both, false, false), "private keys are the default");
+        assert!(pays_publicly(&both, true, false), "--public asks for the account");
+        let public_only = Profile { account: Some([3; 32]), ..Profile::default() };
+        assert!(pays_publicly(&public_only, false, false));
+        assert!(!pays_publicly(&public_only, false, true), "--private insists on keys");
+        assert!(private_keys_of("alice", &public_only).is_err(), "and there are none");
+        let keys_only = Profile { npk: Some([1; 32]), vpk: vec![2; 33], ..Profile::default() };
+        assert!(!pays_publicly(&keys_only, false, false));
     }
 }

@@ -19,6 +19,8 @@ common.workspace = true
 sequencer_service_rpc.workspace = true
 wallet.workspace = true
 clock_core.workspace = true
+# The prototype token program's wire types (docs/wallet/TOKENS.md); its own workspace.
+token_core = { path = "../wallet-tokens/core", package = "wallet_tokens_core" }
 
 anyhow = "1.0.98"
 borsh.workspace = true
