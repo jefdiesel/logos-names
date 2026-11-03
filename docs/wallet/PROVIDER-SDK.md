@@ -7,7 +7,9 @@ The app never sees a key, and nothing is signed or sent until the person
 approves.
 
 This page is the API reference, with a worked example of
-connect → account selection → approval → transaction in QML and in C++.
+connect → account selection → approval → transaction in QML and in C++. Two
+complete reference apps built on it, [Testimonial](../../apps/testimonial/README.md)
+and [Faucet](../../apps/faucet/README.md), are the longer worked examples.
 
 ## How it works
 
@@ -334,16 +336,17 @@ void TipJar::onPoll() {   // connected to m_poll's timeout
 
 ### A program call
 
-The same flow applies to a contract call. For example, take a testimonial
-program that stores each testimonial in an account of its own, derived from a
-seed. The person's account signs and pays only the fee, so the call doesn't
-list `signer`:
+The same flow applies to a contract call. For example, the testimonial program
+(`testimonial/`) keeps each submission's list in a head account and each
+testimonial in an account of its own, both derived from seeds. The person's
+account signs and pays only the fee, so the call doesn't list `signer`:
 
 ```qml
 names("propose_call", [
     testimonialProgramId,                                  // base58
-    JSON.stringify([ { seed: testimonialSeedHex } ]),      // the program's account for this testimonial
-    messageHex,                                            // borsh(Message::Instruction(..)) of your program
+    JSON.stringify([ { seed: headSeedHex },                // the submission's head (made if new)
+                     { seed: nodeSeedHex } ]),             // this author's testimonial account
+    messageHex,                                            // borsh(Message::Instruction(Post {..}))
     "Post a testimonial: “Names Wallet is great”"
 ], function(v) { requestId = v.request; poll.start() })
 ```
@@ -351,6 +354,13 @@ names("propose_call", [
 `state` becomes `done` with `tx` once the call is in a block and has not
 reverted. A call the program refuses fails when the CLI tries it, before
 anything is sent.
+
+When an address in the call depends on who signs (here the testimonial
+account is derived from the author), your app has to know the signer before it
+proposes: let the person pick one of the granted public accounts in your app,
+build the call for it, and tell them to choose the same account in the Names
+sheet. If they choose another, the CLI's dry run refuses the call and nothing
+is sent or charged.
 
 ### What the person sees
 
@@ -366,6 +376,26 @@ anything is sent.
    line, and your summary marked as your own words.
 4. **Approve** or **Reject**. In Settings, under Connected apps, the person can
    take back any app's access.
+
+## Worked examples: the reference mini-apps
+
+Two complete Basecamp apps use only this SDK for everything that touches the
+wallet. Their READMEs walk through connect → account selection → approval →
+transaction with the code that does it, and record how they were tested:
+
+- [Testimonial](../../apps/testimonial/README.md) (`apps/testimonial/`): a
+  program call (`propose_call`) whose message and PDA seeds are built in
+  JavaScript and checked against the program's Rust encoding, then a list read
+  back from the chain with per-month counts.
+- [Faucet](../../apps/faucet/README.md) (`apps/faucet/`): access and account
+  selection, then a request to a disclosed, optional faucet service, with its
+  rate limits explained and the balance watched with `account_balances`.
+
+**Network access in a `ui_qml` app.** Basecamp gives a QML view no network (its
+engine has a deny-all network access manager), so `XMLHttpRequest` can't reach
+a sequencer or any other service. Wallet actions go through this SDK. For plain
+reads or another HTTP service, give the app a small C++ backend (a universal
+`ui_qml` module with a `.rep` file); both mini-apps show one.
 
 ## Security model
 
