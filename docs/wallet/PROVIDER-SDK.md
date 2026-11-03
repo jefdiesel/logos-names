@@ -17,7 +17,7 @@ your app ──propose──▶ names module ──queue──▶ Names app (app
     └──── request_status ◀──┴──── approve / reject ◀─┘
                             │
                             ├─ transfer: names CLI job (`names pay`, `auth-transfer send`)
-                            └─ call:     LEZ Wallet (`lez_core`) signs and sends
+                            └─ call:     names CLI (`names module send`) tries, signs, sends
 ```
 
 1. **Connect.** Your app calls `request_access`. The person sees your app's
@@ -97,7 +97,7 @@ You must call `request_access` before you propose anything. Otherwise
 | `pending` | Waiting for the person |
 | `approved` | Access given (`connect`) |
 | `running` | A transfer is being proven and sent: about 4 minutes from a private account, one block from a public one |
-| `done` | Transfer: included in a block. Call: signed and accepted by the sequencer (`tx`) |
+| `done` | Included in a block and not reverted. A call also gives `tx`, its hash |
 | `failed` | `error` says why, in general terms. The wallet's own message, which may mention the person's balances, goes only to the Names app |
 | `rejected` / `expired` / `cancelled` | Nothing was signed or sent |
 
@@ -108,32 +108,52 @@ Times are in milliseconds. A decided request stays readable for a day.
 `propose_call(program_id, accounts_json, instruction_hex, summary)`:
 
 - `program_id`: the program's ID in base58.
-- `accounts_json`: a JSON array of at most 16 entries, in the order the
-  program expects. Each entry is one of:
-  - a public account ID (base58), used for the program's own data;
-  - `"signer"`, exactly once: the account the person chooses, which signs;
-  - `{"account": "<id or signer>", "balance": true}`, an account used for its
-    LEZ balance. These entries go after all the others.
-- `instruction_hex`: the instruction bytes in hex, at most 2,048 bytes.
+- `instruction_hex`: the message the program's transaction carries, in hex,
+  at most 2,048 bytes. On LEZ 0.4 this is `borsh(Message::Instruction(..))`,
+  as your program defines it.
+- `accounts_json`: the actors the call reaches, as a JSON array of at most 16
+  entries, in the order your program expects. The account the person chooses
+  always comes first, as its own actor of your program (its data for your
+  program). You don't list it. Each entry is one of:
+  - a public account ID (base58): your program's data on that account;
+  - `{"seed": "<64 hex>"}`: one of your program's own accounts (a PDA). The
+    seed is the evidence that lets the call create it. You may also give
+    `"account"`, which must match the seed;
+  - `{"account": "<id>", "balance": true}`: that account's LEZ balance rather
+    than your program's data (it may be combined with `seed`);
+  - `{"account": "signer", "balance": true}`: the chosen account's LEZ. Only
+    with this entry can your program move the person's LEZ.
 - `summary`: what your app says the call does, at most 280 characters. The
   prompt shows it as your own words, unchecked.
 
-The prompt does not rely on your summary. It says what the call can do. The
-signing account lets the program act for it and move its LEZ. The prompt
-lists every other account the call touches and whether it is used for data
-or for balance. It shows the program's label and source-verification status
-from the Program Registry (`program_registry`, `program_label`). When the
-Program Registry isn't installed, the prompt says so. It warns when the
-source isn't verified or has changed since it was registered, when the
-program can be upgraded, and when the program is the Names registry itself.
-For any of these warnings, the person must tick an extra box before Approve
-works. LEZ 0.4 gives this wallet no gas estimate before sending, so the
-prompt says that the gas isn't estimated.
+The prompt does not rely on your summary. It says what the call can do,
+worked out from what it reaches:
+- The chosen account signs, and your program may change the data it keeps on
+  that account.
+- Your program may move the chosen account's LEZ, up to all of it, when you
+  listed `signer` for its balance. Otherwise the prompt says that the call
+  can't move that account's LEZ, and only the fee is paid from it.
+- Each other account is described as data, as your program's own account
+  (made if it is new), or as a LEZ balance.
 
-Program calls are signed by the **LEZ Wallet** module (`lez_core`), with one
-of its public accounts, the same way the names module sends its own registry
-changes. LEZ Wallet must be installed and open. Payments are made by the
-**names CLI's wallet**, from its public or private account.
+The prompt shows the program's label and source-verification status from the
+Program Registry (`program_registry`, `program_label`). When the Program
+Registry isn't installed, the prompt says so. It warns when the source isn't
+verified or has changed since it was registered, when the program can be
+upgraded, and when the program is the Names registry itself. For any of these
+warnings, the person must tick an extra box before Approve works.
+
+Calls and payments both go through the **names CLI's wallet**. An approved
+call goes the same way as the names module's own registry changes on LEZ 0.4:
+the module hands it to `names --program=<your program> module send`. The CLI
+reads your program's bytecode from the chain and runs the call against the
+current state first. A call that would fail stops there, with nothing sent
+and no fee paid. The same run sizes the gas limit. Then the CLI signs with the
+chosen public account, sends the call and waits for its block. A call that
+was included but reverted counts as failed. The gas is sized only at this
+point, so the prompt shows no number for it. The answer to `approve_request`
+waits for the block, up to two minutes. The call can only reach your
+program: the CLI loads one program's bytecode per call.
 
 ### Limits
 
@@ -145,7 +165,7 @@ changes. LEZ Wallet must be installed and open. Payments are made by the
 | Accounts an app can be given | 8 |
 | Apps with access | 64 |
 | `reason`, `summary` | 280 characters; control and bidi characters are removed |
-| Call accounts / instruction | 16 / 2,048 bytes |
+| Actors a call reaches besides the signer's own / its message | 16 / 2,048 bytes |
 
 Requests and grants are kept in `~/.config/logos-names/provider.json`. The
 file is mode 0600 and written atomically, so a grant survives a restart and a
@@ -158,7 +178,7 @@ gets `only the Names app can do this`.
 
 | Method | Value |
 |---|---|
-| `pending_requests()` | the waiting requests, oldest first, with everything the prompt shows and `choices`: `[{account, account_kind, source, label, granted}]` (`source`: `names` for transfers, `lez_wallet` for calls) |
+| `pending_requests()` | the waiting requests, oldest first, with everything the prompt shows and `choices`: `[{account, account_kind, pays, label, granted}]`. A payment comes from the wallet's main public or private account (`pays`). A call can be signed by any of its public accounts; those beyond the main one are read in the background and can appear a few seconds later |
 | `approve_request(request_id, account)` | approves with one of the request's `choices` (for `connect`, one or more separated by commas). A transfer starts as a CLI job, and its `job` is in the value. If the wallet is busy, the request stays pending and the error says so |
 | `reject_request(request_id)` | the rejected request |
 | `app_grants()` | `[{app, accounts, since}]` |
@@ -280,30 +300,31 @@ void TipJar::onPoll() {   // connected to m_poll's timeout
 
 ### A program call
 
-The same flow applies to a contract call. For example, a testimonial program
-that records text, signed and paid by the person's account:
+The same flow applies to a contract call. For example, take a testimonial
+program that stores each testimonial in an account of its own, derived from a
+seed. The person's account signs and pays only the fee, so the call doesn't
+list `signer`:
 
 ```qml
 names("propose_call", [
     testimonialProgramId,                                  // base58
-    JSON.stringify([ boardAccountId, { account: "signer", balance: true } ]),
-    instructionHex,                                        // your program's encoded instruction
+    JSON.stringify([ { seed: testimonialSeedHex } ]),      // the program's account for this testimonial
+    messageHex,                                            // borsh(Message::Instruction(..)) of your program
     "Post a testimonial: “Names Wallet is great”"
 ], function(v) { requestId = v.request; poll.start() })
 ```
 
-`state` becomes `done` with `tx` once LEZ Wallet has signed the call and the
-sequencer has accepted it. To confirm the effect, read your program's account
-afterwards.
+`state` becomes `done` with `tx` once the call is in a block and has not
+reverted. A call the program refuses fails when the CLI tries it, before
+anything is sent.
 
 ### What the person sees
 
 1. A sheet over the Names app with your app's name, as Basecamp gives it, and
    how long the request has left.
-2. **Account selection.** For access, the Names wallet's accounts and LEZ
-   Wallet's accounts, as checkboxes. For a payment, the Names wallet's public
-   or private account. For a call, LEZ Wallet's public accounts. Accounts your
-   app already has are marked.
+2. **Account selection.** For access, the Names wallet's accounts, as
+   checkboxes. For a payment, its main public or private account. For a call,
+   its public accounts. Accounts your app already has are marked.
 3. **What will be sent or signed.** For a payment, the asset, amount and
    destination. For a call, the program's label and ID, its source
    verification, what the call can do, any warnings, the data size, the gas
@@ -324,16 +345,17 @@ afterwards.
 - **Nothing is signed before approval.** The only code that starts a payment
   or a signature for a request is `approve_request`. It runs only for the
   Names app, only on a pending request, and only with an account from that
-  request's own `choices`. A rejected, cancelled or expired request can never
-  be approved. A failed call is never retried, because a send that timed out
-  may still have gone through.
+  request's own `choices`. For a call, the account must also be one the names
+  wallet holds when the person approves. A rejected, cancelled or expired
+  request can never be approved. A failed call is never retried, because on
+  LEZ 0.4 a failed transaction is still charged, and a send that timed out may
+  still have gone through.
 - **Private state is shown only with approval.** An app sees only the
   accounts the person ticked for it. It gets a private account's balance only
   if the person gave it that private account. A failed payment tells the app
   only that it failed.
-- **Keys never leave their wallet.** Payments run in the names CLI with its
-  own keys, and calls are signed by LEZ Wallet. The names module never holds a
-  key.
+- **Keys never leave their wallet.** Payments and calls both run in the names
+  CLI, which signs with its own keys. The names module never holds a key.
 - **Prompts can't be spoofed by text.** Your `reason` and `summary` lose
   control, bidi-override and zero-width characters. The app shows them as
   plain text, labelled as your words.
