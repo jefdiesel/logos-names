@@ -2468,7 +2468,7 @@ Item {
             appBusy = false
             appError = sentence(message)
             loadAppRequests()
-        }, approve && request.kind === "call" ? 30000 : 20000)
+        }, approve && request.kind === "call" ? 180000 : 30000)
     }
 
     function revokeApp(app) {
@@ -5894,7 +5894,7 @@ Item {
                         value: appSheet.kind === "call" ? root.programStatus(appSheet.request.program_label) : ""
                     }
                     Fact { label: "Data"; value: appSheet.kind === "call" ? appSheet.request.instruction_len + " bytes" : "" }
-                    Fact { label: "Gas"; value: "Not estimated: LEZ 0.4 gives no estimate before sending" }
+                    Fact { label: "Gas"; value: "Sized when it's tried, just before sending; if the call would fail, nothing is sent" }
                     Part { text: "What it can do" }
                     Repeater {
                         model: appSheet.kind === "call" ? (appSheet.request.effects || []) : []
@@ -5963,7 +5963,7 @@ Item {
                 Hint {
                     visible: appSheet.request !== null && (appSheet.request.choices || []).length === 0
                     color: root.alarm
-                    text: appSheet.kind === "call" ? "No account can sign this. Program calls are signed by LEZ Wallet: open it, then come back."
+                    text: appSheet.kind === "call" ? "No account can sign this yet. Your wallet's public accounts are being read; if none shows, create your wallet first (Welcome, Create my wallet)."
                         : "Your wallet has no accounts yet. Create your wallet first (Welcome, Create my wallet)."
                 }
 
@@ -5990,7 +5990,7 @@ Item {
                 }
 
                 Hint { visible: root.appError !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.appError }
-                Hint { visible: root.appBusy; color: root.brass; text: appSheet.kind === "call" ? "Asking LEZ Wallet to sign and send it…" : "One moment…" }
+                Hint { visible: root.appBusy; color: root.brass; text: appSheet.kind === "call" ? "Trying it, then signing and sending it. This waits for its block, up to two minutes…" : "One moment…" }
                 RowLayout {
                     Layout.topMargin: 8
                     spacing: 10
