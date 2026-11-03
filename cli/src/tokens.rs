@@ -904,9 +904,10 @@ impl Client {
         })
     }
 
-    /// Checks that `recipient` can take `amount` of `definition`, where its holdings can be read.
+    /// Checks that `recipient` can take `amount` of `definition`, where its holdings can be read
+    /// (one of this wallet's private accounts after a sync, so its note is current).
     async fn check_recipient(
-        &self,
+        &mut self,
         tokens: &Tokens,
         recipient: &AccountIdentity,
         definition: AccountId,
@@ -915,6 +916,12 @@ impl Client {
     ) -> Result<()> {
         if matches!(recipient, AccountIdentity::PrivateForeign { .. }) {
             return Ok(());
+        }
+        if recipient.is_private() {
+            self.wallet
+                .sync_to_latest_block()
+                .await
+                .context("cannot sync the private accounts")?;
         }
         let held = self.held(tokens, recipient.account_id()).await?;
         check_credit(
