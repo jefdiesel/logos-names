@@ -108,7 +108,7 @@ export function waitText(ms, at) {
     if (ms <= 0) return "now"
     if (ms < MINUTE) return "in " + Math.ceil(ms / 1000) + " s"
     if (ms < HOUR) return "in " + Math.ceil(ms / MINUTE) + " min"
-    var h = Math.floor(ms / HOUR), m = Math.ceil((ms - h * HOUR) / MINUTE)
+    var minutes = Math.ceil(ms / MINUTE), h = Math.floor(minutes / 60), m = minutes % 60
     var when = new Date(at)
     return "in " + h + " h" + (m > 0 ? " " + m + " min" : "") + " (at " + pad(when.getHours()) + ":" + pad(when.getMinutes()) + ")"
 }

@@ -51,8 +51,11 @@ Item {
     readonly property double waitUntil: chosen !== "" && retryAt[chosen] ? retryAt[chosen] : 0
     readonly property bool coolingDown: waitUntil > tick
     readonly property bool arriving: outcome !== null && outcome.ok && !arrived
-    readonly property bool arrived: outcome !== null && outcome.ok && outcome.before !== null
-        && Logic.balanceOf(balances, outcome.account) !== null && Logic.above(Logic.balanceOf(balances, outcome.account), outcome.before)
+    // Arrived: the balance grew past what it was when we asked (or, if it hadn't been read
+    // then, reached the amount sent).
+    readonly property bool arrived: outcome !== null && outcome.ok && Logic.balanceOf(balances, outcome.account) !== null
+        && (outcome.before !== null ? Logic.above(Logic.balanceOf(balances, outcome.account), outcome.before)
+                                    : Logic.atLeast(Logic.balanceOf(balances, outcome.account), outcome.amount || "1"))
 
     // ── Palette (the shared Logos theme, as the Names app uses it) ─────────
     readonly property color slate: Theme.palette.background

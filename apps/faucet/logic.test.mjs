@@ -54,6 +54,8 @@ check("garbage reply", L.interpret(null, NOW, 0).ok, false);
 check("describe", [L.describe({ status: 200, body: { amount: "2000000", per_account: "once a day" } }), L.describe({ status: 404, body: {} })], [{ amount: "2000000", per_account: "once a day" }, null]);
 
 // ── Waiting, balances ──────────────────────────────────────────────────────────────
+// Found live: a day minus a few seconds once read "in 23 h 60 min".
+check("waitText never says 60 min", [/^in 24 h \(at/.test(L.waitText(DAY - 25000, NOW + DAY)), /^in 2 h \(at/.test(L.waitText(2 * 3600000 - 1, NOW))], [true, true]);
 check("waitText", [L.waitText(0, NOW), L.waitText(1500, NOW), L.waitText(90000, NOW), /^in 5 h 1 min \(at \d\d:\d\d\)$/.test(L.waitText(5 * 3600000 + 30000, NOW + 5 * 3600000))], ["now", "in 2 s", "in 2 min", true]);
 check("above", [L.above("2000001", "2000000"), L.above("2000000", "2000000"), L.above("100000000000000000000", "99999999999999999999"), L.above("9", "10")], [true, false, true, false]);
 check("grouped", [L.grouped("2000000"), L.grouped("12"), L.grouped("x")], ["2,000,000", "12", "x"]);
