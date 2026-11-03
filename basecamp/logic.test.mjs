@@ -1,6 +1,6 @@
 // Checks the view's own logic (qml/logic.mjs, which qml/Main.qml imports), since the QML
 // engine cannot run in CI. Run with: node basecamp/logic.test.mjs
-import { atLeast, someAmount, entryShown } from "./qml/logic.mjs";
+import { atLeast, someAmount, entryShown, tokenAmountProblem, tokenToProblem, tokenSendProves, tokenShown } from "./qml/logic.mjs";
 import { readFileSync } from "node:fs";
 
 let failures = 0;
@@ -22,6 +22,17 @@ check("entryShown key", entryShown("a".repeat(30) + "b".repeat(30)), "aaaaaaaaaa
 check("entryShown short", entryShown("short value"), "short value");
 check("entryShown sentence", entryShown("a bio that runs on for quite a while, longer than forty"), "a bio that runs on for quite a while, longer than forty");
 check("entryShown link", entryShown("https://example.com/" + "x".repeat(40)), "https://example.com/" + "x".repeat(40));
+
+// Tokens: amounts are 128-bit, so they're checked as text.
+const ok = (problem) => problem === "";
+check("tokenAmount good", ["1", "1,000", "1_000", " 007 ", "340282366920938463463374607431768211455"].map((a) => ok(tokenAmountProblem(a))), [true, true, true, true, true]);
+check("tokenAmount bad", ["", "0", "000", "-1", "1.5", "1e3", "340282366920938463463374607431768211456", "9".repeat(40), null].map((a) => ok(tokenAmountProblem(a))), [false, false, false, false, false, false, false, false, false]);
+const id = "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk";
+check("tokenTo good", ["ada", "Jef.lez", "@ada", "Public/" + id, "Private/" + id].map((t) => ok(tokenToProblem(t))), [true, true, true, true, true]);
+check("tokenTo bad", ["", id, "Public/nope", "Public/" + id + "/x", "a b", "$(id)"].map((t) => ok(tokenToProblem(t))), [false, false, false, false, false, false]);
+check("tokenTo bare id says how", tokenToProblem(id).includes("Public/"), true);
+check("tokenSendProves", [tokenSendProves(true, "Public/" + id), tokenSendProves(false, "Public/" + id), tokenSendProves(false, "ada"), tokenSendProves(false, "Private/" + id)], [true, false, true, true]);
+check("tokenShown", [tokenShown("Demo"), tokenShown(""), tokenShown(null), tokenShown("  ")], ["Demo", "unnamed token", "unnamed token", "unnamed token"]);
 
 // Qt's QML parser on Linux refuses `x.public` ("Expected token 'identifier'") and the whole
 // app then fails to load, so reserved words are read as x["public"]. Strings are blanked

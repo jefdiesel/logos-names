@@ -398,7 +398,7 @@ Branch `names-tokens` (from `lez-0.4`). Section 6, built: `cli/src/tokens.rs`.
   `info <definition>` → `{definition, name, supply, authority}`;
   `send` (stdin `{definition, amount, to, from?, public?, private?}`, amounts as decimal
   strings) → `{tx, block}`; `receive` → `[{tx, block, definition, amount, to}]`.
-  `basecamp-module/` is not changed here.
+  `basecamp-module/` is not changed here (see "Names module and app" below).
 
 ### Tests
 
@@ -546,3 +546,42 @@ Proving times on the Mac mini M4 (CPU): shield 318 s, token send to keys 515 s, 
   the module reads the last line, as it does for `names module accounts`.
 - The private fee payer is the wallet's choice (a private account holding native); a wallet
   with none cannot receive. `names setup` covers that.
+
+## 10. Names module and app
+
+Branch `module-tokens` (from `lez-0.4`). The module (`basecamp-module/rust-lib`) runs the
+CLI's token commands for the Names app only (`only_the_names_app()`), with the token
+program it keeps itself, so the app never shows one program and sends with another.
+
+| method | does |
+|---|---|
+| `set_token_program(program_id) -> bool` | the token program, kept in `config.json` (0600, atomic) and shown by `get_config` as `token_program`; empty forgets it; the native token's ID is refused |
+| `cli_token_holdings(account)` | `{token_program, holdings: [{account, account_kind, definition, name, balance}], updating, error}`; `account` filters (`Public/<id>` or `Private/<id>`, empty for all) |
+| `cli_token_pending()` | `{token_program, pending: [{position, definition, name, amount, to}], updating, error}`, `to` written `Private/<id>` |
+| `cli_token_info(definition)` | `{definition, name, supply, authority}` (`names module token info`), kept 30 s, at most 512 |
+| `cli_token_send(definition, amount, to, from_private, to_public)` | a wallet job, `names token send --to=… --from=private\|public [--public] -- <definition> <amount>`; its ended `job` state has `tx`, `block`, `problem` |
+| `cli_token_receive()` | a wallet job, `names token receive`; its ended state has `applied`, `nothing`, `problem` |
+
+- Holdings and pending credits come from one background read of `names token list --json`
+  (it catches the wallet up first), at most every 20 s, answered at once with the last
+  result; it is dropped when a token job ends, a provider token transfer ends, or the
+  program changes. Token names are the token maker's text: control and bidi characters
+  are removed and they are cut to 64 characters.
+- Every argument is checked before the CLI is looked for: the definition is an account
+  ID other than the native token, the amount a whole number from 1 to 2^128 - 1, `to` a
+  name, `Public/<id>` or `Private/<id>` (a bare ID is refused, as for payments).
+- Token jobs are wallet jobs (`-wallet`), so they never overlap a payment or a move to
+  private. A job stops after 45 minutes: a receive of more than about four credits ends
+  early, and the next receive takes the rest.
+- Provider SDK: `propose_transfer(asset, …)` takes a definition ID as `asset`
+  (`docs/wallet/PROVIDER-SDK.md`, Token transfers). The request is checked against the
+  app's grant and request limits before the module reads the token, so an app can't make
+  the CLI run for free.
+- App: a Tokens section (holdings by account with Public/Private, pending credits with
+  Receive, a Send form to a name or account from the private or public account), with the
+  time each takes said before the button: proven, 7-12 minutes, unless it goes from the
+  public account to a public account. The approval sheet shows "Send N <token> from A to
+  B", the token's ID, the token program's label and verification, and its warnings.
+- Tests: module unit tests with a fake CLI (`tokens` in `lib.rs`, `cli.rs`,
+  `provider.rs`); `node basecamp/logic.test.mjs` for the amount, destination and timing
+  rules the app uses. Not run against a live chain from the app or module yet.

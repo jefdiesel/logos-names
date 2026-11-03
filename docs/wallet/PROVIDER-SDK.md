@@ -66,7 +66,7 @@ balances are 128-bit numbers.
 | `request_access(reason)` | Asks to see some of the person's accounts. `reason` (up to 280 characters) is shown as your own words. If you already have access, nobody is asked. If a request is already waiting, you get that one back. | a request (below); if you're already connected, `{request: null, state: "approved", accounts}` |
 | `granted_accounts()` | The accounts you were given. Asks nobody. | `{connected, accounts: [{account, account_kind}]}`; `account_kind` is `public` or `private` |
 | `account_balances()` | The LEZ balance of each account you were given. Reads run in the background and the answer comes at once with the last balance read. Ask again for a newer one; the chain is read at most every 15 s. | `[{account, account_kind, balance, updating, error}]`; `balance` is decimal text, or null until first read |
-| `propose_transfer(asset, amount, destination)` | Asks to send `amount` of `asset` to `destination`. `asset` is `LEZ`, the native token (empty also means LEZ). `destination` is a name such as `alice`, or `Public/<id>`. The person picks the account it comes from. Checked when you call it. | a request |
+| `propose_transfer(asset, amount, destination)` | Asks to send `amount` of `asset` to `destination`. `asset` is `LEZ`, the native token (empty also means LEZ), or a token of the wallet's token program, written as its definition's account ID in base58 (see [Token transfers](#token-transfers)). `destination` is a name such as `alice`, or `Public/<id>`. The person picks the account it comes from. Checked when you call it. | a request |
 | `propose_call(program_id, accounts_json, instruction_hex, summary)` | Asks to run a program, signed by an account the person picks (details below). | a request |
 | `request_status(request_id)` | How your request stands. Only the app that made a request can read it. | a request |
 | `cancel_request(request_id)` | Withdraws your request while it's pending. | a request, `state: "cancelled"` |
@@ -85,7 +85,8 @@ You must call `request_access` before you propose anything. Otherwise
   "created": 1793735537880, "expires": 1793736137880, "decided": null,
   "account": "Public/…",          // the account the person chose (transfer, call)
   "accounts": ["Public/…"],       // connect: all the accounts you now have
-  "asset": "LEZ", "amount": "1000", "destination": "alice",   // transfer
+  "asset": "LEZ", "asset_kind": "native", "amount": "1000", "destination": "alice",   // transfer
+  "token_name": null,             // transfer of a token: its definition's name
   "program": "<base58>",          // call
   "tx": "<hash>",                 // call: the transaction sent
   "error": null                   // failed: why, without the wallet's details
@@ -154,6 +155,39 @@ was included but reverted counts as failed. The gas is sized only at this
 point, so the prompt shows no number for it. The answer to `approve_request`
 waits for the block, up to two minutes. The call can only reach your
 program: the CLI loads one program's bytecode per call.
+
+### Token transfers
+
+`propose_transfer` also moves tokens of a token program (fungible tokens other
+than LEZ, `docs/wallet/TOKENS.md`). Write the token as its definition's account
+ID:
+
+```qml
+names("propose_transfer", [demoTokenId, "250", "alice"], function(v) { requestId = v.request; poll.start() })
+```
+
+- The person's wallet must have a token program set (Names, Tokens). None runs
+  on the public testnet yet; until one does, a token transfer fails with
+  `this wallet can't send tokens yet: it has no token program set`.
+- The token must be one of that program's: the module reads its definition
+  when you ask, and a token it can't find fails with
+  `this wallet's token program has no such token`.
+- `amount` is in the token's base units, up to 2^128 - 1.
+- The request has `asset_kind: "token"`, and `token_name`, the name the token's
+  definition gives it (its maker's words, with control and direction-changing
+  characters removed).
+- The prompt reads "send N <token name> from <account> to <destination>",
+  with the token's ID, the token program's label and source-verification
+  status from the Program Registry, and any warnings (unverified or changed
+  program, no Program Registry, a token without a name). As for a program
+  call, a warning needs an extra tick before Approve works.
+- A transfer from the person's private account, or to a name (whose tokens go
+  to its private receiving keys and wait there until its holder receives
+  them), is proven on their computer: `running` lasts 7-12 minutes. From the
+  public account to `Public/<id>` it takes one block.
+- It is sent only with the token program the prompt named: if the person
+  changes their token program in between, approving it fails and it stays
+  pending, so they reject it and you can ask again.
 
 ### Limits
 
@@ -326,7 +360,8 @@ anything is sent.
    checkboxes. For a payment, its main public or private account. For a call,
    its public accounts. Accounts your app already has are marked.
 3. **What will be sent or signed.** For a payment, the asset, amount and
-   destination. For a call, the program's label and ID, its source
+   destination; for a token, also the token's name and ID and the token
+   program's label and verification. For a call, the program's label and ID, its source
    verification, what the call can do, any warnings, the data size, the gas
    line, and your summary marked as your own words.
 4. **Approve** or **Reject**. In Settings, under Connected apps, the person can

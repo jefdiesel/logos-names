@@ -322,6 +322,7 @@ Item {
             configKnown = true
             settingsOpen = registry === ""
             savedMain = config.main_name ? config.main_name : ""
+            tokenProgram = config.token_program ? config.token_program : ""
             bridgeKey = config.bridge_key ? config.bridge_key : ""
             bridgeNode = config.bridge_node && config.bridge_node !== defaultBridgeNode ? config.bridge_node : ""
             loadWallet(false)
@@ -2230,7 +2231,13 @@ Item {
     function loadRunningJobs() {
         askLater("running_jobs", [], function(value) {
             // The install and the move to private have their own progress (Welcome).
-            var running = (value || []).filter(function(job) { return job.kind !== "install" && job.kind !== "shield" })
+            var all = value || []
+            // A token transfer or receipt has its own progress (Tokens).
+            var tokens = all.filter(function(job) { return job.kind === "token_send" || job.kind === "token_receive" })
+            if (tokenJob === null && tokens.length > 0)
+                tokenJob = { id: tokens[0].id, kind: tokens[0].kind, started: tokens[0].started || Date.now(), proves: true,
+                             label: tokens[0].kind === "token_send" ? "Your token transfer" : "Receiving your tokens" }
+            var running = all.filter(function(job) { return job.kind !== "install" && job.kind !== "shield" && job.kind !== "token_send" && job.kind !== "token_receive" })
             if (boardJob !== null || running.length === 0)
                 return
             var job = running[0]
@@ -2366,6 +2373,185 @@ Item {
         }
     }
 
+    // ── Tokens ──────────────────────────────────────────────────────────
+    //
+    // Tokens of a token program, other than LEZ itself, held by the names
+    // CLI's accounts (the module's cli_token_* methods, docs/wallet/TOKENS.md).
+    // No token program runs on the public testnet yet, so the person names one.
+    // Reads come back at once with the last one the module made; a send or a
+    // receipt is a wallet job this screen follows until it ends.
+
+    property string tokenProgram: ""     // the token program the module uses, "" if none
+    property bool tokenProgramEditing: false
+    property var tokenHoldings: null     // [{account, account_kind, definition, name, balance}]; null until first read
+    property var tokenPending: []        // [{position, definition, name, amount, to}]
+    property bool tokenUpdating: false   // a newer read is on its way
+    property string tokenError: ""       // why the last read failed
+    property var tokenJob: null          // {id, kind, label, started, proves, asking}
+    property bool tokenFromPrivate: true // the Send form's account: the private one, or the public one
+    property string tokenProblem: ""     // why the last send or receipt didn't go through
+
+    /// Opens Tokens, reading what the wallet holds.
+    function openTokens() {
+        go("tokens")
+        tokenProblem = ""
+        tokenProgramEditing = false
+        loadTokens()
+    }
+
+    /// Reads holdings and pending credits (the module answers at once, with
+    /// what it last read, and reads again in the background).
+    function loadTokens() {
+        if (tokenProgram === "")
+            return
+        askLater("cli_token_holdings", [""], function(value) {
+            tokenHoldings = value.holdings === null || value.holdings === undefined ? null : value.holdings
+            tokenUpdating = !!value.updating
+            tokenError = value.error ? sentence(value.error) : ""
+        }, function(message) {
+            tokenUpdating = false
+            tokenError = sentence(message)
+        })
+        askLater("cli_token_pending", [], function(value) {
+            tokenPending = Array.isArray(value.pending) ? value.pending : []
+        }, function(message) {
+            console.log("names_ui: token pending:", message)
+        })
+    }
+
+    /// Has the module use the token program `id`; "" forgets it.
+    function saveTokenProgram(id) {
+        try {
+            if (!call("names", "set_token_program", [id])) {
+                say("That is not a program ID.", true)
+                return
+            }
+        } catch (error) {
+            say(error.message, true)
+            return
+        }
+        tokenProgram = id
+        tokenProgramEditing = false
+        tokenHoldings = null
+        tokenPending = []
+        tokenError = ""
+        loadTokens()
+    }
+
+    /// Why the Send form can't send as it stands, or "".
+    function tokenSendProblem() {
+        if (tokenJob !== null)
+            return ""
+        var definition = tokenSendDefinition.text.trim()
+        if (definition === "" || tokenSendAmount.text.trim() === "" || tokenSendTo.text.trim() === "")
+            return ""
+        if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(definition))
+            return "The token is its ID: letters and digits. Pick one you hold above, or paste it."
+        var amount = Logic.tokenAmountProblem(tokenSendAmount.text)
+        return amount !== "" ? amount : Logic.tokenToProblem(tokenSendTo.text)
+    }
+
+    /// The name the wallet knows `definition` by, from its holdings or pending credits.
+    function tokenNameOf(definition) {
+        var rows = (tokenHoldings || []).concat(tokenPending)
+        for (var i = 0; i < rows.length; i++)
+            if (rows[i].definition === definition && rows[i].name)
+                return rows[i].name
+        return ""
+    }
+
+    /// Puts a holding into the Send form: its token, and the account it's in.
+    function pickToken(row) {
+        tokenSendDefinition.text = row.definition
+        tokenFromPrivate = row.account_kind === "private"
+        tokenSendAmount.forceActiveFocus()
+    }
+
+    function tokenSend() {
+        var problem = tokenSendProblem()
+        if (problem !== "" || tokenJob !== null)
+            return
+        var definition = tokenSendDefinition.text.trim()
+        var amount = tokenSendAmount.text.trim().replace(/[,_]/g, "")
+        var to = tokenSendTo.text.trim()
+        // The CLI checks the balance before it proves anything, and says so.
+        tokenProblem = ""
+        var label = "Sending " + grouped(amount) + " " + Logic.tokenShown(tokenNameOf(definition)) + " to " + to
+        startTokenJob("cli_token_send", [definition, amount, to, tokenFromPrivate, false], label, Logic.tokenSendProves(tokenFromPrivate, to), function() {
+            tokenSendAmount.text = ""
+        })
+    }
+
+    function tokenReceive() {
+        if (tokenJob !== null || tokenPending.length === 0)
+            return
+        tokenProblem = ""
+        startTokenJob("cli_token_receive", [], tokenPending.length === 1 ? "Receiving 1 credit" : "Receiving " + tokenPending.length + " credits", true, null)
+    }
+
+    /// Starts a token job and follows it until it ends.
+    function startTokenJob(method, args, label, proves, after) {
+        var job = { id: "", kind: method === "cli_token_send" ? "token_send" : "token_receive", label: label, started: Date.now(),
+                    proves: proves, count: tokenPending.length, after: after }
+        tokenJob = job
+        askLater(method, args, function(value) {
+            job.id = value.id
+            job.started = value.started || Date.now()
+            clockTick = Date.now()
+        }, function(message) {
+            tokenJob = null
+            tokenProblem = sentence(message)
+        })
+    }
+
+    function tokenCheckJob() {
+        var job = tokenJob
+        if (job === null || job.id === "" || job.asking)
+            return
+        job.asking = true
+        askLater("job", [job.id], function(value) {
+            job.asking = false
+            if (tokenJob !== job || value.state === "running")
+                return
+            tokenJob = null
+            if (value.state === "done") {
+                if (job.kind === "token_receive")
+                    say(value.nothing ? "There was nothing to receive." : "Received " + (value.applied === 1 ? "1 credit" : value.applied + " credits") + ".", false)
+                else
+                    say(job.label + ": done" + (value.block !== null && value.block !== undefined ? ", in block " + value.block : "") + ".", false)
+                if (job.after)
+                    job.after()
+            } else {
+                tokenProblem = value.problem ? sentence(value.problem) : "It didn't go through: " + lastLogLine(value.log_tail)
+            }
+            loadTokens()
+        }, function() { job.asking = false })
+    }
+
+    /// What the running token job is doing, honestly about how long it takes.
+    function tokenJobLine(job) {
+        var seconds = Math.max(0, Math.floor((Math.max(clockTick, Date.now()) - job.started) / 1000))
+        if (!job.proves)
+            return job.label + ": sending it publicly, one block (about 30 seconds), " + seconds + "s so far."
+        var each = job.kind === "token_receive" && job.count > 1 ? " each" : ""
+        return job.label + ": proving it on this computer, so the chain never learns the private side. This takes 7-12 minutes" + each
+            + " on a fast computer; " + Math.floor(seconds / 60) + " min so far. You can keep using Names meanwhile."
+    }
+
+    Timer {
+        interval: 5000
+        repeat: true
+        running: root.tokenJob !== null
+        onTriggered: { root.clockTick = Date.now(); root.tokenCheckJob() }
+    }
+    // While the module reads the wallet's tokens, ask again until the read ends.
+    Timer {
+        interval: 3000
+        repeat: true
+        running: root.section === "tokens" && root.tokenProgram !== "" && (root.tokenUpdating || (root.tokenHoldings === null && root.tokenError === ""))
+        onTriggered: root.loadTokens()
+    }
+
     // ── Apps asking the wallet (Wallet Provider SDK) ────────────────────
     //
     // Other apps ask the names module for access, payments and program calls
@@ -2436,14 +2622,33 @@ Item {
     function appCanApprove() {
         if (appRequest === null || appBusy || appChosen.length === 0)
             return false
-        if (appRequest.kind === "call" && appRequestRisky(appRequest) && !appUnderstood)
+        if (appRequestRisky(appRequest) && !appUnderstood)
             return false
         return true
     }
 
-    /// A program call whose source isn't verified, or that goes to the Names registry.
+    /// A program call, or a token transfer, with warnings: its program's
+    /// source isn't verified, it goes to the Names registry, the token has no name.
     function appRequestRisky(request) {
-        return request.kind === "call" && ((request.warnings || []).length > 0)
+        return (request.kind === "call" || appIsToken(request)) && ((request.warnings || []).length > 0)
+    }
+
+    /// Whether a transfer request moves a token rather than LEZ.
+    function appIsToken(request) {
+        return request !== null && request.kind === "transfer" && request.asset_kind === "token"
+    }
+
+    /// What a transfer request sends, in words: "1,000 LEZ" or "1,000 Demo".
+    function appSends(request) {
+        return grouped(request.amount) + " " + (appIsToken(request) ? Logic.tokenShown(request.token_name) : request.asset)
+    }
+
+    /// The token sheet's summary: "Send 1,000 Demo from Private/… to ada".
+    function appTokenLine(request) {
+        if (!appIsToken(request))
+            return ""
+        var from = appChosen.length > 0 ? accountShort(appChosen[0]) : "the account you choose below"
+        return "Send " + appSends(request) + " from " + from + " to " + (request.destination_kind === "name" ? request.destination : accountShort(request.destination))
     }
 
     function answerAppRequest(approve) {
@@ -2453,10 +2658,14 @@ Item {
         appBusy = true
         appError = ""
         var method = approve ? "approve_request" : "reject_request"
-        var args = approve ? [request.id, appChosen.join(",")] : [request.id]
+        var chosen = appChosen.slice()
+        var args = approve ? [request.id, chosen.join(",")] : [request.id]
         askLater(method, args, function(value) {
             appBusy = false
-            if (approve && request.kind === "transfer")
+            if (approve && appIsToken(request))
+                say("Sending " + appSends(request) + " to " + request.destination + " for " + request.app + ". "
+                    + (Logic.tokenSendProves(/^Private\//.test(chosen[0] || ""), request.destination) ? "It's proven on this computer first: 7-12 minutes." : "One block, about 30 seconds."), false)
+            else if (approve && request.kind === "transfer")
                 say("Sending " + grouped(request.amount) + " " + request.asset + " to " + request.destination + " for " + request.app + ". It takes a few minutes.", false)
             else if (approve && request.kind === "call")
                 say("Sent for " + request.app + ".", false)
@@ -2485,7 +2694,7 @@ Item {
         if (request.kind === "connect")
             return request.app + " wants to see your accounts"
         if (request.kind === "transfer")
-            return request.app + " asks you to send " + grouped(request.amount) + " " + request.asset
+            return request.app + " asks you to send " + appSends(request)
         return request.app + " asks you to sign a program call"
     }
 
@@ -2768,6 +2977,8 @@ Item {
         property alias text: input.text
         property string hint: ""
         property bool numbersOnly: false
+        /// Up to 39 digits rather than 15, for token amounts (128 bits).
+        property bool longNumbers: false
         property bool code: false
         property int size: 18
         signal accepted()
@@ -2790,13 +3001,14 @@ Item {
             font.pixelSize: field.code ? field.size - 1 : field.size
             clip: true
             selectByMouse: true
-            validator: field.numbersOnly ? digits : null
+            validator: field.numbersOnly ? (field.longNumbers ? longDigits : digits) : null
             onAccepted: field.accepted()
             onEditingFinished: field.edited()
             // A long value set from outside shows its start, not its end.
             onTextChanged: if (!activeFocus) cursorPosition = 0
         }
         RegularExpressionValidator { id: digits; regularExpression: /[0-9]{0,15}/ }
+        RegularExpressionValidator { id: longDigits; regularExpression: /[0-9]{0,39}/ }
         Text {
             anchors.fill: input
             verticalAlignment: Text.AlignVCenter
@@ -3302,6 +3514,7 @@ Item {
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Posts"; current: root.section === "posts"; onPressed: { root.say("", false); root.boardShow(root.boardView === "thread" ? "all" : root.boardView) } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Messages"; current: root.section === "messages"; onPressed: { root.go("messages"); root.chatLoad() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Pay"; current: root.section === "pay"; onPressed: { root.go("pay"); root.loadCliBalance() } }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Tokens"; current: root.section === "tokens"; onPressed: root.openTokens() }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Profile"; current: root.section === "profile"; onPressed: { root.say("", false); root.openProfile() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Search"; current: root.section === "search"; onPressed: { root.go("search"); searchField.forceActiveFocus() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Settings"; current: root.section === "settings"; onPressed: { root.go("settings"); root.registering = false; root.gettingTokens = false; root.record = null; root.missing = "" } }
@@ -3844,6 +4057,241 @@ Item {
                     text: root.notice
                 }
                 Hint { font.pixelSize: root.px(14); text: "The other side sees the payment once their wallet catches up with the chain." }
+            }
+        }
+
+        // Tokens: what the wallet holds of a token program's tokens; send and receive them.
+        Flickable {
+            visible: root.section === "tokens" && !root.needsWelcome
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            contentHeight: tokensPage.implicitHeight + 72
+            clip: true
+            ColumnLayout {
+                id: tokensPage
+                x: 56
+                y: 40
+                width: Math.min(parent.width - 112, 640)
+                spacing: 14
+                RowLayout {
+                    Layout.fillWidth: true
+                    Text { text: "Tokens"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
+                    Item { Layout.fillWidth: true }
+                    Link {
+                        visible: root.tokenProgram !== ""
+                        text: root.tokenUpdating ? "Reading…" : "Refresh"
+                        color: root.faint
+                        font.pixelSize: root.px(15)
+                        onPressed: root.loadTokens()
+                    }
+                }
+                Hint { text: "Tokens made with a token program on LEZ, besides LEZ itself. Your names wallet holds them in the same public and private accounts as its LEZ." }
+
+                // The token program: none is built in.
+                Hint {
+                    visible: root.tokenProgram === ""
+                    color: root.ink
+                    text: "No token program runs on the public testnet yet. If you use one (on a chain of your own, for now), enter its program ID."
+                }
+                RowLayout {
+                    visible: root.tokenProgram !== "" && !root.tokenProgramEditing
+                    Layout.fillWidth: true
+                    spacing: 10
+                    Text { text: "Token program"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
+                    Text { text: root.shorten(root.tokenProgram); color: root.ink; font.family: root.mono; font.pixelSize: root.px(15) }
+                    Link { text: "Change"; font.pixelSize: root.px(15); onPressed: { tokenProgramField.text = root.tokenProgram; root.tokenProgramEditing = true } }
+                    Item { Layout.fillWidth: true }
+                }
+                RowLayout {
+                    visible: root.tokenProgram === "" || root.tokenProgramEditing
+                    Layout.fillWidth: true
+                    spacing: 10
+                    Field { id: tokenProgramField; Layout.fillWidth: true; size: 17; code: true; hint: "The token program's ID"; onAccepted: root.saveTokenProgram(text.trim()) }
+                    Action { label: "Use it"; strong: true; enabledNow: tokenProgramField.text.trim() !== ""; onPressed: root.saveTokenProgram(tokenProgramField.text.trim()) }
+                    Action { visible: root.tokenProgramEditing; label: "Cancel"; onPressed: root.tokenProgramEditing = false }
+                }
+                Hint {
+                    visible: root.tokenProgram === "" && root.notice !== ""
+                    color: root.noticeIsError ? root.alarm : root.dim
+                    text: root.notice
+                }
+
+                // What the wallet holds.
+                Part { visible: root.tokenProgram !== ""; text: "What you hold" }
+                Hint {
+                    visible: root.tokenProgram !== "" && (root.tokenHoldings === null || root.tokenHoldings.length === 0)
+                    color: root.tokenHoldings === null && root.tokenError !== "" ? root.alarm : root.dim
+                    text: root.tokenHoldings !== null ? "Your accounts hold no tokens of this program."
+                        : root.tokenError !== "" ? "Couldn't read your tokens: " + root.tokenError
+                        : "Reading your accounts… A private account's tokens are read once your wallet catches up with the chain, which can take a minute or two."
+                }
+                Repeater {
+                    model: root.tokenProgram !== "" && root.tokenHoldings !== null ? root.tokenHoldings : []
+                    Rectangle {
+                        id: holdingRow
+                        required property var modelData
+                        Layout.fillWidth: true
+                        implicitHeight: root.px(46)
+                        radius: 6
+                        color: holdingArea.containsMouse ? root.hover : "transparent"
+                        border.width: 1
+                        border.color: root.line
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 12
+                            anchors.rightMargin: 12
+                            spacing: 10
+                            Text {
+                                text: holdingRow.modelData.account_kind === "private" ? "Private" : "Public"
+                                color: holdingRow.modelData.account_kind === "private" ? root.brass : root.dim
+                                font.family: root.sans
+                                font.pixelSize: root.px(15)
+                                Layout.preferredWidth: root.px(58)
+                            }
+                            Text {
+                                text: Logic.tokenShown(holdingRow.modelData.name)
+                                textFormat: Text.PlainText
+                                color: root.ink
+                                font.family: root.sans
+                                font.pixelSize: root.px(17)
+                                font.weight: Font.DemiBold
+                                elide: Text.ElideRight
+                                Layout.maximumWidth: root.px(200)
+                            }
+                            Text { text: root.shorten(holdingRow.modelData.definition); color: root.faint; font.family: root.mono; font.pixelSize: root.px(13) }
+                            Item { Layout.fillWidth: true }
+                            Text { text: root.grouped(holdingRow.modelData.balance); color: root.ink; font.family: root.sans; font.pixelSize: root.px(17) }
+                        }
+                        MouseArea {
+                            id: holdingArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.pickToken(holdingRow.modelData)
+                        }
+                    }
+                }
+                Hint {
+                    visible: root.tokenProgram !== "" && root.tokenHoldings !== null && root.tokenHoldings.length > 0
+                    font.pixelSize: root.px(14)
+                    text: "Press a token to send it from that account." + (root.tokenUpdating ? " Checking for newer balances…" : "")
+                }
+                Hint {
+                    visible: root.tokenProgram !== "" && root.tokenHoldings !== null && root.tokenError !== ""
+                    color: root.alarm
+                    font.pixelSize: root.px(15)
+                    text: "The last read failed, so these may be out of date: " + root.tokenError
+                }
+
+                // Credits waiting for the wallet's private keys.
+                Part { visible: root.tokenProgram !== ""; text: "Waiting to be received" }
+                Hint {
+                    visible: root.tokenProgram !== ""
+                    font.pixelSize: root.px(15)
+                    text: root.tokenPending.length === 0 ? "Nothing is waiting. Tokens sent to your name's private keys wait here until you receive them."
+                        : "Sent to your private keys. Receiving proves each one on this computer, 7-12 minutes each, and the fee comes from your private account's LEZ."
+                }
+                Repeater {
+                    model: root.tokenProgram !== "" ? root.tokenPending : []
+                    RowLayout {
+                        id: pendingRow
+                        required property var modelData
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Text {
+                            text: root.grouped(pendingRow.modelData.amount) + " " + Logic.tokenShown(pendingRow.modelData.name)
+                            textFormat: Text.PlainText
+                            color: root.ink
+                            font.family: root.sans
+                            font.pixelSize: root.px(17)
+                            font.weight: Font.DemiBold
+                        }
+                        Text { text: "to " + root.accountShort(pendingRow.modelData.to); color: root.dim; font.family: root.mono; font.pixelSize: root.px(14) }
+                        Item { Layout.fillWidth: true }
+                    }
+                }
+                Action {
+                    visible: root.tokenProgram !== "" && root.tokenPending.length > 0
+                    label: root.tokenPending.length === 1 ? "Receive it" : "Receive all " + root.tokenPending.length
+                    strong: true
+                    enabledNow: root.tokenJob === null
+                    onPressed: root.tokenReceive()
+                }
+
+                // Send.
+                Part { visible: root.tokenProgram !== ""; text: "Send" }
+                ColumnLayout {
+                    visible: root.tokenProgram !== ""
+                    Layout.fillWidth: true
+                    spacing: 10
+                    Text { text: "Token"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
+                    Field { id: tokenSendDefinition; Layout.fillWidth: true; size: 17; code: true; hint: "The token's ID, or press one you hold above" }
+                    Hint {
+                        visible: root.tokenNameOf(tokenSendDefinition.text.trim()) !== ""
+                        font.pixelSize: root.px(15)
+                        textFormat: Text.PlainText
+                        text: "That's " + root.tokenNameOf(tokenSendDefinition.text.trim()) + "."
+                    }
+                    Text { text: "Amount"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
+                    Field { id: tokenSendAmount; Layout.fillWidth: true; size: 19; numbersOnly: true; longNumbers: true; hint: "1000, in the token's base units" }
+                    Text { text: "To"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
+                    Field { id: tokenSendTo; Layout.fillWidth: true; size: 19; hint: "A name, such as ada, or Public/ and an account ID" }
+                    Text { text: "From"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
+                    RowLayout {
+                        spacing: 6
+                        Tab { label: "Your private account"; current: root.tokenFromPrivate; onPressed: root.tokenFromPrivate = true }
+                        Tab { label: "Your public account"; current: !root.tokenFromPrivate; onPressed: root.tokenFromPrivate = false }
+                    }
+                    // How long it takes and what the chain sees, before the button.
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: tokenHowColumn.implicitHeight + root.px(24)
+                        radius: root.px(8)
+                        color: root.noticeFill
+                        border.width: 1
+                        border.color: root.brass
+                        ColumnLayout {
+                            id: tokenHowColumn
+                            x: root.px(14)
+                            y: root.px(12)
+                            width: parent.width - root.px(28)
+                            spacing: 6
+                            Hint {
+                                color: root.ink
+                                font.pixelSize: root.px(16)
+                                text: Logic.tokenSendProves(root.tokenFromPrivate, tokenSendTo.text)
+                                    ? "This is proven on this computer before it's sent: 7-12 minutes on a fast computer. You can keep using Names meanwhile; don't quit Basecamp until it's done."
+                                    : "From your public account to a public account it's public and quick: one block, about 30 seconds. Everyone can see who sent how much of it to whom."
+                            }
+                            Hint {
+                                font.pixelSize: root.px(15)
+                                text: (root.tokenFromPrivate ? "From your private account the chain doesn't show who sent it; the fee comes from that account's LEZ. " : "From your public account the chain shows that you sent it. ")
+                                    + (/^Public\//.test(tokenSendTo.text.trim()) ? "A public account shows what it receives."
+                                       : "To a name, it goes to the name's private keys and waits there until its holder receives it.")
+                            }
+                        }
+                    }
+                    Action {
+                        label: "Send"
+                        strong: true
+                        enabledNow: root.tokenJob === null && tokenSendDefinition.text.trim() !== "" && tokenSendAmount.text.trim() !== ""
+                            && tokenSendTo.text.trim() !== "" && root.tokenSendProblem() === ""
+                        onPressed: root.tokenSend()
+                    }
+                    Hint { visible: root.tokenSendProblem() !== ""; color: root.alarm; font.pixelSize: root.px(15); text: root.tokenSendProblem() }
+                }
+                Hint {
+                    visible: root.tokenJob !== null
+                    color: root.brass
+                    font.pixelSize: root.px(16)
+                    text: root.tokenJob === null ? "" : root.tokenJobLine(root.tokenJob)
+                }
+                Hint { visible: root.tokenProblem !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.tokenProblem }
+                Hint {
+                    visible: root.tokenProgram !== "" && root.tokenJob === null && root.tokenProblem === "" && root.notice !== ""
+                    color: root.noticeIsError ? root.alarm : root.dim
+                    text: root.notice
+                }
             }
         }
 
@@ -5864,13 +6312,54 @@ Item {
                     text: "Choose the accounts it may see. It will see their addresses and balances, and can then ask you to approve payments. It can't send anything without you."
                 }
 
+                // A token transfer: in one line, then the token, its program and how that program stands.
+                Hint {
+                    visible: root.appIsToken(appSheet.request)
+                    textFormat: Text.PlainText
+                    color: root.ink
+                    font.pixelSize: root.px(19)
+                    font.weight: Font.DemiBold
+                    text: root.appTokenLine(appSheet.request)
+                }
+                ColumnLayout {
+                    visible: root.appIsToken(appSheet.request)
+                    Layout.fillWidth: true
+                    spacing: 6
+                    Fact { label: "Token"; value: root.appIsToken(appSheet.request) ? Logic.tokenShown(appSheet.request.token_name) + " (named by its maker; not LEZ)" : "" }
+                    Fact { label: "Token ID"; code: true; value: root.appIsToken(appSheet.request) ? root.shorten(appSheet.request.asset) : ""; full: root.appIsToken(appSheet.request) ? appSheet.request.asset : "" }
+                    Fact {
+                        label: "Program"
+                        value: !root.appIsToken(appSheet.request) ? ""
+                            : appSheet.request.program_label && appSheet.request.program_label.text ? appSheet.request.program_label.text
+                            : root.shorten(appSheet.request.token_program)
+                        full: root.appIsToken(appSheet.request) ? appSheet.request.token_program : ""
+                    }
+                    Fact { label: "Source"; value: root.appIsToken(appSheet.request) ? root.programStatus(appSheet.request.program_label) : "" }
+                    Fact {
+                        label: "Time"
+                        value: !root.appIsToken(appSheet.request) ? ""
+                            : Logic.tokenSendProves(/^Private\//.test(root.appChosen[0] || ""), appSheet.request.destination)
+                            ? "Proven on this computer first: 7-12 minutes"
+                            : "One block, about 30 seconds; public: everyone sees who sent it"
+                    }
+                    Repeater {
+                        model: root.appIsToken(appSheet.request) ? (appSheet.request.warnings || []) : []
+                        Hint {
+                            required property string modelData
+                            textFormat: Text.PlainText
+                            color: root.alarm
+                            text: "!  " + modelData
+                        }
+                    }
+                }
+
                 // A payment: asset, amount, destination.
                 ColumnLayout {
                     visible: appSheet.kind === "transfer"
                     Layout.fillWidth: true
                     spacing: 6
-                    Fact { label: "Asset"; value: appSheet.kind === "transfer" ? appSheet.request.asset + " (the native token)" : "" }
-                    Fact { label: "Amount"; value: appSheet.kind === "transfer" ? root.grouped(appSheet.request.amount) + " " + appSheet.request.asset : "" }
+                    Fact { visible: !root.appIsToken(appSheet.request); label: "Asset"; value: appSheet.kind === "transfer" ? appSheet.request.asset + " (the native token)" : "" }
+                    Fact { label: "Amount"; value: appSheet.kind === "transfer" ? root.appSends(appSheet.request) : "" }
                     Fact {
                         label: "To"
                         code: appSheet.kind === "transfer" && appSheet.request.destination_kind === "account"
@@ -5984,7 +6473,8 @@ Item {
                     }
                     Hint {
                         color: root.ink
-                        text: "I've read the warnings above and trust " + (appSheet.request !== null ? appSheet.request.app : "this app") + " with this account."
+                        text: root.appIsToken(appSheet.request) ? "I've read the warnings above and still want to send this token."
+                            : "I've read the warnings above and trust " + (appSheet.request !== null ? appSheet.request.app : "this app") + " with this account."
                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.appUnderstood = !root.appUnderstood }
                     }
                 }
