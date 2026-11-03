@@ -1,0 +1,23 @@
+[package]
+name = "wallet_tokens_cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "wallet-tokens"
+path = "src/main.rs"
+
+[dependencies]
+token_core.workspace = true
+wallet_tokens_methods = { path = "../methods" }
+lee_core = { workspace = true, features = ["host"] }
+lee.workspace = true
+common.workspace = true
+wallet.workspace = true
+sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc1", features = ["client"] }
+borsh.workspace = true
+url = "2"
+anyhow = "1.0.98"
+clap = { version = "4.5.42", features = ["derive", "env"] }
+tokio = { version = "1.50", features = ["macros", "rt-multi-thread"] }
