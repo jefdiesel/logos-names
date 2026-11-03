@@ -354,6 +354,14 @@ async fn post(cli: &Cli, submission: &str, username: Option<&str>, text: &str, a
     let mut w = open_wallet(&cli.rpc).await?;
     let identity = w.resolve_private_account(author).unwrap_or(AccountIdentity::Public(author));
     let private = identity.is_private();
+    if private && std::env::var_os("TESTIMONIAL_TRY_PRIVATE").is_none() {
+        // The LEZ 0.4 wallet presents a private sender to public actors under a fresh random
+        // alias, and the program refuses an alias (it would let one account post many times).
+        // Proving takes minutes, so say so before starting.
+        bail!(
+            "{author} is a private account: the LEZ 0.4 wallet presents it under a fresh alias, which the program refuses so that each account posts once; post from a public account (TESTIMONIAL_TRY_PRIVATE=1 tries anyway)"
+        );
+    }
     if !private && w.get_account_public_signing_key(author).is_none() {
         bail!("this wallet holds no key for {author}");
     }
@@ -374,9 +382,8 @@ async fn post(cli: &Cli, submission: &str, username: Option<&str>, text: &str, a
     let mentions = vec![identity.select_program_actor_state(program), pda(head_seed(submission)), pda(node_seed(submission, &author))];
     println!("posting for {submission} as {author} (time {})", format_time(now));
     let hash = if private {
-        // Experimental: the program runs inside a proof made here; the chain sees the
-        // testimonial and its author ID (the private account's ID), not the account's
-        // balance or history.
+        // Only with TESTIMONIAL_TRY_PRIVATE: the program runs inside a proof made here. With
+        // the stock wallet's blinded presentation the head refuses it (see README).
         if dry_run {
             bail!("--dry-run tries public posts only");
         }

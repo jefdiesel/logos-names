@@ -301,7 +301,14 @@ pub fn apply(input: &ReceiveInput, effect: Effect) -> Response {
     match effect {
         Effect::Index(mut testimonial) => {
             assert!(here == head_address(&program, &testimonial.submission), "index: not this submission's head");
-            assert!(from == testimonial.author, "index: only the author's own actor indexes a testimonial");
+            // A private author reaches the head under the address its wallet presents. The LEZ
+            // 0.4 wallet presents a fresh random alias per message, which would let one account
+            // post again and again as "new" authors, so only a canonical presentation (the
+            // author's own ID) is accepted.
+            assert!(
+                from == testimonial.author,
+                "index: the author must present its own account ID (a private account's blinded alias is refused)"
+            );
             let mut head = if input.pre_state.is_empty() {
                 Head {
                     schema: SCHEMA,

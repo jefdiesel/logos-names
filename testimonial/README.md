@@ -112,20 +112,26 @@ testimonial can't be backdated by more than 10 minutes or dated in the future. P
 use `at` in UTC; only a post in the last 10 minutes of a month can fall in the month before its
 block's.
 
-### Private authors
+### Private authors: refused with the stock wallet, on purpose
 
-The program does not care whether the root actor is a public or a private account: it needs
-`is_authorized` at `(author, TST)`, which a private account's owner proves inside a
-privacy-preserving transaction. The stored `author` is then the private account's ID, and the
-testimonial account is a public PDA keyed by that ID, so "one per account" still holds. The
-client takes this path (`send_privacy_preserving_tx`) when `--author` is a private account in
-the wallet.
+Tried live (see Status). A private account can run the root step inside a proof: it is
+authorized at `(author, TST)` and the root sees its real ID. But when a private actor sends a
+message to a public actor, LEZ 0.4 shows the receiver the address the sender *presents*
+(`SenderPresentation`, `execution_state.rs`), and the rc1 wallet presents every private sender
+under a **fresh random alias per message** (`AccountManager::presenter`). The head requires the
+sender to be the author's own ID, so the post is refused:
 
-What it reveals: the text, username, time and the private account's ID, linked to each other,
-but not the account's balance or history. That is also the downside for adoption: evaluators
-weigh accounts by their prior testnet activity, and a private account shows none. Public
-authors are the expected path. **The private path is untested** (the names port's private flows
-on rc1 failed on the fee payer's balance, undiagnosed); see Status.
+```
+Guest panicked: index: only the author's own actor indexes a testimonial
+```
+
+(now reworded to name the alias). This is the behaviour we want: if the head accepted the
+alias as the author, one private account could post again and again as "new" accounts and the
+"150 distinct accounts" count would mean nothing. A wallet that presents a private sender
+canonically would pass, but then the private account's ID is published next to the
+testimonial, and evaluators would still see no activity history for it. Public authors are
+the supported path; the client refuses a private `--author` up front rather than spend minutes
+proving a post that will be refused (`TESTIMONIAL_TRY_PRIVATE=1` tries anyway).
 
 ## Verifying the adoption criteria from chain data
 
@@ -202,11 +208,14 @@ No Worker, server or database of ours is involved.
   field at its limit) 98,709 cycles and 1,604 bytes. `t08` posts 150 testimonials from 150
   accounts over two months and the client's own `walk` + `summarize` read them back as meeting
   the bar.
-- **Live, on a throwaway local rc1 sequencer:** deployed through the loader (4 segments, image
-  ID `e4fceabf…8f97`), posted from two public accounts with `testimonial post`, the duplicate
-  refused before sending, a second submission kept separate, and `testimonial list` (plain
-  `getAccountView` reads, 5 for two testimonials) printed the list, per-month counts and author
-  nonces. A post simulated at about 56,400 cycles (gas limit 84,585).
-- **Private author:** see above; not confirmed.
+- **Live, on a throwaway local rc1 sequencer** (stopped afterwards): deployed through the loader
+  with `lezreg wallet program-loader deploy` (4 segments; the final image, a 356,828-byte ELF,
+  has image ID `69d838aa…fd44`), posted from two public accounts with `testimonial post`, the
+  duplicate refused before sending, a second submission kept separate, and `testimonial list`
+  (plain `getAccountView` reads, 5 for two testimonials) printed the list, per-month counts and
+  author nonces. A post simulated at about 56,400 cycles (gas limit 84,585).
+- **Private author:** tried on the first image (`e4fceabf…8f97`, identical but for the panic
+  text): shielding took about 11 minutes of proving, then the post was refused in the proof's
+  simulation with the alias error above. The client now refuses a private author up front.
 - Not yet: deploy on testnet 0.4 (not launched); the Basecamp mini-app on the Wallet Provider
   SDK, which builds the same `Post` and declares the same three actors.
