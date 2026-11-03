@@ -1,0 +1,24 @@
+# Prototype: a fungible token program for LEZ 0.4 and a wallet client for it.
+# Its own workspace, so it never joins the Names workspace. See README.md.
+[workspace]
+resolver = "3"
+members = ["core", "methods", "methods/guest", "cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+token_core = { path = "core", package = "wallet_tokens_core" }
+# The same pins as Names on its lez-0.4 branch.
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc1" }
+lee = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc1" }
+wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc1" }
+common = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc1" }
+risc0-zkvm = { version = "3.0.5", default-features = false, features = ["std"] }
+borsh = "1.5.7"
+
+# Same keccak patch LEZ applies, so the guest matches what the zone builds.
+[patch.crates-io]
+keccak = { git = "https://github.com/logos-blockchain/sponges", rev = "3a56e99771beedf04946eab21a4a62adc2951377" }
