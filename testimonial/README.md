@@ -193,6 +193,20 @@ must keep reading `schema = 1` records. Consider deploying with `--immutable` on
 
 No Worker, server or database of ours is involved.
 
-## Status
+## Status (2026-11-03)
 
-See the commit message and the report for the latest test results and live run.
+- **Host tests:** `cargo test -p testimonial_core`: 11 pass (handler, guards, limits, sizes, the
+  list walk against tampered state, months and the adoption bar over 150 posts).
+- **Engine tests** on LEZ v0.4.0-rc1 (real guest ELF, real signatures, no admission evidence):
+  8 pass. A post costs about 54,600 cycles and 533 transaction bytes; a worst-case post (every
+  field at its limit) 98,709 cycles and 1,604 bytes. `t08` posts 150 testimonials from 150
+  accounts over two months and the client's own `walk` + `summarize` read them back as meeting
+  the bar.
+- **Live, on a throwaway local rc1 sequencer:** deployed through the loader (4 segments, image
+  ID `e4fceabf…8f97`), posted from two public accounts with `testimonial post`, the duplicate
+  refused before sending, a second submission kept separate, and `testimonial list` (plain
+  `getAccountView` reads, 5 for two testimonials) printed the list, per-month counts and author
+  nonces. A post simulated at about 56,400 cycles (gas limit 84,585).
+- **Private author:** see above; not confirmed.
+- Not yet: deploy on testnet 0.4 (not launched); the Basecamp mini-app on the Wallet Provider
+  SDK, which builds the same `Post` and declares the same three actors.

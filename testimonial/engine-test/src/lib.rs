@@ -88,6 +88,14 @@ impl Engine {
         Self { state, program, forwarder, block: 0 }
     }
 
+    /// Makes accounts exist (with a balance), as if funded earlier. An account a transaction
+    /// declares but that neither signs nor exists nor is derived by a seed is refused as
+    /// `UnadmittedPublicActor` before any program runs.
+    pub fn fund(&mut self, accounts: &[AccountId]) {
+        let state = std::mem::take(&mut self.state);
+        self.state = state.with_public_account_balances(accounts.iter().map(|a| (*a, 1_000_000)));
+    }
+
     fn nonce(&self, id: AccountId) -> Nonce {
         self.state.get_account_by_id_ref(id).map_or(Nonce(0), |a| a.nonce)
     }

@@ -101,7 +101,7 @@ enum Command {
 }
 
 fn account(s: &str) -> Result<AccountId> {
-    let bare = s.strip_prefix("Public/").unwrap_or(s);
+    let bare = s.strip_prefix("Public/").or_else(|| s.strip_prefix("Private/")).unwrap_or(s);
     bare.parse().map_err(|_| anyhow!("{s} is not an account ID"))
 }
 

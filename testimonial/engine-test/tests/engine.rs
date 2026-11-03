@@ -101,7 +101,9 @@ fn t04_only_the_author_signs_its_testimonial() {
     let mut e = engine();
     let alice = key(2);
     let bob = key(3);
-    // Rooted at alice's actor but signed by bob.
+    // Alice's account exists (else the engine refuses it as unadmitted before the program
+    // runs). The post is rooted at her actor but signed by bob.
+    e.fund(&[alice.id]);
     refused(&mut e, "a post in alice's name signed by bob", "the author must sign", |e| {
         let message = borsh::to_vec(&Message::Instruction(testimonial_core::Instruction::Post {
             submission: SUB.into(),
@@ -137,7 +139,13 @@ fn t05_a_program_cannot_relay_a_post_or_an_effect() {
     refused(&mut e, "a Post relayed by another program", "root message", |e| {
         e.try_tx(Actor::new(alice.id, forwarder), relay(post.clone(), alice.id, vec![]), actors.clone(), &[&alice], false, T0)
     });
-    // Effects straight from a transaction, or from another program, are refused too.
+    // Effects straight from a transaction, or from another program, are refused too. Bob posts
+    // first so the head exists (an effect to a missing account is refused earlier, as
+    // unadmitted); alice's testimonial account stays empty, so a Write there would succeed if
+    // it got through.
+    let bob = key(3);
+    e.try_post(&bob, SUB, None, "real", T0, T0, false).expect("bob posts");
+    e.fund(&[node_address(&program, SUB, &alice.id)]);
     let draft = Testimonial {
         schema: SCHEMA,
         submission: SUB.into(),
