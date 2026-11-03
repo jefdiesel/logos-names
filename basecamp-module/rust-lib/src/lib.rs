@@ -36,12 +36,13 @@ mod avatar;
 mod changes;
 mod cli;
 mod page_view;
+mod provider;
 mod spell;
 mod registry;
 mod shortlist;
 mod wallet;
 
-use changes::Change;
+use changes::{Change, Mention};
 use registry::{AccountId, Derived, Registry, Settings};
 use wallet::Held;
 use serde_json::{json, Map, Value};
@@ -498,6 +499,100 @@ pub trait NamesModule: Send + 'static {
     /// not a directory.
     fn set_cli_wallet(&mut self, dir: String) -> bool;
 
+    // ── Wallet Provider SDK: for any app (docs/wallet/PROVIDER-SDK.md) ──
+    //
+    // Any app may ask; the person decides in the Names app. The asking app
+    // is the one Basecamp names as the caller, never one an argument names.
+    // Each request answers `{request, kind, state, ...}` (see
+    // `request_status`); `state` starts `pending` and the app polls it.
+
+    /// Asks to see some of the person's accounts. `reason` (at most 280
+    /// characters) is shown in the prompt as the app's own words. If the app
+    /// already has access the value is `{request: null, state: "approved",
+    /// accounts}` and nobody is asked; a request already waiting is returned
+    /// rather than a second one made.
+    fn request_access(&mut self, reason: String) -> String;
+
+    /// The accounts this app has been given: `{connected, accounts:
+    /// [{account, account_kind}]}`, where `account` is `Public/<id>` or
+    /// `Private/<id>` and `account_kind` is `public` or `private`. Asks nobody.
+    fn granted_accounts(&mut self) -> String;
+
+    /// The LEZ balance of each account this app has been given, `[{account,
+    /// account_kind, balance, updating, error}]`; `balance` is decimal text
+    /// or null until first read. Balances are read in the background and the
+    /// answer comes at once with the last one read (`updating` while a newer
+    /// one is on the way); ask again for a fresh one. A private account's
+    /// balance is only here if the person gave this app that account.
+    fn account_balances(&mut self) -> String;
+
+    /// Asks to send `amount` (base units, decimal digits) of `asset` (`LEZ`,
+    /// the native token; empty means LEZ) to `destination`: a name, or a
+    /// public account written `Public/<id>`. The person chooses the account
+    /// it comes from. Checked now, so a bad amount or destination fails here.
+    fn propose_transfer(&mut self, asset: String, amount: String, destination: String) -> String;
+
+    /// Asks to run program `program_id` (base58) with the message
+    /// `instruction_hex` (the bytes its transaction carries, on LEZ 0.4
+    /// `borsh(Message::Instruction(..))`; at most 2,048 bytes), signed by the
+    /// account the person chooses. That account's own actor of the program
+    /// comes first; `accounts_json` lists the up to 16 other actors it
+    /// reaches, in order: a public account ID (the program's data on it), or
+    /// `{"account", "seed", "balance"}`, where `seed` (64 hex) names one of
+    /// the program's own accounts (and lets the call create it), `balance:
+    /// true` means its LEZ balance rather than the program's data, and
+    /// `"account": "signer"` (with `balance: true`) is the chosen account's
+    /// LEZ, which only then the program may move.
+    /// `summary` (at most 280 characters) is shown as the app's own words;
+    /// the prompt also says what the call can do and whether the program's
+    /// source is verified (from `program_registry`, when installed).
+    fn propose_call(&mut self, program_id: String, accounts_json: String, instruction_hex: String, summary: String) -> String;
+
+    /// How this app's request `request_id` stands: `{request, kind, state,
+    /// created, expires, decided, account, tx, error, ...}`. `state` is
+    /// `pending` (waiting for the person), `approved` (access given;
+    /// `accounts` lists it), `running` (a transfer under way), `done` (a
+    /// transfer included in a block, or a call sent: `tx` is its hash),
+    /// `failed` (`error` says why), `rejected`, `expired` (nobody answered
+    /// in 10 minutes) or `cancelled`. `account` is the account the person
+    /// chose. Only the app that made a request can read it.
+    fn request_status(&mut self, request_id: String) -> String;
+
+    /// Withdraws this app's own request while it is still pending.
+    fn cancel_request(&mut self, request_id: String) -> String;
+
+    /// Gives up the access this app was given. `{revoked}`.
+    fn drop_access(&mut self) -> String;
+
+    // ── Wallet Provider SDK: the Names app decides ─────────────────────
+
+    /// The requests waiting for the person, oldest first, each with
+    /// everything its prompt shows and `choices`, the accounts it may use:
+    /// `[{account, account_kind, pays, label, granted}]`, all in the names
+    /// CLI's wallet: a payment comes from its main public or private account
+    /// (`pays`), a call is signed by any of its public accounts (those beyond
+    /// the main one are listed from a read in the background, so they may
+    /// appear a moment later). Names app only.
+    fn pending_requests(&mut self) -> String;
+
+    /// Approves request `request_id` with `account`, one of its `choices`
+    /// (for access, one or more separated by commas). Access is given at
+    /// once; a transfer starts as a names CLI job (`job` in the value); a
+    /// call is tried, signed and sent by the names CLI (`names module send`)
+    /// and the answer waits for its block (up to two minutes). If the wallet
+    /// is busy the request stays pending and the error says so. Names app only.
+    fn approve_request(&mut self, request_id: String, account: String) -> String;
+
+    /// Rejects request `request_id`. Names app only.
+    fn reject_request(&mut self, request_id: String) -> String;
+
+    /// Which apps have access to which accounts: `[{app, accounts, since}]`.
+    /// Names app only.
+    fn app_grants(&mut self) -> String;
+
+    /// Takes back all access `app` was given. Names app only.
+    fn revoke_app(&mut self, app: String) -> String;
+
     /// Called once the module is wired to the host.
     fn on_context_ready(&mut self, _ctx: &RustModuleContext) {}
 }
@@ -548,6 +643,11 @@ struct Names {
     /// name, so screens that ask again don't wait on the network. A change to
     /// the name drops them.
     read_cache: HashMap<(String, String), (String, std::time::Instant)>,
+    /// What other apps have asked the wallet for, and what they were given
+    /// (Wallet Provider SDK), read from disk the first time it is needed.
+    provider: Option<provider::Store>,
+    /// Where that is kept; the config directory's `provider.json` if unset.
+    provider_path: Option<std::path::PathBuf>,
 }
 
 /// How long a cached read about a name is used before it is read again.
@@ -559,6 +659,8 @@ struct BoardRead {
     value: Option<Value>,
     error: Option<String>,
     updating: bool,
+    /// When the last read ended (only kept by `read_in_background`).
+    fetched: Option<std::time::Instant>,
 }
 
 /// Where this module keeps what it remembers between runs.
@@ -621,6 +723,8 @@ impl Default for Names {
             chat_names: Default::default(),
             board_reads: Default::default(),
             read_cache: HashMap::new(),
+            provider: None,
+            provider_path: None,
         };
         // Files saved by versions before 0.10 were readable by every account on the
         // machine; this closes them up once.
@@ -2443,6 +2547,542 @@ impl NamesModule for Names {
             false
         }
     }
+
+    // ── Wallet Provider SDK ─────────────────────────────────────────────
+
+    fn request_access(&mut self, reason: String) -> String {
+        reply((|| {
+            let app = asking_app()?;
+            let now = provider::now_ms();
+            let store = self.store();
+            let granted = store.granted(&app);
+            if !granted.is_empty() {
+                return Ok(json!({ "request": null, "kind": provider::CONNECT, "state": "approved", "accounts": granted }));
+            }
+            if let Some(waiting) = store.requests.iter().find(|r| r["app"] == app.as_str() && r["kind"] == provider::CONNECT && r["state"] == "pending") {
+                return Ok(provider::app_view(waiting));
+            }
+            let request = provider::connect_request(&app, &reason, now)?;
+            let view = provider::app_view(&request);
+            store.add(request, now)?;
+            store.save();
+            Ok(view)
+        })())
+    }
+
+    fn granted_accounts(&mut self) -> String {
+        reply((|| {
+            let app = asking_app()?;
+            let granted = self.store().granted(&app);
+            let accounts: Vec<Value> = granted.iter().map(|account| json!({ "account": account, "account_kind": kind_of(account) })).collect();
+            Ok(json!({ "connected": !accounts.is_empty(), "accounts": accounts }))
+        })())
+    }
+
+    fn account_balances(&mut self) -> String {
+        reply((|| {
+            let app = asking_app()?;
+            let granted = self.store().granted(&app);
+            Ok(Value::from(granted.iter().map(|account| self.granted_balance(account)).collect::<Vec<_>>()))
+        })())
+    }
+
+    fn propose_transfer(&mut self, asset: String, amount: String, destination: String) -> String {
+        reply((|| {
+            let app = asking_app()?;
+            let now = provider::now_ms();
+            let request = provider::transfer_request(&app, &asset, &amount, &destination, now)?;
+            self.queue(&app, request, now)
+        })())
+    }
+
+    fn propose_call(&mut self, program_id: String, accounts_json: String, instruction_hex: String, summary: String) -> String {
+        reply((|| {
+            let app = asking_app()?;
+            let now = provider::now_ms();
+            if self.store().granted(&app).is_empty() {
+                return Err(NOT_CONNECTED.to_owned());
+            }
+            // Checked before the registry is asked, so a bad call costs nothing.
+            provider::call_request(&app, &program_id, &accounts_json, &instruction_hex, &summary, None, None, now)?;
+            let program = registry::parse_account(program_id.trim().strip_prefix("Public/").unwrap_or(program_id.trim()))?;
+            let label = program_registry::label(&registry::account_text(&program));
+            let request = provider::call_request(&app, &program_id, &accounts_json, &instruction_hex, &summary, label.as_ref(), self.program.as_ref(), now)?;
+            self.queue(&app, request, now)
+        })())
+    }
+
+    fn request_status(&mut self, request_id: String) -> String {
+        reply((|| {
+            let app = asking_app()?;
+            self.provider_refresh();
+            let store = self.store();
+            match store.get(request_id.trim()) {
+                // The Names app also sees the payment's job and, if it failed, the CLI's words.
+            Some(request) if may_act(&calling()) => {
+                Ok(merged(provider::app_view(request), &json!({ "app": request["app"], "job": request["job"], "problem": request["problem"] })))
+            }
+            Some(request) if request["app"] == app.as_str() => Ok(provider::app_view(request)),
+                // Another app's request is answered as if it didn't exist.
+                _ => Err("there is no such request".to_owned()),
+            }
+        })())
+    }
+
+    fn cancel_request(&mut self, request_id: String) -> String {
+        reply((|| {
+            let app = asking_app()?;
+            let now = provider::now_ms();
+            let store = self.store();
+            let request = store.get_mut(request_id.trim()).filter(|request| request["app"] == app.as_str()).ok_or("there is no such request")?;
+            if request["state"] != "pending" {
+                return Err(format!("that request is {} already", request["state"].as_str().unwrap_or("decided")));
+            }
+            request["state"] = json!("cancelled");
+            request["decided"] = json!(now);
+            let view = provider::app_view(request);
+            store.save();
+            Ok(view)
+        })())
+    }
+
+    fn drop_access(&mut self) -> String {
+        reply((|| {
+            let app = asking_app()?;
+            let store = self.store();
+            let revoked = store.revoke(&app);
+            store.save();
+            Ok(json!({ "revoked": revoked }))
+        })())
+    }
+
+    fn pending_requests(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        self.provider_refresh();
+        let pending: Vec<Value> = self.store().requests.iter().filter(|request| request["state"] == "pending").cloned().collect();
+        // The wallet's other public accounts take the CLI a moment to list, so
+        // they come from a read in the background and join the choices once known.
+        let others = if pending.iter().any(|request| request["kind"] != provider::TRANSFER) { self.publics_read_lately() } else { Vec::new() };
+        let choices = self.wallet_choices(&others);
+        let store = self.store();
+        let views: Vec<Value> = pending
+            .into_iter()
+            .map(|mut request| {
+                let app = request["app"].as_str().unwrap_or_default().to_owned();
+                let granted = store.granted(&app);
+                let kind = request["kind"].as_str().unwrap_or_default().to_owned();
+                request["choices"] = Value::from(
+                    choices
+                        .iter()
+                        .filter(|choice| offered_for(&kind, choice))
+                        .map(|choice| merged(choice.clone(), &json!({ "granted": granted.iter().any(|account| choice["account"] == account.as_str()) })))
+                        .collect::<Vec<_>>(),
+                );
+                request["granted"] = json!(granted);
+                request
+            })
+            .collect();
+        reply(Ok(Value::from(views)))
+    }
+
+    fn approve_request(&mut self, request_id: String, account: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(self.approve(request_id.trim(), &account))
+    }
+
+    fn reject_request(&mut self, request_id: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let now = provider::now_ms();
+            let store = self.store();
+            let request = store.get_mut(request_id.trim()).ok_or("there is no such request")?;
+            if request["state"] != "pending" {
+                return Err(format!("that request is {} already", request["state"].as_str().unwrap_or("decided")));
+            }
+            request["state"] = json!("rejected");
+            request["decided"] = json!(now);
+            let view = provider::app_view(request);
+            store.save();
+            Ok(view)
+        })())
+    }
+
+    fn app_grants(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let store = self.store();
+        let grants: Vec<Value> = store
+            .grants
+            .iter()
+            .map(|(app, grant)| json!({ "app": app, "accounts": grant["accounts"], "since": grant["since"] }))
+            .collect();
+        reply(Ok(Value::from(grants)))
+    }
+
+    fn revoke_app(&mut self, app: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let store = self.store();
+        let revoked = store.revoke(app.trim());
+        store.save();
+        reply(Ok(json!({ "revoked": revoked })))
+    }
+}
+
+// ── Wallet Provider SDK: the parts behind the methods ───────────────────
+
+/// What an app that hasn't been given access is told when it proposes a transaction.
+const NOT_CONNECTED: &str = "ask for access first (request_access), then propose it";
+
+/// How often an app's balance reads may go to the chain (or the CLI).
+const BALANCE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The app asking, as Basecamp names its credential: a module's name, or
+/// `host` for the host itself (Basecamp, or `logosctl` driving the module).
+/// A caller that can't be named, or a module that calls itself `host`, can't
+/// ask the wallet for anything.
+fn asking_app() -> Result<String, String> {
+    match calling() {
+        logos_rust_sdk::LogosCaller::Module { name, .. } if name != "host" => provider::app_name(&name),
+        logos_rust_sdk::LogosCaller::HostAnchor => Ok("host".to_owned()),
+        other => Err(format!("the wallet can't tell which app is asking ({}), so it refuses", other.describe_for_human())),
+    }
+}
+
+/// Whether `choice` (from `wallet_choices`) may be used for a request of `kind`:
+/// a payment comes from an account the CLI pays from, a call is signed by a
+/// public account, and access may be given to any.
+fn offered_for(kind: &str, choice: &Value) -> bool {
+    match kind {
+        provider::TRANSFER => choice["pays"] == true,
+        provider::CALL => choice["account_kind"] == "public",
+        _ => true,
+    }
+}
+
+/// `public` or `private`, for an account written `Public/...` or `Private/...`.
+fn kind_of(account: &str) -> &'static str {
+    if account.starts_with("Private/") {
+        "private"
+    } else {
+        "public"
+    }
+}
+
+impl Names {
+    /// The provider's store, read from disk the first time, with requests
+    /// nobody answered in time expired.
+    fn store(&mut self) -> &mut provider::Store {
+        if self.provider.is_none() {
+            let path = self.provider_path.clone().or_else(|| config_dir().map(|dir| dir.join("provider.json")));
+            self.provider = Some(provider::Store::load(path));
+        }
+        let store = self.provider.as_mut().expect("the store was just loaded");
+        if store.sweep(provider::now_ms()) {
+            store.save();
+        }
+        store
+    }
+
+    /// Adds a transaction request from `app`, which must have been given access.
+    fn queue(&mut self, app: &str, request: Value, now: u64) -> Result<Value, String> {
+        let store = self.store();
+        if store.granted(app).is_empty() {
+            return Err(NOT_CONNECTED.to_owned());
+        }
+        let view = provider::app_view(&request);
+        store.add(request, now)?;
+        store.save();
+        Ok(view)
+    }
+
+    /// The accounts a request may use, all in the names CLI's wallet: its main
+    /// public and private accounts, which pay (`names setup` saved them), and
+    /// its other public accounts `others`, which can sign program calls.
+    fn wallet_choices(&self, others: &[AccountId]) -> Vec<Value> {
+        let mut choices = Vec::new();
+        let wallet = cli::find_wallet(self.cli_wallet.as_deref()).filter(|dir| dir.join(cli::STORAGE_FILE).is_file());
+        let Some(wallet) = wallet else { return choices };
+        for (which, private, label) in [("public", false, "Names wallet, main public account"), ("private", true, "Names wallet, private account")] {
+            if let Some(id) = cli::saved_account(&wallet, which).and_then(|id| registry::parse_account(&id).ok()) {
+                choices.push(json!({ "account": provider::account_written(private, &id), "account_kind": which, "pays": true, "label": label }));
+            }
+        }
+        for id in others.iter().take(MAX_WALLET_ACCOUNTS) {
+            let account = provider::account_written(false, id);
+            if !choices.iter().any(|choice| choice["account"] == account.as_str()) {
+                choices.push(json!({ "account": account, "account_kind": "public", "pays": false, "label": "Names wallet, public account" }));
+            }
+        }
+        choices
+    }
+
+    /// The wallet's public accounts as last read in the background (see
+    /// `pending_requests`); empty until the first read ends.
+    fn publics_read_lately(&self) -> Vec<AccountId> {
+        let Ok(setup) = self.cli_setup() else { return Vec::new() };
+        let read = self.read_in_background("provider:publics".to_owned(), std::time::Duration::from_secs(30), move || {
+            wallet::accounts(&setup).map(|held| json!(held.public.iter().map(registry::account_text).collect::<Vec<_>>()))
+        });
+        read["value"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|id| registry::parse_account(id.as_str()?).ok())
+            .collect()
+    }
+
+    /// Approves a pending request with the account(s) the person chose.
+    /// Nothing is signed or sent unless the request is pending, the account
+    /// is one of its choices, and the existing payment or signing path
+    /// accepts it.
+    fn approve(&mut self, id: &str, account: &str) -> Result<Value, String> {
+        let now = provider::now_ms();
+        let request = self.store().get(id).cloned().ok_or("there is no such request")?;
+        if request["state"] != "pending" {
+            return Err(format!("that request is {} already", request["state"].as_str().unwrap_or("decided")));
+        }
+        let kind = request["kind"].as_str().unwrap_or_default().to_owned();
+        let app = request["app"].as_str().unwrap_or_default().to_owned();
+        let chosen: Vec<String> = account
+            .split(',')
+            .map(str::trim)
+            .filter(|account| !account.is_empty())
+            .map(|account| provider::account_ref(account).map(|(private, id)| provider::account_written(private, &id)))
+            .collect::<Result<_, _>>()?;
+        if chosen.is_empty() {
+            return Err("choose an account".to_owned());
+        }
+        if kind != provider::CONNECT && chosen.len() != 1 {
+            return Err("choose one account".to_owned());
+        }
+        // Checked against the wallet itself, not a list read earlier: a call
+        // must be signed by an account the CLI's wallet holds now.
+        let others = if kind == provider::TRANSFER { Vec::new() } else { self.held().map(|held| held.public).unwrap_or_default() };
+        let choices = self.wallet_choices(&others);
+        let offered: Vec<&Value> = choices.iter().filter(|choice| offered_for(&kind, choice)).collect();
+        if kind == provider::CALL && !others.iter().any(|id| provider::account_written(false, id) == chosen[0]) {
+            return Err(format!("{} isn't an account the names wallet can sign with now", chosen[0]));
+        }
+        if let Some(stray) = chosen.iter().find(|wanted| !offered.iter().any(|choice| choice["account"] == wanted.as_str())) {
+            return Err(format!("{stray} isn't one of the accounts this request can use"));
+        }
+        let mut outcome = json!({ "decided": now, "account": if kind == provider::CONNECT { Value::Null } else { json!(chosen[0]) } });
+        let failure = match kind.as_str() {
+            provider::CONNECT => {
+                let granted = self.store().grant(&app, &chosen, now)?;
+                outcome["state"] = json!("approved");
+                outcome["granted"] = json!(granted);
+                None
+            }
+            provider::TRANSFER => {
+                // A payment that didn't start sent nothing: the request stays pending.
+                let job = self.provider_transfer(&request, &chosen[0])?;
+                outcome["state"] = json!("running");
+                outcome["job"] = job["id"].clone();
+                None
+            }
+            provider::CALL => match self.provider_call(&request, &chosen[0]) {
+                Ok(tx) => {
+                    outcome["state"] = json!("done");
+                    outcome["tx"] = json!(tx);
+                    None
+                }
+                // A send that failed may still have gone through, so it is
+                // never offered again: the request ends failed.
+                Err(error) => {
+                    outcome["state"] = json!("failed");
+                    outcome["error"] = json!("the wallet couldn't send it");
+                    outcome["problem"] = json!(error);
+                    Some(error)
+                }
+            },
+            _ => return Err("this request can't be approved".to_owned()),
+        };
+        let store = self.store();
+        let view = match store.get_mut(id) {
+            Some(stored) => {
+                for (key, value) in outcome.as_object().into_iter().flatten() {
+                    stored[key.as_str()] = value.clone();
+                }
+                if kind == provider::CALL {
+                    // The instruction was only kept to be sent.
+                    if let Some(fields) = stored.as_object_mut() {
+                        fields.remove("instruction");
+                    }
+                }
+                merged(provider::app_view(stored), &json!({ "job": stored["job"] }))
+            }
+            None => outcome,
+        };
+        store.save();
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(view),
+        }
+    }
+
+    /// Starts an approved transfer through the names CLI, as `cli_pay` and
+    /// `cli_pay_account` would: a name is paid with `names pay` (from the
+    /// public account with `--from`), an account with `auth-transfer send`.
+    fn provider_transfer(&self, request: &Value, account: &str) -> Result<Value, String> {
+        let (private, _) = provider::account_ref(account)?;
+        let amount = request["amount"].as_str().unwrap_or_default().to_owned();
+        let destination = request["destination"].as_str().unwrap_or_default().to_owned();
+        match cli::pay_to(&destination)? {
+            cli::PayTo::Name(name) => {
+                let command = if private {
+                    cli::pay_args(&name, &amount)?
+                } else {
+                    cli::pay_from_public_args(&self.cli_setup()?, &name, &amount)?
+                };
+                let started = parsed_reply(&self.cli_job(&name, "pay", |_, _, _| Ok((command, None, Value::Null))))?;
+                Ok(started)
+            }
+            cli::PayTo::Account(_) => self.wallet_job("pay_account", |setup| cli::pay_account_args(setup, &destination, &amount, private)),
+        }
+    }
+
+    /// Signs and sends an approved program call through the names CLI, the
+    /// way the module sends its own registry changes (`names module send`),
+    /// with the call's program in place of the registry: the CLI tries it
+    /// against the chain first, sizes its gas, signs, sends and waits for its
+    /// block. The signer's own actor of the program comes first, then the
+    /// accounts the request reaches. Returns the transaction hash.
+    fn provider_call(&self, request: &Value, account: &str) -> Result<String, String> {
+        let (_, signer) = provider::account_ref(account)?;
+        let program = registry::parse_account(request["program"].as_str().unwrap_or_default())?;
+        let message = registry::unhex(request["instruction"].as_str().unwrap_or_default())?;
+        if message.is_empty() {
+            return Err("this request has nothing to send".to_owned());
+        }
+        let mut mentions = vec![Mention { account: signer, program, seed: None, signs: true }];
+        for reached in provider::stored_reached(request)? {
+            let account = if reached.account == provider::SIGNER { signer } else { registry::parse_account(&reached.account)? };
+            mentions.push(Mention {
+                account,
+                program: if reached.balance { registry::NATIVE_TOKEN } else { program },
+                seed: reached.seed,
+                signs: account == signer && reached.seed.is_none(),
+            });
+        }
+        let change = Change { message, mentions, signer, needs: 0, extra: Value::Null };
+        let mut setup = self.cli_setup()?;
+        setup.wallet_ready()?;
+        setup.registry = Some(registry::account_text(&program));
+        wallet::send(&setup, &change)
+    }
+
+    /// Ends the requests whose payment job has ended. The app that asked is
+    /// told only whether it went through; the CLI's own words, which may name
+    /// the person's accounts and balances, go only to the Names app.
+    fn provider_refresh(&mut self) {
+        let jobs = self.jobs().ok();
+        let now = provider::now_ms();
+        let store = self.store();
+        let mut changed = false;
+        for request in store.requests.iter_mut().filter(|request| request["state"] == "running") {
+            let state = request["job"].as_str().and_then(|job| jobs.as_ref()?.state(job).ok());
+            let ended = match &state {
+                None => Some((false, "the payment's record is gone; check the balance".to_owned())),
+                Some(state) if state["state"] == "done" => Some((true, String::new())),
+                Some(state) if state["state"] == "failed" => {
+                    let log = state["log_tail"].as_str().unwrap_or_default();
+                    let first = log.lines().map(str::trim).find(|line| line.starts_with("Error:")).unwrap_or_else(|| cli::last_line(log));
+                    Some((false, provider::clean_text(first.trim_start_matches("Error:").trim(), 300)))
+                }
+                _ => None,
+            };
+            if let Some((done, problem)) = ended {
+                request["state"] = json!(if done { "done" } else { "failed" });
+                request["finished"] = json!(now);
+                if !done {
+                    request["error"] = json!("the payment didn't go through");
+                    request["problem"] = json!(problem);
+                }
+                changed = true;
+            }
+        }
+        if changed {
+            store.save();
+        }
+    }
+
+    /// One account's balance for the app it was given to, read in the background.
+    fn granted_balance(&self, account: &str) -> Value {
+        let unreadable = |why: &str| json!({ "account": account, "account_kind": kind_of(account), "balance": null, "updating": false, "error": why });
+        let Ok((private, id)) = provider::account_ref(account) else {
+            return unreadable("not an account");
+        };
+        let read = if private {
+            // Only the names CLI's own private account can be read here.
+            let setup = match self.cli_setup() {
+                Ok(setup) if cli::default_private(&setup).ok().as_deref() == Some(registry::account_text(&id).as_str()) => setup,
+                _ => return unreadable("this private account's balance can't be read on this computer"),
+            };
+            let read = self.read_in_background("provider:cli_balance".to_owned(), BALANCE_EVERY, move || cli::run_balance(&setup));
+            let balance = read["value"]["balance"].clone();
+            merged(read, &json!({ "value": balance }))
+        } else {
+            let registry = Registry { sequencer: self.sequencer.clone(), program: self.program.unwrap_or([0; 32]) };
+            self.read_in_background(format!("provider:balance:{}", registry::account_text(&id)), BALANCE_EVERY, move || {
+                registry.balance(&id).map(|balance| json!(balance.to_string()))
+            })
+        };
+        json!({
+            "account": account,
+            "account_kind": kind_of(account),
+            "balance": read["value"],
+            "updating": read["updating"],
+            "error": read["error"],
+        })
+    }
+
+    /// Answers at once with the last value `fetch` gave for `key`, `{value,
+    /// updating, error}`, and starts a newer read on its own thread unless
+    /// one is on the way or the last ended less than `every` ago.
+    fn read_in_background(&self, key: String, every: std::time::Duration, fetch: impl FnOnce() -> Result<Value, String> + Send + 'static) -> Value {
+        let mut reads = self.board_reads.lock().expect("the board reads lock");
+        let read = reads.entry(key.clone()).or_default();
+        if !read.updating && read.fetched.is_none_or(|at| at.elapsed() >= every) {
+            read.updating = true;
+            let reads = std::sync::Arc::clone(&self.board_reads);
+            std::thread::spawn(move || {
+                let fetched = fetch();
+                let mut reads = reads.lock().expect("the board reads lock");
+                let read = reads.entry(key).or_default();
+                read.updating = false;
+                read.fetched = Some(std::time::Instant::now());
+                match fetched {
+                    Ok(value) => {
+                        read.value = Some(value);
+                        read.error = None;
+                    }
+                    Err(error) => read.error = Some(error),
+                }
+            });
+        }
+        json!({ "value": read.value, "updating": read.updating, "error": read.error })
+    }
+}
+
+/// The value of a reply this module made, or its error.
+fn parsed_reply(text: &str) -> Result<Value, String> {
+    let reply: Value = serde_json::from_str(text).map_err(|_| "an unreadable answer".to_owned())?;
+    if reply["success"] == true {
+        Ok(reply["value"].clone())
+    } else {
+        Err(reply["error"].as_str().unwrap_or("it failed").to_owned())
+    }
 }
 
 /// The most names, and the most answers, the module keeps in memory at once.
@@ -2450,6 +3090,60 @@ const MAX_CACHED: usize = 512;
 
 /// A wallet can hold many accounts and each costs a read, so `wallet` stops here.
 const MAX_WALLET_ACCOUNTS: usize = 64;
+
+/// The Program Registry module (`program_registry`, LP-0023), asked what a
+/// program is and whether its source is verified, for a program call's
+/// prompt. It is optional: without it the prompt says so.
+#[cfg(not(test))]
+mod program_registry {
+    use super::{json, Value};
+    use logos_rust_sdk::LogosModuleSDK;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    /// Asking is also how a missing module is noticed, so it gives up quickly.
+    const LOOK: Duration = Duration::from_secs(3);
+
+    /// `program_label`'s value for `program` (base58), or None when the
+    /// module isn't there or couldn't say. After one goes unanswered it isn't
+    /// asked again for a minute, so a missing registry costs one wait, not one
+    /// per request.
+    pub fn label(program: &str) -> Option<Value> {
+        static ABSENT_UNTIL: AtomicU64 = AtomicU64::new(0);
+        let now = super::now();
+        if now < ABSENT_UNTIL.load(Ordering::Relaxed) {
+            return None;
+        }
+        match LogosModuleSDK::new().plugin("program_registry").call_json_with_timeout("program_label", &json!([program]), LOOK) {
+            Ok(answer) => {
+                // It answers `{success, value, error}`, perhaps as JSON text.
+                let answer = match answer.as_str().map(serde_json::from_str::<Value>) {
+                    Some(Ok(parsed)) => parsed,
+                    _ => answer,
+                };
+                (answer["success"] == true).then(|| answer["value"].clone()).filter(Value::is_object)
+            }
+            Err(_) => {
+                ABSENT_UNTIL.store(now + 60, Ordering::Relaxed);
+                None
+            }
+        }
+    }
+}
+
+/// Stands in for the Program Registry in unit tests: a test sets the label.
+#[cfg(test)]
+mod program_registry {
+    use super::Value;
+
+    thread_local! {
+        pub static LABEL: std::cell::RefCell<Option<Value>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub fn label(_program: &str) -> Option<Value> {
+        LABEL.with(|label| label.borrow().clone())
+    }
+}
 
 #[cfg(not(test))]
 #[no_mangle]
@@ -2485,6 +3179,8 @@ mod tests {
             chat_names: Default::default(),
             board_reads: Default::default(),
             read_cache: HashMap::new(),
+            provider: None,
+            provider_path: None,
         }
     }
 
@@ -3049,5 +3745,306 @@ mod tests {
         let app: Value = serde_json::from_str(include_str!("../../../basecamp/metadata.json")).expect("the app's metadata.json");
         assert_eq!(app["dependencies"][0]["version"], format!(">={MODULE_VERSION}"));
         assert_eq!(fresh().shown_config()["module_version"], MODULE_VERSION);
+    }
+
+    // ── Wallet Provider SDK ─────────────────────────────────────────────
+
+    const PUBLIC: &str = "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk";
+    const PRIVATE: &str = "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z";
+    const OTHER: &str = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
+
+    fn app(name: &str) -> logos_rust_sdk::LogosCaller {
+        logos_rust_sdk::LogosCaller::Module { name: name.into(), instance: None }
+    }
+
+    /// A module with a fake CLI whose wallet has a public and a private
+    /// account, a provider store of its own, and a sequencer nobody answers.
+    fn with_wallet(label: &str, tail: &str) -> (Names, std::path::PathBuf) {
+        let (mut names, dir) = with_fake_cli(label, tail);
+        let wallet = std::path::PathBuf::from(names.cli_wallet.clone().unwrap());
+        std::fs::write(wallet.join("names.json"), format!("{{\"public\":\"{PUBLIC}\",\"private\":\"{PRIVATE}\"}}")).unwrap();
+        names.provider_path = Some(dir.join("provider.json"));
+        names.sequencer = "http://127.0.0.1:9".into();
+        (names, dir)
+    }
+
+    /// Has the Names app (here, the host) approve `id` with `account`.
+    fn approve(names: &mut Names, id: &str, account: &str) -> Value {
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        parsed(&names.approve_request(id.into(), account.into()))
+    }
+
+    /// `app` asks for access and the Names app gives it `account`.
+    fn connect(names: &mut Names, who: &str, account: &str) {
+        as_caller(app(who));
+        let asked = parsed(&names.request_access("to show your balance".into()));
+        let id = asked["value"]["request"].as_str().expect("a request").to_owned();
+        assert_eq!(approve(names, &id, account)["value"]["state"], "approved");
+    }
+
+    #[test]
+    fn another_app_must_ask_and_can_never_decide() {
+        let (mut names, dir) = with_wallet("provider-guard", "exit 0");
+        as_caller(app("evil_ui"));
+        // Nothing can be proposed before access is given.
+        let early = parsed(&names.propose_transfer("LEZ".into(), "5".into(), "jef".into()));
+        assert!(early["error"].as_str().unwrap().contains("request_access"), "{early}");
+        let asked = parsed(&names.request_access("Tips\u{202E} for posts".into()));
+        assert_eq!(asked["value"]["state"], "pending", "{asked}");
+        let id = asked["value"]["request"].as_str().unwrap().to_owned();
+        // Asking again returns the same request rather than a second prompt.
+        assert_eq!(parsed(&names.request_access(String::new()))["value"]["request"], json!(id));
+        // The asking app can't see, approve or reject anything, nor grant itself access.
+        for refused in [
+            names.pending_requests(),
+            names.approve_request(id.clone(), format!("Public/{PUBLIC}")),
+            names.reject_request(id.clone()),
+            names.app_grants(),
+            names.revoke_app("names_ui".into()),
+        ] {
+            assert!(parsed(&refused)["error"].as_str().unwrap().contains("only the Names app"), "{refused}");
+        }
+        assert_eq!(parsed(&names.granted_accounts())["value"], json!({ "connected": false, "accounts": [] }));
+        assert_eq!(parsed(&names.account_balances())["value"], json!([]));
+        // A caller that can't be named can't even ask.
+        as_caller(logos_rust_sdk::LogosCaller::Unknown);
+        assert_eq!(parsed(&names.request_access(String::new()))["success"], false);
+        as_caller(app("host"));
+        assert_eq!(parsed(&names.request_access(String::new()))["success"], false);
+
+        // The Names app sees who asks, why, and which accounts it may give.
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let pending = parsed(&names.pending_requests())["value"].clone();
+        assert_eq!(pending.as_array().unwrap().len(), 1, "{pending}");
+        assert_eq!(pending[0]["app"], "evil_ui");
+        assert_eq!(pending[0]["reason"], "Tips for posts");
+        let choices: Vec<&str> = pending[0]["choices"].as_array().unwrap().iter().map(|c| c["account"].as_str().unwrap()).collect();
+        assert_eq!(choices, vec![format!("Public/{PUBLIC}"), format!("Private/{PRIVATE}")]);
+        // Only an offered account can be given.
+        assert!(approve(&mut names, &id, &format!("Public/{OTHER}"))["error"].as_str().unwrap().contains("isn't one of"));
+        assert!(approve(&mut names, &id, PUBLIC)["error"].as_str().unwrap().contains("Public/<id>"));
+        let given = approve(&mut names, &id, &format!("Public/{PUBLIC}"));
+        assert_eq!(given["value"]["state"], "approved", "{given}");
+        assert_eq!(given["value"]["accounts"], json!([format!("Public/{PUBLIC}")]));
+        assert!(approve(&mut names, &id, &format!("Public/{PUBLIC}"))["error"].as_str().unwrap().contains("approved already"));
+
+        // The app sees only what it was given: the public account, not the private one.
+        as_caller(app("evil_ui"));
+        assert_eq!(parsed(&names.request_status(id.clone()))["value"]["state"], "approved");
+        let granted = parsed(&names.granted_accounts())["value"].clone();
+        assert_eq!(granted, json!({ "connected": true, "accounts": [{ "account": format!("Public/{PUBLIC}"), "account_kind": "public" }] }));
+        let balances = parsed(&names.account_balances())["value"].clone();
+        assert_eq!(balances.as_array().unwrap().len(), 1, "{balances}");
+        assert_eq!(balances[0]["account"], format!("Public/{PUBLIC}"));
+        // Already connected: no new prompt.
+        assert_eq!(parsed(&names.request_access(String::new()))["value"]["request"], Value::Null);
+        // Another app can't read this one's request.
+        as_caller(app("other_ui"));
+        assert!(parsed(&names.request_status(id.clone()))["error"].as_str().unwrap().contains("no such request"));
+        assert!(parsed(&names.cancel_request(id.clone()))["error"].as_str().unwrap().contains("no such request"));
+        // Giving access survives a restart.
+        let mut again = fresh();
+        again.provider_path = names.provider_path.clone();
+        as_caller(app("evil_ui"));
+        assert_eq!(parsed(&again.granted_accounts())["value"]["connected"], true);
+        // Access can be taken back by the Names app, or given up by the app.
+        assert_eq!(parsed(&names.drop_access())["value"]["revoked"], true);
+        assert_eq!(parsed(&names.granted_accounts())["value"]["connected"], false);
+        // Nothing ran the CLI.
+        assert!(!dir.join("jobs").exists() || std::fs::read_dir(dir.join("jobs")).unwrap().count() == 0);
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_transfer_runs_only_after_approval_from_the_chosen_account() {
+        let (mut names, dir) = with_wallet("provider-transfer", "exit 0");
+        connect(&mut names, "tips_ui", &format!("Public/{PUBLIC}"));
+        as_caller(app("tips_ui"));
+        // Checked as it is asked for.
+        for (asset, amount, to) in [("USDC", "5", "jef"), ("LEZ", "0", "jef"), ("LEZ", "5", OTHER), ("LEZ", "5", "$(id)")] {
+            assert_eq!(parsed(&names.propose_transfer(asset.into(), amount.into(), to.into()))["success"], false, "{asset} {amount} {to}");
+        }
+        let to_name = parsed(&names.propose_transfer("LEZ".into(), "1,000".into(), "Jef".into()))["value"].clone();
+        let to_account = parsed(&names.propose_transfer(String::new(), "250".into(), format!("Public/{OTHER}")))["value"].clone();
+        assert_eq!((to_name["state"].as_str(), to_name["amount"].as_str(), to_name["destination"].as_str()), (Some("pending"), Some("1000"), Some("jef")));
+        // Nothing has run yet.
+        assert!(!dir.join("jobs").exists());
+        // The prompt shows the asset, amount and destination, and offers the CLI's accounts.
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let pending = parsed(&names.pending_requests())["value"].clone();
+        let shown = pending.as_array().unwrap().iter().find(|r| r["id"] == to_name["request"]).unwrap().clone();
+        assert_eq!((shown["app"].as_str(), shown["asset"].as_str(), shown["amount"].as_str(), shown["destination"].as_str()), (Some("tips_ui"), Some("LEZ"), Some("1000"), Some("jef")));
+        assert_eq!(shown["choices"].as_array().unwrap().len(), 2);
+        assert_eq!(shown["choices"][0]["granted"], true);
+        assert_eq!(shown["choices"][1]["granted"], false);
+
+        // To a name from the public account: `names pay --from`.
+        let started = approve(&mut names, to_name["request"].as_str().unwrap(), &format!("Public/{PUBLIC}"));
+        assert_eq!(started["value"]["state"], "running", "{started}");
+        let job = started["value"]["job"].as_str().unwrap().to_owned();
+        let ended = job_end(&mut names, &job);
+        assert!(ended["log_tail"].as_str().unwrap().contains(&format!("[pay]\n[--from=Public/{PUBLIC}]\n[--]\n[jef]\n[1000]")), "{ended}");
+        // To an account from the private account: the wallet's own transfer.
+        let started = approve(&mut names, to_account["request"].as_str().unwrap(), &format!("Private/{PRIVATE}"));
+        let job = started["value"]["job"].as_str().unwrap().to_owned();
+        let ended = job_end(&mut names, &job);
+        assert!(ended["log_tail"].as_str().unwrap().contains(&format!("[--from=Private/{PRIVATE}]\n[--to=Public/{OTHER}]\n[--amount=250]")), "{ended}");
+
+        // The app learns it went through, never the CLI's log or job.
+        as_caller(app("tips_ui"));
+        let status = parsed(&names.request_status(to_account["request"].as_str().unwrap().into()))["value"].clone();
+        assert_eq!(status["state"], "done", "{status}");
+        assert_eq!(status["account"], format!("Private/{PRIVATE}"));
+        assert!(status.get("job").is_none() && status.get("log_tail").is_none(), "{status}");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_failed_payment_tells_the_app_nothing_about_the_wallet() {
+        let (mut names, dir) = with_wallet("provider-failed", "echo 'Error: Public/CCVd holds 1200; send it at least 5000' >&2; exit 1");
+        connect(&mut names, "tips_ui", &format!("Public/{PUBLIC}"));
+        as_caller(app("tips_ui"));
+        let asked = parsed(&names.propose_transfer("LEZ".into(), "5000".into(), format!("Public/{OTHER}")))["value"].clone();
+        let id = asked["request"].as_str().unwrap().to_owned();
+        let started = approve(&mut names, &id, &format!("Public/{PUBLIC}"));
+        job_end(&mut names, started["value"]["job"].as_str().unwrap());
+        as_caller(app("tips_ui"));
+        let status = parsed(&names.request_status(id.clone()))["value"].clone();
+        assert_eq!(status["state"], "failed", "{status}");
+        assert_eq!(status["error"], "the payment didn't go through");
+        assert!(!status.to_string().contains("1200"), "{status}");
+        // The Names app gets the CLI's reason.
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let full = parsed(&names.request_status(id))["value"].clone();
+        assert!(full["problem"].as_str().unwrap().contains("holds 1200"), "{full}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_busy_wallet_leaves_the_request_pending() {
+        let (mut names, dir) = with_wallet("provider-busy", "sleep 2");
+        connect(&mut names, "tips_ui", &format!("Public/{PUBLIC}"));
+        as_caller(app("tips_ui"));
+        let first = parsed(&names.propose_transfer("LEZ".into(), "1".into(), format!("Public/{OTHER}")))["value"]["request"].as_str().unwrap().to_owned();
+        let second = parsed(&names.propose_transfer("LEZ".into(), "2".into(), format!("Public/{OTHER}")))["value"]["request"].as_str().unwrap().to_owned();
+        assert_eq!(approve(&mut names, &first, &format!("Public/{PUBLIC}"))["value"]["state"], "running");
+        let busy = approve(&mut names, &second, &format!("Public/{PUBLIC}"));
+        assert!(busy["error"].as_str().unwrap().contains("busy"), "{busy}");
+        as_caller(app("tips_ui"));
+        assert_eq!(parsed(&names.request_status(second.clone()))["value"]["state"], "pending");
+        // The app may withdraw it; afterwards it can't be approved.
+        assert_eq!(parsed(&names.cancel_request(second.clone()))["value"]["state"], "cancelled");
+        assert!(approve(&mut names, &second, &format!("Public/{PUBLIC}"))["error"].as_str().unwrap().contains("cancelled"));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_program_call_is_signed_by_the_names_wallet_only_after_approval() {
+        // The fake CLI lists two public accounts and, asked to send, keeps
+        // what it was given and says it submitted it.
+        let tail = format!(
+            "case \"$*\" in\n\
+             *\"module accounts\"*) echo '{{\"public\":[\"{PUBLIC}\",\"{OTHER}\"],\"private\":[]}}' ;;\n\
+             *\"module send\"*) printf '%s\\n' \"$@\" > \"$(dirname \"$0\")/argv\"; cat > \"$(dirname \"$0\")/sent.json\"; echo 'submitted feedbeef'; echo 'applied in block 4' ;;\n\
+             esac"
+        );
+        let (mut names, dir) = with_wallet("provider-call", &tail);
+        let program = registry::account_text(&[5; 32]);
+        let data = registry::account_text(&[6; 32]);
+        names.program = Some([5; 32]);
+        program_registry::LABEL.with(|label| *label.borrow_mut() = Some(json!({ "text": "Tips 1.0", "kind": "deployer", "verified": false, "stale": false, "upgradeable": true })));
+        connect(&mut names, "tips_ui", &format!("Public/{OTHER}"));
+        as_caller(app("tips_ui"));
+        let accounts = format!("[\"{data}\", {{\"account\": \"signer\", \"balance\": true}}]");
+        assert!(parsed(&names.propose_call(program.clone(), "[\"signer\"]".into(), "0a0b".into(), String::new()))["error"].as_str().unwrap().contains("only for its LEZ balance"));
+        let asked = parsed(&names.propose_call(program.clone(), accounts.clone(), "000a0b".into(), "Tip jef 5 LEZ".into()))["value"].clone();
+        assert_eq!(asked["state"], "pending", "{asked}");
+        assert!(!dir.join("sent.json").exists());
+
+        // The prompt: the program's label and status, what it can do, the app's own words.
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let mut shown = Value::Null;
+        for _ in 0..100 {
+            shown = parsed(&names.pending_requests())["value"][0].clone();
+            if shown["choices"].as_array().is_some_and(|choices| choices.len() == 2) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(shown["program_label"]["text"], "Tips 1.0");
+        assert_eq!(shown["program_label"]["verified"], false);
+        assert_eq!(shown["app_summary"], "Tip jef 5 LEZ");
+        let warnings = shown["warnings"].to_string();
+        assert!(warnings.contains("Names registry") && warnings.contains("hasn't been verified") && warnings.contains("upgraded"), "{warnings}");
+        assert!(shown["effects"][1].as_str().unwrap().contains("Tips 1.0 may move LEZ out of the account you choose"), "{shown}");
+        // Only the wallet's public accounts can sign a call, the main one first.
+        let choices: Vec<&str> = shown["choices"].as_array().unwrap().iter().map(|c| c["account"].as_str().unwrap()).collect();
+        assert_eq!(choices, vec![format!("Public/{PUBLIC}"), format!("Public/{OTHER}")], "{shown}");
+        assert_eq!(shown["choices"][1]["granted"], true);
+        let id = asked["request"].as_str().unwrap().to_owned();
+        assert!(approve(&mut names, &id, &format!("Private/{PRIVATE}"))["error"].as_str().unwrap().contains("sign with"));
+        let sent = approve(&mut names, &id, &format!("Public/{OTHER}"));
+        assert_eq!(sent["value"]["state"], "done", "{sent}");
+        assert_eq!(sent["value"]["tx"], "feedbeef");
+        // The CLI got the call's program in place of the registry, and the change.
+        let argv = std::fs::read_to_string(dir.join("argv")).unwrap();
+        assert!(argv.contains(&format!("--program={program}\n")) && argv.ends_with("module\nsend\n"), "{argv}");
+        let change: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("sent.json")).unwrap()).unwrap();
+        let native = registry::account_text(&registry::NATIVE_TOKEN);
+        assert_eq!(change, json!({
+            "message": "000a0b",
+            "spent": "0",
+            "mentions": [
+                { "account": OTHER, "program": program, "seed": null, "signs": true },
+                { "account": data, "program": program, "seed": null, "signs": false },
+                { "account": OTHER, "program": native, "seed": null, "signs": true },
+            ],
+        }));
+        // It's sent once.
+        std::fs::remove_file(dir.join("sent.json")).unwrap();
+        assert!(approve(&mut names, &id, &format!("Public/{OTHER}"))["error"].as_str().unwrap().contains("done already"));
+        assert!(!dir.join("sent.json").exists());
+        as_caller(app("tips_ui"));
+        assert_eq!(parsed(&names.request_status(id))["value"]["tx"], "feedbeef");
+        // A rejected call is never sent.
+        let again = parsed(&names.propose_call(program, accounts, "0c".into(), String::new()))["value"]["request"].as_str().unwrap().to_owned();
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert_eq!(parsed(&names.reject_request(again.clone()))["value"]["state"], "rejected");
+        assert!(approve(&mut names, &again, &format!("Public/{OTHER}"))["error"].as_str().unwrap().contains("rejected already"));
+        assert!(!dir.join("sent.json").exists());
+        // The Names app sees and can take back what each app was given.
+        let grants = parsed(&names.app_grants())["value"].clone();
+        assert_eq!(grants[0]["app"], "tips_ui");
+        assert_eq!(parsed(&names.revoke_app("tips_ui".into()))["value"]["revoked"], true);
+        as_caller(app("tips_ui"));
+        assert!(parsed(&names.propose_call(registry::account_text(&[5; 32]), "[]".into(), "01".into(), String::new()))["error"].as_str().unwrap().contains("request_access"));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_failed_call_is_never_sent_again() {
+        let tail = format!(
+            "case \"$*\" in\n\
+             *\"module accounts\"*) echo '{{\"public\":[\"{PUBLIC}\"],\"private\":[]}}' ;;\n\
+             *\"module send\"*) touch \"$(dirname \"$0\")/tried\"; echo 'Error: refused: insufficient balance' >&2; exit 1 ;;\n\
+             esac"
+        );
+        let (mut names, dir) = with_wallet("provider-call-failed", &tail);
+        connect(&mut names, "tips_ui", &format!("Public/{PUBLIC}"));
+        as_caller(app("tips_ui"));
+        let id = parsed(&names.propose_call(registry::account_text(&[5; 32]), "[]".into(), "01".into(), String::new()))["value"]["request"].as_str().unwrap().to_owned();
+        let failed = approve(&mut names, &id, &format!("Public/{PUBLIC}"));
+        assert!(failed["error"].as_str().unwrap().contains("insufficient balance"), "{failed}");
+        assert!(dir.join("tried").exists());
+        as_caller(app("tips_ui"));
+        let status = parsed(&names.request_status(id.clone()))["value"].clone();
+        assert_eq!((status["state"].as_str(), status["error"].as_str()), (Some("failed"), Some("the wallet couldn't send it")), "{status}");
+        assert!(approve(&mut names, &id, &format!("Public/{PUBLIC}"))["error"].as_str().unwrap().contains("failed already"));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
