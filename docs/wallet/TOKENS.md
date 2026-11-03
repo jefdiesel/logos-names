@@ -231,7 +231,51 @@ sequencer on 127.0.0.1:3180 (stopped afterwards). The CLI refuses any non-loopba
 sequencer, because the wallet's built-in default is the public testnet
 (`lez/wallet/src/config.rs:62-64`).
 
-RUN-RESULTS
+Run 2026-11-03 (`wallet-tokens/scripts/run-public.sh`, then `run-private.sh`). Every
+step below ran on chain; balances are read back from the chain (public) or from the
+wallet's notes after a sync (private).
+
+- `cargo test -p wallet_tokens_core`: 20 passed.
+- Guest image `382ae94c…02afab6`, 392,520 bytes, deployed in 4 segments at
+  `H1KLp5C3…qY2DneD` with `ProgramLoader::deploy` (blocks 4-8).
+- Accounts: F = imported local-test key (10T native), B = new public account,
+  V and W = new private accounts.
+
+| step | kind | result |
+|---|---|---|
+| create "Demo", supply 1,000,000 to F, authority F | public | block 15; definition `D8fE2uPG…a16A6`, F holds 1,000,000 |
+| mint 500 to F (by F) | public | block 16; supply 1,000,500 |
+| send 250 F → B (B never used before; it signs, so it is admitted) | public | block 17; F 1,000,250, B 250 |
+| send 251 B → F | client check | refused before sending ("holds 250") |
+| shield 50,000,000 native F → V (stock `wallet auth-transfer send`) | proven, ~6 min | block 43 |
+| send 1,000 F → V (public sender, own private recipient credited in the same tx) | proven, 703 s | block 91; V 1,000 |
+| send 300 V → B (private sender, public recipient) | proven, 444 s | block 122; V 700, B 550 |
+| send 200 V → W given only by npk/vpk (`PrivateForeign`, sealed pending credit) | proven, 556 s | block 160; `wallet pending list` shows message 37 to W at the token program; V 500, W nothing yet |
+| `wallet-tokens receive` (W receives message 37, `Credit { amount: 200 }`) | proven, ~9 min | block 198; W 200 |
+| mint 1 by B (not the authority), no client check | public | included in block 202 and **reverted**; sequencer log: `only the mint authority may mint`; supply unchanged |
+
+Final balances: F 999,250, B 550, V 500, W 200 (sum 1,000,500 = supply).
+
+Notes from the run:
+
+- All four directions and the receipt worked with the stock wallet's send path
+  (`send_tx_with_pre_check`, `seal_destination`, `receive_pending_message_with`); the
+  only token-specific client code is the message and the recipient declaration.
+- Proving on the Mac mini M4 took 7-12 minutes per private transaction (CPU proving).
+  The Names app must show progress and allow the work to continue in the background.
+- Every private step paid its fee from V's shielded native balance; the first shield
+  (public → own private) needed no prior private funds. The "fee payer's balance" failure
+  noted in `docs/lez-0.4-port.md` did not occur here.
+- A private send also leaves a pending native credit (message 38 in the list, 17 bytes =
+  a native `Credit`) to an address that is not one of the wallet's accounts; most likely
+  the fee surplus refunded to the payer's blinded alias (`lez/wallet/src/lib.rs:1681-1695`),
+  not checked further.
+  `wallet pending list` shows it next to token credits, so Names should label it.
+- A first attempt at the refusal test was rejected by the sequencer instead: "payer … holds
+  0 but the fee reserve is 16004344". An account needs native tokens for fees before it can
+  do anything with tokens; the faucet flow has to cover that.
+- The sequencer was started for this run only (127.0.0.1:3180, home under
+  `/Volumes/exos162/logos/dev/wallet-tokens-agent/chain`) and stopped afterwards.
 
 ## 6. Recommended integration for Names
 
@@ -289,6 +333,6 @@ amount and destination instead of bytes.
 
 1. No 0.4 reference token program (section 1); the prize excludes writing our own.
 2. Testnet 0.4 is not live, so nothing can be checked against the canonical zone.
-3. Private sends need a private account with native tokens to pay the in-proof fee.
-   `docs/lez-0.4-port.md` records private Names flows failing on the fee payer's balance;
-   see section 5 for what the token run showed.
+3. Private sends need a private account with native tokens to pay the in-proof fee, and
+   each takes minutes to prove on a Mac mini M4 (section 5). Not a blocker, but it shapes
+   the UI.
