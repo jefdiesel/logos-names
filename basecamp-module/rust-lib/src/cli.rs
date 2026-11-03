@@ -713,6 +713,192 @@ pub fn pay_account_args(setup: &Setup, to: &str, amount: &str, from_private: boo
     ])
 }
 
+// ── Tokens (`names token`, docs/wallet/TOKENS.md) ───────────────────────
+
+/// `names token list` catches the wallet up with the chain first, for its
+/// private accounts' notes, then reads each public account and definition.
+const TOKEN_LIST_PATIENCE: Duration = Duration::from_secs(150);
+/// `names module token info` reads one account from the chain.
+const TOKEN_INFO_PATIENCE: Duration = Duration::from_secs(30);
+/// The longest token name shown; the prototype program allows 64 bytes.
+const MAX_TOKEN_NAME: usize = 64;
+/// Most rows of holdings or pending credits believed from one answer.
+const MAX_TOKEN_ROWS: usize = 256;
+
+/// The flag naming the token program. `names token` has none built in, and
+/// the module passes its own, so the app never shows one program and sends
+/// with another.
+fn token_program_arg(program: &registry::AccountId) -> String {
+    format!("--token-program={}", registry::account_text(program))
+}
+
+/// A token amount in base units: a whole number above zero that fits in 128
+/// bits (`,` and `_` may group digits), written plainly.
+pub fn token_amount(amount: &str) -> Result<String, String> {
+    let digits: String = amount.trim().chars().filter(|c| !matches!(c, ',' | '_')).collect();
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("enter a whole amount of the token's base units, such as 1000".to_owned());
+    }
+    match digits.parse::<u128>() {
+        Ok(0) => Err("enter an amount above zero".to_owned()),
+        Ok(amount) => Ok(amount.to_string()),
+        Err(_) => Err("that is more than a token amount can be (2^128 - 1)".to_owned()),
+    }
+}
+
+/// A token's definition, written as its account ID.
+pub fn token_definition(definition: &str) -> Result<registry::AccountId, String> {
+    let definition = definition.trim();
+    let id = registry::parse_account(definition).map_err(|_| "that isn't a token: a token is written as its definition's account ID".to_owned())?;
+    if id == registry::NATIVE_TOKEN {
+        return Err("that is the native token, LEZ; pay it from Pay".to_owned());
+    }
+    Ok(id)
+}
+
+/// Who a token goes to, written as `names token send --to` takes it: a name,
+/// `Public/<id>`, or one of this wallet's own `Private/<id>`. A bare ID is
+/// refused, as for a payment, so an ID is never taken for a name.
+pub fn token_to(to: &str) -> Result<String, String> {
+    let to = to.trim();
+    if let Some(id) = to.strip_prefix("Private/") {
+        return registry::parse_account(id)
+            .ok()
+            .filter(|_| !id.contains('/') && !id.contains(char::is_whitespace))
+            .map(|id| format!("Private/{}", registry::account_text(&id)))
+            .ok_or_else(|| "that isn't a private account; it's Private/ and then the account ID".to_owned());
+    }
+    match pay_to(to)? {
+        PayTo::Name(name) => Ok(name),
+        PayTo::Account(id) => Ok(format!("Public/{id}")),
+    }
+}
+
+/// `names token send`: `amount` of `definition` to `to`, from the wallet's
+/// main private account (`from_private`) or its main public one. To a name it
+/// goes to the name's private receiving keys unless `to_public` (or the name
+/// has only a public account). Everything is checked here first.
+pub fn token_send_args(
+    program: &registry::AccountId,
+    definition: &str,
+    amount: &str,
+    to: &str,
+    from_private: bool,
+    to_public: bool,
+) -> Result<Vec<String>, String> {
+    let definition = token_definition(definition)?;
+    let amount = token_amount(amount)?;
+    let to = token_to(to)?;
+    let mut args = vec![
+        token_program_arg(program),
+        "token".to_owned(),
+        "send".to_owned(),
+        format!("--to={to}"),
+        format!("--from={}", if from_private { "private" } else { "public" }),
+    ];
+    if to_public && !to.contains('/') {
+        args.push("--public".to_owned());
+    }
+    args.extend(["--".to_owned(), registry::account_text(&definition), amount]);
+    Ok(args)
+}
+
+/// `names token receive`: takes every token credit waiting for this wallet's
+/// private keys, one proven transaction each.
+pub fn token_receive_args(program: &registry::AccountId) -> Vec<String> {
+    vec![token_program_arg(program), "token".to_owned(), "receive".to_owned()]
+}
+
+/// Text from a token's definition, which whoever made the token wrote:
+/// control and direction-changing characters can't reorder what the person reads.
+fn token_text(value: &Value) -> Value {
+    value.as_str().map_or(Value::Null, |text| Value::from(crate::provider::clean_text(text, MAX_TOKEN_NAME)))
+}
+
+/// A decimal amount as the CLI printed it, or None.
+fn token_digits(value: &Value) -> Option<String> {
+    value.as_str().filter(|text| !text.is_empty() && text.len() <= 39 && text.bytes().all(|b| b.is_ascii_digit())).map(str::to_owned)
+}
+
+/// `names token list --json` read back: `{holdings: [{account, account_kind,
+/// definition, name, balance}], pending: [{position, definition, name, amount,
+/// to}]}`, each row checked, accounts written `Public/<id>` or `Private/<id>`.
+pub fn parse_token_list(output: &str) -> Result<Value, String> {
+    let answer: Value = serde_json::from_str(last_line(output)).map_err(|_| "the names CLI's token list did not decode".to_owned())?;
+    let rows = |key: &str| answer[key].as_array().map(Vec::as_slice).unwrap_or_default().iter().take(MAX_TOKEN_ROWS).cloned().collect::<Vec<_>>();
+    let id = |value: &Value| value.as_str().and_then(|text| registry::parse_account(text).ok()).map(|id| registry::account_text(&id));
+    let holdings: Vec<Value> = rows("holdings")
+        .iter()
+        .filter_map(|row| {
+            let (private, account) = crate::provider::account_ref(row["account"].as_str()?).ok()?;
+            Some(json!({
+                "account": crate::provider::account_written(private, &account),
+                "account_kind": if private { "private" } else { "public" },
+                "definition": id(&row["definition"])?,
+                "name": token_text(&row["name"]),
+                "balance": token_digits(&row["balance"])?,
+            }))
+        })
+        .collect();
+    let pending: Vec<Value> = rows("pending")
+        .iter()
+        .filter_map(|row| {
+            Some(json!({
+                "position": row["position"].as_u64()?,
+                "definition": id(&row["definition"])?,
+                "name": token_text(&row["name"]),
+                "amount": token_digits(&row["amount"])?,
+                "to": format!("Private/{}", id(&row["to"])?),
+            }))
+        })
+        .collect();
+    Ok(json!({ "holdings": holdings, "pending": pending }))
+}
+
+/// Runs `names token list --json`: what every account of the wallet holds,
+/// and the credits waiting to be received.
+pub fn run_token_list(setup: &Setup, program: &registry::AccountId) -> Result<Value, String> {
+    setup.wallet_ready()?;
+    let args = vec![token_program_arg(program), "token".to_owned(), "list".to_owned(), "--json".to_owned()];
+    parse_token_list(&run_text(setup, args, TOKEN_LIST_PATIENCE)?)
+}
+
+/// Runs `names module token info`: `{definition, name, supply, authority}`.
+pub fn run_token_info(setup: &Setup, program: &registry::AccountId, definition: &registry::AccountId) -> Result<Value, String> {
+    let args = vec![
+        token_program_arg(program),
+        "module".to_owned(),
+        "token".to_owned(),
+        "info".to_owned(),
+        "--".to_owned(),
+        registry::account_text(definition),
+    ];
+    let answer: Value = serde_json::from_str(last_line(&run_text(setup, args, TOKEN_INFO_PATIENCE)?))
+        .map_err(|_| "the names CLI's token info did not decode".to_owned())?;
+    let supply = token_digits(&answer["supply"]).ok_or("the names CLI gave no token supply")?;
+    let authority = answer["authority"].as_str().and_then(|text| registry::parse_account(text).ok()).map(|id| registry::account_text(&id));
+    Ok(json!({
+        "definition": registry::account_text(definition),
+        "name": token_text(&answer["name"]),
+        "supply": supply,
+        "authority": authority,
+    }))
+}
+
+/// What a finished token job printed: the last transaction it sent and the
+/// block it was applied in, how many were applied, and whether there was
+/// nothing to receive.
+pub fn token_outcome(log: &str) -> Value {
+    let tx = log.lines().rev().find_map(|line| line.trim().strip_prefix("submitted ")).map(str::trim);
+    let blocks: Vec<u64> = log.lines().filter_map(|line| line.trim().strip_prefix("applied in block ")?.trim().parse().ok()).collect();
+    json!({
+        "tx": tx,
+        "block": blocks.last(),
+        "applied": blocks.len(),
+        "nothing": log.lines().any(|line| line.trim() == "nothing to receive"),
+    })
+}
+
 /// `names hide`, and the name whose job it is (`board` for a post given by ID).
 pub fn hide_args(post: &str) -> Result<(String, Vec<String>), String> {
     let post = post_ref(post)?;
@@ -2106,5 +2292,108 @@ mod tests {
         assert_eq!(saved_account(&setup.wallet, "public").as_deref(), made["public"].as_str());
         let again = run_create_wallet(&setup).unwrap();
         assert_eq!((again["public"].clone(), again["phrase"].clone()), (made["public"].clone(), Value::Null));
+    }
+
+    // ── Tokens ──────────────────────────────────────────────────────────
+
+    const TOKEN: &str = "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk";
+    const HOLDER: &str = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
+
+    #[test]
+    fn token_amounts_reach_128_bits_and_no_further() {
+        assert_eq!(token_amount(" 1,000_000 "), Ok("1000000".to_owned()));
+        assert_eq!(token_amount(&u128::MAX.to_string()), Ok(u128::MAX.to_string()));
+        assert_eq!(token_amount("007"), Ok("7".to_owned()));
+        for bad in ["", "0", "000", "-1", "1.5", "1e3", "340282366920938463463374607431768211456", "--5", "five"] {
+            assert!(token_amount(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_token_goes_to_a_name_or_a_written_account() {
+        assert_eq!(token_to("Jef.lez"), Ok("jef".to_owned()));
+        assert_eq!(token_to(&format!("Public/{HOLDER}")), Ok(format!("Public/{HOLDER}")));
+        assert_eq!(token_to(&format!(" Private/{HOLDER} ")), Ok(format!("Private/{HOLDER}")));
+        for bad in [HOLDER.to_owned(), format!("Private/{HOLDER}/x"), "Private/nope".to_owned(), "--from=public".to_owned(), "$(id)".to_owned(), String::new()] {
+            assert!(token_to(&bad).is_err(), "{bad}");
+        }
+        assert!(token_definition("nope").is_err());
+        assert!(token_definition(&registry::account_text(&registry::NATIVE_TOKEN)).unwrap_err().contains("native"));
+    }
+
+    #[test]
+    fn a_token_send_is_built_from_checked_parts() {
+        let program = [3; 32];
+        let flag = format!("--token-program={}", registry::account_text(&program));
+        assert_eq!(
+            token_send_args(&program, TOKEN, "1,000", "Jef", true, false).unwrap(),
+            strings(&[&flag, "token", "send", "--to=jef", "--from=private", "--", TOKEN, "1000"])
+        );
+        // `to_public` only means something for a name.
+        assert_eq!(
+            token_send_args(&program, TOKEN, "5", "jef", false, true).unwrap(),
+            strings(&[&flag, "token", "send", "--to=jef", "--from=public", "--public", "--", TOKEN, "5"])
+        );
+        let to = format!("--to=Public/{HOLDER}");
+        assert_eq!(
+            token_send_args(&program, TOKEN, "5", &format!("Public/{HOLDER}"), false, true).unwrap(),
+            strings(&[&flag, "token", "send", &to, "--from=public", "--", TOKEN, "5"])
+        );
+        for (definition, amount, to) in [("nope", "5", "jef"), (TOKEN, "0", "jef"), (TOKEN, "5", HOLDER), (TOKEN, "5", "-x")] {
+            assert!(token_send_args(&program, definition, amount, to, false, false).is_err(), "{definition} {amount} {to}");
+        }
+        assert_eq!(token_receive_args(&program), strings(&[&flag, "token", "receive"]));
+    }
+
+    #[test]
+    fn the_token_list_is_read_from_the_last_line_and_checked() {
+        let output = format!(
+            "Latest block is 12\n{}\n",
+            json!({
+                "holdings": [
+                    { "account": format!("Public/{HOLDER}"), "private": false, "definition": TOKEN, "name": "Demo\u{202E}xx", "balance": "1000250" },
+                    { "account": format!("Private/{HOLDER}"), "private": true, "definition": TOKEN, "name": null, "balance": "200" },
+                    { "account": HOLDER, "private": false, "definition": TOKEN, "name": "bare", "balance": "1" },
+                    { "account": format!("Public/{HOLDER}"), "private": false, "definition": "nope", "name": "x", "balance": "1" },
+                    { "account": format!("Public/{HOLDER}"), "private": false, "definition": TOKEN, "name": "x", "balance": "-1" },
+                ],
+                "pending": [
+                    { "position": 21, "definition": TOKEN, "name": "Demo", "amount": "200", "to": HOLDER },
+                    { "position": "x", "definition": TOKEN, "name": "Demo", "amount": "200", "to": HOLDER },
+                ],
+            })
+        );
+        let list = parse_token_list(&output).unwrap();
+        assert_eq!(
+            list["holdings"],
+            json!([
+                { "account": format!("Public/{HOLDER}"), "account_kind": "public", "definition": TOKEN, "name": "Demo xx", "balance": "1000250" },
+                { "account": format!("Private/{HOLDER}"), "account_kind": "private", "definition": TOKEN, "name": null, "balance": "200" },
+            ])
+        );
+        assert_eq!(list["pending"], json!([{ "position": 21, "definition": TOKEN, "name": "Demo", "amount": "200", "to": format!("Private/{HOLDER}") }]));
+        assert!(parse_token_list("Error: no token program given").is_err());
+    }
+
+    #[test]
+    fn a_token_jobs_log_says_what_it_sent() {
+        let sent = token_outcome("sending 5 Demo\nproved in 515s\nsubmitted 18322d72\napplied in block 74\n");
+        assert_eq!(sent, json!({ "tx": "18322d72", "block": 74, "applied": 1, "nothing": false }));
+        let received = token_outcome("receiving 1\nsubmitted aa\napplied in block 3\nreceiving 2\nsubmitted bb\napplied in block 9\n");
+        assert_eq!((received["tx"].as_str(), received["block"].as_u64(), received["applied"].as_u64()), (Some("bb"), Some(9), Some(2)));
+        assert_eq!(token_outcome("nothing to receive\n")["nothing"], true);
+        assert_eq!(token_outcome("Error: refused")["tx"], Value::Null);
+    }
+
+    #[test]
+    fn token_info_passes_the_program_and_cleans_the_name() {
+        let dir = scratch_dir("token-info");
+        let answer = json!({ "definition": TOKEN, "name": "Demo\u{200B}", "supply": "1000", "authority": HOLDER, "extra": 1 });
+        let setup = setup(&dir, &format!("echo '{answer}'"));
+        let info = run_token_info(&setup, &[3; 32], &registry::parse_account(TOKEN).unwrap()).unwrap();
+        assert_eq!(info, json!({ "definition": TOKEN, "name": "Demo", "supply": "1000", "authority": HOLDER }));
+        let refusing = Setup { program: fake_cli(&dir, "echo 'Error: not a token' >&2; exit 1"), ..setup };
+        assert!(run_token_info(&refusing, &[3; 32], &[4; 32]).unwrap_err().contains("not a token"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

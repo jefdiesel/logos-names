@@ -20,9 +20,13 @@ use crate::registry::{self, AccountId};
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
 
-/// The one asset a transfer moves: LEZ's native token. Token-program
-/// transfers are program calls (`propose_call`).
+/// The native asset a transfer moves: LEZ. A transfer can also move a token
+/// of the wallet's token program, named by its definition's account ID
+/// (`asset_kind` `token`).
 pub const ASSET: &str = "LEZ";
+/// What a transfer's asset is.
+pub const NATIVE: &str = "native";
+pub const TOKEN: &str = "token";
 /// Requests one app may have waiting at once, and all apps together.
 pub const MAX_PENDING_PER_APP: usize = 4;
 pub const MAX_PENDING: usize = 32;
@@ -125,12 +129,25 @@ pub fn account_written(private: bool, id: &AccountId) -> String {
     format!("{}/{}", if private { "Private" } else { "Public" }, registry::account_text(id))
 }
 
-/// The asset a transfer names: LEZ, however the app wrote it.
-pub fn asset(text: &str) -> Result<&'static str, String> {
-    match text.trim().to_ascii_lowercase().as_str() {
-        "" | "lez" | "native" => Ok(ASSET),
-        _ => Err(format!(
-            "only LEZ (the native token) can be sent with propose_transfer; {} is not it. Move other tokens with propose_call",
+/// The asset a transfer names: LEZ, however the app wrote it, or a token of
+/// the wallet's token program, by its definition's account ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Asset {
+    Native,
+    Token(AccountId),
+}
+
+pub fn asset(text: &str) -> Result<Asset, String> {
+    let trimmed = text.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
+        "" | "lez" | "native" => return Ok(Asset::Native),
+        _ => {}
+    }
+    match registry::parse_account(trimmed) {
+        Ok(id) if id == registry::NATIVE_TOKEN => Ok(Asset::Native),
+        Ok(id) => Ok(Asset::Token(id)),
+        Err(_) => Err(format!(
+            "the asset is LEZ (the native token) or a token's definition ID (base58); {} is neither",
             clean_text(text, 40)
         )),
     }
@@ -156,24 +173,89 @@ pub fn connect_request(app: &str, reason: &str, now: u64) -> Result<Value, Strin
     Ok(Value::Object(request))
 }
 
-/// A request to send `amount` LEZ to `destination`, a name or `Public/<id>`.
-/// Checked the way the payment itself will check it.
+/// A request to send `amount` of an asset (LEZ, or a token by its
+/// definition's ID) to `destination`, a name or `Public/<id>`. Checked the
+/// way the payment itself will check it. A token's name and program are
+/// added by [`add_token`] once the wallet has read them.
 pub fn transfer_request(app: &str, asset_text: &str, amount: &str, destination: &str, now: u64) -> Result<Value, String> {
     let asset = asset(asset_text)?;
-    let amount = amount.trim().replace(',', "");
-    if !crate::cli::is_amount(&amount) {
-        return Err("the amount is a whole number of base units above zero, such as 1000".to_owned());
-    }
+    let amount = match asset {
+        Asset::Native => {
+            let amount = amount.trim().replace(',', "");
+            if !crate::cli::is_amount(&amount) {
+                return Err("the amount is a whole number of base units above zero, such as 1000".to_owned());
+            }
+            amount
+        }
+        Asset::Token(_) => crate::cli::token_amount(amount)
+            .map_err(|_| "the amount is a whole number of the token's base units above zero, at most 2^128 - 1".to_owned())?,
+    };
     let (to, to_kind) = match crate::cli::pay_to(destination)? {
         crate::cli::PayTo::Name(name) => (name, "name"),
         crate::cli::PayTo::Account(id) => (format!("Public/{id}"), "account"),
     };
     let mut request = base(app, TRANSFER, now)?;
-    request.insert("asset".into(), json!(asset));
+    match asset {
+        Asset::Native => {
+            request.insert("asset".into(), json!(ASSET));
+            request.insert("asset_kind".into(), json!(NATIVE));
+        }
+        Asset::Token(id) => {
+            request.insert("asset".into(), json!(registry::account_text(&id)));
+            request.insert("asset_kind".into(), json!(TOKEN));
+        }
+    }
     request.insert("amount".into(), json!(amount));
     request.insert("destination".into(), json!(to));
     request.insert("destination_kind".into(), json!(to_kind));
     Ok(Value::Object(request))
+}
+
+/// The token a transfer request moves, if it moves one.
+pub fn token_of(request: &Value) -> Option<AccountId> {
+    if request["asset_kind"] != TOKEN {
+        return None;
+    }
+    registry::parse_account(request["asset"].as_str()?).ok()
+}
+
+/// Adds to a token transfer what its prompt shows besides the amount and
+/// destination: the token's name as its definition gives it (`token_name`),
+/// the token program that moves it and what the Program Registry says about
+/// that program (`token_program`, `program_label`), and the warnings that
+/// follow. The name is the token maker's own text, so it is cleaned, and the
+/// definition's ID is always shown with it.
+pub fn add_token(request: &mut Value, name: Option<&str>, program: &AccountId, label: Option<&Value>) {
+    let label = label_fields(label);
+    let mut warnings = label_warnings(&label, "token program");
+    if name.is_none_or(|name| name.trim().is_empty()) {
+        warnings.push("The token's definition gives it no name; check its ID.".to_owned());
+    }
+    request["token_name"] = name.map_or(Value::Null, |name| json!(clean_text(name, 64)));
+    request["token_program"] = json!(registry::account_text(program));
+    request["program_label"] = label;
+    request["warnings"] = json!(warnings);
+}
+
+/// What a prompt warns about a program, from what the Program Registry said
+/// (`label_fields`). `what` is how the prompt names the program.
+fn label_warnings(label: &Value, what: &str) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if label["registry"] != true {
+        warnings.push(format!("The Program Registry isn't installed, so who wrote this {what} and whether its source is verified is unknown."));
+    } else if label["stale"] == true {
+        warnings.push(format!("The {what} now runs different code than its registered source."));
+    } else if label["verified"] != true {
+        warnings.push(if label["kind"] == "unregistered" {
+            format!("This {what} isn't in the Program Registry: its source is unknown.")
+        } else {
+            format!("This {what}'s source hasn't been verified on this computer.")
+        });
+    }
+    if label["upgradeable"] == true {
+        warnings.push(format!("This {what} can be upgraded, so its code may change later."));
+    }
+    warnings
 }
 
 /// What the `program_registry` module said about a program, kept to the
@@ -311,20 +393,7 @@ pub fn call_request(
     if names_registry == Some(&program) {
         warnings.push("This is the Names registry: a call can change, give away or release the names this account holds.".to_owned());
     }
-    if label["registry"] != true {
-        warnings.push("The Program Registry isn't installed, so who wrote this program and whether its source is verified is unknown.".to_owned());
-    } else if label["stale"] == true {
-        warnings.push("The program now runs different code than its registered source.".to_owned());
-    } else if label["verified"] != true {
-        warnings.push(if label["kind"] == "unregistered" {
-            "This program isn't in the Program Registry: its source is unknown.".to_owned()
-        } else {
-            "This program's source hasn't been verified on this computer.".to_owned()
-        });
-    }
-    if label["upgradeable"] == true {
-        warnings.push("This program can be upgraded, so its code may change later.".to_owned());
-    }
+    warnings.extend(label_warnings(&label, "program"));
 
     let mut request = base(app, CALL, now)?;
     request.insert("program".into(), json!(program_text));
@@ -472,10 +541,23 @@ impl Store {
     /// Adds a new request, unless the app or everyone has too many waiting.
     pub fn add(&mut self, request: Value, now: u64) -> Result<(), String> {
         let app = request["app"].as_str().unwrap_or_default().to_owned();
+        self.room_for(&app, now)?;
+        if self.requests.len() >= MAX_KEPT {
+            if let Some(oldest) = self.requests.iter().position(decided) {
+                self.requests.remove(oldest);
+            }
+        }
+        self.requests.push(request);
+        Ok(())
+    }
+
+    /// Whether `app` may make another request now: checked before anything
+    /// costly is done for one, such as reading a token from the chain.
+    pub fn room_for(&self, app: &str, now: u64) -> Result<(), String> {
         let waiting = |of: Option<&str>| {
             self.requests.iter().filter(|r| r["state"] == "pending" && of.is_none_or(|app| r["app"] == app)).count()
         };
-        if waiting(Some(&app)) >= MAX_PENDING_PER_APP {
+        if waiting(Some(app)) >= MAX_PENDING_PER_APP {
             return Err(format!("this app already has {MAX_PENDING_PER_APP} requests waiting; wait for the person to answer them"));
         }
         if waiting(None) >= MAX_PENDING {
@@ -484,17 +566,11 @@ impl Store {
         let recent = self
             .requests
             .iter()
-            .filter(|r| r["app"] == app.as_str() && r["created"].as_u64().unwrap_or(0).saturating_add(60 * 60 * 1000) > now)
+            .filter(|r| r["app"] == app && r["created"].as_u64().unwrap_or(0).saturating_add(60 * 60 * 1000) > now)
             .count();
         if recent >= MAX_PER_HOUR {
             return Err(format!("this app has made {MAX_PER_HOUR} requests in the last hour; try again later"));
         }
-        if self.requests.len() >= MAX_KEPT {
-            if let Some(oldest) = self.requests.iter().position(decided) {
-                self.requests.remove(oldest);
-            }
-        }
-        self.requests.push(request);
         Ok(())
     }
 
@@ -557,7 +633,7 @@ pub fn app_view(request: &Value) -> Value {
     match request["kind"].as_str() {
         Some(CONNECT) => view["accounts"] = request["granted"].clone(),
         Some(TRANSFER) => {
-            for key in ["asset", "amount", "destination"] {
+            for key in ["asset", "asset_kind", "token_name", "amount", "destination"] {
                 view[key] = request[key].clone();
             }
         }
@@ -604,10 +680,42 @@ mod tests {
         assert_eq!(made["id"].as_str().unwrap().len(), 32);
         let to_account = transfer_request("app", "", "7", &format!("Public/{ONE}"), 5).unwrap();
         assert_eq!(to_account["destination"], format!("Public/{ONE}"));
-        assert!(transfer_request("app", "USDC", "7", "jef", 5).unwrap_err().contains("only LEZ"));
+        assert_eq!(made["asset_kind"], NATIVE);
+        assert!(transfer_request("app", "USDC", "7", "jef", 5).unwrap_err().contains("neither"));
         for (amount, to) in [("0", "jef"), ("-5", "jef"), ("1.5", "jef"), ("7", ONE), ("7", &format!("Private/{ONE}") as &str), ("7", "$(id)")] {
             assert!(transfer_request("app", "LEZ", amount, to, 5).is_err(), "{amount} {to}");
+            assert!(transfer_request("app", TWO, amount, to, 5).is_err(), "token {amount} {to}");
         }
+        // The native token's own ID is LEZ, not a token.
+        assert_eq!(transfer_request("app", &registry::account_text(&registry::NATIVE_TOKEN), "7", "jef", 5).unwrap()["asset"], ASSET);
+    }
+
+    #[test]
+    fn a_token_transfer_names_its_token_and_program() {
+        // A token is named by its definition's ID; its amounts reach 2^128 - 1.
+        let max = u128::MAX.to_string();
+        let mut made = transfer_request("app", &format!(" {TWO} "), &max, "jef", 5).unwrap();
+        assert_eq!((made["asset"].as_str(), made["asset_kind"].as_str(), made["amount"].as_str()), (Some(TWO), Some(TOKEN), Some(max.as_str())));
+        assert_eq!(token_of(&made), Some(registry::parse_account(TWO).unwrap()));
+        assert!(transfer_request("app", TWO, "340282366920938463463374607431768211456", "jef", 5).is_err());
+        assert_eq!(token_of(&transfer_request("app", "LEZ", "7", "jef", 5).unwrap()), None);
+        // The name is the maker's text: cleaned, and a missing one is warned about.
+        let program = registry::parse_account(ONE).unwrap();
+        add_token(&mut made, Some("Demo\u{202E}DSU"), &program, None);
+        assert_eq!(made["token_name"], "Demo DSU");
+        assert_eq!(made["token_program"], ONE);
+        assert_eq!(made["program_label"]["registry"], false);
+        assert!(made["warnings"].to_string().contains("this token program"), "{}", made["warnings"]);
+        let label = json!({ "text": "Tokens 0.1 ✓ verified", "kind": "deployer", "verified": true, "stale": false, "upgradeable": false });
+        add_token(&mut made, Some("Demo"), &program, Some(&label));
+        assert_eq!(made["warnings"], json!([]));
+        assert_eq!(made["program_label"]["text"], "Tokens 0.1 ✓ verified");
+        add_token(&mut made, None, &program, Some(&label));
+        assert!(made["warnings"].to_string().contains("no name"));
+        // The app sees what it asked, with the token's name.
+        let view = app_view(&made);
+        assert_eq!((view["asset"].as_str(), view["asset_kind"].as_str()), (Some(TWO), Some(TOKEN)));
+        assert!(view.get("warnings").is_none() && view.get("program_label").is_none());
     }
 
     #[test]

@@ -499,6 +499,62 @@ pub trait NamesModule: Send + 'static {
     /// not a directory.
     fn set_cli_wallet(&mut self, dir: String) -> bool;
 
+    // ── Tokens of a token program (docs/wallet/TOKENS.md) ──────────────
+    //
+    // All through the names CLI's wallet (`names token`), with the token
+    // program set here. No token program runs on the public LEZ testnet yet,
+    // so none is built in. Names app only.
+
+    /// Has every token method use the token program `program_id` (base58),
+    /// and remembers it across restarts (`get_config`'s `token_program`); an
+    /// empty ID forgets it. Returns false and changes nothing if it is not an
+    /// account ID, or is the native token.
+    fn set_token_program(&mut self, program_id: String) -> bool;
+
+    /// What the names CLI's accounts hold of each token, public and private:
+    /// `{token_program, holdings: [{account, account_kind, definition, name,
+    /// balance}], updating, error}`, only `account`'s (written `Public/<id>`
+    /// or `Private/<id>`) unless it is empty. `name` is the definition's own
+    /// name (the token maker's text, cleaned) or null; amounts are decimal
+    /// text in base units. Read in the background (a private account's
+    /// holdings need the wallet to catch up with the chain, up to a minute or
+    /// two): the answer comes at once with the last read, null until the
+    /// first ends, and `updating` while a newer one is on the way.
+    fn cli_token_holdings(&mut self, account: String) -> String;
+
+    /// The token credits sent to the wallet's private keys and not yet
+    /// received: `{token_program, pending: [{position, definition, name,
+    /// amount, to}], updating, error}`, `to` the private account they credit.
+    /// From the same read as `cli_token_holdings`. `cli_token_receive` takes them.
+    fn cli_token_pending(&mut self) -> String;
+
+    /// What the token `definition` (its definition's account ID) is:
+    /// `{definition, name, supply, authority}`; `authority` may mint more,
+    /// null for a fixed supply. Read from the chain through the CLI (seconds),
+    /// then kept for 30 seconds.
+    fn cli_token_info(&mut self, definition: String) -> String;
+
+    /// Sends `amount` (base units, decimal text up to 2^128 - 1) of the token
+    /// `definition` (its definition's account ID) to `to`: a name, a public
+    /// account written `Public/<id>`, or one of the wallet's own
+    /// `Private/<id>`. From the wallet's main private account with
+    /// `from_private`, else its main public one. To a name it goes to the
+    /// name's private receiving keys, where it waits until its holder receives
+    /// it, unless `to_public` (or the name has only a public account). A
+    /// wallet job (`names token send`): one block from the public account to
+    /// a public account; otherwise proven on this computer, 7-12 minutes.
+    /// Once it ends, its `job` state has `tx`, `block` and, if it failed,
+    /// `problem`. Everything is checked before the CLI runs.
+    fn cli_token_send(&mut self, definition: String, amount: String, to: String, from_private: bool, to_public: bool) -> String;
+
+    /// Receives every token credit waiting for the wallet's private keys
+    /// (`names token receive`), as a wallet job: one proven transaction per
+    /// credit, 7-12 minutes each, paid from a private account's LEZ. A job
+    /// stops after 45 minutes; credits it didn't reach stay pending and the
+    /// next receive takes them. Its ended `job` state has `applied` (how many
+    /// were received), `nothing` (there was nothing to receive) and `problem`.
+    fn cli_token_receive(&mut self) -> String;
+
     // ── Wallet Provider SDK: for any app (docs/wallet/PROVIDER-SDK.md) ──
     //
     // Any app may ask; the person decides in the Names app. The asking app
@@ -526,10 +582,14 @@ pub trait NamesModule: Send + 'static {
     /// balance is only here if the person gave this app that account.
     fn account_balances(&mut self) -> String;
 
-    /// Asks to send `amount` (base units, decimal digits) of `asset` (`LEZ`,
-    /// the native token; empty means LEZ) to `destination`: a name, or a
-    /// public account written `Public/<id>`. The person chooses the account
-    /// it comes from. Checked now, so a bad amount or destination fails here.
+    /// Asks to send `amount` (base units, decimal digits) of `asset` to
+    /// `destination`: a name, or a public account written `Public/<id>`.
+    /// `asset` is `LEZ`, the native token (empty also means LEZ), or a token
+    /// of the wallet's token program, written as its definition's account ID
+    /// (base58); the prompt then shows the token's name and what the Program
+    /// Registry says about the token program. The person chooses the account
+    /// it comes from. Checked now, so a bad amount, destination or token
+    /// fails here.
     fn propose_transfer(&mut self, asset: String, amount: String, destination: String) -> String;
 
     /// Asks to run program `program_id` (base58) with the message
@@ -648,6 +708,10 @@ struct Names {
     provider: Option<provider::Store>,
     /// Where that is kept; the config directory's `provider.json` if unset.
     provider_path: Option<std::path::PathBuf>,
+    /// The token program the token methods use (see `set_token_program`).
+    token_program: Option<AccountId>,
+    /// Recent `cli_token_info` answers, by token program and definition.
+    token_info: HashMap<(AccountId, AccountId), (Value, std::time::Instant)>,
 }
 
 /// How long a cached read about a name is used before it is read again.
@@ -725,6 +789,8 @@ impl Default for Names {
             read_cache: HashMap::new(),
             provider: None,
             provider_path: None,
+            token_program: None,
+            token_info: HashMap::new(),
         };
         // Files saved by versions before 0.10 were readable by every account on the
         // machine; this closes them up once.
@@ -1099,6 +1165,10 @@ impl Names {
             .as_array()
             .map(|list| list.iter().filter_map(|post| post.as_str().map(str::to_owned)).collect())
             .unwrap_or_default();
+        self.token_program = saved["token_program"]
+            .as_str()
+            .and_then(|program| registry::parse_account(program).ok())
+            .filter(|program| *program != registry::NATIVE_TOKEN);
     }
 
     fn config(&self) -> Value {
@@ -1116,6 +1186,7 @@ impl Names {
             "likes": self.likes,
             "dm_names": self.dm_names,
             "chat_names": self.chat_names,
+            "token_program": self.token_program.as_ref().map(registry::account_text),
         })
     }
 
@@ -1358,6 +1429,20 @@ impl Names {
             Some("pay_account") if !running && !done => {
                 let first = log.lines().map(str::trim).find(|line| line.starts_with("Error:")).unwrap_or_else(|| cli::last_line(&log));
                 state["problem"] = Value::from(format!("The payment didn't go through: {}", first.trim_start_matches("Error:").trim()));
+            }
+            Some("token_send" | "token_receive") if !running => {
+                let what = if state["kind"] == "token_send" { "The token transfer didn't go through" } else { "Receiving didn't finish" };
+                if let Some(fields) = cli::token_outcome(&log).as_object() {
+                    for (key, value) in fields {
+                        state[key.as_str()] = value.clone();
+                    }
+                }
+                if !done {
+                    let first = log.lines().map(str::trim).find(|line| line.starts_with("Error:")).unwrap_or_else(|| cli::last_line(&log));
+                    state["problem"] = Value::from(format!("{what}: {}", first.trim_start_matches("Error:").trim()));
+                }
+                // What the wallet holds has changed.
+                self.forget_tokens();
             }
             _ => {}
         }
@@ -2541,11 +2626,117 @@ impl NamesModule for Names {
         if is_http_url(url) {
             self.sequencer = url.to_owned();
             self.forget_all_reads();
+            self.token_info.clear();
             self.save();
             true
         } else {
             false
         }
+    }
+
+    // ── Tokens ──────────────────────────────────────────────────────────
+
+    fn set_token_program(&mut self, program_id: String) -> bool {
+        if only_the_names_app().is_err() {
+            return false;
+        }
+        let program_id = program_id.trim();
+        if program_id.is_empty() {
+            self.token_program = None;
+        } else {
+            match registry::parse_account(program_id) {
+                Ok(program) if program != registry::NATIVE_TOKEN => self.token_program = Some(program),
+                _ => return false,
+            }
+        }
+        self.forget_tokens();
+        self.token_info.clear();
+        self.save();
+        true
+    }
+
+    fn cli_token_holdings(&mut self, account: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let only = match account.trim() {
+                "" => None,
+                account => {
+                    let (private, id) = provider::account_ref(account)?;
+                    Some(provider::account_written(private, &id))
+                }
+            };
+            let (program, read) = self.token_read()?;
+            let holdings = read["value"]["holdings"].as_array().map(|rows| {
+                rows.iter().filter(|row| only.as_ref().is_none_or(|only| row["account"] == only.as_str())).cloned().collect::<Vec<_>>()
+            });
+            Ok(json!({
+                "token_program": registry::account_text(&program),
+                "holdings": holdings,
+                "updating": read["updating"],
+                "error": read["error"],
+            }))
+        })())
+    }
+
+    fn cli_token_pending(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let (program, read) = self.token_read()?;
+            Ok(json!({
+                "token_program": registry::account_text(&program),
+                "pending": read["value"]["pending"],
+                "updating": read["updating"],
+                "error": read["error"],
+            }))
+        })())
+    }
+
+    fn cli_token_info(&mut self, definition: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let definition = cli::token_definition(&definition)?;
+            let program = self.token_program_set()?;
+            self.token_info_of(&program, &definition)
+        })())
+    }
+
+    fn cli_token_send(&mut self, definition: String, amount: String, to: String, from_private: bool, to_public: bool) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            // Checked before the CLI is looked for, so bad input fails the same way every time.
+            let program = self.token_program_set()?;
+            let command = cli::token_send_args(&program, &definition, &amount, &to, from_private, to_public)?;
+            self.wallet_job("token_send", |setup| {
+                // The account it comes from must exist before anything runs.
+                if from_private {
+                    cli::default_private(setup)?;
+                } else {
+                    cli::default_public(setup)?;
+                }
+                Ok(command)
+            })
+        })())
+    }
+
+    fn cli_token_receive(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let program = self.token_program_set()?;
+            self.wallet_job("token_receive", |setup| {
+                cli::default_private(setup)?;
+                Ok(cli::token_receive_args(&program))
+            })
+        })())
     }
 
     // ── Wallet Provider SDK ─────────────────────────────────────────────
@@ -2591,7 +2782,21 @@ impl NamesModule for Names {
         reply((|| {
             let app = asking_app()?;
             let now = provider::now_ms();
-            let request = provider::transfer_request(&app, &asset, &amount, &destination, now)?;
+            let mut request = provider::transfer_request(&app, &asset, &amount, &destination, now)?;
+            if let Some(definition) = provider::token_of(&request) {
+                // Reading the token costs a run of the CLI, so only an app that
+                // may ask now gets one.
+                let store = self.store();
+                if store.granted(&app).is_empty() {
+                    return Err(NOT_CONNECTED.to_owned());
+                }
+                store.room_for(&app, now)?;
+                let program = self.token_program.ok_or("this wallet can't send tokens yet: it has no token program set")?;
+                // The app learns only that the token isn't there, not why the wallet couldn't read it.
+                let info = self.token_info_of(&program, &definition).map_err(|_| "this wallet's token program has no such token".to_owned())?;
+                let label = program_registry::label(&registry::account_text(&program));
+                provider::add_token(&mut request, info["name"].as_str(), &program, label.as_ref());
+            }
             self.queue(&app, request, now)
         })())
     }
@@ -2938,6 +3143,15 @@ impl Names {
         let (private, _) = provider::account_ref(account)?;
         let amount = request["amount"].as_str().unwrap_or_default().to_owned();
         let destination = request["destination"].as_str().unwrap_or_default().to_owned();
+        if let Some(definition) = provider::token_of(request) {
+            // The prompt named one token program; nothing is sent with another.
+            let program = self.token_program_set()?;
+            if request["token_program"] != registry::account_text(&program).as_str() {
+                return Err("the token program has changed since this was asked; reject it, and the app can ask again".to_owned());
+            }
+            let command = cli::token_send_args(&program, &registry::account_text(&definition), &amount, &destination, private, false)?;
+            return self.wallet_job("token_send", |_| Ok(command));
+        }
         match cli::pay_to(&destination)? {
             cli::PayTo::Name(name) => {
                 let command = if private {
@@ -2990,6 +3204,7 @@ impl Names {
         let now = provider::now_ms();
         let store = self.store();
         let mut changed = false;
+        let mut tokens_moved = false;
         for request in store.requests.iter_mut().filter(|request| request["state"] == "running") {
             let state = request["job"].as_str().and_then(|job| jobs.as_ref()?.state(job).ok());
             let ended = match &state {
@@ -3009,11 +3224,15 @@ impl Names {
                     request["error"] = json!("the payment didn't go through");
                     request["problem"] = json!(problem);
                 }
+                tokens_moved |= request["asset_kind"] == provider::TOKEN;
                 changed = true;
             }
         }
         if changed {
             store.save();
+        }
+        if tokens_moved {
+            self.forget_tokens();
         }
     }
 
@@ -3073,7 +3292,59 @@ impl Names {
         }
         json!({ "value": read.value, "updating": read.updating, "error": read.error })
     }
+
+    // ── Tokens ──────────────────────────────────────────────────────────
+
+    /// The token program the token methods use, or why there is none.
+    fn token_program_set(&self) -> Result<AccountId, String> {
+        self.token_program.ok_or_else(|| {
+            "no token program is set: enter its program ID under Tokens (no token program runs on the public testnet yet)".to_owned()
+        })
+    }
+
+    /// The wallet's tokens and pending credits as last read, `{value:
+    /// {holdings, pending}, updating, error}`, with a newer read started in
+    /// the background when the last is older than `TOKENS_EVERY`. Kept per
+    /// wallet and token program.
+    fn token_read(&self) -> Result<(AccountId, Value), String> {
+        let program = self.token_program_set()?;
+        let setup = self.cli_setup()?;
+        setup.wallet_ready()?;
+        let key = format!("{TOKENS_KEY}{}:{}", registry::account_text(&program), setup.wallet.display());
+        let read = self.read_in_background(key, TOKENS_EVERY, move || cli::run_token_list(&setup, &program));
+        Ok((program, read))
+    }
+
+    /// Drops the token reads, after a token job ended or the program changed.
+    fn forget_tokens(&self) {
+        self.board_reads.lock().expect("the board reads lock").retain(|key, _| !key.starts_with(TOKENS_KEY));
+    }
+
+    /// What the token `definition` of `program` is, read through the CLI and
+    /// kept for `READ_FRESH`.
+    fn token_info_of(&mut self, program: &AccountId, definition: &AccountId) -> Result<Value, String> {
+        let key = (*program, *definition);
+        if let Some((info, at)) = self.token_info.get(&key) {
+            if at.elapsed() < READ_FRESH {
+                return Ok(info.clone());
+            }
+        }
+        let info = cli::run_token_info(&self.cli_setup()?, program, definition)?;
+        if self.token_info.len() >= MAX_CACHED {
+            self.token_info.retain(|_, (_, at)| at.elapsed() < READ_FRESH);
+            if self.token_info.len() >= MAX_CACHED {
+                self.token_info.clear();
+            }
+        }
+        self.token_info.insert(key, (info.clone(), std::time::Instant::now()));
+        Ok(info)
+    }
 }
+
+/// The prefix of the token reads' keys among the background reads.
+const TOKENS_KEY: &str = "tokens:";
+/// How often the token reads may run the CLI; each catches the wallet up.
+const TOKENS_EVERY: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// The value of a reply this module made, or its error.
 fn parsed_reply(text: &str) -> Result<Value, String> {
@@ -3181,6 +3452,8 @@ mod tests {
             read_cache: HashMap::new(),
             provider: None,
             provider_path: None,
+            token_program: None,
+            token_info: HashMap::new(),
         }
     }
 
@@ -4044,6 +4317,208 @@ mod tests {
         let status = parsed(&names.request_status(id.clone()))["value"].clone();
         assert_eq!((status["state"].as_str(), status["error"].as_str()), (Some("failed"), Some("the wallet couldn't send it")), "{status}");
         assert!(approve(&mut names, &id, &format!("Public/{PUBLIC}"))["error"].as_str().unwrap().contains("failed already"));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ── Tokens ──────────────────────────────────────────────────────────
+
+    /// The token program and a token of it, in these tests.
+    const PROGRAM: [u8; 32] = [3; 32];
+    const DEMO: [u8; 32] = [4; 32];
+
+    /// Asks `ask` until its read is no longer updating and has a value at `key`.
+    fn settled(names: &mut Names, key: &str, ask: impl Fn(&mut Names) -> String) -> Value {
+        for _ in 0..200 {
+            let answer = parsed(&ask(names));
+            assert_eq!(answer["success"], true, "{answer}");
+            if answer["value"]["updating"] == false && !answer["value"][key].is_null() {
+                return answer["value"].clone();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("the token read did not end");
+    }
+
+    #[test]
+    fn the_token_program_is_chosen_by_the_names_app_and_kept() {
+        let mut names = fresh();
+        // None is built in, and every token method says so.
+        for answer in [names.cli_token_pending(), names.cli_token_holdings(String::new()), names.cli_token_receive(), names.cli_token_info(registry::account_text(&DEMO))] {
+            assert!(parsed(&answer)["error"].as_str().unwrap().contains("no token program"), "{answer}");
+        }
+        assert!(!names.set_token_program("nope".into()));
+        assert!(!names.set_token_program(registry::account_text(&registry::NATIVE_TOKEN)));
+        // Another app can neither choose it nor use any token method.
+        as_caller(app("evil_ui"));
+        assert!(!names.set_token_program(registry::account_text(&PROGRAM)));
+        for refused in [
+            names.cli_token_holdings(String::new()),
+            names.cli_token_pending(),
+            names.cli_token_info(registry::account_text(&DEMO)),
+            names.cli_token_send(registry::account_text(&DEMO), "1".into(), "jef".into(), false, false),
+            names.cli_token_receive(),
+        ] {
+            assert!(parsed(&refused)["error"].as_str().unwrap().contains("only the Names app"), "{refused}");
+        }
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert_eq!(names.token_program, None);
+        assert!(names.set_token_program(format!(" {} ", registry::account_text(&PROGRAM))));
+        assert_eq!(parsed(&names.get_config())["token_program"], registry::account_text(&PROGRAM));
+        // It survives a restart; an edited file can't name something else.
+        let mut again = fresh();
+        again.apply_saved(&names.config());
+        assert_eq!(again.token_program, Some(PROGRAM));
+        again.apply_saved(&json!({ "token_program": "../../etc" }));
+        assert_eq!(again.token_program, None);
+        again.apply_saved(&json!({ "token_program": registry::account_text(&registry::NATIVE_TOKEN) }));
+        assert_eq!(again.token_program, None);
+        assert!(names.set_token_program(String::new()));
+        assert_eq!(names.token_program, None);
+    }
+
+    #[test]
+    fn holdings_and_pending_credits_are_read_in_the_background() {
+        let demo = registry::account_text(&DEMO);
+        let list = json!({
+            "holdings": [
+                { "account": format!("Public/{PUBLIC}"), "private": false, "definition": demo, "name": "Demo", "balance": "1000250" },
+                { "account": format!("Private/{PRIVATE}"), "private": true, "definition": demo, "name": "Demo", "balance": "200" },
+            ],
+            "pending": [{ "position": 21, "definition": demo, "name": "Demo", "amount": "50", "to": PRIVATE }],
+        });
+        let tail = format!(
+            "case \"$*\" in\n\
+             *\"token list --json\"*) printf '%s\\n' \"$@\" > \"$(dirname \"$0\")/argv\"; echo 'Latest block is 9'; echo '{list}' ;;\n\
+             esac"
+        );
+        let (mut names, dir) = with_wallet("token-list", &tail);
+        names.token_program = Some(PROGRAM);
+        let all = settled(&mut names, "holdings", |names| names.cli_token_holdings(String::new()));
+        assert_eq!(all["token_program"], registry::account_text(&PROGRAM));
+        assert_eq!(all["holdings"].as_array().unwrap().len(), 2, "{all}");
+        assert_eq!(all["holdings"][1], json!({ "account": format!("Private/{PRIVATE}"), "account_kind": "private", "definition": demo, "name": "Demo", "balance": "200" }));
+        // One account's only.
+        let private = parsed(&names.cli_token_holdings(format!("Private/{PRIVATE}")))["value"]["holdings"].clone();
+        assert_eq!(private.as_array().unwrap().len(), 1);
+        assert_eq!(private[0]["balance"], "200");
+        assert_eq!(parsed(&names.cli_token_holdings(PUBLIC.into()))["success"], false);
+        // The pending credits come from the same read, written as accounts.
+        let pending = settled(&mut names, "pending", |names| names.cli_token_pending());
+        assert_eq!(pending["pending"], json!([{ "position": 21, "definition": demo, "name": "Demo", "amount": "50", "to": format!("Private/{PRIVATE}") }]));
+        // The CLI was given the module's token program.
+        let argv = std::fs::read_to_string(dir.join("argv")).unwrap();
+        assert!(argv.contains(&format!("--token-program={}\ntoken\nlist\n--json\n", registry::account_text(&PROGRAM))), "{argv}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn token_sends_and_receipts_are_wallet_jobs_checked_first() {
+        let tail = "case \"$*\" in\n\
+                    *\"token send\"*) echo 'sending 1000 Demo'; echo 'submitted ab12'; echo 'applied in block 7' ;;\n\
+                    *\"token receive\"*) echo 'nothing to receive' ;;\n\
+                    esac";
+        let (mut names, dir) = with_wallet("token-send", tail);
+        let demo = registry::account_text(&DEMO);
+        let program = registry::account_text(&PROGRAM);
+        // Without a token program, nothing runs.
+        assert!(parsed(&names.cli_token_send(demo.clone(), "5".into(), "jef".into(), true, false))["error"].as_str().unwrap().contains("no token program"));
+        names.token_program = Some(PROGRAM);
+        for (definition, amount, to) in [
+            ("nope".to_owned(), "5", "jef".to_owned()),
+            (registry::account_text(&registry::NATIVE_TOKEN), "5", "jef".to_owned()),
+            (demo.clone(), "0", "jef".to_owned()),
+            (demo.clone(), "1.5", "jef".to_owned()),
+            (demo.clone(), "340282366920938463463374607431768211456", "jef".to_owned()),
+            (demo.clone(), "5", OTHER.to_owned()),
+            (demo.clone(), "5", "$(id)".to_owned()),
+            (demo.clone(), "5", "--from=public".to_owned()),
+        ] {
+            assert_eq!(parsed(&names.cli_token_send(definition.clone(), amount.into(), to.clone(), true, false))["success"], false, "{definition} {amount} {to}");
+        }
+        assert!(!dir.join("jobs").exists(), "nothing ran");
+
+        // From the private account to a name.
+        let started = parsed(&names.cli_token_send(demo.clone(), "1,000".into(), "Jef".into(), true, false));
+        assert_eq!(started["value"]["kind"], "token_send", "{started}");
+        let ended = job_end(&mut names, started["value"]["id"].as_str().unwrap());
+        assert_eq!((ended["state"].as_str(), ended["tx"].as_str(), ended["block"].as_u64()), (Some("done"), Some("ab12"), Some(7)), "{ended}");
+        let log = ended["log_tail"].as_str().unwrap();
+        assert!(log.contains(&format!("[--token-program={program}]\n[token]\n[send]\n[--to=jef]\n[--from=private]\n[--]\n[{demo}]\n[1000]")), "{log}");
+        // From the public account to a name's public account.
+        let started = parsed(&names.cli_token_send(demo.clone(), "5".into(), "jef".into(), false, true));
+        let ended = job_end(&mut names, started["value"]["id"].as_str().unwrap());
+        assert!(ended["log_tail"].as_str().unwrap().contains("[--to=jef]\n[--from=public]\n[--public]\n[--]"), "{ended}");
+        // Receiving: there was nothing.
+        let started = parsed(&names.cli_token_receive());
+        assert_eq!(started["value"]["kind"], "token_receive", "{started}");
+        let ended = job_end(&mut names, started["value"]["id"].as_str().unwrap());
+        assert_eq!((ended["nothing"].clone(), ended["applied"].clone()), (json!(true), json!(0)), "{ended}");
+        assert!(ended["log_tail"].as_str().unwrap().contains(&format!("[--token-program={program}]\n[token]\n[receive]")));
+        let _ = std::fs::remove_dir_all(dir);
+
+        // A refusal says why.
+        let (mut names, dir) = with_wallet("token-send-refused", "echo 'Error: Public/CCVd holds 0 Demo, less than 5' >&2; exit 1");
+        names.token_program = Some(PROGRAM);
+        let started = parsed(&names.cli_token_send(demo, "5".into(), format!("Public/{OTHER}"), false, false));
+        let ended = job_end(&mut names, started["value"]["id"].as_str().unwrap());
+        assert_eq!(ended["state"], "failed");
+        assert_eq!(ended["problem"], "The token transfer didn't go through: Public/CCVd holds 0 Demo, less than 5");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_app_can_propose_a_token_transfer_named_by_its_token() {
+        let demo = registry::account_text(&DEMO);
+        let missing = registry::account_text(&[8; 32]);
+        let tail = format!(
+            "case \"$*\" in\n\
+             *\"module token info -- {missing}\"*) touch \"$(dirname \"$0\")/asked\"; echo 'Error: not a token' >&2; exit 1 ;;\n\
+             *\"module token info\"*) touch \"$(dirname \"$0\")/asked\"; echo '{{\"definition\":\"{demo}\",\"name\":\"Demo\",\"supply\":\"1000\",\"authority\":null}}' ;;\n\
+             *\"token send\"*) echo 'submitted feed'; echo 'applied in block 9' ;;\n\
+             esac"
+        );
+        let (mut names, dir) = with_wallet("token-provider", &tail);
+        // An app that wasn't given access costs nothing, not even a read.
+        as_caller(app("tips_ui"));
+        assert!(parsed(&names.propose_transfer(demo.clone(), "5".into(), "jef".into()))["error"].as_str().unwrap().contains("request_access"));
+        assert!(!dir.join("asked").exists());
+        connect(&mut names, "tips_ui", &format!("Public/{PUBLIC}"));
+        as_caller(app("tips_ui"));
+        // The wallet needs a token program, and the token must be one of it.
+        assert!(parsed(&names.propose_transfer(demo.clone(), "5".into(), "jef".into()))["error"].as_str().unwrap().contains("no token program"));
+        names.token_program = Some(PROGRAM);
+        let unknown = parsed(&names.propose_transfer(missing, "5".into(), "jef".into()));
+        assert_eq!(unknown["error"], "this wallet's token program has no such token", "{unknown}");
+        program_registry::LABEL.with(|label| *label.borrow_mut() = Some(json!({ "text": "Tokens 0.1", "kind": "deployer", "verified": true, "stale": false, "upgradeable": false })));
+        let asked = parsed(&names.propose_transfer(demo.clone(), "5".into(), "Jef".into()))["value"].clone();
+        assert_eq!((asked["state"].as_str(), asked["asset"].as_str(), asked["asset_kind"].as_str(), asked["token_name"].as_str()), (Some("pending"), Some(demo.as_str()), Some("token"), Some("Demo")), "{asked}");
+
+        // The prompt names the token, its program and the program's label.
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let shown = parsed(&names.pending_requests())["value"][0].clone();
+        assert_eq!((shown["token_name"].as_str(), shown["token_program"].as_str(), shown["amount"].as_str(), shown["destination"].as_str()), (Some("Demo"), Some(registry::account_text(&PROGRAM).as_str()), Some("5"), Some("jef")), "{shown}");
+        assert_eq!(shown["program_label"]["text"], "Tokens 0.1");
+        assert_eq!(shown["warnings"], json!([]));
+        assert_eq!(shown["choices"].as_array().unwrap().len(), 2);
+        // Approved from the private account: a token send, from there, to the name.
+        let started = approve(&mut names, asked["request"].as_str().unwrap(), &format!("Private/{PRIVATE}"));
+        assert_eq!(started["value"]["state"], "running", "{started}");
+        let ended = job_end(&mut names, started["value"]["job"].as_str().unwrap());
+        let log = ended["log_tail"].as_str().unwrap();
+        assert!(log.contains(&format!("[--token-program={}]\n[token]\n[send]\n[--to=jef]\n[--from=private]\n[--]\n[{demo}]\n[5]", registry::account_text(&PROGRAM))), "{log}");
+        as_caller(app("tips_ui"));
+        let status = parsed(&names.request_status(asked["request"].as_str().unwrap().into()))["value"].clone();
+        assert_eq!((status["state"].as_str(), status["token_name"].as_str()), (Some("done"), Some("Demo")), "{status}");
+
+        // Nothing is sent with a token program other than the one the prompt named.
+        let again = parsed(&names.propose_transfer(demo, "6".into(), format!("Public/{OTHER}")))["value"]["request"].as_str().unwrap().to_owned();
+        names.token_program = Some([5; 32]);
+        let refused = approve(&mut names, &again, &format!("Public/{PUBLIC}"));
+        assert!(refused["error"].as_str().unwrap().contains("token program has changed"), "{refused}");
+        as_caller(app("tips_ui"));
+        assert_eq!(parsed(&names.request_status(again))["value"]["state"], "pending");
+        program_registry::LABEL.with(|label| *label.borrow_mut() = None);
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
         let _ = std::fs::remove_dir_all(dir);
     }
