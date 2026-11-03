@@ -67,8 +67,7 @@ that actor plus sync and async messages to other actors (`program/mod.rs:428-438
 handler of the token program has to be re-cut into messages between actors. The
 `spel04-shim` in `~/logos/lez-program-registry` keeps SPEL's attribute syntax on 0.4, but
 it states the same limit: "Only the root actor carries `pre_state` and `is_authorized`: a
-0.4 guest cannot see any other actor's state" (`spel04-shim/src/lib.rs`, doc of
-`AccountWithMetadata`), so it helps with the IDL, not with the logic.
+0.4 guest cannot see any other actor's state" (`spel04-shim/src/lib.rs:51-52`), so it helps with the IDL, not with the logic.
 
 What a port takes: about the size of LEZ's `native_token.rs` (317 lines with tests) plus a
 definition and mint authority, i.e. what `wallet-tokens/core` is (one file, 20 tests).
@@ -147,7 +146,8 @@ Trade-offs of the holdings-map design, for whoever does the reference port:
   (and LP-0014 ATAs). An opt-in step ("open a holding") or per-(owner, definition) PDAs
   would fix it at the cost of an extra transaction.
 - Private notes are padded to 512 bytes, leaving 427 for actor states
-  (`lez/wallet/src/account_manager.rs:30-35`); about seven token kinds fit before a private
+  (`lez/wallet/src/account_manager.rs:28-35`; the same comment already expects "token
+definition and metadata notes"); about seven token kinds fit before a private
   account's note becomes recognizable by length (the wallet warns, `lez/wallet/src/lib.rs:1551-1556`).
 
 ## 3. How a wallet lists a user's holdings
@@ -254,7 +254,11 @@ CLI (all accept `--program`, defaulting per network like `DEFAULT_PROGRAM`):
 | `names token create <name> <supply> [--mintable]`, `names token mint` | for testing and the demo; not needed by the prize |
 
 Module (`basecamp-module`), same shape as the existing `cli_pay` / `cli_balance` methods,
-signing through the hidden `names module` command:
+signing through the hidden `names module` command. `names module send` cannot carry a token
+send as it is: it runs only the registry's bytecode (`cli/src/module.rs:120-121`) and builds
+no async delivery, so a private recipient's sealed credit and a private sender's proof of
+the token program are impossible through it. Add `names module token` requests (`list`,
+`send`, `receive`) that call `cli/src/tokens.rs` instead of widening `Change`. Methods:
 
 - `cli_token_holdings(account?) -> [{account, private, definition, name, balance}]`
 - `cli_token_pending() -> [{position, definition, amount, to}]`

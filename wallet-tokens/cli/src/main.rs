@@ -250,7 +250,7 @@ async fn run(wallet: &mut WalletCore<SequencerClient>, command: Command) -> Resu
             // Root: the new definition's actor, signed by its key. The supply's credit is async;
             // declaring the recipient's actor runs it in the same transaction.
             let mut accounts = vec![AccountIdentity::Public(definition).select_program_actor_state(program)];
-            accounts.push(identity(wallet, to).select_program_actor_state(program).receiving().without_authorization());
+            accounts.push(identity(wallet, to).select_program_actor_state(program).receiving());
             let hash = wallet
                 .send_pub_tx_paid_by(accounts, 0, borsh::to_vec(&message)?, Some(payer))
                 .await?;
@@ -264,7 +264,9 @@ async fn run(wallet: &mut WalletCore<SequencerClient>, command: Command) -> Resu
             if definition != authority {
                 accounts.push(AccountIdentity::PublicNoSign(definition).select_program_actor_state(program));
             }
-            accounts.push(identity(wallet, to).select_program_actor_state(program).receiving().without_authorization());
+            if to != authority {
+                accounts.push(identity(wallet, to).select_program_actor_state(program).receiving());
+            }
             send(wallet, program, accounts, &message, AsyncDelivery::default()).await
         }
         Command::Send { program, definition, from, to, to_pk, to_npk, to_vpk, amount } => {
@@ -356,9 +358,17 @@ async fn run(wallet: &mut WalletCore<SequencerClient>, command: Command) -> Resu
     }
 }
 
-/// How `account` takes part: a private account of this wallet, else public.
+/// How `account` takes part: a private account of this wallet, a public one whose key this
+/// wallet holds (it signs), or someone else's public account (it does not).
 fn identity(wallet: &WalletCore<SequencerClient>, account: AccountId) -> AccountIdentity {
-    wallet.resolve_private_account(account).unwrap_or(AccountIdentity::Public(account))
+    if let Some(private) = wallet.resolve_private_account(account) {
+        return private;
+    }
+    if wallet.get_account_public_signing_key(account).is_some() {
+        AccountIdentity::Public(account)
+    } else {
+        AccountIdentity::PublicNoSign(account)
+    }
 }
 
 /// The token program's state on a public account.

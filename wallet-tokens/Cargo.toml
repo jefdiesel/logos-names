@@ -1,5 +1,6 @@
 # Prototype: a fungible token program for LEZ 0.4 and a wallet client for it.
-# Its own workspace, so it never joins the Names workspace. See README.md.
+# Its own workspace, so it never joins the Names workspace. See docs/wallet/TOKENS.md;
+# scripts/run-public.sh and scripts/run-private.sh are the recorded run.
 [workspace]
 resolver = "3"
 members = ["core", "methods", "methods/guest", "cli"]
