@@ -1,0 +1,26 @@
+[package]
+name = "testimonial_client"
+description = "Post a testimonial and list a submission's testimonials (with per-month counts) on a LEZ 0.4 sequencer."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "testimonial"
+path = "src/main.rs"
+
+[dependencies]
+testimonial_core.workspace = true
+lee_core.workspace = true
+lee.workspace = true
+common.workspace = true
+wallet.workspace = true
+clock_core.workspace = true
+sequencer_service_rpc.workspace = true
+borsh.workspace = true
+
+anyhow = "1.0.98"
+clap = { version = "4.5.42", features = ["derive", "env"] }
+serde_json = "1.0"
+ureq = "3"
+tokio = { version = "1.50", features = ["macros", "rt-multi-thread"] }

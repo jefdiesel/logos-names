@@ -1,0 +1,13 @@
+[package]
+name = "testimonial_forwarder_methods"
+description = "Test-only helper guest for the engine tests: a program that forwards whatever sync messages it is told to send."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[build-dependencies]
+risc0-build = "3.0.5"
+
+[package.metadata.risc0]
+methods = ["guest"]

@@ -1,0 +1,10 @@
+[package]
+name = "logos_testimonial"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+testimonial_core.workspace = true
+lee_core.workspace = true
+risc0-zkvm.workspace = true

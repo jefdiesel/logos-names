@@ -5071,6 +5071,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "logos_testimonial"
+version = "0.1.0"
+dependencies = [
+ "lee_core",
+ "risc0-zkvm",
+ "testimonial_core",
+]
+
+[[package]]
 name = "loki-api"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7998,6 +8007,69 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "testimonial_client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "borsh",
+ "clap",
+ "clock_core",
+ "common",
+ "lee",
+ "lee_core",
+ "sequencer_service_rpc",
+ "serde_json",
+ "testimonial_core",
+ "tokio",
+ "ureq",
+ "wallet",
+]
+
+[[package]]
+name = "testimonial_core"
+version = "0.1.0"
+dependencies = [
+ "borsh",
+ "lee_core",
+ "risc0-zkvm",
+]
+
+[[package]]
+name = "testimonial_engine_test"
+version = "0.1.0"
+dependencies = [
+ "borsh",
+ "lee",
+ "lee_core",
+ "testimonial_core",
+ "testimonial_forwarder_methods",
+ "testimonial_methods",
+]
+
+[[package]]
+name = "testimonial_forwarder"
+version = "0.1.0"
+dependencies = [
+ "borsh",
+ "lee_core",
+ "risc0-zkvm",
+]
+
+[[package]]
+name = "testimonial_forwarder_methods"
+version = "0.1.0"
+dependencies = [
+ "risc0-build",
+]
+
+[[package]]
+name = "testimonial_methods"
+version = "0.1.0"
+dependencies = [
+ "risc0-build",
 ]
 
 [[package]]

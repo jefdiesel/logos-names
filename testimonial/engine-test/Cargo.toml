@@ -1,0 +1,19 @@
+[package]
+name = "testimonial_engine_test"
+description = "The real testimonial guest on LEZ v0.4.0-rc1's real state machine (V03State), with no chain or network."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+testimonial_core.workspace = true
+testimonial_methods = { path = "../methods" }
+testimonial_forwarder_methods = { path = "forwarder" }
+lee_core.workspace = true
+lee.workspace = true
+borsh.workspace = true
+
+[[bin]]
+name = "testimonial-imageid"
+path = "src/bin/imageid.rs"

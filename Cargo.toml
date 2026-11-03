@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["core", "seal", "accountlog", "methods", "methods/guest", "cli", "tools/shortlist", "tools/engine-test", "board/core", "board/methods", "board/methods/guest"]
+members = ["core", "seal", "accountlog", "methods", "methods/guest", "cli", "tools/shortlist", "tools/engine-test", "board/core", "board/methods", "board/methods/guest", "testimonial/core", "testimonial/methods", "testimonial/methods/guest", "testimonial/engine-test", "testimonial/engine-test/forwarder", "testimonial/engine-test/forwarder/guest", "testimonial/client"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +12,7 @@ names_core = { path = "core" }
 names_seal = { path = "seal" }
 names_accountlog = { path = "accountlog" }
 board_core = { path = "board/core" }
+testimonial_core = { path = "testimonial/core" }
 
 # Pinned to LEZ v0.4.0-rc1 on the lez-0.4 port branch.
 lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc1" }
