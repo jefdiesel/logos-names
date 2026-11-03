@@ -17,7 +17,7 @@ testnet 0.4 launches).
 | Wallet Provider SDK (connect, read, propose txs) | other apps may only read names (FR-1 lockdown) | request/approval queue, docs | agent: provider (`docs/wallet/PROVIDER-SDK.md`) |
 | Selection + approval prompts naming app, account, asset, amount, destination; readable summary for program calls | none | approval sheet | agent: provider |
 | Program source-verification status in the prompt | — | `program_registry` module (`program_label`) | done in lez-program-registry M6 (reads); wire in via the provider agent |
-| Testimonial mini-app + an on-chain testimonial program with submission id | none | program, client, mini-app | agent: testimonial (program + client); mini-app UI after |
+| Testimonial mini-app + an on-chain testimonial program with submission id | program + client merged (`testimonial/`, 8 engine tests, live post/list on rc1) | the Basecamp mini-app on the provider SDK; deploy at testnet launch. Our submission id: `lp-0021:names-wallet` (fits the program's format, so the image doesn't change). Public authors only: a private sender shows a fresh alias per message, which would let one account post as many | me, after the provider SDK |
 | Faucet mini-app built on the SDK (account choice, rate limits) | Welcome's "Get free tokens" (Names faucet) | rebuild as a separate mini-app on the SDK; target may change (lambda-prize PR #181) | me, after the SDK |
 | Testnet 0.4 end to end | port done on the 0.4 branch, tested on local rc1 chains | testnet not launched | waits for launch |
 | Module catalog via a fork of `logos-modules-release-base` + `logos-modules-release-action` | our own `logos-repo.json` on the gateway | catalog fork (same one as the registry's) | me; needs the user's OK to create the repo |
