@@ -12,10 +12,10 @@ testnet 0.4 launches).
 | Criterion | Names today | Gap | Who |
 |---|---|---|---|
 | LEZ assets: own/send/receive native, public and private | `cli_pay` (to a name, privately or publicly), `cli_pay_account`, `cli_shield`, `cli_balance`, `wallet` | receive screen (show address/name to receive), history | me, later |
-| Token program: fungible tokens, public and private | nothing | everything | agent: tokens (`docs/wallet/TOKENS.md`) |
+| Token program: fungible tokens, public and private | **CLI done**: `names token list/info/send/receive/create/mint` + `names module token …`, behind a codec trait; prototype 0.4 token program (`wallet-tokens/`) until an official one ships (none exists for 0.4; assumed coming) | tokens in the module, app and approval sheet | me |
 | Multiple accounts, public and private, switch | the CLI wallet holds several; the app shows one main account | create/label/switch in the app | me, after the provider work lands |
-| Wallet Provider SDK (connect, read, propose txs) | other apps may only read names (FR-1 lockdown) | request/approval queue, docs | agent: provider (`docs/wallet/PROVIDER-SDK.md`) |
-| Selection + approval prompts naming app, account, asset, amount, destination; readable summary for program calls | none | approval sheet | agent: provider |
+| Wallet Provider SDK (connect, read, propose txs) | **done**: request_access, granted_accounts, account_balances, propose_transfer, propose_call, request_status; Names-only approve/reject/grants/revoke (`docs/wallet/PROVIDER-SDK.md`); calls signed through the names CLI | real call against a sequencer; run inside Basecamp | me |
+| Selection + approval prompts naming app, account, asset, amount, destination; readable summary for program calls | **done**: approval sheet with registry label + verification, warnings needing an extra tick | gas before sending | me |
 | Program source-verification status in the prompt | — | `program_registry` module (`program_label`) | done in lez-program-registry M6 (reads); wire in via the provider agent |
 | Testimonial mini-app + an on-chain testimonial program with submission id | program + client merged (`testimonial/`, 8 engine tests, live post/list on rc1) | the Basecamp mini-app on the provider SDK; deploy at testnet launch. Our submission id: `lp-0021:names-wallet` (fits the program's format, so the image doesn't change). Public authors only: a private sender shows a fresh alias per message, which would let one account post as many | me, after the provider SDK |
 | Faucet mini-app built on the SDK (account choice, rate limits) | Welcome's "Get free tokens" (Names faucet) | rebuild as a separate mini-app on the SDK; target may change (lambda-prize PR #181) | me, after the SDK |
