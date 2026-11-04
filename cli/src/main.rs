@@ -1460,7 +1460,7 @@ impl Client {
     }
 
     /// What the accounts that can pay for a change over `mentions` hold together: its
-    /// signing public accounts, read from the chain, and every private account of this
+    /// signing public accounts this wallet holds keys for, read from the chain, and every private account of this
     /// wallet, as the wallet last saw them. Measured before and after a change, the
     /// difference less what it moved is its fee (LEZ 0.4 keeps no receipt of fees).
     async fn held_by(&self, mentions: &[AccountMention]) -> u128 {
@@ -1470,10 +1470,13 @@ impl Client {
             let balance = self.wallet.get_account_private(id).and_then(|account| account.data.native_balance().ok());
             held = held.saturating_add(balance.unwrap_or(0));
         }
+        // Only this wallet's own public accounts: a change also has program-owned accounts
+        // sign (a registry's deposit account, say), and what moves into those is not a fee.
         let signers: std::collections::BTreeSet<AccountId> = mentions
             .iter()
             .filter(|mention| mention.authorizes)
             .filter_map(|mention| mention.identity.public_account_id())
+            .filter(|account| self.wallet.get_account_public_signing_key(*account).is_some())
             .collect();
         for id in signers {
             held = held.saturating_add(self.wallet.get_account_balance(id).await.unwrap_or(0));

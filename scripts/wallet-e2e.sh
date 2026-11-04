@@ -11,6 +11,11 @@
 #      create, mint, send public to public, list, and an overspend refused.
 #   4. Testimonial: deploy testimonial/, post one testimonial and list it with its client; a
 #      second post by the same account is refused.
+#   5. Accounts and fees: the fee quote, the fee lines a send prints (the fee paid matches
+#      what left the payer), and making, naming and choosing accounts (`names module account-*`).
+#   6. A network drop and a restart: with the sequencer stopped, reads and sends fail quickly
+#      and say so while the wallet's own settings still change; restarted on the same chain,
+#      every balance and setting is as it was and a transfer goes through.
 #
 # Steps 3 and 4 run while the registration waits out its commitment, from another wallet, so
 # the 15 minutes the registry program enforces (MIN_COMMIT_AGE_MS) are not added on top.
@@ -50,6 +55,7 @@ SUBMISSION=lp-0021/names-wallet
 
 rpc() { curl -sf -m 10 -X POST "$RPC" -H 'Content-Type: application/json' \
   -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":${2:-[]}}"; }
+height() { rpc getLastBlockId | python3 -c 'import json, sys; print(json.load(sys.stdin)["result"])'; }
 say() { echo; echo "## $(date -u +%H:%M:%S) $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 id_of() { grep -oE "$1/[1-9A-HJ-NP-Za-km-z]{32,44}" | head -1 | cut -d/ -f2; }
@@ -78,12 +84,15 @@ say "fresh standalone sequencer on $RPC"
 "$SEQ_BIN" setup "$WORK/seq" --config "$SEQ_CONFIG" \
   --funding-public-key 0101010101010101010101010101010101010101010101010101010101010100 --create-channel \
   > "$WORK/seq-setup.log" 2>&1 || { cat "$WORK/seq-setup.log"; fail "sequencer setup"; }
-RUST_LOG=warn "$SEQ_BIN" start "$WORK/seq" --rpc-listen-address "127.0.0.1:$RPC_PORT" \
-  --metrics-listen-address "127.0.0.1:$METRICS_PORT" > "$WORK/sequencer.log" 2>&1 < /dev/null &
-SEQ_PID=$!
-for _ in $(seq 1 60); do rpc getLastBlockId >/dev/null 2>&1 && break; sleep 2; done
-rpc getLastBlockId >/dev/null || { tail -40 "$WORK/sequencer.log"; fail "the sequencer did not answer"; }
-echo "up (pid $SEQ_PID)"
+start_sequencer() {
+  RUST_LOG=warn "$SEQ_BIN" start "$WORK/seq" --rpc-listen-address "127.0.0.1:$RPC_PORT" \
+    --metrics-listen-address "127.0.0.1:$METRICS_PORT" >> "$WORK/sequencer.log" 2>&1 < /dev/null &
+  SEQ_PID=$!
+  for _ in $(seq 1 60); do rpc getLastBlockId >/dev/null 2>&1 && break; sleep 2; done
+  rpc getLastBlockId >/dev/null || { tail -40 "$WORK/sequencer.log"; fail "the sequencer did not answer"; }
+  echo "up (pid $SEQ_PID)"
+}
+start_sequencer
 
 # Every client is pointed at this chain explicitly: the CLI's default is the public testnet.
 export LEE_WALLET_PASSWORD=
@@ -239,15 +248,27 @@ NR mine
 R1=$(balance "$R")
 echo "R held $R0, now $R1 (deposit 1000000 plus fees)"
 [ "$R1" -le $((R0 - 1000000)) ] || fail "no deposit was taken from R"
+# The fees the registration printed account for all R lost besides the deposit.
+REG_FEES=$(sed -nE 's/^fee paid: ([0-9]+)$/\1/p' "$WORK/register.log" | awk '{ s += $1 } END { print s + 0 }')
+echo "registration fees paid: $REG_FEES"
+[ "$R1" -eq $((R0 - 1000000 - REG_FEES)) ] || fail "the registration's fee paid lines don't add up: R lost $((R0 - R1)), deposit 1000000, fees $REG_FEES"
 
 say "2. payments: R publishes itself as $NAME's public account, then F runs names pay $NAME"
 NR set-account "$NAME" "Public/$R" | grep -vE '^(Stored|Transaction data)'
 N resolve "$NAME" | grep -q "$R" || fail "$NAME does not resolve to R's account"
 X0=$(balance "$R")
-N pay "$NAME" 123456 --from "Public/$F" --public
+FP0=$(balance "$F")
+N pay "$NAME" 123456 --from "Public/$F" --public | tee "$WORK/pay.log"
 X1=$(balance "$R")
+FP1=$(balance "$F")
 echo "R held $X0, now $X1"
 [ "$X1" -eq $((X0 + 123456)) ] || fail "names pay did not credit the name's account"
+# 5. The fee lines the app reads: an estimate before sending, what was paid after.
+grep -qE '^fee: about [0-9]+, at most [0-9]+ \(' "$WORK/pay.log" || fail "names pay printed no fee estimate"
+PAID=$(sed -nE 's/^fee paid: ([0-9]+)$/\1/p' "$WORK/pay.log")
+echo "F held $FP0, now $FP1; fee paid $PAID"
+[ -n "$PAID" ] || fail "names pay printed no fee paid"
+[ "$FP1" -eq $((FP0 - 123456 - PAID)) ] || fail "the fee paid does not match what left F"
 
 say "a transfer to an account: F -> B"
 B0=$(balance "$B"); B0=${B0:-0}
@@ -258,7 +279,73 @@ echo "B held $B0, now $B1; F held $F1, now $F2"
 [ "$B1" -eq $((B0 + 777000)) ] || fail "B was not credited"
 [ "$F2" -le $((F1 - 777000)) ] || fail "F was not debited"
 
+say "5. accounts and fees: the fee quote, then make, name and choose accounts"
+N module fee | tee "$WORK/fee.json"
+S=$(N module account-new public --label=Shop | tee "$WORK/new.json" | id_of Public)
+[ -n "$S" ] || fail "account-new made no public account"
+N module account-label "Public/$S" "Shop 2" > /dev/null
+V=$(N module account-new private --label=Vault | id_of Private)
+[ -n "$V" ] || fail "account-new made no private account"
+N module account-use "Public/$F" > /dev/null
+if N module account-use "$F" > /dev/null 2>&1; then fail "a bare account ID was taken"; fi
+if N module account-new both > /dev/null 2>&1; then fail "an account kind other than public or private was taken"; fi
+N module account-list > "$WORK/accounts.json"
+python3 - "$WORK/fee.json" "$WORK/new.json" "$WORK/accounts.json" "$F" "$S" "$V" <<'PY'
+import json, sys
+fee, new, accounts = (json.load(open(path)) for path in sys.argv[1:4])
+F, S, V = sys.argv[4:7]
+for kind in ("public_transfer", "private_transfer"):
+    about, most = int(fee[kind]["about"]), int(fee[kind]["at_most"])
+    assert 0 < about <= most, (kind, fee)
+# The first public account made in a wallet with no default became the default.
+assert new["label"] == "Shop" and new["default"] is True and len(new["public_key"]) == 64, new
+by = {row["account"]: row for row in accounts}
+assert by[f"Public/{S}"]["label"] == "Shop 2", by[f"Public/{S}"]
+assert by[f"Public/{F}"]["default"] is True and by[f"Public/{S}"]["default"] is False, accounts
+assert by[f"Private/{V}"]["label"] == "Vault" and by[f"Private/{V}"]["default"] is True, accounts
+assert by[f"Private/{V}"]["balance"] == "0" and by[f"Private/{V}"]["public_key"] is None, accounts
+assert int(by[f"Public/{F}"]["balance"]) > 0, accounts
+print("accounts and fee quote ok:", len(accounts), "accounts")
+PY
+N balance | grep -E "Public/$F .*\(default\)" || fail "names balance does not show F as the default public account"
+
+say "6. a network drop: the sequencer stops"
+F_BEFORE=$(balance "$F"); B_BEFORE=$(balance "$B")
+HEIGHT=$(height)
+kill "$SEQ_PID"; wait "$SEQ_PID" 2>/dev/null || true; SEQ_PID=
+rpc getLastBlockId >/dev/null 2>&1 && fail "the sequencer still answers"
+started=$(date +%s)
+if N module fee > "$WORK/offline-fee.log" 2>&1; then fail "a fee quote came back with no sequencer"; fi
+if transfer "$F" "$B" 1000 > "$WORK/offline-send.log" 2>&1; then fail "a transfer went through with no sequencer"; fi
+took=$(( $(date +%s) - started ))
+echo "with no sequencer, a read and a send failed in ${took}s:"; tail -1 "$WORK/offline-fee.log" | cut -c1-200; tail -1 "$WORK/offline-send.log" | cut -c1-200
+[ "$took" -le 240 ] || fail "failing without a sequencer took ${took}s"
+# The wallet's own settings don't need the chain.
+N module account-label "Public/$S" "Shop 3" > /dev/null || fail "a nickname could not be changed offline"
+N module account-use "Public/$S" > /dev/null || fail "the paying account could not be chosen offline"
+N module account-use "Public/$F" > /dev/null
+
+say "6. the sequencer restarts on the same chain"
+start_sequencer
+AFTER=$(height)
+echo "height $HEIGHT before the stop, $AFTER after the restart"
+[ "$AFTER" -ge "$HEIGHT" ] || fail "the chain went back from $HEIGHT to $AFTER"
+[ "$(balance "$F")" = "$F_BEFORE" ] || fail "F's balance changed across the restart"
+[ "$(balance "$B")" = "$B_BEFORE" ] || fail "B's balance changed across the restart"
+N module account-list > "$WORK/accounts-after.json"
+python3 - "$WORK/accounts-after.json" "$F" "$S" "$V" <<'PY'
+import json, sys
+accounts = {row["account"]: row for row in json.load(open(sys.argv[1]))}
+F, S, V = sys.argv[2:5]
+assert accounts[f"Public/{S}"]["label"] == "Shop 3", accounts[f"Public/{S}"]
+assert accounts[f"Public/{F}"]["default"] is True, accounts[f"Public/{F}"]
+assert accounts[f"Private/{V}"]["label"] == "Vault", accounts[f"Private/{V}"]
+print("accounts kept across the drop and the restart")
+PY
+transfer "$F" "$B" 4242
+[ "$(balance "$B")" -eq $((B_BEFORE + 4242)) ] || fail "a transfer after the restart did not land"
+
 say "the chain is still healthy"
 rpc getLastBlockId
 echo
-say "PASS: registry, payments, tokens and testimonial on a fresh rc1 standalone chain"
+say "PASS: registry, payments, tokens, testimonial, accounts and fees, a drop and a restart, on a fresh rc1 standalone chain"
