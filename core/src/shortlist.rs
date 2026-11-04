@@ -1,11 +1,13 @@
-//! The short-name list: a Merkle commitment to the ids of every name of one to
-//! three characters, so the program can lock or surcharge them without ever
-//! seeing a name.
+//! The locked-name list: a Merkle commitment to the ids of every name of one to
+//! four characters and of the reserved list, so the program can lock them without
+//! ever seeing a name. (It began as the 1-3 character list, with a surcharge tier
+//! for three characters; the shipped list has every leaf at [`TIER_LOCKED`].)
 //!
 //! # Format (registry v5)
 //!
-//! A *leaf* is `(id: [u8; 32], tier: u8)`. The list holds one leaf per short
-//! name (tier [`TIER_LOCKED`] for 1-2 characters, [`TIER_THREE`] for 3), plus two
+//! A *leaf* is `(id: [u8; 32], tier: u8)`. The list holds one leaf per listed
+//! name (tier [`TIER_LOCKED`]; the program also accepts [`TIER_THREE`], a higher
+//! deposit, which the shipped list doesn't use), plus two
 //! sentinel leaves, `id = 00..00` and `id = ff..ff`, both with tier `0xff`
 //! ([`TIER_SENTINEL`]). Leaves are sorted by id, strictly ascending, so no id
 //! appears twice and the sentinels are first and last.
@@ -16,8 +18,8 @@
 //! - node:  `H("logos-names/v5/short-node" || left || right)`
 //! - empty: `H("logos-names/v5/short-empty")`
 //!
-//! Tree shape: with `n` leaves, `depth = ceil(log2(n))` (16 for the real list of
-//! 49,286 leaves, which pads to 65,536). Leaf `i` sits at position `i` of level
+//! Tree shape: with `n` leaves, `depth = ceil(log2(n))` (21 for the real list of
+//! 1,845,228 leaves, which pads to 2,097,152). Leaf `i` sits at position `i` of level
 //! 0; positions `n..2^depth` hold the empty hash. Level `k+1` position `j` is the
 //! node hash of level `k` positions `2j` and `2j+1`. The root is the single
 //! node at level `depth`. A path lists the sibling at each level from the leaf
@@ -39,8 +41,8 @@ pub const TIER_THREE: u8 = 3;
 pub const TIER_NORMAL: u8 = 0;
 /// Tier of the two sentinel leaves. Never a real name.
 pub const TIER_SENTINEL: u8 = 0xff;
-/// Depth of the shipped list (49,286 leaves padded to 65,536).
-pub const SHORTLIST_DEPTH: usize = 16;
+/// Depth of the shipped list (1,845,228 leaves padded to 2,097,152).
+pub const SHORTLIST_DEPTH: usize = 21;
 
 pub type Tier = u8;
 
@@ -385,9 +387,10 @@ mod tests {
     }
 
     #[test]
-    fn full_size_list_has_depth_16_and_uses_the_default_verify() {
-        let l = sample(49_284, 7);
-        assert_eq!(l.leaves().len(), 49_286);
+    fn full_size_list_has_the_shipped_depth_and_uses_the_default_verify() {
+        // Any count above 2^20 pads to depth 21, as the shipped list does.
+        let l = sample(1_048_600, 7);
+        assert_eq!(l.leaves().len(), 1_048_602);
         assert_eq!(l.depth(), SHORTLIST_DEPTH);
         let root = l.root();
         let leaf = l.leaves()[12_345];
@@ -400,8 +403,8 @@ mod tests {
         // Proof sizes.
         let mem = borsh::to_vec(&l.prove(&leaf.id).unwrap()).unwrap();
         let non = borsh::to_vec(&p).unwrap();
-        assert_eq!(mem.len(), 1 + 4 + 1 + 4 + 16 * 32);
-        assert_eq!(non.len(), 1 + 33 + 4 + 16 * 32 + 33 + 4 + 16 * 32 + 4);
+        assert_eq!(mem.len(), 1 + 4 + 1 + 4 + SHORTLIST_DEPTH * 32);
+        assert_eq!(non.len(), 1 + 33 + 4 + SHORTLIST_DEPTH * 32 + 33 + 4 + SHORTLIST_DEPTH * 32 + 4);
         // Wrong depth for the default verifier is rejected.
         let small = sample(5, 3);
         let sl = small.leaves()[2];

@@ -4,7 +4,9 @@
 # run this same script.
 #
 #   1. Registry: deploy the Names registry guest through the program loader, configure it
-#      (deposit mode), register a name publicly (commit, the 15-minute wait, reveal).
+#      (deposit mode), register a name publicly (commit, the 15-minute wait, reveal). A locked
+#      name (`apps`: four characters) is refused to anyone but the admin; the admin registers
+#      it and transfers it to R, the launch-day path for the locked list.
 #   2. Payments: `names pay` to the name's public account, and a plain transfer to an account;
 #      balances are checked.
 #   3. Tokens: deploy the prototype token program (wallet-tokens/), then `names token`
@@ -43,6 +45,8 @@
 #   WORK             a new, empty directory for the chain and the wallets
 #   RPC_PORT, METRICS_PORT  (default 3230, 9230), bound to 127.0.0.1 only
 set -euo pipefail
+# The locked-name list: the repository's copy, so no run downloads the published one.
+export NAMES_SHORTLIST="${NAMES_SHORTLIST:-$(cd "$(dirname "$0")/.." && pwd)/shortlist/shortlist.bin}"
 
 for v in SEQ_BIN SEQ_CONFIG NAMES NAMES_ELF WALLET_TOKENS TESTIMONIAL TESTIMONIAL_ELF WORK; do
   [ -n "${!v:-}" ] || { echo "set $v" >&2; exit 2; }
@@ -78,6 +82,7 @@ WORK=$(cd "$WORK" && pwd)
 SEQ_PID= REG_PID=
 cleanup() {
   [ -n "$REG_PID" ] && kill "$REG_PID" 2>/dev/null || true
+  [ -n "${LOCKED_PID:-}" ] && kill "$LOCKED_PID" 2>/dev/null || true
   if [ -n "$SEQ_PID" ]; then
     kill "$SEQ_PID" 2>/dev/null || true
     wait "$SEQ_PID" 2>/dev/null || true
@@ -244,6 +249,14 @@ print("testimonial listed")
 EOF
 
 # ---------------------------------------------------------------- 1. (end) and 2. payments
+say "1. a locked name: refused to R, registered by the admin F (in the background)"
+LOCKED=apps
+if NR register "$LOCKED" --owner "Public/$R" > "$WORK/locked-refused.log" 2>&1; then fail "R registered the locked name $LOCKED"; fi
+grep -q "is locked" "$WORK/locked-refused.log" || { cat "$WORK/locked-refused.log"; fail "R's attempt was not refused as locked"; }
+echo "refused to R: $(grep -o 'is locked[^:]*' "$WORK/locked-refused.log" | head -1)"
+N register "$LOCKED" --owner "Public/$F" --wait > "$WORK/locked.log" 2>&1 &
+LOCKED_PID=$!
+
 say "wait for the registration (the commitment must be 15 minutes old)"
 R0=50000000
 if ! wait "$REG_PID"; then REG_PID=; cat "$WORK/register.log"; fail "register"; fi
@@ -251,6 +264,15 @@ REG_PID=
 grep -vE '^(Stored|Transaction data)' "$WORK/register.log" | cut -c1-200
 N resolve "$NAME" | tee "$WORK/resolve.json"
 NR mine
+say "1. the admin's locked name lands, and is transferred to R"
+if ! wait "$LOCKED_PID"; then LOCKED_PID=; cat "$WORK/locked.log"; fail "the admin's registration of $LOCKED"; fi
+LOCKED_PID=
+grep -vE '^(Stored|Transaction data)' "$WORK/locked.log" | cut -c1-200 | tail -4
+N resolve "$LOCKED" | tee "$WORK/locked-resolve.json" | grep -q "\"held_by\": \"$F\"" || fail "F does not hold $LOCKED"
+N transfer "$LOCKED" "Public/$R" | grep -vE '^(Stored|Transaction data)' | cut -c1-200
+NR resolve "$LOCKED" | grep -q "\"held_by\": \"$R\"" || fail "R does not hold $LOCKED after the transfer"
+N resolve "$LOCKED" | grep -q '"held_by": null' || fail "F still shows as holding $LOCKED"
+echo "$LOCKED: registered by the admin, now held by R"
 R1=$(balance "$R")
 echo "R held $R0, now $R1 (deposit 1000000 plus fees)"
 [ "$R1" -le $((R0 - 1000000)) ] || fail "no deposit was taken from R"

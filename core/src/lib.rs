@@ -642,11 +642,13 @@ fn after(time: u64, length: u64) -> u64 {
 
 pub use shortlist::{LengthProof, TIER_LOCKED, TIER_NORMAL, TIER_THREE};
 
-/// The root of the short-name list ([`shortlist`]): the identifiers of every name
-/// of one to three characters, with their tiers. Set from `tools/shortlist`'s
-/// output (`shortlist/root.hex`) for the v5 derivation: 49,284 names and two
-/// sentinels, depth 16. Regenerate it if the derivation ever changes.
-pub const SHORTLIST_ROOT: [u8; 32] = hex_literal(b"66c75f76e42f1e87c80b8783c8a315dd84471041b029066bd5f8911d6c5a5e3c");
+/// The root of the locked-name list ([`shortlist`]): the identifiers of every name
+/// of one to four characters and of the reserved list (`reserved/reserved.csv`:
+/// nouns, first names, web3 projects, brands, and the app-store and wallet names),
+/// all locked. Set from `tools/shortlist`'s output (`shortlist/root.hex`) for the v5
+/// derivation: 1,845,226 names and two sentinels, depth 21. Regenerate it if the
+/// derivation or the reserved list changes.
+pub const SHORTLIST_ROOT: [u8; 32] = hex_literal(b"9778bed49005fe7401d25685a27d9cf3e681fa0582b562336cdb8ee9661d990c");
 
 /// 64 hex characters as 32 bytes, at compile time.
 const fn hex_literal(hex: &[u8; 64]) -> [u8; 32] {
@@ -1023,7 +1025,7 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
                 // transferring them to whoever they are for.
                 assert!(
                     settings.as_ref().is_some_and(|settings| payer == owner_tag(&id, &settings.admin)),
-                    "one- and two-character names are locked; only the registry's admin may register one"
+                    "this name is locked (one to four characters, or on the reserved list); only the registry's admin may register it"
                 );
             }
             let owed = match settings {
@@ -2648,7 +2650,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "only the registry's admin may register one")]
+    #[should_panic(expected = "only the registry's admin may register it")]
     fn a_locked_name_is_refused_to_everyone_but_the_admin() {
         let mut chain = Chain::default();
         chain.configure_deposits(CAROL);
@@ -2668,7 +2670,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "only the registry's admin may register one")]
+    #[should_panic(expected = "only the registry's admin may register it")]
     fn locked_names_are_locked_in_fee_mode_too() {
         let mut chain = Chain::default();
         chain.configure(PROGRAM, CAROL, PRICES);
@@ -2676,7 +2678,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "only the registry's admin may register one")]
+    #[should_panic(expected = "only the registry's admin may register it")]
     fn an_unconfigured_registry_locks_short_names() {
         let mut chain = Chain::default();
         chain.run(on_registration(&LOCKED_NAME, ALICE), register_at(LOCKED_NAME, Vec::new(), 1, 0, NOW));

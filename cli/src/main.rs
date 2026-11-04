@@ -104,29 +104,90 @@ fn save_defaults(defaults: &Defaults) -> Result<()> {
     Ok(())
 }
 
-/// The short-name list this build was made with: the identifiers of every name of
-/// one to three characters. Its root is the one the registry program checks.
-static SHORTLIST_BIN: &[u8] = include_bytes!("../../shortlist/shortlist.bin");
+/// Where the locked-name list (SPEC.md §8.1) is published: one fixed file per list, named
+/// by its root, so a release can never swap it. Only registering needs it, so it isn't built
+/// into the CLI: the first registration downloads it (about 61 MB) and keeps it. Everyone gets
+/// the same whole file, so nobody learns which name a registration is for.
+const SHORTLIST_URL: &str =
+    "https://github.com/jefdiesel/logos-names/releases/download/shortlist-9778bed4/shortlist.bin";
+/// The most the list may be: a download larger than this is refused.
+const MAX_SHORTLIST: u64 = 128 * 1024 * 1024;
 
+/// Where the list is kept once downloaded: `NAMES_SHORTLIST` if set (a file you already have,
+/// such as the repository's `shortlist/shortlist.bin`), else the user's cache folder, under the
+/// root it must have.
+fn shortlist_path() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("NAMES_SHORTLIST") {
+        return Ok(PathBuf::from(path));
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| anyhow!("no home folder for the locked-name list"))?;
+    let cache = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|| {
+        if cfg!(target_os = "macos") { home.join("Library/Caches") } else { home.join(".cache") }
+    });
+    Ok(cache.join("logos-names").join(format!("shortlist-{}.bin", hex::encode(&names_core::SHORTLIST_ROOT[..4]))))
+}
+
+/// Downloads the list to `path`: to a temporary file beside it, renamed once it is whole.
+/// It is checked against the program's root by [`short_list`] before any use.
+fn download_shortlist(path: &std::path::Path) -> Result<()> {
+    let url = std::env::var("NAMES_SHORTLIST_URL").unwrap_or_else(|_| SHORTLIST_URL.to_owned());
+    eprintln!("downloading the list of locked names (about 61 MB, once; only registering needs it) from {url}");
+    let dir = path.parent().ok_or_else(|| anyhow!("no folder for the locked-name list"))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("cannot make {}", dir.display()))?;
+    let bytes = ureq::get(&url)
+        .call()
+        .with_context(|| format!("cannot download the locked-name list from {url}"))?
+        .body_mut()
+        .with_config()
+        .limit(MAX_SHORTLIST)
+        .read_to_vec()
+        .context("the locked-name list download broke off")?;
+    let partial = path.with_extension("part");
+    std::fs::write(&partial, &bytes).with_context(|| format!("cannot write {}", partial.display()))?;
+    std::fs::rename(&partial, path).with_context(|| format!("cannot keep {}", path.display()))?;
+    Ok(())
+}
+
+/// The locked-name list, read once: downloaded the first time a registration needs it, and
+/// refused unless it rebuilds to the root the registry program has built in.
 fn short_list() -> Result<&'static shortlist::ShortList> {
     static LIST: std::sync::OnceLock<Result<shortlist::ShortList, String>> = std::sync::OnceLock::new();
     LIST.get_or_init(|| {
-        let leaves = SHORTLIST_BIN
-            .chunks_exact(33)
-            .map(|chunk| shortlist::Leaf { id: chunk[..32].try_into().expect("32 bytes"), tier: chunk[32] })
-            .collect();
-        shortlist::ShortList::from_sorted_leaves(leaves).map_err(str::to_owned)
+        let load = || -> Result<shortlist::ShortList> {
+            let path = shortlist_path()?;
+            if !path.is_file() {
+                if std::env::var_os("NAMES_SHORTLIST").is_some() {
+                    bail!("NAMES_SHORTLIST names {}, which isn't a file", path.display());
+                }
+                download_shortlist(&path)?;
+            }
+            let bytes = std::fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
+            if bytes.len() % 33 != 0 {
+                bail!("{} is not a locked-name list", path.display());
+            }
+            let leaves = bytes
+                .chunks_exact(33)
+                .map(|chunk| shortlist::Leaf { id: chunk[..32].try_into().expect("32 bytes"), tier: chunk[32] })
+                .collect();
+            let list = shortlist::ShortList::from_sorted_leaves(leaves).map_err(|reason| anyhow!("{reason}"))?;
+            if list.root() != names_core::SHORTLIST_ROOT {
+                // A wrong or damaged file: drop the cached copy so the next try downloads it again.
+                if std::env::var_os("NAMES_SHORTLIST").is_none() {
+                    let _ = std::fs::remove_file(&path);
+                }
+                bail!("{} is not the list the registry program commits to (its root differs)", path.display());
+            }
+            Ok(list)
+        };
+        load().map_err(|error| format!("{error:#}"))
     })
     .as_ref()
-    .map_err(|reason| anyhow!("the built-in short-name list is invalid: {reason}"))
+    .map_err(|reason| anyhow!("the locked-name list: {reason}"))
 }
 
 /// The proof of where `id` sits relative to the short-name list, and its tier.
 fn length_proof(id: &NameId) -> Result<(LengthProof, u8)> {
     let list = short_list()?;
-    if list.root() != names_core::SHORTLIST_ROOT {
-        bail!("this build's short-name list doesn't match the registry program's; use a matching release");
-    }
     let proof = list.prove(id).map_err(|reason| anyhow!("no length proof: {reason}"))?;
     let tier = shortlist::verify(&names_core::SHORTLIST_ROOT, id, &proof)
         .map_err(|reason| anyhow!("the length proof does not hold: {reason}"))?;
@@ -1047,7 +1108,7 @@ impl Client {
             let admin = self.settings().await?.map(|settings| settings.admin);
             if admin != Some(owner) {
                 bail!(
-                    "{name}{NAME_SUFFIX} is locked: one- and two-character names are released by the registry's admin"
+                    "{name}{NAME_SUFFIX} is locked (one to four characters, or on the reserved list): only the registry's admin registers it, then transfers it to whoever it is for"
                 );
             }
         }
@@ -2400,6 +2461,13 @@ async fn main() -> Result<()> {
         }
         // Runs where the wallet does not open, so it can't wait for the client below.
         Command::Module(module::Request::Restore { accounts }) => return module::restore(accounts, overrides).await,
+        // Needs no wallet: the Basecamp module asks for a proof here, so it needn't carry the list.
+        Command::Module(module::Request::LengthProof { id }) => {
+            let id = parse_hex32(id.trim()).ok_or_else(|| anyhow!("an identifier is 32 bytes of hex"))?;
+            let (proof, tier) = length_proof(&id)?;
+            println!("{}", module::length_proof_json(&proof, tier));
+            return Ok(());
+        }
         _ => {}
     }
     let program = match cli.program {
@@ -2848,10 +2916,23 @@ mod shortlist_tests {
     /// The list shipped in the CLI is the one the program's root commits to, and it
     /// sorts names into the right tiers.
     #[test]
-    fn the_built_in_list_matches_the_program() {
-        let list = super::short_list().expect("the built-in list loads");
+    fn the_published_list_matches_the_program() {
+        // The repository's copy, as CI and the e2e run use it (NAMES_SHORTLIST).
+        // SAFETY: set before any thread reads the environment in this test binary's tests.
+        unsafe { std::env::set_var("NAMES_SHORTLIST", concat!(env!("CARGO_MANIFEST_DIR"), "/../shortlist/shortlist.bin")) };
+        let list = super::short_list().expect("the list loads");
         assert_eq!(list.root(), names_core::SHORTLIST_ROOT);
-        for (name, tier) in [("ab", names_core::TIER_LOCKED), ("jef", names_core::TIER_THREE), ("logos", names_core::TIER_NORMAL)] {
+        // 1-4 characters and the reserved list are locked; anything else is a normal name.
+        for (name, tier) in [
+            ("ab", names_core::TIER_LOCKED),
+            ("jef", names_core::TIER_LOCKED),
+            ("apps", names_core::TIER_LOCKED),
+            ("logos", names_core::TIER_LOCKED),
+            ("names", names_core::TIER_LOCKED),
+            ("nameswallet", names_core::TIER_LOCKED),
+            ("logosappstore", names_core::TIER_LOCKED),
+            ("walletci", names_core::TIER_NORMAL),
+        ] {
             let (_, got) = super::length_proof(&names_seal::derive(name).id).expect("a proof");
             assert_eq!(got, tier, "{name}");
         }

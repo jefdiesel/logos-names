@@ -5381,7 +5381,7 @@ Item {
                         readonly property bool underway: root.registerStepOf(root.missing) > 0
                         Rectangle { width: 10; height: 10; radius: 5; color: parent.reserved ? root.alarm : parent.underway ? root.brass : root.good }
                         Text {
-                            text: parent.underway ? "Registering privately for you" : parent.reserved ? "Reserved: one- and two-character names are released by the registry's admin" : "Available"
+                            text: parent.underway ? "Registering privately for you" : parent.reserved ? "Reserved: names of one to four characters and the reserved list are placed by the registry's admin" : "Available"
                             color: parent.reserved ? root.alarm : parent.underway ? root.brass : root.good
                             font.family: root.sans
                             font.pixelSize: root.px(19)

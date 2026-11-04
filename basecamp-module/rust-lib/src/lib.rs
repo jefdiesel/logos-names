@@ -1975,8 +1975,9 @@ impl NamesModule for Names {
     }
 
     fn deposit(&mut self, name: String) -> String {
-        self.about(&name, |registry, name, derived| {
-            let tier = changes::tier_of(&derived.id)?;
+        // Showing what a name takes needs no proof, so no download of the locked list.
+        self.about(&name, |registry, name, _derived| {
+            let tier = shortlist::tier_of_name(name);
             let settings = registry.settings()?;
             let now = registry.now()?;
             Ok(deposit_json(name, tier, settings.as_ref(), now))
@@ -1996,6 +1997,8 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
+        // The proof a registration carries comes from the names CLI, which holds the list.
+        shortlist::use_cli(self.cli_setup().ok());
         reply(self.register_step(&name, &owner, &private_account))
     }
 

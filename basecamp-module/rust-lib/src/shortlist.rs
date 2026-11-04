@@ -28,13 +28,13 @@ pub const TIER_THREE: u8 = 3;
 pub const TIER_NORMAL: u8 = 0;
 /// Tier of the two sentinel leaves. Never a real name.
 pub const TIER_SENTINEL: u8 = 0xff;
-/// Depth of the shipped list (49,286 leaves padded to 65,536).
-pub const SHORTLIST_DEPTH: usize = 16;
+/// Depth of the shipped list (1,845,228 leaves padded to 2,097,152).
+pub const SHORTLIST_DEPTH: usize = 21;
 
 /// The root the registry program has built in (`core`'s `SHORTLIST_ROOT`).
 pub const SHORTLIST_ROOT: [u8; 32] = [
-    0x66, 0xc7, 0x5f, 0x76, 0xe4, 0x2f, 0x1e, 0x87, 0xc8, 0x0b, 0x87, 0x83, 0xc8, 0xa3, 0x15, 0xdd,
-    0x84, 0x47, 0x10, 0x41, 0xb0, 0x29, 0x06, 0x6b, 0xd5, 0xf8, 0x91, 0x1d, 0x6c, 0x5a, 0x5e, 0x3c,
+    0x97, 0x78, 0xbe, 0xd4, 0x90, 0x05, 0xfe, 0x74, 0x01, 0xd2, 0x56, 0x85, 0xa2, 0x7d, 0x9c, 0xf3,
+    0xe6, 0x81, 0xfa, 0x05, 0x82, 0xb5, 0x62, 0x33, 0x6c, 0xdb, 0x8e, 0xe9, 0x66, 0x1d, 0x99, 0x0c,
 ];
 
 const LEAF_DOMAIN: &[u8] = b"logos-names/v5/short-leaf";
@@ -44,8 +44,16 @@ const EMPTY_DOMAIN: &[u8] = b"logos-names/v5/short-empty";
 pub const SENTINEL_LOW: [u8; 32] = [0x00; 32];
 pub const SENTINEL_HIGH: [u8; 32] = [0xff; 32];
 
-/// The list this module was built with.
-static SHORTLIST_BIN: &[u8] = include_bytes!("../shortlist.bin");
+/// The names CLI this module asks for proofs: the list (61 MB) is built into the CLI, not
+/// into this module. Set before each call that needs a proof.
+static PROVER: std::sync::Mutex<Option<crate::cli::Setup>> = std::sync::Mutex::new(None);
+
+/// Has [`length_proof`] ask the names CLI `setup` runs (or nothing, when there is none).
+pub fn use_cli(setup: Option<crate::cli::Setup>) {
+    if let Ok(mut prover) = PROVER.lock() {
+        *prover = setup;
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Leaf {
@@ -240,18 +248,22 @@ impl ShortList {
         Ok(Self { leaves, levels })
     }
 
-    /// The list built into this module, read once.
-    pub fn built_in() -> Result<&'static Self, String> {
+    /// The repository's list (`shortlist/shortlist.bin`), read once: for tests, which check
+    /// the proofs the CLI's list gives against this copy of the format.
+    #[cfg(test)]
+    pub fn from_repo() -> Result<&'static Self, String> {
         static LIST: std::sync::OnceLock<Result<ShortList, String>> = std::sync::OnceLock::new();
         LIST.get_or_init(|| {
-            let leaves = SHORTLIST_BIN
+            let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../shortlist/shortlist.bin"))
+                .map_err(|e| format!("the repository's shortlist.bin: {e}"))?;
+            let leaves = bytes
                 .chunks_exact(33)
                 .map(|chunk| Leaf { id: chunk[..32].try_into().expect("32 bytes"), tier: chunk[32] })
                 .collect();
             Self::from_sorted_leaves(leaves).map_err(str::to_owned)
         })
         .as_ref()
-        .map_err(|reason| format!("the built-in short-name list is invalid: {reason}"))
+        .map_err(|reason| format!("the repository's list is invalid: {reason}"))
     }
 
     #[allow(dead_code)]
@@ -297,15 +309,68 @@ impl ShortList {
     }
 }
 
-/// The proof of where `id` sits relative to the short-name list, and its tier,
-/// as the CLI's `length_proof` makes it: from the built-in list, refused if that
-/// list is not the one the program's root commits to, and checked before use.
-pub fn length_proof(id: &[u8; 32]) -> Result<(LengthProof, u8), String> {
-    let list = ShortList::built_in()?;
-    if list.root() != SHORTLIST_ROOT {
-        return Err("this module's short-name list doesn't match the registry program's; use a matching release".to_owned());
+/// The reserved names (`reserved/reserved.csv` in the repository, one per line, sorted), which
+/// the locked list holds besides every name of one to four characters.
+static RESERVED: &str = include_str!("../reserved.txt");
+
+/// The tier the locked list gives `name`, worked out from the name itself: one to four
+/// characters or a reserved name is locked, anything else normal. For showing what a name
+/// takes without downloading the list; a registration still carries a proof from it.
+pub fn tier_of_name(name: &str) -> u8 {
+    if name.len() <= 4 || RESERVED.lines().any(|reserved| reserved == name) {
+        TIER_LOCKED
+    } else {
+        TIER_NORMAL
     }
-    let proof = list.prove(id).map_err(|reason| format!("no length proof: {reason}"))?;
+}
+
+/// A proof from the names CLI's JSON (`names module length-proof`, `length_proof_json`).
+pub fn proof_from_json(v: &serde_json::Value) -> Result<LengthProof, String> {
+    let hash = |h: &serde_json::Value| -> Result<[u8; 32], String> {
+        let bytes = crate::registry::unhex(h.as_str().unwrap_or_default())?;
+        bytes.try_into().map_err(|_| "a proof hash is 32 bytes".to_owned())
+    };
+    let path = |p: &serde_json::Value| -> Result<Vec<[u8; 32]>, String> {
+        p.as_array().ok_or("a proof path is a list")?.iter().map(hash).collect()
+    };
+    let leaf = |l: &serde_json::Value| -> Result<Leaf, String> {
+        Ok(Leaf { id: hash(&l["id"])?, tier: u8::try_from(l["tier"].as_u64().ok_or("a leaf has a tier")?).map_err(|_| "a tier is a byte")? })
+    };
+    let index = |i: &serde_json::Value| -> Result<u32, String> {
+        u32::try_from(i.as_u64().ok_or("a proof has an index")?).map_err(|_| "an index is 32 bits".to_owned())
+    };
+    match v["kind"].as_str() {
+        Some("member") => Ok(LengthProof::Membership(Membership {
+            index: index(&v["index"])?,
+            tier: u8::try_from(v["leaf_tier"].as_u64().ok_or("a member has a tier")?).map_err(|_| "a tier is a byte")?,
+            path: path(&v["path"])?,
+        })),
+        Some("non_member") => Ok(LengthProof::NonMembership(NonMembership {
+            left: leaf(&v["left"])?,
+            left_path: path(&v["left_path"])?,
+            right: leaf(&v["right"])?,
+            right_path: path(&v["right_path"])?,
+            left_index: index(&v["left_index"])?,
+        })),
+        _ => Err("the names CLI's length proof has no kind".to_owned()),
+    }
+}
+
+/// The proof of where `id` sits relative to the locked-name list, and its tier: made by the
+/// names CLI, which carries the list, and checked here against the program's root before use,
+/// so a CLI with another list can't make this module send a proof the program refuses.
+#[cfg(not(test))]
+pub fn length_proof(id: &[u8; 32]) -> Result<(LengthProof, u8), String> {
+    let setup = PROVER.lock().ok().and_then(|p| p.clone()).ok_or("the names CLI isn't installed, and it holds the list of locked names a registration needs: install Names first (Welcome)")?;
+    let proof = proof_from_json(&crate::cli::run_length_proof(&setup, id)?)?;
+    let tier = verify(&SHORTLIST_ROOT, id, &proof).map_err(|reason| format!("the names CLI's list doesn't match the registry program's ({reason}); update the names CLI"))?;
+    Ok((proof, tier))
+}
+
+/// In tests: the proof from the repository's list, checked the same way.
+#[cfg(test)]
+pub fn length_proof(id: &[u8; 32]) -> Result<(LengthProof, u8), String> {
+    let proof = ShortList::from_repo()?.prove(id).map_err(|reason| format!("no length proof: {reason}"))?;
     let tier = verify(&SHORTLIST_ROOT, id, &proof).map_err(|reason| format!("the length proof does not hold: {reason}"))?;
     Ok((proof, tier))
 }
@@ -326,25 +391,25 @@ mod tests {
     }
 
     #[test]
-    fn the_built_in_list_rebuilds_to_the_programs_root() {
-        let list = ShortList::built_in().expect("the list loads");
-        assert_eq!(list.leaves().len(), 49_286);
+    fn the_repositorys_list_rebuilds_to_the_programs_root() {
+        let list = ShortList::from_repo().expect("the list loads");
+        assert_eq!(list.leaves().len(), 1_845_228);
         assert_eq!(list.depth(), SHORTLIST_DEPTH);
-        assert_eq!(hex(&list.root()), "66c75f76e42f1e87c80b8783c8a315dd84471041b029066bd5f8911d6c5a5e3c");
+        assert_eq!(hex(&list.root()), "9778bed49005fe7401d25685a27d9cf3e681fa0582b562336cdb8ee9661d990c");
         assert_eq!(list.root(), SHORTLIST_ROOT);
     }
 
     /// Names in each tier, with the sha256 of the proof's borsh bytes as
-    /// `names_core` encodes it (generated from `core` itself). `jef` is three
-    /// characters, so it is on the list, in the three-character tier, as the
-    /// CLI's own test says.
+    /// `names_core` encodes it (generated from `core` itself, through the CLI). One to
+    /// four characters and the reserved list (`logos`) are locked.
     #[test]
     fn names_get_their_tier_and_the_proof_core_would_build() {
         for (name, tier, length, sha) in [
-            ("jef", TIER_THREE, 522, "a7a0e61180ebb015296c7aea39f3a2b1cf86264192942ff0c6141595244c0523"),
-            ("qkz", TIER_THREE, 522, "8120b1a6e2833c13dca673a304330770a3a5f3e9de770150d7195db2be56b527"),
-            ("ab", TIER_LOCKED, 522, "ebe30415ddb61fdc2092903aa77b43924701e8625c9acca432d3b80cf6433042"),
-            ("logos", TIER_NORMAL, 1103, "51fca46480d62d77d4756d18cdda0f4a121b794d434d088bb65f08f97e9b7c67"),
+            ("jef", TIER_LOCKED, 682, "7e85f58dcf1025560dbcc7322726a9d2eb6ca018938db94f1c65888d14627e8b"),
+            ("qkz", TIER_LOCKED, 682, "4170261b91e35ad0b323a2562b48f7ee0354f937e31066918cf53e37377bceb4"),
+            ("ab", TIER_LOCKED, 682, "297209b6d49d664524bcb3e189c6e31f3f5da8832911303758bca1a6a127910c"),
+            ("logos", TIER_LOCKED, 682, "d75142a3665b16da3b3f88d2f617ab940122d0d1392227f3935f0726750d3823"),
+            ("walletci", TIER_NORMAL, 1423, "5db7b882f5f286e9bb99809327955a829da56e3d0776544b28044a81b7fc577a"),
         ] {
             let (proof, got) = length_proof(&derive(name).id).expect("a proof");
             assert_eq!(got, tier, "{name}");
@@ -354,6 +419,44 @@ mod tests {
             assert_eq!(bytes.len(), length, "{name}");
             assert_eq!(digest(&bytes), sha, "{name}");
         }
+    }
+
+    /// The display tier agrees with the list for every reserved name, and the copy of the
+    /// reserved names is the repository's.
+    #[test]
+    fn the_display_tier_agrees_with_the_list() {
+        let csv = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../reserved/reserved.csv")).unwrap();
+        let mut names: Vec<&str> = csv.lines().skip(1).filter_map(|l| l.trim_end_matches('\r').split(',').next()).collect();
+        names.sort_unstable();
+        names.dedup();
+        let copy: Vec<&str> = RESERVED.lines().collect();
+        assert_eq!(copy, names, "copy reserved/reserved.csv's names to basecamp-module/rust-lib/reserved.txt");
+        for name in ["jef", "apps", "logos", "names", "nameswallet", "logosappstore", "walletci", "forumer", "a", "abcde"] {
+            let (_, tier) = length_proof(&derive(name).id).expect("a proof");
+            assert_eq!(tier_of_name(name), tier, "{name}");
+        }
+    }
+
+    /// The names CLI's JSON (`names module length-proof`) parses back to the same proof.
+    #[test]
+    fn the_clis_json_proofs_parse_to_the_same_proof() {
+        let hexes = |p: &[[u8; 32]]| p.iter().map(|h| hex(h)).collect::<Vec<_>>();
+        for name in ["jef", "walletci"] {
+            let (proof, tier) = length_proof(&derive(name).id).expect("a proof");
+            let json = match &proof {
+                LengthProof::Membership(m) => serde_json::json!({
+                    "tier": tier, "kind": "member", "index": m.index, "leaf_tier": m.tier, "path": hexes(&m.path),
+                }),
+                LengthProof::NonMembership(n) => serde_json::json!({
+                    "tier": tier, "kind": "non_member",
+                    "left": { "id": hex(&n.left.id), "tier": n.left.tier }, "left_index": n.left_index, "left_path": hexes(&n.left_path),
+                    "right": { "id": hex(&n.right.id), "tier": n.right.tier }, "right_path": hexes(&n.right_path),
+                }),
+            };
+            assert_eq!(proof_from_json(&json).expect("parses"), proof, "{name}");
+        }
+        assert!(proof_from_json(&serde_json::json!({ "kind": "member", "index": 1 })).is_err());
+        assert!(proof_from_json(&serde_json::json!({})).is_err());
     }
 
     #[test]

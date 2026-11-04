@@ -76,6 +76,27 @@ pub enum Request {
     /// The chain's fee market and what a native transfer costs at it, as JSON: `{height,
     /// base_fee_exec, base_fee_stor, public_transfer: {about, at_most}, private_transfer}`.
     Fee,
+    /// Where the name identifier ID (64 hex) sits relative to the locked-name list, as JSON
+    /// (`length_proof_json`). Needs no wallet. The Basecamp module asks here instead of
+    /// carrying the 61 MB list, and checks the proof against the root itself.
+    LengthProof { id: String },
+}
+
+/// A length proof as JSON: `{tier, kind: "member", index, path}` or `{tier, kind:
+/// "non_member", left: {id, tier}, left_index, left_path, right: {id, tier}, right_path}`,
+/// hashes in hex.
+pub fn length_proof_json(proof: &names_core::LengthProof, tier: u8) -> serde_json::Value {
+    let path = |p: &[[u8; 32]]| p.iter().map(hex::encode).collect::<Vec<_>>();
+    match proof {
+        names_core::LengthProof::Membership(m) => serde_json::json!({
+            "tier": tier, "kind": "member", "index": m.index, "leaf_tier": m.tier, "path": path(&m.path),
+        }),
+        names_core::LengthProof::NonMembership(n) => serde_json::json!({
+            "tier": tier, "kind": "non_member",
+            "left": { "id": hex::encode(n.left.id), "tier": n.left.tier }, "left_index": n.left_index, "left_path": path(&n.left_path),
+            "right": { "id": hex::encode(n.right.id), "tier": n.right.tier }, "right_path": path(&n.right_path),
+        }),
+    }
 }
 
 /// One actor a change reaches.
@@ -105,7 +126,7 @@ impl Client {
             Request::Accounts => self.module_accounts(),
             Request::Keys { account } => self.module_keys(&account),
             Request::Send => self.module_send().await,
-            Request::Restore { .. } => unreachable!("handled before the wallet is opened"),
+            Request::Restore { .. } | Request::LengthProof { .. } => unreachable!("handled before the wallet is opened"),
             Request::Token(_) => unreachable!("handled with the token program chosen, in main"),
             Request::AccountList => self.module_account_list().await,
             Request::AccountNew { kind, label } => self.module_account_new(&kind, &label).await,

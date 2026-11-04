@@ -44,7 +44,7 @@ public LEZ 0.4 testnet; until then it runs on local 0.4 chains, end to end in CI
 
 | | |
 |---|---|
-| **Register a name** | Written bare: `jef`. A refundable deposit of 1,000,000 on testnet (returned in full when you release it); names don't expire. One- and two-character names are reserved. About 20 minutes: a proof, a 15-minute wait so nobody can take the name first, a second proof. |
+| **Register a name** | Written bare: `jef`. A refundable deposit of 1,000,000 on testnet (returned in full when you release it); names don't expire. Names of one to four characters and a reserved list of about 24,000 (common words, first names, projects, brands) are locked: the registry's admin places them. About 20 minutes: a proof, a 15-minute wait so nobody can take the name first, a second proof. |
 | **Profile and page** | Display name, a multi-line bio, avatar, colour, font, and a page of your own HTML, shown in a sanitized view inside the app. Anyone who knows the name can read them. |
 | **Posts** | A public board with replies under the posts they answer, likes, follows, Recent and Following feeds, and each poster's page with all their posts. Every post is signed by a name. |
 | **Messages** | Direct messages and group chats between names, end-to-end encrypted over Logos messaging, through Basecamp's chat module. Turn on messages publishes your chat address on your name. |

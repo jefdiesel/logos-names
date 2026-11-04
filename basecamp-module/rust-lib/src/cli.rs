@@ -48,6 +48,9 @@ const TAIL_LINES: usize = 20;
 const FEE_LOG_BYTES: u64 = 256 * 1024;
 /// How long reading the wallet's accounts may take (it catches up with the chain first).
 const ACCOUNTS_PATIENCE: Duration = Duration::from_secs(150);
+/// How long a length proof may take: the first downloads the locked-name list (about 61 MB).
+#[cfg_attr(test, allow(dead_code))]
+const SHORTLIST_PATIENCE: Duration = Duration::from_secs(10 * 60);
 /// How long a change to the wallet's own files, or a fee quote, may take.
 const QUICK_PATIENCE: Duration = Duration::from_secs(30);
 /// The longest nickname an account takes (the CLI's `MAX_LABEL`).
@@ -1015,6 +1018,16 @@ pub fn run_account_use(setup: &Setup, account: &str) -> Result<Value, String> {
     let (private, id) = crate::provider::account_ref(account)?;
     let args = vec!["module".to_owned(), "account-use".to_owned(), "--".to_owned(), crate::provider::account_written(private, &id)];
     account_entry(&answer(&run_text(setup, args, QUICK_PATIENCE)?, "account switch")?)
+}
+
+/// `names module length-proof <id>`: where the name identifier `id` sits relative to the
+/// locked-name list, as the CLI's JSON. Needs no wallet; the CLI builds the list's tree, a
+/// couple of seconds.
+#[cfg_attr(test, allow(dead_code))]
+pub fn run_length_proof(setup: &Setup, id: &[u8; 32]) -> Result<Value, String> {
+    let args = vec!["module".to_owned(), "length-proof".to_owned(), crate::registry::hex(id)];
+    // The first one downloads the list (about 61 MB), once.
+    answer(&run_text(setup, args, SHORTLIST_PATIENCE)?, "length proof")
 }
 
 /// `names module fee`: the chain's fee market and what a transfer costs at it.

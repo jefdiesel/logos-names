@@ -567,10 +567,6 @@ fn apply_entries(profile: &mut Profile, entries: Vec<(String, String)>, replace:
     }
 }
 
-/// The tier the short-name list gives `id`, for callers that only ask.
-pub fn tier_of(id: &NameId) -> Result<u8, String> {
-    length_proof(id).map(|(_, tier)| tier)
-}
 
 #[cfg(test)]
 mod tests {
@@ -663,8 +659,8 @@ mod tests {
     #[test]
     fn real_registrations_encode_as_core_does() {
         for (name, length, digest) in [
-            ("qkz", 621, "625b1a3e6be8d0af6848c3e2f140bf1cef7cb7a29c5804e1e0e7022dcd51ba3d"),
-            ("logos", 1202, "398990ec6e2f4be68ff15c1b17d1ad31a8b8cefa699b2ba5c47fb62e871c40af"),
+            ("qkz", 781, "f9c5c7b223dd4152f327cc3e0d3d887b207e24c8d1709e923282cf1bf868d74b"),
+            ("walletci", 1522, "c3b72e0e3cd22798dbadbe0eb353db3ff2836959dea725f83cddb70ba6e2fc1d"),
         ] {
             let id = derive(name).id;
             let (proof, _) = length_proof(&id).expect("a proof");
