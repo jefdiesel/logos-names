@@ -16,6 +16,9 @@
 #   6. A network drop and a restart: with the sequencer stopped, reads and sends fail quickly
 #      and say so while the wallet's own settings still change; restarted on the same chain,
 #      every balance and setting is as it was and a transfer goes through.
+#   7. Apps verified by publisher (lez-program-registry docs/APPS.md), when LEZREG names the
+#      registry's `lezreg` CLI: the name publishes an app record for a package that names it,
+#      `lezreg app verify` finds that package verified and a copy with another root a mismatch.
 #
 # Steps 3 and 4 run while the registration waits out its commitment, from another wallet, so
 # the 15 minutes the registry program enforces (MIN_COMMIT_AGE_MS) are not added on top.
@@ -34,6 +37,7 @@
 #   WALLET_TOKENS    the prototype token CLI (cargo build --release --manifest-path wallet-tokens/Cargo.toml)
 #   TESTIMONIAL      the testimonial client (cargo build --release -p testimonial_client)
 #   TESTIMONIAL_ELF  the testimonial guest (testimonial-imageid <path> writes it)
+#   LEZREG           optional: the registry's `lezreg` CLI, for step 7 (skipped without it)
 #   WORK             a new, empty directory for the chain and the wallets
 #   RPC_PORT, METRICS_PORT  (default 3230, 9230), bound to 127.0.0.1 only
 set -euo pipefail
@@ -345,7 +349,26 @@ PY
 transfer "$F" "$B" 4242
 [ "$(balance "$B")" -eq $((B_BEFORE + 4242)) ] || fail "a transfer after the restart did not land"
 
+if [ -n "${LEZREG:-}" ]; then
+  say "7. apps: $NAME publishes demo_ui, and lezreg checks packages against it"
+  ROOT=$(printf 'demo_ui 1.0.0' | shasum -a 256 | cut -d' ' -f1)
+  printf '{"name":"demo_ui","version":"1.0.0","author":"lns:%s","hashes":{"root":"%s"}}' "$NAME" "$ROOT" > "$WORK/demo-manifest.json"
+  printf '{"name":"demo_ui","version":"1.0.0","author":"lns:%s","hashes":{"root":"%s"}}' "$NAME" "$(printf x | shasum -a 256 | cut -d' ' -f1)" > "$WORK/copy-manifest.json"
+  VALUE=$("$LEZREG" --json app record "$WORK/demo-manifest.json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')
+  echo "app.demo_ui = $VALUE"
+  NR set-text "$NAME" app.demo_ui "$VALUE" | grep -vE '^(Stored|Transaction data)' | cut -c1-200
+  "$LEZREG" --rpc "$RPC" --lns "$REG" app verify "$WORK/demo-manifest.json" || fail "the published package was not verified"
+  if "$LEZREG" --rpc "$RPC" --lns "$REG" app verify "$WORK/copy-manifest.json"; then fail "a copy with another root was verified"; fi
+  # `app verify` exits 1 for anything but verified, so its JSON is kept before it is read.
+  COPY=$("$LEZREG" --json --rpc "$RPC" --lns "$REG" app verify "$WORK/copy-manifest.json" || true)
+  echo "$COPY" | grep -q '"status": "mismatch"' || fail "a copy was not reported as a mismatch: $COPY"
+  "$LEZREG" --rpc "$RPC" --lns "$REG" app show "$NAME" | tee "$WORK/apps.txt"
+  grep -q "^demo_ui  1.0.0  root $ROOT" "$WORK/apps.txt" || fail "app show does not list demo_ui"
+else
+  echo "(step 7 skipped: set LEZREG to the registry's lezreg CLI to check apps by publisher)"
+fi
+
 say "the chain is still healthy"
 rpc getLastBlockId
 echo
-say "PASS: registry, payments, tokens, testimonial, accounts and fees, a drop and a restart, on a fresh rc1 standalone chain"
+say "PASS: registry, payments, tokens, testimonial, accounts and fees, a drop and a restart${LEZREG:+, apps by publisher}, on a fresh rc1 standalone chain"

@@ -1,45 +1,45 @@
-# scripts/wallet-e2e.sh on the Mac mini (Apple M4), 2026-11-04, branch lez-0.4 (accounts and
-# fees, module 0.12.0). Prebuilt LEZ v0.4.0-rc1 sequencer_service --features standalone, fresh
+# scripts/wallet-e2e.sh on the Mac mini (Apple M4), 2026-11-04, branch lez-0.4 (accounts, fees,
+# a drop and a restart, and step 7: apps verified by publisher with lez-program-registry 8bda3b6). Prebuilt LEZ v0.4.0-rc1 sequencer_service --features standalone, fresh
 # chain on 127.0.0.1:3230 (stopped at the end). Binaries built from this branch with the local
 # risc0 toolchain. About 21 minutes, 12 of them the registry's commitment wait, overlapped with
 # the token and testimonial steps. Unedited from the first step on (the build output before it
 # is left out). Nothing below is secret: F is LEZ's published local-test account, the rest are
 # throwaway keys on a chain that no longer exists.
 #
-## 13:48:06 fresh standalone sequencer on http://127.0.0.1:3230
-up (pid 76767)
+## 17:40:17 fresh standalone sequencer on http://127.0.0.1:3230
+up (pid 76309)
 
-## 13:48:08 wallets: import the funded local-test account, make the others
-F=6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV (funded)  B=5dBu1YBLU6UVi5dMbCBen24kAuHAnDtCPFuWZWLP7rGx  R=7Wf4vBKqdsk29sw5JFb3y3zbwWYa7bmiidpbRx6g9Rza
+## 17:40:20 wallets: import the funded local-test account, make the others
+F=6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV (funded)  B=B8dWW3TfxdKZA6jRscUMVMK39adkWapwts1DiLoqJAFB  R=F3YkSsa6i7cwqjMW6mettu65KEhZa4ZNkHktL4ktpbrB
 F holds 10000000000000
 
-## 13:48:09 1. deploy the Names registry
-deploying logos_names.bin (459452 bytes, 5 segments) at Dsb9KwySw74XyYxwqVZmNFg7U9YnJ3fS8D6mQ9QvRkDc
-Transaction hash is ff9a52659bf037142d2188c0b4806ce873ec727a053cc66f56409627d0e48b2f
+## 17:40:21 1. deploy the Names registry
+deploying logos_names.bin (459452 bytes, 5 segments) at GrkPkfoAmbBXfqgj5Lnx9TBYtZmHEa2mXn3jmhX3tem4
+Transaction hash is 8312b05d09a9fe1d7ebc3ce5681cd1aa406ada021d4cfe6b81fe1e2a52c2cd79
 Transaction is included in block 2
-Transaction hash is 454170a86a1d6972cba18e991989860eff5e91c608ad8ac61fe01543647ecb57
+Transaction hash is cd95a51f1c356ed8071c956cd187ecc33facb385aab4c8e6234da7c2cfcd6087
 Transaction is included in block 3
-Transaction hash is 9ab614a33c8dbff0943539744a98f9298e32689df2b0ad3dd39c6cc7672d6c5a
+Transaction hash is c28e36609c1e7a75509d8d0c8391714cd088209eacdcc8d23ed728922403d468
 Transaction is included in block 4
-Transaction hash is e94ba42551bc5bb9f97b27c1e8bbd21c427c57c1861703622d4e6fca7932fcff
+Transaction hash is d80ff95498d9088093eb6da260a809319ade7598c8420fdb8b92621a868df502
 Transaction is included in block 5
-Transaction hash is 0c5066005b6ad85f0c74b97e47b903aee18e7d0cb36b8c4231029a8c5f1e7799
+Transaction hash is 215471b2bff6f0c550b406acbb996dbd2a541c2ad3301985505fa44c7f356654
 Transaction is included in block 6
-Transaction hash is a02bb2de54eac60d11f40ac7de69866a76c54c69d2186b1432268567b6406246
+Transaction hash is f9be20f467155977af2d5c5820d052ace45c3bcfbdd2d46c04ef397e0a60ad2e
 Transaction is included in block 7
-Program deployed. Header account id: Dsb9KwySw74XyYxwqVZmNFg7U9YnJ3fS8D6mQ9QvRkDc
-registry Dsb9KwySw74XyYxwqVZmNFg7U9YnJ3fS8D6mQ9QvRkDc
+Program deployed. Header account id: GrkPkfoAmbBXfqgj5Lnx9TBYtZmHEa2mXn3jmhX3tem4
+registry GrkPkfoAmbBXfqgj5Lnx9TBYtZmHEa2mXn3jmhX3tem4
 
-## 13:49:45 fund the registry's own account (it signs the first Configure) and R
-Transaction hash is bc5d2b4f643b2b2782749e5946dfa7a07fcf5468ede392313b44ecb512f68fbc
+## 17:41:57 fund the registry's own account (it signs the first Configure) and R
+Transaction hash is 27178af2f44c96becb7848e7b953e64c00f458148157e2fe88c925b175f0ea30
 Transaction is included in block 8
-Transaction hash is 41a04c59bd744ada3f53cf615052fa1630acde12a813403220bedfc8b0dc4c4f
+Transaction hash is 7f859c0da99415021ce5af08bb4ab6ac2c527df7042842fc7c86bb3f3356b335
 Transaction is included in block 9
 
-## 13:50:09 configure: deposit mode, admin and treasury F, deposits 1000000 (a normal name) / 3000000 (three characters)
+## 17:42:21 configure: deposit mode, admin and treasury F, deposits 1000000 (a normal name) / 3000000 (three characters)
 reading the registry's bytecode from the chain
 fee: about 261552, at most 435888 (gas: 31475 cycles, limit 47213)
-submitted bf81992ae01ef86d6c5cbe34a5b4885290c9c428d4c522353ad58469442df0d5
+submitted 08d039c5e7b269a739ac8aca0c5238c267f6c5a7c92a8092a8ae3bdf5434d1ee
 applied in block 10
 fee paid: 257768
 {
@@ -62,125 +62,125 @@ fee paid: 257768
   "treasury": "6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV"
 }
 
-## 13:50:33 register walletci publicly to R (commit now, reveal after 15 minutes, in the background)
+## 17:42:45 register walletci publicly to R (commit now, reveal after 15 minutes, in the background)
 
-## 13:50:33 3. deploy the prototype token program
+## 17:42:45 3. deploy the prototype token program
 image id 382ae94c57a97c1d7e147dcfff6101ad57f1f652ea8edc8d5dbed793f02afab6
-deploying 392520 bytes in 4 segment(s) at header 2tWz1ZC5Wpajd7q91ANLnmwwJSDLeLpbqvkSboeRV6Bv
-Transaction hash is 2844109bbaf81b5b01ac1446a8a74f6c09938ee931c0fb6f9a4021da5d91f217
+deploying 392520 bytes in 4 segment(s) at header EWYV2F7SJWjS5TW4EpgQHgxmdJpQkZnkgZUJ2gGpgCuq
+Transaction hash is 3faa5a6de4e0bb57ac21b95ff76de510ed32232a38da2d0d8c83b00c87c7a559
 Transaction is included in block 11
-Transaction hash is 6789a9d452a49473ebc8a682e15ce9b9cd8c0c5577452b47f41d072b21a723e9
+Transaction hash is f5697495a7a30d6649bac00d5b980bf59e74c157e6b0b748b0a0725a7cb7afb2
 Transaction is included in block 12
-Transaction hash is 2218a790de85883b1992b90a0abd6f560e301f756fa342c917c7450be52c368c
+Transaction hash is d78b5e529f631ada4762e82c8a420c68e47017f130ed12f314fa887f1466faf4
 Transaction is included in block 13
-Transaction hash is f8f547d68aea9443b2abe21cd8bdc91ae46c3983c05a5301b708e0278256a4eb
+Transaction hash is e0bbe3df17bddd0ea1ead98108f1858eabd82df57bbbe5656f15238e841e7a41
 Transaction is included in block 14
-Transaction hash is afe1effef17ec35ba10fdcf04a7e1f47d89b85aadcbdbdd44c2ffb708d53911d
+Transaction hash is 19aec8974f03aef31f7fa937d616562b533d6eea10f724dcdb45d7f41d2f56b1
 Transaction is included in block 15
-program 2tWz1ZC5Wpajd7q91ANLnmwwJSDLeLpbqvkSboeRV6Bv
-token program 2tWz1ZC5Wpajd7q91ANLnmwwJSDLeLpbqvkSboeRV6Bv
+program EWYV2F7SJWjS5TW4EpgQHgxmdJpQkZnkgZUJ2gGpgCuq
+token program EWYV2F7SJWjS5TW4EpgQHgxmdJpQkZnkgZUJ2gGpgCuq
 
-## 13:51:46 names token create Demo 1000000 (F may mint)
-creating Demo at 4kfbEBPg9eMfvJTvnDPjNP2ueW6uakKCncPGdLh6JhWv, 1000000 to 6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV
+## 17:43:58 names token create Demo 1000000 (F may mint)
+creating Demo at 5fiRMPuZx2ZdqzVvTg3oAEUJkrbBsgfydUcvCNp3UcsQ, 1000000 to 6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV
 reading the token program's bytecode from the chain
 fee: about 180248, at most 299268 (gas: 21441 cycles, limit 32162)
-submitted 7c53b11a41e62b981c0b7e1815430dcb8c82abbe926b9e414f1613a45d9b5ad1
+submitted 9cb62f01a79ae22529bd5d757af48c3695d9fd349b7a6c4417575b083b09deb1
 applied in block 16
 fee paid: 177352
-token 4kfbEBPg9eMfvJTvnDPjNP2ueW6uakKCncPGdLh6JhWv
+token 5fiRMPuZx2ZdqzVvTg3oAEUJkrbBsgfydUcvCNp3UcsQ
 name      Demo
 supply    1000000
 authority 6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV
 
-## 13:51:58 names token mint 500 to F
+## 17:44:10 names token mint 500 to F
 minting 500 Demo to 6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV
 fee: about 305640, at most 510903 (gas: 37124 cycles, limit 55686)
-submitted 3256a91edea15120b83704de665d20ddf86cd21b0f486106268b952e0419c36a
+submitted 56ebc965ba0da92919ff0c67057b1b3fb33d3a55b1d68b388d29f8dc07d6c728
 applied in block 17
 fee paid: 301336
 
-## 13:52:10 names token send 250 Public/F -> Public/B
-sending 250 Demo from Public/6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV to Public/5dBu1YBLU6UVi5dMbCBen24kAuHAnDtCPFuWZWLP7rGx
+## 17:44:22 names token send 250 Public/F -> Public/B
+sending 250 Demo from Public/6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV to Public/B8dWW3TfxdKZA6jRscUMVMK39adkWapwts1DiLoqJAFB
 fee: about 195336, at most 324765 (gas: 23336 cycles, limit 35004)
-submitted d2f70177e150bcf27285a694886b6a337c764358d83993d77e25704798177843
+submitted b9c101e46ddb90e5fdd8c61143395f7f0b3d9b10e303cc3fd7f7e14e28e36e94
 applied in block 18
 fee paid: 192440
 
-## 13:52:22 names token list
+## 17:44:34 names token list
 Latest block is 18
 Syncing to block 18. Blocks to sync: 17
-Synced to block 18 in 236.672ms
+Synced to block 18 in 283.082791ms
 Latest block is 18
 Public/6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV
-  1000250  Demo  4kfbEBPg9eMfvJTvnDPjNP2ueW6uakKCncPGdLh6JhWv
-Public/5dBu1YBLU6UVi5dMbCBen24kAuHAnDtCPFuWZWLP7rGx
-  250  Demo  4kfbEBPg9eMfvJTvnDPjNP2ueW6uakKCncPGdLh6JhWv
-holdings ok: {'6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV': 1000250, '5dBu1YBLU6UVi5dMbCBen24kAuHAnDtCPFuWZWLP7rGx': 250}
+  1000250  Demo  5fiRMPuZx2ZdqzVvTg3oAEUJkrbBsgfydUcvCNp3UcsQ
+Public/B8dWW3TfxdKZA6jRscUMVMK39adkWapwts1DiLoqJAFB
+  250  Demo  5fiRMPuZx2ZdqzVvTg3oAEUJkrbBsgfydUcvCNp3UcsQ
+holdings ok: {'6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV': 1000250, 'B8dWW3TfxdKZA6jRscUMVMK39adkWapwts1DiLoqJAFB': 250}
 
-## 13:52:23 an overspend is refused before sending (B holds 250, sends 251)
-Error: Public/5dBu1YBLU6UVi5dMbCBen24kAuHAnDtCPFuWZWLP7rGx holds 250 Demo, less than 251
+## 17:44:34 an overspend is refused before sending (B holds 250, sends 251)
+Error: Public/B8dWW3TfxdKZA6jRscUMVMK39adkWapwts1DiLoqJAFB holds 250 Demo, less than 251
 refused, as it should be
 
-## 13:52:23 4. deploy the testimonial program
-deploying testimonial.bin (356828 bytes, 4 segments) at 335odAsQ1YpPxnegwXg4PQoaa4rpV51iNTzw5mmTRPCr
-Transaction hash is 7e7e23760d7d4eb5958e075fd9da973fa09c679c4e99ee1ee4421b1f8b4ceef3
+## 17:44:34 4. deploy the testimonial program
+deploying testimonial.bin (356828 bytes, 4 segments) at BsvE5cAJjWkhKVfH6P9tDsG5d66yeGrNvqV5aPfM2MbB
+Transaction hash is 8121d7adab51a8fe57e447b3927e5b776815c4b68497378633460285d75f3155
 Transaction is included in block 19
-Transaction hash is ae35872a3065e15b49def92a743310e407333046b1be8d4104e5448db2afdf0a
+Transaction hash is e07df491189d1c4921689b23b2fa1de0d93ba4e8f1db4964b6c9ad4404a806c9
 Transaction is included in block 20
-Transaction hash is 36747bdcaf0fa374b3b108564964c5ff42e8bfdf68d0c7a139fef144906d11f4
+Transaction hash is 7675cd153dcd2de893f3dc823ffa568037db092eb21d718ff535bb08a98841cb
 Transaction is included in block 21
-Transaction hash is eb71f75833f9d1972411635e6986b698cb86d5049b6d218219ea8321b1eedbdb
+Transaction hash is f76f8ea94319c646f8111e096a8703674941504ff8888f86863e18464da64b97
 Transaction is included in block 22
-Transaction hash is 8577fb81ce910bb2e73c7643c451c6f74cb9d2eb15809f1a992eabb9ca0e2e43
+Transaction hash is 05028d053fac6e5df0fa8f3749fbd87dc5edcf59f007ee31e6fedcaa93c9eb0b
 Transaction is included in block 23
-Program deployed. Header account id: 335odAsQ1YpPxnegwXg4PQoaa4rpV51iNTzw5mmTRPCr
-testimonial program 335odAsQ1YpPxnegwXg4PQoaa4rpV51iNTzw5mmTRPCr
+Program deployed. Header account id: BsvE5cAJjWkhKVfH6P9tDsG5d66yeGrNvqV5aPfM2MbB
+testimonial program BsvE5cAJjWkhKVfH6P9tDsG5d66yeGrNvqV5aPfM2MbB
 
-## 13:53:47 post a testimonial as F
-posting for lp-0021/names-wallet as 6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV (time 2026-11-04 13:53:37 UTC)
+## 17:45:58 post a testimonial as F
+posting for lp-0021/names-wallet as 6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV (time 2026-11-04 17:45:49 UTC)
 simulated: ok, 56072 cycles, gas limit 84108, fee reserve ~766971 (balance 9999930350736)
-submitted fac34471fabd981639bf8085d55f893947d6f3a05dcd2d927dbf0e6291dc0701
+submitted bff9dc9f7ef99130dca2fbe42012773aa515f03a42043c6d84f5c6865df53f3a
 applied in block 24; read back:
-#0    2026-11-04 13:53:37 UTC  6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV "ci"
-      at 9U7E1eew94TLBsXQAiZpVEyBeU7T3J7uh9t9f8h9nokL
+#0    2026-11-04 17:45:49 UTC  6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV "ci"
+      at 69Ekgn6iCFewBJTARc7WxNQn3u4bSzHxtRqr1CN692FU
       | Paid a name and sent tokens from the Names Wallet (CI end-to-end).
 
-## 13:53:59 a second post by the same account is refused
-Error: 6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV already posted a testimonial for lp-0021/names-wallet (at 9U7E1eew94TLBsXQAiZpVEyBeU7T3J7uh9t9f8h9nokL); there is one per account
+## 17:46:11 a second post by the same account is refused
+Error: 6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV already posted a testimonial for lp-0021/names-wallet (at 69Ekgn6iCFewBJTARc7WxNQn3u4bSzHxtRqr1CN692FU); there is one per account
 
-## 13:53:59 list
+## 17:46:11 list
 submission  lp-0021/names-wallet
-program     335odAsQ1YpPxnegwXg4PQoaa4rpV51iNTzw5mmTRPCr
-head        9c17Pd3FYrukPsTrxTgjMLRYvy8G7hn5FF71NqGRJvLD
+program     BsvE5cAJjWkhKVfH6P9tDsG5d66yeGrNvqV5aPfM2MbB
+head        4yA9Wm46NpeU7awRvqrr3feGuMJVmdNSEW9vTCYDvKk
 
-1 testimonials from 1 distinct accounts, 2026-11-04 13:53:37 UTC to 2026-11-04 13:53:37 UTC
+1 testimonials from 1 distinct accounts, 2026-11-04 17:45:49 UTC to 2026-11-04 17:45:49 UTC
 per month (UTC, by the on-chain time):
   2026-11      1
 adoption bar (150 testimonials from 150 accounts, 2+ months of 30+): not met yet
 
-#0    2026-11-04 13:53:37 UTC  6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV "ci"
-      at 9U7E1eew94TLBsXQAiZpVEyBeU7T3J7uh9t9f8h9nokL
+#0    2026-11-04 17:45:49 UTC  6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV "ci"
+      at 69Ekgn6iCFewBJTARc7WxNQn3u4bSzHxtRqr1CN692FU
       | Paid a name and sent tokens from the Names Wallet (CI end-to-end).
 
 (2 sequencer reads, checked: one record per account, numbered 0..0, no gaps)
 testimonial listed
 
-## 13:53:59 wait for the registration (the commitment must be 15 minutes old)
+## 17:46:11 wait for the registration (the commitment must be 15 minutes old)
 walletci takes a deposit of 1000000, held for as long as you keep the name and refunded when you release it
 (the deposit stops name squatting: holding many names ties up many deposits; nobody keeps it)
 step 1 of 2: committing to walletci
 reading the registry's bytecode from the chain
 fee: about 178880, at most 297171 (gas: 21318 cycles, limit 31977)
-submitted b23865857680e5571e9d7bd0a13c3214df29733597a424aa4a147c1cbe777a91
+submitted 4a36646fbb996c904d97e1f7a14cc84df53acb2e971d64a2fdc94d3b50098284
 applied in block 11
 fee paid: 175096
-waiting 885s before revealing (the commitment must be 15 minutes old)
-waiting 855s before revealing (the commitment must be 15 minutes old)
+waiting 886s before revealing (the commitment must be 15 minutes old)
+waiting 856s before revealing (the commitment must be 15 minutes old)
 waiting 826s before revealing (the commitment must be 15 minutes old)
 waiting 796s before revealing (the commitment must be 15 minutes old)
 waiting 766s before revealing (the commitment must be 15 minutes old)
-waiting 736s before revealing (the commitment must be 15 minutes old)
-waiting 705s before revealing (the commitment must be 15 minutes old)
+waiting 735s before revealing (the commitment must be 15 minutes old)
+waiting 706s before revealing (the commitment must be 15 minutes old)
 waiting 675s before revealing (the commitment must be 15 minutes old)
 waiting 645s before revealing (the commitment must be 15 minutes old)
 waiting 615s before revealing (the commitment must be 15 minutes old)
@@ -204,10 +204,10 @@ waiting 105s before revealing (the commitment must be 15 minutes old)
 waiting 75s before revealing (the commitment must be 15 minutes old)
 waiting 45s before revealing (the commitment must be 15 minutes old)
 waiting 15s before revealing (the commitment must be 15 minutes old)
-payments to walletci will arrive privately at Private/FaGW51CUg9yp9opbdGoHdiyvmzFbNwKUvEN4iddByNsg
-step 2 of 2: registering walletci at 1793801122190 for a deposit of 1000000
+payments to walletci will arrive privately at Private/HyZR4XVnU5vEa5pXbcSDR5xABuH5UtdZBC3t35ADbHMF
+step 2 of 2: registering walletci at 1793815054121 for a deposit of 1000000
 fee: about 1306088, at most 2188242 (gas: 159753 cycles, limit 239630)
-submitted f0a6e9910c8b72590bfb0ba72116dfd815d3c1bda16dbb27ec795d92d79d1429
+submitted 4daee170c9f2f95533aade4bc2c606a4a1721a775d0d4d03ff38269d30bde847
 applied in block 71
 fee paid: 1305904
 walletci is registered
@@ -226,44 +226,54 @@ walletci  held by a deposit (no expiry); held by a public account
 R held 50000000, now 47519000 (deposit 1000000 plus fees)
 registration fees paid: 1481000
 
-## 14:05:43 2. payments: R publishes itself as walletci's public account, then F runs names pay walletci
+## 17:57:55 2. payments: R publishes itself as walletci's public account, then F runs names pay walletci
 fee: about 483776, at most 805815 (gas: 58126 cycles, limit 87189)
-submitted 1f2f959936db33cd9ced91fe97714e12cca4e747a98e82547a89667cd54382e9
+submitted 9f8788c105a2e5dd79927b5f2714d3d23e6f3642603fcbe9c473a4abb98274df
 applied in block 72
 fee paid: 479472
-paying 123456 to walletci (7Wf4vBKqdsk29sw5JFb3y3zbwWYa7bmiidpbRx6g9Rza)
+paying 123456 to walletci (F3YkSsa6i7cwqjMW6mettu65KEhZa4ZNkHktL4ktpbrB)
 fee: about 8000, at most 18000 (a public transfer)
-submitted cabd8616b2f8e63c1bfd18244c756d521e0193475cdc18793a20404466190fbd
+submitted e76a0f6be7e312aa4cf36e43090498fd19bed1a3cbf441c0560f83a4cfd242b4
 paid in block 73
 fee paid: 4088
 R held 47039528, now 47162984
 F held 9999929896024, now 9999929768480; fee paid 4088
 
-## 14:06:08 a transfer to an account: F -> B
-Transaction hash is c22b0da8d9c4d32054c31fd481a73b21813b57bf2c901f02fb9476e239d50f2e
+## 17:58:19 a transfer to an account: F -> B
+Transaction hash is 5edae6fbf0974e18f7e4c32b6e52d7f3f03c1d69f4024db5252dab689accc269
 Transaction is included in block 74
 B held 0, now 777000; F held 9999929768480, now 9999928987392
 
-## 14:06:32 5. accounts and fees: the fee quote, then make, name and choose accounts
+## 17:58:43 5. accounts and fees: the fee quote, then make, name and choose accounts
 {"base_fee_exec":8,"base_fee_stor":8,"height":74,"private_transfer":{"about":"5070616","at_most":"8239751"},"public_transfer":{"about":"8000","at_most":"18000"}}
 accounts and fee quote ok: 23 accounts
   Public/6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV  9999928987392  (default)
 
-## 14:06:33 6. a network drop: the sequencer stops
+## 17:58:44 6. a network drop: the sequencer stops
 with no sequencer, a read and a send failed in 0s:
     1: Connection refused (os error 61)
     2: Connection refused (os error 61)
 
-## 14:06:33 6. the sequencer restarts on the same chain
-up (pid 84598)
+## 17:58:44 6. the sequencer restarts on the same chain
+up (pid 83993)
 height 74 before the stop, 74 after the restart
 accounts kept across the drop and the restart
-Transaction hash is 8b85866c33cdb46e171d24adfd6f0eb988b0ec1aa99db1ff44b0b90033534485
+Transaction hash is 7de3ea1fdb20dba6f3997aa6901555e27f9a2a9d7a2e6c8e1b26140cda18f2f3
 Transaction is included in block 75
 
-## 14:07:08 the chain is still healthy
-{"jsonrpc":"2.0","id":1,"result":75}
+## 17:59:17 7. apps: walletci publishes demo_ui, and lezreg checks packages against it
+app.demo_ui = {"root":"fa59e93e7d7884d40214d8a205f9cd9450c25f4e6a9dc9b5c7450c1738322933","v":1,"version":"1.0.0"}
+fee: about 522944, at most 870759 (gas: 62766 cycles, limit 94149)
+submitted 8e5f63bc9b02d12e9ddbc838e4eacb325779d39b127f799ad9cf0724644816ed
+applied in block 76
+fee paid: 518640
+verified: demo_ui 1.0.0 is published by walletci
+MISMATCH: walletci publishes demo_ui but does not vouch for this package (root 2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881)
+demo_ui  1.0.0  root fa59e93e7d7884d40214d8a205f9cd9450c25f4e6a9dc9b5c7450c1738322933
 
-## 14:07:08 PASS: registry, payments, tokens, testimonial, accounts and fees, a drop and a restart, on a fresh rc1 standalone chain
+## 17:59:30 the chain is still healthy
+{"jsonrpc":"2.0","id":1,"result":76}
+
+## 17:59:30 PASS: registry, payments, tokens, testimonial, accounts and fees, a drop and a restart, apps by publisher, on a fresh rc1 standalone chain
 sequencer stopped
 exit 0
