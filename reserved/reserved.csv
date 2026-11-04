@@ -1192,6 +1192,7 @@ appropriation,nouns,wordfreq;wordnet
 approval,nouns,google-10000-english;wordnet
 approving,nouns,wordfreq;wordnet
 approximation,nouns,wordfreq;wordnet
+appstore,brands,hand;lns
 apricot,nouns,wordfreq;wordnet
 april,firstnames,knowledge:claude
 apro,web3,coingecko
@@ -12323,6 +12324,7 @@ logistics,nouns,google-10000-english;wordnet
 logitech,brands,knowledge:interbrand-brandz-fortune500;knowledge:tech-social-media
 logo,nouns,google-10000-english;wordnet
 logos,web3,hand;logos
+logos-appstore,brands,hand;lns
 logos-bedrock,web3,hand
 logos-blockchain,web3,hand;logos
 logos-chat,web3,hand;logos
@@ -12335,6 +12337,7 @@ logos-press,web3,hand
 logos-sequencer,web3,hand
 logos-storage,web3,hand;logos
 logos-wallet,web3,hand;logos
+logosappstore,brands,hand;lns
 lohan,nouns,wordfreq;wordnet
 loin,nouns,wordfreq;wordnet
 loins,nouns,wordfreq;wordnet
@@ -14233,7 +14236,9 @@ name,nouns,google-10000-english;wordnet
 namecheap,brands,knowledge:tech-social-media;tranco-ZJ8PG-top1000
 nameplate,nouns,wordfreq;wordnet
 names,nouns,google-10000-english;wordnet
+names-wallet,brands,hand;lns
 namesake,nouns,wordfreq;wordnet
+nameswallet,brands,hand;lns
 nami,web3,hand
 naming,nouns,wordfreq;wordnet
 namjoon,firstnames,knowledge:claude
