@@ -38,6 +38,8 @@
 #   TESTIMONIAL      the testimonial client (cargo build --release -p testimonial_client)
 #   TESTIMONIAL_ELF  the testimonial guest (testimonial-imageid <path> writes it)
 #   LEZREG           optional: the registry's `lezreg` CLI, for step 7 (skipped without it)
+#   STORAGE_BIN      optional: a Logos Storage binary; step 7 then also publishes a package by
+#                    CID and installs it with `lezreg app get` (checked by sha256 and root)
 #   WORK             a new, empty directory for the chain and the wallets
 #   RPC_PORT, METRICS_PORT  (default 3230, 9230), bound to 127.0.0.1 only
 set -euo pipefail
@@ -364,6 +366,28 @@ if [ -n "${LEZREG:-}" ]; then
   echo "$COPY" | grep -q '"status": "mismatch"' || fail "a copy was not reported as a mismatch: $COPY"
   "$LEZREG" --rpc "$RPC" --lns "$REG" app show "$NAME" | tee "$WORK/apps.txt"
   grep -q "^demo_ui  1.0.0  root $ROOT" "$WORK/apps.txt" || fail "app show does not list demo_ui"
+  if [ -n "${STORAGE_BIN:-}" ]; then
+    say "7. apps: a package published by CID on Logos Storage, installed with lezreg app get"
+    mkdir -p "$WORK/storage" && chmod 700 "$WORK/storage"
+    "$STORAGE_BIN" --data-dir="$WORK/storage" --api-port=8189 --listen-port=8179 --nat=extip:127.0.0.1 --block-ttl=86400 > "$WORK/storage.log" 2>&1 &
+    STORAGE_PID=$!
+    API=http://127.0.0.1:8189/api/storage/v1
+    for _ in $(seq 1 30); do curl -sf "$API/debug/info" >/dev/null && break; sleep 1; done
+    python3 - "$WORK/cid_ui-1.0.0.lgx" "$NAME" <<'MAKE'
+import io, json, os, sys, tarfile
+manifest = {"name": "cid_ui", "version": "1.0.0", "author": "lns:" + sys.argv[2], "hashes": {"root": "cd" * 32}}
+with tarfile.open(sys.argv[1], "w:gz") as t:
+    for name, data in (("manifest.json", json.dumps(manifest).encode()), ("payload.bin", os.urandom(200_000))):
+        info = tarfile.TarInfo(name); info.size = len(data); t.addfile(info, io.BytesIO(data))
+MAKE
+    VALUE=$("$LEZREG" --json app record "$WORK/cid_ui-1.0.0.lgx" --upload --storage-api "$API" | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')
+    echo "app.cid_ui = $VALUE"
+    echo "$VALUE" | grep -q '"cid":"z' || fail "the record has no CID"
+    NR set-text "$NAME" app.cid_ui "$VALUE" | grep -vE '^(Stored|Transaction data)' | cut -c1-200
+    "$LEZREG" --rpc "$RPC" --lns "$REG" app get "$NAME" cid_ui -o "$WORK/installed.lgx" --storage-api "$API" || fail "app get"
+    cmp "$WORK/cid_ui-1.0.0.lgx" "$WORK/installed.lgx" || fail "app get wrote other bytes than were published"
+    kill "$STORAGE_PID" 2>/dev/null || true
+  fi
 else
   echo "(step 7 skipped: set LEZREG to the registry's lezreg CLI to check apps by publisher)"
 fi
@@ -371,4 +395,4 @@ fi
 say "the chain is still healthy"
 rpc getLastBlockId
 echo
-say "PASS: registry, payments, tokens, testimonial, accounts and fees, a drop and a restart${LEZREG:+, apps by publisher}, on a fresh rc1 standalone chain"
+say "PASS: registry, payments, tokens, testimonial, accounts and fees, a drop and a restart${LEZREG:+, apps by publisher}${STORAGE_BIN:+ and by CID}, on a fresh rc1 standalone chain"
