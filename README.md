@@ -25,6 +25,20 @@ Earlier: [0.9](https://github.com/jefdiesel/logos-names/releases/tag/basecamp-v0
 [SPEC.md](SPEC.md) is the specification: everything a wallet, app or gateway needs
 to resolve and change names without this repository's code.
 
+**Names Wallet (LEZ 0.4, in progress, for [λPrize LP-0021](https://github.com/logos-co/lambda-prize/blob/master/prizes/LP-0021.md)).**
+On this branch Names is also the wallet other Basecamp apps use: they connect, see only
+the accounts you share, and propose payments, token transfers and program calls that
+you approve in Names, with the app, account, amount, destination, network fee and the
+program's verified source on the prompt. You hold several public and private accounts
+and choose which one pays, send and receive the native token and fungible tokens,
+publicly or privately, and see each change's fee before and after it goes out. For app
+developers: [the Wallet Provider SDK](docs/wallet/PROVIDER-SDK.md), with two mini-apps
+built on it as worked examples, [a testimonial board](apps/testimonial/README.md) and
+[a faucet](apps/faucet/README.md). Tokens: [docs/wallet/TOKENS.md](docs/wallet/TOKENS.md).
+Status against the prize: [docs/wallet/PLAN.md](docs/wallet/PLAN.md). It goes live with the
+public LEZ 0.4 testnet; until then it runs on local 0.4 chains, end to end in CI
+([wallet-e2e.yml](.github/workflows/wallet-e2e.yml)).
+
 ## What you can do
 
 | | |
