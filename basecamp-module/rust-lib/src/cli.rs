@@ -1736,10 +1736,17 @@ impl Jobs {
         let mut record = self.record(id).ok_or_else(|| format!("there is no job {id}"))?;
         if record["state"] == "running" {
             let watched = WATCHED.lock().is_ok_and(|watched| watched.contains(id));
-            // Started before the module last restarted: nothing waits on it.
             if !watched && !record["pid"].as_u64().is_some_and(alive) {
-                record["state"] = Value::from("failed");
-                record["error"] = Value::from("the names module restarted while this ran, so how it ended is unknown; read the name again");
+                // The watcher writes the outcome before it lets go of the job, so a job it
+                // just finished has its outcome on disk now: read it again before deciding.
+                match self.record(id).filter(|again| again["state"] != "running") {
+                    Some(ended) => record = ended,
+                    // Started before the module last restarted: nothing waits on it.
+                    None => {
+                        record["state"] = Value::from("failed");
+                        record["error"] = Value::from("the names module restarted while this ran, so how it ended is unknown; read the name again");
+                    }
+                }
             }
         }
         let tail = self.tail(id);
