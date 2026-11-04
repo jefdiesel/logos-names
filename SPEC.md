@@ -235,7 +235,8 @@ transactions contain is identifiers and sealed bytes.
 
 **Forward (name to profile).** Normalise the name, derive `id` and `key`, derive
 the record account, read the registry's actor state on it, decode `NameRecord`, open
-`sealed`. One derivation and one account read.
+`sealed`. One derivation and one account read. A client that uses the name then
+follows its `forward` entry, if it has one (section 7, Forwarding).
 
 **Expiry.** A name is held for a term and then lapses. With `now` the reader's
 own clock in milliseconds and a grace period of 30 days (2,592,000,000 ms):
@@ -290,6 +291,29 @@ application-defined and should be namespaced, for example `myapp.setting`.
 | `theme` | The card's theme: `light` (the default), `dark` or `auto` (follows the viewer). |
 | `font` | The card's font: `sans` (the default), `serif`, `mono` or `rounded`, from the viewer's own system fonts. |
 | `logos.account` | The holder's Logos account: an [AccountLog](https://github.com/logos-co/logos-lips/blob/main/docs/identity/raw/accountlog.md) address, the account's Ed25519 public key as 64 lowercase hex characters. See below. |
+| `forward` | Another name this one points to, written bare (`names`). See [Forwarding](#forwarding). |
+| `app.<module>` | An app this name publishes: JSON with the package's root hash, as the LEZ Program Registry defines it ([APPS.md](https://github.com/jefdiesel/lez-program-registry/blob/main/docs/APPS.md)). |
+
+### Forwarding
+
+A name can point to another name with the `forward` entry, so a brand name or an
+old name leads to the one in use: `nameswallet` forwards to `names`. A client
+that **uses** a name follows it: to pay it, message it, show its profile, or check
+an app it publishes. With `A` the name asked for:
+
+1. Resolve `A`. If its profile has no `forward`, use `A`.
+2. Otherwise the value, normalised, is `B`. If `B` is not a valid name, or is `A`
+   itself, ignore the entry and use `A`.
+3. Resolve `B`. If it is not registered, refuse: `A` points to a name that isn't
+   registered. Otherwise use `B`'s profile, and `B`'s `forward` is **not**
+   followed: one hop only, so there are no chains and no loops.
+
+A client MUST show that it followed a forward (`nameswallet → names`) wherever it
+shows what it resolved, before a payment above all, as it would show an address.
+Changing a name (its profile, page, holder, release) never follows a forward: it
+changes `A`. Only `A`'s holder can set or remove its `forward`, so a forward says
+as much as a payment address in the same profile: whoever holds `A` vouches for
+`B`.
 
 ### Linking a name to a Logos account
 

@@ -69,7 +69,10 @@ pub trait NamesModule: Send + 'static {
     /// `{name, display, public, public_hex, private}`: `private` is
     /// `{nullifier_public_key, viewing_public_key}` in hex or null, and
     /// `public` is an account ID or null. Prefer `private` when it is there.
-    /// A null value means the name is not registered.
+    /// A name that forwards (its `forward` entry, SPEC.md §7) is paid where it
+    /// points, one hop: then `name` is the target and `forwarded_from` the name
+    /// asked for, which a payer must be shown. A null value means the name is
+    /// not registered.
     fn recipient(&mut self, name: String) -> String;
 
     /// Everything `name` resolves to: `{name, display, owner_tag, expires,
@@ -80,6 +83,8 @@ pub trait NamesModule: Send + 'static {
     /// is true once it has passed. `owner_tag` is the holder's tag (hex): the
     /// chain never names the holder. A null value means it is not registered,
     /// which includes a fee-mode name that lapsed more than 30 days ago.
+    /// `forward` is the name it points to (SPEC.md §7, Forwarding), or null:
+    /// `resolve` doesn't follow it, so the name's holder can still edit it.
     fn resolve(&mut self, name: String) -> String;
 
     /// The page published under `name`: `{content_type, bytes, text}`, where
@@ -1771,10 +1776,25 @@ fn settings_json(settings: &Settings, now: u64) -> Value {
 
 impl NamesModule for Names {
     fn recipient(&mut self, name: String) -> String {
-        self.about(&name, |registry, name, derived| {
-            let resolved = registry.resolve(name, derived)?;
-            Ok(resolved.map_or(Value::Null, |resolved| resolved.recipient_json()))
-        })
+        reply((|| {
+            let name = registry::parse_name(&name)?;
+            let registry = self.registry()?;
+            let derived = self.derived(&name);
+            let Some(resolved) = registry.resolve(&name, &derived)? else {
+                return Ok(Value::Null);
+            };
+            // A name that forwards is paid where it points, one hop (SPEC.md §7).
+            let Some(target) = resolved.forward_target() else {
+                return Ok(resolved.recipient_json());
+            };
+            let derived = self.derived(&target);
+            let forwarded = registry
+                .resolve(&target, &derived)?
+                .ok_or_else(|| format!("{name} points to {target}, which isn't registered"))?;
+            let mut value = forwarded.recipient_json();
+            value["forwarded_from"] = Value::from(name);
+            Ok(value)
+        })())
     }
 
     fn resolve(&mut self, name: String) -> String {

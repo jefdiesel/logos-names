@@ -32,6 +32,7 @@ Item {
     property string cliWallet: ""
     property bool revealing: false     // a pending registration is being asked about
     property var record: null          // the name on the plate
+    property string forwardedFrom: ""  // the name asked for, when the plate shows where it forwards
     property var page: null
     property string editTab: "profile"   // the Edit screen's tab: profile, page or giveup
     property bool publicRegisterOpen: false
@@ -1140,7 +1141,18 @@ Item {
         pageSourceOpen = false
         pageAll = false
         pageLink = ""
+        forwardedFrom = ""
         read(name)
+        // A name that forwards is shown where it points, one hop (SPEC.md §7); a name
+        // this wallet holds opens as itself, so its holder can edit it.
+        if (record !== null && record.forward && !cliHolds(record.name)) {
+            var from = record.name
+            read(record.forward)
+            if (record !== null)
+                forwardedFrom = from
+            else
+                say(from + " points to " + missing + ", which isn't registered.", true)
+        }
         if (record !== null)
             loadAuthorPosts(record.name, false)
     }
@@ -1836,6 +1848,7 @@ Item {
     }
 
     property bool terminalNoteOpen: false // Welcome shows the command-line install
+    property string payForwardSeen: ""   // "name→target" once the payer was told the name forwards
     property bool payFromPublic: false   // paying an account from the public account rather than the private one
     property bool payingPublicly: false  // the payment under way goes from the public account (one block, no proof)
 
@@ -1891,7 +1904,23 @@ Item {
             say(bare + " is your own name: the payment would come back to you.", true)
             return
         }
-        boardStart("cli_pay", [to, amount], "Your payment to " + to, function() {
+        // A name that forwards is paid where it points: say so first (SPEC.md §7).
+        var target = ""
+        try {
+            var recipient = ask("recipient", [bare !== "" ? bare : to])
+            if (recipient && recipient.forwarded_from)
+                target = recipient.name
+        } catch (error) {
+            say(sentence(error.message), true)
+            return
+        }
+        if (target !== "" && payForwardSeen !== to + "→" + target) {
+            payForwardSeen = to + "→" + target
+            say(to + " forwards to " + target + ", so the payment goes to " + target + ". Press Pay again to send it.", false)
+            return
+        }
+        payForwardSeen = ""
+        boardStart("cli_pay", [to, amount], "Your payment to " + (target !== "" ? to + " → " + target : to), function() {
             payAmount.text = ""
             loadCliBalance()
         })
@@ -5595,6 +5624,15 @@ Item {
                                 name: root.record !== null ? root.record.name : ""
                                 size: 52
                                 weight: Font.DemiBold
+                            }
+                            Text {
+                                visible: root.forwardedFrom !== "" && root.record !== null
+                                text: root.record === null ? "" : root.forwardedFrom + " → " + root.record.name + "  (" + root.forwardedFrom + " forwards here)"
+                                textFormat: Text.PlainText
+                                color: root.brass
+                                font.family: root.sans
+                                font.weight: Font.DemiBold
+                                font.pixelSize: root.px(16)
                             }
                             Text {
                                 visible: root.profileDisplay !== ""

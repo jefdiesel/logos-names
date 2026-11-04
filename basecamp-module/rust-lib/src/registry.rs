@@ -17,6 +17,8 @@ use sha2::{Digest, Sha256};
 
 /// How names are shown: bare, `jef` (SPEC 2).
 pub const NAME_SUFFIX: &str = "";
+/// The text entry that points a name to another (SPEC.md §7, Forwarding).
+pub const FORWARD_KEY: &str = "forward";
 /// The old suffix, still accepted and removed when typed or pasted.
 pub const LEGACY_SUFFIX: &str = ".lez";
 const MAX_NAME_LEN: usize = 32;
@@ -601,6 +603,13 @@ impl Resolved {
     }
 
     /// The name in the JSON shape SPEC.md gives.
+    /// The name this one forwards to (SPEC.md §7, Forwarding): its `forward` entry, if
+    /// that is a valid name other than this one. A client follows it one hop.
+    pub fn forward_target(&self) -> Option<String> {
+        let (_, value) = self.profile.texts.iter().find(|(key, _)| key == FORWARD_KEY)?;
+        parse_name(value).ok().filter(|target| *target != self.profile.name)
+    }
+
     pub fn to_json(&self) -> Value {
         let profile = &self.profile;
         let texts: Map<String, Value> = profile
@@ -620,6 +629,7 @@ impl Resolved {
             "npk": profile.npk.as_ref().map(|npk| hex(npk)),
             "vpk": (!profile.vpk.is_empty()).then(|| hex(&profile.vpk)),
             "texts": texts,
+            "forward": self.forward_target(),
         })
     }
 
@@ -854,6 +864,23 @@ mod tests {
     const PROGRAM: AccountId = [7; 32];
 
     /// The profile sealed in SPEC.md's vector.
+    /// SPEC.md §7, Forwarding: a valid other name, normalised, shown in `resolve`.
+    #[test]
+    fn a_record_says_where_it_forwards() {
+        let with = |value: &str| Resolved {
+            owner: [1; 32],
+            expires: NEVER,
+            profile: Profile { name: "nameswallet".into(), texts: vec![("forward".into(), value.into())], ..Profile::default() },
+            claimed: false,
+        };
+        assert_eq!(with("names").forward_target().as_deref(), Some("names"));
+        assert_eq!(with(" @Names ").forward_target().as_deref(), Some("names"));
+        assert_eq!(with("nameswallet").forward_target(), None, "not to itself");
+        assert_eq!(with("not a name").forward_target(), None);
+        assert_eq!(with("names").to_json()["forward"], "names");
+        assert_eq!(Resolved { profile: sample_profile(), ..with("x") }.to_json()["forward"], Value::Null);
+    }
+
     fn sample_profile() -> Profile {
         Profile {
             name: "jef".to_owned(),

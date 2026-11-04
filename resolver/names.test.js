@@ -14,6 +14,7 @@ import {
   decodeProfile,
   decodeSettings,
   deriveName,
+  forwardOf,
   encodePageContent,
   encodeProfile,
   isValidName,
@@ -512,3 +513,14 @@ test("an account with no reverse record, or one that claims nothing usable, has 
   assert.equal(await reverseLookup(RPC_URL, PROGRAM, OWNER), null);
   assert.deepEqual(asked, [OWNER]);
 });
+
+test("a forward names another valid name, one hop (SPEC.md §7)", () => {
+  const record = (texts) => ({ name: "nameswallet", texts });
+  assert.equal(forwardOf(record({ forward: "names" })), "names");
+  assert.equal(forwardOf(record({ forward: " @Names " })), "names", "normalised");
+  assert.equal(forwardOf(record({ forward: "nameswallet" })), null, "not to itself");
+  for (const bad of ["", "-bad", "a b", "x".repeat(33)]) assert.equal(forwardOf(record({ forward: bad })), null, bad);
+  assert.equal(forwardOf(record({})), null);
+  assert.equal(forwardOf(null), null);
+});
+

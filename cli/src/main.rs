@@ -394,6 +394,16 @@ enum Command {
         #[arg(long)]
         replace: bool,
     },
+    /// Point NAME to another name (SPEC.md §7, Forwarding): paying, messaging or viewing NAME
+    /// then uses TO, one hop. `--clear` removes the forward.
+    Forward {
+        #[arg(value_parser = parse_name)]
+        name: String,
+        #[arg(value_parser = parse_name, required_unless_present = "clear")]
+        to: Option<String>,
+        #[arg(long, conflicts_with = "to")]
+        clear: bool,
+    },
     /// Set a text entry such as `chat`, `inbox` or `agent`; an empty value removes it.
     SetText {
         #[arg(value_parser = parse_name)]
@@ -624,6 +634,15 @@ mod claims;
 mod fees;
 mod module;
 mod tokens;
+
+/// The text entry that points a name to another (SPEC.md §7, Forwarding).
+const FORWARD_KEY: &str = "forward";
+
+/// Where `name`'s profile forwards to: a valid name other than `name`, or `None`.
+fn forward_of(name: &str, profile: &Profile) -> Option<String> {
+    let value = profile.texts.iter().find(|text| text.key == FORWARD_KEY)?.value.as_str();
+    parse_name(value).ok().filter(|target| target != name)
+}
 
 /// Accepts a name as people write it (`jef`, `@jef`, `lns:jef` or `jef.lez`, any case) and returns the bare name.
 fn parse_name(input: &str) -> Result<String, String> {
@@ -934,6 +953,21 @@ impl Client {
             None => self.registry_balance(name_seeds(id)[2]),
         };
         vec![self.signer(payer).balance(), paid]
+    }
+
+    /// The name to use for `name` (SPEC.md §7, Forwarding): the name its `forward` entry
+    /// names, one hop, or `name` itself. Says so on standard error when it forwards, since
+    /// a payer must see where a payment goes.
+    async fn following(&self, name: &str) -> Result<String> {
+        let (_, _, profile) = self.lookup(name).await?;
+        let Some(target) = forward_of(name, &profile) else {
+            return Ok(name.to_owned());
+        };
+        self.lookup(&target)
+            .await
+            .map_err(|_| anyhow!("{name} points to {target}, which isn't registered"))?;
+        eprintln!("{name} → {target} (it forwards there)");
+        Ok(target)
     }
 
     /// The record of `name` and its opened profile, for reading: a name past its
@@ -1735,6 +1769,7 @@ impl Client {
     /// Where paying `name` goes, as `names pay` decides it (see [`pays_publicly`]): its
     /// public account, or its private receiving keys.
     async fn payee(&self, name: &str, public: bool, private: bool) -> Result<AccountIdentity> {
+        let name = &self.following(name).await?;
         let (_, _, profile) = self.lookup(name).await?;
         if pays_publicly(&profile, public, private) {
             let to = profile
@@ -2711,9 +2746,33 @@ async fn main() -> Result<()> {
                 })
                 .await
         }
+        Command::Forward { name, to, clear } => {
+            let to = if clear { String::new() } else { to.expect("clap requires TO without --clear") };
+            if to == name {
+                bail!("a name can't forward to itself");
+            }
+            if !to.is_empty() {
+                client.lookup(&to).await.map_err(|_| anyhow!("{to} is not registered, so {name} can't point to it"))?;
+            }
+            client
+                .edit(&name, |profile| {
+                    let existing = profile.texts.iter().position(|text| text.key == FORWARD_KEY);
+                    match (existing, to.is_empty()) {
+                        (Some(index), true) => {
+                            profile.texts.remove(index);
+                        }
+                        (Some(index), false) => profile.texts[index].value = to.clone(),
+                        (None, true) => bail!("{name} doesn't forward anywhere"),
+                        (None, false) => profile.texts.push(TextRecord { key: FORWARD_KEY.to_owned(), value: to.clone() }),
+                    }
+                    Ok(())
+                })
+                .await
+        }
         Command::Transfer { name, new_owner } => client.transfer(&name, new_owner).await,
         Command::Release { name } => client.release(&name).await,
         Command::Open { name, port, no_browser, storage } => {
+            let name = client.following(&name).await?;
             let (_, _, profile) = client.lookup(&name).await?;
             let page = client.page(&name).await?;
             let card = profile_card(&name, &profile, page.is_some(), &storage);
@@ -2736,6 +2795,7 @@ async fn main() -> Result<()> {
                 Some(from) => from,
                 None => default_private()?,
             };
+            let name = client.following(&name).await?;
             let (_, _, profile) = client.lookup(&name).await?;
             if pays_publicly(&profile, public, private) {
                 client.pay(&name, amount, from).await
@@ -2744,7 +2804,12 @@ async fn main() -> Result<()> {
             }
         }
         Command::Resolve { name } => {
-            println!("{}", serde_json::to_string_pretty(&client.resolve(&name).await?)?);
+            let used = client.following(&name).await?;
+            let mut resolved = client.resolve(&used).await?;
+            if used != name {
+                resolved["forwarded_from"] = name.into();
+            }
+            println!("{}", serde_json::to_string_pretty(&resolved)?);
             Ok(())
         }
         Command::Post { as_name, text, cids, reply } => client.post(&as_name, text, cids, reply).await,
@@ -2795,7 +2860,23 @@ mod shortlist_tests {
 
 #[cfg(test)]
 mod pay_tests {
-    use super::{Profile, pays_publicly, private_keys_of};
+    use super::{Profile, TextRecord, forward_of, pays_publicly, private_keys_of};
+
+    /// SPEC.md §7, Forwarding: a valid other name, normalised; anything else is ignored.
+    #[test]
+    fn a_forward_names_another_valid_name() {
+        let with = |value: &str| Profile {
+            texts: vec![TextRecord { key: "forward".into(), value: value.into() }],
+            ..Profile::default()
+        };
+        assert_eq!(forward_of("nameswallet", &with("names")).as_deref(), Some("names"));
+        assert_eq!(forward_of("nameswallet", &with("  @Names ")).as_deref(), Some("names"), "normalised");
+        assert_eq!(forward_of("names", &with("names")), None, "not to itself");
+        for bad in ["", "-bad", "a b", "Has.Dots.lez.x", &"x".repeat(33)] {
+            assert_eq!(forward_of("a", &with(bad)), None, "{bad:?}");
+        }
+        assert_eq!(forward_of("a", &Profile::default()), None);
+    }
 
     /// `names pay` and `names token send` pick a name's destination the same way.
     #[test]

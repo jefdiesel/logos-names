@@ -409,6 +409,36 @@ export async function resolveName(rpcUrl, program, name, now = Date.now()) {
   return { ...held, account, npk, vpk, texts };
 }
 
+/** The text entry that points a name to another (SPEC.md §7, Forwarding). */
+export const FORWARD_KEY = "forward";
+
+/**
+ * Where a resolved record forwards to: its `forward` entry, normalised, if that
+ * is a valid name other than the record's own; otherwise null.
+ */
+export function forwardOf(record) {
+  const value = record && record.texts ? record.texts[FORWARD_KEY] : undefined;
+  if (typeof value !== "string") return null;
+  const target = normalizeName(value);
+  return isValidName(target) && target !== record.name ? target : null;
+}
+
+/**
+ * Resolves `name` for using it (paying, messaging, showing it): when it forwards,
+ * the record of the name it points to, one hop, with `forwardedFrom` set to the
+ * name asked for, which a payer must be shown. Null when `name` isn't
+ * registered; throws when it points to a name that isn't. Changing a name never
+ * follows a forward: use `resolveName` for that.
+ */
+export async function resolveUsing(rpcUrl, program, name, now = Date.now()) {
+  const record = await resolveName(rpcUrl, program, name, now);
+  const target = forwardOf(record);
+  if (target === null) return record;
+  const forwarded = await resolveName(rpcUrl, program, target, now);
+  if (forwarded === null) throw new Error(`${name} points to ${target}, which isn't registered`);
+  return { ...forwarded, forwardedFrom: name };
+}
+
 /**
  * What a name shows people: whether it can be paid privately, and the public
  * account only if its holder published one. The private receiving keys are
