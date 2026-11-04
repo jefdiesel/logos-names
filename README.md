@@ -29,7 +29,8 @@ to resolve and change names without this repository's code.
 On this branch Names is also the wallet other Basecamp apps use: they connect, see only
 the accounts you share, and propose payments, token transfers and program calls that
 you approve in Names, with the app, account, amount, destination, network fee and the
-program's verified source on the prompt. You hold several public and private accounts
+program's verified source on the prompt, and **who publishes the asking app**, checked
+against its LNS name ("forumer ✓ verified publisher", or a warning that it may be a copy). You hold several public and private accounts
 and choose which one pays, send and receive the native token and fungible tokens,
 publicly or privately, and see each change's fee before and after it goes out. For app
 developers: [the Wallet Provider SDK](docs/wallet/PROVIDER-SDK.md), with two mini-apps
@@ -49,6 +50,8 @@ public LEZ 0.4 testnet; until then it runs on local 0.4 chains, end to end in CI
 | **Messages** | Direct messages and group chats between names, end-to-end encrypted over Logos messaging, through Basecamp's chat module. Turn on messages publishes your chat address on your name. |
 | **Pay** | Send to a name from your private account; the chain doesn't show who paid whom or how much. |
 | **Anon** | A second name like `anon-frost-frog`, held by its own private account, funded privately, so nothing on chain links it to your main name. |
+| **Forward** | Point a name to another (`names forward nameswallet names`): paying, messaging or viewing `nameswallet` then uses `names`, one hop, and always says so. For brand names and old names. [SPEC.md §7](SPEC.md) |
+| **Publish apps** | A name can vouch for the Basecamp apps it publishes, so a copy can't pass as the real one: the app names you, your name names its package hash (and where to fetch it on Logos Storage). Done with the [LEZ Program Registry](https://github.com/jefdiesel/lez-program-registry#apps-verified-by-publisher). |
 
 ### Private or public
 
