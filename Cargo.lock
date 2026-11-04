@@ -5349,6 +5349,7 @@ dependencies = [
  "clap_mangen",
  "clock_core",
  "common",
+ "fee_core",
  "futures",
  "getrandom 0.3.4",
  "hex",

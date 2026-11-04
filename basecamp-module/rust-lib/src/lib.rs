@@ -484,7 +484,10 @@ pub trait NamesModule: Send + 'static {
     /// exit, log_tail}`. `state` is `running`, `done` (the CLI exited 0: the
     /// change was sent and included; `resolve` shows it) or `failed`;
     /// `log_tail` is the end of the CLI's output, whose last line says why it
-    /// failed. Times are in milliseconds.
+    /// failed. Times are in milliseconds. `fee` is what the changes it sent
+    /// cost, `{about, at_most, paid}` (decimal text; `paid` null until one
+    /// applied, or if it couldn't be measured), or null if it sent none that
+    /// the CLI prices (a payment to a bare account does not).
     fn job(&mut self, id: String) -> String;
 
     /// Runs the `names` CLI at this path, and remembers it across restarts;
@@ -554,6 +557,47 @@ pub trait NamesModule: Send + 'static {
     /// next receive takes them. Its ended `job` state has `applied` (how many
     /// were received), `nothing` (there was nothing to receive) and `problem`.
     fn cli_token_receive(&mut self) -> String;
+
+    // ── Accounts and fees: the names CLI's wallet. Names app only. ──────
+
+    /// Every account of the names CLI's wallet: `[{account, kind, label,
+    /// balance, default, public_key}]`. `account` is written `Public/<id>` or
+    /// `Private/<id>`; `label` the nickname given here, or null; `balance`
+    /// decimal text (a public account's read from the chain, a private one's as
+    /// the wallet last saw it), or null if it couldn't be read; `default` marks
+    /// the account of its kind the wallet pays and registers from. `public_key`
+    /// (hex, public accounts only) is what someone needs to pay a public
+    /// account the chain hasn't seen yet. The wallet catches up with the chain
+    /// first: seconds to a minute or two, so ask with a long timeout.
+    fn cli_accounts(&mut self) -> String;
+
+    /// Makes a new `kind` (`public` or `private`) account in the wallet, with
+    /// the nickname `label` (empty for none, at most 40 characters), and gives
+    /// it as a `cli_accounts` entry. Nothing is sent and nothing is paid. A
+    /// wallet without a default account of that kind makes it the default.
+    /// Refused while a CLI job runs, since a job saves the wallet when it ends.
+    fn cli_account_new(&mut self, kind: String, label: String) -> String;
+
+    /// Gives the wallet's `account` (`Public/<id>` or `Private/<id>`) the
+    /// nickname `label`; an empty one clears it. `{account, label}`.
+    fn cli_account_label(&mut self, account: String, label: String) -> String;
+
+    /// Pays and registers from `account` (`Public/<id>` or `Private/<id>`)
+    /// from now on: it becomes the default of its kind, and `cli_balance`,
+    /// `cli_pay`, `cli_register` and the rest use it. Names already held stay
+    /// with the accounts holding them; payments to a name go where the name
+    /// points, as before. Apps keep the accounts they were granted. Gives the
+    /// account as a `cli_accounts` entry. Refused while a CLI job runs.
+    fn cli_account_use(&mut self, account: String) -> String;
+
+    /// The chain's fees now: `{height, base_fee_exec, base_fee_stor,
+    /// public_transfer: {about, at_most}, private_transfer: {about,
+    /// at_most}}`, amounts in base units as decimal text. `about` is what a
+    /// transfer costs at the current base fees, `at_most` what is held for it
+    /// (a public transfer) or reserved in its proof (a private one) should
+    /// fees climb before it lands. A job's state has `fee` for what it sent:
+    /// `{about, at_most, paid}`, `paid` measured once it applied.
+    fn cli_fee(&mut self) -> String;
 
     // ── Wallet Provider SDK: for any app (docs/wallet/PROVIDER-SDK.md) ──
     //
@@ -834,7 +878,7 @@ const NAMES_APP: &str = "names_ui";
 /// `get_config` reports it so the Names app can refuse a module from another
 /// release (the app's own metadata asks for at least this at install, but an
 /// older module can still be the one loaded).
-const MODULE_VERSION: &str = "0.11.0";
+const MODULE_VERSION: &str = "0.12.0";
 
 /// Whether `caller` may use those methods. Basecamp gives each app its own
 /// credential, named after the app, so the module knows which app is calling.
@@ -1381,6 +1425,20 @@ impl Names {
         let jobs = self.jobs()?;
         let id = jobs.prepare(cli::WALLET_JOB)?;
         jobs.start(&setup, &id, cli::WALLET_JOB, kind, command, None)
+    }
+
+    /// Refuses while any CLI job runs: each one saves the wallet and the CLI's
+    /// settings when it ends, from the copy it read when it started, which
+    /// would undo an account change made meanwhile.
+    fn no_job_running(&self) -> Result<(), String> {
+        match self.jobs()?.running().first() {
+            Some(job) => Err(format!(
+                "wait for \"{}\" to finish first (job {}): it saves the wallet when it ends",
+                job["kind"].as_str().unwrap_or("a change"),
+                job["id"].as_str().unwrap_or_default()
+            )),
+            None => Ok(()),
+        }
     }
 
     /// Adds what a finished install or wallet job means to its `job` state:
@@ -2541,6 +2599,7 @@ impl NamesModule for Names {
         let mut state = (|| self.jobs()?.state(id.trim()))();
         if let Ok(state) = &mut state {
             self.job_outcome(state);
+            state["fee"] = self.jobs().map_or(Value::Null, |jobs| cli::parse_fee(&jobs.whole_log(id.trim())));
         }
         // A change that ended may have changed its name: read it fresh next time.
         if let Ok(state) = &state {
@@ -2737,6 +2796,56 @@ impl NamesModule for Names {
                 Ok(cli::token_receive_args(&program))
             })
         })())
+    }
+
+    fn cli_accounts(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| cli::run_account_list(&self.cli_setup()?))())
+    }
+
+    fn cli_account_new(&mut self, kind: String, label: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let setup = self.cli_setup()?;
+            self.no_job_running()?;
+            cli::run_account_new(&setup, kind.trim(), &label)
+        })())
+    }
+
+    fn cli_account_label(&mut self, account: String, label: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let setup = self.cli_setup()?;
+            self.no_job_running()?;
+            cli::run_account_label(&setup, &account, &label)
+        })())
+    }
+
+    fn cli_account_use(&mut self, account: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let setup = self.cli_setup()?;
+            self.no_job_running()?;
+            let chosen = cli::run_account_use(&setup, &account)?;
+            // Balances and holdings were read for the old default.
+            self.forget_mine();
+            Ok(chosen)
+        })())
+    }
+
+    fn cli_fee(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| cli::run_fee(&self.cli_setup()?))())
     }
 
     // ── Wallet Provider SDK ─────────────────────────────────────────────
@@ -4521,5 +4630,71 @@ mod tests {
         program_registry::LABEL.with(|label| *label.borrow_mut() = None);
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ── Accounts and fees ──────────────────────────────────────────────
+
+    #[test]
+    fn the_account_list_is_checked_before_the_app_sees_it() {
+        let key = "ab".repeat(32);
+        let list = format!(
+            r#"[{{"account":"Public/{PUBLIC}","kind":"public","label":"Main","balance":"12","default":true,"public_key":"{key}"}},{{"account":"Private/{PRIVATE}","kind":"private","label":"bad\u0007","balance":"x","default":false,"public_key":"{key}"}}]"#
+        );
+        let (mut names, dir) = with_wallet("accounts-list", &format!("echo '{list}'"));
+        let got = parsed(&names.cli_accounts());
+        assert_eq!(got["success"], true, "{got}");
+        let rows = got["value"].as_array().unwrap();
+        assert_eq!(rows[0], json!({ "account": format!("Public/{PUBLIC}"), "kind": "public", "label": "Main", "balance": "12", "default": true, "public_key": key }));
+        assert_eq!(rows[1], json!({ "account": format!("Private/{PRIVATE}"), "kind": "private", "label": null, "balance": null, "default": false, "public_key": null }));
+        // Another app can't read the wallet's accounts this way.
+        as_caller(app("snoop_ui"));
+        assert_eq!(parsed(&names.cli_accounts())["success"], false);
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn account_changes_check_their_input_and_wait_for_running_jobs() {
+        let entry = format!(r#"{{"account":"Private/{PRIVATE}","kind":"private","label":"Savings","balance":"0","default":true,"public_key":null}}"#);
+        let (mut names, dir) = with_wallet("accounts-change", &format!("sleep 1; echo '{entry}'"));
+        for (kind, label) in [("both", ""), ("public", &"x".repeat(41)[..]), ("public", "two\nlines")] {
+            let refused = parsed(&names.cli_account_new(kind.into(), label.into()));
+            assert_eq!(refused["success"], false, "{kind} {label:?}");
+        }
+        assert_eq!(parsed(&names.cli_account_use(PRIVATE.into()))["success"], false, "a bare ID is refused");
+        // While a job runs, nothing changes the wallet's accounts.
+        let job = parsed(&names.cli_shield(String::new()))["value"]["id"].as_str().unwrap().to_owned();
+        let busy = parsed(&names.cli_account_use(format!("Private/{PRIVATE}")));
+        assert!(busy["error"].as_str().unwrap().contains("wait for"), "{busy}");
+        assert_eq!(parsed(&names.cli_account_new("private".into(), "Savings".into()))["success"], false);
+        job_end(&mut names, &job);
+        let chosen = parsed(&names.cli_account_use(format!("Private/{PRIVATE}")));
+        assert_eq!(chosen["value"]["label"], "Savings", "{chosen}");
+        let made = parsed(&names.cli_account_new("private".into(), "-Savings".into()));
+        assert_eq!(made["value"]["account"], format!("Private/{PRIVATE}"), "{made}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_job_reports_the_fee_it_paid() {
+        let (mut names, dir) = with_wallet("job-fee", "echo 'fee: about 10, at most 20 (gas: 1 cycles, limit 2)'; echo 'applied in block 4'; echo 'fee paid: 9'");
+        let job = parsed(&names.cli_shield(String::new()))["value"]["id"].as_str().unwrap().to_owned();
+        job_end(&mut names, &job);
+        let state = parsed(&names.job(job))["value"].clone();
+        assert_eq!(state["fee"], json!({ "about": "10", "at_most": "20", "paid": "9" }), "{state}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_fee_quote_is_checked() {
+        let quote = r#"{"height":7,"base_fee_exec":8,"base_fee_stor":8,"public_transfer":{"about":"8000","at_most":"18000"},"private_transfer":{"about":"900","at_most":"1200"}}"#;
+        let (mut names, dir) = with_wallet("fee-quote", &format!("echo '{quote}'"));
+        let got = parsed(&names.cli_fee());
+        assert_eq!(got["value"]["public_transfer"], json!({ "about": "8000", "at_most": "18000" }), "{got}");
+        assert_eq!(got["value"]["height"], 7);
+        let (mut bad, other) = with_wallet("fee-quote-bad", r#"echo '{"public_transfer":{"about":"-1","at_most":"2"}}'"#);
+        assert_eq!(parsed(&bad.cli_fee())["success"], false);
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(other);
     }
 }

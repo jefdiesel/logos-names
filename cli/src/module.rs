@@ -11,12 +11,18 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use clap::Subcommand;
 use lee_core::{account::AccountId, program::PdaSeed};
 use wallet::{
-    AccountIdentity, AccountMention, WalletCore,
+    AccountIdentity, AccountMention, WalletCore, WalletSequencerClient as _,
     config::WalletConfigOverrides,
     utils::{fetch_config_path, fetch_persistent_storage_path, read_password},
 };
 
-use crate::{Client, Defaults, OLD_WALLET, new_wallet_password, parse_account, parse_hex32, quietly, save_defaults, write_default_wallet_files};
+use crate::{
+    Client, Defaults, NATIVE_TRANSFER_GAS_LIMIT, OLD_WALLET, fees, load_defaults, new_wallet_password, parse_account, parse_hex32,
+    quietly, save_defaults, write_default_wallet_files,
+};
+
+/// The longest nickname an account takes.
+const MAX_LABEL: usize = 40;
 
 #[derive(Subcommand)]
 pub enum Request {
@@ -40,6 +46,36 @@ pub enum Request {
     /// pending credit for a private recipient.
     #[command(subcommand)]
     Token(crate::tokens::TokenRequest),
+    /// Print every account of this wallet as JSON: `[{account, kind, label, balance,
+    /// default, public_key}]`. `balance` is decimal text, read from the chain for a public
+    /// account and as the wallet last synced it for a private one. `default` marks the
+    /// account `names` pays and registers from when none is given. `public_key` (hex,
+    /// public accounts only) is what a sender needs to pay an account the chain has not
+    /// seen yet.
+    AccountList,
+    /// Make a new `public` or `private` account, with an optional nickname; prints it as
+    /// one `account-list` entry. Nothing is sent: a new account exists on the chain once
+    /// it is paid (a private one) or first used (a public one).
+    AccountNew {
+        #[arg(value_parser = ["public", "private"])]
+        kind: String,
+        #[arg(long, default_value = "")]
+        label: String,
+    },
+    /// Give one of this wallet's accounts (`Public/<id>` or `Private/<id>`) a nickname;
+    /// an empty one clears it.
+    AccountLabel {
+        account: String,
+        #[arg(default_value = "")]
+        label: String,
+    },
+    /// Pay and register from `account` (`Public/<id>` or `Private/<id>`) from now on: it
+    /// becomes the default of its kind. Names already held stay with the accounts that
+    /// hold them, and payments to a name still go where the name points.
+    AccountUse { account: String },
+    /// The chain's fee market and what a native transfer costs at it, as JSON: `{height,
+    /// base_fee_exec, base_fee_stor, public_transfer: {about, at_most}, private_transfer}`.
+    Fee,
 }
 
 /// One actor a change reaches.
@@ -71,7 +107,131 @@ impl Client {
             Request::Send => self.module_send().await,
             Request::Restore { .. } => unreachable!("handled before the wallet is opened"),
             Request::Token(_) => unreachable!("handled with the token program chosen, in main"),
+            Request::AccountList => self.module_account_list().await,
+            Request::AccountNew { kind, label } => self.module_account_new(&kind, &label).await,
+            Request::AccountLabel { account, label } => self.module_account_label(&account, &label),
+            Request::AccountUse { account } => self.module_account_use(&account).await,
+            Request::Fee => {
+                let quote = self.wallet.client().get_fee_state().await?;
+                let headroom = self.wallet.config().private_fee_headroom_blocks;
+                println!("{}", fees::quote_json(&quote, headroom, NATIVE_TRANSFER_GAS_LIMIT));
+                Ok(())
+            }
         }
+    }
+
+    /// One of this wallet's accounts, written with its kind: `(private, id)`.
+    fn owned(&self, text: &str) -> Result<(bool, AccountId)> {
+        let private = if text.starts_with("Private/") {
+            true
+        } else if text.starts_with("Public/") {
+            false
+        } else {
+            bail!("write the account as Public/<id> or Private/<id>");
+        };
+        let id = parse_account(text).map_err(|error| anyhow!(error))?;
+        let key_chain = self.wallet.storage().key_chain();
+        let held = if private {
+            key_chain.private_account_ids().any(|(found, _)| found == id)
+        } else {
+            key_chain.public_account_ids().any(|(found, _)| found == id)
+        };
+        if !held {
+            bail!("this wallet has no account {text}");
+        }
+        Ok((private, id))
+    }
+
+    /// `account` as an `account-list` entry.
+    async fn account_entry(&self, private: bool, id: AccountId, defaults: &Defaults) -> serde_json::Value {
+        let account = format!("{}/{id}", if private { "Private" } else { "Public" });
+        let (balance, default, public_key) = if private {
+            let balance = self.wallet.get_account_private(id).and_then(|found| found.data.native_balance().ok());
+            (balance, defaults.private.as_deref() == Some(&id.to_string()), None)
+        } else {
+            let balance = self.wallet.get_account_balance(id).await.ok();
+            let key = self
+                .wallet
+                .get_account_public_signing_key(id)
+                .map(|key| hex::encode(lee::PublicKey::new_from_private_key(key).value()));
+            (balance, defaults.public.as_deref() == Some(&id.to_string()), key)
+        };
+        serde_json::json!({
+            "account": account,
+            "kind": if private { "private" } else { "public" },
+            "label": defaults.labels.get(&account),
+            "balance": balance.map(|balance| balance.to_string()),
+            "default": default,
+            "public_key": public_key,
+        })
+    }
+
+    async fn module_account_list(&self) -> Result<()> {
+        let defaults = load_defaults();
+        let key_chain = self.wallet.storage().key_chain();
+        let accounts: Vec<(bool, AccountId)> = key_chain
+            .public_account_ids()
+            .map(|(id, _)| (false, id))
+            .chain(key_chain.private_account_ids().map(|(id, _)| (true, id)))
+            .collect();
+        let mut list = Vec::new();
+        for (private, id) in accounts {
+            list.push(self.account_entry(private, id, &defaults).await);
+        }
+        println!("{}", serde_json::Value::Array(list));
+        Ok(())
+    }
+
+    async fn module_account_new(&mut self, kind: &str, label: &str) -> Result<()> {
+        let label = checked_label(label)?;
+        let private = kind == "private";
+        let id = if private {
+            self.wallet.create_new_account_private(None).0
+        } else {
+            self.wallet.create_new_account_public(None).0
+        };
+        quietly(|| self.wallet.store_persistent_data())?;
+        let mut defaults = load_defaults();
+        let account = format!("{}/{id}", if private { "Private" } else { "Public" });
+        if !label.is_empty() {
+            defaults.labels.insert(account, label);
+        }
+        // A wallet with no default of this kind (one made outside `names setup`) takes it.
+        let slot = if private { &mut defaults.private } else { &mut defaults.public };
+        if slot.is_none() {
+            *slot = Some(id.to_string());
+        }
+        save_defaults(&defaults)?;
+        println!("{}", self.account_entry(private, id, &defaults).await);
+        Ok(())
+    }
+
+    fn module_account_label(&self, account: &str, label: &str) -> Result<()> {
+        let label = checked_label(label)?;
+        let (private, id) = self.owned(account)?;
+        let account = format!("{}/{id}", if private { "Private" } else { "Public" });
+        let mut defaults = load_defaults();
+        if label.is_empty() {
+            defaults.labels.remove(&account);
+        } else {
+            defaults.labels.insert(account.clone(), label.clone());
+        }
+        save_defaults(&defaults)?;
+        println!("{}", serde_json::json!({ "account": account, "label": (!label.is_empty()).then_some(label) }));
+        Ok(())
+    }
+
+    async fn module_account_use(&self, account: &str) -> Result<()> {
+        let (private, id) = self.owned(account)?;
+        let mut defaults = load_defaults();
+        if private {
+            defaults.private = Some(id.to_string());
+        } else {
+            defaults.public = Some(id.to_string());
+        }
+        save_defaults(&defaults)?;
+        println!("{}", self.account_entry(private, id, &defaults).await);
+        Ok(())
     }
 
     fn module_accounts(&self) -> Result<()> {
@@ -140,6 +300,19 @@ impl Client {
         };
         Ok(identity.select_program_actor_state(program))
     }
+}
+
+/// A nickname as given, trimmed: at most [`MAX_LABEL`] characters, none of them control
+/// characters. Empty means none.
+fn checked_label(label: &str) -> Result<String> {
+    let label = label.trim();
+    if label.chars().count() > MAX_LABEL {
+        bail!("a nickname is at most {MAX_LABEL} characters");
+    }
+    if label.chars().any(char::is_control) {
+        bail!("a nickname is one line of text");
+    }
+    Ok(label.to_owned())
 }
 
 /// `path` with `suffix` added, numbered if that is taken, so nothing is overwritten.

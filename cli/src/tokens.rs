@@ -23,7 +23,7 @@ use lee::privacy_preserving_transaction::circuit::ProgramCatalog;
 use lee_core::{
     NullifierPublicKey, PrivateAccountKind, account::AccountId, encryption::ViewingPublicKey,
 };
-use wallet::{AccountIdentity, AccountMention, AsyncDelivery};
+use wallet::{AccountIdentity, AccountMention, AsyncDelivery, WalletSequencerClient as _};
 
 use crate::{Client, gas_limit_for, load_defaults, parse_account, parse_name};
 
@@ -1123,7 +1123,15 @@ impl Client {
         let proven = mentions.iter().any(|mention| mention.identity.is_private())
             || !delivery.recoveries.is_empty()
             || !delivery.seals.is_empty();
+        let paying: Vec<AccountMention> = match payer {
+            Some(payer) => vec![AccountIdentity::Public(payer).balance()],
+            None => mentions.clone(),
+        };
+        let before = self.held_by(&paying).await;
         let hash = if proven {
+            let quote = self.wallet.client().get_fee_state().await?;
+            let estimate = crate::fees::private(&quote, self.wallet.config().private_fee_headroom_blocks);
+            println!("{}", crate::fees::estimate_line(&estimate, "paid inside the proof"));
             if std::env::var_os("LOGOS_NAMES_DRY_RUN").is_some() {
                 bail!(
                     "LOGOS_NAMES_DRY_RUN is set, so nothing was sent (a private change is not tried first)"
@@ -1163,14 +1171,9 @@ impl Client {
                 .simulate(&mentions, &call.message, vec![(tokens.program, program)])
                 .await?;
             let limit = gas_limit_for(cycles);
-            let paying: Vec<AccountMention> = match payer {
-                Some(payer) => vec![AccountIdentity::Public(payer).balance()],
-                None => mentions.clone(),
-            };
-            self.check_payer(&paying, call.message.len(), 0, limit)
+            self.check_payer(&paying, call.message.len(), 0, limit, cycles)
                 .await?;
             if std::env::var_os("LOGOS_NAMES_DRY_RUN").is_some() {
-                println!("gas: {cycles} cycles, limit {limit}");
                 bail!("LOGOS_NAMES_DRY_RUN is set, so nothing was sent");
             }
             let saved = self.wallet.config().clone();
@@ -1190,6 +1193,10 @@ impl Client {
             .await
             .context("the transaction was not applied")?;
         println!("applied in block {block}");
+        // A token call moves no native tokens: all that left the payers is the fee.
+        if let Some(line) = crate::fees::paid_line(before, self.held_by(&paying).await, 0) {
+            println!("{line}");
+        }
         Ok((hash, block))
     }
 

@@ -70,6 +70,11 @@ struct Defaults {
     /// The token program `names token` uses when `--token-program` is not given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     token_program: Option<String>,
+    /// Nicknames for this wallet's accounts, by `Public/<id>` or `Private/<id>`, shown in
+    /// the app (`names module account-label`). The LEZ wallet's own labels can't be changed
+    /// or removed once set, so these are kept here.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    labels: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -616,6 +621,7 @@ fn write_man_pages(dir: &std::path::Path) -> Result<()> {
 
 mod board;
 mod claims;
+mod fees;
 mod module;
 mod tokens;
 
@@ -1410,7 +1416,12 @@ impl Client {
         spent: u128,
     ) -> Result<()> {
         let dry_run = std::env::var_os("LOGOS_NAMES_DRY_RUN").is_some();
+        let paying = mentions.clone();
+        let before = self.held_by(&paying).await;
         let hash = if mentions.iter().any(|mention| mention.identity.is_private()) {
+            let quote = self.wallet.client().get_fee_state().await?;
+            let estimate = fees::private(&quote, self.wallet.config().private_fee_headroom_blocks);
+            println!("{}", fees::estimate_line(&estimate, "paid inside the proof, from a private account"));
             if dry_run {
                 bail!("LOGOS_NAMES_DRY_RUN is set, so nothing was sent (a private change is not tried first)");
             }
@@ -1427,9 +1438,8 @@ impl Client {
             // sizes the gas limit, whose whole reserve is held from the payer meanwhile.
             let cycles = self.simulate(&mentions, &message, programs).await?;
             let limit = gas_limit_for(cycles);
-            self.check_payer(&mentions, message.len(), spent, limit).await?;
+            self.check_payer(&mentions, message.len(), spent, limit, cycles).await?;
             if dry_run {
-                println!("gas: {cycles} cycles, limit {limit}");
                 bail!("LOGOS_NAMES_DRY_RUN is set, so nothing was sent");
             }
             let saved = self.wallet.config().clone();
@@ -1443,7 +1453,32 @@ impl Client {
         println!("submitted {hash}");
         let block = self.finish(hash).await.context("the transaction was not applied")?;
         println!("applied in block {block}");
+        if let Some(line) = fees::paid_line(before, self.held_by(&paying).await, spent) {
+            println!("{line}");
+        }
         Ok(())
+    }
+
+    /// What the accounts that can pay for a change over `mentions` hold together: its
+    /// signing public accounts, read from the chain, and every private account of this
+    /// wallet, as the wallet last saw them. Measured before and after a change, the
+    /// difference less what it moved is its fee (LEZ 0.4 keeps no receipt of fees).
+    async fn held_by(&self, mentions: &[AccountMention]) -> u128 {
+        let mut held = 0_u128;
+        let key_chain = self.wallet.storage().key_chain();
+        for (id, _) in key_chain.private_account_ids() {
+            let balance = self.wallet.get_account_private(id).and_then(|account| account.data.native_balance().ok());
+            held = held.saturating_add(balance.unwrap_or(0));
+        }
+        let signers: std::collections::BTreeSet<AccountId> = mentions
+            .iter()
+            .filter(|mention| mention.authorizes)
+            .filter_map(|mention| mention.identity.public_account_id())
+            .collect();
+        for id in signers {
+            held = held.saturating_add(self.wallet.get_account_balance(id).await.unwrap_or(0));
+        }
+        held
     }
 
     /// Waits for `hash` to be included and returns its block. A block includes reverted
@@ -1529,7 +1564,7 @@ impl Client {
     /// it (a fee or deposit) plus the fee reserve at `limit`, so a short account is told
     /// so here instead of refused by the sequencer. The reserve is priced at the highest
     /// base fees the next block can have.
-    async fn check_payer(&self, mentions: &[AccountMention], bytes: usize, spent: u128, limit: u64) -> Result<()> {
+    async fn check_payer(&self, mentions: &[AccountMention], bytes: usize, spent: u128, limit: u64, cycles: u64) -> Result<()> {
         // The wallet has the first funded signing account pay the fee.
         let Some(payer) = mentions.iter().find(|mention| mention.authorizes).map(|mention| mention.identity.account_id())
         else {
@@ -1537,9 +1572,9 @@ impl Client {
         };
         let quote = self.wallet.client().get_fee_state().await?;
         // The transaction's bytes are billed too: signatures, nonces and actors besides the message.
-        let bytes = u128::try_from(bytes)? + 1_000;
-        let reserve = u128::from(limit) * u128::from(quote.next_base_fee_exec_ceiling)
-            + bytes * u128::from(quote.next_base_fee_stor_ceiling);
+        let estimate = fees::public(&quote, cycles, limit, bytes);
+        let reserve = estimate.at_most;
+        println!("{}", fees::estimate_line(&estimate, &format!("gas: {cycles} cycles, limit {limit}")));
         if std::env::var_os("LOGOS_NAMES_DRY_RUN").is_some() {
             println!("fee reserve: {reserve} from Public/{payer}, plus {spent} the call moves");
         }
@@ -1584,6 +1619,9 @@ impl Client {
         }
 
         println!("paying {amount} to {name}{NAME_SUFFIX} ({to})");
+        let paying = vec![self.signer(from).balance()];
+        let held = self.held_by(&paying).await;
+        self.print_transfer_fee(from).await?;
         // From a private account this is a deshielded transfer: the chain sees the
         // public account credited, but not who paid.
         let (hash, _) = if self.is_private(from) {
@@ -1625,6 +1663,21 @@ impl Client {
             bail!("transfer {hash} was included in block {block} but {name} was not credited");
         }
         println!("paid in block {block}");
+        if let Some(line) = fees::paid_line(held, self.held_by(&paying).await, amount) {
+            println!("{line}");
+        }
+        Ok(())
+    }
+
+    /// Prints what a native transfer from `from` costs in fees.
+    async fn print_transfer_fee(&self, from: AccountId) -> Result<()> {
+        let quote = self.wallet.client().get_fee_state().await?;
+        let (estimate, how) = if self.is_private(from) {
+            (fees::private(&quote, self.wallet.config().private_fee_headroom_blocks), "a private transfer, paid inside the proof")
+        } else {
+            (fees::native_public(&quote, NATIVE_TRANSFER_GAS_LIMIT), "a public transfer")
+        };
+        println!("{}", fees::estimate_line(&estimate, how));
         Ok(())
     }
 
@@ -1632,6 +1685,9 @@ impl Client {
     async fn pay_private(&mut self, name: &str, amount: u128, from: AccountId) -> Result<()> {
         let (_, _, profile) = self.lookup(name).await?;
         let recipient = private_keys_of(name, &profile)?;
+        let paying = vec![self.signer(from).balance()];
+        let held = self.held_by(&paying).await;
+        self.print_transfer_fee(from).await?;
         if self.is_private(from) {
             // From a private account neither side is seen: no sender, no recipient,
             // no amount.
@@ -1643,6 +1699,9 @@ impl Client {
             println!("submitted {hash}");
             let block = self.finish(hash).await.context("the transfer was not applied")?;
             println!("included in block {block}; the recipient sees it after syncing their private accounts");
+            if let Some(line) = fees::paid_line(held, self.held_by(&paying).await, amount) {
+                println!("{line}");
+            }
             return Ok(());
         }
         let before = self.wallet.get_account_balance(from).await?;
@@ -1664,6 +1723,9 @@ impl Client {
         }
         println!("included in block {block}; {from} was debited {debited} (the amount, plus any fee)");
         println!("the recipient sees it after syncing their private accounts");
+        if let Some(line) = fees::paid_line(held, self.held_by(&paying).await, amount) {
+            println!("{line}");
+        }
         Ok(())
     }
 
@@ -2338,6 +2400,12 @@ async fn main() -> Result<()> {
                     | Command::Settings
                     | Command::VerifyAccount { .. }
                     | Command::Token(tokens::TokenCommand::Info { .. })
+                    | Command::Module(
+                        module::Request::AccountNew { .. }
+                            | module::Request::AccountLabel { .. }
+                            | module::Request::AccountUse { .. }
+                            | module::Request::Fee
+                    )
             ),
         )
         .await?,

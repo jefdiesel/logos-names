@@ -44,6 +44,14 @@ const JOB_PATIENCE: Duration = Duration::from_secs(45 * 60);
 /// How much of a job's log `state` returns.
 const TAIL_BYTES: u64 = 4096;
 const TAIL_LINES: usize = 20;
+/// How much of a job's output is read for its fee lines.
+const FEE_LOG_BYTES: u64 = 256 * 1024;
+/// How long reading the wallet's accounts may take (it catches up with the chain first).
+const ACCOUNTS_PATIENCE: Duration = Duration::from_secs(150);
+/// How long a change to the wallet's own files, or a fee quote, may take.
+const QUICK_PATIENCE: Duration = Duration::from_secs(30);
+/// The longest nickname an account takes (the CLI's `MAX_LABEL`).
+pub const MAX_LABEL: usize = 40;
 /// Finished jobs are forgotten after a week.
 const KEEP_FINISHED_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
@@ -899,6 +907,135 @@ pub fn token_outcome(log: &str) -> Value {
     })
 }
 
+/// The fee lines a CLI run printed (`cli/src/fees.rs` in the names CLI): `{about, at_most,
+/// paid}`, decimal text, or null if it printed none. A run that sent several changes
+/// prints one estimate and one fee paid for each; they are added up. `paid` is null
+/// until a change has applied, and when the CLI could not tell it.
+pub fn parse_fee(log: &str) -> Value {
+    let mut about: Option<u128> = None;
+    let mut at_most: Option<u128> = None;
+    let mut paid: Option<u128> = None;
+    let add = |sum: &mut Option<u128>, text: &str| {
+        if let Ok(amount) = text.trim().parse::<u128>() {
+            *sum = Some(sum.unwrap_or(0).saturating_add(amount));
+        }
+    };
+    for line in log.lines().map(str::trim) {
+        if let Some(rest) = line.strip_prefix("fee paid: ") {
+            add(&mut paid, rest);
+        } else if let Some(rest) = line.strip_prefix("fee: about ") {
+            let Some((first, rest)) = rest.split_once(", at most ") else { continue };
+            let most = rest.split_whitespace().next().unwrap_or_default();
+            if first.trim().parse::<u128>().is_ok() && most.parse::<u128>().is_ok() {
+                add(&mut about, first);
+                add(&mut at_most, most);
+            }
+        }
+    }
+    if about.is_none() && paid.is_none() {
+        return Value::Null;
+    }
+    let text = |amount: Option<u128>| amount.map_or(Value::Null, |amount| Value::from(amount.to_string()));
+    json!({ "about": text(about), "at_most": text(at_most), "paid": text(paid) })
+}
+
+/// A nickname for an account, trimmed: at most [`MAX_LABEL`] characters on one line.
+pub fn account_label(label: &str) -> Result<String, String> {
+    let label = label.trim();
+    if label.chars().count() > MAX_LABEL {
+        return Err(format!("a nickname is at most {MAX_LABEL} characters"));
+    }
+    if label.chars().any(char::is_control) {
+        return Err("a nickname is one line of text".to_owned());
+    }
+    Ok(label.to_owned())
+}
+
+/// The CLI's JSON answer: its last line.
+fn answer(output: &str, what: &str) -> Result<Value, String> {
+    serde_json::from_str(last_line(output)).map_err(|_| format!("the names CLI's {what} did not decode"))
+}
+
+/// An `account-list` entry as the CLI gave it, checked: `{account, kind, label, balance,
+/// default, public_key}`.
+fn account_entry(entry: &Value) -> Result<Value, String> {
+    let account = entry["account"].as_str().ok_or("an account without an ID")?;
+    let (private, id) = crate::provider::account_ref(account)?;
+    let digits = |value: &Value| value.as_str().filter(|text| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())).map(str::to_owned);
+    let key = entry["public_key"].as_str().filter(|key| key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()));
+    Ok(json!({
+        "account": crate::provider::account_written(private, &id),
+        "kind": if private { "private" } else { "public" },
+        "label": entry["label"].as_str().and_then(|label| account_label(label).ok()).filter(|label| !label.is_empty()),
+        "balance": digits(&entry["balance"]),
+        "default": entry["default"] == true,
+        "public_key": if private { None } else { key },
+    }))
+}
+
+/// `names module account-list`: every account of the wallet.
+pub fn run_account_list(setup: &Setup) -> Result<Value, String> {
+    setup.wallet_ready()?;
+    let output = run_text(setup, vec!["module".to_owned(), "account-list".to_owned()], ACCOUNTS_PATIENCE)?;
+    let list = answer(&output, "account list")?;
+    let rows = list.as_array().ok_or("the names CLI's account list is not a list")?;
+    Ok(Value::Array(rows.iter().map(account_entry).collect::<Result<_, _>>()?))
+}
+
+/// `names module account-new`: a new `public` or `private` account.
+pub fn run_account_new(setup: &Setup, kind: &str, label: &str) -> Result<Value, String> {
+    setup.wallet_ready()?;
+    if kind != "public" && kind != "private" {
+        return Err("an account is public or private".to_owned());
+    }
+    let label = account_label(label)?;
+    // `--label=` keeps a nickname that starts with `-` from reading as an option.
+    let args = vec!["module".to_owned(), "account-new".to_owned(), format!("--label={label}"), kind.to_owned()];
+    account_entry(&answer(&run_text(setup, args, QUICK_PATIENCE)?, "new account")?)
+}
+
+/// `names module account-label`: gives `account` a nickname, or clears it.
+pub fn run_account_label(setup: &Setup, account: &str, label: &str) -> Result<Value, String> {
+    setup.wallet_ready()?;
+    let (private, id) = crate::provider::account_ref(account)?;
+    let label = account_label(label)?;
+    let args = vec![
+        "module".to_owned(),
+        "account-label".to_owned(),
+        "--".to_owned(),
+        crate::provider::account_written(private, &id),
+        label,
+    ];
+    answer(&run_text(setup, args, QUICK_PATIENCE)?, "nickname")
+}
+
+/// `names module account-use`: pays and registers from `account` from now on.
+pub fn run_account_use(setup: &Setup, account: &str) -> Result<Value, String> {
+    setup.wallet_ready()?;
+    let (private, id) = crate::provider::account_ref(account)?;
+    let args = vec!["module".to_owned(), "account-use".to_owned(), "--".to_owned(), crate::provider::account_written(private, &id)];
+    account_entry(&answer(&run_text(setup, args, QUICK_PATIENCE)?, "account switch")?)
+}
+
+/// `names module fee`: the chain's fee market and what a transfer costs at it.
+pub fn run_fee(setup: &Setup) -> Result<Value, String> {
+    let quote = answer(&run_text(setup, vec!["module".to_owned(), "fee".to_owned()], QUICK_PATIENCE)?, "fee quote")?;
+    let digits = |value: &Value| value.as_str().filter(|text| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())).map(str::to_owned);
+    let estimate = |value: &Value| -> Result<Value, String> {
+        Ok(json!({
+            "about": digits(&value["about"]).ok_or("the fee quote has no estimate")?,
+            "at_most": digits(&value["at_most"]).ok_or("the fee quote has no estimate")?,
+        }))
+    };
+    Ok(json!({
+        "height": quote["height"].as_u64(),
+        "base_fee_exec": quote["base_fee_exec"].as_u64(),
+        "base_fee_stor": quote["base_fee_stor"].as_u64(),
+        "public_transfer": estimate(&quote["public_transfer"])?,
+        "private_transfer": estimate(&quote["private_transfer"])?,
+    }))
+}
+
 /// `names hide`, and the name whose job it is (`board` for a post given by ID).
 pub fn hide_args(post: &str) -> Result<(String, Vec<String>), String> {
     let post = post_ref(post)?;
@@ -1567,6 +1704,16 @@ impl Jobs {
         lines[lines.len().saturating_sub(TAIL_LINES)..].join("\n")
     }
 
+    /// The job's output, its last [`FEE_LOG_BYTES`] if it is longer.
+    pub fn whole_log(&self, id: &str) -> String {
+        let Ok(mut file) = std::fs::File::open(self.path(id, "log")) else { return String::new() };
+        let length = file.metadata().map_or(0, |meta| meta.len());
+        let _ = file.seek(SeekFrom::Start(length.saturating_sub(FEE_LOG_BYTES)));
+        let mut bytes = Vec::new();
+        let _ = file.read_to_end(&mut bytes);
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
     /// `{id, name, kind, state, started, finished, exit, log_tail}`, where
     /// `state` is `running`, `done` or `failed`.
     pub fn state(&self, id: &str) -> Result<Value, String> {
@@ -1598,6 +1745,14 @@ impl Jobs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fee_lines_add_up_and_nothing_else_counts() {
+        assert_eq!(parse_fee("submitted x\napplied in block 3"), Value::Null);
+        let log = "fee: about 10, at most 20 (gas: 1 cycles, limit 2)\nfee paid: 9\nstep 2\nfee: about 5, at most 7 (paid inside the proof)\nfee: about x, at most 7 (bad)\nfee paid: nope";
+        assert_eq!(parse_fee(log), json!({ "about": "15", "at_most": "27", "paid": "9" }));
+        assert_eq!(parse_fee("fee: about 5, at most 7 (a public transfer)"), json!({ "about": "5", "at_most": "7", "paid": null }));
+    }
 
     fn scratch_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("logos-names-cli-{label}-{}-{}", std::process::id(), now_ms()));
