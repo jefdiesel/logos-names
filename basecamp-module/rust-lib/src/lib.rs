@@ -756,6 +756,8 @@ struct Names {
     token_program: Option<AccountId>,
     /// Recent `cli_token_info` answers, by token program and definition.
     token_info: HashMap<(AccountId, AccountId), (Value, std::time::Instant)>,
+    /// What the Program Registry said about each asking app's publisher, and when (seconds).
+    publishers: HashMap<String, (Value, u64)>,
 }
 
 /// How long a cached read about a name is used before it is read again.
@@ -835,6 +837,7 @@ impl Default for Names {
             provider_path: None,
             token_program: None,
             token_info: HashMap::new(),
+            publishers: HashMap::new(),
         };
         // Files saved by versions before 0.10 were readable by every account on the
         // machine; this closes them up once.
@@ -2980,6 +2983,14 @@ impl NamesModule for Names {
         // they come from a read in the background and join the choices once known.
         let others = if pending.iter().any(|request| request["kind"] != provider::TRANSFER) { self.publics_read_lately() } else { Vec::new() };
         let choices = self.wallet_choices(&others);
+        let mut publishers = HashMap::new();
+        for request in &pending {
+            let app = request["app"].as_str().unwrap_or_default().to_owned();
+            if !publishers.contains_key(&app) {
+                let publisher = self.publisher_of(&app);
+                publishers.insert(app, publisher);
+            }
+        }
         let store = self.store();
         let views: Vec<Value> = pending
             .into_iter()
@@ -2995,6 +3006,7 @@ impl NamesModule for Names {
                         .collect::<Vec<_>>(),
                 );
                 request["granted"] = json!(granted);
+                request["publisher"] = publishers.get(&app).cloned().unwrap_or(Value::Null);
                 request
             })
             .collect();
@@ -3107,6 +3119,26 @@ impl Names {
     }
 
     /// Adds a transaction request from `app`, which must have been given access.
+    /// Whether the asking app is really published by the LNS name its package names, as the
+    /// Program Registry checks it (`verify_app`, docs/APPS.md in lez-program-registry):
+    /// `{status, publisher, module, version, record}`, `{status: "unavailable"}` when the
+    /// registry module isn't installed or couldn't say, or null for Basecamp itself. Kept for
+    /// a minute per app.
+    fn publisher_of(&mut self, app: &str) -> Value {
+        if app == "host" {
+            return Value::Null;
+        }
+        let now = now();
+        if let Some((answer, at)) = self.publishers.get(app) {
+            if now.saturating_sub(*at) < 60 {
+                return answer.clone();
+            }
+        }
+        let answer = program_registry::publisher(app).unwrap_or_else(|| json!({ "status": "unavailable" }));
+        self.publishers.insert(app.to_owned(), (answer.clone(), now));
+        answer
+    }
+
     fn queue(&mut self, app: &str, request: Value, now: u64) -> Result<Value, String> {
         let store = self.store();
         if store.granted(app).is_empty() {
@@ -3509,6 +3541,21 @@ mod program_registry {
             }
         }
     }
+
+    /// `verify_app`'s value for the Basecamp module `app`: whether its package is really
+    /// published by the LNS name it names. The first check of a name derives it (Argon2, about
+    /// a second) and reads its record, so it may take a few seconds.
+    pub fn publisher(app: &str) -> Option<Value> {
+        let answer = LogosModuleSDK::new()
+            .plugin("program_registry")
+            .call_json_with_timeout("verify_app", &json!([app]), Duration::from_secs(15))
+            .ok()?;
+        let answer = match answer.as_str().map(serde_json::from_str::<Value>) {
+            Some(Ok(parsed)) => parsed,
+            _ => answer,
+        };
+        (answer["success"] == true).then(|| answer["value"].clone()).filter(Value::is_object)
+    }
 }
 
 /// Stands in for the Program Registry in unit tests: a test sets the label.
@@ -3522,6 +3569,14 @@ mod program_registry {
 
     pub fn label(_program: &str) -> Option<Value> {
         LABEL.with(|label| label.borrow().clone())
+    }
+
+    thread_local! {
+        pub static PUBLISHER: std::cell::RefCell<Option<Value>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub fn publisher(_app: &str) -> Option<Value> {
+        PUBLISHER.with(|publisher| publisher.borrow().clone())
     }
 }
 
@@ -3563,6 +3618,7 @@ mod tests {
             provider_path: None,
             token_program: None,
             token_info: HashMap::new(),
+            publishers: HashMap::new(),
         }
     }
 
@@ -4301,6 +4357,32 @@ mod tests {
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
         let full = parsed(&names.request_status(id))["value"].clone();
         assert!(full["problem"].as_str().unwrap().contains("holds 1200"), "{full}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_prompt_says_who_publishes_the_asking_app() {
+        let (mut names, dir) = with_wallet("provider-publisher", "exit 0");
+        // Without the Program Registry the prompt says it couldn't check.
+        program_registry::PUBLISHER.with(|p| *p.borrow_mut() = None);
+        as_caller(app("forumer_ui"));
+        parsed(&names.request_access("to post as you".into()));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let shown = parsed(&names.pending_requests())["value"][0].clone();
+        assert_eq!(shown["publisher"], json!({ "status": "unavailable" }));
+        // What the registry says is shown, and kept for a minute.
+        names.publishers.clear();
+        let verified = json!({ "status": "verified", "publisher": "forumer", "module": "forumer_ui", "version": "1.2.0", "root": "ab".repeat(32), "record": null });
+        program_registry::PUBLISHER.with(|p| *p.borrow_mut() = Some(verified.clone()));
+        let shown = parsed(&names.pending_requests())["value"][0].clone();
+        assert_eq!(shown["publisher"], verified);
+        program_registry::PUBLISHER.with(|p| *p.borrow_mut() = Some(json!({ "status": "mismatch" })));
+        assert_eq!(parsed(&names.pending_requests())["value"][0]["publisher"], verified, "kept for a minute");
+        // The asking app never sees it: only the Names app reads pending requests.
+        as_caller(app("forumer_ui"));
+        assert_eq!(parsed(&names.pending_requests())["success"], false);
+        program_registry::PUBLISHER.with(|p| *p.borrow_mut() = None);
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
         let _ = std::fs::remove_dir_all(dir);
     }
 

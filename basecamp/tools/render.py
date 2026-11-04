@@ -243,6 +243,8 @@ SCENARIOS = {
     "welcome-move-poor": 'root.cliNames = []; root.cliPending = []; root.moveToPrivate(); Qt.callLater(function() { Qt.callLater(function() { root.checkShield() }) })',
     "welcome-moved": 'root.cliNames = []; root.cliPending = []',
     # Paying an account rather than a name.
+    "approve-verified": 'root.appRequests = [{ id: "r1", kind: "connect", app: "forumer_ui", reason: "to post on the forum as you", created: Date.now(), expires: Date.now() + 600000, choices: [{ account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", label: "Names wallet, main public account", granted: false }], publisher: { status: "verified", publisher: "forumer", module: "forumer_ui", version: "1.2.0" } }]; root.appChosen = ["Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk"]; root.appChosenFor = "r1"',
+    "approve-fake": 'root.appRequests = [{ id: "r1", kind: "connect", app: "forumer_ui", reason: "to post on the forum as you", created: Date.now(), expires: Date.now() + 600000, choices: [{ account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", label: "Names wallet, main public account", granted: false }], publisher: { status: "mismatch", publisher: "forumer", module: "forumer_ui", version: "1.2.0" } }]; root.appChosen = ["Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk"]; root.appChosenFor = "r1"',
     "settings-accounts": 'root.section = "settings"; root.loadAccounts(); root.accountRenaming = "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR"',
     "settings-account-new": 'root.section = "settings"; root.loadAccounts(); root.accountNewKind = "private"',
     "pay-fee": 'root.section = "pay"; root.loadFee(); payTo.text = "ada"; payAmount.text = "1000"',

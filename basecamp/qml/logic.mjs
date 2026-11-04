@@ -115,3 +115,26 @@ export function accountsShown(list) {
         .sort(function(a, b) { return a[0] - b[0] || a[1] - b[1] })
         .map(function(pair) { return pair[2] })
 }
+
+/// The approval sheet's publisher line, from the Program Registry's check of the asking app
+/// (`verify_app`): `{text, tone}`, tone `good`, `warn` or `plain`; null to show nothing.
+export function publisherLine(publisher) {
+    if (!publisher || typeof publisher !== "object")
+        return null
+    var name = String(publisher.publisher || "")
+    switch (publisher.status) {
+    case "verified":
+        return { text: name + " ✓ verified publisher", tone: "good" }
+    case "mismatch":
+        return { text: "Claims " + name + ", but " + name + " doesn't vouch for this copy. It may be a fake.", tone: "warn" }
+    case "not_published":
+        return { text: "Claims " + name + ", but " + name + " doesn't list this app.", tone: "warn" }
+    case "no_such_name":
+        return { text: "Claims " + name + ", which isn't a registered name.", tone: "warn" }
+    case "unclaimed":
+        return { text: "Not published under any LNS name, so who made it can't be checked.", tone: "plain" }
+    case "unavailable":
+        return { text: "Couldn't check who publishes it (the Program Registry module isn't installed or didn't answer).", tone: "plain" }
+    }
+    return null
+}

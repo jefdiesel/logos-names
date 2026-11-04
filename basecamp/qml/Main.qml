@@ -6481,6 +6481,19 @@ Item {
                     text: appSheet.request === null ? "" : "Asked by the app “" + appSheet.request.app + "”, as Basecamp names it. "
                         + root.appExpiresIn(appSheet.request) + (root.appRequests.length > 1 ? " " + (root.appRequests.length - 1) + " more waiting." : "")
                 }
+                // Who publishes the app, checked against its LNS name by the Program Registry.
+                Text {
+                    readonly property var line: appSheet.request === null ? null : Logic.publisherLine(appSheet.request.publisher)
+                    visible: line !== null
+                    Layout.fillWidth: true
+                    text: line === null ? "" : line.text
+                    textFormat: Text.PlainText
+                    color: line === null ? root.dim : line.tone === "good" ? root.good : line.tone === "warn" ? root.alarm : root.dim
+                    font.family: root.sans
+                    font.pixelSize: root.px(16)
+                    font.weight: line !== null && line.tone !== "plain" ? Font.DemiBold : Font.Normal
+                    wrapMode: Text.WordWrap
+                }
 
                 // Access: why, and what sharing means.
                 Hint {
