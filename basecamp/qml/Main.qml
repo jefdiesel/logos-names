@@ -459,6 +459,77 @@ Item {
         }, 120000)
     }
 
+    // ── Accounts and fees ───────────────────────────────────────────────
+
+    property var cliAccounts: null        // cli_accounts, sorted for Settings; null until read
+    property string accountsError: ""
+    property bool accountsBusy: false     // a change to the accounts is on its way
+    property string accountRenaming: ""   // the account whose nickname is being edited
+    property string accountNewKind: ""    // "public" or "private" while one is being made
+    property var feeQuote: null           // cli_fee, or null
+    property double feeQuoteAt: 0
+
+    /// Reads every account of the names CLI's wallet.
+    function loadAccounts() {
+        if (cliPath === "")
+            return
+        askLater("cli_accounts", [], function(value) {
+            cliAccounts = Logic.accountsShown(value)
+            accountsError = ""
+        }, function(message) {
+            accountsError = sentence(message)
+            console.log("names_ui: accounts:", message)
+        }, 180000)
+    }
+
+    /// Changes the accounts through `method`, then reads them again.
+    function accountChange(method, args, done) {
+        if (accountsBusy)
+            return
+        accountsBusy = true
+        accountsError = ""
+        askLater(method, args, function(value) {
+            accountsBusy = false
+            if (done)
+                done(value)
+            loadAccounts()
+            loadCliBalance()
+        }, function(message) {
+            accountsBusy = false
+            accountsError = sentence(message)
+        }, 60000)
+    }
+
+    function useAccount(account) {
+        accountChange("cli_account_use", [account], function(value) {
+            say(Logic.accountTitle(value) + " now pays and registers.", false)
+        })
+    }
+
+    function nameAccount(account, label) {
+        accountChange("cli_account_label", [account, label], function() { accountRenaming = "" })
+    }
+
+    function newAccount(kind, label) {
+        accountChange("cli_account_new", [kind, label], function(value) {
+            accountNewKind = ""
+            say(value.label ? "Made " + value.label + "." : "Made a new " + kind + " account.", false)
+        })
+    }
+
+    /// Reads what the chain's fees are now, at most once a minute.
+    function loadFee() {
+        if (cliPath === "" || Date.now() - feeQuoteAt < 60000)
+            return
+        feeQuoteAt = Date.now()
+        askLater("cli_fee", [], function(value) {
+            feeQuote = value
+        }, function(message) {
+            feeQuoteAt = 0
+            console.log("names_ui: fee:", message)
+        }, 30000)
+    }
+
     // ── Get tokens ──────────────────────────────────────────────────────
 
     readonly property string defaultBridgeNode: "http://127.0.0.1:8080"
@@ -1996,7 +2067,8 @@ Item {
                 return
             boardJob = null
             if (value.state === "done") {
-                say(job.label + " done.", false)
+                var paid = Logic.feePaid(value.fee)
+                say(job.label + " done." + (paid !== "" ? " " + paid : ""), false)
                 if (job.after)
                     job.after()
                 boardLoad()
@@ -2587,6 +2659,8 @@ Item {
                 var given = choices.filter(function(choice) { return choice.granted })
                 appChosen = given.length > 0 ? [given[0].account] : choices.length > 0 ? [choices[0].account] : []
             }
+            if (request.kind === "transfer")
+                loadFee()
         }, function(message) {
             console.log("names_ui: pending_requests:", message)
         }, 20000)
@@ -3513,11 +3587,11 @@ Item {
 
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Posts"; current: root.section === "posts"; onPressed: { root.say("", false); root.boardShow(root.boardView === "thread" ? "all" : root.boardView) } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Messages"; current: root.section === "messages"; onPressed: { root.go("messages"); root.chatLoad() } }
-                Tab { Layout.fillWidth: true; alignLeft: true; label: "Pay"; current: root.section === "pay"; onPressed: { root.go("pay"); root.loadCliBalance() } }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Pay"; current: root.section === "pay"; onPressed: { root.go("pay"); root.loadCliBalance(); root.loadFee() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Tokens"; current: root.section === "tokens"; onPressed: root.openTokens() }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Profile"; current: root.section === "profile"; onPressed: { root.say("", false); root.openProfile() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Search"; current: root.section === "search"; onPressed: { root.go("search"); searchField.forceActiveFocus() } }
-                Tab { Layout.fillWidth: true; alignLeft: true; label: "Settings"; current: root.section === "settings"; onPressed: { root.go("settings"); root.registering = false; root.gettingTokens = false; root.record = null; root.missing = "" } }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Settings"; current: root.section === "settings"; onPressed: { root.go("settings"); root.registering = false; root.gettingTokens = false; root.record = null; root.missing = ""; root.loadAccounts() } }
 
                 Item { Layout.fillHeight: true }
 
@@ -4032,6 +4106,15 @@ Item {
                             font.pixelSize: root.px(15)
                             onPressed: root.payFromPublic = !root.payFromPublic
                         }
+                    }
+                }
+                Hint {
+                    visible: text !== ""
+                    font.pixelSize: root.px(15)
+                    // A name is paid from the private account; an account from the public one only when chosen.
+                    text: {
+                        var estimate = Logic.feeEstimate(root.feeQuote, !(root.payIsAccount(payTo.text) && root.payGoesPublic(payAmount.text.trim())))
+                        return estimate === "" ? "" : "Network fee: " + estimate + "."
                     }
                 }
                 Action {
@@ -4767,6 +4850,105 @@ Item {
                         label: "+  Register another name"
                         strong: true
                         onPressed: root.openRegister()
+                    }
+                    Part { text: "Accounts" }
+                    Hint { text: "Your wallet's accounts. The one marked Pays is where payments and new names come from, one private and one public. Names you hold stay with the accounts holding them, and payments to a name still go where the name points." }
+                    Hint { visible: root.cliPath === ""; text: "Install Names on this computer first (Welcome) to see your accounts." }
+                    Hint { visible: root.cliPath !== "" && root.cliAccounts === null && root.accountsError === ""; text: "Reading your accounts…" }
+                    Repeater {
+                        model: root.cliAccounts || []
+                        ColumnLayout {
+                            id: accountRow
+                            required property var modelData
+                            readonly property bool chosen: accountRow.modelData["default"] === true
+                            readonly property bool isPrivate: accountRow.modelData.kind === "private"
+                            readonly property bool empty: accountRow.modelData.balance === "0"
+                            Layout.fillWidth: true
+                            spacing: 4
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 40
+                                spacing: 12
+                                Text { Layout.preferredWidth: 170; text: Logic.accountTitle(accountRow.modelData); color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); elide: Text.ElideRight }
+                                Text {
+                                    text: root.accountShort(accountRow.modelData.account)
+                                    color: root.dim
+                                    font.family: root.mono
+                                    font.pixelSize: root.px(14)
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.copy(accountRow.modelData.account, "Account") }
+                                }
+                                Text {
+                                    text: accountRow.modelData.balance === null ? "?" : root.grouped(accountRow.modelData.balance)
+                                    color: root.faint
+                                    font.family: root.sans
+                                    font.pixelSize: root.px(15)
+                                }
+                                Text { visible: accountRow.chosen; text: "Pays"; color: root.brass; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(15) }
+                                Item { Layout.fillWidth: true }
+                                Action {
+                                    visible: !accountRow.chosen
+                                    label: "Pay from this"
+                                    enabledNow: !root.accountsBusy
+                                    onPressed: root.useAccount(accountRow.modelData.account)
+                                }
+                                Action {
+                                    label: "Rename"
+                                    enabledNow: !root.accountsBusy
+                                    onPressed: {
+                                        root.accountRenaming = accountRow.modelData.account
+                                        renameField.text = accountRow.modelData.label || ""
+                                    }
+                                }
+                            }
+                            RowLayout {
+                                visible: root.accountRenaming === accountRow.modelData.account
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Field { id: renameField; Layout.fillWidth: true; size: 16; hint: "A nickname, such as Savings (empty: none)"; onAccepted: root.nameAccount(accountRow.modelData.account, renameField.text) }
+                                Action { label: "Save"; strong: true; enabledNow: !root.accountsBusy; onPressed: root.nameAccount(accountRow.modelData.account, renameField.text) }
+                                Action { label: "Cancel"; onPressed: root.accountRenaming = "" }
+                            }
+                            // LEZ 0.4 credits a public account the chain hasn't seen only to a sender who has its key.
+                            RowLayout {
+                                visible: !accountRow.isPrivate && accountRow.empty && !!accountRow.modelData.public_key
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Hint { Layout.fillWidth: true; font.pixelSize: root.px(14); text: "Not used on the chain yet: to pay it, a sender needs its key as well as its address." }
+                                Link { text: "Copy key"; font.pixelSize: root.px(14); onPressed: root.copy(accountRow.modelData.public_key || "", "Key") }
+                            }
+                            Hint {
+                                visible: accountRow.chosen && accountRow.empty
+                                color: root.brass
+                                font.pixelSize: root.px(14)
+                                text: accountRow.isPrivate ? "This account is empty, so payments and new names can't come from it until tokens are moved in. Pay into it from another account, or choose a funded one."
+                                    : "This account is empty, so it can't pay fees. Get tokens into it, or choose a funded one."
+                            }
+                        }
+                    }
+                    Hint { visible: root.accountsError !== ""; color: root.alarm; text: root.accountsError }
+                    RowLayout {
+                        visible: root.accountNewKind === "" && root.cliPath !== ""
+                        spacing: 10
+                        Action { label: "+  New private account"; enabledNow: !root.accountsBusy; onPressed: { root.accountNewKind = "private"; newAccountField.text = "" } }
+                        Action { label: "+  New public account"; enabledNow: !root.accountsBusy; onPressed: { root.accountNewKind = "public"; newAccountField.text = "" } }
+                    }
+                    ColumnLayout {
+                        visible: root.accountNewKind !== ""
+                        Layout.fillWidth: true
+                        spacing: 6
+                        Hint {
+                            font.pixelSize: root.px(15)
+                            text: root.accountNewKind === "private"
+                                ? "A new private account: only your wallet sees it or what it holds. It starts empty. Nothing is sent and nothing is paid."
+                                : "A new public account: everyone can see what it holds and sends. The chain learns of it when it's first paid or used. Nothing is sent and nothing is paid."
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Field { id: newAccountField; Layout.fillWidth: true; size: 16; hint: "Nickname (optional)"; onAccepted: root.newAccount(root.accountNewKind, newAccountField.text) }
+                            Action { label: "Make it"; strong: true; enabledNow: !root.accountsBusy; onPressed: root.newAccount(root.accountNewKind, newAccountField.text) }
+                            Action { label: "Cancel"; onPressed: root.accountNewKind = "" }
+                        }
                     }
                     Part { text: "Tokens" }
                     Hint { text: "Bring tokens from your Logos Blockchain node into LEZ. They take about 12 hours to arrive." }
@@ -6365,6 +6547,19 @@ Item {
                         code: appSheet.kind === "transfer" && appSheet.request.destination_kind === "account"
                         value: appSheet.kind !== "transfer" ? "" : appSheet.request.destination_kind === "name" ? appSheet.request.destination + " (a name)" : appSheet.request.destination
                         full: appSheet.kind === "transfer" ? appSheet.request.destination : ""
+                    }
+                    Fact {
+                        label: "Network fee"
+                        value: {
+                            if (appSheet.kind !== "transfer")
+                                return ""
+                            var fromPrivate = /^Private\//.test(root.appChosen[0] || "")
+                            // A token transfer runs the token program: its gas is sized when it's tried.
+                            if (root.appIsToken(appSheet.request) && !Logic.tokenSendProves(fromPrivate, appSheet.request.destination))
+                                return "Sized when it's tried, just before sending"
+                            var estimate = Logic.feeEstimate(root.feeQuote, fromPrivate || appSheet.request.destination_kind === "name")
+                            return estimate !== "" ? estimate : "Reading the chain's fees…"
+                        }
                     }
                 }
 

@@ -73,7 +73,7 @@ BRIDGE = r"""
                         private_accounts: [{ account: "%(carol)s", balance: "2999000", funded: true }] })
                 return JSON.stringify({ success: false, value: null, error: "the LEZ wallet is not running; install LEZ Wallet and open it" })
             }
-            if (method === "get_config") return JSON.stringify({ registry: %(registry)s, sequencer: "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json", cli: "/Users/you/.local/bin/names", cli_wallet: "/Users/you/.lee/wallet", bridge_key: "%(bridge_key)s", bridge_node: null })
+            if (method === "get_config") return JSON.stringify({ registry: %(registry)s, sequencer: "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json", cli: "/Users/you/.local/bin/names", cli_wallet: "/Users/you/.lee/wallet", bridge_key: "%(bridge_key)s", bridge_node: null, module_version: root.neededModule })
             if (method === "normalize") return String(args[0]).toLowerCase().replace(/\.lez$/, "")
             if (method === "mine") return ok({ names: names.filter(function(entry) { return entry.owner === "%(alice)s" }).map(function(entry) {
                 return { name: entry.name, display: entry.name + ".lez", owner: entry.owner, expires: null, never: true, lapsed: false } }), pending: [] })
@@ -111,6 +111,16 @@ BRIDGE = r"""
                 if (args[3]) return ok({ sent: true, lines: [], hash: "5d1f0c9a7be24e3f8a61c0d2b9e47f135a08c6d2e91b4f70a3c5d8e2f1b6a904", total: "5000400", notes: "2", fee: "100000", to: "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk" })
                 return ok({ sent: false, lines: [], hash: null, total: "5000400", notes: "2", fee: "100000", to: "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk" })
             }
+            // Accounts and fees: stand-ins for the names CLI's wallet.
+            if (method === "cli_accounts") return ok(mock.accounts || [
+                { account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", kind: "public", label: null, balance: "1250000", "default": true, public_key: "ab".repeat(32) },
+                { account: "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", kind: "public", label: "Shop", balance: "0", "default": false, public_key: "cd".repeat(32) },
+                { account: "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", kind: "private", label: "Everyday", balance: "250000000", "default": true, public_key: null },
+                { account: "Private/2RHZhw9h534Zr3eq2RGhQete2Hh667foECzXPmSkGni2", kind: "private", label: "Savings", balance: "40000000", "default": false, public_key: null }])
+            if (method === "cli_fee") return ok({ height: 31012, base_fee_exec: 8, base_fee_stor: 8,
+                public_transfer: { about: "8000", at_most: "18000" }, private_transfer: { about: "1601600", at_most: "2002000" } })
+            if (method === "cli_account_use" || method === "cli_account_new" || method === "cli_account_label")
+                return JSON.stringify({ success: false, value: null, error: "a stand-in: nothing changes here" })
             if (method === "board_follows") return ok(["ada"])
             if (method === "anon_name") return ok(root.anonMock || "")
             if (method === "board_likes") return ok(["jef/0"])
@@ -233,6 +243,9 @@ SCENARIOS = {
     "welcome-move-poor": 'root.cliNames = []; root.cliPending = []; root.moveToPrivate(); Qt.callLater(function() { Qt.callLater(function() { root.checkShield() }) })',
     "welcome-moved": 'root.cliNames = []; root.cliPending = []',
     # Paying an account rather than a name.
+    "settings-accounts": 'root.section = "settings"; root.loadAccounts(); root.accountRenaming = "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR"',
+    "settings-account-new": 'root.section = "settings"; root.loadAccounts(); root.accountNewKind = "private"',
+    "pay-fee": 'root.section = "pay"; root.loadFee(); payTo.text = "ada"; payAmount.text = "1000"',
     "pay-account": 'root.section = "pay"; payTo.text = "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR"; payAmount.text = "1000"',
     "pay-account-public": 'root.section = "pay"; payTo.text = "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR"; payAmount.text = "1000"; root.payFromPublic = true',
     "pay-account-bad": 'root.section = "pay"; payTo.text = "Public/7wx3U7qMRWop"; payAmount.text = "1000"',
@@ -286,7 +299,7 @@ def main():
             "registry": "null" if scenario == "unset" else json.dumps("DbYLkKwd2b13bQhceVj351mpPw7QmRzEjRT2EfU56CKH"),
             "mock": json.dumps(MOCKS.get(scenario, {})),
             "bridge_key": "" if scenario == "get-tokens" else "8e3b0f4a2c71d95e6a0b4c8d2f1e7a3954c6b0d8e2f4a6c8b0d2e4f6a8c0b2d4",
-            "scenario": SCENARIOS[scenario], "out": out, "height": 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "name") else 1500 if scenario.startswith("get-tokens") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
+            "scenario": SCENARIOS[scenario], "out": out, "height": 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "name", "settings-accounts", "settings-account-new") else 1500 if scenario.startswith("get-tokens") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
         }
         # Beside Main.qml, so its relative imports (logic.mjs) resolve.
         with tempfile.NamedTemporaryFile("w", suffix=".qml", delete=False, dir=os.path.join(HERE, "..", "qml")) as handle:

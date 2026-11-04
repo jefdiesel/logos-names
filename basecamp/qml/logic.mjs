@@ -67,3 +67,51 @@ export function tokenShown(name) {
     var text = String(name === null || name === undefined ? "" : name).trim()
     return text === "" ? "unnamed token" : text
 }
+
+/// Decimal text with thousands grouped: "1,234,567".
+function groupDigits(digits) {
+    return String(digits).replace(/\B(?=(\d{3})+(?!\d))/g, ",")
+}
+
+/// The network fee a transfer will cost, from `cli_fee`'s quote: "about 8,000
+/// (at most 18,000 held while it runs)". From a private account the fee is paid
+/// inside the proof. "" while there is no quote.
+export function feeEstimate(quote, fromPrivate) {
+    if (!quote)
+        return ""
+    var estimate = fromPrivate ? quote.private_transfer : quote.public_transfer
+    if (!estimate || !/^\d+$/.test(String(estimate.about)) || !/^\d+$/.test(String(estimate.at_most)))
+        return ""
+    var about = "about " + groupDigits(estimate.about)
+    if (String(estimate.at_most) === String(estimate.about))
+        return about
+    return about + (fromPrivate ? " (at most " + groupDigits(estimate.at_most) + " if fees climb before it lands)"
+                                : " (at most " + groupDigits(estimate.at_most) + " held while it runs)")
+}
+
+/// What a finished job's `fee` says it cost: "Fee paid: 7,950." or "".
+export function feePaid(fee) {
+    if (!fee || !/^\d+$/.test(String(fee.paid)))
+        return ""
+    return "Fee paid: " + groupDigits(fee.paid) + "."
+}
+
+/// An account as listed in Settings: its nickname, else its kind; the default
+/// account of each kind is the one the wallet pays and registers from.
+export function accountTitle(entry) {
+    if (!entry)
+        return ""
+    var kind = entry.kind === "private" ? "Private account" : "Public account"
+    var label = String(entry.label === null || entry.label === undefined ? "" : entry.label).trim()
+    return label !== "" ? label : kind
+}
+
+/// The accounts sorted for Settings: private ones first, the default of each
+/// kind leading its kind, the rest in wallet order.
+export function accountsShown(list) {
+    var rows = Array.isArray(list) ? list.slice() : []
+    var rank = function(entry) { return (entry.kind === "private" ? 0 : 2) + (entry["default"] ? 0 : 1) }
+    return rows.map(function(entry, i) { return [rank(entry), i, entry] })
+        .sort(function(a, b) { return a[0] - b[0] || a[1] - b[1] })
+        .map(function(pair) { return pair[2] })
+}

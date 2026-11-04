@@ -1,6 +1,6 @@
 // Checks the view's own logic (qml/logic.mjs, which qml/Main.qml imports), since the QML
 // engine cannot run in CI. Run with: node basecamp/logic.test.mjs
-import { atLeast, someAmount, entryShown, tokenAmountProblem, tokenToProblem, tokenSendProves, tokenShown } from "./qml/logic.mjs";
+import { atLeast, someAmount, entryShown, tokenAmountProblem, tokenToProblem, tokenSendProves, tokenShown, feeEstimate, feePaid, accountTitle, accountsShown } from "./qml/logic.mjs";
 import { readFileSync } from "node:fs";
 
 let failures = 0;
@@ -38,6 +38,23 @@ check("tokenShown", [tokenShown("Demo"), tokenShown(""), tokenShown(null), token
 // app then fails to load, so reserved words are read as x["public"]. Strings are blanked
 // first, so a word inside text doesn't count.
 const reserved = /\.(public|private|protected|package|interface|implements|static|let|yield|enum|class|const|export|import|extends|super)\b/;
+// Fees: what the quote and a finished job's `fee` say, as the app shows them.
+const quote = { public_transfer: { about: "8000", at_most: "18000" }, private_transfer: { about: "1234567", at_most: "1234567" } };
+check("feeEstimate public", feeEstimate(quote, false), "about 8,000 (at most 18,000 held while it runs)");
+check("feeEstimate private, no headroom", feeEstimate(quote, true), "about 1,234,567");
+check("feeEstimate private, headroom", feeEstimate({ private_transfer: { about: "5", at_most: "9" } }, true), "about 5 (at most 9 if fees climb before it lands)");
+check("feeEstimate missing", [feeEstimate(null, false), feeEstimate({}, true), feeEstimate({ public_transfer: { about: "x", at_most: "1" } }, false)], ["", "", ""]);
+check("feePaid", [feePaid({ paid: "7950" }), feePaid({ paid: null }), feePaid(null)], ["Fee paid: 7,950.", "", ""]);
+// Accounts: private first, each kind's default leading it.
+const rows = [
+  { account: "Public/a", kind: "public", label: null, default: false },
+  { account: "Private/b", kind: "private", label: "Savings", default: false },
+  { account: "Public/c", kind: "public", label: "Main", default: true },
+  { account: "Private/d", kind: "private", label: " ", default: true },
+];
+check("accountsShown order", accountsShown(rows).map((r) => r.account), ["Private/d", "Private/b", "Public/c", "Public/a"]);
+check("accountTitle", rows.map(accountTitle), ["Public account", "Savings", "Main", "Private account"]);
+check("accountsShown not a list", accountsShown(null), []);
 const source = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8").split("\n");
 const dotted = source
   .map((line, i) => [i + 1, line.replace(/"(\\.|[^"\\])*"|'(\\.|[^'\\])*'|\/\/.*$/g, '""')])
