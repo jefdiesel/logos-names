@@ -1567,6 +1567,21 @@ impl Client {
             .map(AccountId::new)
             .ok_or_else(|| anyhow!("{name} has no public account set"))?;
         let before = self.wallet.get_account_balance(to).await?;
+        // LEZ 0.4 credits a public account the chain doesn't know yet only when the sender
+        // supplies its public key (`wallet auth-transfer send --to-pk`), and a name publishes
+        // the account id, not the key. Such a transfer reverts, and the payer still pays its
+        // fee, so refuse before sending. Paying the name privately works whatever the account.
+        let unused = before == 0
+            && self.wallet.get_accounts_nonces(&[to]).await?.first().copied().unwrap_or_default()
+                == lee_core::account::Nonce::default();
+        if unused {
+            let how = if profile.npk.is_some() && !profile.vpk.is_empty() {
+                format!("pay {name} privately instead (`names pay {name} {amount}` without --public)")
+            } else {
+                format!("{name} publishes no private keys either, so its holder must use that account once (or publish private keys) before it can be paid")
+            };
+            bail!("{name}{NAME_SUFFIX}'s public account {to} has never been used on this chain, and LEZ can't credit it without its owner's public key; {how}");
+        }
 
         println!("paying {amount} to {name}{NAME_SUFFIX} ({to})");
         // From a private account this is a deshielded transfer: the chain sees the
