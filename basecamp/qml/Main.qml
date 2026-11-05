@@ -115,7 +115,7 @@ Item {
     // at install, but an older module can still be the one Basecamp loaded).
     readonly property string neededModule: "0.14.0"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.14.1"
+    readonly property string appVersion: "0.14.2"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -694,6 +694,43 @@ Item {
     property string addTokenProblem: ""
     property bool addTokenBusy: false
     readonly property color orange: Theme.palette.primary
+    property string walletMenuFor: ""    // the asset row whose … menu is open, "" if none
+
+    /// What a row's … menu offers: [{label, act}].
+    function walletMenu(row) {
+        if (row.kind === "chain")
+            return [{ label: "Staking details", act: "stake" }, { label: "Bridge into LEZ", act: "bridge" }]
+        if (row.kind === "lez")
+            return row.fromPrivate ? [{ label: "Names", act: "names" }]
+                : [{ label: "Bridge in from the Logos Blockchain", act: "bridge" }, { label: "Names", act: "names" }]
+        var token = [{ label: "Copy the token's address", act: "copy" }]
+        return watchedTokens.indexOf(row.definition) >= 0 ? token.concat([{ label: "Remove from the wallet", act: "remove" }]) : token
+    }
+
+    function walletAct(act, row) {
+        walletMenuFor = ""
+        if (act === "stake") {
+            walletView = "stake"
+            loadChain()
+        } else if (act === "bridge") {
+            openGetTokens()
+        } else if (act === "names") {
+            walletView = "names"
+            loadCliMine()
+        } else if (act === "copy") {
+            copy(row.definition, row.title + "'s address")
+        } else if (act === "remove") {
+            removeToken(row.definition)
+        }
+    }
+
+    /// Which names a LEZ row is shown with: the private account is where they're held.
+    function namesLine(row) {
+        if (row.kind !== "lez" || !row.fromPrivate || cliNames.length === 0)
+            return ""
+        var main = mainName !== "" ? mainName : cliNames[0].name
+        return cliNames.length === 1 ? main : main + " +" + (cliNames.length - 1)
+    }
 
     readonly property var walletRows: Logic.walletAssets(cliBalance, tokenProgram !== "" ? tokenHoldings : null, watchedTokens, watchedNames,
                                                          chainAccounts, chainAccounts === null && chainError !== "")
@@ -701,6 +738,7 @@ Item {
     /// Opens the Wallet at `view` (home by default) and reads every balance.
     function openWallet(view) {
         go("wallet")
+        walletMenuFor = ""
         walletView = view || "home"
         sendReviewing = false
         walletRefresh()
@@ -4437,7 +4475,7 @@ Item {
                 id: walletPage
                 x: 56
                 y: 40
-                width: Math.min(parent.width - 112, 720)
+                width: Math.min(parent.width - 112, 860)
                 spacing: 16
 
                 // ── Home: what you hold ──
@@ -4457,55 +4495,6 @@ Item {
                         visible: root.walletRows.length === 0
                         text: root.cliBalance === undefined ? "Reading your balances…" : "No balances yet. Make a wallet in Settings, or start your node in Basecamp's Blockchain app."
                     }
-                    // The names this wallet holds: as many as you like, unlinked on chain.
-                    Rectangle {
-                        visible: root.cliKnown
-                        Layout.fillWidth: true
-                        implicitHeight: namesColumn.implicitHeight + root.px(28)
-                        radius: 12
-                        color: root.card
-                        border.width: 1
-                        border.color: root.line
-                        ColumnLayout {
-                            id: namesColumn
-                            x: root.px(16)
-                            y: root.px(14)
-                            width: parent.width - root.px(32)
-                            spacing: 10
-                            Text {
-                                text: root.cliNames.length === 1 ? "Your name" : "Your names"
-                                color: root.dim
-                                font.family: root.sans
-                                font.pixelSize: root.px(14)
-                            }
-                            Flow {
-                                Layout.fillWidth: true
-                                spacing: 8
-                                Repeater {
-                                    model: root.cliNames
-                                    Chip {
-                                        required property var modelData
-                                        link: true
-                                        label: modelData.name + (modelData.name === root.mainName ? "  · main" : "")
-                                        onPressed: { root.go("search"); root.show(modelData.name) }
-                                    }
-                                }
-                                Repeater {
-                                    model: root.cliPending
-                                    Chip {
-                                        required property var modelData
-                                        label: modelData.name + (modelData.failed ? "  · didn't register" : "  · registering")
-                                    }
-                                }
-                                Chip { link: true; label: root.cliNames.length === 0 ? "+ Get a name" : "+ Get another name"; onPressed: root.openRegister() }
-                            }
-                            Hint {
-                                font.pixelSize: root.px(14)
-                                text: "One wallet can hold many names, and the chain shows nothing that links them. Each is paid privately, into its own private account."
-                            }
-                        }
-                    }
-
                     Repeater {
                         model: root.walletRows
                         Rectangle {
@@ -4513,6 +4502,7 @@ Item {
                             required property var modelData
                             Layout.fillWidth: true
                             implicitHeight: assetRow.implicitHeight + root.px(28)
+                            z: root.walletMenuFor === modelData.id ? 5 : 0
                             radius: 12
                             color: root.card
                             border.width: 1
@@ -4542,6 +4532,7 @@ Item {
                                 ColumnLayout {
                                     spacing: 2
                                     Layout.fillWidth: true
+                                    Layout.minimumWidth: root.px(150)
                                     Text {
                                         Layout.fillWidth: true
                                         text: assetCard.modelData.title
@@ -4553,8 +4544,11 @@ Item {
                                         font.weight: Font.DemiBold
                                     }
                                     Text {
+                                        Layout.fillWidth: true
+                                        elide: Text.ElideRight
                                         text: assetCard.modelData.kind === "chain" ? assetCard.modelData.where
                                             : assetCard.modelData.where + (assetCard.modelData.kind === "token" ? " · token on LEZ" : " account")
+                                              + (root.namesLine(assetCard.modelData) !== "" ? " · " + root.namesLine(assetCard.modelData) : "")
                                         color: assetCard.modelData.where === "Private" ? root.brass : assetCard.modelData.balance === null ? root.alarm : root.dim
                                         font.family: root.sans
                                         font.pixelSize: root.px(14)
@@ -4571,8 +4565,8 @@ Item {
                                 // The buttons take the same width on every row, so the balances line up.
                                 RowLayout {
                                     Layout.fillWidth: false
-                                    Layout.minimumWidth: root.px(290)
-                                    Layout.maximumWidth: root.px(290)
+                                    Layout.minimumWidth: root.px(340)
+                                    Layout.maximumWidth: root.px(340)
                                     spacing: 8
                                     Item { Layout.fillWidth: true }
                                     Action {
@@ -4597,6 +4591,59 @@ Item {
                                         visible: assetCard.modelData.balance === null && assetCard.modelData.kind === "chain"
                                         label: "Open the Blockchain app"
                                         onPressed: if (logos.request) logos.request("basecamp.apps.launch", { app: "blockchain_ui" }, function() { root.loadChain() })
+                                    }
+                                    Action {
+                                        visible: root.walletMenu(assetCard.modelData).length > 0
+                                        label: "⋯"
+                                        implicitWidth: root.px(44)
+                                        onPressed: root.walletMenuFor = root.walletMenuFor === assetCard.modelData.id ? "" : assetCard.modelData.id
+                                    }
+                                }
+                            }
+                            // The … menu: below the card's right edge, over the cards under it.
+                            Rectangle {
+                                visible: root.walletMenuFor === assetCard.modelData.id
+                                anchors.top: parent.bottom
+                                anchors.topMargin: 4
+                                anchors.right: parent.right
+                                width: Math.max(root.px(220), menuColumn.implicitWidth + 8)
+                                height: menuColumn.implicitHeight + 8
+                                radius: 10
+                                color: root.raised
+                                border.width: 1
+                                border.color: root.line
+                                Column {
+                                    id: menuColumn
+                                    x: 4
+                                    y: 4
+                                    width: parent.width - 8
+                                    Repeater {
+                                        model: root.walletMenuFor === assetCard.modelData.id ? root.walletMenu(assetCard.modelData) : []
+                                        Rectangle {
+                                            id: menuItem
+                                            required property var modelData
+                                            width: parent.width
+                                            implicitWidth: menuText.implicitWidth + 28
+                                            height: root.px(40)
+                                            radius: 6
+                                            color: menuArea.containsMouse ? root.hover : "transparent"
+                                            Text {
+                                                id: menuText
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                x: 14
+                                                text: menuItem.modelData.label
+                                                color: menuItem.modelData.act === "stake" ? root.orange : root.ink
+                                                font.family: root.sans
+                                                font.pixelSize: root.px(16)
+                                            }
+                                            MouseArea {
+                                                id: menuArea
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: root.walletAct(menuItem.modelData.act, assetCard.modelData)
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -4632,13 +4679,12 @@ Item {
                     RowLayout {
                         Layout.topMargin: 6
                         spacing: 10
-                        Action { label: "Add a token"; onPressed: { root.addTokenProblem = ""; root.walletView = "add"; addTokenField.forceActiveFocus() } }
-                        Action { label: "Bridge"; onPressed: root.openGetTokens() }
+                        Action { label: "Add a token"; onPressed: { root.walletMenuFor = ""; root.addTokenProblem = ""; root.walletView = "add"; addTokenField.forceActiveFocus() } }
                         Item { Layout.fillWidth: true }
                     }
                     Hint {
                         font.pixelSize: root.px(14)
-                        text: "Private LEZ is seen only by you. Public LEZ and the Logos Blockchain can be seen by anyone. Bridge moves Logos Blockchain tokens into LEZ."
+                        text: "Private LEZ is seen only by you. Public LEZ and the Logos Blockchain can be seen by anyone. ⋯ on a balance has its other options: staking, the bridge and your names."
                     }
                 }
 
@@ -4903,6 +4949,60 @@ Item {
                     }
                     Hint { visible: root.chainProblem !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.chainProblem }
                     Hint { visible: root.notice !== ""; color: root.noticeIsError ? root.alarm : root.dim; font.pixelSize: root.px(16); text: root.notice }
+                }
+
+                // ── Names: register one, and the ones you hold ──
+                ColumnLayout {
+                    visible: root.walletView === "names"
+                    Layout.fillWidth: true
+                    spacing: 14
+                    Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
+                    Text { text: "Names"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
+                    Hint { text: "Your wallet can hold many names, and the chain shows nothing that links them. Each is paid privately, into its own private account." }
+
+                    Card {
+                        Layout.fillWidth: true
+                        Part { Layout.topMargin: 0; text: "Register a name" }
+                        Hint { text: "Pick a name people can pay and message you by. It's private from the start: the chain never learns which account holds it." }
+                        Action { label: "Register a name"; strong: true; onPressed: root.openRegister() }
+                    }
+
+                    Card {
+                        Layout.fillWidth: true
+                        Part { Layout.topMargin: 0; text: "My names" }
+                        Hint { visible: root.cliNames.length === 0 && root.cliPending.length === 0; text: root.cliKnown ? "None yet." : "Reading your names…" }
+                        Repeater {
+                            model: root.cliNames
+                            RowLayout {
+                                id: myName
+                                required property var modelData
+                                Layout.fillWidth: true
+                                spacing: 14
+                                Text { text: myName.modelData.name; color: root.ink; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.Bold }
+                                Text { visible: myName.modelData.name === root.mainName; text: "main"; color: root.brass; font.family: root.sans; font.pixelSize: root.px(14) }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: myName.modelData.state || ""
+                                    color: myName.modelData.lapsed ? root.alarm : root.dim
+                                    font.family: root.sans
+                                    font.pixelSize: root.px(14)
+                                    elide: Text.ElideRight
+                                }
+                                Link { visible: myName.modelData.name !== root.mainName; text: "Make main"; font.pixelSize: root.px(15); onPressed: root.setMain(myName.modelData.name) }
+                                Link { text: "Open"; font.pixelSize: root.px(15); onPressed: { root.go("search"); root.show(myName.modelData.name) } }
+                                Link { text: "Copy"; font.pixelSize: root.px(15); onPressed: root.copy(myName.modelData.name, "Your name") }
+                            }
+                        }
+                        Repeater {
+                            model: root.cliPending
+                            RowLayout {
+                                required property var modelData
+                                spacing: 14
+                                Text { text: modelData.name; color: root.dim; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.Bold }
+                                Text { text: modelData.failed ? "didn't register" : "registering"; color: modelData.failed ? root.alarm : root.brass; font.family: root.sans; font.pixelSize: root.px(14) }
+                            }
+                        }
+                    }
                 }
 
                 // ── Add a token by its address ──
