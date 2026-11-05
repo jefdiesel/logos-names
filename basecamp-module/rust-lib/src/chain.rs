@@ -50,7 +50,10 @@ pub fn problem(method: &str, error: &str) -> String {
     if lower.contains("node is not running") || lower.contains("not initialized") {
         return "Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.".to_owned();
     }
-    if lower.contains("insufficient") || lower.contains("not enough") {
+    // The node (0.3.4) says "Wallet does not have enough funds, available=…". A claim
+    // gets the same words about a wallet no one chose, so it keeps the node's own.
+    let short = lower.contains("insufficient") || lower.contains("not enough") || lower.contains("not have enough");
+    if short && method != "leader_claim" {
         return "That key doesn't hold enough for this and its fee.".to_owned();
     }
     format!("the Logos Blockchain node refused {method}: {error}")
@@ -224,6 +227,17 @@ mod tests {
         assert!(unwrap("wallet_get_balance", down).unwrap_err().contains("isn't running"));
         let other = json!({ "success": false, "error": "Keystore file exists." });
         assert_eq!(unwrap("generate_key", other).unwrap_err(), "the Logos Blockchain node refused generate_key: Keystore file exists.");
+    }
+
+    /// The refusals a solo 0.3.4 node gave over logosctl (scripts/chain-ipc-e2e.sh): a
+    /// transfer whose fee the key can't cover, and a claim with no wallet to pay from.
+    #[test]
+    fn a_short_wallet_reads_as_advice_but_a_claim_keeps_the_nodes_words() {
+        let short = json!({ "error": "Failed to transfer funds: Wallet does not have enough funds, available=3100", "success": false, "value": null });
+        assert_eq!(unwrap("wallet_transfer_funds", short).unwrap_err(), "That key doesn't hold enough for this and its fee.");
+        let claim = "Failed to claim leader rewards: Chain leader service error: Wallet API error: Wallet does not have enough funds, available=0";
+        let refused = unwrap("leader_claim", json!({ "error": claim, "success": false, "value": null })).unwrap_err();
+        assert_eq!(refused, format!("the Logos Blockchain node refused leader_claim: {claim}"));
     }
 
     #[test]
