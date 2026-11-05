@@ -115,7 +115,7 @@ Item {
     // at install, but an older module can still be the one Basecamp loaded).
     readonly property string neededModule: "0.14.0"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.14.2"
+    readonly property string appVersion: "0.14.3"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -694,51 +694,43 @@ Item {
     property string addTokenProblem: ""
     property bool addTokenBusy: false
     readonly property color orange: Theme.palette.primary
-    property string walletMenuFor: ""    // the asset row whose … menu is open, "" if none
+    property bool walletHidden: false    // amounts shown as dots (the eye)
+    property var walletOpen: ({})        // chain group id -> false when closed
+    property string walletRowOpen: ""    // the address row whose actions are open
 
-    /// What a row's … menu offers: [{label, act}].
-    function walletMenu(row) {
-        if (row.kind === "chain")
-            return [{ label: "Staking details", act: "stake" }, { label: "Bridge into LEZ", act: "bridge" }]
-        if (row.kind === "lez")
-            return row.fromPrivate ? [{ label: "Names", act: "names" }]
-                : [{ label: "Bridge in from the Logos Blockchain", act: "bridge" }, { label: "Names", act: "names" }]
-        var token = [{ label: "Copy the token's address", act: "copy" }]
-        return watchedTokens.indexOf(row.definition) >= 0 ? token.concat([{ label: "Remove from the wallet", act: "remove" }]) : token
+    readonly property var walletGroups: Logic.walletGroups(cliBalance, cliAccounts, tokenProgram !== "" ? tokenHoldings : null, watchedTokens, watchedNames,
+                                                           chainAccounts, chainAccounts === null && chainError !== "", chainStake)
+
+    /// An amount as the Wallet shows it: grouped, a dash while unknown, dots when hidden.
+    function amountShown(value) {
+        if (walletHidden)
+            return "••••••"
+        return value === null || value === undefined ? "—" : grouped(value)
     }
 
-    function walletAct(act, row) {
-        walletMenuFor = ""
-        if (act === "stake") {
-            walletView = "stake"
-            loadChain()
-        } else if (act === "bridge") {
-            openGetTokens()
-        } else if (act === "names") {
-            walletView = "names"
-            loadCliMine()
-        } else if (act === "copy") {
-            copy(row.definition, row.title + "'s address")
-        } else if (act === "remove") {
-            removeToken(row.definition)
-        }
+    function walletAnyOpen() {
+        return walletGroups.some(function(group) { return walletOpen[group.id] !== false })
     }
 
-    /// Which names a LEZ row is shown with: the private account is where they're held.
-    function namesLine(row) {
-        if (row.kind !== "lez" || !row.fromPrivate || cliNames.length === 0)
-            return ""
-        var main = mainName !== "" ? mainName : cliNames[0].name
-        return cliNames.length === 1 ? main : main + " +" + (cliNames.length - 1)
+    function walletSetAll(open) {
+        var next = {}
+        walletGroups.forEach(function(group) { next[group.id] = open })
+        walletOpen = next
+        walletRowOpen = ""
     }
 
-    readonly property var walletRows: Logic.walletAssets(cliBalance, tokenProgram !== "" ? tokenHoldings : null, watchedTokens, watchedNames,
-                                                         chainAccounts, chainAccounts === null && chainError !== "")
+    function walletToggle(id) {
+        var next = Object.assign({}, walletOpen)
+        next[id] = walletOpen[id] === false
+        walletOpen = next
+    }
+
+    /// Every address that can send, for Send's From choices.
+    readonly property var walletRows: walletGroups.reduce(function(rows, group) { return rows.concat(group.rows.filter(function(row) { return row.canSend })) }, [])
 
     /// Opens the Wallet at `view` (home by default) and reads every balance.
     function openWallet(view) {
         go("wallet")
-        walletMenuFor = ""
         walletView = view || "home"
         sendReviewing = false
         walletRefresh()
@@ -746,6 +738,7 @@ Item {
 
     function walletRefresh() {
         loadCliBalance()
+        loadAccounts()
         loadTokens()
         loadWatched()
         loadChain()
@@ -758,6 +751,9 @@ Item {
         sendDefinition = asset.definition || ""
         sendTitle = asset.title
         sendFromPrivate = asset.kind === "chain" ? false : asset.fromPrivate
+        if (asset.kind === "chain" && asset.key)
+            chainFrom = asset.key
+        sendTitle = asset.kind === "chain" ? "Logos Blockchain" : asset.kind === "lez" ? "LEZ" : asset.title
         sendReviewing = false
         chainPlan = null
         chainProblem = ""
@@ -4000,7 +3996,8 @@ Item {
                     }
                 }
 
-                Tab { Layout.fillWidth: true; alignLeft: true; label: "Wallet"; current: root.section === "wallet"; onPressed: root.openWallet("home") }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Wallet"; current: root.section === "wallet" && root.walletView !== "names"; onPressed: root.openWallet("home") }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Names"; current: root.section === "wallet" && root.walletView === "names"; onPressed: { root.openWallet("names"); root.loadCliMine() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Messages"; current: root.section === "messages"; onPressed: { root.go("messages"); root.chatLoad() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Profile"; current: root.section === "profile"; onPressed: { root.say("", false); root.openProfile() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Search"; current: root.section === "search"; onPressed: { root.go("search"); searchField.forceActiveFocus() } }
@@ -4485,163 +4482,275 @@ Item {
                     spacing: 14
                     RowLayout {
                         Layout.fillWidth: true
+                        spacing: 8
                         Text { text: "Wallet"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
                         Item { Layout.fillWidth: true }
                         Link { text: root.chainReading || root.cliBalance === undefined ? "Reading…" : "Refresh"; color: root.faint; font.pixelSize: root.px(15); onPressed: root.walletRefresh() }
+                        // Show or hide every amount, as wallets do for a screen others can see.
+                        Rectangle {
+                            id: eyeButton
+                            implicitWidth: root.px(38)
+                            implicitHeight: root.px(38)
+                            radius: 8
+                            color: eyeArea.containsMouse ? root.hover : "transparent"
+                            border.width: 1
+                            border.color: root.line
+                            Accessible.name: root.walletHidden ? "Show balances" : "Hide balances"
+                            Canvas {
+                                anchors.centerIn: parent
+                                width: root.px(20)
+                                height: root.px(20)
+                                property bool closed: root.walletHidden
+                                onClosedChanged: requestPaint()
+                                onPaint: {
+                                    var c = getContext("2d")
+                                    c.reset()
+                                    c.strokeStyle = root.dim
+                                    c.lineWidth = 1.8
+                                    var w = width, h = height
+                                    c.beginPath()
+                                    c.moveTo(1, h / 2)
+                                    c.quadraticCurveTo(w / 2, -h * 0.15, w - 1, h / 2)
+                                    c.quadraticCurveTo(w / 2, h * 1.15, 1, h / 2)
+                                    c.stroke()
+                                    c.beginPath()
+                                    c.arc(w / 2, h / 2, w * 0.16, 0, Math.PI * 2)
+                                    c.stroke()
+                                    if (closed) {
+                                        c.beginPath()
+                                        c.moveTo(2, 2)
+                                        c.lineTo(w - 2, h - 2)
+                                        c.stroke()
+                                    }
+                                }
+                            }
+                            MouseArea {
+                                id: eyeArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.walletHidden = !root.walletHidden
+                            }
+                        }
+                        Action {
+                            label: root.walletAnyOpen() ? "Just totals" : "Show every address"
+                            onPressed: root.walletSetAll(!root.walletAnyOpen())
+                        }
                     }
                     Hint { visible: root.sendingLine() !== ""; color: root.brass; font.pixelSize: root.px(16); text: root.sendingLine() }
                     Hint { visible: root.notice !== "" && root.sendingLine() === ""; color: root.noticeIsError ? root.alarm : root.dim; font.pixelSize: root.px(16); text: root.notice }
                     Hint {
-                        visible: root.walletRows.length === 0
+                        visible: root.walletGroups.length === 0
                         text: root.cliBalance === undefined ? "Reading your balances…" : "No balances yet. Make a wallet in Settings, or start your node in Basecamp's Blockchain app."
                     }
+
+                    // One card per chain: its total, then (open) one row per address.
                     Repeater {
-                        model: root.walletRows
+                        model: root.walletGroups
                         Rectangle {
-                            id: assetCard
+                            id: groupCard
                             required property var modelData
+                            readonly property bool open: root.walletOpen[modelData.id] !== false
                             Layout.fillWidth: true
-                            implicitHeight: assetRow.implicitHeight + root.px(28)
-                            z: root.walletMenuFor === modelData.id ? 5 : 0
+                            implicitHeight: groupColumn.implicitHeight
                             radius: 12
                             color: root.card
                             border.width: 1
                             border.color: root.line
-                            RowLayout {
-                                id: assetRow
-                                anchors.left: parent.left
-                                anchors.right: parent.right
-                                anchors.verticalCenter: parent.verticalCenter
-                                anchors.leftMargin: root.px(16)
-                                anchors.rightMargin: root.px(16)
-                                spacing: root.px(14)
+                            clip: true
+                            ColumnLayout {
+                                id: groupColumn
+                                width: parent.width
+                                spacing: 0
+                                // The chain's line: press it to open or close.
                                 Rectangle {
-                                    implicitWidth: root.px(40)
-                                    implicitHeight: root.px(40)
-                                    radius: height / 2
-                                    color: assetCard.modelData.kind === "chain" ? root.orange : assetCard.modelData.kind === "lez" ? root.brass : root.raised
-                                    Text {
-                                        anchors.centerIn: parent
-                                        text: assetCard.modelData.kind === "chain" ? "B" : assetCard.modelData.kind === "lez" ? "L" : assetCard.modelData.title.charAt(0).toUpperCase()
-                                        color: assetCard.modelData.kind === "token" ? root.ink : root.slate
-                                        font.family: root.sans
-                                        font.pixelSize: root.px(18)
-                                        font.weight: Font.Bold
-                                    }
-                                }
-                                ColumnLayout {
-                                    spacing: 2
                                     Layout.fillWidth: true
-                                    Layout.minimumWidth: root.px(150)
-                                    Text {
-                                        Layout.fillWidth: true
-                                        text: assetCard.modelData.title
-                                        textFormat: Text.PlainText
-                                        elide: Text.ElideRight
-                                        color: root.ink
-                                        font.family: root.sans
-                                        font.pixelSize: root.px(18)
-                                        font.weight: Font.DemiBold
-                                    }
-                                    Text {
-                                        Layout.fillWidth: true
-                                        elide: Text.ElideRight
-                                        text: assetCard.modelData.kind === "chain" ? assetCard.modelData.where
-                                            : assetCard.modelData.where + (assetCard.modelData.kind === "token" ? " · token on LEZ" : " account")
-                                              + (root.namesLine(assetCard.modelData) !== "" ? " · " + root.namesLine(assetCard.modelData) : "")
-                                        color: assetCard.modelData.where === "Private" ? root.brass : assetCard.modelData.balance === null ? root.alarm : root.dim
-                                        font.family: root.sans
-                                        font.pixelSize: root.px(14)
-                                    }
-                                }
-                                Text {
-                                    text: assetCard.modelData.balance === null ? "—" : root.grouped(assetCard.modelData.balance)
-                                    color: root.ink
-                                    font.family: root.sans
-                                    font.pixelSize: root.px(20)
-                                    font.weight: Font.DemiBold
-                                    Layout.rightMargin: root.px(6)
-                                }
-                                // The buttons take the same width on every row, so the balances line up.
-                                RowLayout {
-                                    Layout.fillWidth: false
-                                    Layout.minimumWidth: root.px(340)
-                                    Layout.maximumWidth: root.px(340)
-                                    spacing: 8
-                                    Item { Layout.fillWidth: true }
-                                    Action {
-                                        visible: assetCard.modelData.balance !== null
-                                        label: "Send"
-                                        enabledNow: assetCard.modelData.balance !== "0"
-                                        onPressed: root.openSend(assetCard.modelData, "")
-                                    }
-                                    Action {
-                                        visible: assetCard.modelData.balance !== null
-                                        label: "Receive"
-                                        onPressed: root.openReceive(assetCard.modelData)
-                                    }
-                                    Action {
-                                        visible: assetCard.modelData.stakable && assetCard.modelData.balance !== null
-                                        label: "Stake"
-                                        strong: true
-                                        tint: root.orange
-                                        onPressed: { root.walletView = "stake"; root.loadChain() }
-                                    }
-                                    Action {
-                                        visible: assetCard.modelData.balance === null && assetCard.modelData.kind === "chain"
-                                        label: "Open the Blockchain app"
-                                        onPressed: if (logos.request) logos.request("basecamp.apps.launch", { app: "blockchain_ui" }, function() { root.loadChain() })
-                                    }
-                                    Action {
-                                        visible: root.walletMenu(assetCard.modelData).length > 0
-                                        label: "⋯"
-                                        implicitWidth: root.px(44)
-                                        onPressed: root.walletMenuFor = root.walletMenuFor === assetCard.modelData.id ? "" : assetCard.modelData.id
-                                    }
-                                }
-                            }
-                            // The … menu: below the card's right edge, over the cards under it.
-                            Rectangle {
-                                visible: root.walletMenuFor === assetCard.modelData.id
-                                anchors.top: parent.bottom
-                                anchors.topMargin: 4
-                                anchors.right: parent.right
-                                width: Math.max(root.px(220), menuColumn.implicitWidth + 8)
-                                height: menuColumn.implicitHeight + 8
-                                radius: 10
-                                color: root.raised
-                                border.width: 1
-                                border.color: root.line
-                                Column {
-                                    id: menuColumn
-                                    x: 4
-                                    y: 4
-                                    width: parent.width - 8
-                                    Repeater {
-                                        model: root.walletMenuFor === assetCard.modelData.id ? root.walletMenu(assetCard.modelData) : []
+                                    implicitHeight: groupHead.implicitHeight + root.px(32)
+                                    color: groupArea.containsMouse ? root.hover : "transparent"
+                                    radius: 12
+                                    RowLayout {
+                                        id: groupHead
+                                        anchors.left: parent.left
+                                        anchors.right: parent.right
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        anchors.leftMargin: root.px(18)
+                                        anchors.rightMargin: root.px(18)
+                                        spacing: root.px(14)
                                         Rectangle {
-                                            id: menuItem
-                                            required property var modelData
-                                            width: parent.width
-                                            implicitWidth: menuText.implicitWidth + 28
-                                            height: root.px(40)
-                                            radius: 6
-                                            color: menuArea.containsMouse ? root.hover : "transparent"
+                                            implicitWidth: root.px(42)
+                                            implicitHeight: root.px(42)
+                                            radius: height / 2
+                                            color: groupCard.modelData.id === "chain" ? root.orange : groupCard.modelData.id === "lez" ? root.brass : root.raised
+                                            Text { anchors.centerIn: parent; text: groupCard.modelData.letter; color: groupCard.modelData.id === "tokens" ? root.ink : root.slate; font.family: root.sans; font.pixelSize: root.px(18); font.weight: Font.Bold }
+                                        }
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 2
+                                            Text { text: groupCard.modelData.title; color: root.ink; font.family: root.sans; font.pixelSize: root.px(18); font.weight: Font.DemiBold }
                                             Text {
-                                                id: menuText
-                                                anchors.verticalCenter: parent.verticalCenter
-                                                x: 14
-                                                text: menuItem.modelData.label
-                                                color: menuItem.modelData.act === "stake" ? root.orange : root.ink
+                                                Layout.fillWidth: true
+                                                elide: Text.ElideRight
+                                                text: groupCard.modelData.note
+                                                color: groupCard.modelData.tone === "alarm" ? root.alarm : groupCard.modelData.tone === "stake" ? root.orange : root.dim
                                                 font.family: root.sans
-                                                font.pixelSize: root.px(16)
+                                                font.pixelSize: root.px(14)
                                             }
+                                        }
+                                        Text {
+                                            // Different tokens don't add up to one total.
+                                            visible: groupCard.modelData.id !== "tokens"
+                                            text: root.amountShown(groupCard.modelData.total)
+                                            color: root.ink
+                                            font.family: root.sans
+                                            font.pixelSize: root.px(24)
+                                            font.weight: Font.Bold
+                                        }
+                                        Text { text: groupCard.open ? "▾" : "▸"; color: root.dim; font.pixelSize: root.px(18); Layout.preferredWidth: root.px(18) }
+                                    }
+                                    MouseArea {
+                                        id: groupArea
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: root.walletToggle(groupCard.modelData.id)
+                                    }
+                                }
+                                // The node is off: say what to do.
+                                RowLayout {
+                                    visible: groupCard.modelData.tone === "alarm"
+                                    Layout.fillWidth: true
+                                    Layout.leftMargin: root.px(74)
+                                    Layout.rightMargin: root.px(18)
+                                    Layout.bottomMargin: root.px(16)
+                                    spacing: 10
+                                    Hint { font.pixelSize: root.px(15); text: "Start it in Basecamp's Blockchain app, then Refresh." }
+                                    Action { label: "Open the Blockchain app"; onPressed: if (logos.request) logos.request("basecamp.apps.launch", { app: "blockchain_ui" }, function() { root.loadChain() }) }
+                                }
+                                // Its addresses.
+                                Repeater {
+                                    model: groupCard.open ? groupCard.modelData.rows : []
+                                    ColumnLayout {
+                                        id: addressRow
+                                        required property var modelData
+                                        readonly property bool open: root.walletRowOpen === modelData.id
+                                        Layout.fillWidth: true
+                                        spacing: 0
+                                        Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: root.line }
+                                        // Press the row (not its copy button) for its actions.
+                                        Rectangle {
+                                            Layout.fillWidth: true
+                                            implicitHeight: rowLine.implicitHeight + root.px(24)
+                                            color: rowArea.containsMouse ? root.hover : "transparent"
                                             MouseArea {
-                                                id: menuArea
+                                                id: rowArea
                                                 anchors.fill: parent
                                                 hoverEnabled: true
                                                 cursorShape: Qt.PointingHandCursor
-                                                onClicked: root.walletAct(menuItem.modelData.act, assetCard.modelData)
+                                                onClicked: root.walletRowOpen = addressRow.open ? "" : addressRow.modelData.id
+                                            }
+                                        RowLayout {
+                                            id: rowLine
+                                            anchors.left: parent.left
+                                            anchors.right: parent.right
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            anchors.leftMargin: root.px(30)
+                                            anchors.rightMargin: root.px(18)
+                                            spacing: root.px(12)
+                                            Rectangle {
+                                                implicitWidth: root.px(34)
+                                                implicitHeight: root.px(34)
+                                                radius: height / 2
+                                                color: root.raised
+                                                border.width: 2
+                                                border.color: addressRow.modelData.kind === "chain" ? root.orange : addressRow.modelData.fromPrivate ? root.brass : root.line
+                                                Text { anchors.centerIn: parent; text: addressRow.modelData.title.charAt(0).toUpperCase(); color: root.ink; font.family: root.sans; font.pixelSize: root.px(14); font.weight: Font.Bold }
+                                            }
+                                            ColumnLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 1
+                                                Text { text: addressRow.modelData.title; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); font.weight: Font.DemiBold }
+                                                Text {
+                                                    Layout.fillWidth: true
+                                                    elide: Text.ElideRight
+                                                    text: addressRow.modelData.sub
+                                                    color: addressRow.modelData.fromPrivate ? root.brass : root.dim
+                                                    font.family: root.sans
+                                                    font.pixelSize: root.px(13)
+                                                }
+                                            }
+                                            // Copy the address.
+                                            Rectangle {
+                                                visible: addressRow.modelData.address !== ""
+                                                implicitWidth: root.px(34)
+                                                implicitHeight: root.px(34)
+                                                radius: 8
+                                                color: copyArea.containsMouse ? root.hover : "transparent"
+                                                border.width: 1
+                                                border.color: root.line
+                                                Accessible.name: "Copy the address"
+                                                Text { anchors.centerIn: parent; text: "⧉"; color: root.dim; font.pixelSize: root.px(17) }
+                                                MouseArea {
+                                                    id: copyArea
+                                                    anchors.fill: parent
+                                                    hoverEnabled: true
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    onClicked: root.copy(addressRow.modelData.address, addressRow.modelData.title + "'s address")
+                                                }
+                                            }
+                                            Text {
+                                                text: root.amountShown(addressRow.modelData.balance)
+                                                color: root.ink
+                                                font.family: root.sans
+                                                font.pixelSize: root.px(18)
+                                                font.weight: Font.DemiBold
+                                                horizontalAlignment: Text.AlignRight
+                                                Layout.minimumWidth: root.px(150)
+                                            }
+                                            Text { text: addressRow.open ? "▾" : "▸"; color: root.dim; font.pixelSize: root.px(16); Layout.preferredWidth: root.px(16) }
+                                        }
+                                        }
+                                        // Its actions, opened in place.
+                                        Flow {
+                                            visible: addressRow.open
+                                            Layout.fillWidth: true
+                                            Layout.leftMargin: root.px(76)
+                                            Layout.rightMargin: root.px(18)
+                                            Layout.bottomMargin: root.px(14)
+                                            spacing: 8
+                                            Action {
+                                                visible: addressRow.modelData.canSend
+                                                label: "Send"
+                                                strong: true
+                                                enabledNow: addressRow.modelData.balance !== null && addressRow.modelData.balance !== "0"
+                                                onPressed: root.openSend(addressRow.modelData, "")
+                                            }
+                                            Action {
+                                                visible: !addressRow.modelData.canSend && addressRow.modelData.kind === "lez"
+                                                label: "Pay from this account"
+                                                onPressed: { root.useAccount(addressRow.modelData.account); root.loadAccounts() }
+                                            }
+                                            Action { label: "Receive"; onPressed: root.openReceive(addressRow.modelData) }
+                                            Action {
+                                                visible: addressRow.modelData.kind === "chain"
+                                                label: "Bridge into LEZ"
+                                                onPressed: root.openGetTokens()
+                                            }
+                                            Action {
+                                                visible: addressRow.modelData.kind === "lez" && !addressRow.modelData.fromPrivate && addressRow.modelData.canSend
+                                                label: "Bridge in"
+                                                onPressed: root.openGetTokens()
+                                            }
+                                            Action {
+                                                visible: addressRow.modelData.kind === "chain"
+                                                label: "Staking ›"
+                                                tint: root.orange
+                                                strong: true
+                                                onPressed: { root.walletView = "stake"; root.loadChain() }
+                                            }
+                                            Action {
+                                                visible: addressRow.modelData.kind === "token" && root.watchedTokens.indexOf(addressRow.modelData.definition) >= 0
+                                                label: "Remove"
+                                                onPressed: root.removeToken(addressRow.modelData.definition)
                                             }
                                         }
                                     }
@@ -4679,12 +4788,12 @@ Item {
                     RowLayout {
                         Layout.topMargin: 6
                         spacing: 10
-                        Action { label: "Add a token"; onPressed: { root.walletMenuFor = ""; root.addTokenProblem = ""; root.walletView = "add"; addTokenField.forceActiveFocus() } }
+                        Action { label: "Add a token"; onPressed: { root.addTokenProblem = ""; root.walletView = "add"; addTokenField.forceActiveFocus() } }
                         Item { Layout.fillWidth: true }
                     }
                     Hint {
                         font.pixelSize: root.px(14)
-                        text: "Private LEZ is seen only by you. Public LEZ and the Logos Blockchain can be seen by anyone. ⋯ on a balance has its other options: staking, the bridge and your names."
+                        text: "Private accounts are seen only by you; public ones and the Logos Blockchain by anyone. LEZ and the Logos Blockchain are separate chains with their own addresses; the bridge moves tokens into LEZ."
                     }
                 }
 
@@ -4705,8 +4814,8 @@ Item {
                             Tab {
                                 id: fromTab
                                 required property var modelData
-                                label: modelData.title + (modelData.kind === "chain" ? "" : " · " + modelData.where) + "   " + root.grouped(modelData.balance)
-                                current: modelData.kind === root.sendKind && modelData.definition === root.sendDefinition && (modelData.kind === "chain" || modelData.fromPrivate === root.sendFromPrivate)
+                                label: (modelData.kind === "chain" ? "Logos Blockchain · " + Logic.keyShown(modelData.key) : modelData.kind === "lez" ? "LEZ · " + modelData.title : modelData.title + " · " + (modelData.fromPrivate ? "Private" : "Public")) + "   " + root.amountShown(modelData.balance)
+                                current: modelData.kind === root.sendKind && modelData.definition === root.sendDefinition && (modelData.kind === "chain" ? modelData.key === root.chainFrom : modelData.fromPrivate === root.sendFromPrivate)
                                 onPressed: root.openSend(modelData, sendTo.text.trim())
                             }
                         }
@@ -4865,9 +4974,11 @@ Item {
                     }
                 }
 
-                // ── Stake ──
+                // ── Stake: the amounts, then how it works and how to unstake ──
                 ColumnLayout {
                     visible: root.walletView === "stake"
+                    readonly property var table: Logic.stakeTable(root.chainStake, root.chainAccounts)
+                    id: stakePage
                     Layout.fillWidth: true
                     spacing: 14
                     Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
@@ -4884,67 +4995,153 @@ Item {
                         strong: true
                         onPressed: if (logos.request) logos.request("basecamp.apps.launch", { app: "blockchain_ui" }, function() { root.loadChain() })
                     }
+                    Hint { visible: stakePage.table === null && root.chainError === ""; text: "Reading your node…" }
 
-                    Card {
-                        visible: root.chainStake !== null
+                    // The amounts.
+                    Rectangle {
+                        visible: stakePage.table !== null
                         Layout.fillWidth: true
-                        Text { text: "Staked on the Logos Blockchain"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(15) }
-                        Text { text: root.chainStake !== null ? root.grouped(root.chainStake.staked) : ""; color: root.ink; font.family: root.sans; font.pixelSize: root.px(34); font.weight: Font.Bold }
-                        Hint {
-                            font.pixelSize: root.px(16)
-                            text: root.chainStake === null ? "" : "In " + root.grouped(root.chainStake.notes) + (root.chainStake.notes === 1 ? " note" : " notes") + " on "
-                                + (root.chainStake.keys || []).map(Logic.keyShown).join(", ") + "."
+                        implicitHeight: stakeRows.implicitHeight
+                        radius: 12
+                        color: root.card
+                        border.width: 1
+                        border.color: root.line
+                        ColumnLayout {
+                            id: stakeRows
+                            width: parent.width
+                            spacing: 0
+                            Repeater {
+                                model: stakePage.table === null ? [] : [
+                                    { label: "On your node", value: stakePage.table.held, dot: "" },
+                                    { label: "Staked now", value: stakePage.table.staked, dot: "full" },
+                                    { label: "Not counted yet", value: stakePage.table.waiting, dot: "ring" },
+                                ]
+                                ColumnLayout {
+                                    required property var modelData
+                                    required property int index
+                                    Layout.fillWidth: true
+                                    spacing: 0
+                                    Rectangle { visible: index > 0; Layout.fillWidth: true; implicitHeight: 1; color: root.line }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Layout.margins: root.px(18)
+                                        spacing: 12
+                                        Rectangle {
+                                            visible: modelData.dot !== ""
+                                            implicitWidth: root.px(10)
+                                            implicitHeight: root.px(10)
+                                            radius: height / 2
+                                            color: modelData.dot === "full" ? root.orange : "transparent"
+                                            border.width: modelData.dot === "ring" ? 2 : 0
+                                            border.color: root.orange
+                                        }
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: modelData.label
+                                            color: modelData.dot === "full" ? root.orange : modelData.dot === "" ? root.dim : root.ink
+                                            font.family: root.sans
+                                            font.pixelSize: root.px(16)
+                                            font.weight: modelData.dot === "full" ? Font.DemiBold : Font.Normal
+                                        }
+                                        Text { text: root.amountShown(modelData.value); color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
+                                    }
+                                }
+                            }
+                            Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: root.line }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Layout.margins: root.px(18)
+                                spacing: 12
+                                Text { Layout.fillWidth: true; text: "Rewards to claim"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16) }
+                                Text {
+                                    text: stakePage.table === null || stakePage.table.vouchers === 0 ? "None yet"
+                                        : root.amountShown(stakePage.table.claimable) + " from " + stakePage.table.vouchers + (stakePage.table.vouchers === 1 ? " block" : " blocks")
+                                    color: stakePage.table !== null && stakePage.table.vouchers > 0 ? root.ink : root.dim
+                                    font.family: root.sans
+                                    font.pixelSize: root.px(17)
+                                }
+                                Action {
+                                    label: root.chainBusy ? "Claiming…" : "Claim one"
+                                    strong: stakePage.table !== null && stakePage.table.vouchers > 0
+                                    tint: root.orange
+                                    enabledNow: !root.chainBusy && stakePage.table !== null && stakePage.table.vouchers > 0
+                                    onPressed: root.chainClaim()
+                                }
+                            }
                         }
-                        Hint { font.pixelSize: root.px(16); text: Logic.stakeLines(root.chainStake).length > 1 ? Logic.stakeLines(root.chainStake)[1] : "" }
-                        Hint {
-                            visible: root.chainStatus !== null
-                            font.pixelSize: root.px(15)
-                            text: root.chainStatus === null ? "" : "Your node: " + (root.chainStatus.mode || "?") + ", block " + root.grouped(root.chainStatus.height) + "."
-                        }
+                    }
+                    Hint {
+                        visible: root.chainStake !== null
+                        font.pixelSize: root.px(14)
+                        text: root.chainStake === null ? "" : "Epoch " + root.chainStake.epoch + " · " + root.grouped(root.chainStake.notes) + (root.chainStake.notes === 1 ? " note" : " notes") + " on "
+                            + (root.chainStake.keys || []).map(Logic.keyShown).join(", ")
+                            + (root.chainStatus !== null ? " · node " + (root.chainStatus.mode || "?") + ", block " + root.grouped(root.chainStatus.height) : "")
+                            + ". LEZ balances aren't part of this stake."
                     }
 
                     Card {
                         visible: root.chainStake !== null
                         Layout.fillWidth: true
-                        Part { Layout.topMargin: 0; text: "Rewards" }
-                        Hint { color: root.ink; text: Logic.rewardsLine(root.chainStake) }
-                        Action {
-                            visible: root.chainStake !== null && root.chainStake.vouchers > 0
-                            label: root.chainBusy ? "Claiming…" : "Claim one"
-                            strong: true
-                            tint: root.orange
-                            enabledNow: !root.chainBusy
-                            onPressed: root.chainClaim()
-                        }
-                    }
-
-                    Card {
-                        visible: root.chainStake !== null
-                        Layout.fillWidth: true
-                        Part { Layout.topMargin: 0; text: "Stake more" }
-                        Hint { text: "There's no separate stake step: every token on your node's keys is staked. To stake more, receive Logos Blockchain tokens on your node's key." }
-                        Action {
-                            label: "Receive"
-                            onPressed: root.openReceive({ kind: "chain" })
-                        }
+                        Part { Layout.topMargin: 0; text: "How it works" }
+                        Hint { font.pixelSize: root.px(16); text: "• There's no stake button: tokens on your node's key are staked by holding them there." }
+                        Hint { font.pixelSize: root.px(16); text: "• New tokens start counting within two epochs of arriving." }
+                        Hint { font.pixelSize: root.px(16); text: "• Staked tokens stay yours and spendable; spending them takes them out of the stake." }
+                        Hint { font.pixelSize: root.px(16); text: "• Each block your node leads earns one reward. Each claim cashes one reward and pays its own fee, which can be more than the reward." }
                     }
 
                     Card {
                         visible: root.chainStake !== null
                         Layout.fillWidth: true
                         Part { Layout.topMargin: 0; text: "Unstake" }
-                        Hint { text: "Unstaking moves tokens off your node's keys. They stop counting at the next epoch. Choose where they go:" }
+                        Hint { text: "Move tokens off your node's key. They leave the stake at a coming epoch boundary." }
                         RowLayout {
-                            spacing: 10
-                            Action {
-                                label: "Send to another key"
-                                onPressed: {
-                                    var rows = root.walletRows.filter(function(row) { return row.kind === "chain" })
-                                    if (rows.length > 0)
-                                        root.openSend(rows[0], "")
+                            Layout.fillWidth: true
+                            spacing: 12
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.alignment: Qt.AlignTop
+                                implicitHeight: unstakeSend.implicitHeight + root.px(32)
+                                radius: 10
+                                color: "transparent"
+                                border.width: 1
+                                border.color: root.line
+                                ColumnLayout {
+                                    id: unstakeSend
+                                    x: root.px(16)
+                                    y: root.px(16)
+                                    width: parent.width - root.px(32)
+                                    spacing: 10
+                                    Text { text: "Send to a key outside this node"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold }
+                                    Hint { font.pixelSize: root.px(14); text: "Stays on the Logos Blockchain. Sending to one of this node's own keys keeps it staked." }
+                                    Action {
+                                        label: "Send…"
+                                        onPressed: {
+                                            var rows = root.walletRows.filter(function(row) { return row.kind === "chain" })
+                                            if (rows.length > 0)
+                                                root.openSend(rows[0], "")
+                                        }
+                                    }
                                 }
                             }
-                            Action { label: "Bridge into LEZ"; onPressed: root.openGetTokens() }
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.alignment: Qt.AlignTop
+                                implicitHeight: unstakeBridge.implicitHeight + root.px(32)
+                                radius: 10
+                                color: "transparent"
+                                border.width: 1
+                                border.color: root.line
+                                ColumnLayout {
+                                    id: unstakeBridge
+                                    x: root.px(16)
+                                    y: root.px(16)
+                                    width: parent.width - root.px(32)
+                                    spacing: 10
+                                    Text { text: "Bridge into LEZ"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold }
+                                    Hint { font.pixelSize: root.px(14); color: root.brass; text: "One way for now: LEZ can't send back to the Logos Blockchain yet. Arrives in about 12 hours." }
+                                    Action { label: "Bridge…"; onPressed: root.openGetTokens() }
+                                }
+                            }
                         }
                     }
                     Hint { visible: root.chainProblem !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.chainProblem }

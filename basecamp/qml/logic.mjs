@@ -248,3 +248,76 @@ export function walletAssets(cliBalance, holdings, watched, tokenNames, chainAcc
     }
     return rows
 }
+
+/// `a - b` for amounts in decimal text, exactly; null when b > a or either isn't digits.
+export function subDigits(a, b) {
+    var x = String(a || "0").replace(/^0+(?=\d)/, ""), y = String(b || "0").replace(/^0+(?=\d)/, "")
+    if (!/^\d+$/.test(x) || !/^\d+$/.test(y) || !atLeast(x, y)) return null
+    var out = "", borrow = 0
+    for (var i = x.length - 1, j = y.length - 1; i >= 0; i--, j--) {
+        var d = (x.charCodeAt(i) - 48) - (j >= 0 ? y.charCodeAt(j) - 48 : 0) - borrow
+        borrow = d < 0 ? 1 : 0
+        out = String(d < 0 ? d + 10 : d) + out
+    }
+    return out.replace(/^0+(?=\d)/, "")
+}
+
+/// The Wallet home: one group per chain (LEZ, tokens on LEZ, the Logos
+/// Blockchain), each with its total and one row per address. `accounts` is
+/// cli_accounts' list (every LEZ account) or null, then `cliBalance` gives the
+/// two default ones; `stake` is chain_stake's reply or null. A row:
+/// `{id, kind, title, sub, address, balance, fromPrivate, definition, key,
+/// canSend, account}`; `canSend` is false for a LEZ account that isn't the
+/// default of its kind (the CLI pays from the default).
+export function walletGroups(cliBalance, accounts, holdings, watched, tokenNames, chainAccounts, chainDown, stake) {
+    var groups = []
+    var lez = []
+    if (Array.isArray(accounts) && accounts.length > 0) {
+        accountsShown(accounts).forEach(function(a) {
+            var priv = a.kind === "private"
+            var label = String(a.label === null || a.label === undefined ? "" : a.label).trim()
+            lez.push({ id: "lez-" + a.account, kind: "lez", title: label !== "" ? label : a["default"] ? (priv ? "Main" : "Public") : (priv ? "Private account" : "Public account"),
+                       sub: (priv ? "Private" : "Public") + (a["default"] ? (priv ? " · pays and registers" : " · bridged tokens land here") : " · " + keyShown(a.account.replace(/^(Public|Private)\//, ""))),
+                       address: a.account, balance: a.balance === null || a.balance === undefined ? null : String(a.balance), fromPrivate: priv, definition: "", key: "",
+                       canSend: !!a["default"], account: a.account })
+        })
+    } else if (cliBalance && typeof cliBalance === "object") {
+        lez.push({ id: "lez-private", kind: "lez", title: "Main", sub: "Private · pays and registers", address: cliBalance.account ? "Private/" + cliBalance.account : "",
+                   balance: cliBalance.balance === undefined ? null : String(cliBalance.balance), fromPrivate: true, definition: "", key: "", canSend: true, account: "" })
+        if (cliBalance["public"])
+            lez.push({ id: "lez-public", kind: "lez", title: "Public", sub: "Public · bridged tokens land here", address: "Public/" + cliBalance["public"].account,
+                       balance: String(cliBalance["public"].balance), fromPrivate: false, definition: "", key: "", canSend: true, account: "" })
+    }
+    if (lez.length > 0) {
+        var lezTotal = lez.reduce(function(sum, r) { return sum === null || r.balance === null ? sum : addDigits(sum, r.balance) }, "0")
+        groups.push({ id: "lez", title: "LEZ", letter: "L", total: lezTotal, note: lez.length === 1 ? "1 account" : lez.length + " accounts", tone: "plain", rows: lez })
+    }
+
+    var tokens = walletAssets(null, holdings, watched, tokenNames, null, false).map(function(r) {
+        return { id: r.id, kind: "token", title: r.title, sub: r.where + " · token on LEZ", address: r.definition, balance: r.balance, fromPrivate: r.fromPrivate,
+                 definition: r.definition, key: "", canSend: r.balance !== "0", account: "" }
+    })
+    if (tokens.length > 0)
+        groups.push({ id: "tokens", title: "Tokens on LEZ", letter: "T", total: null, note: tokens.length === 1 ? "1 token" : tokens.length + " tokens", tone: "plain", rows: tokens })
+
+    if (chainAccounts || chainDown) {
+        var keys = (chainAccounts || []).map(function(a) {
+            return { id: "chain-" + a.key, kind: "chain", title: "Node key", sub: "Public · " + keyShown(a.key), address: a.key,
+                     balance: a.balance === null || a.balance === undefined ? null : String(a.balance), fromPrivate: false, definition: "", key: a.key, canSend: true, account: "" }
+        })
+        var total = chainAccounts ? keys.reduce(function(sum, r) { return sum === null || r.balance === null ? sum : addDigits(sum, r.balance) }, "0") : null
+        var waiting = stake && total !== null ? subDigits(total, stake.staked) : null
+        var note = chainDown ? "Node not running" : (keys.length === 1 ? "1 key on your node" : keys.length + " keys on your node")
+            + (stake === null || stake === undefined || total === null ? "" : waiting === "0" ? " · all staked" : waiting !== null ? " · " + grouped(waiting) + " not counted yet" : " · " + grouped(stake.staked) + " staked")
+        groups.push({ id: "chain", title: "Logos Blockchain", letter: "B", total: total, note: note, tone: chainDown ? "alarm" : stake ? "stake" : "plain", rows: keys })
+    }
+    return groups
+}
+
+/// The Staking table: what the node holds, what is staked, what isn't counted yet.
+export function stakeTable(stake, chainAccounts) {
+    if (!stake) return null
+    var held = (chainAccounts || []).reduce(function(sum, a) { return sum === null || a.balance === null ? sum : addDigits(sum, a.balance) }, "0")
+    var waiting = held === null ? null : subDigits(held, stake.staked)
+    return { held: held, staked: String(stake.staked), waiting: waiting === null ? "0" : waiting, claimable: String(stake.claimable || "0"), vouchers: stake.vouchers || 0 }
+}

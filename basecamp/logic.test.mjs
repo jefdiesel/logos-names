@@ -1,6 +1,6 @@
 // Checks the view's own logic (qml/logic.mjs, which qml/Main.qml imports), since the QML
 // engine cannot run in CI. Run with: node basecamp/logic.test.mjs
-import { atLeast, someAmount, entryShown, tokenAmountProblem, tokenToProblem, tokenSendProves, tokenShown, feeEstimate, feePaid, accountTitle, accountsShown, publisherLine, durationWords, keyShown, chainToProblem, stakeLines, rewardsLine, grouped, addDigits, walletAssets } from "./qml/logic.mjs";
+import { atLeast, someAmount, entryShown, tokenAmountProblem, tokenToProblem, tokenSendProves, tokenShown, feeEstimate, feePaid, accountTitle, accountsShown, publisherLine, durationWords, keyShown, chainToProblem, stakeLines, rewardsLine, grouped, addDigits, walletAssets, subDigits, walletGroups, stakeTable } from "./qml/logic.mjs";
 import { readFileSync } from "node:fs";
 
 let failures = 0;
@@ -95,5 +95,26 @@ check("addDigits", [addDigits("999", "1"), addDigits("34002373886", "1191220464"
   check("walletAssets node down", down.map(r => [r.id, r.balance, r.where]), [["chain", null, "Node not running"]]);
   check("walletAssets nothing yet", walletAssets(undefined, null, [], {}, null, false), []);
 }
+// The Wallet's groups and the Staking table.
+check("subDigits", [subDigits("1000", "1"), subDigits("210939029", "210939029"), subDigits("5", "6"), subDigits("100000000000000000000", "1")], ["999", "0", null, "99999999999999999999"]);
+{
+  const accounts = [
+    { account: "Public/CCVd", kind: "public", label: null, balance: "38858810170", default: true },
+    { account: "Private/yGrP", kind: "private", label: null, balance: "40599000", default: true },
+    { account: "Private/HqRv", kind: "private", label: null, balance: "1000", default: false },
+  ];
+  const stake = { staked: "210939029", claimable: "0", vouchers: 0 };
+  const g = walletGroups(null, accounts, null, [], {}, [{ key: KEY, balance: "210939029" }], false, stake);
+  check("walletGroups ids", g.map(x => x.id), ["lez", "chain"]);
+  check("walletGroups lez rows", g[0].rows.map(r => [r.title, r.canSend]), [["Main", true], ["Private account", false], ["Public", true]]);
+  check("walletGroups lez total", g[0].total, "38899410170");
+  check("walletGroups all staked", g[1].note, "1 key on your node · all staked");
+  const more = walletGroups(null, accounts, null, [], {}, [{ key: KEY, balance: "215939029" }], false, stake);
+  check("walletGroups not counted yet", more[1].note, "1 key on your node · 5,000,000 not counted yet");
+  check("walletGroups fallback", walletGroups({ balance: "5", account: "a", public: { account: "b", balance: "7" } }, null, null, [], {}, null, false, null).map(x => [x.id, x.total]), [["lez", "12"]]);
+  check("walletGroups node down", walletGroups(null, null, null, [], {}, null, true, null).map(x => [x.id, x.total, x.note]), [["chain", null, "Node not running"]]);
+  check("stakeTable", stakeTable(stake, [{ key: KEY, balance: "215939029" }]), { held: "215939029", staked: "210939029", waiting: "5000000", claimable: "0", vouchers: 0 });
+}
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);
