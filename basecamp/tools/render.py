@@ -112,9 +112,15 @@ BRIDGE = r"""
                 return ok({ sent: false, lines: [], hash: null, total: "5000400", notes: "2", fee: "100000", to: "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk" })
             }
             // Accounts and fees: stand-ins for the names CLI's wallet.
+            // Tokens: a program on a chain of one's own, one token held and one added by address.
+            if (method === "cli_token_holdings") return ok({ token_program: "Tok3nProgram1111111111111111111111111111111", updating: false, error: null,
+                holdings: [{ account: "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", account_kind: "private", definition: "GoLDdef1nition11111111111111111111111111111", name: "Gold", balance: "4200" }] })
+            if (method === "cli_token_pending") return ok({ token_program: "Tok3nProgram1111111111111111111111111111111", pending: mock.tokenPending || [], updating: false, error: null })
+            if (method === "watched_tokens") return ok([{ definition: "S1LVERdef1nition1111111111111111111111111111", name: "Silver" }])
+            if (method === "watch_token") return ok([{ definition: "S1LVERdef1nition1111111111111111111111111111", name: "Silver" }, { definition: args[0], name: "Copper" }])
             if (method === "chain_status") return mock.nodeDown ? JSON.stringify({ success: false, value: null, error: "Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app." })
                 : ok({ height: 66467, slot: 2286493, lib_slot: 2247925, mode: "Online", epoch: 7 })
-            if (method === "chain_accounts") return ok([
+            if (method === "chain_accounts") return mock.nodeDown ? JSON.stringify({ success: false, value: null, error: "Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app." }) : ok([
                 { key: "66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b", balance: "1191220464" },
                 { key: "73058ad5edb0e72b66c3e05ae90471382c3bb4d61314db995ef40e674dbf591e", balance: "25000000" },
                 { key: "5f9f8fd1696c6e6d85bb52fc4b61810a3f9c75422612b72a566ff3ef6a68ad12", balance: "0" }])
@@ -181,9 +187,23 @@ BRIDGE = r"""
 
 SCENARIOS = {
     "start": "",
+    "wallet": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home")',
+    "wallet-send": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); root.openSend({ id: "lez-private", kind: "lez", title: "LEZ", definition: "", fromPrivate: true }, "ada"); sendAmount.text = "1000"',
+    "wallet-review": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); root.openSend({ id: "lez-private", kind: "lez", title: "LEZ", definition: "", fromPrivate: true }, "ada"); sendAmount.text = "1000"; root.sendReview()',
+    "wallet-review-public": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); root.openSend({ id: "lez-public", kind: "lez", title: "LEZ", definition: "", fromPrivate: false }, "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR"); sendAmount.text = "1000"; root.sendReview()',
+    "wallet-send-bad": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); root.openSend({ id: "lez-public", kind: "lez", title: "LEZ", definition: "", fromPrivate: false }, "Public/7wx3U7qMRWop"); sendAmount.text = "1000"',
+    "wallet-sending": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); root.openSend({ id: "lez-public", kind: "lez", title: "LEZ", definition: "", fromPrivate: false }, "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR"); sendAmount.text = "1000"; root.sendConfirm()',
+    "wallet-chain-review": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); Qt.callLater(function() { root.chainFrom = "66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b"; root.openSend({ id: "chain", kind: "chain", title: "Logos Blockchain", definition: "", fromPrivate: false }, "hopper"); sendAmount.text = "1,000,000"; root.sendReview() })',
+    "wallet-receive": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); root.openReceive({ id: "lez-private", kind: "lez", title: "LEZ", definition: "", fromPrivate: true })',
+    "wallet-receive-chain": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); root.openReceive({ id: "chain", kind: "chain", title: "Logos Blockchain", definition: "", fromPrivate: false })',
+    "wallet-stake": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); root.walletView = "stake"',
+    "wallet-add": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); root.walletView = "add"; addTokenField.text = "CoPPERdef1nition111111111111111111111111111"',
+    "wallet-add-noprogram": 'root.openWallet("add")',
+    "wallet-bridge": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); Qt.callLater(function() { root.openGetTokens() })',
+    "wallet-down": 'root.openWallet("home")',
+    "wallet-waiting": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home")',
     "home-reply": 'root.boardReply("Jef0x")',
     "anon-off": 'root.anonOn = true',
-    "pay": 'root.section = "pay"',
     "poster": 'root.show("linus")',
     "messages": 'root.section = "messages"; root.chatLoad(); root.chatOpen("c1")',
     "group": 'root.section = "messages"; root.chatLoad(); Qt.callLater(function() { root.chatOpen("g1") })',
@@ -255,16 +275,8 @@ SCENARIOS = {
     # Paying an account rather than a name.
     "approve-verified": 'root.appRequests = [{ id: "r1", kind: "connect", app: "forumer_ui", reason: "to post on the forum as you", created: Date.now(), expires: Date.now() + 600000, choices: [{ account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", label: "Names wallet, main public account", granted: false }], publisher: { status: "verified", publisher: "forumer", module: "forumer_ui", version: "1.2.0" } }]; root.appChosen = ["Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk"]; root.appChosenFor = "r1"',
     "approve-fake": 'root.appRequests = [{ id: "r1", kind: "connect", app: "forumer_ui", reason: "to post on the forum as you", created: Date.now(), expires: Date.now() + 600000, choices: [{ account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", label: "Names wallet, main public account", granted: false }], publisher: { status: "mismatch", publisher: "forumer", module: "forumer_ui", version: "1.2.0" } }]; root.appChosen = ["Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk"]; root.appChosenFor = "r1"',
-    "chain": 'root.openChain()',
-    "chain-plan": 'root.openChain(); root.chainFrom = "66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b"; chainToField.text = "hopper"; chainAmountField.text = "1000000"; root.chainCheck()',
-    "chain-down": 'root.openChain()',
     "settings-accounts": 'root.section = "settings"; root.loadAccounts(); root.accountRenaming = "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR"',
     "settings-account-new": 'root.section = "settings"; root.loadAccounts(); root.accountNewKind = "private"',
-    "pay-fee": 'root.section = "pay"; root.loadFee(); payTo.text = "ada"; payAmount.text = "1000"',
-    "pay-account": 'root.section = "pay"; payTo.text = "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR"; payAmount.text = "1000"',
-    "pay-account-public": 'root.section = "pay"; payTo.text = "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR"; payAmount.text = "1000"; root.payFromPublic = true',
-    "pay-account-bad": 'root.section = "pay"; payTo.text = "Public/7wx3U7qMRWop"; payAmount.text = "1000"',
-    "pay-account-sending": 'root.section = "pay"; payTo.text = "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR"; payAmount.text = "1000"; root.payFromPublic = true; root.payName()',
 }
 
 # What the module's stand-in says in each Welcome state (see `mock` in BRIDGE).
@@ -293,7 +305,9 @@ MOCKS = {
                                         "problem": "Your public account holds 1,200, and moving to private needs at least 5,000,000. Get more tokens, then try again."}},
     "welcome-moved": {"private": "5000000", "public": "1000000"},
     "pay-account": {"private": "250000000", "public": "1250000"},
-    "chain-down": {"nodeDown": True},
+    "wallet-down": {"nodeDown": True},
+    "wallet-waiting": {"tokenPending": [{"position": 21, "definition": "GoLDdef1nition11111111111111111111111111111", "name": "Gold", "amount": "50", "to": "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z"}]},
+    "wallet-sending": {"private": "250000000", "public": "1250000"},
 }
 
 def main():
@@ -315,7 +329,7 @@ def main():
             "registry": "null" if scenario == "unset" else json.dumps("DbYLkKwd2b13bQhceVj351mpPw7QmRzEjRT2EfU56CKH"),
             "mock": json.dumps(MOCKS.get(scenario, {})),
             "bridge_key": "" if scenario == "get-tokens" else "8e3b0f4a2c71d95e6a0b4c8d2f1e7a3954c6b0d8e2f4a6c8b0d2e4f6a8c0b2d4",
-            "scenario": SCENARIOS[scenario], "out": out, "height": 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "name", "settings-accounts", "settings-account-new") else 1500 if scenario.startswith("get-tokens") or scenario.startswith("chain") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
+            "scenario": SCENARIOS[scenario], "out": out, "height": 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "name", "settings-accounts", "settings-account-new") else 1500 if scenario.startswith("get-tokens") or scenario.startswith("wallet") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
         }
         # Beside Main.qml, so its relative imports (logic.mjs) resolve.
         with tempfile.NamedTemporaryFile("w", suffix=".qml", delete=False, dir=os.path.join(HERE, "..", "qml")) as handle:

@@ -61,7 +61,7 @@ Item {
     property string walletProblem: ""  // why the wallet cannot be used, if it cannot
     property int fromIndex: 0
     property string tool: ""           // the open panel: "", "pay" or "settings"
-    property string section: "posts"   // posts, pay, profile, search or settings
+    property string section: "wallet"  // wallet, messages, profile, search or settings
     // The board (Home): see board/ and the names module's board_* calls.
     property string boardView: "all"   // all, following or thread
     property string boardThreadOf: ""  // the post a thread view shows, <name>/<n>
@@ -113,9 +113,9 @@ Item {
     property bool configKnown: false   // the names module has answered once
     // The names module this app needs: the same release (metadata.json asks for it
     // at install, but an older module can still be the one Basecamp loaded).
-    readonly property string neededModule: "0.13.0"
+    readonly property string neededModule: "0.14.0"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.13.1"
+    readonly property string appVersion: "0.14.0"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -333,7 +333,10 @@ Item {
             loadCliBalance()
             loadCliStatus()
             loadClaims()
-            boardLoad()
+            // The Wallet opens first: its balances, tokens and node.
+            loadTokens()
+            loadWatched()
+            loadChain()
             loadRunningJobs()
             loadAppGrants()
             return true
@@ -551,9 +554,8 @@ Item {
 
     /// Opens Blockchain and reads the node.
     function openChain() {
-        go("chain")
         chainProblem = ""
-        loadChain()
+        openWallet("stake")
     }
 
     /// Reads the node's state, its keys and its stake.
@@ -587,7 +589,7 @@ Item {
     }
 
     function chainAsked() {
-        return [chainFrom, chainToField.text.trim(), chainAmountField.text.trim()]
+        return [chainFrom, sendTo.text.trim(), sendAmount.text.trim()]
     }
 
     /// Checks the send and shows its plan; nothing is sent.
@@ -626,7 +628,7 @@ Item {
         askLater("chain_send", [asked[0], asked[1], asked[2], true], function(sent) {
             chainBusy = false
             chainPlan = null
-            chainAmountField.text = ""
+            sendAmount.text = ""
             chainSent = { hash: sent.hash, amount: sent.amount, to: sent.to, name: sent.name, state: sent.hash ? "pending" : "unknown", fee: sent.fee }
             chainSentAt = Date.now()
             loadChain()
@@ -674,8 +676,226 @@ Item {
     Timer {
         interval: 5000
         repeat: true
-        running: root.section === "chain" && root.chainSent !== null && root.chainSent.state === "pending" && Date.now() - root.chainSentAt < 600000
+        running: root.section === "wallet" && root.chainSent !== null && root.chainSent.state === "pending" && Date.now() - root.chainSentAt < 600000
         onTriggered: root.chainPoll()
+    }
+
+    // ── Wallet: every balance, with send, receive, staking and the bridge ──
+
+    property string walletView: "home"   // home, send, receive, stake, add or bridge
+    property string sendKind: "lez"      // what Send sends: lez, token or chain
+    property string sendDefinition: ""   // the token Send sends, when sendKind is token
+    property string sendTitle: "LEZ"
+    property bool sendFromPrivate: true  // LEZ and tokens: from the private account, else the public one
+    property bool sendReviewing: false   // the summary is up, waiting for Confirm
+    property string receiveKind: "lez"   // what Receive shows: lez, token or chain
+    property var watchedTokens: []       // token IDs added by address (watched_tokens)
+    property var watchedNames: ({})      // their names, as cli_token_info read them
+    property string addTokenProblem: ""
+    property bool addTokenBusy: false
+    readonly property color orange: Theme.palette.primary
+
+    readonly property var walletRows: Logic.walletAssets(cliBalance, tokenProgram !== "" ? tokenHoldings : null, watchedTokens, watchedNames,
+                                                         chainAccounts, chainAccounts === null && chainError !== "")
+
+    /// Opens the Wallet at `view` (home by default) and reads every balance.
+    function openWallet(view) {
+        go("wallet")
+        walletView = view || "home"
+        sendReviewing = false
+        walletRefresh()
+    }
+
+    function walletRefresh() {
+        loadCliBalance()
+        loadTokens()
+        loadWatched()
+        loadChain()
+        loadFee()
+    }
+
+    /// The Send screen for `asset` (a walletRows row), to `to` if given.
+    function openSend(asset, to) {
+        sendKind = asset.kind
+        sendDefinition = asset.definition || ""
+        sendTitle = asset.title
+        sendFromPrivate = asset.kind === "chain" ? false : asset.fromPrivate
+        sendReviewing = false
+        chainPlan = null
+        chainProblem = ""
+        tokenProblem = ""
+        go("wallet")
+        walletView = "send"
+        sendTo.text = to || ""
+        sendAmount.text = ""
+        if (asset.kind !== "chain")
+            loadFee()
+        if (to)
+            sendAmount.forceActiveFocus()
+        else
+            sendTo.forceActiveFocus()
+    }
+
+    /// Send's first LEZ row: for a name's Pay button.
+    function payTo(name) {
+        var rows = walletRows.filter(function(row) { return row.id === "lez-private" })
+        openSend(rows.length > 0 ? rows[0] : { kind: "lez", title: "LEZ", definition: "", fromPrivate: true }, name)
+    }
+
+    function openReceive(asset) {
+        receiveKind = asset.kind
+        go("wallet")
+        walletView = "receive"
+    }
+
+    /// Whether a LEZ or token send goes to a name (so privately, from the private account).
+    function sendToName() {
+        var to = sendTo.text.trim()
+        return to !== "" && !payIsAccount(to)
+    }
+
+    /// Why Send can't go as it stands, or "" (also "" while a field is empty).
+    function sendProblem() {
+        var to = sendTo.text.trim()
+        var amount = sendAmount.text.trim()
+        if (to === "" || amount === "")
+            return ""
+        if (sendKind === "chain") {
+            var bad = Logic.chainToProblem(to)
+            return bad !== "" ? bad : /^([0-9]+|[0-9]{1,3}(,[0-9]{3})+)$/.test(amount) ? "" : "Enter a whole amount, such as 1000 or 1,000."
+        }
+        if (sendKind === "token")
+            return tokenSendProblem()
+        if (payIsAccount(to))
+            return payAccountProblem(to)
+        return /^[0-9]+$/.test(amount) ? "" : "Enter a whole amount, such as 1000."
+    }
+
+    /// Shows the summary to confirm; a chain send is checked by the node first.
+    function sendReview() {
+        if (sendProblem() !== "" || sendTo.text.trim() === "" || sendAmount.text.trim() === "")
+            return
+        if (sendKind === "chain") {
+            chainCheck()
+            sendReviewing = true
+            return
+        }
+        sendReviewing = true
+    }
+
+    /// Sends what the summary shows.
+    function sendConfirm() {
+        sendReviewing = false
+        if (sendKind === "chain") {
+            chainSend()
+            return
+        }
+        if (sendKind === "token") {
+            tokenFromPrivate = sendFromPrivate || sendToName()
+            tokenSend()
+            return
+        }
+        payFromPublic = !sendFromPrivate && !sendToName()
+        payName()
+    }
+
+    /// What the chain will see, in one line.
+    function sendSeen() {
+        if (sendKind === "chain")
+            return "The Logos Blockchain is public: anyone can see this transfer, and the node's key that sent it."
+        if (sendToName())
+            return "Private: it goes from your private account to the name's private keys. The chain doesn't show who paid whom, or how much."
+        return sendFromPrivate ? "Paying an account is public: everyone sees which account got how much. From your private account, it doesn't show who paid."
+            : "Public: everyone can see that you paid, who got it, and how much."
+    }
+
+    /// How long it takes, in one line.
+    function sendTakes() {
+        if (sendKind === "chain")
+            return "Your node proves it, up to a minute, then it's in the next blocks."
+        var proves = sendToName() || sendFromPrivate
+        if (!proves)
+            return "One block, about 30 seconds."
+        return sendKind === "token" ? "Proved on this computer first: 7-12 minutes." : "Proved on this computer first: about 4 minutes."
+    }
+
+    /// The fee, in one line ("" while unknown).
+    function sendFee() {
+        if (sendKind === "chain")
+            return "Paid from the key's notes; shown once it's sent (about 2,000 on the testnet)."
+        var estimate = Logic.feeEstimate(feeQuote, sendFromPrivate || sendToName())
+        return estimate === "" ? "" : estimate
+    }
+
+    /// What is being sent right now, in one line, or "".
+    function sendingLine() {
+        if (boardJob !== null && /^cli_pay/.test(boardJob.kind))
+            return boardJob.kind === "cli_pay_account" && payingPublicly
+                ? boardJob.label + ": sending it publicly, one block (about 30 seconds)."
+                : boardJob.label + ": proving it on this computer. About 4 min, " + Math.max(0, Math.floor((Math.max(clockTick, Date.now()) - boardJob.started) / 60000)) + " so far."
+        if (tokenJob !== null)
+            return tokenJobLine(tokenJob)
+        if (chainBusy)
+            return "Your node is working on it…"
+        if (chainSent !== null && chainSent.state === "pending")
+            return "Sent " + grouped(chainSent.amount) + " on the Logos Blockchain; waiting for a block…"
+        return ""
+    }
+
+    /// The tokens added by address, and their names.
+    function loadWatched() {
+        if (tokenProgram === "")
+            return
+        askLater("watched_tokens", [], function(list) {
+            watchedTokens = Array.isArray(list) ? list.map(function(entry) { return entry.definition }) : []
+            var names = {}
+            ;(list || []).forEach(function(entry) { if (entry.name) names[entry.definition] = entry.name })
+            watchedNames = names
+        }, function(message) {
+            console.log("names_ui: watched tokens:", message)
+        })
+    }
+
+    /// Adds the token `definition` by address; `program` first when none is set.
+    function addToken(definition, program) {
+        addTokenProblem = ""
+        if (program !== "" && program !== tokenProgram)
+            saveTokenProgram(program)
+        if (tokenProgram === "") {
+            addTokenProblem = "Enter the token program's ID too: no token program runs on the public testnet yet."
+            return
+        }
+        if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(definition)) {
+            addTokenProblem = "A token's address is its ID on LEZ: 32 to 44 letters and digits."
+            return
+        }
+        addTokenBusy = true
+        askLater("watch_token", [definition, true], function(list) {
+            addTokenBusy = false
+            addTokenField.text = ""
+            loadWatched()
+            loadTokens()
+            var added = (list || []).filter(function(entry) { return entry.definition === definition })
+            say("Added " + (added.length > 0 && added[0].name ? Logic.tokenShown(added[0].name) : "the token") + " to your wallet.", false)
+            walletView = "home"
+        }, function(message) {
+            addTokenBusy = false
+            addTokenProblem = sentence(message)
+        }, 60000)
+    }
+
+    function removeToken(definition) {
+        askLater("watch_token", [definition, false], function() { loadWatched() }, function(message) { say(sentence(message), true) })
+    }
+
+    /// Puts the node's key on your name as its `blockchain` entry, so it can be paid by name.
+    function keyOnName(key) {
+        if (mainName === "")
+            return
+        var name = mainName
+        change("set_text", [name, "blockchain", key], name, function() {
+            return ask("resolve", [name]).texts["blockchain"] === key
+        }, "Saved: " + name + " can now be paid on the Logos Blockchain.")
     }
 
     // ── Get tokens ──────────────────────────────────────────────────────
@@ -686,22 +906,16 @@ Item {
 
     /// Opens the "Get tokens" screen.
     function openGetTokens() {
-        section = "settings"
-        say("", false)
-        record = null
-        page = null
-        missing = ""
-        tool = ""
-        settingsOpen = false
-        registering = false
-        gettingTokens = true
+        go("wallet")
+        walletView = "bridge"
         bridgePlan = null
         bridgePlanFor = ""
         bridgeConfirm = false
         bridgeError = ""
         bridgeSent = false
         bridgeHash = ""
-        bridgeKeyField.text = bridgeKey
+        // The node's own key unless another was saved: Bridge sends from it.
+        bridgeKeyField.text = bridgeKey !== "" ? bridgeKey : chainAccounts !== null && chainAccounts.length > 0 ? chainAccounts[0].key : ""
         bridgeNodeField.text = bridgeNode
         loadCliBalance()
     }
@@ -1300,8 +1514,6 @@ Item {
             else
                 say(from + " points to " + missing + ", which isn't registered.", true)
         }
-        if (record !== null)
-            loadAuthorPosts(record.name, false)
     }
 
     /// The posts of `name`, for its page. Answers at once with the last read
@@ -1949,7 +2161,7 @@ Item {
     readonly property bool needsWelcome: configKnown && registry !== "" && (cliPath === "" || (cliKnown && mainName === "" && cliPending.length === 0))
     // The Welcome screen stands in for every section but Settings (where
     // Register is) and Search (where a name checked there opens to register).
-    readonly property bool welcomeCovers: needsWelcome && section !== "settings" && section !== "search"
+    readonly property bool welcomeCovers: needsWelcome && section !== "settings" && section !== "search" && !(section === "wallet" && walletView === "bridge")
 
     /// Opens a section of the sidebar; a notice from another section doesn't follow.
     function go(which) {
@@ -2016,17 +2228,14 @@ Item {
 
     /// Whether paying an account goes from the public account: when asked to,
     /// or when the private account is known not to hold enough.
+    /// Whether an account is paid from the public account: only when Send's From says so.
     function payGoesPublic(amount) {
-        if (payFromPublic)
-            return true
-        if (cliBalance === undefined || cliBalance === null)
-            return false
-        return /^[0-9]+$/.test(amount) && !Logic.atLeast(cliBalance.balance, amount) && cliPublic !== null && Logic.atLeast(cliPublic.balance, amount)
+        return payFromPublic
     }
 
     function payName() {
-        var to = payTo.text.trim()
-        var amount = payAmount.text.trim()
+        var to = sendTo.text.trim()
+        var amount = sendAmount.text.trim()
         if (to === "" || amount === "")
             return
         if (payIsAccount(to)) {
@@ -2040,7 +2249,7 @@ Item {
             var fromPublic = payGoesPublic(amount)
             payingPublicly = fromPublic
             boardStart("cli_pay_account", [to, amount, !fromPublic], "Your payment to " + shorten(to.substr(7)), function() {
-                payAmount.text = ""
+                sendAmount.text = ""
                 loadCliBalance()
             }, "-wallet")
             return
@@ -2068,7 +2277,7 @@ Item {
         }
         payForwardSeen = ""
         boardStart("cli_pay", [to, amount], "Your payment to " + (target !== "" ? to + " → " + target : to), function() {
-            payAmount.text = ""
+            sendAmount.text = ""
             loadCliBalance()
         })
     }
@@ -2641,10 +2850,9 @@ Item {
 
     /// Opens Tokens, reading what the wallet holds.
     function openTokens() {
-        go("tokens")
         tokenProblem = ""
         tokenProgramEditing = false
-        loadTokens()
+        openWallet("home")
     }
 
     /// Reads holdings and pending credits (the module answers at once, with
@@ -2690,13 +2898,13 @@ Item {
     function tokenSendProblem() {
         if (tokenJob !== null)
             return ""
-        var definition = tokenSendDefinition.text.trim()
-        if (definition === "" || tokenSendAmount.text.trim() === "" || tokenSendTo.text.trim() === "")
+        var definition = sendDefinition
+        if (definition === "" || sendAmount.text.trim() === "" || sendTo.text.trim() === "")
             return ""
         if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(definition))
             return "The token is its ID: letters and digits. Pick one you hold above, or paste it."
-        var amount = Logic.tokenAmountProblem(tokenSendAmount.text)
-        return amount !== "" ? amount : Logic.tokenToProblem(tokenSendTo.text)
+        var amount = Logic.tokenAmountProblem(sendAmount.text)
+        return amount !== "" ? amount : Logic.tokenToProblem(sendTo.text)
     }
 
     /// The name the wallet knows `definition` by, from its holdings or pending credits.
@@ -2708,25 +2916,18 @@ Item {
         return ""
     }
 
-    /// Puts a holding into the Send form: its token, and the account it's in.
-    function pickToken(row) {
-        tokenSendDefinition.text = row.definition
-        tokenFromPrivate = row.account_kind === "private"
-        tokenSendAmount.forceActiveFocus()
-    }
-
     function tokenSend() {
         var problem = tokenSendProblem()
         if (problem !== "" || tokenJob !== null)
             return
-        var definition = tokenSendDefinition.text.trim()
-        var amount = tokenSendAmount.text.trim().replace(/[,_]/g, "")
-        var to = tokenSendTo.text.trim()
+        var definition = sendDefinition
+        var amount = sendAmount.text.trim().replace(/[,_]/g, "")
+        var to = sendTo.text.trim()
         // The CLI checks the balance before it proves anything, and says so.
         tokenProblem = ""
         var label = "Sending " + grouped(amount) + " " + Logic.tokenShown(tokenNameOf(definition)) + " to " + to
         startTokenJob("cli_token_send", [definition, amount, to, tokenFromPrivate, false], label, Logic.tokenSendProves(tokenFromPrivate, to), function() {
-            tokenSendAmount.text = ""
+            sendAmount.text = ""
         })
     }
 
@@ -3761,11 +3962,8 @@ Item {
                     }
                 }
 
-                Tab { Layout.fillWidth: true; alignLeft: true; label: "Posts"; current: root.section === "posts"; onPressed: { root.say("", false); root.boardShow(root.boardView === "thread" ? "all" : root.boardView) } }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Wallet"; current: root.section === "wallet"; onPressed: root.openWallet("home") }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Messages"; current: root.section === "messages"; onPressed: { root.go("messages"); root.chatLoad() } }
-                Tab { Layout.fillWidth: true; alignLeft: true; label: "Pay"; current: root.section === "pay"; onPressed: { root.go("pay"); root.loadCliBalance(); root.loadFee() } }
-                Tab { Layout.fillWidth: true; alignLeft: true; label: "Tokens"; current: root.section === "tokens"; onPressed: root.openTokens() }
-                Tab { Layout.fillWidth: true; alignLeft: true; label: "Blockchain"; current: root.section === "chain"; onPressed: root.openChain() }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Profile"; current: root.section === "profile"; onPressed: { root.say("", false); root.openProfile() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Search"; current: root.section === "search"; onPressed: { root.go("search"); searchField.forceActiveFocus() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Settings"; current: root.section === "settings"; onPressed: { root.go("settings"); root.registering = false; root.gettingTokens = false; root.record = null; root.missing = ""; root.loadAccounts() } }
@@ -4228,504 +4426,646 @@ Item {
             }
         }
 
-        // Pay: send to a name, privately.
+        // Wallet: every balance, then Send, Receive, Stake, Add token and Bridge.
         Flickable {
-            visible: root.section === "pay" && !root.needsWelcome
+            visible: root.section === "wallet" && (!root.needsWelcome || root.walletView === "bridge")
             Layout.fillWidth: true
             Layout.fillHeight: true
-            contentHeight: payPage.implicitHeight + 72
+            contentHeight: walletPage.implicitHeight + 72
             clip: true
             ColumnLayout {
-                id: payPage
+                id: walletPage
                 x: 56
                 y: 40
-                width: Math.min(parent.width - 112, 560)
+                width: Math.min(parent.width - 112, 720)
                 spacing: 16
-                Text { text: "Pay"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
-                Hint { text: "Send to a name. It goes from your private account to the name's private keys: the chain doesn't show who paid whom, or how much. Someone without a name yet can be paid at their public account." }
-                Text { text: "To"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
-                Field { id: payTo; Layout.fillWidth: true; size: 19; hint: "A name, such as ada, or Public/ and an account ID" }
-                Text { text: "Amount"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
-                Field { id: payAmount; Layout.fillWidth: true; size: 19; numbersOnly: true; hint: "1000" }
-                Hint {
-                    font.pixelSize: root.px(15)
-                    text: root.cliBalance === undefined ? "Checking your accounts…"
-                        : root.cliBalance === null ? "No private account found."
-                        : "Your private account holds " + root.grouped(root.cliBalance.balance) + "."
-                          + (root.payIsAccount(payTo.text) && root.cliPublic !== null ? " Your public account holds " + root.grouped(root.cliPublic.balance) + "." : "")
-                }
-                // Paying an account is seen on chain: say so before the button.
-                Rectangle {
-                    visible: root.payIsAccount(payTo.text)
-                    Layout.fillWidth: true
-                    implicitHeight: payPublicColumn.implicitHeight + root.px(24)
-                    radius: root.px(8)
-                    color: root.noticeFill
-                    border.width: 1
-                    border.color: root.brass
-                    ColumnLayout {
-                        id: payPublicColumn
-                        x: root.px(14)
-                        y: root.px(12)
-                        width: parent.width - root.px(28)
-                        spacing: 6
-                        Hint {
-                            color: root.ink
-                            font.pixelSize: root.px(16)
-                            text: root.payAccountProblem(payTo.text) !== "" && payTo.text.trim().length > 7 ? root.payAccountProblem(payTo.text)
-                                : root.payGoesPublic(payAmount.text.trim())
-                                ? "Paying an account is public. From your public account, everyone can see that you paid, who got it, and how much."
-                                : "Paying an account is public: everyone can see which account got it, and how much. It goes from your private account, so it doesn't show who paid. Proving takes about 4 minutes."
-                        }
-                        Link {
-                            visible: root.cliPublic !== null && root.payAccountProblem(payTo.text) === ""
-                            text: root.payFromPublic ? "Pay from my private account" : "Pay from my public account instead (faster, shows you paid)"
-                            font.pixelSize: root.px(15)
-                            onPressed: root.payFromPublic = !root.payFromPublic
-                        }
-                    }
-                }
-                Hint {
-                    visible: text !== ""
-                    font.pixelSize: root.px(15)
-                    // A name is paid from the private account; an account from the public one only when chosen.
-                    text: {
-                        var estimate = Logic.feeEstimate(root.feeQuote, !(root.payIsAccount(payTo.text) && root.payGoesPublic(payAmount.text.trim())))
-                        return estimate === "" ? "" : "Network fee: " + estimate + "."
-                    }
-                }
-                Action {
-                    label: !root.payIsAccount(payTo.text) ? "Pay privately" : "Pay publicly"
-                    strong: true
-                    enabledNow: root.boardJob === null && payTo.text.trim() !== "" && payAmount.text.trim() !== ""
-                        && (!root.payIsAccount(payTo.text) || root.payAccountProblem(payTo.text) === "")
-                    onPressed: root.payName()
-                }
-                Hint {
-                    visible: root.boardJob !== null
-                    color: root.brass
-                    font.pixelSize: root.px(16)
-                    text: root.boardJob === null ? ""
-                        : root.boardJob.kind === "cli_pay_account" && root.payingPublicly
-                        ? root.boardJob.label + ": sending it publicly, one block (about 30 seconds)."
-                        : root.boardJob.label + ": proving it on this computer. About 4 min, "
-                        + Math.max(0, Math.floor((Math.max(root.clockTick, Date.now()) - root.boardJob.started) / 60000)) + " so far."
-                }
-                Hint {
-                    visible: root.boardJob === null && root.notice !== ""
-                    color: root.noticeIsError ? root.alarm : root.dim
-                    text: root.notice
-                }
-                Hint { font.pixelSize: root.px(14); text: "The other side sees the payment once their wallet catches up with the chain." }
-            }
-        }
 
-        // Tokens: what the wallet holds of a token program's tokens; send and receive them.
-        Flickable {
-            visible: root.section === "tokens" && !root.needsWelcome
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            contentHeight: tokensPage.implicitHeight + 72
-            clip: true
-            ColumnLayout {
-                id: tokensPage
-                x: 56
-                y: 40
-                width: Math.min(parent.width - 112, 640)
-                spacing: 14
-                RowLayout {
+                // ── Home: what you hold ──
+                ColumnLayout {
+                    visible: root.walletView === "home"
                     Layout.fillWidth: true
-                    Text { text: "Tokens"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
-                    Item { Layout.fillWidth: true }
-                    Link {
-                        visible: root.tokenProgram !== ""
-                        text: root.tokenUpdating ? "Reading…" : "Refresh"
-                        color: root.faint
-                        font.pixelSize: root.px(15)
-                        onPressed: root.loadTokens()
-                    }
-                }
-                Hint { text: "Tokens made with a token program on LEZ, besides LEZ itself. Your names wallet holds them in the same public and private accounts as its LEZ." }
-
-                // The token program: none is built in.
-                Hint {
-                    visible: root.tokenProgram === ""
-                    color: root.ink
-                    text: "No token program runs on the public testnet yet. If you use one (on a chain of your own, for now), enter its program ID."
-                }
-                RowLayout {
-                    visible: root.tokenProgram !== "" && !root.tokenProgramEditing
-                    Layout.fillWidth: true
-                    spacing: 10
-                    Text { text: "Token program"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
-                    Text { text: root.shorten(root.tokenProgram); color: root.ink; font.family: root.mono; font.pixelSize: root.px(15) }
-                    Link { text: "Change"; font.pixelSize: root.px(15); onPressed: { tokenProgramField.text = root.tokenProgram; root.tokenProgramEditing = true } }
-                    Item { Layout.fillWidth: true }
-                }
-                RowLayout {
-                    visible: root.tokenProgram === "" || root.tokenProgramEditing
-                    Layout.fillWidth: true
-                    spacing: 10
-                    Field { id: tokenProgramField; Layout.fillWidth: true; size: 17; code: true; hint: "The token program's ID"; onAccepted: root.saveTokenProgram(text.trim()) }
-                    Action { label: "Use it"; strong: true; enabledNow: tokenProgramField.text.trim() !== ""; onPressed: root.saveTokenProgram(tokenProgramField.text.trim()) }
-                    Action { visible: root.tokenProgramEditing; label: "Cancel"; onPressed: root.tokenProgramEditing = false }
-                }
-                Hint {
-                    visible: root.tokenProgram === "" && root.notice !== ""
-                    color: root.noticeIsError ? root.alarm : root.dim
-                    text: root.notice
-                }
-
-                // What the wallet holds.
-                Part { visible: root.tokenProgram !== ""; text: "What you hold" }
-                Hint {
-                    visible: root.tokenProgram !== "" && (root.tokenHoldings === null || root.tokenHoldings.length === 0)
-                    color: root.tokenHoldings === null && root.tokenError !== "" ? root.alarm : root.dim
-                    text: root.tokenHoldings !== null ? "Your accounts hold no tokens of this program."
-                        : root.tokenError !== "" ? "Couldn't read your tokens: " + root.tokenError
-                        : "Reading your accounts… A private account's tokens are read once your wallet catches up with the chain, which can take a minute or two."
-                }
-                Repeater {
-                    model: root.tokenProgram !== "" && root.tokenHoldings !== null ? root.tokenHoldings : []
-                    Rectangle {
-                        id: holdingRow
-                        required property var modelData
+                    spacing: 14
+                    RowLayout {
                         Layout.fillWidth: true
-                        implicitHeight: root.px(46)
-                        radius: 6
-                        color: holdingArea.containsMouse ? root.hover : "transparent"
-                        border.width: 1
-                        border.color: root.line
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 12
-                            anchors.rightMargin: 12
-                            spacing: 10
-                            Text {
-                                text: holdingRow.modelData.account_kind === "private" ? "Private" : "Public"
-                                color: holdingRow.modelData.account_kind === "private" ? root.brass : root.dim
-                                font.family: root.sans
-                                font.pixelSize: root.px(15)
-                                Layout.preferredWidth: root.px(58)
+                        Text { text: "Wallet"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
+                        Item { Layout.fillWidth: true }
+                        Link { text: root.chainReading || root.cliBalance === undefined ? "Reading…" : "Refresh"; color: root.faint; font.pixelSize: root.px(15); onPressed: root.walletRefresh() }
+                    }
+                    Hint { visible: root.sendingLine() !== ""; color: root.brass; font.pixelSize: root.px(16); text: root.sendingLine() }
+                    Hint { visible: root.notice !== "" && root.sendingLine() === ""; color: root.noticeIsError ? root.alarm : root.dim; font.pixelSize: root.px(16); text: root.notice }
+                    Hint {
+                        visible: root.walletRows.length === 0
+                        text: root.cliBalance === undefined ? "Reading your balances…" : "No balances yet. Make a wallet in Settings, or start your node in Basecamp's Blockchain app."
+                    }
+                    Repeater {
+                        model: root.walletRows
+                        Rectangle {
+                            id: assetCard
+                            required property var modelData
+                            Layout.fillWidth: true
+                            implicitHeight: assetRow.implicitHeight + root.px(28)
+                            radius: 12
+                            color: root.card
+                            border.width: 1
+                            border.color: root.line
+                            RowLayout {
+                                id: assetRow
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.leftMargin: root.px(16)
+                                anchors.rightMargin: root.px(16)
+                                spacing: root.px(14)
+                                Rectangle {
+                                    implicitWidth: root.px(40)
+                                    implicitHeight: root.px(40)
+                                    radius: height / 2
+                                    color: assetCard.modelData.kind === "chain" ? root.orange : assetCard.modelData.kind === "lez" ? root.brass : root.raised
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: assetCard.modelData.kind === "chain" ? "B" : assetCard.modelData.kind === "lez" ? "L" : assetCard.modelData.title.charAt(0).toUpperCase()
+                                        color: assetCard.modelData.kind === "token" ? root.ink : root.slate
+                                        font.family: root.sans
+                                        font.pixelSize: root.px(18)
+                                        font.weight: Font.Bold
+                                    }
+                                }
+                                ColumnLayout {
+                                    spacing: 2
+                                    Layout.fillWidth: true
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: assetCard.modelData.title
+                                        textFormat: Text.PlainText
+                                        elide: Text.ElideRight
+                                        color: root.ink
+                                        font.family: root.sans
+                                        font.pixelSize: root.px(18)
+                                        font.weight: Font.DemiBold
+                                    }
+                                    Text {
+                                        text: assetCard.modelData.kind === "chain" ? assetCard.modelData.where
+                                            : assetCard.modelData.where + (assetCard.modelData.kind === "token" ? " · token on LEZ" : " account")
+                                        color: assetCard.modelData.where === "Private" ? root.brass : assetCard.modelData.balance === null ? root.alarm : root.dim
+                                        font.family: root.sans
+                                        font.pixelSize: root.px(14)
+                                    }
+                                }
+                                Text {
+                                    text: assetCard.modelData.balance === null ? "—" : root.grouped(assetCard.modelData.balance)
+                                    color: root.ink
+                                    font.family: root.sans
+                                    font.pixelSize: root.px(20)
+                                    font.weight: Font.DemiBold
+                                    Layout.rightMargin: root.px(6)
+                                }
+                                // The buttons take the same width on every row, so the balances line up.
+                                RowLayout {
+                                    Layout.fillWidth: false
+                                    Layout.minimumWidth: root.px(290)
+                                    Layout.maximumWidth: root.px(290)
+                                    spacing: 8
+                                    Item { Layout.fillWidth: true }
+                                    Action {
+                                        visible: assetCard.modelData.balance !== null
+                                        label: "Send"
+                                        enabledNow: assetCard.modelData.balance !== "0"
+                                        onPressed: root.openSend(assetCard.modelData, "")
+                                    }
+                                    Action {
+                                        visible: assetCard.modelData.balance !== null
+                                        label: "Receive"
+                                        onPressed: root.openReceive(assetCard.modelData)
+                                    }
+                                    Action {
+                                        visible: assetCard.modelData.stakable && assetCard.modelData.balance !== null
+                                        label: "Stake"
+                                        strong: true
+                                        tint: root.orange
+                                        onPressed: { root.walletView = "stake"; root.loadChain() }
+                                    }
+                                    Action {
+                                        visible: assetCard.modelData.balance === null && assetCard.modelData.kind === "chain"
+                                        label: "Open the Blockchain app"
+                                        onPressed: if (logos.request) logos.request("basecamp.apps.launch", { app: "blockchain_ui" }, function() { root.loadChain() })
+                                    }
+                                }
                             }
+                        }
+                    }
+
+                    // Tokens sent to your name's private keys, waiting to be taken in.
+                    Rectangle {
+                        visible: root.tokenProgram !== "" && root.tokenPending.length > 0
+                        Layout.fillWidth: true
+                        implicitHeight: waitingRow.implicitHeight + root.px(24)
+                        radius: 12
+                        color: root.noticeFill
+                        border.width: 1
+                        border.color: root.brass
+                        RowLayout {
+                            id: waitingRow
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.leftMargin: root.px(16)
+                            anchors.rightMargin: root.px(16)
+                            spacing: 12
+                            Hint {
+                                color: root.ink
+                                font.pixelSize: root.px(16)
+                                text: (root.tokenPending.length === 1 ? "1 token payment is" : root.tokenPending.length + " token payments are") + " waiting for you. Taking each in is proved on this computer, 7-12 minutes."
+                            }
+                            Action { label: "Take it in"; strong: true; enabledNow: root.tokenJob === null; onPressed: root.tokenReceive() }
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.topMargin: 6
+                        spacing: 10
+                        Action { label: "Add a token"; onPressed: { root.addTokenProblem = ""; root.walletView = "add"; addTokenField.forceActiveFocus() } }
+                        Action { label: "Bridge"; onPressed: root.openGetTokens() }
+                        Item { Layout.fillWidth: true }
+                    }
+                    Hint {
+                        font.pixelSize: root.px(14)
+                        text: "Private LEZ is seen only by you. Public LEZ and the Logos Blockchain can be seen by anyone. Bridge moves Logos Blockchain tokens into LEZ."
+                    }
+                }
+
+                // ── Send ──
+                ColumnLayout {
+                    visible: root.walletView === "send"
+                    Layout.fillWidth: true
+                    spacing: 12
+                    Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
+                    Text { text: root.sendKind === "chain" ? "Send on the Logos Blockchain" : "Send " + root.sendTitle; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
+
+                    Part { text: "From" }
+                    Flow {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Repeater {
+                            model: root.walletRows.filter(function(row) { return row.balance !== null && row.balance !== "0" })
+                            Tab {
+                                id: fromTab
+                                required property var modelData
+                                label: modelData.title + (modelData.kind === "chain" ? "" : " · " + modelData.where) + "   " + root.grouped(modelData.balance)
+                                current: modelData.kind === root.sendKind && modelData.definition === root.sendDefinition && (modelData.kind === "chain" || modelData.fromPrivate === root.sendFromPrivate)
+                                onPressed: root.openSend(modelData, sendTo.text.trim())
+                            }
+                        }
+                    }
+
+                    Part { text: "To" }
+                    Field {
+                        id: sendTo
+                        Layout.fillWidth: true
+                        size: 19
+                        hint: root.sendKind === "chain" ? "A name, or a Logos Blockchain key (64 hex characters)" : "A name, such as ada, or Public/ and an account ID"
+                        onTextChanged: root.sendReviewing = false
+                    }
+                    Part { text: "Amount" }
+                    Field {
+                        id: sendAmount
+                        Layout.fillWidth: true
+                        size: 19
+                        numbersOnly: true
+                        longNumbers: true
+                        hint: "1000"
+                        onTextChanged: root.sendReviewing = false
+                    }
+                    Hint {
+                        visible: root.sendKind !== "chain" && root.sendToName() && !root.sendFromPrivate
+                        font.pixelSize: root.px(15)
+                        text: "A name is always paid from your private account."
+                    }
+                    Hint {
+                        readonly property string problem: root.sendProblem() !== "" ? root.sendProblem() : root.sendKind === "chain" ? root.chainProblem : root.sendKind === "token" ? root.tokenProblem : ""
+                        visible: problem !== ""
+                        color: root.alarm
+                        font.pixelSize: root.px(16)
+                        textFormat: Text.PlainText
+                        text: problem
+                    }
+                    Action {
+                        visible: !root.sendReviewing
+                        label: root.chainBusy ? "Checking…" : "Review"
+                        strong: true
+                        enabledNow: sendTo.text.trim() !== "" && sendAmount.text.trim() !== "" && root.sendProblem() === "" && root.sendingLine() === ""
+                        onPressed: root.sendReview()
+                    }
+
+                    // The summary: what goes where, what it costs, and what the chain sees.
+                    Card {
+                        visible: root.sendReviewing && (root.sendKind !== "chain" || root.chainPlan !== null)
+                        Layout.fillWidth: true
+                        Text { text: "Check it, then send"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
+                        Fact {
+                            label: "To"
+                            value: root.sendKind === "chain" && root.chainPlan !== null
+                                ? (root.chainPlan.name ? root.chainPlan.name + " · " : "") + Logic.keyShown(root.chainPlan.to)
+                                : sendTo.text.trim()
+                        }
+                        Fact { label: "Amount"; value: root.grouped(sendAmount.text.trim().replace(/,/g, "")) + (root.sendKind === "chain" ? "" : " " + root.sendTitle) }
+                        Fact {
+                            label: "From"
+                            value: root.sendKind === "chain" ? "Your node's key " + Logic.keyShown(root.chainFrom)
+                                : root.sendFromPrivate || root.sendToName() ? "Your private account" : "Your public account"
+                        }
+                        Fact { visible: root.sendFee() !== ""; label: "Fee"; value: root.sendFee() }
+                        Hint { font.pixelSize: root.px(16); text: root.sendSeen() }
+                        Hint { font.pixelSize: root.px(16); text: root.sendTakes() + " It can't be undone." }
+                        RowLayout {
+                            spacing: 10
+                            Action { label: "Send it"; strong: true; enabledNow: root.sendingLine() === ""; onPressed: root.sendConfirm() }
+                            Action { label: "Change something"; onPressed: root.sendReviewing = false }
+                        }
+                    }
+                    Hint { visible: root.sendingLine() !== ""; color: root.brass; font.pixelSize: root.px(16); text: root.sendingLine() }
+                    Hint {
+                        visible: root.sendKind === "chain" && root.chainSent !== null && root.chainSent.state === "in_block"
+                        color: root.good
+                        font.pixelSize: root.px(16)
+                        text: root.chainSent === null ? "" : "Sent " + root.grouped(root.chainSent.amount) + ": it's in a block." + (root.chainSent.fee ? " The fee was " + root.grouped(root.chainSent.fee) + "." : "")
+                    }
+                    Hint { visible: root.notice !== "" && root.sendingLine() === ""; color: root.noticeIsError ? root.alarm : root.dim; font.pixelSize: root.px(16); text: root.notice }
+                }
+
+                // ── Receive ──
+                ColumnLayout {
+                    visible: root.walletView === "receive"
+                    Layout.fillWidth: true
+                    spacing: 14
+                    Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
+                    Text { text: root.receiveKind === "chain" ? "Receive on the Logos Blockchain" : "Receive LEZ and tokens"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
+
+                    Card {
+                        visible: root.receiveKind !== "chain"
+                        Layout.fillWidth: true
+                        Part { Layout.topMargin: 0; text: "Your name" }
+                        RowLayout {
+                            visible: root.mainName !== ""
+                            spacing: 14
+                            Text { text: root.mainName; color: root.ink; font.family: root.sans; font.pixelSize: root.px(26); font.weight: Font.Bold }
+                            Link { text: "Copy"; onPressed: root.copy(root.mainName, "Your name") }
+                        }
+                        Hint {
+                            text: root.mainName !== "" ? "Anyone can pay " + root.mainName + " from Names. It arrives in your private account, and the chain doesn't show who paid you or how much."
+                                : "You don't have a name yet. With one, people pay you by name, privately."
+                        }
+                    }
+                    Card {
+                        visible: root.receiveKind !== "chain" && root.cliPublic !== null
+                        Layout.fillWidth: true
+                        Part { Layout.topMargin: 0; text: "Your public account" }
+                        Text {
+                            Layout.fillWidth: true
+                            text: root.cliPublic !== null ? "Public/" + root.cliPublic.account : ""
+                            color: root.ink
+                            font.family: root.mono
+                            font.pixelSize: root.px(16)
+                            wrapMode: Text.WrapAnywhere
+                        }
+                        Link { text: "Copy"; onPressed: root.copy("Public/" + root.cliPublic.account, "Your public account") }
+                        Hint { font.pixelSize: root.px(15); text: "For apps, exchanges and the bridge. Anyone can see what it receives." }
+                    }
+
+                    Repeater {
+                        model: root.receiveKind === "chain" && root.chainAccounts !== null ? root.chainAccounts : []
+                        Card {
+                            id: keyCard
+                            required property var modelData
+                            required property int index
+                            Layout.fillWidth: true
+                            Part { Layout.topMargin: 0; text: "Your node's key" }
                             Text {
-                                text: Logic.tokenShown(holdingRow.modelData.name)
+                                Layout.fillWidth: true
+                                text: keyCard.modelData.key
+                                color: root.ink
+                                font.family: root.mono
+                                font.pixelSize: root.px(16)
+                                wrapMode: Text.WrapAnywhere
+                            }
+                            RowLayout {
+                                spacing: 14
+                                Link { text: "Copy"; onPressed: root.copy(keyCard.modelData.key, "Your Logos Blockchain key") }
+                                Link {
+                                    visible: root.mainName !== "" && keyCard.index === 0
+                                    text: "Let people pay " + root.mainName + " here"
+                                    onPressed: root.keyOnName(keyCard.modelData.key)
+                                }
+                            }
+                            Hint { font.pixelSize: root.px(15); text: "Tokens sent to this key are staked: they join the leader lottery at the next epoch." }
+                        }
+                    }
+                    Hint {
+                        visible: root.receiveKind === "chain" && root.chainAccounts === null
+                        color: root.alarm
+                        text: root.chainError !== "" ? root.chainError : "Reading your node…"
+                    }
+                }
+
+                // ── Stake ──
+                ColumnLayout {
+                    visible: root.walletView === "stake"
+                    Layout.fillWidth: true
+                    spacing: 14
+                    Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Text { text: "Staking"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
+                        Item { Layout.fillWidth: true }
+                        Link { text: root.chainReading ? "Reading…" : "Refresh"; color: root.faint; font.pixelSize: root.px(15); onPressed: root.loadChain() }
+                    }
+                    Hint { visible: root.chainError !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.chainError }
+                    Action {
+                        visible: /isn't running|didn't answer/.test(root.chainError)
+                        label: "Open the Blockchain app"
+                        strong: true
+                        onPressed: if (logos.request) logos.request("basecamp.apps.launch", { app: "blockchain_ui" }, function() { root.loadChain() })
+                    }
+
+                    Card {
+                        visible: root.chainStake !== null
+                        Layout.fillWidth: true
+                        Text { text: "Staked on the Logos Blockchain"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(15) }
+                        Text { text: root.chainStake !== null ? root.grouped(root.chainStake.staked) : ""; color: root.ink; font.family: root.sans; font.pixelSize: root.px(34); font.weight: Font.Bold }
+                        Hint {
+                            font.pixelSize: root.px(16)
+                            text: root.chainStake === null ? "" : "In " + root.grouped(root.chainStake.notes) + (root.chainStake.notes === 1 ? " note" : " notes") + " on "
+                                + (root.chainStake.keys || []).map(Logic.keyShown).join(", ") + "."
+                        }
+                        Hint { font.pixelSize: root.px(16); text: Logic.stakeLines(root.chainStake).length > 1 ? Logic.stakeLines(root.chainStake)[1] : "" }
+                        Hint {
+                            visible: root.chainStatus !== null
+                            font.pixelSize: root.px(15)
+                            text: root.chainStatus === null ? "" : "Your node: " + (root.chainStatus.mode || "?") + ", block " + root.grouped(root.chainStatus.height) + "."
+                        }
+                    }
+
+                    Card {
+                        visible: root.chainStake !== null
+                        Layout.fillWidth: true
+                        Part { Layout.topMargin: 0; text: "Rewards" }
+                        Hint { color: root.ink; text: Logic.rewardsLine(root.chainStake) }
+                        Action {
+                            visible: root.chainStake !== null && root.chainStake.vouchers > 0
+                            label: root.chainBusy ? "Claiming…" : "Claim one"
+                            strong: true
+                            tint: root.orange
+                            enabledNow: !root.chainBusy
+                            onPressed: root.chainClaim()
+                        }
+                    }
+
+                    Card {
+                        visible: root.chainStake !== null
+                        Layout.fillWidth: true
+                        Part { Layout.topMargin: 0; text: "Stake more" }
+                        Hint { text: "There's no separate stake step: every token on your node's keys is staked. To stake more, receive Logos Blockchain tokens on your node's key." }
+                        Action {
+                            label: "Receive"
+                            onPressed: root.openReceive({ kind: "chain" })
+                        }
+                    }
+
+                    Card {
+                        visible: root.chainStake !== null
+                        Layout.fillWidth: true
+                        Part { Layout.topMargin: 0; text: "Unstake" }
+                        Hint { text: "Unstaking moves tokens off your node's keys. They stop counting at the next epoch. Choose where they go:" }
+                        RowLayout {
+                            spacing: 10
+                            Action {
+                                label: "Send to another key"
+                                onPressed: {
+                                    var rows = root.walletRows.filter(function(row) { return row.kind === "chain" })
+                                    if (rows.length > 0)
+                                        root.openSend(rows[0], "")
+                                }
+                            }
+                            Action { label: "Bridge into LEZ"; onPressed: root.openGetTokens() }
+                        }
+                    }
+                    Hint { visible: root.chainProblem !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.chainProblem }
+                    Hint { visible: root.notice !== ""; color: root.noticeIsError ? root.alarm : root.dim; font.pixelSize: root.px(16); text: root.notice }
+                }
+
+                // ── Add a token by its address ──
+                ColumnLayout {
+                    visible: root.walletView === "add"
+                    Layout.fillWidth: true
+                    spacing: 12
+                    Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
+                    Text { text: "Add a token"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
+                    Hint { text: "Paste the token's address, its ID on LEZ. It stays in your wallet from now on, even before you hold any." }
+                    Part { text: "Token address" }
+                    Field { id: addTokenField; Layout.fillWidth: true; size: 17; code: true; hint: "32 to 44 letters and digits" }
+                    ColumnLayout {
+                        visible: root.tokenProgram === "" || root.tokenProgramEditing
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Part { text: "Token program" }
+                        Hint { font.pixelSize: root.px(15); text: "No token program runs on the public testnet yet. On a chain of your own, enter its program ID." }
+                        Field { id: addProgramField; Layout.fillWidth: true; size: 17; code: true; hint: "The token program's ID" }
+                    }
+                    RowLayout {
+                        visible: root.tokenProgram !== "" && !root.tokenProgramEditing
+                        spacing: 10
+                        Text { text: "Token program"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(15) }
+                        Text { text: root.shorten(root.tokenProgram); color: root.ink; font.family: root.mono; font.pixelSize: root.px(15) }
+                        Link { text: "Change"; font.pixelSize: root.px(15); onPressed: { addProgramField.text = root.tokenProgram; root.tokenProgramEditing = true } }
+                    }
+                    Action {
+                        label: root.addTokenBusy ? "Checking…" : "Add token"
+                        strong: true
+                        enabledNow: !root.addTokenBusy && addTokenField.text.trim() !== ""
+                        onPressed: { root.tokenProgramEditing = false; root.addToken(addTokenField.text.trim(), addProgramField.text.trim()) }
+                    }
+                    Hint { visible: root.addTokenProblem !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.addTokenProblem }
+
+                    Part { visible: root.watchedTokens.length > 0; text: "Added by address" }
+                    Repeater {
+                        model: root.watchedTokens
+                        RowLayout {
+                            id: watchedRow
+                            required property string modelData
+                            Layout.fillWidth: true
+                            spacing: 12
+                            Text {
+                                text: root.watchedNames[watchedRow.modelData] ? Logic.tokenShown(root.watchedNames[watchedRow.modelData]) : "Token"
                                 textFormat: Text.PlainText
                                 color: root.ink
                                 font.family: root.sans
                                 font.pixelSize: root.px(17)
                                 font.weight: Font.DemiBold
-                                elide: Text.ElideRight
-                                Layout.maximumWidth: root.px(200)
                             }
-                            Text { text: root.shorten(holdingRow.modelData.definition); color: root.faint; font.family: root.mono; font.pixelSize: root.px(13) }
+                            Text { text: root.shorten(watchedRow.modelData); color: root.dim; font.family: root.mono; font.pixelSize: root.px(14) }
                             Item { Layout.fillWidth: true }
-                            Text { text: root.grouped(holdingRow.modelData.balance); color: root.ink; font.family: root.sans; font.pixelSize: root.px(17) }
-                        }
-                        MouseArea {
-                            id: holdingArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.pickToken(holdingRow.modelData)
+                            Link { text: "Remove"; font.pixelSize: root.px(15); onPressed: root.removeToken(watchedRow.modelData) }
                         }
                     }
                 }
-                Hint {
-                    visible: root.tokenProgram !== "" && root.tokenHoldings !== null && root.tokenHoldings.length > 0
-                    font.pixelSize: root.px(14)
-                    text: "Press a token to send it from that account." + (root.tokenUpdating ? " Checking for newer balances…" : "")
-                }
-                Hint {
-                    visible: root.tokenProgram !== "" && root.tokenHoldings !== null && root.tokenError !== ""
-                    color: root.alarm
-                    font.pixelSize: root.px(15)
-                    text: "The last read failed, so these may be out of date: " + root.tokenError
-                }
 
-                // Credits waiting for the wallet's private keys.
-                Part { visible: root.tokenProgram !== ""; text: "Waiting to be received" }
-                Hint {
-                    visible: root.tokenProgram !== ""
-                    font.pixelSize: root.px(15)
-                    text: root.tokenPending.length === 0 ? "Nothing is waiting. Tokens sent to your name's private keys wait here until you receive them."
-                        : "Sent to your private keys. Receiving proves each one on this computer, 7-12 minutes each, and the fee comes from your private account's LEZ."
-                }
-                Repeater {
-                    model: root.tokenProgram !== "" ? root.tokenPending : []
-                    RowLayout {
-                        id: pendingRow
-                        required property var modelData
-                        Layout.fillWidth: true
-                        spacing: 10
-                        Text {
-                            text: root.grouped(pendingRow.modelData.amount) + " " + Logic.tokenShown(pendingRow.modelData.name)
-                            textFormat: Text.PlainText
-                            color: root.ink
-                            font.family: root.sans
-                            font.pixelSize: root.px(17)
-                            font.weight: Font.DemiBold
-                        }
-                        Text { text: "to " + root.accountShort(pendingRow.modelData.to); color: root.dim; font.family: root.mono; font.pixelSize: root.px(14) }
-                        Item { Layout.fillWidth: true }
-                    }
-                }
-                Action {
-                    visible: root.tokenProgram !== "" && root.tokenPending.length > 0
-                    label: root.tokenPending.length === 1 ? "Receive it" : "Receive all " + root.tokenPending.length
-                    strong: true
-                    enabledNow: root.tokenJob === null
-                    onPressed: root.tokenReceive()
-                }
-
-                // Send.
-                Part { visible: root.tokenProgram !== ""; text: "Send" }
+                // Bridge: from the Logos Blockchain into LEZ.
                 ColumnLayout {
-                    visible: root.tokenProgram !== ""
+                    visible: root.walletView === "bridge"
                     Layout.fillWidth: true
-                    spacing: 10
-                    Text { text: "Token"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
-                    Field { id: tokenSendDefinition; Layout.fillWidth: true; size: 17; code: true; hint: "The token's ID, or press one you hold above" }
-                    Hint {
-                        visible: root.tokenNameOf(tokenSendDefinition.text.trim()) !== ""
+                    spacing: 14
+                    Link {
+                        text: "‹ Wallet"
+                        color: root.dim
                         font.pixelSize: root.px(15)
-                        textFormat: Text.PlainText
-                        text: "That's " + root.tokenNameOf(tokenSendDefinition.text.trim()) + "."
+                        onPressed: root.walletView = "home"
                     }
-                    Text { text: "Amount"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
-                    Field { id: tokenSendAmount; Layout.fillWidth: true; size: 19; numbersOnly: true; longNumbers: true; hint: "1000, in the token's base units" }
-                    Text { text: "To"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
-                    Field { id: tokenSendTo; Layout.fillWidth: true; size: 19; hint: "A name, such as ada, or Public/ and an account ID" }
-                    Text { text: "From"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
-                    RowLayout {
-                        spacing: 6
-                        Tab { label: "Your private account"; current: root.tokenFromPrivate; onPressed: root.tokenFromPrivate = true }
-                        Tab { label: "Your public account"; current: !root.tokenFromPrivate; onPressed: root.tokenFromPrivate = false }
-                    }
-                    // How long it takes and what the chain sees, before the button.
-                    Rectangle {
+                    Text { text: "Bridge into LEZ"; color: root.ink; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(28) }
+                    Hint { text: "Tokens come from your Logos Blockchain node. Bridging them into LEZ takes about 12 hours to arrive." }
+                    Card {
                         Layout.fillWidth: true
-                        implicitHeight: tokenHowColumn.implicitHeight + root.px(24)
-                        radius: root.px(8)
-                        color: root.noticeFill
-                        border.width: 1
-                        border.color: root.brass
-                        ColumnLayout {
-                            id: tokenHowColumn
-                            x: root.px(14)
-                            y: root.px(12)
-                            width: parent.width - root.px(28)
-                            spacing: 6
-                            Hint {
-                                color: root.ink
-                                font.pixelSize: root.px(16)
-                                text: Logic.tokenSendProves(root.tokenFromPrivate, tokenSendTo.text)
-                                    ? "This is proven on this computer before it's sent: 7-12 minutes on a fast computer. You can keep using Names meanwhile; don't quit Basecamp until it's done."
-                                    : "From your public account to a public account it's public and quick: one block, about 30 seconds. Everyone can see who sent how much of it to whom."
-                            }
-                            Hint {
-                                font.pixelSize: root.px(15)
-                                text: (root.tokenFromPrivate ? "From your private account the chain doesn't show who sent it; the fee comes from that account's LEZ. " : "From your public account the chain shows that you sent it. ")
-                                    + (/^Public\//.test(tokenSendTo.text.trim()) ? "A public account shows what it receives."
-                                       : "To a name, it goes to the name's private keys and waits there until its holder receives it.")
-                            }
+                        Part { Layout.topMargin: 0; text: "Your LEZ public account" }
+                        Hint {
+                            visible: root.cliPublic === null
+                            text: root.cliPath === "" ? "Install the names program first (see Welcome)."
+                                : root.cliBalance === undefined ? "Checking your accounts…"
+                                : root.hasCliWallet ? "Couldn't read your accounts just now."
+                                : "You don't have a wallet yet. Create one first: it's where bridged tokens land."
+                            color: root.cliBalance === undefined ? root.dim : root.alarm
+                        }
+                        Action {
+                            visible: root.cliPath !== "" && root.cliBalance !== undefined && root.cliPublic === null && !root.hasCliWallet
+                            label: root.walletBusy ? "Creating…" : "Create my wallet"
+                            strong: true
+                            enabledNow: !root.walletBusy
+                            onPressed: root.createWallet()
+                        }
+                        Link {
+                            visible: root.cliPath !== "" && root.cliBalance !== undefined && root.cliPublic === null && root.hasCliWallet
+                            text: "Check again"
+                            font.pixelSize: root.px(15)
+                            onPressed: root.loadCliBalance()
+                        }
+                        Hint { visible: root.walletError !== ""; color: root.alarm; text: root.walletError }
+                        Fact {
+                            visible: root.cliPublic !== null
+                            label: "Account"
+                            code: true
+                            value: root.cliPublic !== null ? root.cliPublic.account : ""
+                            full: root.cliPublic !== null ? "Public/" + root.cliPublic.account : ""
+                        }
+                        Fact {
+                            visible: root.cliPublic !== null
+                            label: "Balance"
+                            value: root.cliPublic !== null ? root.grouped(root.cliPublic.balance) : ""
+                        }
+                        Hint {
+                            visible: root.cliPublic !== null
+                            font.pixelSize: root.px(14)
+                            text: "Bridged tokens land here. To use them for names, move " + root.grouped(root.shieldAmount) + " of them to your private account."
+                        }
+                        Action {
+                            visible: root.cliPublic !== null
+                            label: root.shieldJob !== null ? "Moving…" : "Move to private"
+                            enabledNow: root.shieldJob === null && root.canShield
+                            onPressed: root.moveToPrivate()
+                        }
+                        Hint { visible: root.shieldJob !== null; color: root.brass; font.pixelSize: root.px(15); text: root.shieldLine() }
+                        Hint { visible: root.shieldMoved && root.shieldJob === null; color: root.good; font.pixelSize: root.px(15); text: "Moved. Your private account is ready for names." }
+                        Hint { visible: root.shieldProblem !== "" && root.shieldJob === null; color: root.alarm; font.pixelSize: root.px(15); text: root.shieldProblem }
+                    }
+                    Part { text: "Your Logos Blockchain public key" }
+                    Hint { font.pixelSize: root.px(14); text: "The key your node's wallet lists, 64 characters. It's public, not a secret." }
+                    Field {
+                        id: bridgeKeyField
+                        Layout.fillWidth: true
+                        size: 17
+                        code: true
+                        hint: "64 characters, 0-9 and a-f"
+                    }
+                    Part { text: "Amount" }
+                    Field {
+                        id: bridgeAmountField
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: 360
+                        size: 17
+                        numbersOnly: true
+                        hint: "Such as 5000000"
+                        onAccepted: root.bridgeRun(false)
+                    }
+                    Part { text: "Node address (optional)" }
+                    Field {
+                        id: bridgeNodeField
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: 360
+                        size: 17
+                        code: true
+                        hint: root.defaultBridgeNode
+                    }
+                    RowLayout {
+                        Layout.topMargin: 4
+                        spacing: 8
+                        Action {
+                            label: root.bridgeBusy && !root.bridgeConfirm ? "Checking…" : "Check"
+                            enabledNow: !root.bridgeBusy && root.cliPublic !== null
+                            onPressed: root.bridgeRun(false)
+                        }
+                        Action {
+                            visible: !root.bridgeConfirm
+                            label: "Bridge"
+                            strong: true
+                            enabledNow: !root.bridgeBusy && root.bridgePlan !== null && root.bridgePlanFor === root.bridgeAsked().join("|")
+                            onPressed: root.bridgeConfirm = true
                         }
                     }
-                    Action {
-                        label: "Send"
-                        strong: true
-                        enabledNow: root.tokenJob === null && tokenSendDefinition.text.trim() !== "" && tokenSendAmount.text.trim() !== ""
-                            && tokenSendTo.text.trim() !== "" && root.tokenSendProblem() === ""
-                        onPressed: root.tokenSend()
+                    Hint {
+                        visible: root.bridgePlan !== null
+                        color: root.bridgePlanFor === root.bridgeAsked().join("|") ? root.ink : root.faint
+                        text: root.bridgePlanFor === root.bridgeAsked().join("|") ? root.bridgePlanText() : "You changed something. Check again before you bridge."
                     }
-                    Hint { visible: root.tokenSendProblem() !== ""; color: root.alarm; font.pixelSize: root.px(15); text: root.tokenSendProblem() }
-                }
-                Hint {
-                    visible: root.tokenJob !== null
-                    color: root.brass
-                    font.pixelSize: root.px(16)
-                    text: root.tokenJob === null ? "" : root.tokenJobLine(root.tokenJob)
-                }
-                Hint { visible: root.tokenProblem !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.tokenProblem }
-                Hint {
-                    visible: root.tokenProgram !== "" && root.tokenJob === null && root.tokenProblem === "" && root.notice !== ""
-                    color: root.noticeIsError ? root.alarm : root.dim
-                    text: root.notice
-                }
-            }
-        }
-
-        // Blockchain: the Logos Blockchain through Basecamp's own node.
-        Flickable {
-            visible: root.section === "chain" && !root.needsWelcome
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            contentHeight: chainPage.implicitHeight + 72
-            clip: true
-            ColumnLayout {
-                id: chainPage
-                x: 56
-                y: 40
-                width: Math.min(parent.width - 112, 640)
-                spacing: 14
-                RowLayout {
-                    Layout.fillWidth: true
-                    Text { text: "Logos Blockchain"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
-                    Item { Layout.fillWidth: true }
-                    Link { text: root.chainReading ? "Reading…" : "Refresh"; color: root.faint; font.pixelSize: root.px(15); onPressed: root.loadChain() }
-                }
-                Hint { text: "The base chain under LEZ, through the node Basecamp runs for you. Your node holds the keys and proves each transfer; nothing else is asked." }
-                Hint {
-                    visible: root.chainStatus !== null
-                    color: root.ink
-                    text: root.chainStatus === null ? "" : "Height " + Logic.grouped(root.chainStatus.height) + " · epoch " + root.chainStatus.epoch + " · " + (root.chainStatus.mode || "?") + " · final up to slot " + Logic.grouped(root.chainStatus.lib_slot)
-                }
-                Hint { visible: root.chainError !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.chainError }
-                // The node is started in Basecamp's own Blockchain app, not here.
-                Action {
-                    visible: /isn't running|didn't answer/.test(root.chainError)
-                    label: "Open the Blockchain app"
-                    strong: true
-                    onPressed: if (logos.request) logos.request("basecamp.apps.launch", { app: "blockchain_ui" }, function() { root.loadChain() })
-                }
-
-                // The node's keys: its accounts on the Logos Blockchain.
-                Part { visible: root.chainAccounts !== null; text: "Your keys" }
-                Hint {
-                    visible: root.chainAccounts !== null && root.chainAccounts.length === 0
-                    text: "Your node's wallet holds no keys yet. Make one in Basecamp's Blockchain app."
-                }
-                Repeater {
-                    model: root.chainAccounts !== null ? root.chainAccounts : []
-                    Rectangle {
-                        id: keyRow
-                        required property var modelData
-                        readonly property bool chosen: root.chainFrom === modelData.key
+                    Card {
+                        visible: root.bridgeConfirm && root.bridgePlan !== null
                         Layout.fillWidth: true
-                        implicitHeight: root.px(46)
-                        radius: 6
-                        color: keyArea.containsMouse ? root.hover : "transparent"
-                        border.width: 1
-                        border.color: chosen ? root.brass : root.line
+                        Hint {
+                            color: root.ink
+                            text: root.bridgePlan === null ? "" : "This moves " + root.grouped(root.bridgePlan.total || root.bridgeAsked()[0]) + " from your Logos Blockchain wallet into LEZ. It can't be undone. It arrives in about 12 hours."
+                        }
                         RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 12
-                            anchors.rightMargin: 12
-                            spacing: 10
-                            Text { text: Logic.keyShown(keyRow.modelData.key); color: root.ink; font.family: root.mono; font.pixelSize: root.px(15) }
-                            Text { visible: keyRow.chosen; text: "sends"; color: root.brass; font.family: root.sans; font.pixelSize: root.px(14) }
-                            Item { Layout.fillWidth: true }
-                            Text { text: keyRow.modelData.balance === null ? "—" : Logic.grouped(keyRow.modelData.balance); color: root.ink; font.family: root.sans; font.pixelSize: root.px(17) }
-                            Link { text: "Copy"; font.pixelSize: root.px(14); onPressed: root.copy(keyRow.modelData.key) }
-                        }
-                        MouseArea {
-                            id: keyArea
-                            anchors.fill: parent
-                            anchors.rightMargin: root.px(56)
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: { root.chainFrom = keyRow.modelData.key; root.chainPlan = null }
-                        }
-                    }
-                }
-                Hint {
-                    visible: root.chainAccounts !== null && root.chainAccounts.length > 0
-                    font.pixelSize: root.px(14)
-                    text: "Press a key to send from it. To be paid by name, copy a key and add it to your name in Profile, under Entries, as an entry called blockchain."
-                }
-
-                // Send.
-                Part { visible: root.chainAccounts !== null && root.chainAccounts.length > 0; text: "Send" }
-                ColumnLayout {
-                    visible: root.chainAccounts !== null && root.chainAccounts.length > 0
-                    Layout.fillWidth: true
-                    spacing: 10
-                    Field { id: chainToField; Layout.fillWidth: true; code: true; size: 16; hint: "To: a key (64 hex characters) or a name"; onEdited: root.chainPlan = null }
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 10
-                        Field { id: chainAmountField; Layout.fillWidth: true; numbersOnly: true; hint: "Amount"; onEdited: root.chainPlan = null; onAccepted: root.chainCheck() }
-                        Action { label: root.chainBusy && root.chainPlan === null ? "Checking…" : "Check"; enabledNow: !root.chainBusy; onPressed: root.chainCheck() }
-                    }
-                    Rectangle {
-                        visible: root.chainPlan !== null
-                        Layout.fillWidth: true
-                        implicitHeight: planColumn.implicitHeight + 24
-                        radius: 6
-                        color: root.raised
-                        border.width: 1
-                        border.color: root.line
-                        ColumnLayout {
-                            id: planColumn
-                            x: 12
-                            y: 12
-                            width: parent.width - 24
-                            spacing: 6
-                            Text {
-                                Layout.fillWidth: true
-                                wrapMode: Text.Wrap
-                                textFormat: Text.PlainText
-                                color: root.ink
-                                font.family: root.sans
-                                font.pixelSize: root.px(17)
-                                text: root.chainPlan === null ? "" : "Send " + Logic.grouped(root.chainPlan.amount) + " to " + (root.chainPlan.name ? root.chainPlan.name + " (" + Logic.keyShown(root.chainPlan.to) + ")" : Logic.keyShown(root.chainPlan.to))
+                            spacing: 8
+                            Action {
+                                label: root.bridgeBusy ? "Sending…" : "Yes, bridge it"
+                                strong: true
+                                enabledNow: !root.bridgeBusy
+                                onPressed: root.bridgeRun(true)
                             }
-                            Text {
-                                visible: root.chainPlan !== null && !!root.chainPlan.forwarded_from
-                                Layout.fillWidth: true
-                                wrapMode: Text.Wrap
-                                textFormat: Text.PlainText
-                                color: root.brass
-                                font.family: root.sans
-                                font.pixelSize: root.px(15)
-                                text: root.chainPlan === null || !root.chainPlan.forwarded_from ? "" : root.chainPlan.forwarded_from + " → " + root.chainPlan.name + ": " + root.chainPlan.forwarded_from + " forwards there."
-                            }
-                            Hint { font.pixelSize: root.px(15); text: root.chainPlan === null ? "" : "From " + Logic.keyShown(root.chainPlan.from) + ", which holds " + Logic.grouped(root.chainPlan.balance) + ". Change comes back to it. Your node takes the fee from the same key. A transfer can't be undone." }
-                            RowLayout {
-                                spacing: 10
-                                Action { label: root.chainBusy ? "Sending…" : "Send"; strong: true; enabledNow: !root.chainBusy; onPressed: root.chainSend() }
-                                Action { label: "Cancel"; enabledNow: !root.chainBusy; onPressed: root.chainPlan = null }
+                            Action {
+                                label: "Cancel"
+                                enabledNow: !root.bridgeBusy
+                                onPressed: root.bridgeConfirm = false
                             }
                         }
                     }
                     Hint {
-                        visible: root.chainSent !== null
-                        color: root.chainSent !== null && root.chainSent.state === "in_block" ? root.good : root.brass
-                        textFormat: Text.PlainText
-                        text: root.chainSent === null ? "" : "Sent " + Logic.grouped(root.chainSent.amount) + " to " + (root.chainSent.name || Logic.keyShown(root.chainSent.to)) + ": "
-                            + (root.chainSent.state === "in_block" ? "in a block" : root.chainSent.state === "pending" ? "waiting for a block…" : "sent; your node didn't say when it lands")
-                            + (root.chainSent.fee ? " Fee: " + Logic.grouped(root.chainSent.fee) + "." : "")
+                        visible: root.bridgeError !== ""
+                        color: root.alarm
+                        text: root.bridgeError
                     }
-                }
-                Hint { visible: root.chainProblem !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.chainProblem }
-
-                // Stake and rewards.
-                Part { visible: root.chainStake !== null; text: "Stake" }
-                Repeater {
-                    model: Logic.stakeLines(root.chainStake)
-                    Hint { required property var modelData; color: root.ink; text: modelData }
-                }
-                Hint { visible: root.chainStake !== null; text: "There is no separate staking step: tokens on your node's keys play the lottery for leading blocks. To unstake, send them to a key your node doesn't hold." }
-                RowLayout {
-                    visible: root.chainStake !== null
-                    Layout.fillWidth: true
-                    spacing: 10
-                    Text { Layout.fillWidth: true; wrapMode: Text.Wrap; text: Logic.rewardsLine(root.chainStake); color: root.ink; font.family: root.sans; font.pixelSize: root.px(17) }
-                    Action { visible: root.chainStake !== null && root.chainStake.vouchers > 0; label: root.chainBusy ? "Claiming…" : "Claim"; strong: true; enabledNow: !root.chainBusy; onPressed: root.chainClaim() }
-                }
-
-                // Into LEZ.
-                Part { text: "Into LEZ" }
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 10
-                    Hint { Layout.fillWidth: true; text: "Move tokens from one of these keys into your LEZ account: a deposit on the bridge, credited once its block is final." }
-                    Action { label: "Bridge…"; onPressed: root.openGetTokens() }
-                }
-                Hint {
-                    visible: root.notice !== ""
-                    color: root.noticeIsError ? root.alarm : root.dim
-                    text: root.notice
+                    Card {
+                        visible: root.bridgeSent
+                        Layout.fillWidth: true
+                        Hint { color: root.good; font.weight: Font.DemiBold; text: "Sent. It arrives in your public account in about 12 hours." }
+                        Fact { visible: root.bridgeHash !== ""; label: "Deposit"; code: true; value: root.bridgeHash; full: root.bridgeHash }
+                        // A reply the module couldn't read a hash from: what the CLI said.
+                        Text {
+                            visible: root.bridgeHash === ""
+                            Layout.fillWidth: true
+                            textFormat: Text.PlainText
+                            text: root.bridgeSentLines.join("\n")
+                            color: root.dim
+                            font.family: root.mono
+                            font.pixelSize: root.px(13)
+                            wrapMode: Text.WrapAnywhere
+                        }
+                    }
                 }
             }
         }
@@ -5339,166 +5679,6 @@ Item {
                     }
                 }
 
-                // Get tokens: bridge from the Logos Blockchain into LEZ.
-                ColumnLayout {
-                    visible: root.section === "settings" && root.gettingTokens
-                    Layout.fillWidth: true
-                    Layout.maximumWidth: 820
-                    spacing: 14
-                    Link {
-                        text: "‹ Settings"
-                        color: root.dim
-                        font.pixelSize: root.px(15)
-                        onPressed: root.gettingTokens = false
-                    }
-                    Text { text: "Get tokens"; color: root.ink; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(28) }
-                    Hint { text: "Tokens come from your Logos Blockchain node. Bridging them into LEZ takes about 12 hours to arrive." }
-                    Card {
-                        Layout.fillWidth: true
-                        Part { Layout.topMargin: 0; text: "Your LEZ public account" }
-                        Hint {
-                            visible: root.cliPublic === null
-                            text: root.cliPath === "" ? "Install the names program first (see Welcome)."
-                                : root.cliBalance === undefined ? "Checking your accounts…"
-                                : root.hasCliWallet ? "Couldn't read your accounts just now."
-                                : "You don't have a wallet yet. Create one first: it's where bridged tokens land."
-                            color: root.cliBalance === undefined ? root.dim : root.alarm
-                        }
-                        Action {
-                            visible: root.cliPath !== "" && root.cliBalance !== undefined && root.cliPublic === null && !root.hasCliWallet
-                            label: root.walletBusy ? "Creating…" : "Create my wallet"
-                            strong: true
-                            enabledNow: !root.walletBusy
-                            onPressed: root.createWallet()
-                        }
-                        Link {
-                            visible: root.cliPath !== "" && root.cliBalance !== undefined && root.cliPublic === null && root.hasCliWallet
-                            text: "Check again"
-                            font.pixelSize: root.px(15)
-                            onPressed: root.loadCliBalance()
-                        }
-                        Hint { visible: root.walletError !== ""; color: root.alarm; text: root.walletError }
-                        Fact {
-                            visible: root.cliPublic !== null
-                            label: "Account"
-                            code: true
-                            value: root.cliPublic !== null ? root.cliPublic.account : ""
-                            full: root.cliPublic !== null ? "Public/" + root.cliPublic.account : ""
-                        }
-                        Fact {
-                            visible: root.cliPublic !== null
-                            label: "Balance"
-                            value: root.cliPublic !== null ? root.grouped(root.cliPublic.balance) : ""
-                        }
-                        Hint {
-                            visible: root.cliPublic !== null
-                            font.pixelSize: root.px(14)
-                            text: "Bridged tokens land here. To use them for names, move " + root.grouped(root.shieldAmount) + " of them to your private account."
-                        }
-                        Action {
-                            visible: root.cliPublic !== null
-                            label: root.shieldJob !== null ? "Moving…" : "Move to private"
-                            enabledNow: root.shieldJob === null && root.canShield
-                            onPressed: root.moveToPrivate()
-                        }
-                        Hint { visible: root.shieldJob !== null; color: root.brass; font.pixelSize: root.px(15); text: root.shieldLine() }
-                        Hint { visible: root.shieldMoved && root.shieldJob === null; color: root.good; font.pixelSize: root.px(15); text: "Moved. Your private account is ready for names." }
-                        Hint { visible: root.shieldProblem !== "" && root.shieldJob === null; color: root.alarm; font.pixelSize: root.px(15); text: root.shieldProblem }
-                    }
-                    Part { text: "Your Logos Blockchain public key" }
-                    Hint { font.pixelSize: root.px(14); text: "The key your node's wallet lists, 64 characters. It's public, not a secret." }
-                    Field {
-                        id: bridgeKeyField
-                        Layout.fillWidth: true
-                        size: 17
-                        code: true
-                        hint: "64 characters, 0-9 and a-f"
-                    }
-                    Part { text: "Amount" }
-                    Field {
-                        id: bridgeAmountField
-                        Layout.fillWidth: true
-                        Layout.maximumWidth: 360
-                        size: 17
-                        numbersOnly: true
-                        hint: "Such as 5000000"
-                        onAccepted: root.bridgeRun(false)
-                    }
-                    Part { text: "Node address (optional)" }
-                    Field {
-                        id: bridgeNodeField
-                        Layout.fillWidth: true
-                        Layout.maximumWidth: 360
-                        size: 17
-                        code: true
-                        hint: root.defaultBridgeNode
-                    }
-                    RowLayout {
-                        Layout.topMargin: 4
-                        spacing: 8
-                        Action {
-                            label: root.bridgeBusy && !root.bridgeConfirm ? "Checking…" : "Check"
-                            enabledNow: !root.bridgeBusy && root.cliPublic !== null
-                            onPressed: root.bridgeRun(false)
-                        }
-                        Action {
-                            visible: !root.bridgeConfirm
-                            label: "Bridge"
-                            strong: true
-                            enabledNow: !root.bridgeBusy && root.bridgePlan !== null && root.bridgePlanFor === root.bridgeAsked().join("|")
-                            onPressed: root.bridgeConfirm = true
-                        }
-                    }
-                    Hint {
-                        visible: root.bridgePlan !== null
-                        color: root.bridgePlanFor === root.bridgeAsked().join("|") ? root.ink : root.faint
-                        text: root.bridgePlanFor === root.bridgeAsked().join("|") ? root.bridgePlanText() : "You changed something. Check again before you bridge."
-                    }
-                    Card {
-                        visible: root.bridgeConfirm && root.bridgePlan !== null
-                        Layout.fillWidth: true
-                        Hint {
-                            color: root.ink
-                            text: root.bridgePlan === null ? "" : "This moves " + root.grouped(root.bridgePlan.total || root.bridgeAsked()[0]) + " from your Logos Blockchain wallet into LEZ. It can't be undone. It arrives in about 12 hours."
-                        }
-                        RowLayout {
-                            spacing: 8
-                            Action {
-                                label: root.bridgeBusy ? "Sending…" : "Yes, bridge it"
-                                strong: true
-                                enabledNow: !root.bridgeBusy
-                                onPressed: root.bridgeRun(true)
-                            }
-                            Action {
-                                label: "Cancel"
-                                enabledNow: !root.bridgeBusy
-                                onPressed: root.bridgeConfirm = false
-                            }
-                        }
-                    }
-                    Hint {
-                        visible: root.bridgeError !== ""
-                        color: root.alarm
-                        text: root.bridgeError
-                    }
-                    Card {
-                        visible: root.bridgeSent
-                        Layout.fillWidth: true
-                        Hint { color: root.good; font.weight: Font.DemiBold; text: "Sent. It arrives in your public account in about 12 hours." }
-                        Fact { visible: root.bridgeHash !== ""; label: "Deposit"; code: true; value: root.bridgeHash; full: root.bridgeHash }
-                        // A reply the module couldn't read a hash from: what the CLI said.
-                        Text {
-                            visible: root.bridgeHash === ""
-                            Layout.fillWidth: true
-                            textFormat: Text.PlainText
-                            text: root.bridgeSentLines.join("\n")
-                            color: root.dim
-                            font.family: root.mono
-                            font.pixelSize: root.px(13)
-                            wrapMode: Text.WrapAnywhere
-                        }
-                    }
-                }
 
                 // Advanced.
                 ColumnLayout {
@@ -6020,7 +6200,7 @@ Item {
                         }
                         Action {
                             label: "Pay"
-                            onPressed: { var name = root.record.name; root.go("pay"); payTo.text = name; root.loadCliBalance(); payAmount.forceActiveFocus() }
+                            onPressed: { root.payTo(root.record.name); root.walletRefresh() }
                         }
                         Action {
                             label: root.record !== null && root.boardFollowing(root.record.name) ? "Following" : "Follow"
@@ -6557,9 +6737,9 @@ Item {
 
                     }
 
-                    // Their posts.
+                    // Their posts: gone with the board (this list goes with its code).
                     ColumnLayout {
-                        visible: root.tool !== "settings" && root.record !== null
+                        visible: false
                         Layout.fillWidth: true
                         spacing: 10
                         Text { text: "Posts" + (root.authorTotal > 0 ? "  " + root.authorTotal : ""); color: root.ink; font.family: root.sans; font.pixelSize: root.px(18); font.weight: Font.Bold }

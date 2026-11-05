@@ -199,3 +199,52 @@ export function grouped(digits) {
     var text = String(digits === null || digits === undefined ? "" : digits)
     return /^\d+$/.test(text) ? text.replace(/\B(?=(\d{3})+(?!\d))/g, ",") : text
 }
+
+/// Two amounts in decimal text added, exactly (they pass what a JS number holds).
+export function addDigits(a, b) {
+    var x = String(a || "0").replace(/^0+(?=\d)/, ""), y = String(b || "0").replace(/^0+(?=\d)/, "")
+    if (!/^\d+$/.test(x) || !/^\d+$/.test(y)) return null
+    var out = "", carry = 0
+    for (var i = x.length - 1, j = y.length - 1; i >= 0 || j >= 0 || carry; i--, j--) {
+        var sum = (i >= 0 ? x.charCodeAt(i) - 48 : 0) + (j >= 0 ? y.charCodeAt(j) - 48 : 0) + carry
+        out = String(sum % 10) + out
+        carry = sum >= 10 ? 1 : 0
+    }
+    return out
+}
+
+/// Everything the wallet holds, one row per asset and account, for the Wallet
+/// screen: `[{id, kind, title, where, balance, definition, fromPrivate,
+/// stakable}]`. `kind` is `lez`, `token` or `chain`; `balance` decimal text, or
+/// null while unknown. `cliBalance` is cli_balance's reply ({balance, public}),
+/// `holdings` cli_token_holdings', `watched` the token IDs added by address,
+/// `chainAccounts` chain_accounts' ([{key, balance}]) and `chainDown` whether the
+/// node couldn't be read.
+export function walletAssets(cliBalance, holdings, watched, tokenNames, chainAccounts, chainDown) {
+    var rows = []
+    if (cliBalance && typeof cliBalance === "object") {
+        rows.push({ id: "lez-private", kind: "lez", title: "LEZ", where: "Private", balance: cliBalance.balance === undefined ? null : String(cliBalance.balance), definition: "", fromPrivate: true, stakable: false })
+        if (cliBalance["public"])
+            rows.push({ id: "lez-public", kind: "lez", title: "LEZ", where: "Public", balance: String(cliBalance["public"].balance), definition: "", fromPrivate: false, stakable: false })
+    }
+    var held = {}
+    ;(holdings || []).forEach(function(h) {
+        held[h.definition] = true
+        var priv = h.account_kind === "private"
+        rows.push({ id: "token-" + h.definition + "-" + (priv ? "private" : "public"), kind: "token", title: tokenShown(h.name), where: priv ? "Private" : "Public",
+                    balance: String(h.balance), definition: h.definition, fromPrivate: priv, stakable: false })
+    })
+    ;(watched || []).forEach(function(definition) {
+        if (held[definition]) return
+        held[definition] = true
+        var name = tokenNames && tokenNames[definition]
+        rows.push({ id: "token-" + definition, kind: "token", title: name ? tokenShown(name) : keyShown(definition), where: "None yet",
+                    balance: "0", definition: definition, fromPrivate: true, stakable: false })
+    })
+    if (chainAccounts || chainDown) {
+        var total = chainAccounts ? (chainAccounts || []).reduce(function(sum, a) { return a.balance === null || sum === null ? sum : addDigits(sum, a.balance) }, "0") : null
+        rows.push({ id: "chain", kind: "chain", title: "Logos Blockchain", where: chainDown ? "Node not running" : "On your node",
+                    balance: chainDown ? null : total, definition: "", fromPrivate: false, stakable: true })
+    }
+    return rows
+}

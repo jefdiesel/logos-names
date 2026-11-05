@@ -543,6 +543,18 @@ pub trait NamesModule: Send + 'static {
     /// then kept for 30 seconds.
     fn cli_token_info(&mut self, definition: String) -> String;
 
+    /// The tokens added to the wallet by address, for the token program in
+    /// use: `[{definition, name}]`, in the order added; `name` is the
+    /// definition's own (as `cli_token_info` read it when added) or null.
+    fn watched_tokens(&mut self) -> String;
+
+    /// Adds (`watch`) or removes the token `definition` (its definition's
+    /// account ID) from the wallet's list, so it shows before any of it is
+    /// held. Adding reads the definition through the CLI first, so an ID that
+    /// isn't a token of the program in use is refused. Gives the list as
+    /// `watched_tokens` does. Kept on this device, per token program.
+    fn watch_token(&mut self, definition: String, watch: bool) -> String;
+
     /// Sends `amount` (base units, decimal text up to 2^128 - 1) of the token
     /// `definition` (its definition's account ID) to `to`: a name, a public
     /// account written `Public/<id>`, or one of the wallet's own
@@ -938,7 +950,7 @@ const NAMES_APP: &str = "names_ui";
 /// `get_config` reports it so the Names app can refuse a module from another
 /// release (the app's own metadata asks for at least this at install, but an
 /// older module can still be the one loaded).
-const MODULE_VERSION: &str = "0.13.0";
+const MODULE_VERSION: &str = "0.14.0";
 
 /// Whether `caller` may use those methods. Basecamp gives each app its own
 /// credential, named after the app, so the module knows which app is calling.
@@ -2873,6 +2885,38 @@ impl NamesModule for Names {
         })())
     }
 
+    fn watched_tokens(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let program = self.token_program_set()?;
+            Ok(Value::from(tokens_watched(&program)))
+        })())
+    }
+
+    fn watch_token(&mut self, definition: String, watch: bool) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let definition = cli::token_definition(&definition)?;
+            let program = self.token_program_set()?;
+            let id = registry::account_text(&definition);
+            let mut list = tokens_watched(&program);
+            list.retain(|entry| entry["definition"] != id.as_str());
+            if watch {
+                if list.len() >= MAX_WATCHED_TOKENS {
+                    return Err(format!("The wallet keeps at most {MAX_WATCHED_TOKENS} tokens added by address: remove one first."));
+                }
+                let info = self.token_info_of(&program, &definition)?;
+                list.push(json!({ "definition": id, "name": info["name"] }));
+            }
+            save_tokens_watched(&program, &list)?;
+            Ok(Value::from(list))
+        })())
+    }
+
     fn cli_token_send(&mut self, definition: String, amount: String, to: String, from_private: bool, to_public: bool) -> String {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
@@ -3811,6 +3855,24 @@ mod program_registry {
         };
         (answer["success"] == true).then(|| answer["value"].clone()).filter(Value::is_object)
     }
+}
+
+/// The most tokens the wallet keeps added by address, per token program.
+const MAX_WATCHED_TOKENS: usize = 64;
+
+/// The tokens added by address for `program`: `[{definition, name}]`.
+fn tokens_watched(program: &AccountId) -> Vec<Value> {
+    let all = config_dir().map(|dir| load_object(&dir.join("tokens-watched.json"))).unwrap_or_default();
+    all.get(&registry::account_text(program)).and_then(Value::as_array).cloned().unwrap_or_default()
+}
+
+fn save_tokens_watched(program: &AccountId, list: &[Value]) -> Result<(), String> {
+    let dir = config_dir().ok_or("there is no config folder to keep the token list in")?;
+    let path = dir.join("tokens-watched.json");
+    let mut all = load_object(&path);
+    all.insert(registry::account_text(program), Value::from(list.to_vec()));
+    save_object(&path, &all);
+    Ok(())
 }
 
 /// Sends made from this device, by hash: `{from, inputs, fee, at}`, for `chain_tx`.
@@ -5101,6 +5163,42 @@ mod tests {
         let ended = job_end(&mut names, started["value"]["id"].as_str().unwrap());
         assert_eq!(ended["state"], "failed");
         assert_eq!(ended["problem"], "The token transfer didn't go through: Public/CCVd holds 0 Demo, less than 5");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_token_added_by_address_is_kept_and_a_wrong_one_refused() {
+        let demo = registry::account_text(&DEMO);
+        let missing = registry::account_text(&[8; 32]);
+        let tail = format!(
+            "case \"$*\" in\n\
+             *\"module token info -- {missing}\"*) echo 'Error: not a token' >&2; exit 1 ;;\n\
+             *\"module token info\"*) echo '{{\"definition\":\"{demo}\",\"name\":\"Demo\",\"supply\":\"1000\",\"authority\":null}}' ;;\n\
+             esac"
+        );
+        let (mut names, dir) = with_wallet("token-watch", &tail);
+        assert!(parsed(&names.watched_tokens())["error"].as_str().unwrap().contains("no token program"));
+        names.token_program = Some(PROGRAM);
+        let _ = std::fs::remove_file(config_dir().unwrap().join("tokens-watched.json"));
+        assert_eq!(parsed(&names.watched_tokens())["value"], json!([]));
+        // An ID that isn't a token of the program is refused, and nothing is kept.
+        assert_eq!(parsed(&names.watch_token(missing, true))["success"], false);
+        assert_eq!(parsed(&names.watch_token("not an id".into(), true))["success"], false);
+        // A real one is read and kept, once, with its name; it survives a restart.
+        let added = parsed(&names.watch_token(demo.clone(), true));
+        assert_eq!(added["value"], json!([{ "definition": demo, "name": "Demo" }]), "{added}");
+        names.watch_token(demo.clone(), true);
+        let mut again = fresh();
+        again.token_program = Some(PROGRAM);
+        assert_eq!(parsed(&again.watched_tokens())["value"], json!([{ "definition": demo, "name": "Demo" }]));
+        // Kept per program, and only the Names app may change it.
+        again.token_program = Some([9; 32]);
+        assert_eq!(parsed(&again.watched_tokens())["value"], json!([]));
+        as_caller(app("evil_ui"));
+        assert!(parsed(&names.watch_token(demo.clone(), false))["error"].as_str().unwrap().contains("only the Names app"));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert_eq!(parsed(&names.watch_token(demo, false))["value"], json!([]));
+        let _ = std::fs::remove_file(config_dir().unwrap().join("tokens-watched.json"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
