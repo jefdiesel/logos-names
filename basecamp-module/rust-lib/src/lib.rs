@@ -33,6 +33,7 @@
 //! machine with the CLI's own keys.
 
 mod avatar;
+mod chain;
 mod changes;
 mod cli;
 mod page_view;
@@ -604,6 +605,48 @@ pub trait NamesModule: Send + 'static {
     /// `{about, at_most, paid}`, `paid` measured once it applied.
     fn cli_fee(&mut self) -> String;
 
+    // ── The Logos Blockchain (LP-0022): Basecamp's own node. Names app only. ──
+    //
+    // Asked of `blockchain_module` over Logos Core; the node holds the keys and
+    // proves each transfer. Each fails with advice when the node isn't running.
+
+    /// The node: `{height, slot, lib_slot, mode, epoch}`; `lib_slot` is the
+    /// last final block's slot, `mode` the node's (`Online` once synced).
+    fn chain_status(&mut self) -> String;
+
+    /// The keys the node's wallet holds: `[{key, balance}]`, `balance`
+    /// decimal text or null if it couldn't be read.
+    fn chain_accounts(&mut self) -> String;
+
+    /// Stake: `{staked, notes, keys, epoch, next_epoch_in_s, claimable,
+    /// vouchers, reward_per_voucher}`, amounts as decimal text. `staked` is
+    /// what the node's notes put in the leader lottery (any note on its keys,
+    /// once in an epoch's snapshot); `next_epoch_in_s` is null when the node
+    /// doesn't say. To unstake, send to a key the node doesn't hold.
+    fn chain_stake(&mut self) -> String;
+
+    /// Where `to` sends: `{key, name, forwarded_from}`. A key (64 hex) is
+    /// itself; a name is the key its `blockchain` entry publishes, following
+    /// a `forward` one hop (`forwarded_from` is then the name asked for).
+    fn chain_recipient(&mut self, to: String) -> String;
+
+    /// Sends `amount` (base units, decimal digits) from the node's key
+    /// `from_key` to `to` (a key, or a name as `chain_recipient` reads it).
+    /// Without `send` it checks everything and gives the plan `{from, to,
+    /// name, forwarded_from, amount, balance}`; with `send` the transfer is
+    /// made (it cannot be undone) and `hash` is added. The node proves it,
+    /// which can take a minute, so ask with a long timeout.
+    fn chain_send(&mut self, from_key: String, to: String, amount: String, send: bool) -> String;
+
+    /// Whether transaction `hash` is in a block: `{hash, state, fee}`,
+    /// `state` `in_block` or `pending`, `fee` decimal text or null.
+    fn chain_tx(&mut self, hash: String) -> String;
+
+    /// The node's leader rewards: without `send`, `{claimable, vouchers}`;
+    /// with `send`, one transaction claims them all and `hash` is added
+    /// (null when there was nothing to claim).
+    fn chain_claim(&mut self, send: bool) -> String;
+
     // ── Wallet Provider SDK: for any app (docs/wallet/PROVIDER-SDK.md) ──
     //
     // Any app may ask; the person decides in the Names app. The asking app
@@ -886,7 +929,7 @@ const NAMES_APP: &str = "names_ui";
 /// `get_config` reports it so the Names app can refuse a module from another
 /// release (the app's own metadata asks for at least this at install, but an
 /// older module can still be the one loaded).
-const MODULE_VERSION: &str = "0.12.0";
+const MODULE_VERSION: &str = "0.13.0";
 
 /// Whether `caller` may use those methods. Basecamp gives each app its own
 /// credential, named after the app, so the module knows which app is calling.
@@ -1567,6 +1610,36 @@ impl Names {
             .entry(name.to_owned())
             .or_insert_with(|| registry::derive(name))
             .clone()
+    }
+
+    /// Where a Logos Blockchain send to `to` goes: `{key, name, forwarded_from}`, a key
+    /// as given, or the `blockchain` entry of a name (one `forward` hop, SPEC.md §7).
+    fn chain_target(&mut self, to: &str) -> Result<Value, String> {
+        if let Some(key) = chain::parse_key(to) {
+            return Ok(json!({ "key": key, "name": null, "forwarded_from": null }));
+        }
+        let name = registry::parse_name(to).map_err(|_| "enter a Logos Blockchain key (64 hex characters) or a name".to_owned())?;
+        let registry = self.registry()?;
+        let derived = self.derived(&name);
+        let resolved = registry.resolve(&name, &derived)?.ok_or_else(|| format!("{name} isn't registered"))?;
+        let (resolved, shown, forwarded_from) = match resolved.forward_target() {
+            Some(target) => {
+                let derived = self.derived(&target);
+                let forwarded = registry
+                    .resolve(&target, &derived)?
+                    .ok_or_else(|| format!("{name} points to {target}, which isn't registered"))?;
+                (forwarded, target, Some(name))
+            }
+            None => (resolved, name, None),
+        };
+        let key = resolved
+            .profile
+            .texts
+            .iter()
+            .find(|(key, _)| key == chain::BLOCKCHAIN_KEY)
+            .and_then(|(_, value)| chain::parse_key(value))
+            .ok_or_else(|| format!("{shown} hasn't published a Logos Blockchain key"))?;
+        Ok(json!({ "key": key, "name": shown, "forwarded_from": forwarded_from }))
     }
 
     /// Answers a question about the name a person typed.
@@ -2874,6 +2947,125 @@ impl NamesModule for Names {
         reply((|| cli::run_fee(&self.cli_setup()?))())
     }
 
+    // ── The Logos Blockchain ────────────────────────────────────────────
+
+    fn chain_status(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let info = node::call("get_cryptarchia_info", json!([]), node::QUICK)?;
+            let time = node::call("get_time_info", json!([]), node::QUICK)?;
+            Ok(chain::status(&info, &time))
+        })())
+    }
+
+    fn chain_accounts(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let keys = node::call("wallet_get_known_addresses", json!([]), node::QUICK)?;
+            let keys: Vec<String> = keys.as_array().map(|k| k.iter().filter_map(|k| k.as_str().and_then(chain::parse_key)).collect()).unwrap_or_default();
+            Ok(Value::from(
+                keys.into_iter()
+                    .take(MAX_WALLET_ACCOUNTS)
+                    .map(|key| {
+                        let balance = node::call("wallet_get_balance", json!([key]), node::QUICK).ok().map(|b| chain::balance_of(&b).to_string());
+                        json!({ "key": key, "balance": balance })
+                    })
+                    .collect::<Vec<_>>(),
+            ))
+        })())
+    }
+
+    fn chain_stake(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let aged = node::call("wallet_get_leader_aged_notes", json!([""]), node::QUICK)?;
+            let vouchers = node::call("wallet_get_claimable_vouchers", json!([]), node::QUICK)?;
+            let time = node::call("get_time_info", json!([]), node::QUICK)?;
+            Ok(chain::stake(&aged, &vouchers, &time))
+        })())
+    }
+
+    fn chain_recipient(&mut self, to: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(self.chain_target(&to))
+    }
+
+    fn chain_send(&mut self, from_key: String, to: String, amount: String, send: bool) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let target = self.chain_target(&to)?;
+            let (from, to_key, amount) = chain::send_input(&from_key, target["key"].as_str().unwrap_or_default(), &amount)?;
+            let balance = chain::balance_of(&node::call("wallet_get_balance", json!([from]), node::QUICK)?);
+            if balance < u128::from(amount) {
+                return Err(format!("that key holds {balance}, less than {amount}"));
+            }
+            let mut plan = json!({
+                "from": from,
+                "to": to_key,
+                "name": target["name"],
+                "forwarded_from": target["forwarded_from"],
+                "amount": amount.to_string(),
+                "balance": balance.to_string(),
+            });
+            if send {
+                let sent = node::call("wallet_transfer_funds", json!([from, [from], to_key, amount.to_string(), ""]), node::PROVING)?;
+                plan["hash"] = chain::hash_of(&sent).map_or(Value::Null, Value::from);
+            }
+            Ok(plan)
+        })())
+    }
+
+    fn chain_tx(&mut self, hash: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let hash = chain::parse_key(&hash).ok_or("a transaction hash is 64 hex characters")?;
+            // The node answers "not found" until the transaction is in a block it stored.
+            let found = match node::call("get_transaction", json!([hash]), node::QUICK) {
+                Ok(tx) if !tx.is_null() => Some(tx),
+                Ok(_) => None,
+                Err(error) if error.to_ascii_lowercase().contains("not found") => None,
+                Err(error) => return Err(error),
+            };
+            let fee = found.as_ref().and_then(chain::fee_of);
+            Ok(json!({
+                "hash": hash,
+                "state": if found.is_some() { "in_block" } else { "pending" },
+                "fee": fee.map(|f| f.to_string()),
+            }))
+        })())
+    }
+
+    fn chain_claim(&mut self, send: bool) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let vouchers = node::call("wallet_get_claimable_vouchers", json!([]), node::QUICK)?;
+            let count = vouchers["vouchers"].as_array().map_or(0, Vec::len);
+            let mut plan = json!({ "claimable": chain::amount(&vouchers["total_claimable"]).to_string(), "vouchers": count });
+            if send {
+                plan["hash"] = if count == 0 {
+                    Value::Null
+                } else {
+                    chain::hash_of(&node::call("leader_claim", json!([]), node::PROVING)?).map_or(Value::Null, Value::from)
+                };
+            }
+            Ok(plan)
+        })())
+    }
+
     // ── Wallet Provider SDK ─────────────────────────────────────────────
 
     fn request_access(&mut self, reason: String) -> String {
@@ -3581,6 +3773,51 @@ mod program_registry {
     }
 }
 
+/// Basecamp's Logos Blockchain node (`blockchain_module`), for the chain methods.
+#[cfg(not(test))]
+mod node {
+    use super::{chain, Value};
+    use logos_rust_sdk::LogosModuleSDK;
+    use std::time::Duration;
+
+    /// A read: the node answers from its own state.
+    pub const QUICK: Duration = Duration::from_secs(15);
+    /// A transfer or claim, which the node proves before it answers.
+    pub const PROVING: Duration = Duration::from_secs(180);
+
+    pub fn call(method: &str, args: Value, wait: Duration) -> Result<Value, String> {
+        let answer = LogosModuleSDK::new()
+            .plugin(chain::MODULE)
+            .call_json_with_timeout(method, &args, wait)
+            .map_err(|_| "Basecamp's Logos Blockchain node didn't answer. Install the Blockchain app and start its node.".to_owned())?;
+        chain::unwrap(method, answer)
+    }
+}
+
+/// Stands in for the node in unit tests: a test sets each method's answer, and
+/// what was asked is kept.
+#[cfg(test)]
+mod node {
+    use super::{chain, Value};
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    pub const QUICK: Duration = Duration::from_secs(15);
+    pub const PROVING: Duration = Duration::from_secs(180);
+
+    thread_local! {
+        pub static ANSWERS: RefCell<HashMap<String, Value>> = RefCell::new(HashMap::new());
+        pub static ASKED: RefCell<Vec<(String, Value)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub fn call(method: &str, args: Value, _wait: Duration) -> Result<Value, String> {
+        ASKED.with(|asked| asked.borrow_mut().push((method.to_owned(), args)));
+        let answer = ANSWERS.with(|answers| answers.borrow().get(method).cloned());
+        chain::unwrap(method, answer.ok_or_else(|| "Basecamp's Logos Blockchain node didn't answer.".to_owned())?)
+    }
+}
+
 /// Stands in for the Program Registry in unit tests: a test sets the label.
 #[cfg(test)]
 mod program_registry {
@@ -3987,6 +4224,82 @@ mod tests {
 
     fn as_caller(caller: logos_rust_sdk::LogosCaller) {
         TEST_CALLER.with(|current| *current.borrow_mut() = caller);
+    }
+
+    // ── The Logos Blockchain, against a stand-in node ──────────────────
+
+    const NODE_KEY: &str = "66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b";
+
+    /// Answers `method` as the node module does: `{success, value, error}`, the value as JSON text.
+    fn node_answers(method: &str, value: Value) {
+        let value = if value.is_string() { value } else { Value::from(value.to_string()) };
+        node::ANSWERS.with(|answers| answers.borrow_mut().insert(method.to_owned(), json!({ "success": true, "value": value, "error": null })));
+    }
+
+    fn node_asked() -> Vec<String> {
+        node::ASKED.with(|asked| asked.borrow().iter().map(|(method, _)| method.clone()).collect())
+    }
+
+    #[test]
+    fn chain_accounts_lists_the_nodes_keys_with_balances() {
+        let mut names = fresh();
+        node::ANSWERS.with(|answers| answers.borrow_mut().insert("wallet_get_known_addresses".into(), json!({ "success": true, "value": [NODE_KEY, "not-a-key"] })));
+        node_answers("wallet_get_balance", json!("1191220464"));
+        let shown = parsed(&names.chain_accounts());
+        assert_eq!(shown["value"], json!([{ "key": NODE_KEY, "balance": "1191220464" }]), "{shown}");
+    }
+
+    #[test]
+    fn chain_send_plans_then_sends_and_refuses_overdrafts() {
+        let mut names = fresh();
+        let to = "ab".repeat(32);
+        node_answers("wallet_get_balance", json!("5000"));
+        node_answers("wallet_transfer_funds", json!("cd".repeat(32)));
+        let plan = parsed(&names.chain_send(NODE_KEY.into(), to.clone(), "1,000".into(), false));
+        assert_eq!(plan["value"]["amount"], "1000", "{plan}");
+        assert_eq!(plan["value"]["hash"], Value::Null, "a plan sends nothing");
+        assert!(!node_asked().contains(&"wallet_transfer_funds".to_owned()));
+        let sent = parsed(&names.chain_send(NODE_KEY.into(), to.clone(), "1000".into(), true));
+        assert_eq!(sent["value"]["hash"], "cd".repeat(32), "{sent}");
+        let asked = node::ASKED.with(|asked| asked.borrow().iter().find(|(m, _)| m == "wallet_transfer_funds").map(|(_, a)| a.clone()));
+        assert_eq!(asked, Some(json!([NODE_KEY, [NODE_KEY], to, "1000", ""])), "change goes back to the sender");
+        let over = parsed(&names.chain_send(NODE_KEY.into(), "ab".repeat(32), "5001".into(), true));
+        assert_eq!(over["success"], false);
+        assert!(over["error"].as_str().unwrap().contains("less than 5001"), "{over}");
+    }
+
+    #[test]
+    fn chain_claim_sends_nothing_without_vouchers() {
+        let mut names = fresh();
+        node_answers("wallet_get_claimable_vouchers", json!({ "reward_amount": "13140", "total_claimable": "0", "vouchers": [] }));
+        let claimed = parsed(&names.chain_claim(true));
+        assert_eq!(claimed["value"], json!({ "claimable": "0", "vouchers": 0, "hash": null }), "{claimed}");
+        assert!(!node_asked().contains(&"leader_claim".to_owned()));
+    }
+
+    #[test]
+    fn chain_tx_is_pending_until_the_node_has_it() {
+        let mut names = fresh();
+        node::ANSWERS.with(|answers| answers.borrow_mut().insert("get_transaction".into(), json!({ "success": false, "error": "Transaction not found" })));
+        assert_eq!(parsed(&names.chain_tx("cd".repeat(32)))["value"]["state"], "pending");
+        node_answers("get_transaction", json!({ "mantle_tx": { "tx_fee": "1234" } }));
+        let found = parsed(&names.chain_tx("cd".repeat(32)));
+        assert_eq!(found["value"]["state"], "in_block");
+        assert_eq!(found["value"]["fee"], "1234");
+    }
+
+    #[test]
+    fn chain_methods_are_the_names_apps_alone_and_say_when_the_node_is_down() {
+        let mut names = fresh();
+        node::ANSWERS.with(|answers| answers.borrow_mut().insert("get_cryptarchia_info".into(), json!({ "success": false, "error": "The node is not running." })));
+        let down = parsed(&names.chain_status());
+        assert!(down["error"].as_str().unwrap().contains("isn't running"), "{down}");
+        as_caller(logos_rust_sdk::LogosCaller::Module { name: "evil_ui".into(), instance: None });
+        for refused in [names.chain_accounts(), names.chain_send(NODE_KEY.into(), "ab".repeat(32), "1".into(), true), names.chain_claim(true)] {
+            assert!(parsed(&refused)["error"].as_str().unwrap().contains("only the Names app"), "{refused}");
+        }
+        assert!(node_asked().iter().all(|m| m == "get_cryptarchia_info"), "nothing was asked for the other app");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
     }
 
     #[test]

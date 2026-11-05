@@ -138,3 +138,60 @@ export function publisherLine(publisher) {
     }
     return null
 }
+
+// ── The Logos Blockchain (chain_* in the names module) ─────────────────
+
+/// About how long `seconds` is, in words.
+export function durationWords(seconds) {
+    var s = Math.max(0, Math.round(Number(seconds) || 0))
+    if (s < 90) return s + " s"
+    if (s < 5400) return Math.round(s / 60) + " min"
+    if (s < 172800) return (s / 3600).toFixed(1) + " h"
+    return (s / 86400).toFixed(1) + " days"
+}
+
+/// A Logos Blockchain key cut down for a line of text: `66ecf4bc…a81b`.
+export function keyShown(key) {
+    var text = String(key || "")
+    return text.length > 16 ? text.substr(0, 8) + "…" + text.substr(text.length - 4) : text
+}
+
+/// Why `text` isn't something a Logos Blockchain send can go to (a 64-hex key, or a
+/// name), or "" if it is one. Names are checked by the module; this catches typos.
+export function chainToProblem(text) {
+    var to = String(text === null || text === undefined ? "" : text).trim().replace(/^0x/i, "")
+    if (to === "") return "Enter a key or a name."
+    if (/^[0-9a-fA-F]+$/.test(to) && to.length > 32)
+        return to.length === 64 ? "" : "A Logos Blockchain key is 64 hex characters; that one has " + to.length + "."
+    return /^@?[a-zA-Z0-9-]{1,32}(\.lez)?$/.test(to) ? "" : "Enter a key (64 hex characters) or a name."
+}
+
+/// The stake, as `chain_stake` gives it, in lines for the Stake part.
+export function stakeLines(stake) {
+    if (!stake) return []
+    var keys = stake.keys || []
+    var lines = []
+    if (keys.length === 0)
+        lines.push("Nothing staked yet: tokens on your node's keys join at an epoch boundary.")
+    else if (keys.length === 1)
+        lines.push(grouped(stake.staked) + " staked in " + stake.notes + (stake.notes === 1 ? " note" : " notes") + " on " + keyShown(keys[0]) + ".")
+    else
+        lines.push(grouped(stake.staked) + " staked in " + stake.notes + " notes on " + keys.length + " keys.")
+    var epoch = "Epoch " + stake.epoch
+    if (stake.next_epoch_in_s !== null && stake.next_epoch_in_s !== undefined)
+        epoch += "; the next starts in about " + durationWords(stake.next_epoch_in_s)
+    lines.push(epoch + ". New tokens join the stake at an epoch boundary, up to two epochs after they arrive.")
+    return lines
+}
+
+/// The rewards line: what a claim would cash out, or that there's nothing.
+export function rewardsLine(stake) {
+    if (!stake || !stake.vouchers) return "Nothing to claim. Each block your node leads earns a reward to claim here."
+    return grouped(stake.claimable) + " to claim from " + stake.vouchers + (stake.vouchers === 1 ? " block" : " blocks") + " your node led."
+}
+
+/// `1234567` (decimal text or a number) as `1,234,567`.
+export function grouped(digits) {
+    var text = String(digits === null || digits === undefined ? "" : digits)
+    return /^\d+$/.test(text) ? text.replace(/\B(?=(\d{3})+(?!\d))/g, ",") : text
+}

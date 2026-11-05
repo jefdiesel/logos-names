@@ -113,7 +113,7 @@ Item {
     property bool configKnown: false   // the names module has answered once
     // The names module this app needs: the same release (metadata.json asks for it
     // at install, but an older module can still be the one Basecamp loaded).
-    readonly property string neededModule: "0.12.0"
+    readonly property string neededModule: "0.13.0"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -529,6 +529,148 @@ Item {
             feeQuoteAt = 0
             console.log("names_ui: fee:", message)
         }, 30000)
+    }
+
+    // ── The Logos Blockchain: Basecamp's own node (chain_* in the module) ──
+
+    property var chainStatus: null       // chain_status, or null
+    property var chainAccounts: null     // chain_accounts: [{key, balance}]; null until read
+    property var chainStake: null        // chain_stake, or null
+    property string chainError: ""       // why the node couldn't be read
+    property bool chainReading: false
+    property string chainFrom: ""        // the key the Send form pays from
+    property var chainPlan: null         // the checked send: {from, to, name, forwarded_from, amount, balance}
+    property string chainPlanFor: ""     // what that plan was checked for: from|to|amount
+    property bool chainBusy: false       // a check, send or claim is on its way
+    property string chainProblem: ""     // why the last check, send or claim failed
+    property var chainSent: null         // the last send: {hash, amount, to, name, state, fee}
+    property double chainSentAt: 0
+    property string chainClaimed: ""     // the last claim's transaction, "" if none
+
+    /// Opens Blockchain and reads the node.
+    function openChain() {
+        go("chain")
+        chainProblem = ""
+        loadChain()
+    }
+
+    /// Reads the node's state, its keys and its stake.
+    function loadChain() {
+        if (chainReading)
+            return
+        chainReading = true
+        askLater("chain_status", [], function(value) {
+            chainStatus = value
+            chainError = ""
+            askLater("chain_accounts", [], function(keys) {
+                chainAccounts = keys
+                if (chainFrom === "" && keys.length > 0)
+                    chainFrom = keys[0].key
+                askLater("chain_stake", [], function(stake) {
+                    chainStake = stake
+                    chainReading = false
+                }, function(message) {
+                    chainReading = false
+                    console.log("names_ui: stake:", message)
+                }, 30000)
+            }, function(message) {
+                chainReading = false
+                chainError = sentence(message)
+            }, 60000)
+        }, function(message) {
+            chainReading = false
+            chainStatus = null
+            chainError = sentence(message)
+        }, 20000)
+    }
+
+    function chainAsked() {
+        return [chainFrom, chainToField.text.trim(), chainAmountField.text.trim()]
+    }
+
+    /// Checks the send and shows its plan; nothing is sent.
+    function chainCheck() {
+        var asked = chainAsked()
+        var problem = asked[0] === "" ? "Choose a key to send from." : Logic.chainToProblem(asked[1])
+        if (problem === "" && !/^[0-9][0-9,]*$/.test(asked[2]))
+            problem = "Enter a whole amount, such as 1000."
+        if (problem !== "") {
+            chainProblem = problem
+            return
+        }
+        chainBusy = true
+        chainProblem = ""
+        chainPlan = null
+        askLater("chain_send", [asked[0], asked[1], asked[2], false], function(plan) {
+            chainBusy = false
+            chainPlan = plan
+            chainPlanFor = asked.join("|")
+        }, function(message) {
+            chainBusy = false
+            chainProblem = sentence(message)
+        }, 60000)
+    }
+
+    /// Sends what the plan shows. The node proves it first, which can take a minute.
+    function chainSend() {
+        var asked = chainAsked()
+        if (chainPlan === null || chainPlanFor !== asked.join("|")) {
+            chainCheck()
+            return
+        }
+        chainBusy = true
+        chainProblem = ""
+        askLater("chain_send", [asked[0], asked[1], asked[2], true], function(sent) {
+            chainBusy = false
+            chainPlan = null
+            chainAmountField.text = ""
+            chainSent = { hash: sent.hash, amount: sent.amount, to: sent.to, name: sent.name, state: "pending", fee: null }
+            chainSentAt = Date.now()
+            loadChain()
+        }, function(message) {
+            chainBusy = false
+            chainProblem = sentence(message)
+        }, 240000)
+    }
+
+    /// Asks whether the last send is in a block yet.
+    function chainPoll() {
+        if (chainSent === null || chainSent.hash === null || chainSent.state !== "pending")
+            return
+        askLater("chain_tx", [chainSent.hash], function(tx) {
+            if (chainSent === null || chainSent.hash !== tx.hash)
+                return
+            var updated = Object.assign({}, chainSent)
+            updated.state = tx.state
+            updated.fee = tx.fee
+            chainSent = updated
+            if (tx.state === "in_block")
+                loadChain()
+        }, function(message) {
+            console.log("names_ui: chain tx:", message)
+        }, 20000)
+    }
+
+    /// Claims every leader reward waiting, in one transaction.
+    function chainClaim() {
+        chainBusy = true
+        chainProblem = ""
+        askLater("chain_claim", [true], function(claimed) {
+            chainBusy = false
+            chainClaimed = claimed.hash ? claimed.hash : ""
+            say(claimed.hash ? "Claimed " + Logic.grouped(claimed.claimable) + "; it lands with the next block." : "Nothing to claim.", false)
+            loadChain()
+        }, function(message) {
+            chainBusy = false
+            chainProblem = sentence(message)
+        }, 240000)
+    }
+
+    Timer {
+        interval: 5000
+        repeat: true
+        running: root.section === "chain" && root.chainSent !== null && root.chainSent.state === "pending" && Date.now() - root.chainSentAt < 600000
+        onTriggered: root.chainPoll()
     }
 
     // ── Get tokens ──────────────────────────────────────────────────────
@@ -3618,6 +3760,7 @@ Item {
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Messages"; current: root.section === "messages"; onPressed: { root.go("messages"); root.chatLoad() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Pay"; current: root.section === "pay"; onPressed: { root.go("pay"); root.loadCliBalance(); root.loadFee() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Tokens"; current: root.section === "tokens"; onPressed: root.openTokens() }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Blockchain"; current: root.section === "chain"; onPressed: root.openChain() }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Profile"; current: root.section === "profile"; onPressed: { root.say("", false); root.openProfile() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Search"; current: root.section === "search"; onPressed: { root.go("search"); searchField.forceActiveFocus() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Settings"; current: root.section === "settings"; onPressed: { root.go("settings"); root.registering = false; root.gettingTokens = false; root.record = null; root.missing = ""; root.loadAccounts() } }
@@ -4401,6 +4544,173 @@ Item {
                 Hint { visible: root.tokenProblem !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.tokenProblem }
                 Hint {
                     visible: root.tokenProgram !== "" && root.tokenJob === null && root.tokenProblem === "" && root.notice !== ""
+                    color: root.noticeIsError ? root.alarm : root.dim
+                    text: root.notice
+                }
+            }
+        }
+
+        // Blockchain: the Logos Blockchain through Basecamp's own node.
+        Flickable {
+            visible: root.section === "chain" && !root.needsWelcome
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            contentHeight: chainPage.implicitHeight + 72
+            clip: true
+            ColumnLayout {
+                id: chainPage
+                x: 56
+                y: 40
+                width: Math.min(parent.width - 112, 640)
+                spacing: 14
+                RowLayout {
+                    Layout.fillWidth: true
+                    Text { text: "Logos Blockchain"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
+                    Item { Layout.fillWidth: true }
+                    Link { text: root.chainReading ? "Reading…" : "Refresh"; color: root.faint; font.pixelSize: root.px(15); onPressed: root.loadChain() }
+                }
+                Hint { text: "The base chain under LEZ, through the node Basecamp runs for you. Your node holds the keys and proves each transfer; nothing else is asked." }
+                Hint {
+                    visible: root.chainStatus !== null
+                    color: root.ink
+                    text: root.chainStatus === null ? "" : "Height " + Logic.grouped(root.chainStatus.height) + " · epoch " + root.chainStatus.epoch + " · " + (root.chainStatus.mode || "?") + " · final up to slot " + Logic.grouped(root.chainStatus.lib_slot)
+                }
+                Hint { visible: root.chainError !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.chainError }
+
+                // The node's keys: its accounts on the Logos Blockchain.
+                Part { visible: root.chainAccounts !== null; text: "Your keys" }
+                Hint {
+                    visible: root.chainAccounts !== null && root.chainAccounts.length === 0
+                    text: "Your node's wallet holds no keys yet. Make one in Basecamp's Blockchain app."
+                }
+                Repeater {
+                    model: root.chainAccounts !== null ? root.chainAccounts : []
+                    Rectangle {
+                        id: keyRow
+                        required property var modelData
+                        readonly property bool chosen: root.chainFrom === modelData.key
+                        Layout.fillWidth: true
+                        implicitHeight: root.px(46)
+                        radius: 6
+                        color: keyArea.containsMouse ? root.hover : "transparent"
+                        border.width: 1
+                        border.color: chosen ? root.brass : root.line
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 12
+                            anchors.rightMargin: 12
+                            spacing: 10
+                            Text { text: Logic.keyShown(keyRow.modelData.key); color: root.ink; font.family: root.mono; font.pixelSize: root.px(15) }
+                            Text { visible: keyRow.chosen; text: "sends"; color: root.brass; font.family: root.sans; font.pixelSize: root.px(14) }
+                            Item { Layout.fillWidth: true }
+                            Text { text: keyRow.modelData.balance === null ? "—" : Logic.grouped(keyRow.modelData.balance); color: root.ink; font.family: root.sans; font.pixelSize: root.px(17) }
+                            Link { text: "Copy"; font.pixelSize: root.px(14); onPressed: root.copy(keyRow.modelData.key) }
+                        }
+                        MouseArea {
+                            id: keyArea
+                            anchors.fill: parent
+                            anchors.rightMargin: root.px(56)
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: { root.chainFrom = keyRow.modelData.key; root.chainPlan = null }
+                        }
+                    }
+                }
+                Hint {
+                    visible: root.chainAccounts !== null && root.chainAccounts.length > 0
+                    font.pixelSize: root.px(14)
+                    text: "Press a key to send from it. To be paid by name, copy a key and add it to your name in Profile, under Entries, as an entry called blockchain."
+                }
+
+                // Send.
+                Part { visible: root.chainAccounts !== null && root.chainAccounts.length > 0; text: "Send" }
+                ColumnLayout {
+                    visible: root.chainAccounts !== null && root.chainAccounts.length > 0
+                    Layout.fillWidth: true
+                    spacing: 10
+                    Field { id: chainToField; Layout.fillWidth: true; code: true; size: 16; hint: "To: a key (64 hex characters) or a name"; onEdited: root.chainPlan = null }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Field { id: chainAmountField; Layout.fillWidth: true; numbersOnly: true; hint: "Amount"; onEdited: root.chainPlan = null; onAccepted: root.chainCheck() }
+                        Action { label: root.chainBusy && root.chainPlan === null ? "Checking…" : "Check"; enabledNow: !root.chainBusy; onPressed: root.chainCheck() }
+                    }
+                    Rectangle {
+                        visible: root.chainPlan !== null
+                        Layout.fillWidth: true
+                        implicitHeight: planColumn.implicitHeight + 24
+                        radius: 6
+                        color: root.raised
+                        border.width: 1
+                        border.color: root.line
+                        ColumnLayout {
+                            id: planColumn
+                            x: 12
+                            y: 12
+                            width: parent.width - 24
+                            spacing: 6
+                            Text {
+                                Layout.fillWidth: true
+                                wrapMode: Text.Wrap
+                                textFormat: Text.PlainText
+                                color: root.ink
+                                font.family: root.sans
+                                font.pixelSize: root.px(17)
+                                text: root.chainPlan === null ? "" : "Send " + Logic.grouped(root.chainPlan.amount) + " to " + (root.chainPlan.name ? root.chainPlan.name + " (" + Logic.keyShown(root.chainPlan.to) + ")" : Logic.keyShown(root.chainPlan.to))
+                            }
+                            Text {
+                                visible: root.chainPlan !== null && !!root.chainPlan.forwarded_from
+                                Layout.fillWidth: true
+                                wrapMode: Text.Wrap
+                                textFormat: Text.PlainText
+                                color: root.brass
+                                font.family: root.sans
+                                font.pixelSize: root.px(15)
+                                text: root.chainPlan === null || !root.chainPlan.forwarded_from ? "" : root.chainPlan.forwarded_from + " → " + root.chainPlan.name + ": " + root.chainPlan.forwarded_from + " forwards there."
+                            }
+                            Hint { font.pixelSize: root.px(15); text: root.chainPlan === null ? "" : "From " + Logic.keyShown(root.chainPlan.from) + ", which holds " + Logic.grouped(root.chainPlan.balance) + ". Change comes back to it. Your node takes the fee from the same key. A transfer can't be undone." }
+                            RowLayout {
+                                spacing: 10
+                                Action { label: root.chainBusy ? "Sending…" : "Send"; strong: true; enabledNow: !root.chainBusy; onPressed: root.chainSend() }
+                                Action { label: "Cancel"; enabledNow: !root.chainBusy; onPressed: root.chainPlan = null }
+                            }
+                        }
+                    }
+                    Hint {
+                        visible: root.chainSent !== null
+                        color: root.chainSent !== null && root.chainSent.state === "in_block" ? root.good : root.brass
+                        textFormat: Text.PlainText
+                        text: root.chainSent === null ? "" : "Sent " + Logic.grouped(root.chainSent.amount) + " to " + (root.chainSent.name || Logic.keyShown(root.chainSent.to)) + ": "
+                            + (root.chainSent.state === "in_block" ? "in a block" + (root.chainSent.fee ? "; fee paid: " + Logic.grouped(root.chainSent.fee) : "") + "." : "waiting for a block…")
+                    }
+                }
+                Hint { visible: root.chainProblem !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.chainProblem }
+
+                // Stake and rewards.
+                Part { visible: root.chainStake !== null; text: "Stake" }
+                Repeater {
+                    model: Logic.stakeLines(root.chainStake)
+                    Hint { required property var modelData; color: root.ink; text: modelData }
+                }
+                Hint { visible: root.chainStake !== null; text: "There is no separate staking step: tokens on your node's keys play the lottery for leading blocks. To unstake, send them to a key your node doesn't hold." }
+                RowLayout {
+                    visible: root.chainStake !== null
+                    Layout.fillWidth: true
+                    spacing: 10
+                    Text { Layout.fillWidth: true; wrapMode: Text.Wrap; text: Logic.rewardsLine(root.chainStake); color: root.ink; font.family: root.sans; font.pixelSize: root.px(17) }
+                    Action { visible: root.chainStake !== null && root.chainStake.vouchers > 0; label: root.chainBusy ? "Claiming…" : "Claim"; strong: true; enabledNow: !root.chainBusy; onPressed: root.chainClaim() }
+                }
+
+                // Into LEZ.
+                Part { text: "Into LEZ" }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+                    Hint { Layout.fillWidth: true; text: "Move tokens from one of these keys into your LEZ account: a deposit on the bridge, credited once its block is final." }
+                    Action { label: "Bridge…"; onPressed: root.openGetTokens() }
+                }
+                Hint {
+                    visible: root.notice !== ""
                     color: root.noticeIsError ? root.alarm : root.dim
                     text: root.notice
                 }
