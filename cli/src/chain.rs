@@ -86,8 +86,9 @@ pub enum ChainCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Claim the node's leader rewards: one transaction turns every claimable voucher
-    /// into a note. Without `--yes` it only shows what is claimable.
+    /// Claim a leader reward: the node's claim cashes ONE voucher per transaction and
+    /// pays its own fee from the leader funding key, which can be more than the reward.
+    /// Without `--yes` it only shows what is claimable.
     Claim {
         #[arg(long, env = "LOGOS_NODE", default_value = NODE)]
         node: String,
@@ -229,6 +230,11 @@ fn duration_words(seconds: u64) -> String {
     }
 }
 
+/// What one claim pays: one voucher's reward, not every voucher's.
+fn claimed_by_one(vouchers: &Value) -> u128 {
+    amount(&vouchers["reward_amount"])
+}
+
 /// The stake picture from the node's replies to `/leader/aged-notes`,
 /// `/leader/claim/vouchers` and `/time/info`.
 pub fn stake_summary(aged: &Value, vouchers: &Value, time: &Value) -> Value {
@@ -273,7 +279,7 @@ pub fn stake_lines(summary: &Value) -> Vec<String> {
     lines.push(if vouchers == 0 {
         "rewards: nothing to claim".to_owned()
     } else {
-        format!("rewards: {} claimable from {vouchers} leader win(s); `names chain claim --yes` cashes them out", grouped(claimable))
+        format!("rewards: {} claimable from {vouchers} leader win(s); `names chain claim --yes` cashes one per claim, each paying its own fee", grouped(claimable))
     });
     lines.push("to unstake, send tokens to a key this node doesn't hold".to_owned());
     lines
@@ -504,16 +510,18 @@ pub fn run(command: ChainCommand, resolved: Option<(String, String)>) -> Result<
                 if json {
                     println!("{}", json!({ "plan": true, "claimable": claimable.to_string(), "vouchers": count }));
                 } else {
-                    println!("{} claimable from {count} leader win(s); run again with --yes to claim", grouped(claimable));
+                    println!("{} claimable from {count} leader win(s); run again with --yes to claim one ({}; each claim pays its own fee)", grouped(claimable), grouped(amount(&vouchers["reward_amount"])));
                 }
                 return Ok(());
             }
             let reply = node.post("/leader/claim", None)?;
             let hash = reply["tx_hash"].as_str().unwrap_or_default();
+            // One voucher per claim (the node makes a single claim op).
+            let claimed = claimed_by_one(&vouchers);
             if json {
-                println!("{}", json!({ "claimed": claimable.to_string(), "hash": hash }));
+                println!("{}", json!({ "claimed": claimed.to_string(), "hash": hash, "vouchers_left": count - 1 }));
             } else {
-                println!("claimed {}: transaction {hash}", grouped(claimable));
+                println!("claimed {} (one of {count} leader wins): transaction {hash}", grouped(claimed));
             }
             Ok(())
         }
@@ -579,6 +587,8 @@ mod tests {
         let lines = stake_lines(&stake_summary(&aged, &vouchers, &json!({})));
         assert_eq!(lines[0], "staked: 12 in 2 notes on 2 keys");
         assert!(lines[2].starts_with("rewards: 13,140 claimable from 1 leader win(s)"), "{}", lines[2]);
+        let many = json!({ "vouchers": vec![json!({ "commitment": "c", "nullifier": "n" }); 1722], "reward_amount": "38", "total_claimable": "65436" });
+        assert_eq!(claimed_by_one(&many), 38, "a claim cashes one voucher");
     }
 
     #[test]

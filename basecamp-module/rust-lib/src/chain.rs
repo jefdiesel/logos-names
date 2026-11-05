@@ -165,6 +165,30 @@ pub fn whole_amount(text: &str) -> Result<u64, String> {
     Ok(amount)
 }
 
+/// What one `leader_claim` did: `{hash, claimed, fee, vouchers_left, claimable_left}`,
+/// amounts as decimal text, plus `warning` when the fee came to more than the reward.
+/// The node claims ONE voucher per transaction (a single LeaderClaim op) and pays the
+/// fee from its leader funding key, so `claimed` is one voucher's reward. `vouchers` is
+/// the node's reply from before the claim; `fee` is read from the stored transaction
+/// against the notes of the node's keys from before it, or null.
+pub fn claim_result(hash: Option<String>, vouchers: &Value, fee: Option<u128>) -> Value {
+    let count = vouchers["vouchers"].as_array().map_or(0, Vec::len);
+    let reward = amount(&vouchers["reward_amount"]);
+    let mut result = json!({
+        "hash": hash,
+        "claimed": reward.to_string(),
+        "fee": fee.map(|f| f.to_string()),
+        "vouchers_left": count.saturating_sub(1),
+        "claimable_left": amount(&vouchers["total_claimable"]).saturating_sub(reward).to_string(),
+    });
+    if let Some(fee) = fee.filter(|fee| *fee > reward) {
+        result["warning"] = Value::from(format!(
+            "This claim paid a fee of {fee} for a reward of {reward}: each claim cashes one voucher and pays its own fee."
+        ));
+    }
+    result
+}
+
 /// A transaction hash as the node writes it (64 hex), from a reply that is the hash
 /// itself or `{hash}` / `{tx_hash}`.
 pub fn hash_of(reply: &Value) -> Option<String> {
@@ -329,6 +353,29 @@ mod tests {
         }
         assert_eq!(whole_amount("000"), Err("enter an amount above zero".to_owned()));
         assert_eq!(whole_amount("99999999999999999999999"), Err("that amount is too large".to_owned()));
+    }
+
+    /// The claim a solo 0.3.4 node made over logosctl (a4b15b78…): 1722 vouchers of 38,
+    /// one claimed, its fee 5000 in less 2972 change = 2028.
+    #[test]
+    fn a_claim_is_one_voucher_and_says_when_its_fee_is_more() {
+        let vouchers = json!({ "reward_amount": "38", "total_claimable": "65436", "vouchers": vec![json!({ "commitment": "c", "nullifier": "n" }); 1722] });
+        let shown = claim_result(Some(KEY.to_owned()), &vouchers, Some(2028));
+        assert_eq!(shown["claimed"], "38");
+        assert_eq!(shown["fee"], "2028");
+        assert_eq!(shown["vouchers_left"], 1721);
+        assert_eq!(shown["claimable_left"], "65398", "what the node showed after the claim");
+        assert!(shown["warning"].as_str().unwrap().contains("fee of 2028 for a reward of 38"), "{shown}");
+        assert!(shown.get("claimable").is_none(), "the totals from before the claim aren't put next to its hash");
+        let cheap = claim_result(Some(KEY.to_owned()), &vouchers, Some(10));
+        assert!(cheap.get("warning").is_none());
+        assert_eq!(claim_result(None, &vouchers, None)["fee"], Value::Null);
+        // The claim transaction as the node stored it: the LeaderClaim op, then a transfer paying the fee.
+        let tx = json!({ "mantle_tx": { "ops": [
+            { "opcode": 48, "payload": { "pk": "e01a", "voucher_nullifier": "eda3" } },
+            { "opcode": 0, "payload": { "inputs": ["af49"], "outputs": [{ "pk": "e01a", "value": 2972 }] } },
+        ] } });
+        assert_eq!(transfer_fee(&tx, &notes_of(&json!({ "notes": [{ "id": "af49", "value": "5000" }] }))), Some(2028));
     }
 
     #[test]

@@ -653,14 +653,15 @@ Item {
         }, 20000)
     }
 
-    /// Claims every leader reward waiting, in one transaction.
+    /// Claims one leader reward: the node's claim cashes one voucher and pays its own fee.
     function chainClaim() {
         chainBusy = true
         chainProblem = ""
         askLater("chain_claim", [true], function(claimed) {
             chainBusy = false
             chainClaimed = claimed.hash ? claimed.hash : ""
-            say(claimed.hash ? "Claimed " + Logic.grouped(claimed.claimable) + "; it lands with the next block." : "Nothing to claim.", false)
+            say("Claimed " + Logic.grouped(claimed.claimed) + " (one block's reward)" + (claimed.fee ? " for a fee of " + Logic.grouped(claimed.fee) : "")
+                + "; it lands with the next block." + (claimed.warning ? " " + claimed.warning : ""), claimed.warning ? true : false)
             loadChain()
         }, function(message) {
             chainBusy = false

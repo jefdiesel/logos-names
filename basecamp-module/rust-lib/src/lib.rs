@@ -647,9 +647,13 @@ pub trait NamesModule: Send + 'static {
     /// `in_block`. A hash not sent from here fails, saying why.
     fn chain_tx(&mut self, hash: String) -> String;
 
-    /// The node's leader rewards: without `send`, `{claimable, vouchers}`;
-    /// with `send`, one transaction claims them all and `hash` is added
-    /// (null when there was nothing to claim).
+    /// The node's leader rewards: without `send`, `{claimable, vouchers,
+    /// reward_per_voucher}`. With `send`, one transaction claims ONE voucher
+    /// (the node's `leader_claim` makes a single claim op) and pays its own
+    /// fee from the node's leader funding key, which can be more than the
+    /// reward: `{hash, claimed, fee, vouchers_left, claimable_left}`, with
+    /// `warning` when the fee was more than `claimed`. Fails when there is
+    /// nothing to claim.
     fn chain_claim(&mut self, send: bool) -> String;
 
     // ── Wallet Provider SDK: for any app (docs/wallet/PROVIDER-SDK.md) ──
@@ -3074,15 +3078,31 @@ impl NamesModule for Names {
         reply((|| {
             let vouchers = node::call("wallet_get_claimable_vouchers", json!([]), node::QUICK)?;
             let count = vouchers["vouchers"].as_array().map_or(0, Vec::len);
-            let mut plan = json!({ "claimable": chain::amount(&vouchers["total_claimable"]).to_string(), "vouchers": count });
-            if send {
-                plan["hash"] = if count == 0 {
-                    Value::Null
-                } else {
-                    chain::hash_of(&node::call("leader_claim", json!([]), node::PROVING)?).map_or(Value::Null, Value::from)
-                };
+            if !send {
+                return Ok(json!({
+                    "claimable": chain::amount(&vouchers["total_claimable"]).to_string(),
+                    "vouchers": count,
+                    "reward_per_voucher": chain::amount(&vouchers["reward_amount"]).to_string(),
+                }));
             }
-            Ok(plan)
+            if count == 0 {
+                return Err("There is nothing to claim: your node has no leader rewards waiting.".to_owned());
+            }
+            // The fee comes from the node's leader funding key, known only once the claim
+            // exists, and the solo node can put it in a block within a second: so every
+            // key's notes are read first.
+            let keys = node::call("wallet_get_known_addresses", json!([]), node::QUICK)?;
+            let mut before = serde_json::Map::new();
+            for key in keys.as_array().into_iter().flatten().filter_map(Value::as_str).take(MAX_WALLET_ACCOUNTS) {
+                if let Ok(notes) = node::call("wallet_get_notes", json!([key, ""]), node::QUICK) {
+                    before.extend(chain::notes_of(&notes));
+                }
+            }
+            let hash = chain::hash_of(&node::call("leader_claim", json!([]), node::PROVING)?);
+            // Claimed: from here nothing fails, so the hash always comes back.
+            let stored = hash.as_ref().and_then(|hash| node::call("get_transaction", json!([hash]), node::QUICK).ok());
+            let fee = stored.as_ref().and_then(|tx| chain::transfer_fee(tx, &before));
+            Ok(chain::claim_result(hash, &vouchers, fee))
         })())
     }
 
@@ -4321,12 +4341,41 @@ mod tests {
     }
 
     #[test]
-    fn chain_claim_sends_nothing_without_vouchers() {
+    fn chain_claim_with_nothing_to_claim_says_so_and_sends_nothing() {
         let mut names = fresh();
         node_answers("wallet_get_claimable_vouchers", json!({ "reward_amount": "13140", "total_claimable": "0", "vouchers": [] }));
+        let plan = parsed(&names.chain_claim(false));
+        assert_eq!(plan["value"], json!({ "claimable": "0", "vouchers": 0, "reward_per_voucher": "13140" }), "{plan}");
         let claimed = parsed(&names.chain_claim(true));
-        assert_eq!(claimed["value"], json!({ "claimable": "0", "vouchers": 0, "hash": null }), "{claimed}");
+        assert_eq!(claimed["success"], false, "{claimed}");
+        assert_eq!(claimed["error"], "There is nothing to claim: your node has no leader rewards waiting.");
         assert!(!node_asked().contains(&"leader_claim".to_owned()));
+    }
+
+    /// As a solo 0.3.4 node claimed over logosctl: one voucher of 1722, the fee paid
+    /// from the leader funding key (5000 in, 2972 back).
+    #[test]
+    fn chain_claim_claims_one_voucher_and_reads_its_fee() {
+        let mut names = fresh();
+        let funding = "e01a".repeat(16);
+        node_answers("wallet_get_claimable_vouchers", json!({ "reward_amount": "38", "total_claimable": "76", "vouchers": [{ "commitment": "c1", "nullifier": "n1" }, { "commitment": "c2", "nullifier": "n2" }] }));
+        node::ANSWERS.with(|answers| answers.borrow_mut().insert("wallet_get_known_addresses".into(), json!({ "success": true, "value": [NODE_KEY, funding] })));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "af49", "value": "5000" }] }));
+        node_answers("leader_claim", json!("a4".repeat(32)));
+        node_answers("get_transaction", json!({ "mantle_tx": { "ops": [
+            { "opcode": 48, "payload": { "pk": funding, "voucher_nullifier": "n1" } },
+            { "opcode": 0, "payload": { "inputs": ["af49"], "outputs": [{ "pk": funding, "value": 2972 }] } },
+        ] } }));
+        let claimed = parsed(&names.chain_claim(true));
+        assert_eq!(claimed["value"]["hash"], "a4".repeat(32), "{claimed}");
+        assert_eq!(claimed["value"]["claimed"], "38");
+        assert_eq!(claimed["value"]["fee"], "2028");
+        assert_eq!(claimed["value"]["vouchers_left"], 1);
+        assert_eq!(claimed["value"]["claimable_left"], "38");
+        assert!(claimed["value"]["warning"].as_str().unwrap().contains("fee of 2028 for a reward of 38"), "{claimed}");
+        let asked = node_asked();
+        let notes_at = asked.iter().position(|m| m == "wallet_get_notes").unwrap();
+        assert!(notes_at < asked.iter().position(|m| m == "leader_claim").unwrap(), "the notes are read before the claim: {asked:?}");
     }
 
     /// A hash this device didn't send fails: with the node's own reason, or saying the

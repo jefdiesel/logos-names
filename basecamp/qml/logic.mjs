@@ -187,7 +187,11 @@ export function stakeLines(stake) {
 /// The rewards line: what a claim would cash out, or that there's nothing.
 export function rewardsLine(stake) {
     if (!stake || !stake.vouchers) return "Nothing to claim. Each block your node leads earns a reward to claim here."
-    return grouped(stake.claimable) + " to claim from " + stake.vouchers + (stake.vouchers === 1 ? " block" : " blocks") + " your node led."
+    var line = grouped(stake.claimable) + " to claim from " + stake.vouchers + (stake.vouchers === 1 ? " block" : " blocks") + " your node led."
+    // The node's claim cashes one voucher a time and pays its own fee from the leader funding key.
+    if (stake.reward_per_voucher)
+        line += " Each claim cashes one block's reward (" + grouped(stake.reward_per_voucher) + ") and pays its own fee, which can be more than that."
+    return line
 }
 
 /// `1234567` (decimal text or a number) as `1,234,567`.
