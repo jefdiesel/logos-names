@@ -570,6 +570,10 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// The Logos Blockchain, through your own node: status, balances, sending to a
+    /// key or a name, stake and leader rewards. Run `names chain help`.
+    #[command(subcommand)]
+    Chain(chain::ChainCommand),
     /// Fungible tokens: list what this wallet holds, send to a name or an account,
     /// receive private credits. Needs `--token-program` (or NAMES_TOKEN_PROGRAM).
     #[command(subcommand)]
@@ -692,6 +696,7 @@ fn write_man_pages(dir: &std::path::Path) -> Result<()> {
 
 mod board;
 mod claims;
+mod chain;
 mod fees;
 mod module;
 mod tokens;
@@ -2459,6 +2464,8 @@ async fn main() -> Result<()> {
             let rpc = cli.rpc.as_deref().unwrap_or(DEFAULT_RPC);
             return bridge(rpc, &node, amount, &to, &from_key, max_fee, yes);
         }
+        // Only a name target needs the registry; everything else is between you and your node.
+        Command::Chain(command) if command.name().is_none() => return chain::run(command.clone(), None),
         // Runs where the wallet does not open, so it can't wait for the client below.
         Command::Module(module::Request::Restore { accounts }) => return module::restore(accounts, overrides).await,
         // Needs no wallet: the Basecamp module asks for a proof here, so it needn't carry the list.
@@ -2502,6 +2509,7 @@ async fn main() -> Result<()> {
             !matches!(
                 cli.command,
                 Command::Resolve { .. }
+                    | Command::Chain(_)
                     | Command::Open { .. }
                     | Command::Settings
                     | Command::VerifyAccount { .. }
@@ -2520,6 +2528,15 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Setup { shield } => setup(&mut client, shield).await,
+        Command::Chain(command) => {
+            let asked = command.name().expect("key targets ran before the wallet opened").to_owned();
+            let name = client.following(&parse_name(&asked).map_err(|e| anyhow!(e))?).await?;
+            let (_, _, profile) = client.lookup(&name).await?;
+            let key = chain::key_of(&profile).ok_or_else(|| {
+                anyhow!("{name} publishes no Logos Blockchain key; its holder can add one with `names set-text {name} {} <key>`", chain::BLOCKCHAIN_KEY)
+            })?;
+            chain::run(command, Some((name, key)))
+        }
         Command::Token(command) => {
             let tokens = tokens::Tokens::select(cli.token_program, &cli.token_codec)?;
             client.token(&tokens, command).await
@@ -2799,6 +2816,11 @@ async fn main() -> Result<()> {
         }
         Command::SetText { name, key, value } => {
             validate_text_key(&key).map_err(|reason| anyhow!(reason))?;
+            let value = if key == chain::BLOCKCHAIN_KEY && !value.is_empty() {
+                chain::parse_key(&value).ok_or_else(|| anyhow!("a `{}` entry is a Logos Blockchain public key: 64 hex characters", chain::BLOCKCHAIN_KEY))?
+            } else {
+                value
+            };
             client
                 .edit(&name, |profile| {
                     let existing = profile.texts.iter().position(|text| text.key == key);

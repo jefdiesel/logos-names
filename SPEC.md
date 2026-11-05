@@ -291,6 +291,7 @@ application-defined and should be namespaced, for example `myapp.setting`.
 | `theme` | The card's theme: `light` (the default), `dark` or `auto` (follows the viewer). |
 | `font` | The card's font: `sans` (the default), `serif`, `mono` or `rounded`, from the viewer's own system fonts. |
 | `logos.account` | The holder's Logos account: an [AccountLog](https://github.com/logos-co/logos-lips/blob/main/docs/identity/raw/accountlog.md) address, the account's Ed25519 public key as 64 lowercase hex characters. See below. |
+| `blockchain` | The holder's Logos Blockchain public key, 64 lowercase hex characters, where `names chain send <amount> <name>` sends. It is followed through a `forward` like any payment. |
 | `forward` | Another name this one points to, written bare (`names`). See [Forwarding](#forwarding). |
 | `app.<module>` | An app this name publishes: JSON with the package's root hash, as the LEZ Program Registry defines it ([APPS.md](https://github.com/jefdiesel/lez-program-registry/blob/main/docs/APPS.md)). |
 

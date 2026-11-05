@@ -137,6 +137,28 @@ names make-public jef              # move it to a new public account for fast po
 names release jef                  # give it up; the deposit comes back
 ```
 
+### The Logos Blockchain
+
+`names chain` works with your own Logos Blockchain node (Basecamp's, or a headless
+one; `--node`, or `LOGOS_NODE`, default `http://127.0.0.1:8080`). The node holds the
+keys and proves each transfer; nothing else is contacted.
+
+```sh
+names chain status                 # height, final block, epoch, mining, gas prices
+names chain balance <key>          # or a name that publishes a key
+names set-text jef blockchain <key>   # publish your key on your name
+names chain send 1000 jef --from-key <key>         # shows the plan; --yes sends
+names chain tx <hash>              # in a block yet? and the fee it paid
+names chain stake                  # what plays the leader lottery, and rewards
+names chain claim --yes            # cash out leader rewards
+names bridge 1000 --to Public/<id> --from-key <key>  # into a LEZ account
+```
+
+Staking on the Logos Blockchain has no separate step: tokens on the node's keys join
+the stake at an epoch boundary (up to two epochs after they arrive), and unstaking is
+sending them to a key the node doesn't hold. Leader wins pay vouchers; `claim` turns
+them into tokens.
+
 ## Logos accounts
 
 A name and a Logos account (an AccountLog key, from the identity LIP) can point at
