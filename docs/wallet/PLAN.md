@@ -47,3 +47,21 @@ testnet 0.4 launches).
 | Names faucet | existing service on the M2 (fixed cost, rate-limited per account) | fixed; the faucet mini-app must also work with the official LEZ faucet so ours is optional |
 
 No new Worker, server or database. Nothing is sent to a third party without opt-in.
+
+## LP-0022: the Logos Blockchain and many zones
+
+LP-0022 (draft, $10,000) builds on this wallet. Where each criterion stands:
+
+| Criterion | State |
+|---|---|
+| Blockchain assets: own, send, receive | Done: `names chain balance/send/tx`, the app's Blockchain tab; send to a key or a name's `blockchain` entry |
+| Staking: stake, unstake, claim | Done as Cryptarchia has it: no stake op (aged notes on the node's keys are the stake), unstake = send off the node's keys, `names chain claim` / Claim. SDP (blend) stake is not wired: the module has no withdrawal call |
+| Bridging, chain → zone | Done before (`names bridge`, Get tokens); settled = the bridge's deposit receipt PDA, not shown yet |
+| Bridging, zone → chain | Blocked upstream: the LEZ bridge guest panics "Withdraws are disabled" in rc1 and on dev |
+| Multi-zone, per-zone sequencer | To do: a zone = its own LEZ wallet home + sequencer URL + channel; the registry resolves on a home zone |
+| Multiple blockchain accounts | Listing done (the node's keys); making a key needs `generate_key`, whose arguments differ between the module's lidl and its client |
+| SDK across chain and zones | To do: `propose_transfer` etc. for the blockchain |
+| Testimonial + faucet on the blockchain | To do |
+| Approval prompts for stake/bridge calls | To do; source verification (LP-0023) is in |
+| Gas on blockchain transactions | Fee read from the stored transaction when it shows one; gas prices in `names chain status` |
+| E2E against a real node in CI | To do: the wallet e2e runs only a sequencer |
