@@ -380,6 +380,10 @@ pub fn run(command: ChainCommand, resolved: Option<(String, String)>) -> Result<
                 Some(name) => format!("{name} ({})", short(&to_key)),
                 None => short(&to_key),
             };
+            if !yes && json {
+                println!("{}", json!({ "plan": true, "from": from, "to": to_key, "name": name, "amount": value.to_string(), "change": change, "balance": held.to_string() }));
+                return Ok(());
+            }
             if !yes {
                 println!("send {} from {} to {target}", grouped(value.into()), short(&from));
                 println!("  change back to {}, through {}", short(&change), node.url);
@@ -395,6 +399,7 @@ pub fn run(command: ChainCommand, resolved: Option<(String, String)>) -> Result<
             });
             let reply = node.post("/wallet/transactions/transfer-funds", Some(&body))?;
             let hash = reply["hash"].as_str().ok_or_else(|| anyhow!("the node accepted the transfer but returned no hash: {reply}"))?.to_owned();
+            // Printed at once, before any waiting, so a sent transaction's hash is never lost.
             if !json {
                 println!("sent {} to {target}: transaction {hash}", grouped(value.into()));
             }
@@ -402,7 +407,8 @@ pub fn run(command: ChainCommand, resolved: Option<(String, String)>) -> Result<
             if !no_wait {
                 let started = Instant::now();
                 while started.elapsed() < LAND_PATIENCE {
-                    if let Some(tx) = landed(&node, &hash)? {
+                    // A failed look is not a failed send: keep waiting, and report it pending at worst.
+                    if let Ok(Some(tx)) = landed(&node, &hash) {
                         found = Some(tx);
                         break;
                     }
@@ -458,7 +464,11 @@ pub fn run(command: ChainCommand, resolved: Option<(String, String)>) -> Result<
                 return Ok(());
             }
             if !yes {
-                println!("{} claimable from {count} leader win(s); run again with --yes to claim", grouped(claimable));
+                if json {
+                    println!("{}", json!({ "plan": true, "claimable": claimable.to_string(), "vouchers": count }));
+                } else {
+                    println!("{} claimable from {count} leader win(s); run again with --yes to claim", grouped(claimable));
+                }
                 return Ok(());
             }
             let reply = node.post("/leader/claim", None)?;
