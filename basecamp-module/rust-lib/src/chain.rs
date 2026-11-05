@@ -137,15 +137,27 @@ pub fn send_input(from_key: &str, to_key: &str, amount: &str) -> Result<(String,
     if from == to {
         return Err("that sends a key to itself".to_owned());
     }
-    let amount = amount.trim().replace(',', "");
-    if amount.is_empty() || !amount.bytes().all(|b| b.is_ascii_digit()) {
+    Ok((from, to, whole_amount(amount)?))
+}
+
+/// An amount as a person writes it: digits, with commas only between groups of three
+/// (`1000` or `1,000`). Any other comma (`1,5`, a decimal comma) is refused, since
+/// dropping it would read `1,5` as 15.
+pub fn whole_amount(text: &str) -> Result<u64, String> {
+    let text = text.trim();
+    let groups: Vec<&str> = text.split(',').collect();
+    if text.is_empty() || !groups.iter().all(|group| group.bytes().all(|b| b.is_ascii_digit())) {
         return Err("enter a whole amount, such as 1000".to_owned());
     }
-    let amount: u64 = amount.parse().map_err(|_| "that amount is too large".to_owned())?;
+    let grouped = groups.len() == 1 || ((1..=3).contains(&groups[0].len()) && groups[1..].iter().all(|group| group.len() == 3));
+    if !grouped {
+        return Err(format!("{text} isn't a whole amount: commas go only between groups of three digits, such as 1,000"));
+    }
+    let amount: u64 = groups.concat().parse().map_err(|_| "that amount is too large".to_owned())?;
     if amount == 0 {
         return Err("enter an amount above zero".to_owned());
     }
-    Ok((from, to, amount))
+    Ok(amount)
 }
 
 /// A transaction hash as the node writes it (64 hex), from a reply that is the hash
@@ -295,6 +307,23 @@ mod tests {
         assert!(send_input(KEY, &other, "1.5").is_err());
         assert!(send_input("", &other, "1").is_err());
         assert!(send_input(KEY, "alice", "1").is_err(), "names are resolved before this");
+    }
+
+    /// Commas group thousands and nothing else: `1,5` was read as 15 (a verifier's find).
+    #[test]
+    fn a_comma_only_groups_thousands() {
+        for (text, want) in [("1000", 1000), ("1,000", 1000), ("10,000", 10_000), ("100,001", 100_001), ("1,000,000", 1_000_000), (" 3,000 ", 3000)] {
+            assert_eq!(whole_amount(text), Ok(want), "{text}");
+        }
+        for text in ["1,5", "1,00", "0,", ",100", "1,,000", "1000,000", "1,0000"] {
+            let refused = whole_amount(text).unwrap_err();
+            assert!(refused.contains("commas go only between groups of three digits"), "{text}: {refused}");
+        }
+        for text in ["", "1.5", "-5", "1.5x", "\"1.5\""] {
+            assert_eq!(whole_amount(text), Err("enter a whole amount, such as 1000".to_owned()), "{text}");
+        }
+        assert_eq!(whole_amount("000"), Err("enter an amount above zero".to_owned()));
+        assert_eq!(whole_amount("99999999999999999999999"), Err("that amount is too large".to_owned()));
     }
 
     #[test]

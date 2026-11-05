@@ -630,7 +630,8 @@ pub trait NamesModule: Send + 'static {
     /// a `forward` one hop (`forwarded_from` is then the name asked for).
     fn chain_recipient(&mut self, to: String) -> String;
 
-    /// Sends `amount` (base units, decimal digits) from the node's key
+    /// Sends `amount` (base units: digits, commas only between groups of
+    /// three, so `1,000` but never `1,5`) from the node's key
     /// `from_key` to `to` (a key, or a name as `chain_recipient` reads it).
     /// Without `send` it checks everything and gives the plan `{from, to,
     /// name, forwarded_from, amount, balance}`; with `send` the transfer is

@@ -592,8 +592,9 @@ Item {
     function chainCheck() {
         var asked = chainAsked()
         var problem = asked[0] === "" ? "Choose a key to send from." : Logic.chainToProblem(asked[1])
-        if (problem === "" && !/^[0-9][0-9,]*$/.test(asked[2]))
-            problem = "Enter a whole amount, such as 1000."
+        // Commas only between groups of three, as the module reads it: "1,5" is refused, not 15.
+        if (problem === "" && !/^([0-9]+|[0-9]{1,3}(,[0-9]{3})+)$/.test(asked[2]))
+            problem = "Enter a whole amount, such as 1000 or 1,000."
         if (problem !== "") {
             chainProblem = problem
             return
