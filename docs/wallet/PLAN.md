@@ -54,8 +54,8 @@ LP-0022 (draft, $10,000) builds on this wallet. Where each criterion stands:
 
 | Criterion | State |
 |---|---|
-| Blockchain assets: own, send, receive | Done: `names chain balance/send/tx`, the app's Blockchain tab; send to a key or a name's `blockchain` entry |
-| Staking: stake, unstake, claim | Done as Cryptarchia has it: no stake op (aged notes on the node's keys are the stake), unstake = send off the node's keys, `names chain claim` / Claim. SDP (blend) stake is not wired: the module has no withdrawal call |
+| Blockchain assets: own, send, receive | Done: `names chain balance/send/tx`, the app's Blockchain tab; send to a key or a name's `blockchain` entry. Chain over IPC: `scripts/chain-ipc-e2e.sh` runs the module's `chain_*` through logosctl against the real blockchain_module 0.3.4 on a solo node (26 checks, `docs/wallet/e2e-chain-ipc.log`) |
+| Staking: stake, unstake, claim | Done as Cryptarchia has it: no stake op (aged notes on the node's keys are the stake), unstake = send off the node's keys, `names chain claim` / Claim. SDP (blend) stake is not wired: the module has no withdrawal call. Chain over IPC: stake read and a claim with no vouchers checked; `leader_claim` with vouchers is untested (it goes through Blend, which a solo node never brings up) |
 | Bridging, chain → zone | Done before (`names bridge`, Get tokens); settled = the bridge's deposit receipt PDA, not shown yet |
 | Bridging, zone → chain | Blocked upstream: the LEZ bridge guest panics "Withdraws are disabled" in rc1 and on dev |
 | Multi-zone, per-zone sequencer | To do: a zone = its own LEZ wallet home + sequencer URL + channel; the registry resolves on a home zone |
@@ -63,5 +63,5 @@ LP-0022 (draft, $10,000) builds on this wallet. Where each criterion stands:
 | SDK across chain and zones | To do: `propose_transfer` etc. for the blockchain |
 | Testimonial + faucet on the blockchain | To do |
 | Approval prompts for stake/bridge calls | To do; source verification (LP-0023) is in |
-| Gas on blockchain transactions | Fee read from the stored transaction when it shows one; gas prices in `names chain status` |
-| E2E against a real node in CI | To do: the wallet e2e runs only a sequencer |
+| Gas on blockchain transactions | Fee read from the stored transaction when it shows one; gas prices in `names chain status`. Chain over IPC: the fee (834 for 3,000) equals inputs less outputs and the node's balances |
+| E2E against a real node in CI | Chain over IPC on the Mini (`scripts/chain-ipc-e2e.sh`, solo node, no peers); not in CI: the wallet e2e there runs only a sequencer |
