@@ -641,10 +641,10 @@ pub trait NamesModule: Send + 'static {
     /// but its wallet doesn't hold are left out of `chain_accounts`.
     fn chain_send(&mut self, from_key: String, to: String, amount: String, send: bool) -> String;
 
-    /// Whether transaction `hash`, sent with `chain_send` since the module
-    /// started, is in a block: `{hash, state, fee}`. `state` is `pending` until
-    /// its input notes leave the sender's wallet, then `in_block`; `unknown`
-    /// for a send this module didn't make.
+    /// Whether transaction `hash`, sent with `chain_send` on this device (kept
+    /// across restarts), is in a block: `{hash, state, fee}`. `state` is
+    /// `pending` until its input notes leave the sender's wallet, then
+    /// `in_block`. A hash not sent from here fails, saying why.
     fn chain_tx(&mut self, hash: String) -> String;
 
     /// The node's leader rewards: without `send`, `{claimable, vouchers}`;
@@ -3033,11 +3033,7 @@ impl NamesModule for Names {
                 let fee = stored.as_ref().and_then(|tx| chain::transfer_fee(tx, &before));
                 if let (Some(hash), Some(tx)) = (&hash, &stored) {
                     let inputs = chain::transfer_parts(tx).0;
-                    let mut sent = SENT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if sent.len() >= MAX_CACHED {
-                        sent.clear();
-                    }
-                    sent.insert(hash.clone(), json!({ "from": from, "inputs": inputs, "fee": fee.map(|f| f.to_string()) }));
+                    chain_sent_add(hash, json!({ "from": from, "inputs": inputs, "fee": fee.map(|f| f.to_string()), "at": now() }));
                 }
                 plan["hash"] = hash.map_or(Value::Null, Value::from);
                 plan["fee"] = fee.map_or(Value::Null, |f| Value::from(f.to_string()));
@@ -3054,9 +3050,12 @@ impl NamesModule for Names {
             let hash = chain::parse_key(&hash).ok_or("a transaction hash is 64 hex characters")?;
             // A send made here is in a block once its input notes leave the sender's wallet
             // (the node stores a transaction as soon as it takes it, so finding it says nothing).
-            let known = SENT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&hash).cloned();
-            let Some(known) = known else {
-                return Ok(json!({ "hash": hash, "state": "unknown", "fee": null }));
+            let Some(known) = chain_sent().remove(&hash) else {
+                // Not sent from here: the node is asked, so a node that is down or has no
+                // record of it says so. Even when it has it, which key it spends from (and
+                // so whether it is in a block) isn't known here.
+                node::call("get_transaction", json!([hash]), node::QUICK)?;
+                return Err("That transaction wasn't sent from the Names app, so the app can't tell whether it is in a block.".to_owned());
             };
             let inputs: Vec<String> = known["inputs"].as_array().into_iter().flatten().filter_map(|i| i.as_str().map(str::to_owned)).collect();
             let notes = chain::notes_of(&node::call("wallet_get_notes", json!([known["from"], ""]), node::QUICK)?);
@@ -3794,8 +3793,23 @@ mod program_registry {
     }
 }
 
-/// Sends made from this module, by hash: `{from, inputs, fee}`, for `chain_tx`.
-static SENT: std::sync::Mutex<std::collections::BTreeMap<String, Value>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+/// Sends made from this device, by hash: `{from, inputs, fee, at}`, for `chain_tx`.
+/// Kept on disk, so a send is still followed after the module restarts.
+fn chain_sent() -> Map<String, Value> {
+    config_dir().map(|dir| load_object(&dir.join("chain-sent.json"))).unwrap_or_default()
+}
+
+/// Remembers a send; past `MAX_CACHED` sends the oldest is forgotten.
+fn chain_sent_add(hash: &str, sent: Value) {
+    let Some(dir) = config_dir() else { return };
+    let mut all = chain_sent();
+    while all.len() >= MAX_CACHED {
+        let Some(oldest) = all.iter().min_by_key(|(_, s)| s["at"].as_u64().unwrap_or(0)).map(|(h, _)| h.clone()) else { break };
+        all.remove(&oldest);
+    }
+    all.insert(hash.to_owned(), sent);
+    save_object(&dir.join("chain-sent.json"), &all);
+}
 
 /// Basecamp's Logos Blockchain node (`blockchain_module`), for the chain methods.
 #[cfg(not(test))]
@@ -4296,6 +4310,9 @@ mod tests {
         node_answers("wallet_get_notes", json!({ "notes": [{ "id": "c0de", "value": "3946" }] }));
         let landed = parsed(&names.chain_tx("cd".repeat(32)));
         assert_eq!(landed["value"], json!({ "hash": "cd".repeat(32), "state": "in_block", "fee": "54" }));
+        // The module reloaded (a verifier's find: the send was held in memory only).
+        let mut reloaded = fresh();
+        assert_eq!(parsed(&reloaded.chain_tx("cd".repeat(32)))["value"], landed["value"], "a send is followed after a restart");
         let asked = node::ASKED.with(|asked| asked.borrow().iter().find(|(m, _)| m == "wallet_transfer_funds").map(|(_, a)| a.clone()));
         assert_eq!(asked, Some(json!([NODE_KEY, [NODE_KEY], to, "1000", ""])), "change goes back to the sender");
         let over = parsed(&names.chain_send(NODE_KEY.into(), "ab".repeat(32), "5001".into(), true));
@@ -4312,10 +4329,21 @@ mod tests {
         assert!(!node_asked().contains(&"leader_claim".to_owned()));
     }
 
+    /// A hash this device didn't send fails: with the node's own reason, or saying the
+    /// app can't follow it (a verifier's find: it answered success, state unknown).
     #[test]
-    fn chain_tx_of_a_send_made_elsewhere_is_unknown() {
+    fn chain_tx_of_a_send_made_elsewhere_fails_plainly() {
         let mut names = fresh();
-        assert_eq!(parsed(&names.chain_tx("ef".repeat(32)))["value"]["state"], "unknown");
+        let other = "ef".repeat(32);
+        node::ANSWERS.with(|answers| answers.borrow_mut().insert("get_transaction".into(), json!({ "success": false, "error": "No transaction found for hash TxHash([239, 239])" })));
+        let missing = parsed(&names.chain_tx(other.clone()));
+        assert_eq!(missing["success"], false, "{missing}");
+        assert_eq!(missing["error"], "Your node has no record of that transaction, and it wasn't sent from the Names app: check the hash.");
+        node_answers("get_transaction", json!({ "mantle_tx": { "ops": [] } }));
+        let elsewhere = parsed(&names.chain_tx(other.clone()));
+        assert_eq!(elsewhere["error"], "That transaction wasn't sent from the Names app, so the app can't tell whether it is in a block.", "{elsewhere}");
+        node::ANSWERS.with(|answers| answers.borrow_mut().insert("get_transaction".into(), json!({ "success": false, "error": "The node is not running." })));
+        assert!(parsed(&names.chain_tx(other))["error"].as_str().unwrap().contains("isn't running"));
     }
 
     #[test]

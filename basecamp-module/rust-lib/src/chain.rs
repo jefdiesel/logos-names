@@ -61,6 +61,11 @@ pub fn problem(method: &str, error: &str) -> String {
     if lower.contains("invalid public key") || lower.contains("invalid wallet address") {
         return "That isn't a Logos Blockchain public key: check it and try again.".to_owned();
     }
+    // 0.3.4 keeps a transaction only while it is in the mempool and for about ten
+    // minutes after its block, so this says nothing about whether it ever happened.
+    if lower.contains("no transaction found") {
+        return "Your node has no record of that transaction, and it wasn't sent from the Names app: check the hash.".to_owned();
+    }
     format!("the Logos Blockchain node refused {method}: {error}")
 }
 
@@ -324,6 +329,15 @@ mod tests {
         }
         assert_eq!(whole_amount("000"), Err("enter an amount above zero".to_owned()));
         assert_eq!(whole_amount("99999999999999999999999"), Err("that amount is too large".to_owned()));
+    }
+
+    #[test]
+    fn an_unknown_transaction_reads_as_advice() {
+        let missing = json!({ "error": "No transaction found for hash TxHash([205, 205])", "success": false, "value": null });
+        assert_eq!(
+            unwrap("get_transaction", missing).unwrap_err(),
+            "Your node has no record of that transaction, and it wasn't sent from the Names app: check the hash."
+        );
     }
 
     #[test]
