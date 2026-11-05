@@ -147,20 +147,53 @@ pub fn hash_of(reply: &Value) -> Option<String> {
     parse_key(text)
 }
 
-/// The fee a stored transaction paid, if its JSON shows one.
-pub fn fee_of(transaction: &Value) -> Option<u128> {
-    match transaction {
-        Value::Object(map) => {
-            for key in ["tx_fee", "fee", "total_fee"] {
-                if let Some(found) = map.get(key).map(amount).filter(|a| *a > 0) {
-                    return Some(found);
-                }
-            }
-            map.values().find_map(fee_of)
-        }
-        Value::Array(items) => items.iter().find_map(fee_of),
-        _ => None,
+/// A wallet's notes as `{id: value}`, from `wallet_get_notes` (`{notes: [{id, value}]}`)
+/// or the HTTP balance's `{notes: {id: value}}`.
+pub fn notes_of(reply: &Value) -> serde_json::Map<String, Value> {
+    match &reply["notes"] {
+        Value::Object(map) => map.clone(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|note| Some((note["id"].as_str().or(note["note_id"].as_str())?.to_owned(), note["value"].clone())))
+            .collect(),
+        _ => serde_json::Map::new(),
     }
+}
+
+/// The note ids a transfer spends and the total it pays out (recipient and change),
+/// from the stored transaction's transfer ops (opcode 0).
+pub fn transfer_parts(transaction: &Value) -> (Vec<String>, u128) {
+    let mut inputs = Vec::new();
+    let mut paid = 0;
+    for op in transaction["mantle_tx"]["ops"].as_array().into_iter().flatten().filter(|op| op["opcode"] == 0) {
+        inputs.extend(op["payload"]["inputs"].as_array().into_iter().flatten().filter_map(|i| i.as_str().map(str::to_owned)));
+        paid += op["payload"]["outputs"].as_array().into_iter().flatten().map(|o| amount(&o["value"])).sum::<u128>();
+    }
+    (inputs, paid)
+}
+
+/// What a transfer paid in fees: what its inputs held (from the sender's notes before
+/// it sent) less what it pays out; `None` if any input isn't among those notes.
+pub fn transfer_fee(transaction: &Value, notes: &serde_json::Map<String, Value>) -> Option<u128> {
+    let (inputs, paid) = transfer_parts(transaction);
+    if inputs.is_empty() {
+        return None;
+    }
+    let held: Option<u128> = inputs.iter().map(|id| notes.get(id).map(amount)).sum();
+    held?.checked_sub(paid)
+}
+
+/// Whether none of `inputs` is among the wallet's notes any more. The node's wallet
+/// follows the chain, not the mempool (and the node stores a transaction as soon as it
+/// takes it), so this is when a transfer is in a block.
+pub fn spent(inputs: &[String], notes: &serde_json::Map<String, Value>) -> bool {
+    !inputs.is_empty() && inputs.iter().all(|id| !notes.contains_key(id))
+}
+
+/// Whether a balance error means the node's wallet doesn't hold that key at all (it
+/// lists some keys it can't spend from).
+pub fn not_held(error: &str) -> bool {
+    error.to_ascii_lowercase().contains("unknown wallet address")
 }
 
 #[cfg(test)]
@@ -236,7 +269,21 @@ mod tests {
         assert_eq!(hash_of(&json!(KEY)), Some(KEY.to_owned()));
         assert_eq!(hash_of(&json!({ "tx_hash": KEY })), Some(KEY.to_owned()));
         assert_eq!(hash_of(&json!("nope")), None);
-        assert_eq!(fee_of(&json!({ "mantle_tx": { "tx_fee": "1234" } })), Some(1234));
-        assert_eq!(fee_of(&json!({ "ops": [] })), None);
+    }
+
+    /// The transfer sent from the M2 node on 2026-11-04 (dc77f07b…), as the module gave
+    /// it: one input of 3,608,664 paying 1,000 and 3,605,610 back, so a fee of 2,054.
+    #[test]
+    fn a_transfers_fee_and_landing_read_from_its_notes() {
+        let tx = json!({ "mantle_tx": { "ops": [{ "opcode": 0, "payload": {
+            "inputs": ["b271"], "outputs": [{ "value": 1000, "pk": "5f9f" }, { "value": 3_605_610, "pk": KEY }] } }] } });
+        let before = notes_of(&json!({ "notes": [{ "id": "b271", "value": "3608664" }, { "id": "0326", "value": "1803521" }] }));
+        assert_eq!(transfer_fee(&tx, &before), Some(2054));
+        assert!(!spent(&transfer_parts(&tx).0, &before));
+        let after = notes_of(&json!({ "notes": [{ "id": "0326", "value": "1803521" }, { "id": "c0de", "value": "3605610" }] }));
+        assert!(spent(&transfer_parts(&tx).0, &after));
+        assert!(!spent(&[], &after), "a transfer with no inputs read hasn't been seen to land");
+        assert_eq!(notes_of(&json!({ "notes": { "b271": 5 } })).len(), 1, "the HTTP shape too");
+        assert!(not_held("Unknown wallet address."));
     }
 }

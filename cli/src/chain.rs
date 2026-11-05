@@ -296,31 +296,49 @@ pub fn status_lines(info: &Value, time: &Value, pow: Option<&Value>, gas: Option
     lines
 }
 
-/// The transaction, once it is in a block this node has stored.
-fn landed(node: &Node, hash: &str) -> Result<Option<Value>> {
+/// The transaction as the node stored it. The node stores one as soon as it accepts
+/// it, so being found does not mean it is in a block: see [`spent`].
+fn stored(node: &Node, hash: &str) -> Result<Option<Value>> {
     node.find(&format!("/cryptarchia/transaction/{hash}"))
 }
 
-/// The fee a transaction paid, if its JSON shows one.
-pub fn fee_of(transaction: &Value) -> Option<u128> {
-    fn walk(value: &Value) -> Option<u128> {
-        match value {
-            Value::Object(map) => {
-                for key in ["tx_fee", "fee", "total_fee"] {
-                    if let Some(v) = map.get(key) {
-                        let found = amount(v);
-                        if found > 0 {
-                            return Some(found);
-                        }
-                    }
-                }
-                map.values().find_map(walk)
-            }
-            Value::Array(items) => items.iter().find_map(walk),
-            _ => None,
-        }
+/// The note ids a transfer spends and the total it pays out (to the recipient and
+/// back as change), from the transaction's transfer ops (opcode 0).
+pub fn transfer_parts(transaction: &Value) -> (Vec<String>, u128) {
+    let ops = transaction["mantle_tx"]["ops"].as_array().cloned().unwrap_or_default();
+    let mut inputs = Vec::new();
+    let mut paid = 0;
+    for op in ops.iter().filter(|op| op["opcode"] == 0) {
+        inputs.extend(op["payload"]["inputs"].as_array().into_iter().flatten().filter_map(|i| i.as_str().map(str::to_owned)));
+        paid += op["payload"]["outputs"].as_array().into_iter().flatten().map(|o| amount(&o["value"])).sum::<u128>();
     }
-    walk(transaction)
+    (inputs, paid)
+}
+
+/// What a transfer paid in fees: what its inputs held, less what it pays out. `notes`
+/// is the sender's notes before it sent (`{id: value}`); `None` if any input isn't there.
+pub fn transfer_fee(transaction: &Value, notes: &serde_json::Map<String, Value>) -> Option<u128> {
+    let (inputs, paid) = transfer_parts(transaction);
+    if inputs.is_empty() {
+        return None;
+    }
+    let held: Option<u128> = inputs.iter().map(|id| notes.get(id).map(amount)).sum();
+    held?.checked_sub(paid)
+}
+
+/// Whether the sender's wallet no longer holds any of `inputs`. The wallet follows the
+/// chain, not the mempool, so this is when the transfer is in a block.
+fn spent(node: &Node, from: &str, inputs: &[String]) -> bool {
+    match node.get(&format!("/wallet/{from}/balance")) {
+        Ok(reply) => reply["notes"].as_object().is_some_and(|notes| inputs.iter().all(|id| !notes.contains_key(id))),
+        Err(_) => false,
+    }
+}
+
+/// Whether the node's mempool holds `hash`, or `None` if it couldn't be read.
+fn in_mempool(node: &Node, hash: &str) -> Option<bool> {
+    let view = node.get("/mempool/view").ok()?;
+    Some(view.as_array()?.iter().any(|h| h.as_str() == Some(hash)))
 }
 
 /// Runs a chain command. `resolved` is the key a name target resolved to, with the name.
@@ -372,7 +390,9 @@ pub fn run(command: ChainCommand, resolved: Option<(String, String)>) -> Result<
                 bail!("that sends {from} to itself");
             }
             let node = Node::new(&node);
-            let held = amount(&node.get(&format!("/wallet/{from}/balance"))?["balance"]);
+            let before = node.get(&format!("/wallet/{from}/balance"))?;
+            let held = amount(&before["balance"]);
+            let notes_before = before["notes"].as_object().cloned().unwrap_or_default();
             if held < u128::from(value) {
                 bail!("{} holds {}, less than {}", short(&from), grouped(held), grouped(value.into()));
             }
@@ -403,23 +423,30 @@ pub fn run(command: ChainCommand, resolved: Option<(String, String)>) -> Result<
             if !json {
                 println!("sent {} to {target}: transaction {hash}", grouped(value.into()));
             }
-            let mut found = None;
-            if !no_wait {
-                let started = Instant::now();
-                while started.elapsed() < LAND_PATIENCE {
-                    // A failed look is not a failed send: keep waiting, and report it pending at worst.
-                    if let Ok(Some(tx)) = landed(&node, &hash) {
-                        found = Some(tx);
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_secs(3));
+            // A failed look is not a failed send: from here on nothing fails, it reports what it saw.
+            let transaction = stored(&node, &hash).ok().flatten();
+            let fee = transaction.as_ref().and_then(|tx| transfer_fee(tx, &notes_before));
+            let inputs = transaction.as_ref().map(|tx| transfer_parts(tx).0).unwrap_or_default();
+            if !json {
+                if let Some(fee) = fee {
+                    println!("fee: {}", grouped(fee));
                 }
             }
-            let fee = found.as_ref().and_then(fee_of);
+            let mut landed = false;
+            if !no_wait && !inputs.is_empty() {
+                let started = Instant::now();
+                while started.elapsed() < LAND_PATIENCE {
+                    std::thread::sleep(Duration::from_secs(5));
+                    if spent(&node, &from, &inputs) {
+                        landed = true;
+                        break;
+                    }
+                }
+            }
             if json {
-                println!("{}", json!({ "hash": hash, "to": to_key, "name": name, "amount": value.to_string(), "state": if found.is_some() { "in_block" } else { "pending" }, "fee": fee.map(|f| f.to_string()) }));
-            } else if found.is_some() {
-                println!("in a block{}", fee.map(|f| format!("; fee paid: {}", grouped(f))).unwrap_or_default());
+                println!("{}", json!({ "hash": hash, "to": to_key, "name": name, "amount": value.to_string(), "state": if landed { "in_block" } else { "pending" }, "fee": fee.map(|f| f.to_string()) }));
+            } else if landed {
+                println!("in a block");
             } else if !no_wait {
                 println!("not in a block yet; check with `names chain tx {hash}`");
             }
@@ -427,14 +454,24 @@ pub fn run(command: ChainCommand, resolved: Option<(String, String)>) -> Result<
         }
         ChainCommand::Tx { hash, node, json } => {
             let hash = hash.trim().trim_start_matches("0x").to_lowercase();
-            let found = landed(&Node::new(&node), &hash)?;
-            let fee = found.as_ref().and_then(fee_of);
+            let node = Node::new(&node);
+            let found = stored(&node, &hash)?;
+            // Stored and out of the mempool: in a block. Stored and still in it: waiting.
+            let state = match (&found, in_mempool(&node, &hash)) {
+                (None, _) => "unknown",
+                (Some(_), Some(true)) => "pending",
+                (Some(_), Some(false)) => "in_block",
+                (Some(_), None) => "stored",
+            };
             if json {
-                println!("{}", json!({ "hash": hash, "state": if found.is_some() { "in_block" } else { "pending" }, "fee": fee.map(|f| f.to_string()), "transaction": found }));
-            } else if found.is_some() {
-                println!("{hash}: in a block{}", fee.map(|f| format!("; fee paid: {}", grouped(f))).unwrap_or_default());
+                println!("{}", json!({ "hash": hash, "state": state, "transaction": found }));
             } else {
-                println!("{hash}: not in a block yet (pending, or unknown to this node)");
+                println!("{hash}: {}", match state {
+                    "unknown" => "this node doesn't know it",
+                    "pending" => "waiting in the mempool for a block",
+                    "in_block" => "in a block",
+                    _ => "accepted; the mempool couldn't be read to say whether it is in a block yet",
+                });
             }
             Ok(())
         }
@@ -563,7 +600,18 @@ mod tests {
         assert_eq!(grouped(1_191_220_464), "1,191,220,464");
         assert_eq!(grouped(999), "999");
         assert_eq!(amount(&json!("42")), 42);
-        assert_eq!(fee_of(&json!({ "mantle_tx": { "ops": [], "tx_fee": 1234 } })), Some(1234));
-        assert_eq!(fee_of(&json!({ "ops": [] })), None);
+    }
+
+    /// The transfer sent from the M2 node on 2026-11-04 (dc77f07b…): one input note of
+    /// 3,608,664, paying 1,000 and 3,605,610 back as change, so a fee of 2,054.
+    #[test]
+    fn a_transfers_fee_is_its_inputs_less_its_outputs() {
+        let tx = json!({ "mantle_tx": { "hash": "dc77", "ops": [{ "opcode": 0, "payload": {
+            "inputs": ["b271"],
+            "outputs": [{ "value": 1000, "pk": "5f9f" }, { "value": 3_605_610, "pk": KEY }] } }] } });
+        assert_eq!(transfer_parts(&tx), (vec!["b271".to_owned()], 3_606_610));
+        let notes = json!({ "b271": 3_608_664, "0326": 1_803_521 });
+        assert_eq!(transfer_fee(&tx, notes.as_object().unwrap()), Some(2054));
+        assert_eq!(transfer_fee(&tx, json!({ "0326": 1 }).as_object().unwrap()), None, "an input it didn't see");
     }
 }

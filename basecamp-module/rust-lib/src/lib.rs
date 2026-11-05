@@ -634,12 +634,16 @@ pub trait NamesModule: Send + 'static {
     /// `from_key` to `to` (a key, or a name as `chain_recipient` reads it).
     /// Without `send` it checks everything and gives the plan `{from, to,
     /// name, forwarded_from, amount, balance}`; with `send` the transfer is
-    /// made (it cannot be undone) and `hash` is added. The node proves it,
-    /// which can take a minute, so ask with a long timeout.
+    /// made (it cannot be undone) and `hash` and `fee` (what it paid, decimal
+    /// text, or null if it couldn't be read) are added. The node proves it,
+    /// which can take a minute, so ask with a long timeout. Keys the node lists
+    /// but its wallet doesn't hold are left out of `chain_accounts`.
     fn chain_send(&mut self, from_key: String, to: String, amount: String, send: bool) -> String;
 
-    /// Whether transaction `hash` is in a block: `{hash, state, fee}`,
-    /// `state` `in_block` or `pending`, `fee` decimal text or null.
+    /// Whether transaction `hash`, sent with `chain_send` since the module
+    /// started, is in a block: `{hash, state, fee}`. `state` is `pending` until
+    /// its input notes leave the sender's wallet, then `in_block`; `unknown`
+    /// for a send this module didn't make.
     fn chain_tx(&mut self, hash: String) -> String;
 
     /// The node's leader rewards: without `send`, `{claimable, vouchers}`;
@@ -2967,12 +2971,14 @@ impl NamesModule for Names {
         reply((|| {
             let keys = node::call("wallet_get_known_addresses", json!([]), node::QUICK)?;
             let keys: Vec<String> = keys.as_array().map(|k| k.iter().filter_map(|k| k.as_str().and_then(chain::parse_key)).collect()).unwrap_or_default();
+            // The node lists some keys its wallet can't spend from; those are left out.
             Ok(Value::from(
                 keys.into_iter()
                     .take(MAX_WALLET_ACCOUNTS)
-                    .map(|key| {
-                        let balance = node::call("wallet_get_balance", json!([key]), node::QUICK).ok().map(|b| chain::balance_of(&b).to_string());
-                        json!({ "key": key, "balance": balance })
+                    .filter_map(|key| match node::call("wallet_get_balance", json!([key]), node::QUICK) {
+                        Ok(balance) => Some(json!({ "key": key, "balance": chain::balance_of(&balance).to_string() })),
+                        Err(error) if chain::not_held(&error) => None,
+                        Err(_) => Some(json!({ "key": key, "balance": null })),
                     })
                     .collect::<Vec<_>>(),
             ))
@@ -3018,8 +3024,22 @@ impl NamesModule for Names {
                 "balance": balance.to_string(),
             });
             if send {
+                let before = chain::notes_of(&node::call("wallet_get_notes", json!([from, ""]), node::QUICK)?);
                 let sent = node::call("wallet_transfer_funds", json!([from, [from], to_key, amount.to_string(), ""]), node::PROVING)?;
-                plan["hash"] = chain::hash_of(&sent).map_or(Value::Null, Value::from);
+                let hash = chain::hash_of(&sent);
+                // Sent: from here nothing fails, so the hash always comes back.
+                let stored = hash.as_ref().and_then(|hash| node::call("get_transaction", json!([hash]), node::QUICK).ok());
+                let fee = stored.as_ref().and_then(|tx| chain::transfer_fee(tx, &before));
+                if let (Some(hash), Some(tx)) = (&hash, &stored) {
+                    let inputs = chain::transfer_parts(tx).0;
+                    let mut sent = SENT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if sent.len() >= MAX_CACHED {
+                        sent.clear();
+                    }
+                    sent.insert(hash.clone(), json!({ "from": from, "inputs": inputs, "fee": fee.map(|f| f.to_string()) }));
+                }
+                plan["hash"] = hash.map_or(Value::Null, Value::from);
+                plan["fee"] = fee.map_or(Value::Null, |f| Value::from(f.to_string()));
             }
             Ok(plan)
         })())
@@ -3031,18 +3051,18 @@ impl NamesModule for Names {
         }
         reply((|| {
             let hash = chain::parse_key(&hash).ok_or("a transaction hash is 64 hex characters")?;
-            // The node answers "not found" until the transaction is in a block it stored.
-            let found = match node::call("get_transaction", json!([hash]), node::QUICK) {
-                Ok(tx) if !tx.is_null() => Some(tx),
-                Ok(_) => None,
-                Err(error) if error.to_ascii_lowercase().contains("not found") => None,
-                Err(error) => return Err(error),
+            // A send made here is in a block once its input notes leave the sender's wallet
+            // (the node stores a transaction as soon as it takes it, so finding it says nothing).
+            let known = SENT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&hash).cloned();
+            let Some(known) = known else {
+                return Ok(json!({ "hash": hash, "state": "unknown", "fee": null }));
             };
-            let fee = found.as_ref().and_then(chain::fee_of);
+            let inputs: Vec<String> = known["inputs"].as_array().into_iter().flatten().filter_map(|i| i.as_str().map(str::to_owned)).collect();
+            let notes = chain::notes_of(&node::call("wallet_get_notes", json!([known["from"], ""]), node::QUICK)?);
             Ok(json!({
                 "hash": hash,
-                "state": if found.is_some() { "in_block" } else { "pending" },
-                "fee": fee.map(|f| f.to_string()),
+                "state": if chain::spent(&inputs, &notes) { "in_block" } else { "pending" },
+                "fee": known["fee"],
             }))
         })())
     }
@@ -3773,6 +3793,9 @@ mod program_registry {
     }
 }
 
+/// Sends made from this module, by hash: `{from, inputs, fee}`, for `chain_tx`.
+static SENT: std::sync::Mutex<std::collections::BTreeMap<String, Value>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
 /// Basecamp's Logos Blockchain node (`blockchain_module`), for the chain methods.
 #[cfg(not(test))]
 mod node {
@@ -4247,6 +4270,9 @@ mod tests {
         node_answers("wallet_get_balance", json!("1191220464"));
         let shown = parsed(&names.chain_accounts());
         assert_eq!(shown["value"], json!([{ "key": NODE_KEY, "balance": "1191220464" }]), "{shown}");
+        // A key the node lists but its wallet doesn't hold, as the M2 node does with three of six.
+        node::ANSWERS.with(|answers| answers.borrow_mut().insert("wallet_get_balance".into(), json!({ "success": false, "error": "Unknown wallet address." })));
+        assert_eq!(parsed(&names.chain_accounts())["value"], json!([]));
     }
 
     #[test]
@@ -4254,13 +4280,21 @@ mod tests {
         let mut names = fresh();
         let to = "ab".repeat(32);
         node_answers("wallet_get_balance", json!("5000"));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "b271", "value": "5000" }] }));
         node_answers("wallet_transfer_funds", json!("cd".repeat(32)));
+        node_answers("get_transaction", json!({ "mantle_tx": { "ops": [{ "opcode": 0, "payload": { "inputs": ["b271"], "outputs": [{ "value": 1000 }, { "value": 3946 }] } }] } }));
         let plan = parsed(&names.chain_send(NODE_KEY.into(), to.clone(), "1,000".into(), false));
         assert_eq!(plan["value"]["amount"], "1000", "{plan}");
         assert_eq!(plan["value"]["hash"], Value::Null, "a plan sends nothing");
         assert!(!node_asked().contains(&"wallet_transfer_funds".to_owned()));
         let sent = parsed(&names.chain_send(NODE_KEY.into(), to.clone(), "1000".into(), true));
         assert_eq!(sent["value"]["hash"], "cd".repeat(32), "{sent}");
+        assert_eq!(sent["value"]["fee"], "54", "5000 in, 1000 + 3946 out");
+        // Pending while its input is still in the wallet, in a block once it's gone.
+        assert_eq!(parsed(&names.chain_tx("cd".repeat(32)))["value"]["state"], "pending");
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "c0de", "value": "3946" }] }));
+        let landed = parsed(&names.chain_tx("cd".repeat(32)));
+        assert_eq!(landed["value"], json!({ "hash": "cd".repeat(32), "state": "in_block", "fee": "54" }));
         let asked = node::ASKED.with(|asked| asked.borrow().iter().find(|(m, _)| m == "wallet_transfer_funds").map(|(_, a)| a.clone()));
         assert_eq!(asked, Some(json!([NODE_KEY, [NODE_KEY], to, "1000", ""])), "change goes back to the sender");
         let over = parsed(&names.chain_send(NODE_KEY.into(), "ab".repeat(32), "5001".into(), true));
@@ -4278,14 +4312,9 @@ mod tests {
     }
 
     #[test]
-    fn chain_tx_is_pending_until_the_node_has_it() {
+    fn chain_tx_of_a_send_made_elsewhere_is_unknown() {
         let mut names = fresh();
-        node::ANSWERS.with(|answers| answers.borrow_mut().insert("get_transaction".into(), json!({ "success": false, "error": "Transaction not found" })));
-        assert_eq!(parsed(&names.chain_tx("cd".repeat(32)))["value"]["state"], "pending");
-        node_answers("get_transaction", json!({ "mantle_tx": { "tx_fee": "1234" } }));
-        let found = parsed(&names.chain_tx("cd".repeat(32)));
-        assert_eq!(found["value"]["state"], "in_block");
-        assert_eq!(found["value"]["fee"], "1234");
+        assert_eq!(parsed(&names.chain_tx("ef".repeat(32)))["value"]["state"], "unknown");
     }
 
     #[test]

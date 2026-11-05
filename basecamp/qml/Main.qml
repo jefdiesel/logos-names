@@ -624,7 +624,7 @@ Item {
             chainBusy = false
             chainPlan = null
             chainAmountField.text = ""
-            chainSent = { hash: sent.hash, amount: sent.amount, to: sent.to, name: sent.name, state: "pending", fee: null }
+            chainSent = { hash: sent.hash, amount: sent.amount, to: sent.to, name: sent.name, state: sent.hash ? "pending" : "unknown", fee: sent.fee }
             chainSentAt = Date.now()
             loadChain()
         }, function(message) {
@@ -642,7 +642,8 @@ Item {
                 return
             var updated = Object.assign({}, chainSent)
             updated.state = tx.state
-            updated.fee = tx.fee
+            if (tx.fee)
+                updated.fee = tx.fee
             chainSent = updated
             if (tx.state === "in_block")
                 loadChain()
@@ -4681,7 +4682,8 @@ Item {
                         color: root.chainSent !== null && root.chainSent.state === "in_block" ? root.good : root.brass
                         textFormat: Text.PlainText
                         text: root.chainSent === null ? "" : "Sent " + Logic.grouped(root.chainSent.amount) + " to " + (root.chainSent.name || Logic.keyShown(root.chainSent.to)) + ": "
-                            + (root.chainSent.state === "in_block" ? "in a block" + (root.chainSent.fee ? "; fee paid: " + Logic.grouped(root.chainSent.fee) : "") + "." : "waiting for a block…")
+                            + (root.chainSent.state === "in_block" ? "in a block" : root.chainSent.state === "pending" ? "waiting for a block…" : "sent; your node didn't say when it lands")
+                            + (root.chainSent.fee ? " Fee: " + Logic.grouped(root.chainSent.fee) + "." : "")
                     }
                 }
                 Hint { visible: root.chainProblem !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.chainProblem }
