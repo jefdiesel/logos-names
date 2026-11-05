@@ -269,15 +269,22 @@ export function subDigits(a, b) {
 /// `{id, kind, title, sub, address, balance, fromPrivate, definition, key,
 /// canSend, account}`; `canSend` is false for a LEZ account that isn't the
 /// default of its kind (the CLI pays from the default).
-export function walletGroups(cliBalance, accounts, holdings, watched, tokenNames, chainAccounts, chainDown, stake) {
+export function walletGroups(cliBalance, accounts, holdings, watched, tokenNames, chainAccounts, chainDown, stake, namesByNpk) {
     var groups = []
     var lez = []
+    var named = 0
     if (Array.isArray(accounts) && accounts.length > 0) {
         accountsShown(accounts).forEach(function(a) {
             var priv = a.kind === "private"
             var label = String(a.label === null || a.label === undefined ? "" : a.label).trim()
-            lez.push({ id: "lez-" + a.account, kind: "lez", title: label !== "" ? label : a["default"] ? (priv ? "Main" : "Public") : (priv ? "Private account" : "Public account"),
-                       sub: (priv ? "Private" : "Public") + (a["default"] ? (priv ? " · pays and registers" : " · bridged tokens land here") : " · " + keyShown(a.account.replace(/^(Public|Private)\//, ""))),
+            // The names this account receives for: their profiles publish its npk.
+            var names = priv && a.npk && namesByNpk && namesByNpk[String(a.npk).toLowerCase()] ? namesByNpk[String(a.npk).toLowerCase()] : []
+            named += names.length
+            var title = names.length > 0 ? names.join(", ") : label !== "" ? label : a["default"] ? (priv ? "Main" : "Public") : (priv ? "Private account" : "Public account")
+            var sub = (priv ? "Private" : "Public")
+                + (names.length > 0 ? " · receives payments to " + names.join(", ") : "")
+                + (a["default"] ? (priv ? " · pays and registers" : " · bridged tokens land here") : names.length > 0 ? "" : " · " + keyShown(a.account.replace(/^(Public|Private)\//, "")))
+            lez.push({ id: "lez-" + a.account, kind: "lez", title: title, sub: sub, name: names.length > 0 ? names[0] : "",
                        address: a.account, balance: a.balance === null || a.balance === undefined ? null : String(a.balance), fromPrivate: priv, definition: "", key: "",
                        canSend: !!a["default"], account: a.account })
         })
@@ -290,7 +297,8 @@ export function walletGroups(cliBalance, accounts, holdings, watched, tokenNames
     }
     if (lez.length > 0) {
         var lezTotal = lez.reduce(function(sum, r) { return sum === null || r.balance === null ? sum : addDigits(sum, r.balance) }, "0")
-        groups.push({ id: "lez", title: "LEZ", letter: "L", total: lezTotal, note: lez.length === 1 ? "1 account" : lez.length + " accounts", tone: "plain", rows: lez })
+        groups.push({ id: "lez", title: "LEZ", letter: "L", total: lezTotal, tone: "plain", rows: lez,
+                      note: (lez.length === 1 ? "1 account" : lez.length + " accounts") + (named === 0 ? "" : named === 1 ? " · 1 name" : " · " + named + " names") })
     }
 
     var tokens = walletAssets(null, holdings, watched, tokenNames, null, false).map(function(r) {

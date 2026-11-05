@@ -264,6 +264,21 @@ REG_PID=
 grep -vE '^(Stored|Transaction data)' "$WORK/register.log" | cut -c1-200
 N resolve "$NAME" | tee "$WORK/resolve.json"
 NR mine
+# The account the name is paid into is told apart in the account list by its npk, the key
+# the name's profile publishes: it must be the receiving account's own (`module keys`).
+RECEIVING=$(sed -nE "s/^payments to $NAME(\.lez)? will arrive privately at (Private\/[^ ]+)$/\2/p" "$WORK/register.log" | tail -1)
+[ -n "$RECEIVING" ] || fail "register named no receiving account"
+NR module account-list > "$WORK/accounts-r.json"
+NR module keys "$RECEIVING" > "$WORK/keys-r.json"
+python3 - "$WORK/accounts-r.json" "$WORK/keys-r.json" "$RECEIVING" <<'PY' || fail "the account list's npk for $RECEIVING"
+import json, sys
+rows, keys, receiving = json.load(open(sys.argv[1])), json.load(open(sys.argv[2])), sys.argv[3]
+row = next((r for r in rows if r["account"] == receiving), None)
+assert row is not None, f"{receiving} is not in the account list"
+assert row["npk"] == keys["npk"] and len(row["npk"]) == 64, (row["npk"], keys["npk"])
+assert all(r["npk"] is None for r in rows if r["kind"] == "public"), "a public account has an npk"
+print(f"{receiving}: account-list npk {row['npk'][:8]}… matches its receiving keys")
+PY
 say "1. the admin's locked name lands, and is transferred to R"
 if ! wait "$LOCKED_PID"; then LOCKED_PID=; cat "$WORK/locked.log"; fail "the admin's registration of $LOCKED"; fi
 LOCKED_PID=

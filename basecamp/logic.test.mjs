@@ -113,6 +113,12 @@ check("subDigits", [subDigits("1000", "1"), subDigits("210939029", "210939029"),
   check("walletGroups not counted yet", more[1].note, "1 key on your node · 5,000,000 not counted yet");
   check("walletGroups fallback", walletGroups({ balance: "5", account: "a", public: { account: "b", balance: "7" } }, null, null, [], {}, null, false, null).map(x => [x.id, x.total]), [["lez", "12"]]);
   check("walletGroups node down", walletGroups(null, null, null, [], {}, null, true, null).map(x => [x.id, x.total, x.note]), [["chain", null, "Node not running"]]);
+  // A name is matched to the account its profile's npk points at.
+  const npkAccounts = accounts.concat([{ account: "Private/Jef1", kind: "private", label: null, balance: "7", default: false, npk: "AB".repeat(32) }]);
+  const withNames = walletGroups(null, npkAccounts, null, [], {}, null, false, null, { ["ab".repeat(32)]: ["jefdiesel"] });
+  const jefRow = withNames[0].rows.find(r => r.account === "Private/Jef1");
+  check("walletGroups name row", [jefRow.title, jefRow.name, jefRow.sub], ["jefdiesel", "jefdiesel", "Private · receives payments to jefdiesel"]);
+  check("walletGroups names count", withNames[0].note, "4 accounts · 1 name");
   check("stakeTable", stakeTable(stake, [{ key: KEY, balance: "215939029" }]), { held: "215939029", staked: "210939029", waiting: "5000000", claimable: "0", vouchers: 0 });
 }
 

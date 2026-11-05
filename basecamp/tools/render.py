@@ -132,7 +132,9 @@ BRIDGE = r"""
                 { account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", kind: "public", label: null, balance: "1250000", "default": true, public_key: "ab".repeat(32) },
                 { account: "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", kind: "public", label: "Shop", balance: "0", "default": false, public_key: "cd".repeat(32) },
                 { account: "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", kind: "private", label: "Everyday", balance: "250000000", "default": true, public_key: null },
-                { account: "Private/2RHZhw9h534Zr3eq2RGhQete2Hh667foECzXPmSkGni2", kind: "private", label: "Savings", balance: "40000000", "default": false, public_key: null }])
+                { account: "Private/2RHZhw9h534Zr3eq2RGhQete2Hh667foECzXPmSkGni2", kind: "private", label: "Savings", balance: "40000000", "default": false, public_key: null },
+                { account: "Private/HqRvXf9Lw3jQm5nYc2KpT8sDzV6bR4aE1uGhJ7kNoP2x", kind: "private", label: null, balance: "1000000", "default": false, public_key: null, npk: "b2f49d03" },
+                { account: "Private/5tUiY8oPa2sDf4gHj6kLz9xCv3bNm1qWe7rTyUiOpAs4", kind: "private", label: null, balance: "0", "default": false, public_key: null, npk: "7e".repeat(32) }])
             if (method === "cli_fee") return ok({ height: 31012, base_fee_exec: 8, base_fee_stor: 8,
                 public_transfer: { about: "8000", at_most: "18000" }, private_transfer: { about: "1601600", at_most: "2002000" } })
             if (method === "cli_account_use" || method === "cli_account_new" || method === "cli_account_label")

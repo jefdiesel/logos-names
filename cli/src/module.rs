@@ -51,7 +51,8 @@ pub enum Request {
     /// account and as the wallet last synced it for a private one. `default` marks the
     /// account `names` pays and registers from when none is given. `public_key` (hex,
     /// public accounts only) is what a sender needs to pay an account the chain has not
-    /// seen yet.
+    /// seen yet. `npk` (hex, private accounts only) is the nullifier public key a name's
+    /// profile publishes to be paid there, so it tells which name an account receives for.
     AccountList,
     /// Make a new `public` or `private` account, with an optional nickname; prints it as
     /// one `account-list` entry. Nothing is sent: a new account exists on the chain once
@@ -166,6 +167,11 @@ impl Client {
     /// `account` as an `account-list` entry.
     async fn account_entry(&self, private: bool, id: AccountId, defaults: &Defaults) -> serde_json::Value {
         let account = format!("{}/{id}", if private { "Private" } else { "Public" });
+        // A private account's nullifier public key is what a name's profile publishes to be
+        // paid there, so the app can tell which name an account receives for. It is public.
+        let npk = private
+            .then(|| self.wallet.storage().key_chain().private_account(id).map(|found| hex::encode(found.key_chain.nullifier_public_key.0)))
+            .flatten();
         let (balance, default, public_key) = if private {
             let balance = self.wallet.get_account_private(id).and_then(|found| found.data.native_balance().ok());
             (balance, defaults.private.as_deref() == Some(&id.to_string()), None)
@@ -184,6 +190,7 @@ impl Client {
             "balance": balance.map(|balance| balance.to_string()),
             "default": default,
             "public_key": public_key,
+            "npk": npk,
         })
     }
 

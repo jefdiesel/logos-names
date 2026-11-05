@@ -113,9 +113,9 @@ Item {
     property bool configKnown: false   // the names module has answered once
     // The names module this app needs: the same release (metadata.json asks for it
     // at install, but an older module can still be the one Basecamp loaded).
-    readonly property string neededModule: "0.14.0"
+    readonly property string neededModule: "0.14.1"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.14.3"
+    readonly property string appVersion: "0.14.4"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -333,7 +333,8 @@ Item {
             loadCliBalance()
             loadCliStatus()
             loadClaims()
-            // The Wallet opens first: its balances, tokens and node.
+            // The Wallet opens first: its balances, every account, tokens and node.
+            loadAccounts()
             loadTokens()
             loadWatched()
             loadChain()
@@ -442,6 +443,8 @@ Item {
             cliNames = value.filter(function(entry) { return !entry.registering && !entry.failed })
             cliPending = value.filter(function(entry) { return entry.registering || entry.failed })
             cliKnown = true
+            // Each name's profile: its picture, and the npk that says which account it pays into.
+            cliNames.forEach(function(entry) { boardLookUp(entry.name) })
             if (savedMain === "" && mainName !== "")
                 setMain(mainName)
         }, function(message) {
@@ -699,7 +702,19 @@ Item {
     property string walletRowOpen: ""    // the address row whose actions are open
 
     readonly property var walletGroups: Logic.walletGroups(cliBalance, cliAccounts, tokenProgram !== "" ? tokenHoldings : null, watchedTokens, watchedNames,
-                                                           chainAccounts, chainAccounts === null && chainError !== "", chainStake)
+                                                           chainAccounts, chainAccounts === null && chainError !== "", chainStake, namesByNpk)
+
+    /// The wallet's names by the npk their profiles publish: {npk: [name]}, from the lookups.
+    readonly property var namesByNpk: {
+        var map = {}
+        cliNames.forEach(function(entry) {
+            var person = boardPeople[entry.name]
+            if (person && person.npk) {
+                map[person.npk] = (map[person.npk] || []).concat([entry.name])
+            }
+        })
+        return map
+    }
 
     /// An amount as the Wallet shows it: grouped, a dash while unknown, dots when hidden.
     function amountShown(value) {
@@ -739,6 +754,7 @@ Item {
     function walletRefresh() {
         loadCliBalance()
         loadAccounts()
+        cliNames.forEach(function(entry) { boardLookUp(entry.name) })
         loadTokens()
         loadWatched()
         loadChain()
@@ -2435,6 +2451,7 @@ Item {
             var texts = found.texts || {}
             var next = Object.assign({}, boardPeople)
             next[name] = Object.assign({}, next[name], {
+                npk: typeof found.npk === "string" ? found.npk.toLowerCase() : "",
                 display: typeof texts.display === "string" ? texts.display.trim() : "",
                 color: /^#[0-9a-fA-F]{6}$/.test(texts.color || "") ? readable(texts.color) : ""
             })
@@ -4656,7 +4673,17 @@ Item {
                                             anchors.leftMargin: root.px(30)
                                             anchors.rightMargin: root.px(18)
                                             spacing: root.px(12)
+                                            // A name's own picture when it has one; else its seal, or a letter.
+                                            Avatar {
+                                                visible: addressRow.modelData.name !== undefined && addressRow.modelData.name !== ""
+                                                Layout.preferredWidth: root.px(34)
+                                                Layout.preferredHeight: root.px(34)
+                                                pixels: visible && root.boardPeople[addressRow.modelData.name] ? root.boardPeople[addressRow.modelData.name].pixels : null
+                                                owner: visible ? addressRow.modelData.name : ""
+                                                letter: visible ? addressRow.modelData.name.charAt(0) : ""
+                                            }
                                             Rectangle {
+                                                visible: addressRow.modelData.name === undefined || addressRow.modelData.name === ""
                                                 implicitWidth: root.px(34)
                                                 implicitHeight: root.px(34)
                                                 radius: height / 2

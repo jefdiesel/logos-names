@@ -960,12 +960,15 @@ fn answer(output: &str, what: &str) -> Result<Value, String> {
 }
 
 /// An `account-list` entry as the CLI gave it, checked: `{account, kind, label, balance,
-/// default, public_key}`.
+/// default, public_key, npk}`. `npk` (hex, private accounts only, null from a CLI too old to
+/// give it) is the key a name's profile publishes to be paid there.
 fn account_entry(entry: &Value) -> Result<Value, String> {
     let account = entry["account"].as_str().ok_or("an account without an ID")?;
     let (private, id) = crate::provider::account_ref(account)?;
     let digits = |value: &Value| value.as_str().filter(|text| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())).map(str::to_owned);
-    let key = entry["public_key"].as_str().filter(|key| key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()));
+    let hex64 = |value: &Value| value.as_str().filter(|key| key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit())).map(str::to_ascii_lowercase);
+    let key = hex64(&entry["public_key"]);
+    let npk = hex64(&entry["npk"]);
     Ok(json!({
         "account": crate::provider::account_written(private, &id),
         "kind": if private { "private" } else { "public" },
@@ -973,6 +976,7 @@ fn account_entry(entry: &Value) -> Result<Value, String> {
         "balance": digits(&entry["balance"]),
         "default": entry["default"] == true,
         "public_key": if private { None } else { key },
+        "npk": if private { npk } else { None },
     }))
 }
 

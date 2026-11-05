@@ -579,13 +579,15 @@ pub trait NamesModule: Send + 'static {
     // ── Accounts and fees: the names CLI's wallet. Names app only. ──────
 
     /// Every account of the names CLI's wallet: `[{account, kind, label,
-    /// balance, default, public_key}]`. `account` is written `Public/<id>` or
+    /// balance, default, public_key, npk}]`. `account` is written `Public/<id>` or
     /// `Private/<id>`; `label` the nickname given here, or null; `balance`
     /// decimal text (a public account's read from the chain, a private one's as
     /// the wallet last saw it), or null if it couldn't be read; `default` marks
     /// the account of its kind the wallet pays and registers from. `public_key`
     /// (hex, public accounts only) is what someone needs to pay a public
-    /// account the chain hasn't seen yet. The wallet catches up with the chain
+    /// account the chain hasn't seen yet; `npk` (hex, private accounts only)
+    /// is the key a name's profile publishes to be paid there, so it tells
+    /// which name an account receives for. The wallet catches up with the chain
     /// first: seconds to a minute or two, so ask with a long timeout.
     fn cli_accounts(&mut self) -> String;
 
@@ -950,7 +952,7 @@ const NAMES_APP: &str = "names_ui";
 /// `get_config` reports it so the Names app can refuse a module from another
 /// release (the app's own metadata asks for at least this at install, but an
 /// older module can still be the one loaded).
-const MODULE_VERSION: &str = "0.14.0";
+const MODULE_VERSION: &str = "0.14.1";
 
 /// Whether `caller` may use those methods. Basecamp gives each app its own
 /// credential, named after the app, so the module knows which app is calling.
@@ -5264,14 +5266,15 @@ mod tests {
     fn the_account_list_is_checked_before_the_app_sees_it() {
         let key = "ab".repeat(32);
         let list = format!(
-            r#"[{{"account":"Public/{PUBLIC}","kind":"public","label":"Main","balance":"12","default":true,"public_key":"{key}"}},{{"account":"Private/{PRIVATE}","kind":"private","label":"bad\u0007","balance":"x","default":false,"public_key":"{key}"}}]"#
+            r#"[{{"account":"Public/{PUBLIC}","kind":"public","label":"Main","balance":"12","default":true,"public_key":"{key}"}},{{"account":"Private/{PRIVATE}","kind":"private","label":"bad\u0007","balance":"x","default":false,"public_key":"{key}","npk":"{key}"}}]"#
         );
         let (mut names, dir) = with_wallet("accounts-list", &format!("echo '{list}'"));
         let got = parsed(&names.cli_accounts());
         assert_eq!(got["success"], true, "{got}");
         let rows = got["value"].as_array().unwrap();
-        assert_eq!(rows[0], json!({ "account": format!("Public/{PUBLIC}"), "kind": "public", "label": "Main", "balance": "12", "default": true, "public_key": key }));
-        assert_eq!(rows[1], json!({ "account": format!("Private/{PRIVATE}"), "kind": "private", "label": null, "balance": null, "default": false, "public_key": null }));
+        assert_eq!(rows[0], json!({ "account": format!("Public/{PUBLIC}"), "kind": "public", "label": "Main", "balance": "12", "default": true, "public_key": key, "npk": null }));
+        // A private account's npk comes through (a public key: a name's profile publishes it).
+        assert_eq!(rows[1], json!({ "account": format!("Private/{PRIVATE}"), "kind": "private", "label": null, "balance": null, "default": false, "public_key": null, "npk": key }));
         // Another app can't read the wallet's accounts this way.
         as_caller(app("snoop_ui"));
         assert_eq!(parsed(&names.cli_accounts())["success"], false);
