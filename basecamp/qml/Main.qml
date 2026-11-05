@@ -115,7 +115,7 @@ Item {
     // at install, but an older module can still be the one Basecamp loaded).
     readonly property string neededModule: "0.14.0"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.14.0"
+    readonly property string appVersion: "0.14.1"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -4457,6 +4457,55 @@ Item {
                         visible: root.walletRows.length === 0
                         text: root.cliBalance === undefined ? "Reading your balances…" : "No balances yet. Make a wallet in Settings, or start your node in Basecamp's Blockchain app."
                     }
+                    // The names this wallet holds: as many as you like, unlinked on chain.
+                    Rectangle {
+                        visible: root.cliKnown
+                        Layout.fillWidth: true
+                        implicitHeight: namesColumn.implicitHeight + root.px(28)
+                        radius: 12
+                        color: root.card
+                        border.width: 1
+                        border.color: root.line
+                        ColumnLayout {
+                            id: namesColumn
+                            x: root.px(16)
+                            y: root.px(14)
+                            width: parent.width - root.px(32)
+                            spacing: 10
+                            Text {
+                                text: root.cliNames.length === 1 ? "Your name" : "Your names"
+                                color: root.dim
+                                font.family: root.sans
+                                font.pixelSize: root.px(14)
+                            }
+                            Flow {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Repeater {
+                                    model: root.cliNames
+                                    Chip {
+                                        required property var modelData
+                                        link: true
+                                        label: modelData.name + (modelData.name === root.mainName ? "  · main" : "")
+                                        onPressed: { root.go("search"); root.show(modelData.name) }
+                                    }
+                                }
+                                Repeater {
+                                    model: root.cliPending
+                                    Chip {
+                                        required property var modelData
+                                        label: modelData.name + (modelData.failed ? "  · didn't register" : "  · registering")
+                                    }
+                                }
+                                Chip { link: true; label: root.cliNames.length === 0 ? "+ Get a name" : "+ Get another name"; onPressed: root.openRegister() }
+                            }
+                            Hint {
+                                font.pixelSize: root.px(14)
+                                text: "One wallet can hold many names, and the chain shows nothing that links them. Each is paid privately, into its own private account."
+                            }
+                        }
+                    }
+
                     Repeater {
                         model: root.walletRows
                         Rectangle {
@@ -4703,15 +4752,19 @@ Item {
                     Card {
                         visible: root.receiveKind !== "chain"
                         Layout.fillWidth: true
-                        Part { Layout.topMargin: 0; text: "Your name" }
-                        RowLayout {
-                            visible: root.mainName !== ""
-                            spacing: 14
-                            Text { text: root.mainName; color: root.ink; font.family: root.sans; font.pixelSize: root.px(26); font.weight: Font.Bold }
-                            Link { text: "Copy"; onPressed: root.copy(root.mainName, "Your name") }
+                        Part { Layout.topMargin: 0; text: root.cliNames.length > 1 ? "Your names" : "Your name" }
+                        Repeater {
+                            model: root.cliNames
+                            RowLayout {
+                                required property var modelData
+                                spacing: 14
+                                Text { text: modelData.name; color: root.ink; font.family: root.sans; font.pixelSize: root.px(26); font.weight: Font.Bold }
+                                Text { visible: modelData.name === root.mainName; text: "main"; color: root.brass; font.family: root.sans; font.pixelSize: root.px(14) }
+                                Link { text: "Copy"; onPressed: root.copy(modelData.name, "Your name") }
+                            }
                         }
                         Hint {
-                            text: root.mainName !== "" ? "Anyone can pay " + root.mainName + " from Names. It arrives in your private account, and the chain doesn't show who paid you or how much."
+                            text: root.cliNames.length > 0 ? "Anyone can pay any of these from Names. It arrives privately, in that name's own private account, and the chain doesn't show who paid you or how much."
                                 : "You don't have a name yet. With one, people pay you by name, privately."
                         }
                     }
