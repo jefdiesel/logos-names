@@ -4625,6 +4625,9 @@ mod tests {
         assert_eq!(metadata["version"], MODULE_VERSION);
         let app: Value = serde_json::from_str(include_str!("../../../basecamp/metadata.json")).expect("the app's metadata.json");
         assert_eq!(app["dependencies"][0]["version"], format!(">={MODULE_VERSION}"));
+        // The version the app shows in its corner is its package's.
+        let shown = format!("readonly property string appVersion: \"{}\"", app["version"].as_str().expect("the app's version"));
+        assert!(include_str!("../../../basecamp/qml/Main.qml").contains(&shown), "Main.qml must have {shown}");
         assert_eq!(fresh().shown_config()["module_version"], MODULE_VERSION);
     }
 

@@ -114,6 +114,8 @@ Item {
     // The names module this app needs: the same release (metadata.json asks for it
     // at install, but an older module can still be the one Basecamp loaded).
     readonly property string neededModule: "0.13.0"
+    // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
+    readonly property string appVersion: "0.13.1"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -4579,6 +4581,13 @@ Item {
                     text: root.chainStatus === null ? "" : "Height " + Logic.grouped(root.chainStatus.height) + " · epoch " + root.chainStatus.epoch + " · " + (root.chainStatus.mode || "?") + " · final up to slot " + Logic.grouped(root.chainStatus.lib_slot)
                 }
                 Hint { visible: root.chainError !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.chainError }
+                // The node is started in Basecamp's own Blockchain app, not here.
+                Action {
+                    visible: /isn't running|didn't answer/.test(root.chainError)
+                    label: "Open the Blockchain app"
+                    strong: true
+                    onPressed: if (logos.request) logos.request("basecamp.apps.launch", { app: "blockchain_ui" }, function() { root.loadChain() })
+                }
 
                 // The node's keys: its accounts on the Logos Blockchain.
                 Part { visible: root.chainAccounts !== null; text: "Your keys" }
@@ -6794,6 +6803,18 @@ Item {
                 }
             }
         }
+    }
+
+    // The app's version, bottom right of the main screen, under any sheet.
+    Text {
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.rightMargin: root.px(16)
+        anchors.bottomMargin: root.px(12)
+        text: "Names " + root.appVersion
+        color: root.dim
+        font.family: root.sans
+        font.pixelSize: root.px(15)
     }
 
     // Another app's request, over everything but a recovery phrase, until the
