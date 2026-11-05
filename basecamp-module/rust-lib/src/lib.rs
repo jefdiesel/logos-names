@@ -3738,7 +3738,7 @@ impl Names {
     /// The token program the token methods use, or why there is none.
     fn token_program_set(&self) -> Result<AccountId, String> {
         self.token_program.ok_or_else(|| {
-            "no token program is set: enter its program ID under Tokens (no token program runs on the public testnet yet)".to_owned()
+            "no token program is set: enter its program ID under Wallet, Add a token (no token program runs on the public testnet yet)".to_owned()
         })
     }
 
