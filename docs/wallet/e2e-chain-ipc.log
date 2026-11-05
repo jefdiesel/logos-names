@@ -1,20 +1,20 @@
-chain-ipc-e2e  2026-11-05T09:56:59Z  host minim4-5
+chain-ipc-e2e  2026-11-05T10:58:52Z  host minim4-5
   work dir  /Volumes/exos162/logos/dev/chain-ipc/run
   ports     net 3340 (udp), blend 3341, http 127.0.0.1:3342
   logosctl  /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/bin/logosctl (logosctl version 0.3.2)
   module    /Volumes/exos162/logos/dev/chain-ipc/real-module/blockchain_module (blockchain_module 0.3.4)
-  names     /nix/store/80hjxl56b5n63717mslhrrzka01sjr05-logos-names-module-lib-lgx-0.13.0
-            lgx sha256 bd132ecb33cdfb101354b236f6251d360fafda88cd5ca4d078eabd0485c3d11d
+  names     /nix/store/0m40fdxybn55mzvlfqly4b6i43cb2pkl-logos-names-module-lib-lgx-0.13.0
+            lgx sha256 61b8ea3ceb6a76fc2e737a7d91208d305e81ee1f23e350a30a21db2005ca3ebe
 deployment.yaml: OK
 standalone-node-config.yaml: OK
-Daemon started (pid 85060)
+Daemon started (pid 14701)
 Logs: /Volumes/exos162/logos/dev/chain-ipc/run/session/logs/daemon.log
   daemon processes holding the work dir:
-    85061 /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/bin/logos_host --name capability_module --path /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/modules/capability_module/capability_module_plugin.dylib --instance-persistence-path /Volumes/exos162/logos/dev/chain-ipc/run/session/data/capability_module/e216f2f7e257 --transport-set W3sicHJvdG9jb2wiOiJsb2NhbCJ9XQ== --host-services token_registry,token_delivery --token-source stdin
-    85062 /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/bin/logos_host --name modules_state --path /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/modules/modules_state/modules_state_plugin.dylib --instance-persistence-path /Volumes/exos162/logos/dev/chain-ipc/run/session/data/modules_state/db69cbdad555 --token-source stdin
-    85064 /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/bin/logos_host --name package_manager --path /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/modules-pkg/package_manager/package_manager_plugin.dylib --instance-persistence-path /Volumes/exos162/logos/dev/chain-ipc/run/session/data/package_manager/5de04fcab4e9 --token-source stdin
-    85067 /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/bin/logos_host --name storage_module --path /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/modules-pkg/storage_module/storage_module_plugin.dylib --instance-persistence-path /Volumes/exos162/logos/dev/chain-ipc/run/session/data/storage_module/b88c70139718 --token-source stdin
-    85068 /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/bin/logos_host --name package_downloader --path /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/modules-pkg/package_downloader/package_downloader_plugin.dylib --instance-persistence-path /Volumes/exos162/logos/dev/chain-ipc/run/session/data/package_downloader/b23e80032948 --token-source stdin
+    14702 /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/bin/logos_host --name capability_module --path /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/modules/capability_module/capability_module_plugin.dylib --instance-persistence-path /Volumes/exos162/logos/dev/chain-ipc/run/session/data/capability_module/f03a3d0ffc35 --transport-set W3sicHJvdG9jb2wiOiJsb2NhbCJ9XQ== --host-services token_registry,token_delivery --token-source stdin
+    14703 /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/bin/logos_host --name modules_state --path /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/modules/modules_state/modules_state_plugin.dylib --instance-persistence-path /Volumes/exos162/logos/dev/chain-ipc/run/session/data/modules_state/13e40b4f753a --token-source stdin
+    14704 /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/bin/logos_host --name package_manager --path /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/modules-pkg/package_manager/package_manager_plugin.dylib --instance-persistence-path /Volumes/exos162/logos/dev/chain-ipc/run/session/data/package_manager/056f07ad9b05 --token-source stdin
+    14705 /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/bin/logos_host --name storage_module --path /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/modules-pkg/storage_module/storage_module_plugin.dylib --instance-persistence-path /Volumes/exos162/logos/dev/chain-ipc/run/session/data/storage_module/4b1244c87404 --token-source stdin
+    14706 /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/bin/logos_host --name package_downloader --path /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/modules-pkg/package_downloader/package_downloader_plugin.dylib --instance-persistence-path /Volumes/exos162/logos/dev/chain-ipc/run/session/data/package_downloader/4a708ce508ed --token-source stdin
 
 == session
     install names: exit 0
@@ -29,12 +29,12 @@ PASS refusal: node not started
 
 == solo node
     gen-args.json: {"skip_ibd": true, "net_port": 3340, "blend_port": 3341, "http_addr": "127.0.0.1:3342", "output": "user_config.yaml", "use_persistence_paths": true}
-    config: /Volumes/exos162/logos/dev/chain-ipc/run/session/data/blockchain_module/46fb1df9f3be/user_config.yaml
+    config: /Volumes/exos162/logos/dev/chain-ipc/run/session/data/blockchain_module/cf340dac88f1/user_config.yaml
     add_key GenesisStake (e3635f20…): ok
     add_key GenesisSmall (39e16b43…): ok
 
 == ISOLATION (before anything moves)
-    /Volumes/exos162/logos/dev/chain-ipc/run/session/data/blockchain_module/46fb1df9f3be/user_config.yaml, in full:
+    /Volumes/exos162/logos/dev/chain-ipc/run/session/data/blockchain_module/cf340dac88f1/user_config.yaml, in full:
       | network:
       |   backend:
       |     swarm:
@@ -49,50 +49,50 @@ PASS refusal: node not started
       | tracing:
       |   logger:
       |     file:
-      |       directory: /Volumes/exos162/logos/dev/chain-ipc/run/session/data/blockchain_module/46fb1df9f3be/logs
+      |       directory: /Volumes/exos162/logos/dev/chain-ipc/run/session/data/blockchain_module/cf340dac88f1/logs
       |       prefix: node.log
       |       appender_type: Simple
       | state:
-      |   base_folder: /Volumes/exos162/logos/dev/chain-ipc/run/session/data/blockchain_module/46fb1df9f3be/state
+      |   base_folder: /Volumes/exos162/logos/dev/chain-ipc/run/session/data/blockchain_module/cf340dac88f1/state
       | cryptarchia:
       |   service:
       |     bootstrap:
       |       prolonged_bootstrap_period: 5s
     grep -i -E 'peer|ibd' user_config.yaml: (no match)
     skip_ibd: true is a generate_user_config argument (gen-args.json above); the yaml it writes names no peers
-    slot 15591772 (by the clock), 2228 s to the next epoch boundary
+    slot 15595486 (by the clock), 4514 s to the next epoch boundary
     start: null
-    get_cryptarchia_info: {"height": 2, "lib": "6c0cba559465e59ef5a7a9cf75fc6fdc6bd3b46d233d588c3442dcf74efd470b", "lib_slot": 0, "mode": "Online", "slot": 15591779, "tip": "97f911b309860c7e7f0e626c503c6604c61bf5420df7b9e0128ec7e035bbd17c"}
+    get_cryptarchia_info: {"height": 1, "lib": "6c0cba559465e59ef5a7a9cf75fc6fdc6bd3b46d233d588c3442dcf74efd470b", "lib_slot": 0, "mode": "Online", "slot": 15595492, "tip": "6282ddba4b844763413466e6498db8dc95a35346faff5cc9789d6c022f4d0481"}
     get_network_info: {"n_connections": 0, "n_discovered_peers": 0, "n_peers": 0, "n_pending_connections": 0}
     node log: WARN logos_blockchain::chain::network::bootstrap::ibd: Skipping IBD as no peers are configured
 PASS ISOLATION: no peers configured, IBD skipped, zero peers and connections
     get_chain_id: "standalone-local"
-    get_time_info: {"current_epoch": 2598, "current_slot": 15591779, "genesis_time_unix_ms": 1778280849000, "slot_duration_ms": 1000}
-PASS epoch arithmetic matches the node — slot 15591779 // 6000 = epoch 2598
+    get_time_info: {"current_epoch": 2599, "current_slot": 15595492, "genesis_time_unix_ms": 1778280849000, "slot_duration_ms": 1000}
+PASS epoch arithmetic matches the node — slot 15595492 // 6000 = epoch 2599
 
 == chain_status
-    names chain_status: {"epoch": 2598, "height": 2, "lib_slot": 0, "mode": "Online", "slot": 15591779}
-    node before: {"height": 2, "lib": "6c0cba559465e59ef5a7a9cf75fc6fdc6bd3b46d233d588c3442dcf74efd470b", "lib_slot": 0, "mode": "Online", "slot": 15591779, "tip": "97f911b309860c7e7f0e626c503c6604c61bf5420df7b9e0128ec7e035bbd17c"}
-    node after:  {"height": 2, "lib": "6c0cba559465e59ef5a7a9cf75fc6fdc6bd3b46d233d588c3442dcf74efd470b", "lib_slot": 0, "mode": "Online", "slot": 15591779, "tip": "97f911b309860c7e7f0e626c503c6604c61bf5420df7b9e0128ec7e035bbd17c"}
-PASS chain_status matches the node — height 2 <= 2 <= 2, mode Online, epoch 2598
+    names chain_status: {"epoch": 2599, "height": 1, "lib_slot": 0, "mode": "Online", "slot": 15595492}
+    node before: {"height": 1, "lib": "6c0cba559465e59ef5a7a9cf75fc6fdc6bd3b46d233d588c3442dcf74efd470b", "lib_slot": 0, "mode": "Online", "slot": 15595492, "tip": "6282ddba4b844763413466e6498db8dc95a35346faff5cc9789d6c022f4d0481"}
+    node after:  {"height": 1, "lib": "6c0cba559465e59ef5a7a9cf75fc6fdc6bd3b46d233d588c3442dcf74efd470b", "lib_slot": 0, "mode": "Online", "slot": 15595492, "tip": "6282ddba4b844763413466e6498db8dc95a35346faff5cc9789d6c022f4d0481"}
+PASS chain_status matches the node — height 1 <= 1 <= 1, mode Online, epoch 2599
 FLAG shape: the solo node's get_cryptarchia_info has ['lib', 'tip'] beyond the M2 record in chain.rs (height, lib_slot, mode, slot); names reads only those four, so both shapes are accepted
 
 == chain_accounts
-    node wallet_get_balance be60770e…: ERR Unknown wallet address.
-    node wallet_get_balance e3635f20…: 100000
-    node wallet_get_balance 76908934…: ERR Unknown wallet address.
-    node wallet_get_balance a6599e1e…: ERR Unknown wallet address.
-    node wallet_get_balance c007023a…: ERR Unknown wallet address.
-    node wallet_get_balance 9a28ab4d…: ERR Unknown wallet address.
     node wallet_get_balance 39e16b43…: 100
-    node wallet_get_balance bbec3f26…: ERR Unknown wallet address.
-    names chain_accounts: [{"balance": "100000", "key": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07"}, {"balance": "100", "key": "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225"}]
+    node wallet_get_balance a2b6aead…: ERR Unknown wallet address.
+    node wallet_get_balance e3635f20…: 100000
+    node wallet_get_balance 72e98da1…: ERR Unknown wallet address.
+    node wallet_get_balance 47cc7321…: ERR Unknown wallet address.
+    node wallet_get_balance 294a959d…: ERR Unknown wallet address.
+    node wallet_get_balance ed71ad71…: ERR Unknown wallet address.
+    node wallet_get_balance ca069840…: ERR Unknown wallet address.
+    names chain_accounts: [{"balance": "100", "key": "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225"}, {"balance": "100000", "key": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07"}]
 PASS chain_accounts lists exactly the keys the node can spend from, with its balances — 8 known to the node, 2 held, names lists 2
 
 == chain_stake
-    node wallet_get_leader_aged_notes: {"notes": [{"id": "7302de07081f1558b6705822ea852113b936efc2ba63483bd62b6c1976678f2d", "public_key": "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225", "value": "100"}, {"id": "f08aaa6388c8aa77e71fbc3a2a2b3edea5684e3b80bd7e778b8755bc893c0b0f", "public_key": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07", "value": "100000"}], "tip": "97f911b309860c7e7f0e626c503c6604c61bf5420df7b9e0128ec7e035bbd17c", "total_value": "100100"}
-    node wallet_get_claimable_vouchers: {"reward_amount": "0", "tip": "97f911b309860c7e7f0e626c503c6604c61bf5420df7b9e0128ec7e035bbd17c", "total_claimable": "0", "vouchers": []}
-    names chain_stake: {"claimable": "0", "epoch": 2598, "keys": ["39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225", "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07"], "next_epoch_in_s": null, "notes": 2, "reward_per_voucher": "0", "staked": "100100", "vouchers": 0}
+    node wallet_get_leader_aged_notes: {"notes": [{"id": "7302de07081f1558b6705822ea852113b936efc2ba63483bd62b6c1976678f2d", "public_key": "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225", "value": "100"}, {"id": "f08aaa6388c8aa77e71fbc3a2a2b3edea5684e3b80bd7e778b8755bc893c0b0f", "public_key": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07", "value": "100000"}], "tip": "27e0f6a80fb1d38307381cf58830718051fc8d13acbffa7d286606e5e8c31a25", "total_value": "100100"}
+    node wallet_get_claimable_vouchers: {"reward_amount": "0", "tip": "27e0f6a80fb1d38307381cf58830718051fc8d13acbffa7d286606e5e8c31a25", "total_claimable": "0", "vouchers": []}
+    names chain_stake: {"claimable": "0", "epoch": 2599, "keys": ["39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225", "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07"], "next_epoch_in_s": null, "notes": 2, "reward_per_voucher": "0", "staked": "100100", "vouchers": 0}
 PASS chain_stake matches the node's aged notes and vouchers — staked 100100 over 2 notes, 0 vouchers
 
 == chain_send plan (send=false)
@@ -100,31 +100,38 @@ PASS chain_stake matches the node's aged notes and vouchers — staked 100100 ov
 PASS chain_send plan reads the node's balance and moves nothing — balance 100000 = node 100000; after: A 100000, B 100
 
 == chain_send (send=true)
-    node wallet_get_notes A (before): {"notes": [{"id": "f08aaa6388c8aa77e71fbc3a2a2b3edea5684e3b80bd7e778b8755bc893c0b0f", "value": "100000"}], "tip": "97f911b309860c7e7f0e626c503c6604c61bf5420df7b9e0128ec7e035bbd17c"}
+    node wallet_get_notes A (before): {"notes": [{"id": "f08aaa6388c8aa77e71fbc3a2a2b3edea5684e3b80bd7e778b8755bc893c0b0f", "value": "100000"}], "tip": "27e0f6a80fb1d38307381cf58830718051fc8d13acbffa7d286606e5e8c31a25"}
     names chain_send: {"amount": "3000", "balance": "100000", "fee": "834", "forwarded_from": null, "from": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07", "hash": "5a61228cb0102bfb100cd05b3b73b633ecebc09774617fdb503f1373c7b3cbb8", "name": null, "to": "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225"}
 PASS chain_send sends and returns the hash and a fee — hash 5a61228cb0102bfb100cd05b3b73b633ecebc09774617fdb503f1373c7b3cbb8, fee 834, 0.1s
 
 == chain_tx until in_block
     names chain_tx, at once (node B balance read right after: 100): {"fee": "834", "hash": "5a61228cb0102bfb100cd05b3b73b633ecebc09774617fdb503f1373c7b3cbb8", "state": "pending"}
       0.7s  names chain_tx: in_block  node B balance read right after: 3100
-    node log: block at slot 15591780 with 5a61228c… taken 0.49s after the send began; names' first answer was back at 0.09s
-PASS chain_tx says pending before the transaction is in a block — node B balance 100 after the answer (was 100)
+    node log: block at slot 15595494 with 5a61228c… taken 0.65s after the send began; names' first answer was back at 0.12s
+PASS chain_tx's first answer agrees with the node: pending before the transaction is in a block — node B balance 100 after the answer (was 100)
 PASS chain_tx says in_block only once the recipient's balance moved — after 2 pending answers; node B balance 100 -> 3100
-    node get_transaction: {"mantle_tx": {"ops": [{"opcode": 0, "payload": {"inputs": ["f08aaa6388c8aa77e71fbc3a2a2b3edea5684e3b80bd7e778b8755bc893c0b0f"], "outputs": [{"pk": "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225", "value": 3000}, {"pk": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07", "value": 96166}]}}]}, "ops_proofs": [{"ZkSig": {"pi_a": "eac4be6e975fef641d0b84ab99bb5e8e869bcecc988b0ca6b227f100a9216389", "pi_b": "0b06f666ba9e29713f8410c219004e508b0823e051f58264abc7571942af1d1d6023af4ef82cf7895b74983aa16d6de2a4680fbb9403c106e75466cfc61ebaa4", "pi_c": "c4ca914df19ce9b968ba7b5d508bb8a600a96fad3c2b4032283cfb7e35925016"}}]}
-PASS the node's log shows the transaction in a block — block at slot 15591780 carries 5a61228c…, same ops as get_transaction
+    node get_transaction: {"mantle_tx": {"ops": [{"opcode": 0, "payload": {"inputs": ["f08aaa6388c8aa77e71fbc3a2a2b3edea5684e3b80bd7e778b8755bc893c0b0f"], "outputs": [{"pk": "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225", "value": 3000}, {"pk": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07", "value": 96166}]}}]}, "ops_proofs": [{"ZkSig": {"pi_a": "6204d8dbf0f23e4831effd6c4427fcce119aee049cd74d1aab382ebc1567f783", "pi_b": "fb411115669927c170efa1f3c836c527a130b50cb8aad4141d119fb1514e1207ad955be80b0ab7a509846f8cb0670aab9b848587fa81f3f442df39356356a918", "pi_c": "9762120cb0561facce1cc38a5eba3eee1f4e4a1a0c389539d4a7ba5ebca9548c"}}]}
+PASS the node's log shows the transaction in a block — block at slot 15595494 carries 5a61228c…, same ops as get_transaction
+
+== chain_tx after the names module reloads
+    module unload names: exit 0 {"dependents_unloaded":[],"module":"names","status":"ok"}
+    module load names: exit 0 {"dependencies_loaded":[],"module":"names","status":"ok","version":"0.13.0"}
+    names chain_tx H after the reload: {"fee": "834", "hash": "5a61228cb0102bfb100cd05b3b73b633ecebc09774617fdb503f1373c7b3cbb8", "state": "in_block"}
+PASS chain_tx still follows the send after the names module reloads — state in_block, fee 834
 
 == the fee
-    node wallet_get_notes A (after): {"notes": [{"id": "626fd31ff40c9449a7cdfa8dcecf0b351b1d5b42d475ffd0bf16171f5288d323", "value": "96166"}], "tip": "5024d67c3b9fcc326f3a51eaa6b2c960fa26a99e3472b002827d608cdf8e574f"}
+    node wallet_get_notes A (after): {"notes": [{"id": "626fd31ff40c9449a7cdfa8dcecf0b351b1d5b42d475ffd0bf16171f5288d323", "value": "96166"}], "tip": "5f9ac1c756abef3ba5f122c2c9e52a586bc07395f87ab2f909570fa243367428"}
     inputs ['f08aaa63'] held 100000; outputs [('39e16b43', 3000), ('e3635f20', 96166)] = 99166; fee 834
     node balances: A 100000 -> 96166 (= 100000 - 3000 - 834?), B 100 -> 3100
 PASS the fee is inputs less outputs, and agrees with the node's notes and balances — names fee 834, node fee 834
 
 == chain_claim
-    node wallet_get_claimable_vouchers: {"reward_amount": "0", "tip": "5024d67c3b9fcc326f3a51eaa6b2c960fa26a99e3472b002827d608cdf8e574f", "total_claimable": "0", "vouchers": []}
-    names chain_claim plan: {"claimable": "0", "vouchers": 0}
+    node wallet_get_claimable_vouchers: {"reward_amount": "0", "tip": "5f9ac1c756abef3ba5f122c2c9e52a586bc07395f87ab2f909570fa243367428", "total_claimable": "0", "vouchers": []}
+    names chain_claim plan: {"claimable": "0", "reward_per_voucher": "0", "vouchers": 0}
 PASS chain_claim plan matches the node's vouchers
-    names chain_claim send: {"claimable": "0", "hash": null, "vouchers": 0}
-PASS chain_claim with no vouchers sends nothing — names asks leader_claim only for vouchers; balances unchanged
+    names chain_claim send: ERR There is nothing to claim: your node has no leader rewards waiting.
+    node: 3 blocks since, carrying 0 transactions
+PASS refusal: chain_claim with nothing to claim says so, and the node moved nothing — names asks leader_claim only for vouchers; balances unchanged
 
 == refusal: overdraft
     names chain_send B -> A 3,100 (all B holds, nothing left for the fee): ERR That key doesn't hold enough for this and its fee.
@@ -144,14 +151,21 @@ PASS refusal: a key the node can't read, as sender
     names chain_send a key the node can't read, as recipient: ERR That isn't a Logos Blockchain public key: check it and try again.
 PASS refusal: a key the node can't read, as recipient
 PASS the node itself refuses that key — Invalid wallet address: FrFromBytesError { parsed_bytes: "77
-    node wallet_get_balance be60770e… (known, not held): ERR Unknown wallet address.
+    node wallet_get_balance a2b6aead… (known, not held): ERR Unknown wallet address.
     names chain_send from it: ERR the Logos Blockchain node refused wallet_get_balance: Unknown wallet address.
 PASS refusal: a key the node knows but its wallet doesn't hold
     names chain_tx zz: ERR a transaction hash is 64 hex characters
 PASS refusal: a malformed transaction hash
-    names chain_tx of a hash not sent here: {"fee": null, "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd", "state": "unknown"}
+    names chain_tx of a hash never sent: ERR Your node has no record of that transaction, and it wasn't sent from the Names app: check the hash.
     node get_transaction of it: ERR No transaction found for hash TxHash([205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205])
-PASS chain_tx of a hash not sent here is unknown
+PASS refusal: chain_tx of a hash never sent says the node has no record of it
+
+== refusal: amounts
+    names chain_send A -> B 1,5 (a decimal comma): ERR 1,5 isn't a whole amount: commas go only between groups of three digits, such as 1,000
+PASS refusal: a comma that doesn't group thousands is refused, not read as 15
+    names chain_send A -> B 100 (bare digits): ERR Call to names.chain_send failed (dispatch_failed: expected string at arg2, got number).
+    names chain_send A -> B '"100"': ERR enter a whole amount, such as 1000
+FLAG upstream (logosctl 0.3.2): bare digits become a JSON number and the host refuses the call before names runs (Call to names.chain_send failed (dispatch_failed: expected string at arg2, got number).); nothing moved: A 96166 (was 96166), B 3100 (was 3100). The Names app passes text, so only logosctl users meet it.
 
 == refusal: node stopped
     node stop: null
@@ -161,11 +175,13 @@ PASS chain_tx of a hash not sent here is unknown
     names chain_stake: ERR Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.
     names chain_send: ERR Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.
     names chain_tx: ERR Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.
+    names chain_tx: ERR Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.
+    names chain_claim: ERR Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.
     names chain_claim: ERR Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.
 PASS refusal: node stopped, every chain method says so as the node does
 
 == stopping the session
 {"message":"Daemon shutting down.","status":"ok"}
 PASS session stopped — pgrep -fl /Volumes/exos162/logos/dev/chain-ipc/run prints nothing
-RESULT 26 PASS, 0 FAIL (+ session stop above)
+RESULT 28 PASS, 0 FAIL (+ session stop above)
 exit 0

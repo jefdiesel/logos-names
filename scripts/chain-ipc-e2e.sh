@@ -16,7 +16,10 @@
 # Funding: the standalone deployment's genesis gives 100000 to zk key e3635f…ce07 and 100
 # to 39e16b…3225; their secret keys are in the same repo's standalone-node-config.yaml.
 # Both files are pinned by sha256 below. They are a PUBLIC test fixture: never use these
-# keys on a real chain. Nothing is mined and nothing is claimed.
+# keys on a real chain. Nothing is mined, and the run stays inside one epoch, so the node
+# has no leader vouchers and the claim checked is the one with nothing to claim. (A claim
+# with vouchers needs an epoch boundary, every 6000 slots = 100 min here; it was checked
+# by hand on a solo node: one voucher per claim, see docs/wallet/PLAN.md.)
 #
 # Every step checks what names said against the node itself (call blockchain_module …
 # directly, or the node's own log in the daemon log), prints PASS or FAIL, and the script
@@ -25,6 +28,8 @@
 #
 # logosctl turns an argument that looks like a number into a JSON number, and names takes
 # amounts as text, so amounts are written with a comma (3,000), which names reads as 3000.
+# A bare 3000 is refused by the host before names runs ("expected string at arg2, got
+# number"): an upstream logosctl behaviour, shown as a FLAG below.
 set -uo pipefail
 
 T=${CHAIN_IPC_AREA:-/Volumes/exos162/logos/dev/chain-ipc}
@@ -281,8 +286,8 @@ say("    skip_ibd: true is a generate_user_config argument (gen-args.json above)
 if peers:
     abort("PEERS IN CONFIG")
 
-# An epoch boundary during the run would make leader vouchers claimable, and a claim would
-# go through Blend, which a solo node never brings up: keep the run inside one epoch.
+# An epoch boundary during the run would make leader vouchers claimable; keep the run
+# inside one epoch so the claim checked is the one with nothing to claim.
 slot = (int(time.time() * 1000) - GENESIS_MS) // 1000
 left = SLOTS_PER_EPOCH - slot % SLOTS_PER_EPOCH
 say(f"    slot {slot} (by the clock), {left} s to the next epoch boundary")
@@ -413,6 +418,8 @@ first_at = time.time()               # names had answered by now
 first_b = balance(B)                 # read after names answered
 show(f"names chain_tx, at once (node B balance read right after: {first_b})", first)
 states, landed, wrong = [first["value"].get("state") if first["ok"] else None], None, []
+if states[0] == "in_block":           # the node took the block before names was asked
+    landed = (first, first_b)
 deadline = time.time() + 120
 while states[-1] == "pending" and time.time() < deadline:
     time.sleep(0.2)
@@ -438,11 +445,18 @@ for line in daemon_log()[log_mark:].splitlines():
 block_at = blocks[0][0] if blocks else None
 say(f"    node log: block at slot {blocks[0][1]['header']['slot'] if blocks else '?'} with {H[:8]}… taken "
     f"{(block_at - sent_at) if block_at else float('nan'):.2f}s after the send began; names' first answer was back at {first_at - sent_at:.2f}s")
-# Pending is right if the recipient hadn't been paid even after names answered, or names
-# answered before the node took the block.
-step("chain_tx says pending before the transaction is in a block",
-     states[0] == "pending" and (first_b == b0 or (block_at is not None and first_at < block_at)),
-     f"node B balance {first_b} after the answer (was {b0})")
+# The first answer must agree with the node. Pending is right if the recipient hadn't been
+# paid even after names answered, or names answered before the node took the block; the
+# solo node makes a block every second, so sometimes the block comes first, and then
+# in_block is right only if the node's log shows the block before names answered.
+if states[0] == "pending":
+    step("chain_tx's first answer agrees with the node: pending before the transaction is in a block",
+         first_b == b0 or (block_at is not None and first_at < block_at),
+         f"node B balance {first_b} after the answer (was {b0})")
+else:
+    step("chain_tx's first answer agrees with the node: in_block, the block already taken (no pending to see this run)",
+         states[0] == "in_block" and block_at is not None and block_at < first_at and first_b == b0 + 3000,
+         f"first answer {states[0]}; block taken {(block_at - sent_at) if block_at else float('nan'):.2f}s, answer back {first_at - sent_at:.2f}s; B {b0} -> {first_b}")
 if landed:
     tx, bal = landed
     step("chain_tx says in_block only once the recipient's balance moved", bal == b0 + 3000,
@@ -456,6 +470,17 @@ inblk = [t for _, b in blocks for t in b.get("transactions", []) if t.get("id") 
 step("the node's log shows the transaction in a block", bool(inblk) and gt["ok"]
      and inblk[0]["mantle_tx"] == gt["value"]["mantle_tx"],
      f"block at slot {blocks[0][1]['header']['slot'] if blocks else '?'} carries {H[:8]}…, same ops as get_transaction")
+
+say("\n== chain_tx after the names module reloads")
+rc1, out1 = ctl("module", "unload", "names")
+rc2, out2 = ctl("module", "load", "names")
+say(f"    module unload names: exit {rc1} {out1}")
+say(f"    module load names: exit {rc2} {out2}")
+again = names("chain_tx", H)
+show("names chain_tx H after the reload", again)
+step("chain_tx still follows the send after the names module reloads", rc1 == 0 and rc2 == 0 and again["ok"]
+     and landed is not None and again["value"] == landed[0]["value"],
+     f"state {again['value'].get('state') if again['ok'] else again['error']}, fee {again['value'].get('fee') if again['ok'] else None}")
 
 say("\n== the fee")
 ops = [op for op in gt["value"]["mantle_tx"]["ops"] if op["opcode"] == 0]
@@ -486,17 +511,25 @@ vv = vou["value"]
 c = names("chain_claim", "false")
 show("names chain_claim plan", c)
 step("chain_claim plan matches the node's vouchers", c["ok"] and c["value"]["claimable"] == str(vv["total_claimable"])
-     and c["value"]["vouchers"] == len(vv["vouchers"]) and "hash" not in c["value"])
+     and c["value"]["vouchers"] == len(vv["vouchers"]) and c["value"]["reward_per_voucher"] == str(vv["reward_amount"])
+     and "hash" not in c["value"])
 if len(vv["vouchers"]) == 0:
     before_claim = (balance(A), balance(B))
+    log_mark = len(daemon_log())
     c = names("chain_claim", "true")
     show("names chain_claim send", c)
-    step("chain_claim with no vouchers sends nothing", c["ok"] and c["value"]["hash"] is None
-         and c["value"]["vouchers"] == 0 and (balance(A), balance(B)) == before_claim,
+    time.sleep(3)
+    later = [json.loads(line.split("Received new block: ", 1)[1]) for line in daemon_log()[log_mark:].splitlines()
+             if "Received new block: " in line]
+    carried = sum(len(b.get("transactions", [])) for b in later)
+    say(f"    node: {len(later)} blocks since, carrying {carried} transactions")
+    step("refusal: chain_claim with nothing to claim says so, and the node moved nothing", not c["ok"]
+         and c["error"] == "There is nothing to claim: your node has no leader rewards waiting."
+         and (balance(A), balance(B)) == before_claim and len(later) >= 2 and carried == 0,
          "names asks leader_claim only for vouchers; balances unchanged")
 else:
-    step("chain_claim with no vouchers sends nothing", False,
-         f"the node holds {len(vv['vouchers'])} vouchers: a claim would go through Blend, untested on a solo node; not sent")
+    step("refusal: chain_claim with nothing to claim says so, and the node moved nothing", False,
+         f"the node holds {len(vv['vouchers'])} vouchers: this run was meant to stay inside one epoch; not sent")
 
 # ── Refusals ───────────────────────────────────────────────────────────────
 say("\n== refusal: overdraft")
@@ -556,9 +589,26 @@ step("refusal: a malformed transaction hash", not r["ok"] and r["error"] == "a t
 other = "cd" * 32
 r = names("chain_tx", other)
 g = node("get_transaction", other)
-show("names chain_tx of a hash not sent here", r)
+show("names chain_tx of a hash never sent", r)
 show("node get_transaction of it", g)
-step("chain_tx of a hash not sent here is unknown", r["ok"] and r["value"]["state"] == "unknown")
+step("refusal: chain_tx of a hash never sent says the node has no record of it", not r["ok"]
+     and r["error"] == "Your node has no record of that transaction, and it wasn't sent from the Names app: check the hash."
+     and not g["ok"] and "no transaction found" in str(g["error"]).lower())
+
+say("\n== refusal: amounts")
+ha, hb = balance(A), balance(B)
+r = names("chain_send", A, B, "1,5", "false")
+show("names chain_send A -> B 1,5 (a decimal comma)", r)
+step("refusal: a comma that doesn't group thousands is refused, not read as 15", not r["ok"]
+     and r["error"] == "1,5 isn't a whole amount: commas go only between groups of three digits, such as 1,000"
+     and (balance(A), balance(B)) == (ha, hb))
+r = names("chain_send", A, B, "100", "false")
+q = names("chain_send", A, B, '"100"', "false")
+show("names chain_send A -> B 100 (bare digits)", r)
+show("names chain_send A -> B '\"100\"'", q)
+say("FLAG upstream (logosctl 0.3.2): bare digits become a JSON number and the host refuses the call before names "
+    f"runs ({str(r['error'])[:90]}); nothing moved: A {balance(A)} (was {ha}), B {balance(B)} (was {hb}). "
+    "The Names app passes text, so only logosctl users meet it.")
 
 # ── Node stopped ───────────────────────────────────────────────────────────
 say("\n== refusal: node stopped")
@@ -569,7 +619,8 @@ time.sleep(1)
 n = node("get_cryptarchia_info")
 show("node get_cryptarchia_info", n)
 down = [(m, names(m, *a)) for m, a in (("chain_status", ()), ("chain_accounts", ()), ("chain_stake", ()),
-                                       ("chain_send", (A, B, "1,000", "true")), ("chain_tx", (H,)), ("chain_claim", ("true",)))]
+                                       ("chain_send", (A, B, "1,000", "true")), ("chain_tx", (H,)), ("chain_tx", (other,)),
+                                       ("chain_claim", ("true",)), ("chain_claim", ("false",)))]
 for m, x in down:
     show(f"names {m}", x)
 step("refusal: node stopped, every chain method says so as the node does",
