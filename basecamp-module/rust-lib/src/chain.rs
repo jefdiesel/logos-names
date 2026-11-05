@@ -56,6 +56,11 @@ pub fn problem(method: &str, error: &str) -> String {
     if short && method != "leader_claim" {
         return "That key doesn't hold enough for this and its fee.".to_owned();
     }
+    // 64 hex characters that aren't a point the node can use (0.3.4 answers with the
+    // library's own debug text, `FrFromBytesError { parsed_bytes: …, modulus: … }`).
+    if lower.contains("invalid public key") || lower.contains("invalid wallet address") {
+        return "That isn't a Logos Blockchain public key: check it and try again.".to_owned();
+    }
     format!("the Logos Blockchain node refused {method}: {error}")
 }
 
@@ -238,6 +243,20 @@ mod tests {
         let claim = "Failed to claim leader rewards: Chain leader service error: Wallet API error: Wallet does not have enough funds, available=0";
         let refused = unwrap("leader_claim", json!({ "error": claim, "success": false, "value": null })).unwrap_err();
         assert_eq!(refused, format!("the Logos Blockchain node refused leader_claim: {claim}"));
+    }
+
+    /// A key of 64 hex characters that the node can't read (here `ab` × 32), as a solo
+    /// 0.3.4 node refused it over logosctl: as the sender's balance, and as a recipient.
+    #[test]
+    fn a_key_the_node_cannot_read_reads_as_advice() {
+        let fr = r#"FrFromBytesError { parsed_bytes: "77648812782670860460512307594061302913369283834606025297048026922953510464427", modulus: "21888242871839275222246405745257275088548364400416034343698204186575808495617" }"#;
+        let advice = "That isn't a Logos Blockchain public key: check it and try again.";
+        let balance = json!({ "error": format!("Invalid wallet address: {fr}"), "success": false, "value": null });
+        assert_eq!(unwrap("wallet_get_balance", balance).unwrap_err(), advice);
+        let transfer = json!({ "error": format!("Invalid public key: {fr}"), "success": false, "value": null });
+        assert_eq!(unwrap("wallet_transfer_funds", transfer).unwrap_err(), advice);
+        let unknown = json!({ "error": "Unknown wallet address.", "success": false, "value": null });
+        assert!(not_held(&unwrap("wallet_get_balance", unknown).unwrap_err()), "a key the wallet doesn't hold is still told apart");
     }
 
     #[test]
