@@ -115,7 +115,7 @@ Item {
     // at install, but an older module can still be the one Basecamp loaded).
     readonly property string neededModule: "0.14.6"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.14.10"
+    readonly property string appVersion: "0.14.11"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -1097,6 +1097,14 @@ Item {
         return "Ready: " + grouped(bridgePlan.total || asked) + " from " + (bridgePlan.notes || "?") + (bridgePlan.notes === "1" ? " note" : " notes")
             + " of that key, into your LEZ public account." + whole
             + (bridgePlan.fee ? " Network fee at most " + grouped(bridgePlan.fee) + "." : "") + " Nothing has been sent yet."
+    }
+
+    /// Whether the plan deposits more than twice what was asked (whole notes): worth a warning.
+    function bridgeOvershoots() {
+        if (bridgePlan === null || !bridgePlan.total)
+            return false
+        var asked = bridgeAsked()[0]
+        return /^[0-9]+$/.test(asked) && Logic.atLeast(bridgePlan.total, Logic.addDigits(asked, asked)) && bridgePlan.total !== Logic.addDigits(asked, asked)
     }
 
     // ── Getting started: install, wallet, move to private ───────────────
@@ -5468,6 +5476,12 @@ Item {
                         visible: root.bridgePlan !== null
                         color: root.bridgePlanFor === root.bridgeAsked().join("|") ? root.ink : root.faint
                         text: root.bridgePlanFor === root.bridgeAsked().join("|") ? root.bridgePlanText() : "You changed something. Check again before you bridge."
+                    }
+                    Hint {
+                        visible: root.bridgePlanFor === root.bridgeAsked().join("|") && root.bridgeOvershoots()
+                        color: root.brass
+                        font.pixelSize: root.px(16)
+                        text: "That's far more than you asked for: the bridge can only move whole notes, and that key's smallest is " + root.grouped(root.bridgePlan ? root.bridgePlan.total : "") + ". To bridge less, first send part of it to another of your node's keys (Send on the Logos Blockchain): that splits it into smaller notes."
                     }
                     Card {
                         visible: root.bridgeConfirm && root.bridgePlan !== null
