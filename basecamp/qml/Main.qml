@@ -115,7 +115,7 @@ Item {
     // at install, but an older module can still be the one Basecamp loaded).
     readonly property string neededModule: "0.15.0"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.15.1"
+    readonly property string appVersion: "0.15.2"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -1007,6 +1007,8 @@ Item {
         bridgeFromLez = ""
         bridgeTo = ""
         bridgeToPrivate = false
+        bridgeFromOpen = false
+        bridgeToOpen = false
         bridgeOtherNode = bridgeNode !== ""
         bridgeNodeField.text = bridgeNode
         loadCliBalance()
@@ -1042,6 +1044,30 @@ Item {
     function privateMoveAmount() {
         var typed = privateMoveField.text.trim().replace(/,/g, "")
         return typed !== "" ? typed : bridgeAsked()[0]
+    }
+
+    property bool bridgeFromOpen: false  // the From list is open
+    property bool bridgeToOpen: false    // the To list is open
+
+    /// What the picked node key holds, in words.
+    function bridgeFromAmount() {
+        var found = (chainAccounts || []).filter(function(entry) { return entry.key === bridgeFrom })
+        return found.length > 0 ? amountShown(found[0].balance) : ""
+    }
+
+    /// The picked LEZ public account: its title and what it holds.
+    function bridgeToEntry() {
+        var rows = bridgeTargets
+        var found = rows.filter(function(row) { return row.account === bridgeTo })
+        return found.length > 0 ? found[0] : rows.length > 0 ? rows[0] : null
+    }
+    function bridgeToTitle() {
+        var entry = bridgeToEntry()
+        return entry !== null ? entry.title : "Public"
+    }
+    function bridgeToAmount() {
+        var entry = bridgeToEntry()
+        return entry !== null ? amountShown(entry.balance) : ""
     }
 
     /// Makes a new public LEZ account and picks it as where the bridge lands.
@@ -3847,13 +3873,18 @@ Item {
         property string amount: ""
         property bool current: false
         property bool enabledNow: true
+        /// The face of a dropdown: a chevron instead of a dot, opened or not.
+        property bool dropdown: false
+        property bool open: false
+        /// An option in an open dropdown: a little shorter.
+        property bool compact: false
         signal pressed()
         Layout.fillWidth: true
-        implicitHeight: root.px(54)
+        implicitHeight: root.px(pick.compact ? 46 : 54)
         radius: 8
-        color: pick.current ? root.raised : pickArea.containsMouse && pick.enabledNow ? root.hover : "transparent"
+        color: pick.dropdown ? root.raised : pick.current ? root.raised : pickArea.containsMouse && pick.enabledNow ? root.hover : "transparent"
         border.width: 1
-        border.color: pick.current ? root.brass : root.line
+        border.color: pick.dropdown ? (pick.open ? root.brass : root.line) : pick.current ? root.brass : root.line
         opacity: pick.enabledNow ? 1 : 0.5
         RowLayout {
             anchors.fill: parent
@@ -3861,6 +3892,7 @@ Item {
             anchors.rightMargin: root.px(14)
             spacing: root.px(12)
             Rectangle {
+                visible: !pick.dropdown
                 Layout.preferredWidth: root.px(16)
                 Layout.preferredHeight: root.px(16)
                 radius: width / 2
@@ -3883,6 +3915,7 @@ Item {
                 Text { Layout.fillWidth: true; visible: pick.sub !== ""; text: pick.sub; elide: Text.ElideRight; color: root.dim; font.family: root.sans; font.pixelSize: root.px(13) }
             }
             Text { visible: pick.amount !== ""; text: pick.amount; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold }
+            Text { visible: pick.dropdown; text: "›"; rotation: pick.open ? 270 : 90; color: root.dim; font.family: root.sans; font.pixelSize: root.px(20) }
         }
         MouseArea {
             id: pickArea
@@ -5613,9 +5646,19 @@ Item {
                     Hint { font.pixelSize: root.px(15); text: "Moves the native coin between the Logos Blockchain and LEZ. Tokens made on LEZ stay on LEZ: only the native coin crosses." }
 
                     Part { text: "From" }
+                    PickRow {
+                        title: root.bridgeFromLez !== "" ? (root.bridgeFromLez !== "LEZ" ? "LEZ · " + root.bridgeLezTitle() : "LEZ") : "Logos Blockchain"
+                        sub: root.bridgeFromLez !== "" ? "Back to the Logos Blockchain: comes with a later LEZ version" : root.bridgeFrom !== "" ? "Node key · " + Logic.keyShown(root.bridgeFrom) : "No node key yet"
+                        amount: root.bridgeFromLez !== "" ? (root.bridgeFromLez !== "LEZ" ? root.bridgeLezAmount() : "") : root.bridgeFromAmount()
+                        dropdown: true
+                        open: root.bridgeFromOpen
+                        onPressed: { root.bridgeFromOpen = !root.bridgeFromOpen; root.bridgeToOpen = false }
+                    }
                     ColumnLayout {
+                        visible: root.bridgeFromOpen
                         Layout.fillWidth: true
-                        spacing: 6
+                        Layout.leftMargin: root.px(14)
+                        spacing: 4
                         Repeater {
                             model: root.chainAccounts || []
                             PickRow {
@@ -5624,8 +5667,9 @@ Item {
                                 sub: "Node key · " + Logic.keyShown(modelData.key)
                                 amount: root.amountShown(modelData.balance)
                                 enabledNow: modelData.balance !== "0"
+                                compact: true
                                 current: root.bridgeFromLez === "" && modelData.key === root.bridgeFrom
-                                onPressed: { root.bridgeFromLez = ""; root.bridgeFromKey = modelData.key }
+                                onPressed: { root.bridgeFromLez = ""; root.bridgeFromKey = modelData.key; root.bridgeFromOpen = false }
                             }
                         }
                         // LEZ as a source is one row: withdrawals aren't on yet, whichever account.
@@ -5634,8 +5678,9 @@ Item {
                             title: root.bridgeFromLez !== "" && root.bridgeFromLez !== "LEZ" ? "LEZ · " + root.bridgeLezTitle() : "LEZ"
                             sub: "Back to the Logos Blockchain: comes with a later LEZ version"
                             amount: root.bridgeFromLez !== "" && root.bridgeFromLez !== "LEZ" ? root.bridgeLezAmount() : ""
+                            compact: true
                             current: root.bridgeFromLez !== ""
-                            onPressed: if (root.bridgeFromLez === "") root.bridgeFromLez = "LEZ"
+                            onPressed: { if (root.bridgeFromLez === "") root.bridgeFromLez = "LEZ"; root.bridgeFromOpen = false }
                         }
                     }
                     Hint {
@@ -5661,9 +5706,19 @@ Item {
                         Layout.fillWidth: true
                         spacing: 10
                         Part { text: "To" }
+                        PickRow {
+                            title: root.bridgeToPrivate ? "LEZ · Private" : "LEZ · " + root.bridgeToTitle()
+                            sub: root.bridgeToPrivate ? "Lands in your main public account, then you move it to private" : "Public · everyone can see it arrive"
+                            amount: root.bridgeToPrivate ? (root.cliBalance ? root.amountShown(root.cliBalance.balance) : "") : root.bridgeToAmount()
+                            dropdown: true
+                            open: root.bridgeToOpen
+                            onPressed: { root.bridgeToOpen = !root.bridgeToOpen; root.bridgeFromOpen = false }
+                        }
                         ColumnLayout {
+                            visible: root.bridgeToOpen
                             Layout.fillWidth: true
-                            spacing: 6
+                            Layout.leftMargin: root.px(14)
+                            spacing: 4
                             Repeater {
                                 model: root.bridgeTargets
                                 PickRow {
@@ -5672,8 +5727,9 @@ Item {
                                     title: "LEZ · " + modelData.title
                                     sub: "Public · everyone can see it arrive"
                                     amount: root.amountShown(modelData.balance)
+                                    compact: true
                                     current: !root.bridgeToPrivate && (root.bridgeTo === modelData.account || (root.bridgeTo === "" && index === 0))
-                                    onPressed: { root.bridgeToPrivate = false; root.bridgeTo = index === 0 ? "" : modelData.account }
+                                    onPressed: { root.bridgeToPrivate = false; root.bridgeTo = index === 0 ? "" : modelData.account; root.bridgeToOpen = false }
                                 }
                             }
                             PickRow {
@@ -5681,15 +5737,17 @@ Item {
                                 title: "LEZ · Private"
                                 sub: "Lands in your main public account, then you move it to private"
                                 amount: root.cliBalance ? root.amountShown(root.cliBalance.balance) : ""
+                                compact: true
                                 current: root.bridgeToPrivate
-                                onPressed: root.bridgeToPrivate = true
+                                onPressed: { root.bridgeToPrivate = true; root.bridgeToOpen = false }
                             }
                             PickRow {
                                 visible: root.cliPublic !== null && !root.cliOld
                                 title: root.accountsBusy ? "Making a new account…" : "＋ New public account"
                                 sub: "Made in your wallet now, then picked"
+                                compact: true
                                 enabledNow: !root.accountsBusy
-                                onPressed: root.bridgeToNewAccount()
+                                onPressed: { root.bridgeToNewAccount(); root.bridgeToOpen = false }
                             }
                         }
                         Hint { visible: root.accountsError !== ""; color: root.alarm; font.pixelSize: root.px(14); text: root.accountsError }
@@ -5711,35 +5769,6 @@ Item {
                             color: root.brass
                             font.pixelSize: root.px(14)
                             text: "Moving it to private costs a private fee of about 5,100,000 taken from what moves, so " + root.grouped(root.bridgeAsked()[0]) + " would leave next to nothing. Bridge at least " + root.grouped(root.shieldMinimum) + "."
-                        }
-
-                        // Fees and minimums, in one place.
-                        Rectangle {
-                            Layout.fillWidth: true
-                            implicitHeight: feeNotes.implicitHeight + root.px(20)
-                            radius: 8
-                            color: "transparent"
-                            border.width: 1
-                            border.color: root.line
-                            ColumnLayout {
-                                id: feeNotes
-                                anchors.left: parent.left
-                                anchors.right: parent.right
-                                anchors.verticalCenter: parent.verticalCenter
-                                anchors.leftMargin: root.px(14)
-                                anchors.rightMargin: root.px(14)
-                                spacing: 4
-                                Text { text: "Gas and minimums"; color: root.ink; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(15) }
-                                Hint { font.pixelSize: root.px(14); text: "• Logos Blockchain fee: at most 100,000, paid from the key's other notes, not from the amount." }
-                                Hint { font.pixelSize: root.px(14); text: "• The amount goes as one whole note. If no note holds exactly that, a split makes one first: a send from the key to itself, a fee of about 2,000, one block." }
-                                Hint { font.pixelSize: root.px(14); text: "• It arrives once the Logos Blockchain block is final: about 12 hours on the testnet. LEZ takes no fee to credit it." }
-                                Hint {
-                                    visible: root.bridgeToPrivate
-                                    font.pixelSize: root.px(14)
-                                    text: root.cliOutdated ? "• Then moving it to private is proven on this computer, about 4 minutes."
-                                        : "• Then moving it to private is a private transaction: a fee of about 5,100,000, taken from what moves, and about 4 minutes of proving. To register a name privately you need " + root.grouped(root.shieldMinimum) + " there."
-                                }
-                            }
                         }
 
                         RowLayout {
@@ -5876,6 +5905,36 @@ Item {
                         Hint { visible: root.shieldJob !== null; color: root.brass; font.pixelSize: root.px(15); text: root.shieldLine() }
                         Hint { visible: root.shieldMoved && root.shieldJob === null; color: root.good; font.pixelSize: root.px(15); text: "Moved. Your private account is ready for names." }
                         Hint { visible: root.shieldProblem !== "" && root.shieldJob === null; color: root.alarm; font.pixelSize: root.px(15); text: root.shieldProblem }
+                    }
+                    // Gas and minimums, at the very bottom.
+                    Rectangle {
+                        visible: root.bridgeFromLez === ""
+                        Layout.topMargin: root.px(6)
+                        Layout.fillWidth: true
+                        implicitHeight: feeNotes.implicitHeight + root.px(20)
+                        radius: 8
+                        color: "transparent"
+                        border.width: 1
+                        border.color: root.line
+                        ColumnLayout {
+                            id: feeNotes
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.leftMargin: root.px(14)
+                            anchors.rightMargin: root.px(14)
+                            spacing: 4
+                            Text { text: "Gas and minimums"; color: root.ink; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(15) }
+                            Hint { font.pixelSize: root.px(14); text: "• Logos Blockchain fee: at most 100,000, paid from the key's other notes, not from the amount." }
+                            Hint { font.pixelSize: root.px(14); text: "• The amount goes as one whole note. If no note holds exactly that, a split makes one first: a send from the key to itself, a fee of about 2,000, one block." }
+                            Hint { font.pixelSize: root.px(14); text: "• It arrives once the Logos Blockchain block is final: about 12 hours on the testnet. LEZ takes no fee to credit it." }
+                            Hint {
+                                visible: root.bridgeToPrivate
+                                font.pixelSize: root.px(14)
+                                text: root.cliOutdated ? "• Then moving it to private is proven on this computer, about 4 minutes."
+                                    : "• Then moving it to private is a private transaction: a fee of about 5,100,000, taken from what moves, and about 4 minutes of proving. To register a name privately you need " + root.grouped(root.shieldMinimum) + " there."
+                            }
+                        }
                     }
                 }
             }

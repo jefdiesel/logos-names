@@ -213,6 +213,8 @@ SCENARIOS = {
     "wallet-bridge-private": 'root.openWallet("home"); Qt.callLater(function() { root.openGetTokens(); root.bridgeToPrivate = true; bridgeAmountField.text = "1000000" })',
     "wallet-bridge-from-lez": 'root.openWallet("home"); Qt.callLater(function() { root.openBridgeFromLez("Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk") })',
     "wallet-bridge-plain": 'root.openWallet("home"); Qt.callLater(function() { root.openGetTokens() })',
+    "wallet-bridge-open": 'root.openWallet("home"); Qt.callLater(function() { root.openGetTokens(); root.bridgeFromOpen = true })',
+    "wallet-bridge-open-to": 'root.openWallet("home"); Qt.callLater(function() { root.openGetTokens(); root.bridgeToOpen = true })',
     "settings-network": 'root.section = "settings"; root.settingsOpen = true; sequencerField.text = "https://other.example"; root.networkConfirm = true',
     "wallet-send": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); root.openSend({ id: "lez-private", kind: "lez", title: "LEZ", definition: "", fromPrivate: true }, "ada"); sendAmount.text = "1000"',
     "wallet-review": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); root.openSend({ id: "lez-private", kind: "lez", title: "LEZ", definition: "", fromPrivate: true }, "ada"); sendAmount.text = "1000"; root.sendReview()',
