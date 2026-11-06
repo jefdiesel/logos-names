@@ -425,6 +425,10 @@ pub trait NamesModule: Send + 'static {
     /// `bridge_key` and `bridge_node`). Every argument is checked first.
     fn cli_bridge(&mut self, amount: String, from_key: String, node: String, send: bool) -> String;
 
+    /// `cli_bridge`, credited to the LEZ public account `to` (`Public/<id>`, one the
+    /// person picked; empty is the wallet's default public account).
+    fn cli_bridge_to(&mut self, amount: String, from_key: String, to: String, node: String, send: bool) -> String;
+
     // ── Getting started without a terminal ─────────────────────────────
 
     /// Asks the Names faucet to pay the wallet's default public account a
@@ -952,7 +956,7 @@ const NAMES_APP: &str = "names_ui";
 /// `get_config` reports it so the Names app can refuse a module from another
 /// release (the app's own metadata asks for at least this at install, but an
 /// older module can still be the one loaded).
-const MODULE_VERSION: &str = "0.14.5";
+const MODULE_VERSION: &str = "0.14.6";
 
 /// Whether `caller` may use those methods. Basecamp gives each app its own
 /// credential, named after the app, so the module knows which app is calling.
@@ -2330,6 +2334,24 @@ impl NamesModule for Names {
                 self.save();
             }
             cli::run_bridge(&setup, &amount, &key, &node, send)
+        })())
+    }
+
+    fn cli_bridge_to(&mut self, amount: String, from_key: String, to: String, node: String, send: bool) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            cli::bridge_amount(&amount)?;
+            let key = cli::bridge_key(&from_key)?;
+            let node = cli::bridge_node(&node)?;
+            let setup = self.cli_setup()?;
+            if self.bridge_key.as_deref() != Some(key.as_str()) || self.bridge_node.as_deref() != Some(node.as_str()) {
+                self.bridge_key = Some(key.clone());
+                self.bridge_node = Some(node.clone());
+                self.save();
+            }
+            cli::run_bridge_to(&setup, &amount, &key, &to, &node, send)
         })())
     }
 

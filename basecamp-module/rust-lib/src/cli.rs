@@ -462,12 +462,22 @@ pub fn bridge_problem(output: &str, node: &str) -> String {
 /// Runs `names bridge` (only the plan unless `send`) to the wallet's default
 /// public account and returns what `parse_bridge` makes of it, or why it failed.
 pub fn run_bridge(setup: &Setup, amount: &str, from_key: &str, node: &str, send: bool) -> Result<Value, String> {
+    run_bridge_to(setup, amount, from_key, "", node, send)
+}
+
+/// `run_bridge` into the public account `to` (`Public/<id>`); empty is the wallet's default one.
+pub fn run_bridge_to(setup: &Setup, amount: &str, from_key: &str, to: &str, node: &str, send: bool) -> Result<Value, String> {
     setup.wallet_ready()?;
     // Checked before the wallet is read, so bad input fails the same way every time.
     let node = bridge_node(node)?;
     bridge_amount(amount)?;
     bridge_key(from_key)?;
-    let to = default_public(setup)?;
+    let to = if to.trim().is_empty() {
+        default_public(setup)?
+    } else {
+        let id = to.trim().strip_prefix("Public/").ok_or("the bridge credits a public LEZ account: Public/ and its ID")?;
+        registry::account_text(&registry::parse_account(id).map_err(|_| "that isn't a public LEZ account".to_owned())?)
+    };
     let args = bridge_args(amount, &to, from_key, &node, send)?;
     let (code, out, err) = run_capture(setup, args, BRIDGE_PATIENCE)?;
     if code != Some(0) {
@@ -2261,6 +2271,11 @@ mod tests {
             ]
         );
         assert!(!lines.contains(&"[--yes]"));
+        // Another public account picked as the destination; never a private one.
+        let other = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
+        let picked = run_bridge_to(&setup, "1000", KEY, &format!("Public/{other}"), "", false).unwrap();
+        assert!(picked["lines"].as_array().unwrap().contains(&json!(format!("[--to=Public/{other}]"))), "{picked}");
+        assert!(run_bridge_to(&setup, "1000", KEY, &format!("Private/{other}"), "", false).unwrap_err().contains("public LEZ account"));
         assert_eq!(read["total"], "1200");
         assert_eq!(read["sent"], false);
         // The stand-in CLI is the only one ever given --yes in a test.

@@ -113,9 +113,9 @@ Item {
     property bool configKnown: false   // the names module has answered once
     // The names module this app needs: the same release (metadata.json asks for it
     // at install, but an older module can still be the one Basecamp loaded).
-    readonly property string neededModule: "0.14.5"
+    readonly property string neededModule: "0.14.6"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.14.9"
+    readonly property string appVersion: "0.14.10"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -989,24 +989,47 @@ Item {
     readonly property var cliPublic: cliBalance !== undefined && cliBalance !== null && cliBalance["public"] ? cliBalance["public"] : null
 
     /// Opens the "Get tokens" screen.
-    function openGetTokens() {
+    function openGetTokens(fromKey) {
         go("wallet")
         walletView = "bridge"
+        loadChain()
+        loadAccounts()
         bridgePlan = null
         bridgePlanFor = ""
         bridgeConfirm = false
         bridgeError = ""
         bridgeSent = false
         bridgeHash = ""
-        // The node's own key unless another was saved: Bridge sends from it.
-        bridgeKeyField.text = bridgeKey !== "" ? bridgeKey : chainAccounts !== null && chainAccounts.length > 0 ? chainAccounts[0].key : ""
+        // The key it was opened from, else the one used last, else the node's first.
+        bridgeFromKey = fromKey ? fromKey : bridgeKey !== "" ? bridgeKey : chainAccounts !== null && chainAccounts.length > 0 ? chainAccounts[0].key : ""
+        bridgeTo = ""
+        bridgeOtherNode = bridgeNode !== ""
         bridgeNodeField.text = bridgeNode
         loadCliBalance()
     }
 
     /// What the fields ask for, so a plan is only sent for what it was checked for.
+    property string bridgeFromKey: ""    // the node key the bridge sends from, picked
+    property string bridgeTo: ""         // the LEZ public account it credits, picked ("" = the default)
+    property bool bridgeOtherNode: false // the node address field is open
+
+    /// The LEZ public accounts the bridge can credit: [{account, title, balance}].
+    readonly property var bridgeTargets: {
+        var rows = (cliAccounts || []).filter(function(entry) { return entry.kind === "public" && (entry.balance !== "0" || entry["default"]) })
+        if (rows.length === 0 && cliPublic !== null)
+            rows = [{ account: "Public/" + cliPublic.account, label: null, balance: cliPublic.balance, "default": true }]
+        rows = rows.slice().sort(function(a, b) { return (b["default"] ? 1 : 0) - (a["default"] ? 1 : 0) })
+        return rows.map(function(entry) { return { account: entry.account, title: entry.label ? entry.label : entry["default"] ? "Public (where bridged tokens land)" : "Public · " + Logic.keyShown(entry.account.substr(7)), balance: entry.balance } })
+    }
+
+    /// The node key the bridge sends from: the one picked, if the node holds it, else its first.
+    readonly property string bridgeFrom: {
+        var keys = (chainAccounts || []).map(function(entry) { return entry.key })
+        return keys.indexOf(bridgeFromKey) >= 0 ? bridgeFromKey : keys.length > 0 ? keys[0] : ""
+    }
+
     function bridgeAsked() {
-        return [bridgeAmountField.text.trim(), bridgeKeyField.text.trim().toLowerCase(), bridgeNodeField.text.trim()]
+        return [bridgeAmountField.text.trim().replace(/,/g, ""), bridgeFrom, bridgeNodeField.text.trim(), bridgeTo]
     }
 
     /// Checks the fields before the module sees them; "" if they look right.
@@ -1014,7 +1037,7 @@ Item {
         if (!/^[0-9]+$/.test(asked[0]) || /^0+$/.test(asked[0]))
             return "Enter a whole amount, such as 1000."
         if (!/^[0-9a-f]{64}$/.test(asked[1]))
-            return "The key is 64 characters, 0-9 and a-f. Copy it from your node's wallet."
+            return "Choose the node key to send from. If none is listed, start your node in Basecamp's Blockchain app."
         if (asked[2] !== "" && !/^https?:\/\/(127\.0\.0\.1|localhost):[0-9]{1,5}\/?$/.test(asked[2]))
             return "The node is an address on this computer, such as " + defaultBridgeNode + "."
         return ""
@@ -1039,7 +1062,9 @@ Item {
             bridgeHash = ""
             bridgeSent = false
         }
-        askLater("cli_bridge", [asked[0], asked[1], asked[2], send], function(value) {
+        var method = asked[3] !== "" ? "cli_bridge_to" : "cli_bridge"
+        var args = asked[3] !== "" ? [asked[0], asked[1], asked[3], asked[2], send] : [asked[0], asked[1], asked[2], send]
+        askLater(method, args, function(value) {
             bridgeBusy = false
             bridgeConfirm = false
             bridgeKey = asked[1]
@@ -4805,13 +4830,14 @@ Item {
                                             Action { label: "Receive"; onPressed: root.openReceive(addressRow.modelData) }
                                             Action {
                                                 visible: addressRow.modelData.kind === "chain"
-                                                label: "Bridge into LEZ"
-                                                onPressed: root.openGetTokens()
+                                                label: "Bridge to LEZ"
+                                                onPressed: root.openGetTokens(addressRow.modelData.key)
                                             }
+                                            // LEZ to the Logos Blockchain: off in this LEZ version (withdrawals are disabled).
                                             Action {
-                                                visible: addressRow.modelData.kind === "lez" && !addressRow.modelData.fromPrivate && addressRow.modelData.canSend
-                                                label: "Bridge in"
-                                                onPressed: root.openGetTokens()
+                                                visible: addressRow.modelData.kind === "lez"
+                                                label: "Bridge to Logos Blockchain"
+                                                enabledNow: false
                                             }
                                             Action {
                                                 visible: addressRow.modelData.kind === "chain"
@@ -4825,6 +4851,14 @@ Item {
                                                 label: "Remove"
                                                 onPressed: root.removeToken(addressRow.modelData.definition)
                                             }
+                                        }
+                                        Hint {
+                                            visible: addressRow.open && addressRow.modelData.kind === "lez"
+                                            Layout.leftMargin: root.px(76)
+                                            Layout.rightMargin: root.px(18)
+                                            Layout.bottomMargin: root.px(12)
+                                            font.pixelSize: root.px(14)
+                                            text: "Bridging from LEZ back to the Logos Blockchain isn't possible yet: this LEZ version has withdrawals switched off."
                                         }
                                     }
                                 }
@@ -5210,7 +5244,7 @@ Item {
                                     y: root.px(16)
                                     width: parent.width - root.px(32)
                                     spacing: 10
-                                    Text { text: "Bridge into LEZ"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold }
+                                    Text { text: "Bridge to LEZ"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold }
                                     Hint { font.pixelSize: root.px(14); color: root.brass; text: "One way for now: LEZ can't send back to the Logos Blockchain yet. Arrives in about 12 hours." }
                                     Action { label: "Bridge…"; onPressed: root.openGetTokens() }
                                 }
@@ -5349,70 +5383,44 @@ Item {
                         font.pixelSize: root.px(15)
                         onPressed: root.walletView = "home"
                     }
-                    Text { text: "Bridge into LEZ"; color: root.ink; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(28) }
+                    Text { text: "Bridge to LEZ"; color: root.ink; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(28) }
                     Hint { text: "Tokens come from your Logos Blockchain node. Bridging them into LEZ takes about 12 hours to arrive." }
-                    Card {
+                    Part { text: "From your node" }
+                    Flow {
                         Layout.fillWidth: true
-                        Part { Layout.topMargin: 0; text: "Your LEZ public account" }
-                        Hint {
-                            visible: root.cliPublic === null
-                            text: root.cliPath === "" ? "Install the names program first (see Welcome)."
-                                : root.cliBalance === undefined ? "Checking your accounts…"
-                                : root.hasCliWallet ? "Couldn't read your accounts just now."
-                                : "You don't have a wallet yet. Create one first: it's where bridged tokens land."
-                            color: root.cliBalance === undefined ? root.dim : root.alarm
+                        spacing: 8
+                        Repeater {
+                            model: root.chainAccounts || []
+                            Tab {
+                                required property var modelData
+                                label: "Logos Blockchain · " + Logic.keyShown(modelData.key) + "   " + root.amountShown(modelData.balance)
+                                current: modelData.key === root.bridgeFrom
+                                onPressed: root.bridgeFromKey = modelData.key
+                            }
                         }
-                        Action {
-                            visible: root.cliPath !== "" && root.cliBalance !== undefined && root.cliPublic === null && !root.hasCliWallet
-                            label: root.walletBusy ? "Creating…" : "Create my wallet"
-                            strong: true
-                            enabledNow: !root.walletBusy
-                            onPressed: root.createWallet()
-                        }
-                        Link {
-                            visible: root.cliPath !== "" && root.cliBalance !== undefined && root.cliPublic === null && root.hasCliWallet
-                            text: "Check again"
-                            font.pixelSize: root.px(15)
-                            onPressed: root.loadCliBalance()
-                        }
-                        Hint { visible: root.walletError !== ""; color: root.alarm; text: root.walletError }
-                        Fact {
-                            visible: root.cliPublic !== null
-                            label: "Account"
-                            code: true
-                            value: root.cliPublic !== null ? root.cliPublic.account : ""
-                            full: root.cliPublic !== null ? "Public/" + root.cliPublic.account : ""
-                        }
-                        Fact {
-                            visible: root.cliPublic !== null
-                            label: "Balance"
-                            value: root.cliPublic !== null ? root.grouped(root.cliPublic.balance) : ""
-                        }
-                        Hint {
-                            visible: root.cliPublic !== null
-                            font.pixelSize: root.px(14)
-                            text: "Bridged tokens land here. To use them for names, move " + root.grouped(root.shieldAmount) + " of them to your private account."
-                        }
-                        Action {
-                            // The October testnet names program has no `shield`.
-                            visible: root.cliPublic !== null && !root.cliOutdated
-                            label: root.shieldJob !== null ? "Moving…" : "Move to private"
-                            enabledNow: root.shieldJob === null && root.canShield
-                            onPressed: root.moveToPrivate()
-                        }
-                        Hint { visible: root.shieldJob !== null; color: root.brass; font.pixelSize: root.px(15); text: root.shieldLine() }
-                        Hint { visible: root.shieldMoved && root.shieldJob === null; color: root.good; font.pixelSize: root.px(15); text: "Moved. Your private account is ready for names." }
-                        Hint { visible: root.shieldProblem !== "" && root.shieldJob === null; color: root.alarm; font.pixelSize: root.px(15); text: root.shieldProblem }
                     }
-                    Part { text: "Your Logos Blockchain public key" }
-                    Hint { font.pixelSize: root.px(14); text: "The key your node's wallet lists, 64 characters. It's public, not a secret." }
-                    Field {
-                        id: bridgeKeyField
+                    Hint {
+                        visible: root.chainAccounts === null || root.chainAccounts.length === 0
+                        color: root.alarm
+                        font.pixelSize: root.px(15)
+                        text: root.chainReading ? "Reading your node…" : "Your node isn't answering. Start it in Basecamp's Blockchain app, then come back."
+                    }
+                    Part { text: "To your LEZ account" }
+                    Flow {
                         Layout.fillWidth: true
-                        size: 17
-                        code: true
-                        hint: "64 characters, 0-9 and a-f"
+                        spacing: 8
+                        Repeater {
+                            model: root.bridgeTargets
+                            Tab {
+                                required property var modelData
+                                required property int index
+                                label: modelData.title + "   " + root.amountShown(modelData.balance)
+                                current: root.bridgeTo === modelData.account || (root.bridgeTo === "" && index === 0)
+                                onPressed: root.bridgeTo = index === 0 ? "" : modelData.account
+                            }
+                        }
                     }
+                    Hint { font.pixelSize: root.px(14); text: "The bridge credits a public LEZ account: everyone can see it arrive. Move it to private afterwards to use it privately." }
                     Part { text: "Amount" }
                     Field {
                         id: bridgeAmountField
@@ -5423,9 +5431,17 @@ Item {
                         hint: "Such as 5000000"
                         onAccepted: root.bridgeRun(false)
                     }
-                    Part { text: "Node address (optional)" }
+                    Link {
+                        visible: !root.bridgeOtherNode
+                        text: "Another node…"
+                        color: root.dim
+                        font.pixelSize: root.px(14)
+                        onPressed: root.bridgeOtherNode = true
+                    }
+                    Part { visible: root.bridgeOtherNode; text: "Node address" }
                     Field {
                         id: bridgeNodeField
+                        visible: root.bridgeOtherNode
                         Layout.fillWidth: true
                         Layout.maximumWidth: 360
                         size: 17
@@ -5437,7 +5453,7 @@ Item {
                         spacing: 8
                         Action {
                             label: root.bridgeBusy && !root.bridgeConfirm ? "Checking…" : "Check"
-                            enabledNow: !root.bridgeBusy && root.cliPublic !== null
+                            enabledNow: !root.bridgeBusy && root.cliPublic !== null && root.bridgeFrom !== ""
                             onPressed: root.bridgeRun(false)
                         }
                         Action {
@@ -5496,6 +5512,61 @@ Item {
                             font.pixelSize: root.px(13)
                             wrapMode: Text.WrapAnywhere
                         }
+                    }
+                    // No wallet yet (make one), or the move to private that follows a bridge.
+                    Card {
+                        visible: root.cliPublic === null || !root.cliOutdated
+                        Layout.fillWidth: true
+                        Part { Layout.topMargin: 0; text: root.cliPublic === null ? "Your LEZ wallet" : "Then, to use it privately" }
+                        Hint {
+                            visible: root.cliPublic === null
+                            text: root.cliPath === "" ? "Install the names program first (see Welcome)."
+                                : root.cliBalance === undefined ? "Checking your accounts…"
+                                : root.hasCliWallet ? "Couldn't read your accounts just now."
+                                : "You don't have a wallet yet. Create one first: it's where bridged tokens land."
+                            color: root.cliBalance === undefined ? root.dim : root.alarm
+                        }
+                        Action {
+                            visible: root.cliPath !== "" && root.cliBalance !== undefined && root.cliPublic === null && !root.hasCliWallet
+                            label: root.walletBusy ? "Creating…" : "Create my wallet"
+                            strong: true
+                            enabledNow: !root.walletBusy
+                            onPressed: root.createWallet()
+                        }
+                        Link {
+                            visible: root.cliPath !== "" && root.cliBalance !== undefined && root.cliPublic === null && root.hasCliWallet
+                            text: "Check again"
+                            font.pixelSize: root.px(15)
+                            onPressed: root.loadCliBalance()
+                        }
+                        Hint { visible: root.walletError !== ""; color: root.alarm; text: root.walletError }
+                        Fact {
+                            visible: false
+                            label: "Account"
+                            code: true
+                            value: root.cliPublic !== null ? root.cliPublic.account : ""
+                            full: root.cliPublic !== null ? "Public/" + root.cliPublic.account : ""
+                        }
+                        Fact {
+                            visible: false
+                            label: "Balance"
+                            value: root.cliPublic !== null ? root.grouped(root.cliPublic.balance) : ""
+                        }
+                        Hint {
+                            visible: root.cliPublic !== null
+                            font.pixelSize: root.px(14)
+                            text: "Bridged tokens land here. To use them for names, move " + root.grouped(root.shieldAmount) + " of them to your private account."
+                        }
+                        Action {
+                            // The October testnet names program has no `shield`.
+                            visible: root.cliPublic !== null && !root.cliOutdated
+                            label: root.shieldJob !== null ? "Moving…" : "Move to private"
+                            enabledNow: root.shieldJob === null && root.canShield
+                            onPressed: root.moveToPrivate()
+                        }
+                        Hint { visible: root.shieldJob !== null; color: root.brass; font.pixelSize: root.px(15); text: root.shieldLine() }
+                        Hint { visible: root.shieldMoved && root.shieldJob === null; color: root.good; font.pixelSize: root.px(15); text: "Moved. Your private account is ready for names." }
+                        Hint { visible: root.shieldProblem !== "" && root.shieldJob === null; color: root.alarm; font.pixelSize: root.px(15); text: root.shieldProblem }
                     }
                 }
             }
