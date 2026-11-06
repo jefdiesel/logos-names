@@ -430,6 +430,8 @@ else
 fi
 
 say "8. back and forth: B sends to F, and F's balance takes it"
+# B pays fees in this step (a send, a set-account, a transfer): fund it first.
+transfer "$F" "$B" 5000000
 BB0=$(balance "$B"); FB0=$(balance "$F")
 transfer "$B" "$F" 1000
 BB1=$(balance "$B"); FB1=$(balance "$F")
