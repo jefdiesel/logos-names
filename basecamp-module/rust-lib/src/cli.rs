@@ -1114,6 +1114,26 @@ pub fn mine_args() -> Vec<String> {
     vec!["mine".to_owned()]
 }
 
+/// `names transfer <name> <new holder>`: the new holder is a LEZ account, `Public/…`,
+/// `Private/…` or a bare account ID. Only a tag of it reaches the chain.
+pub fn transfer_args(name: &str, new_owner: &str) -> Result<Vec<String>, String> {
+    let name = registry::parse_name(name)?;
+    let owner = new_owner.trim();
+    let (kind, id) = match (owner.strip_prefix("Public/"), owner.strip_prefix("Private/")) {
+        (Some(id), _) => ("Public", id),
+        (_, Some(id)) => ("Private", id),
+        _ => ("Public", owner),
+    };
+    let id = registry::parse_account(id).map_err(|_| "the new holder is a LEZ account: Public/ or Private/ and its ID, or a pasted account address".to_owned())?;
+    Ok(vec!["transfer".to_owned(), "--".to_owned(), name, format!("{kind}/{}", registry::account_text(&id))])
+}
+
+/// `names receive-privately <name>`: payments to a name this wallet holds (one handed
+/// to it, say) start arriving at new receiving keys of its own.
+pub fn receive_privately_args(name: &str) -> Result<Vec<String>, String> {
+    Ok(vec!["receive-privately".to_owned(), "--".to_owned(), registry::parse_name(name)?])
+}
+
 /// `names set-text`: an empty value removes the entry.
 pub fn set_text_args(name: &str, key: &str, value: &str) -> Result<Vec<String>, String> {
     let name = registry::parse_name(name)?;
@@ -2126,6 +2146,11 @@ mod tests {
         assert!(pay_args("ada", "0").is_err());
         assert!(pay_args("ada", "-5").is_err());
         assert!(pay_args("ada", "1e9").is_err());
+        let to = "9uwkVJuXScDwLKVtQMcHFU9Hvb3uZjiEDVvDv4PYjCfM";
+        assert_eq!(transfer_args("Ada", to).unwrap(), strings(&["transfer", "--", "ada", &format!("Public/{to}")]));
+        assert_eq!(transfer_args("ada", &format!("Private/{to}")).unwrap()[3], format!("Private/{to}"));
+        assert!(transfer_args("ada", "bob").is_err(), "a name is not a holder");
+        assert_eq!(receive_privately_args("Ada").unwrap(), strings(&["receive-privately", "--", "ada"]));
         // A decimal comma or a stray one is refused, not read as more (SC-2, A-2).
         for bad in ["1,5", ",7", "1,,000", "1000,", "12,34", "1,0000"] {
             assert!(pay_args("ada", bad).is_err(), "{bad}");

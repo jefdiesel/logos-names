@@ -1,7 +1,7 @@
 {
   "name": "names_ui",
   "display_name": "Names",
-  "version": "0.15.5",
+  "version": "0.15.6",
   "type": "ui_qml",
   "category": "identity",
   "description": "Your name on Logos: register it, post as it, edit its profile",
@@ -10,7 +10,7 @@
   "dependencies": [
     {
       "name": "names",
-      "version": ">=0.15.2"
+      "version": ">=0.15.3"
     }
   ],
   "provides": [

@@ -1,7 +1,7 @@
 {
   "name": "names",
   "display_name": "Names",
-  "version": "0.15.2",
+  "version": "0.15.3",
   "type": "core",
   "interface": "cdylib",
   "category": "identity",

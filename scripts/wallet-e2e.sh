@@ -445,6 +445,17 @@ N resolve "$LOCKED" | grep -q "\"held_by\": \"$B\"" || fail "B does not hold $LO
 NR resolve "$LOCKED" | grep -q '"held_by": null' || fail "R still shows as holding $LOCKED"
 echo "$LOCKED: R -> B"
 
+say "8. receive-privately: R, who no longer holds $LOCKED, is refused and left no new account; B sets it up"
+PRIV_R0=$(NR wallet account list 2>/dev/null | grep -c "Private/" || true)
+if NR receive-privately "$LOCKED" > "$WORK/rp-refused.log" 2>&1; then fail "R set up a name it no longer holds"; fi
+grep -q "does not hold" "$WORK/rp-refused.log" || { cat "$WORK/rp-refused.log"; fail "the refusal didn't say why"; }
+PRIV_R1=$(NR wallet account list 2>/dev/null | grep -c "Private/" || true)
+[ "$PRIV_R1" -eq "$PRIV_R0" ] || fail "a refused receive-privately still made a private account ($PRIV_R0 -> $PRIV_R1)"
+N receive-privately "$LOCKED" | grep -vE '^(Stored|Transaction data)' | cut -c1-200
+N resolve "$LOCKED" | grep -q '"payable_privately": true' || fail "$LOCKED has no receiving keys after B's receive-privately"
+N mine | grep -q "^$LOCKED" || fail "names mine doesn't list $LOCKED after receive-privately"
+echo "$LOCKED: B receives privately, and names mine lists it"
+
 say "8. the new holder is paid by the name: B publishes Public/B on $LOCKED, R pays $LOCKED"
 N set-account "$LOCKED" "Public/$B" | grep -vE '^(Stored|Transaction data)' | cut -c1-200
 N resolve "$LOCKED" | grep -q "\"public_account\": \"$B\"" || fail "$LOCKED does not resolve to B's account"

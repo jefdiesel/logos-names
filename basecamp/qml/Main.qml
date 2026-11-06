@@ -113,9 +113,9 @@ Item {
     property bool configKnown: false   // the names module has answered once
     // The names module this app needs: the same release (metadata.json asks for it
     // at install, but an older module can still be the one Basecamp loaded).
-    readonly property string neededModule: "0.15.2"
+    readonly property string neededModule: "0.15.3"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.15.5"
+    readonly property string appVersion: "0.15.6"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -1982,7 +1982,52 @@ Item {
     /// The same change for a name the names CLI holds: the module starts the
     /// CLI, which proves the change on this machine (minutes), and this polls
     /// the job until it ends, then reads the name back.
-    readonly property var cliMethods: ({ set_text: "cli_set_text", set_profile: "cli_profile", set_page: "cli_set_page", register: "cli_register" })
+    readonly property var cliMethods: ({ set_text: "cli_set_text", set_profile: "cli_profile", set_page: "cli_set_page", register: "cli_register", transfer: "cli_transfer" })
+
+    // ── Handing names on (names transfer / receive-privately) ───────────
+    property string transferTarget: ""   // the name whose Transfer card is open
+    property bool transferConfirm: false
+
+    function openTransfer(name) {
+        transferTarget = name
+        transferConfirm = false
+        transferToField.text = ""
+        say("", false)
+    }
+
+    /// Why the Transfer field can't be used, or "" (also "" while it is empty).
+    function transferProblem() {
+        var to = transferToField.text.trim()
+        if (to === "")
+            return ""
+        if (!/^((Public|Private)\/)?[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(to))
+            return "That isn't an account. It's Public/ or Private/ and the account ID, or a pasted account address."
+        var mine = [cliPublic ? cliPublic.account : "", cliBalance ? cliBalance.account : ""]
+        if (mine.indexOf(to.replace(/^(Public|Private)\//, "")) >= 0)
+            return "That's one of your own main accounts: the name is already yours."
+        return ""
+    }
+
+    function transferNow() {
+        var name = transferTarget
+        var to = transferToField.text.trim()
+        transferConfirm = false
+        boardStart("cli_transfer", [name, to], "Transferring " + name, function() {
+            say(name + " now belongs to " + Logic.keyShown(to.replace(/^(Public|Private)\//, "")) + ". They set it up with Got a name from someone? (or names receive-privately).", false)
+            transferTarget = ""
+            loadCliMine()
+            loadActivity()
+        }, name)
+    }
+
+    function takeName(name) {
+        boardStart("cli_receive_privately", [name], "Setting up " + name, function() {
+            say(name + " is set up: payments to it now arrive privately in a new account of yours.", false)
+            takeNameField.text = ""
+            loadCliMine()
+            loadAccounts()
+        }, name)
+    }
     function cliChange(method, args, name, settled, done) {
         var cliMethod = cliMethods[method]
         if (cliMethod === undefined) {
@@ -5703,6 +5748,7 @@ Item {
                                 Link { visible: myName.modelData.name !== root.mainName; text: "Make main"; font.pixelSize: root.px(15); onPressed: root.setMain(myName.modelData.name) }
                                 Link { text: "Open"; font.pixelSize: root.px(15); onPressed: { root.go("search"); root.show(myName.modelData.name) } }
                                 Link { text: "Copy"; font.pixelSize: root.px(15); onPressed: root.copy(myName.modelData.name, "Your name") }
+                                Link { text: "Transfer…"; font.pixelSize: root.px(15); onPressed: root.openTransfer(myName.modelData.name) }
                             }
                         }
                         Repeater {
@@ -5715,6 +5761,79 @@ Item {
                             }
                         }
                     }
+
+                    // Hand a name to someone else (names transfer).
+                    Card {
+                        visible: root.transferTarget !== ""
+                        Layout.fillWidth: true
+                        Part { Layout.topMargin: 0; text: "Transfer " + root.transferTarget }
+                        Hint {
+                            font.pixelSize: root.px(15)
+                            text: "Hands " + root.transferTarget + " to another LEZ account. Its receiving keys, profile entries and page are cleared; payments to it go to the new holder once they set it up. Any deposit goes with it. It can't be undone."
+                        }
+                        Part { text: "Their account" }
+                        Field {
+                            id: transferToField
+                            Layout.fillWidth: true
+                            size: 17
+                            code: true
+                            hint: "Public/… or Private/…, or a pasted account address"
+                            onTextChanged: root.transferConfirm = false
+                        }
+                        Hint { visible: root.transferProblem() !== ""; color: root.alarm; font.pixelSize: root.px(14); text: root.transferProblem() }
+                        RowLayout {
+                            visible: !root.transferConfirm
+                            spacing: 8
+                            Action {
+                                label: "Transfer…"
+                                strong: true
+                                enabledNow: transferToField.text.trim() !== "" && root.transferProblem() === "" && root.boardJob === null
+                                onPressed: root.transferConfirm = true
+                            }
+                            Action { label: "Cancel"; onPressed: { root.transferTarget = ""; transferToField.text = "" } }
+                        }
+                        Card {
+                            visible: root.transferConfirm
+                            Layout.fillWidth: true
+                            Hint {
+                                color: root.ink
+                                text: "Give " + root.transferTarget + " to " + Logic.keyShown(transferToField.text.trim().replace(/^(Public|Private)\//, "")) + "? It's proven on this computer, about 4 minutes, and then it's theirs."
+                            }
+                            RowLayout {
+                                spacing: 8
+                                Action {
+                                    label: "Yes, transfer it"
+                                    grave: true
+                                    enabledNow: root.boardJob === null
+                                    onPressed: root.transferNow()
+                                }
+                                Action { label: "Cancel"; onPressed: root.transferConfirm = false }
+                            }
+                        }
+                    }
+
+                    // Take a name someone handed to you (names receive-privately).
+                    Card {
+                        Layout.fillWidth: true
+                        Part { Layout.topMargin: 0; text: "Got a name from someone?" }
+                        Hint { font.pixelSize: root.px(15); text: "Once they've transferred it to one of your accounts, set it up here: payments to it start arriving privately, at a new account of yours, and it joins My names." }
+                        RowLayout {
+                            spacing: 8
+                            Field { id: takeNameField; Layout.preferredWidth: 260; size: 17; hint: "The name, such as ada" }
+                            Action {
+                                label: "Set it up"
+                                enabledNow: takeNameField.text.trim() !== "" && root.boardJob === null
+                                onPressed: root.takeName(takeNameField.text.trim())
+                            }
+                        }
+                    }
+                    Hint {
+                        visible: root.boardJob !== null && /^cli_(transfer|receive_privately)$/.test(root.boardJob.kind)
+                        color: root.brass
+                        font.pixelSize: root.px(15)
+                        text: root.boardJob === null ? "" : root.boardJob.label + ": proving it on this computer. About 4 min, " + Math.max(0, Math.floor((Math.max(root.clockTick, Date.now()) - root.boardJob.started) / 60000)) + " so far."
+                    }
+                    Hint { visible: root.notice !== "" && root.walletView === "names"; color: root.noticeIsError ? root.alarm : root.good; font.pixelSize: root.px(15); text: root.notice }
                 }
 
                 // ── Add a token by its address ──
@@ -7831,7 +7950,7 @@ Item {
 
                         Hint {
                             visible: root.editTab === "giveup" && root.cliHeld
-                            text: "For a name held privately, transfer and release it with the names CLI: names transfer, names release."
+                            text: "To hand this name to someone, use Names → Transfer… beside it. To give it up for good, use the names CLI: names release."
                         }
                         RowLayout {
                             visible: root.editTab === "giveup" && !root.cliHeld

@@ -306,6 +306,15 @@ pub trait NamesModule: Send + 'static {
     /// Starts `names set-text`; an empty value removes the entry.
     fn cli_set_text(&mut self, name: String, key: String, value: String) -> String;
 
+    /// Hands a name the names CLI holds to `new_owner` (`Public/…`, `Private/…` or a bare
+    /// account ID), as a job: `names transfer`. Its receiving keys, text entries and page
+    /// are cleared; the new holder runs `receive-privately`. It can't be undone.
+    fn cli_transfer(&mut self, name: String, new_owner: String) -> String;
+
+    /// Sets up payments to a name the wallet holds (one handed to it), as a job:
+    /// `names receive-privately`.
+    fn cli_receive_privately(&mut self, name: String) -> String;
+
     /// Registers `name` through the names CLI, from its private account, so
     /// the holder never appears on chain. Starts a job like `cli_set_text`;
     /// it ends once the commitment is made (a proof of a few minutes), and
@@ -997,7 +1006,7 @@ const NAMES_APP: &str = "names_ui";
 /// `get_config` reports it so the Names app can refuse a module from another
 /// release (the app's own metadata asks for at least this at install, but an
 /// older module can still be the one loaded).
-const MODULE_VERSION: &str = "0.15.2";
+const MODULE_VERSION: &str = "0.15.3";
 
 /// Whether `caller` may use those methods. Basecamp gives each app its own
 /// credential, named after the app, so the module knows which app is calling.
@@ -2400,6 +2409,33 @@ impl NamesModule for Names {
                 }
             }
         })
+    }
+
+    fn cli_transfer(&mut self, name: String, new_owner: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let command = match cli::transfer_args(&name, &new_owner) {
+            Ok(command) => command,
+            Err(error) => return reply(Err(error)),
+        };
+        let to = command[3].clone();
+        let out = self.cli_job(&name, "transfer", |_, _, _| Ok((command, None, Value::Null)));
+        log_started(&out, json!({ "kind": "transfer", "chain": "lez", "name": registry::normalize_name(&name), "to": to }));
+        // The names it holds change: read them afresh.
+        self.forget_mine();
+        out
+    }
+
+    fn cli_receive_privately(&mut self, name: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let command = match cli::receive_privately_args(&name) {
+            Ok(command) => command,
+            Err(error) => return reply(Err(error)),
+        };
+        self.cli_job(&name, "receive_privately", |_, _, _| Ok((command, None, Value::Null)))
     }
 
     fn cli_set_text(&mut self, name: String, key: String, value: String) -> String {

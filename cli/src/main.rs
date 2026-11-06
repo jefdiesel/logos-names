@@ -2888,6 +2888,9 @@ async fn main() -> Result<()> {
                 .await
         }
         Command::ReceivePrivately { name } => {
+            // Checked first, so a name this wallet doesn't hold leaves no new account behind (SC-7).
+            let (Derived { id, .. }, record, _) = client.lookup(&name).await?;
+            client.holder(&name, &id, &record)?;
             let (account, npk, vpk) = client.new_receiving_keys()?;
             println!("made private account Private/{account} to receive payments to {name}{NAME_SUFFIX}");
             client
@@ -2898,6 +2901,12 @@ async fn main() -> Result<()> {
                 })
                 .await?;
             println!("payments arrive privately; see them with `names wallet account sync-private`");
+            // A name handed to this wallet is listed by `names mine` from now on.
+            let mut defaults = load_defaults();
+            if !defaults.names.contains(&name) {
+                defaults.names.push(name.clone());
+                save_defaults(&defaults)?;
+            }
             Ok(())
         }
         Command::SetLogosAccount { name, address } => {

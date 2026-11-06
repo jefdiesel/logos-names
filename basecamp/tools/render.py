@@ -97,6 +97,7 @@ BRIDGE = r"""
                 { id: "a3", at: Date.now() - 26 * 3600000, kind: "pay", chain: "lez", name: "ada", amount: "250000", fee: "4088", state: "done", job: "ada-1" },
                 { id: "a4", at: Date.now() - 30 * 3600000, kind: "arrived", chain: "lez", to: "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", amount: "5000000", state: "arrived" },
                 { id: "a5", at: Date.now() - 50 * 3600000, kind: "pay_account", chain: "lez", to: "Public/FaPur3GjBrXZoE5Yz6bNjLeqXJzEn6pzXEdE9MCJZsdg", amount: "1000", state: "failed" }])
+            if (method === "cli_transfer" || method === "cli_receive_privately") return ok({ id: args[0] + "-1792000000010", name: args[0], kind: method.substr(4), state: "running", started: Date.now() - 30000 })
             if (method === "cli_receive") return ok({ id: "-wallet-1792000000009", name: "-wallet", kind: "receive", state: "running", started: Date.now() - 60000 })
             // Getting started. Stand-ins only: nothing is installed, no wallet is made.
             if (method === "cli_status") return ok(Object.assign({ cli: "/Users/you/.config/logos-names/bin/names", prover: true, installing: null, wallet_dir: "/Users/you/.lee/wallet",
@@ -220,6 +221,7 @@ SCENARIOS = {
     "wallet-account-main": 'root.openWallet("home"); Qt.callLater(function() { root.openAccount(root.walletGroups[0].rows[0]) })',
     "wallet-account-chain": 'root.openWallet("home"); Qt.callLater(function() { var g = root.walletGroups.filter(function(x) { return x.id === "chain" || (x.rows[0] && x.rows[0].kind === "chain") })[0]; root.openAccount(g.rows[0]) })',
     "wallet-activity-page": 'root.go("activity"); root.loadActivity()',
+    "wallet-names-transfer": 'root.openWallet("names"); root.loadCliMine(); Qt.callLater(function() { root.openTransfer("hopper"); transferToField.text = "9uwkVJuXScDwLKVtQMcHFU9Hvb3uZjiEDVvDv4PYjCfM"; root.transferConfirm = true })',
     "wallet-send-address": 'root.openWallet("home"); Qt.callLater(function() { root.openSend(root.walletGroups[0].rows.filter(function(r) { return r.canSend && !r.fromPrivate })[0], ""); sendTo.text = "9uwkVJuXScDwLKVtQMcHFU9Hvb3uZjiEDVvDv4PYjCfM"; sendAmount.text = "69420000" })',
     "wallet-row-history": 'root.openWallet("home"); root.walletRowOpen = "chain-66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b"',
     "wallet-bridge-private": 'root.openWallet("home"); Qt.callLater(function() { root.openGetTokens(); root.bridgeToPrivate = true; bridgeAmountField.text = "1000000" })',

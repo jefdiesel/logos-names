@@ -6,7 +6,8 @@
 # account of the same wallet paying that fee (campaign finding SC-1, 2026-11-06).
 #
 #   1. R makes P (the receiving account, empty) and Q, funded from a public account.
-#   2. S pays P's keys 3,000,000 from a public account: P still holds 0, and both
+#   2. S pays P's keys 3,000,000 from its own private account (a private payment's fee is
+#      paid inside the proof, by a private account of the sender): P still holds 0, and both
 #      `names balance` and `names receive --list` say a payment waits.
 #   3. `names receive`: P holds exactly 3,000,000, Q paid the fee, nothing waits after.
 #   4. Refusals: no other private account to pay the fee; a public --fee-from.
@@ -67,10 +68,14 @@ R wallet account sync-private > /dev/null 2>&1 || true
 Q0=$(priv "$Q"); P0=$(priv "$P")
 echo "P=Private/$P holds ${P0:-0}; Q=Private/$Q holds $Q0"
 [ "${Q0:-0}" -gt 6000000 ] || fail "Q was not funded"
+# The sender's own private account, as names setup makes one: it pays from there.
+SP=$(S wallet account new private | id_of Private); [ -n "$SP" ] || fail "S's private account"
+S wallet auth-transfer send --from "Public/$F" --to "Private/$SP" --amount 20000000 2>&1 | clean
+S wallet account sync-private > /dev/null 2>&1 || true
 
 say "2. S pays P's keys 3,000,000 (a payment to a name's receiving keys looks just like this)"
 R wallet account show-keys --account-id "Private/$P" > "$WORK/p-keys.txt"
-S wallet auth-transfer send --from "Public/$F" --to-keys "$WORK/p-keys.txt" --amount 3000000 2>&1 | clean
+S wallet auth-transfer send --from "Private/$SP" --to-keys "$WORK/p-keys.txt" --amount 3000000 2>&1 | clean
 R wallet account sync-private > /dev/null 2>&1 || true
 P1=$(priv "$P"); echo "P holds ${P1:-0} before claiming"
 [ "${P1:-0}" -eq 0 ] || fail "P was credited without a claim (expected a pending credit)"
@@ -102,7 +107,8 @@ new_wallet "$WORK/lonely"
 L() { LEE_WALLET_HOME_DIR=$WORK/lonely "$NAMES" "$@"; }
 LP=$(L wallet account new private | id_of Private)
 L wallet account show-keys --account-id "Private/$LP" > "$WORK/lp-keys.txt"
-S wallet auth-transfer send --from "Public/$F" --to-keys "$WORK/lp-keys.txt" --amount 1000000 2>&1 | clean
+S wallet account sync-private > /dev/null 2>&1 || true
+S wallet auth-transfer send --from "Private/$SP" --to-keys "$WORK/lp-keys.txt" --amount 1000000 2>&1 | clean
 if L receive > "$WORK/refused-lonely.txt" 2>&1; then fail "a claim with nothing to pay its fee went ahead"; fi
 grep -qE "no other private account|move more into a private account" "$WORK/refused-lonely.txt" || { cat "$WORK/refused-lonely.txt"; fail "the refusal didn't say why"; }
 tail -1 "$WORK/refused-lonely.txt"

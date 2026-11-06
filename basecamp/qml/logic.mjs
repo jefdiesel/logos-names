@@ -371,6 +371,7 @@ export function activityLine(entry, now) {
     case "shield": title = "Moved to private"; sub = "on LEZ, from your public account"; sign = ""; break
     case "receive": title = "Claimed waiting payments"; sub = "on LEZ, into your private accounts"; sign = "+"; break
     case "token_send": title = "Sent a token"; sub = "to " + whoShown(e.to); break
+    case "transfer": title = "Gave " + (e.name || "a name") + " away"; sub = "to " + whoShown(e.to); sign = ""; break
     case "arrived": title = "Arrived"; sub = "in " + whoShown(e.to) + (e.chain === "logos" ? " on the Logos Blockchain" : " on LEZ"); sign = "+"; break
     default: title = kind; sub = ""
     }
