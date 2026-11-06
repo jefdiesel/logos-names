@@ -113,9 +113,9 @@ Item {
     property bool configKnown: false   // the names module has answered once
     // The names module this app needs: the same release (metadata.json asks for it
     // at install, but an older module can still be the one Basecamp loaded).
-    readonly property string neededModule: "0.15.1"
+    readonly property string neededModule: "0.15.2"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.15.3"
+    readonly property string appVersion: "0.15.4"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -754,7 +754,64 @@ Item {
     /// An amount as the Wallet shows it: grouped, a dash while unknown, dots when hidden.
     // ── History (activity in the module) ───────────────────────────────
     property var activityRows: []         // newest first, as `activity` gives it
-    property bool activityAll: false      // the Wallet's Activity shows every entry
+    property string activityFilter: ""    // Activity: "", "logos", "lez" or "bridge"
+    readonly property var activityShown: activityRows.filter(function(e) {
+        return activityFilter === "" || (activityFilter === "bridge" ? (e.kind === "bridge" || e.kind === "split") : e.chain === activityFilter)
+    })
+
+    property var walletAccount: null      // the account whose page is open: a Wallet row
+
+    /// Opens an account's own page: its balance, what it can do, its history.
+    function openAccount(row) {
+        walletAccount = row
+        walletView = "account"
+        loadActivity()
+    }
+
+    /// The account a Wallet row stands for, as the history names it: `Public/…`,
+    /// `Private/…`, or a node key.
+    function rowAccount(row) {
+        if (!row)
+            return ""
+        if (row.kind === "chain")
+            return row.key
+        if (row.account)
+            return row.account
+        if (row.kind === "lez")
+            return row.fromPrivate ? (cliBalance ? "Private/" + cliBalance.account : "") : (cliPublic ? "Public/" + cliPublic.account : "")
+        return ""
+    }
+
+    /// Whether Send works for `row`, and if not why: {enabled, reason, switchFirst}.
+    function sendState(row) {
+        if (!row)
+            return { enabled: false, reason: "", switchFirst: false }
+        if (row.balance === null || row.balance === undefined)
+            return { enabled: false, reason: "Its balance isn't known yet.", switchFirst: false }
+        if (/^0*$/.test(String(row.balance)))
+            return { enabled: false, reason: "Nothing to send from it.", switchFirst: false }
+        if (row.canSend || row.kind !== "lez")
+            return { enabled: true, reason: "", switchFirst: false }
+        if (cliOutdated)
+            return { enabled: false, reason: "Your names program sends only from your main accounts. The LEZ 0.4 update lifts this.", switchFirst: false }
+        return { enabled: true, reason: "", switchFirst: true }
+    }
+
+    /// Send from `row`: from another LEZ account, it becomes the paying one first.
+    function sendFrom(row) {
+        var state = sendState(row)
+        if (!state.enabled)
+            return
+        if (!state.switchFirst) {
+            openSend(row, "")
+            return
+        }
+        accountChange("cli_account_use", [row.account], function() {
+            var same = Object.assign({}, row)
+            same.canSend = true
+            openSend(same, "")
+        })
+    }
 
     function loadActivity() {
         askLater("activity", [""], function(value) {
@@ -4382,6 +4439,7 @@ Item {
                 }
 
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Wallet"; current: root.section === "wallet" && root.walletView !== "names"; onPressed: root.openWallet("home") }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Activity"; current: root.section === "activity"; onPressed: { root.go("activity"); root.loadActivity() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Names"; current: root.section === "wallet" && root.walletView === "names"; onPressed: { root.openWallet("names"); root.loadCliMine() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Messages"; current: root.section === "messages"; onPressed: { root.go("messages"); root.chatLoad() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Profile"; current: root.section === "profile"; onPressed: { root.say("", false); root.openProfile() } }
@@ -4613,6 +4671,50 @@ Item {
                         enabledNow: root.cliPath !== "" && root.hasCliWallet
                         onPressed: root.openRegister()
                     }
+                }
+            }
+        }
+
+        // Activity: everything the Wallet sent or saw arrive.
+        Flickable {
+            visible: root.section === "activity" && !root.needsWelcome
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            contentHeight: activityPage.implicitHeight + 72
+            clip: true
+            ColumnLayout {
+                id: activityPage
+                x: 32
+                y: 32
+                width: Math.min(parent.width - 64, 760)
+                spacing: 8
+                RowLayout {
+                    Layout.fillWidth: true
+                    Text { text: "Activity"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
+                    Item { Layout.fillWidth: true }
+                    Link { text: "Refresh"; color: root.faint; font.pixelSize: root.px(15); onPressed: { root.loadActivity(); root.loadCliBalance(); root.loadChain() } }
+                }
+                Hint { font.pixelSize: root.px(14); text: "What this app sent on the Logos Blockchain and LEZ, followed until it settles, and money seen arriving. Kept on this computer: neither chain is asked for history." }
+                Row {
+                    spacing: 8
+                    Repeater {
+                        model: [{ key: "", label: "All" }, { key: "logos", label: "Logos Blockchain" }, { key: "lez", label: "LEZ" }, { key: "bridge", label: "Bridges" }]
+                        Tab {
+                            required property var modelData
+                            label: modelData.label
+                            current: root.activityFilter === modelData.key
+                            onPressed: root.activityFilter = modelData.key
+                        }
+                    }
+                }
+                Hint {
+                    visible: root.activityShown.length === 0
+                    font.pixelSize: root.px(15)
+                    text: "Nothing yet. What you send, bridge or receive shows here."
+                }
+                Repeater {
+                    model: root.activityShown
+                    ActivityRow { required property var modelData; entry: modelData }
                 }
             }
         }
@@ -5070,7 +5172,7 @@ Item {
                                                 anchors.fill: parent
                                                 hoverEnabled: true
                                                 cursorShape: Qt.PointingHandCursor
-                                                onClicked: root.walletRowOpen = addressRow.open ? "" : addressRow.modelData.id
+                                                onClicked: root.openAccount(addressRow.modelData)
                                             }
                                         RowLayout {
                                             id: rowLine
@@ -5140,63 +5242,8 @@ Item {
                                                 horizontalAlignment: Text.AlignRight
                                                 Layout.minimumWidth: root.px(150)
                                             }
-                                            Text { text: addressRow.open ? "▾" : "▸"; color: root.dim; font.pixelSize: root.px(16); Layout.preferredWidth: root.px(16) }
+                                            Text { text: "›"; color: root.dim; font.pixelSize: root.px(20); Layout.preferredWidth: root.px(16) }
                                         }
-                                        }
-                                        // Its actions, opened in place.
-                                        Flow {
-                                            visible: addressRow.open
-                                            Layout.fillWidth: true
-                                            Layout.leftMargin: root.px(76)
-                                            Layout.rightMargin: root.px(18)
-                                            Layout.bottomMargin: root.px(14)
-                                            spacing: 8
-                                            Action {
-                                                visible: addressRow.modelData.canSend
-                                                label: "Send"
-                                                strong: true
-                                                enabledNow: addressRow.modelData.balance !== null && addressRow.modelData.balance !== "0"
-                                                onPressed: root.openSend(addressRow.modelData, "")
-                                            }
-                                            Action {
-                                                visible: !addressRow.modelData.canSend && addressRow.modelData.kind === "lez" && !root.cliOutdated
-                                                label: "Pay from this account"
-                                                onPressed: { root.useAccount(addressRow.modelData.account); root.loadAccounts() }
-                                            }
-                                            Action { label: "Receive"; onPressed: root.openReceive(addressRow.modelData) }
-                                            Action {
-                                                visible: addressRow.modelData.kind === "chain" || addressRow.modelData.kind === "lez"
-                                                label: "Bridge"
-                                                onPressed: addressRow.modelData.kind === "chain" ? root.openGetTokens(addressRow.modelData.key) : root.openBridgeFromLez(addressRow.modelData.account)
-                                            }
-                                            Action {
-                                                visible: addressRow.modelData.kind === "chain"
-                                                label: "Staking ›"
-                                                tint: root.orange
-                                                strong: true
-                                                onPressed: { root.walletView = "stake"; root.loadChain() }
-                                            }
-                                            Action {
-                                                visible: addressRow.modelData.kind === "token" && root.watchedTokens.indexOf(addressRow.modelData.definition) >= 0
-                                                label: "Remove"
-                                                onPressed: root.removeToken(addressRow.modelData.definition)
-                                            }
-                                        }
-                                        // This account's own history.
-                                        ColumnLayout {
-                                            readonly property var mine: Logic.activityFor(root.activityRows, addressRow.modelData.kind === "chain" ? addressRow.modelData.key : addressRow.modelData.account)
-                                            visible: addressRow.open && addressRow.modelData.kind !== "token"
-                                            Layout.fillWidth: true
-                                            Layout.leftMargin: root.px(64)
-                                            Layout.rightMargin: root.px(12)
-                                            Layout.bottomMargin: root.px(10)
-                                            spacing: 0
-                                            Text { text: "History"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(13); font.weight: Font.DemiBold }
-                                            Hint { visible: parent.mine.length === 0; font.pixelSize: root.px(13); text: "Nothing sent or received here yet, as far as this app has seen." }
-                                            Repeater {
-                                                model: parent.mine.slice(0, 5)
-                                                ActivityRow { required property var modelData; entry: modelData; small: true }
-                                            }
                                         }
                                     }
                                 }
@@ -5227,56 +5274,6 @@ Item {
                                 text: (root.tokenPending.length === 1 ? "1 token payment is" : root.tokenPending.length + " token payments are") + " waiting for you. Taking each in is proved on this computer, 7-12 minutes."
                             }
                             Action { label: "Take it in"; strong: true; enabledNow: root.tokenJob === null; onPressed: root.tokenReceive() }
-                        }
-                    }
-
-                    // Activity: what this app sent, on either chain, and money seen arriving.
-                    Rectangle {
-                        Layout.fillWidth: true
-                        implicitHeight: activityList.implicitHeight + root.px(24)
-                        radius: 12
-                        color: root.card
-                        border.width: 1
-                        border.color: root.line
-                        ColumnLayout {
-                            id: activityList
-                            anchors.left: parent.left
-                            anchors.right: parent.right
-                            anchors.top: parent.top
-                            anchors.margins: root.px(12)
-                            spacing: 2
-                            RowLayout {
-                                Layout.fillWidth: true
-                                Layout.leftMargin: root.px(6)
-                                Layout.bottomMargin: root.px(4)
-                                Text { text: "Activity"; color: root.ink; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(18) }
-                                Item { Layout.fillWidth: true }
-                                Link {
-                                    visible: root.activityRows.length > 6
-                                    text: root.activityAll ? "Show less" : "Show all (" + root.activityRows.length + ")"
-                                    color: root.dim
-                                    font.pixelSize: root.px(14)
-                                    onPressed: root.activityAll = !root.activityAll
-                                }
-                            }
-                            Hint {
-                                visible: root.activityRows.length === 0
-                                Layout.leftMargin: root.px(6)
-                                font.pixelSize: root.px(14)
-                                text: "Nothing yet. What you send, bridge or receive shows here."
-                            }
-                            Repeater {
-                                model: root.activityAll ? root.activityRows : root.activityRows.slice(0, 6)
-                                ActivityRow { required property var modelData; entry: modelData }
-                            }
-                            Hint {
-                                visible: root.activityRows.length > 0
-                                Layout.leftMargin: root.px(6)
-                                Layout.topMargin: root.px(4)
-                                font.pixelSize: root.px(12)
-                                color: root.faint
-                                text: "Kept on this computer: what this app sent, followed until it settles, and money seen arriving between reads."
-                            }
                         }
                     }
 
@@ -5757,6 +5754,112 @@ Item {
                             Item { Layout.fillWidth: true }
                             Link { text: "Remove"; font.pixelSize: root.px(15); onPressed: root.removeToken(watchedRow.modelData) }
                         }
+                    }
+                }
+
+                // One account's own page.
+                ColumnLayout {
+                    id: accountPage
+                    visible: root.walletView === "account" && root.walletAccount !== null
+                    readonly property var row: root.walletAccount
+                    readonly property var send: root.sendState(row)
+                    readonly property var mine: Logic.activityFor(root.activityRows, root.rowAccount(row))
+                    Layout.fillWidth: true
+                    Layout.maximumWidth: 720
+                    spacing: 12
+                    Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: root.px(14)
+                        Avatar {
+                            visible: accountPage.row !== null && accountPage.row.name !== undefined && accountPage.row.name !== ""
+                            Layout.preferredWidth: root.px(52)
+                            Layout.preferredHeight: root.px(52)
+                            pixels: visible && root.boardPeople[accountPage.row.name] ? root.boardPeople[accountPage.row.name].pixels : null
+                            owner: visible ? accountPage.row.name : ""
+                            letter: visible ? accountPage.row.name.charAt(0) : ""
+                        }
+                        Rectangle {
+                            visible: accountPage.row !== null && (accountPage.row.name === undefined || accountPage.row.name === "")
+                            implicitWidth: root.px(52)
+                            implicitHeight: root.px(52)
+                            radius: height / 2
+                            color: root.raised
+                            border.width: 2
+                            border.color: accountPage.row === null ? root.line : accountPage.row.kind === "chain" ? root.orange : accountPage.row.fromPrivate ? root.brass : root.line
+                            Text { anchors.centerIn: parent; text: accountPage.row ? accountPage.row.title.charAt(0).toUpperCase() : ""; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.Bold }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 2
+                            Text { text: accountPage.row ? accountPage.row.title : ""; color: root.ink; font.family: root.sans; font.pixelSize: root.px(26); font.weight: Font.DemiBold }
+                            Text {
+                                Layout.fillWidth: true
+                                elide: Text.ElideRight
+                                text: accountPage.row ? accountPage.row.sub : ""
+                                color: accountPage.row && accountPage.row.fromPrivate ? root.brass : root.dim
+                                font.family: root.sans
+                                font.pixelSize: root.px(14)
+                            }
+                        }
+                        Text {
+                            text: accountPage.row ? root.amountShown(accountPage.row.balance) : ""
+                            color: root.ink
+                            font.family: root.sans
+                            font.pixelSize: root.px(28)
+                            font.weight: Font.DemiBold
+                        }
+                    }
+                    Fact {
+                        visible: accountPage.row !== null && accountPage.row.address !== undefined && accountPage.row.address !== ""
+                        label: "Address"
+                        code: true
+                        value: accountPage.row ? accountPage.row.address : ""
+                        full: accountPage.row ? accountPage.row.address : ""
+                    }
+                    Flow {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Action {
+                            visible: accountPage.row !== null
+                            label: root.accountsBusy ? "Switching…" : "Send"
+                            strong: true
+                            enabledNow: accountPage.send.enabled && !root.accountsBusy
+                            onPressed: root.sendFrom(accountPage.row)
+                        }
+                        Action { label: "Receive"; onPressed: root.openReceive(accountPage.row) }
+                        Action {
+                            visible: accountPage.row !== null && (accountPage.row.kind === "chain" || accountPage.row.kind === "lez")
+                            label: "Bridge"
+                            onPressed: accountPage.row.kind === "chain" ? root.openGetTokens(accountPage.row.key) : root.openBridgeFromLez(root.rowAccount(accountPage.row))
+                        }
+                        Action {
+                            visible: accountPage.row !== null && accountPage.row.kind === "lez" && !accountPage.row.canSend && !root.cliOutdated
+                            label: "Make it the paying account"
+                            enabledNow: !root.accountsBusy
+                            onPressed: { root.useAccount(accountPage.row.account); root.walletView = "home" }
+                        }
+                        Action {
+                            visible: accountPage.row !== null && accountPage.row.kind === "chain"
+                            label: "Staking ›"
+                            tint: root.orange
+                            strong: true
+                            onPressed: { root.walletView = "stake"; root.loadChain() }
+                        }
+                        Action {
+                            visible: accountPage.row !== null && accountPage.row.kind === "token" && root.watchedTokens.indexOf(accountPage.row.definition) >= 0
+                            label: "Remove"
+                            onPressed: { root.removeToken(accountPage.row.definition); root.walletView = "home" }
+                        }
+                    }
+                    Hint { visible: accountPage.send.reason !== ""; font.pixelSize: root.px(14); text: accountPage.send.reason }
+                    Hint { visible: accountPage.send.switchFirst; font.pixelSize: root.px(14); text: "Send makes this the account payments come from, then opens the form." }
+                    Hint { visible: root.accountsError !== ""; color: root.alarm; font.pixelSize: root.px(14); text: root.accountsError }
+                    Part { text: "History" }
+                    Hint { visible: accountPage.mine.length === 0; font.pixelSize: root.px(14); text: "Nothing sent or received here yet, as far as this app has seen." }
+                    Repeater {
+                        model: accountPage.mine
+                        ActivityRow { required property var modelData; entry: modelData }
                     }
                 }
 

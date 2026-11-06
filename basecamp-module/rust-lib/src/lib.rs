@@ -997,7 +997,7 @@ const NAMES_APP: &str = "names_ui";
 /// `get_config` reports it so the Names app can refuse a module from another
 /// release (the app's own metadata asks for at least this at install, but an
 /// older module can still be the one loaded).
-const MODULE_VERSION: &str = "0.15.1";
+const MODULE_VERSION: &str = "0.15.2";
 
 /// Whether `caller` may use those methods. Basecamp gives each app its own
 /// credential, named after the app, so the module knows which app is calling.
@@ -2568,7 +2568,10 @@ impl NamesModule for Names {
             })
         })());
         let moved = cli::setup_args(&amount).ok().and_then(|command| command[1].strip_prefix("--shield=").map(str::to_owned));
-        log_started(&out, json!({ "kind": "shield", "chain": "lez", "amount": moved }));
+        let (from, to) = self.cli_setup().ok().map_or((None, None), |setup| {
+            (cli::default_public(&setup).ok().map(|id| format!("Public/{id}")), cli::default_private(&setup).ok().map(|id| format!("Private/{id}")))
+        });
+        log_started(&out, json!({ "kind": "shield", "chain": "lez", "from": from, "to": to, "amount": moved }));
         out
     }
 
@@ -2659,7 +2662,10 @@ impl NamesModule for Names {
             }
             self.wallet_job("pay_account", |setup| cli::pay_account_args(setup, &account, &amount, from_private))
         })());
-        log_started(&out, json!({ "kind": "pay_account", "chain": "lez", "to": account.trim(), "amount": cli::ungrouped(&amount), "private": from_private }));
+        let from = self.cli_setup().ok().and_then(|setup| {
+            if from_private { cli::default_private(&setup).ok().map(|id| format!("Private/{id}")) } else { cli::default_public(&setup).ok().map(|id| format!("Public/{id}")) }
+        });
+        log_started(&out, json!({ "kind": "pay_account", "chain": "lez", "from": from, "to": account.trim(), "amount": cli::ungrouped(&amount), "private": from_private }));
         out
     }
 
@@ -2901,7 +2907,8 @@ impl NamesModule for Names {
             Err(error) => return reply(Err(error)),
         };
         let out = self.cli_job(&name, "pay", |_, _, _| Ok((command, None, Value::Null)));
-        log_started(&out, json!({ "kind": "pay", "chain": "lez", "name": registry::normalize_name(&name), "amount": cli::ungrouped(&amount) }));
+        let from = self.cli_setup().ok().and_then(|setup| cli::default_private(&setup).ok()).map(|id| format!("Private/{id}"));
+        log_started(&out, json!({ "kind": "pay", "chain": "lez", "from": from, "name": registry::normalize_name(&name), "amount": cli::ungrouped(&amount) }));
         out
     }
 
@@ -3152,7 +3159,10 @@ impl NamesModule for Names {
                 Ok(command)
             })
         })());
-        log_started(&out, json!({ "kind": "token_send", "chain": "lez", "to": to.trim(), "amount": cli::ungrouped(&amount), "token": definition.trim() }));
+        let from = self.cli_setup().ok().and_then(|setup| {
+            if from_private { cli::default_private(&setup).ok().map(|id| format!("Private/{id}")) } else { cli::default_public(&setup).ok().map(|id| format!("Public/{id}")) }
+        });
+        log_started(&out, json!({ "kind": "token_send", "chain": "lez", "from": from, "to": to.trim(), "amount": cli::ungrouped(&amount), "token": definition.trim() }));
         out
     }
 

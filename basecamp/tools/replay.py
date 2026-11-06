@@ -38,6 +38,8 @@ SCENARIOS = {
     "receive": 'root.openReceive({ kind: "lez" })',
     "names": 'root.openWallet("names")',
     "settings": 'root.section = "settings"; root.loadAccounts()',
+    "account-low": 'root.openAccount(root.walletGroups[0].rows.filter(function(r) { return !r.canSend && r.balance !== "0" })[0])',
+    "activity": 'root.section = "activity"; root.loadActivity()',
     "profile": "root.openProfile()",
     "search-jef": 'root.go("search"); root.show("jef")',
     "send": 'Qt.callLater(function() { var rows = root.walletRows.filter(function(r) { return r.kind === "lez" }); if (rows.length) root.openSend(rows[0], "jef") })',
