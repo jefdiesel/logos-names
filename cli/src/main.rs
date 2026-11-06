@@ -288,6 +288,9 @@ enum Command {
         /// Only list what is waiting.
         #[arg(long)]
         list: bool,
+        /// Claim even what is worth less than claiming it costs (a small fee refund).
+        #[arg(long)]
+        all: bool,
     },
     /// List the names this wallet holds. A name someone transferred to you is listed
     /// once you `--add` it: the chain is checked that this wallet holds it.
@@ -1863,7 +1866,7 @@ impl Client {
     /// a name's private keys arrive this way). Each claim is a private transaction whose
     /// fee comes from `fee_from`, or the private account of this wallet that holds the
     /// most: the receiving account starts empty and can't pay it (SC-1).
-    async fn receive(&mut self, fee_from: Option<AccountId>, list: bool) -> Result<()> {
+    async fn receive(&mut self, fee_from: Option<AccountId>, list: bool, all: bool) -> Result<()> {
         self.wallet.sync_to_latest_block().await.ok();
         let pending: Vec<_> = self
             .wallet
@@ -1892,6 +1895,22 @@ impl Client {
         }
         let quote = self.wallet.client().get_fee_state().await?;
         let fee = fees::private(&quote, self.wallet.config().private_fee_headroom_blocks);
+        // A credit worth less than claiming it costs (a private fee's refund, most often) is
+        // left: claiming it would lose money. `--all` claims it anyway.
+        let (pending, left): (Vec<_>, Vec<_>) =
+            pending.into_iter().partition(|message| all || message.native_credit().unwrap_or(0) > fee.about);
+        for message in &left {
+            println!(
+                "left waiting: {} to Private/{}: claiming it costs about {}, more than it holds (`names receive --all` claims it anyway)",
+                message.native_credit().unwrap_or(0),
+                message.body.to.account_id,
+                fee.about
+            );
+        }
+        if pending.is_empty() {
+            println!("nothing worth claiming");
+            return Ok(());
+        }
         let receivers: std::collections::BTreeSet<AccountId> =
             pending.iter().map(|message| message.body.to.account_id).collect();
         let private_balance = |client: &Self, id: AccountId| {
@@ -2723,20 +2742,33 @@ async fn main() -> Result<()> {
                 }
             }
             println!("private total: {total_private}");
-            // Payments to your name's private keys wait until you claim them (SC-1).
+            // Payments to your name's private keys wait until you claim them (SC-1); those
+            // worth less than a claim costs (a fee's refund) are told apart.
             if let Ok(pending) = client.wallet.owned_pending_messages().await {
                 let credits: Vec<u128> = pending.iter().filter_map(|message| message.native_credit()).collect();
-                if !credits.is_empty() {
+                let claim = match client.wallet.client().get_fee_state().await {
+                    Ok(quote) => fees::private(&quote, client.wallet.config().private_fee_headroom_blocks).about,
+                    Err(_) => 0,
+                };
+                let (worth, small): (Vec<u128>, Vec<u128>) = credits.into_iter().partition(|amount| *amount > claim);
+                if !worth.is_empty() {
                     println!(
                         "waiting to be claimed: {} payment(s), {} in all; run `names receive`",
-                        credits.len(),
-                        credits.iter().sum::<u128>()
+                        worth.len(),
+                        worth.iter().sum::<u128>()
+                    );
+                }
+                if !small.is_empty() {
+                    println!(
+                        "also waiting, worth less than claiming costs (about {claim}): {} credit(s), {} in all",
+                        small.len(),
+                        small.iter().sum::<u128>()
                     );
                 }
             }
             Ok(())
         }
-        Command::Receive { fee_from, list } => client.receive(fee_from, list).await,
+        Command::Receive { fee_from, list, all } => client.receive(fee_from, list, all).await,
         Command::Mine { add } => {
             if let Some(name) = add {
                 let (Derived { id, .. }, record, _) = client.lookup(&name).await?;

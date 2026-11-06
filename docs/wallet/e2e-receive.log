@@ -1,0 +1,49 @@
+
+## 18:17:06 fresh standalone sequencer on http://127.0.0.1:3260
+
+## 18:17:09 1. R: P to receive (empty), Q funded from a public account
+Transaction hash is 8a23bee4899ad6888beda57b90c664b2906942150aca380d01e3f41546a4cb27
+Transaction is included in block 22
+P=Private/95oFRGH1GY11uNixQjFaFBTDbrtumrGbLUmmPaXgvMnB holds 0; Q=Private/HY5D6c5cJmugxS7rnSsDtS6Wfg2UupAZ8Bh3wagks5d8 holds 24929384
+Transaction hash is 6b07989f08901427cb2e1bde6a406119575849f777045567528bfcbb3775e83f
+Transaction is included in block 43
+
+## 18:27:47 2. S pays P's keys 12,000,000 (a payment to a name's receiving keys looks just like this)
+Transaction hash is 48019b86f7930a0302f7f31fceeffe0fc1840ad7488e8aa9cce9b4890c1a0d64
+Transaction is included in block 78
+P holds 0 before claiming
+private total: 24929384
+Latest block is 78
+waiting to be claimed: 1 payment(s), 12000000 in all; run `names receive`
+Latest block is 78
+Latest block is 78
+1 payment(s) waiting, 12000000 in all:
+  12000000 to Private/95oFRGH1GY11uNixQjFaFBTDbrtumrGbLUmmPaXgvMnB (position 28)
+
+## 18:36:27 4a. refused: a public account can't pay a claim's fee (inside the proof)
+
+## 18:36:27 3. names receive: Q pays the fee, P gets the whole 12,000,000
+Latest block is 78
+Latest block is 78
+1 payment(s) waiting, 12000000 in all:
+  12000000 to Private/95oFRGH1GY11uNixQjFaFBTDbrtumrGbLUmmPaXgvMnB (position 28)
+fee: about 5070616, at most 8239751 (each claim, paid from Private/HY5D6c5cJmugxS7rnSsDtS6Wfg2UupAZ8Bh3wagks5d8 inside the proof)
+receiving 12000000 into Private/95oFRGH1GY11uNixQjFaFBTDbrtumrGbLUmmPaXgvMnB; proving it on this computer (several minutes)
+submitted 52ba326307226acb94edc8491459dc43b21e4ad7b365f90059953e9e99558a4b
+received in block 113; Private/95oFRGH1GY11uNixQjFaFBTDbrtumrGbLUmmPaXgvMnB now holds 12000000
+MEASURED claim: took 526 s; P 0 -> 12000000; Q 24929384 -> 16689633 (fee 8239751)
+Latest block is 113
+Latest block is 113
+1 payment(s) waiting, 3169135 in all:
+  3169135 to Private/2tUr2oybZXFtSBNgu8txutNxfzSYUv4nVmB6dGxQktFp (position 37)
+left waiting: 3169135 to Private/2tUr2oybZXFtSBNgu8txutNxfzSYUv4nVmB6dGxQktFp: claiming it costs about 5070616, more than it holds (`names receive --all` claims it anyway)
+nothing worth claiming
+(a fee refund is left waiting, worth less than claiming it costs)
+
+## 18:45:14 4b. refused: a wallet whose only private account is the one being paid
+Transaction hash is cc751009ada467a00b0167235843472dc4c92e4871727a65d0f2e9d274686518
+Transaction is included in block 149
+Error: a claim costs at most 8239751 (about 5070616), paid from Private/6BtDt7ASiEShEy3CRdC5WfNWQFFgiSKpH6kQCHfeTjBB, which holds 0; move more into a private account first (`names setup --shield=<amount>`)
+
+## 18:54:10 PASS: a payment to private keys waits, names balance and receive --list say so, names receive claims all of it with another account paying the fee
+sequencer stopped
