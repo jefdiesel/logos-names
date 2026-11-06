@@ -115,7 +115,7 @@ Item {
     // at install, but an older module can still be the one Basecamp loaded).
     readonly property string neededModule: "0.15.3"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.15.7"
+    readonly property string appVersion: "0.15.8"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -831,6 +831,12 @@ Item {
         onTriggered: { root.loadActivity(); root.loadCliBalance() }
     }
 
+    /// A row's subtitle with only its kind marked: "Private" in brass, the rest dim.
+    function subShown(sub) {
+        var text = String(sub || "").replace(/&/g, "&amp;").replace(/</g, "&lt;")
+        return /^Private/.test(text) ? "<font color=\"" + brass + "\">Private</font>" + text.substr(7) : text
+    }
+
     function amountShown(value) {
         if (walletHidden)
             return "••••••"
@@ -913,6 +919,19 @@ Item {
         walletView = "receive"
     }
 
+    property bool sendFromOpen: false      // Send's From list is open
+
+    function sendRowIsCurrent(row) {
+        return row.kind === sendKind && row.definition === sendDefinition && (row.kind === "chain" ? row.key === chainFrom : row.fromPrivate === sendFromPrivate)
+    }
+    function sendFromRow() {
+        var found = walletRows.filter(function(row) { return sendRowIsCurrent(row) })
+        return found.length > 0 ? found[0] : null
+    }
+    function sendRowTitle(row) {
+        return row.kind === "chain" ? "Logos Blockchain" : row.kind === "lez" ? "LEZ · " + row.title : row.title
+    }
+
     /// What Send's To means: a bare LEZ account ID, as copied from a wallet, is that public
     /// account (`Public/` added); a name can't have capitals, so it is never one.
     function sendToResolved() {
@@ -992,7 +1011,7 @@ Item {
         var proves = sendToName() || sendFromPrivate
         if (!proves)
             return "One block, about 30 seconds."
-        return sendKind === "token" ? "Proved on this computer first: 7-12 minutes." : "Proved on this computer first: about 4 minutes."
+        return sendKind === "token" ? "Proved on this computer first: 7-12 minutes." : "Proved on this computer first: usually 5–12 minutes."
     }
 
     /// The fee, in one line ("" while unknown).
@@ -1008,7 +1027,7 @@ Item {
         if (boardJob !== null && /^cli_pay/.test(boardJob.kind))
             return boardJob.kind === "cli_pay_account" && payingPublicly
                 ? boardJob.label + ": sending it publicly, one block (about 30 seconds)."
-                : boardJob.label + ": proving it on this computer. About 4 min, " + Math.max(0, Math.floor((Math.max(clockTick, Date.now()) - boardJob.started) / 60000)) + " so far."
+                : boardJob.label + ": proving it on this computer. Usually 5–12 min, " + Math.max(0, Math.floor((Math.max(clockTick, Date.now()) - boardJob.started) / 60000)) + " so far."
         if (tokenJob !== null)
             return tokenJobLine(tokenJob)
         if (chainBusy)
@@ -1138,6 +1157,7 @@ Item {
         return typed !== "" ? typed : bridgeAsked()[0]
     }
 
+    property bool bridgeReview: false    // Review was pressed: confirm at once if the plan is ready
     property bool bridgeFromOpen: false  // the From list is open
     property bool bridgeToOpen: false    // the To list is open
 
@@ -1246,6 +1266,10 @@ Item {
             } else {
                 bridgePlan = value
                 bridgePlanFor = asked.join("|")
+                // Review: a plan that can go straight away opens its confirmation.
+                if (bridgeReview && bridgePlanReady())
+                    bridgeConfirm = true
+                bridgeReview = false
             }
         }, function(message) {
             bridgeBusy = false
@@ -1627,7 +1651,7 @@ Item {
         if (shieldJob === null)
             return ""
         var minutes = Math.max(0, Math.floor((Math.max(clockTick, Date.now()) - shieldJob.started) / 60000))
-        return "Proving it on this computer, so the chain can't link your two accounts. About 4 min" + (minutes > 0 ? ", " + minutes + " so far." : ".")
+        return "Proving it on this computer, so the chain can't link your two accounts. Usually 5–12 min" + (minutes > 0 ? ", " + minutes + " so far." : ".")
     }
 
     Timer {
@@ -2053,17 +2077,17 @@ Item {
         var minutes = Math.floor((Date.now() - job.started) / 60000)
         var sofar = minutes > 0 ? ", " + minutes + " min so far" : ""
         if (job.kind === "register")
-            return "Step 1 of 3: proving the commitment on this computer. About 4 min" + sofar + "."
-        return "Proving the change on this computer, so the chain never learns your account. About 4 min" + sofar + "."
+            return "Step 1 of 3: proving the commitment on this computer. Usually 5–12 min" + sofar + "."
+        return "Proving the change on this computer, so the chain never learns your account. Usually 5–12 min" + sofar + "."
     }
 
     /// The three steps of a private registration, for the register card and its progress.
     readonly property var registerSteps: [
-        { title: "Prove the commitment", time: "about 4 min",
+        { title: "Prove the commitment", time: "5–12 min",
           why: "Your computer builds a zero-knowledge proof. The chain checks it without learning which account is yours." },
         { title: "Wait", time: "until 15 min after step 1",
           why: "The commitment hides which name you picked. Waiting means nobody who sees it can rush to take the name first." },
-        { title: "Prove and register", time: "about 4 min",
+        { title: "Prove and register", time: "5–12 min",
           why: "A second proof reveals the name and moves the deposit. Then it's yours." }
     ]
 
@@ -2083,7 +2107,7 @@ Item {
             return "Stopped. Open it to try again"
         var minutes = /about (\d+) minutes/.exec(entry.state)
         if (/finishing now/.test(entry.state))
-            return "Step 3 of 3 · about 4 min left"
+            return "Step 3 of 3 · usually 5–12 min"
         return "Step 2 of 3 · " + (minutes ? "waiting " + minutes[1] + " min" : /about a minute/.test(entry.state) ? "waiting 1 min" : "waiting") + ", then about 4"
     }
 
@@ -2721,7 +2745,7 @@ Item {
             return job.label + ": sending it publicly, one block (about 30 seconds), " + seconds + "s so far."
         if (heldPublicly(job.name) && (job.kind === "board_post" || job.kind === "board_toggle_like" || job.kind === "board_hide"))
             return job.label + ": sending it publicly, one block (about 30 seconds), " + seconds + "s so far."
-        return job.label + ": proving it on this computer, so the chain never learns your account. About 4 min, " + Math.floor(seconds / 60) + " so far."
+        return job.label + ": proving it on this computer, so the chain never learns your account. Usually 5–12 min, " + Math.floor(seconds / 60) + " so far."
     }
 
     /// The posts as a tree: each post, then its replies under it (oldest first),
@@ -4075,6 +4099,14 @@ Item {
         Layout.topMargin: root.px(act.small ? 4 : 6)
         Layout.bottomMargin: root.px(act.small ? 4 : 6)
         spacing: root.px(10)
+        Text {
+            Layout.preferredWidth: root.px(18)
+            horizontalAlignment: Text.AlignHCenter
+            text: act.line.sign === "+" ? "↓" : act.line.sign === "-" ? "↑" : "⇄"
+            color: act.line.sign === "+" ? root.good : root.dim
+            font.family: root.sans
+            font.pixelSize: root.px(act.small ? 14 : 16)
+        }
         ColumnLayout {
             Layout.fillWidth: true
             spacing: 1
@@ -4688,7 +4720,7 @@ Item {
                     opacity: root.hasCliWallet ? 1 : 0.5
                     StepHead { number: 3; done: root.hasPrivateFunds && root.shieldJob === null; title: "Move to private" }
                     Hint {
-                        text: "Moves " + (root.canShield ? root.grouped(root.shieldAmount) : "your tokens") + " from your public account to your private one, so your names and payments stay private. Your computer proves it, about 4 minutes."
+                        text: "Moves " + (root.canShield ? root.grouped(root.shieldAmount) : "your tokens") + " from your public account to your private one, so your names and payments stay private. Your computer proves it, usually 5–12 minutes."
                     }
                     Hint {
                         visible: root.hasCliWallet && root.cliPublic !== null && !root.canShield && root.shieldJob === null && !root.hasPrivateFunds
@@ -4719,7 +4751,7 @@ Item {
                     opacity: root.hasCliWallet ? 1 : 0.5
                     StepHead { number: 4; done: false; title: "Pick your name" }
                     Hint {
-                        text: "Held privately: nobody can find which account holds it. It takes a 1,000,000 deposit, returned in full if you ever give the name up, and about 20 minutes to register."
+                        text: "Held privately: nobody can find which account holds it. It takes a deposit (1,000,000 for most names, more for 3–4 characters), returned when you release it; if you transfer it, the deposit goes with it, and about 20 minutes to register."
                     }
                     Action {
                         label: "Choose my name"
@@ -4742,7 +4774,7 @@ Item {
                 id: activityPage
                 x: 32
                 y: 32
-                width: Math.min(parent.width - 64, 760)
+                width: Math.min(parent.width - 64, 680)
                 spacing: 8
                 RowLayout {
                     Layout.fillWidth: true
@@ -5023,6 +5055,7 @@ Item {
                 ColumnLayout {
                     visible: root.walletView === "home"
                     Layout.fillWidth: true
+                    Layout.maximumWidth: 680
                     spacing: 14
                     RowLayout {
                         Layout.fillWidth: true
@@ -5087,7 +5120,7 @@ Item {
                             visible: root.waitingPayments !== null
                             color: root.ink
                             text: root.waitingPayments === null ? "" : (root.waitingPayments.count === "1" ? "A payment is" : root.waitingPayments.count + " payments are")
-                                + " to your names waiting: " + root.amountShown(root.waitingPayments.total) + ". Claiming takes a few minutes each and a fee of about 5,100,000, paid from your fullest private account."
+                                + " to your names waiting: " + root.amountShown(root.waitingPayments.total) + ". Claiming takes about 9 minutes each and reserves up to 8,239,751 from your fullest private account; about 3,169,135 of that comes back later as a small credit."
                         }
                         Action {
                             visible: root.waitingPayments !== null
@@ -5264,15 +5297,16 @@ Item {
                                                 Text {
                                                     Layout.fillWidth: true
                                                     elide: Text.ElideRight
-                                                    text: addressRow.modelData.sub
-                                                    color: addressRow.modelData.fromPrivate ? root.brass : root.dim
+                                                    textFormat: Text.StyledText
+                                                    text: root.subShown(addressRow.modelData.sub)
+                                                    color: root.dim
                                                     font.family: root.sans
                                                     font.pixelSize: root.px(13)
                                                 }
                                             }
-                                            // Copy the address.
+                                            // Copy lives on the account's page, not on every row.
                                             Rectangle {
-                                                visible: addressRow.modelData.address !== ""
+                                                visible: false
                                                 implicitWidth: root.px(34)
                                                 implicitHeight: root.px(34)
                                                 radius: 8
@@ -5349,22 +5383,36 @@ Item {
                 ColumnLayout {
                     visible: root.walletView === "send"
                     Layout.fillWidth: true
+                    Layout.maximumWidth: 680
                     spacing: 12
                     Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
                     Text { text: root.sendKind === "chain" ? "Send on the Logos Blockchain" : "Send " + root.sendTitle; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
 
                     Part { text: "From" }
-                    Flow {
+                    PickRow {
+                        readonly property var row: root.sendFromRow()
+                        title: row ? root.sendRowTitle(row) : "Choose an account"
+                        sub: row ? (row.kind === "chain" ? "Logos Blockchain · node key " + Logic.keyShown(row.key) : row.fromPrivate ? "Private" : "Public") : ""
+                        amount: row ? root.amountShown(row.balance) : ""
+                        dropdown: true
+                        open: root.sendFromOpen
+                        onPressed: root.sendFromOpen = !root.sendFromOpen
+                    }
+                    ColumnLayout {
+                        visible: root.sendFromOpen
                         Layout.fillWidth: true
-                        spacing: 8
+                        Layout.leftMargin: root.px(14)
+                        spacing: 4
                         Repeater {
                             model: root.walletRows.filter(function(row) { return row.balance !== null && row.balance !== "0" })
-                            Tab {
-                                id: fromTab
+                            PickRow {
                                 required property var modelData
-                                label: (modelData.kind === "chain" ? "Logos Blockchain · " + Logic.keyShown(modelData.key) : modelData.kind === "lez" ? "LEZ · " + modelData.title : modelData.title + " · " + (modelData.fromPrivate ? "Private" : "Public")) + "   " + root.amountShown(modelData.balance)
-                                current: modelData.kind === root.sendKind && modelData.definition === root.sendDefinition && (modelData.kind === "chain" ? modelData.key === root.chainFrom : modelData.fromPrivate === root.sendFromPrivate)
-                                onPressed: root.openSend(modelData, sendToResolved())
+                                compact: true
+                                title: root.sendRowTitle(modelData)
+                                sub: modelData.kind === "chain" ? "Logos Blockchain · node key " + Logic.keyShown(modelData.key) : modelData.fromPrivate ? "Private" : "Public"
+                                amount: root.amountShown(modelData.balance)
+                                current: root.sendRowIsCurrent(modelData)
+                                onPressed: { root.sendFromOpen = false; root.openSend(modelData, root.sendToResolved()) }
                             }
                         }
                     }
@@ -5380,7 +5428,7 @@ Item {
                     Hint {
                         visible: root.sendKind !== "chain" && root.sendToResolved() !== sendTo.text.trim()
                         font.pixelSize: root.px(14)
-                        text: "That's a LEZ account address: it's paid as the public account " + Logic.keyShown(sendTo.text.trim()) + ", and everyone can see the payment."
+                        text: "That's a LEZ account address: it's paid as the public account " + Logic.keyShown(sendTo.text.trim()) + ", and everyone can see the payment. Make sure it's their public address: money sent this way to a private account's address can't be spent by anyone."
                     }
                     Part { text: "Amount" }
                     Field {
@@ -5705,10 +5753,11 @@ Item {
                 ColumnLayout {
                     visible: root.walletView === "names"
                     Layout.fillWidth: true
+                    Layout.maximumWidth: 680
                     spacing: 14
                     Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
                     Text { text: "Names"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
-                    Hint { text: "Your wallet can hold many names, and the chain shows nothing that links them. Each is paid privately, into its own private account." }
+                    Hint { text: "Your wallet can hold many names. Names held privately can't be linked to each other on chain; a name held publicly shows its holder. Each name is paid into its own private account unless it publishes a public one." }
 
                     Card {
                         Layout.fillWidth: true
@@ -5797,7 +5846,7 @@ Item {
                             Layout.fillWidth: true
                             Hint {
                                 color: root.ink
-                                text: "Give " + root.transferTarget + " to " + Logic.keyShown(transferToField.text.trim().replace(/^(Public|Private)\//, "")) + "? It's proven on this computer, about 4 minutes, and then it's theirs."
+                                text: "Give " + root.transferTarget + " to " + Logic.keyShown(transferToField.text.trim().replace(/^(Public|Private)\//, "")) + "? It's proven on this computer, usually 5–12 minutes, and then it's theirs."
                             }
                             RowLayout {
                                 spacing: 8
@@ -5831,7 +5880,7 @@ Item {
                         visible: root.boardJob !== null && /^cli_(transfer|receive_privately)$/.test(root.boardJob.kind)
                         color: root.brass
                         font.pixelSize: root.px(15)
-                        text: root.boardJob === null ? "" : root.boardJob.label + ": proving it on this computer. About 4 min, " + Math.max(0, Math.floor((Math.max(root.clockTick, Date.now()) - root.boardJob.started) / 60000)) + " so far."
+                        text: root.boardJob === null ? "" : root.boardJob.label + ": proving it on this computer. Usually 5–12 min, " + Math.max(0, Math.floor((Math.max(root.clockTick, Date.now()) - root.boardJob.started) / 60000)) + " so far."
                     }
                     Hint { visible: root.notice !== "" && root.walletView === "names"; color: root.noticeIsError ? root.alarm : root.good; font.pixelSize: root.px(15); text: root.notice }
                 }
@@ -5900,7 +5949,7 @@ Item {
                     readonly property var send: root.sendState(row)
                     readonly property var mine: Logic.activityFor(root.activityRows, root.rowAccount(row))
                     Layout.fillWidth: true
-                    Layout.maximumWidth: 720
+                    Layout.maximumWidth: 680
                     spacing: 12
                     Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
                     RowLayout {
@@ -5931,8 +5980,9 @@ Item {
                             Text {
                                 Layout.fillWidth: true
                                 elide: Text.ElideRight
-                                text: accountPage.row ? accountPage.row.sub : ""
-                                color: accountPage.row && accountPage.row.fromPrivate ? root.brass : root.dim
+                                textFormat: Text.StyledText
+                                text: accountPage.row ? root.subShown(accountPage.row.sub) : ""
+                                color: root.dim
                                 font.family: root.sans
                                 font.pixelSize: root.px(14)
                             }
@@ -5949,7 +5999,7 @@ Item {
                         visible: accountPage.row !== null && accountPage.row.address !== undefined && accountPage.row.address !== ""
                         label: "Address"
                         code: true
-                        value: accountPage.row ? accountPage.row.address : ""
+                        value: accountPage.row ? (accountPage.row.address.length > 50 ? Logic.keyShown(accountPage.row.address) : accountPage.row.address) : ""
                         full: accountPage.row ? accountPage.row.address : ""
                     }
                     Flow {
@@ -6002,7 +6052,7 @@ Item {
                 ColumnLayout {
                     visible: root.walletView === "bridge"
                     Layout.fillWidth: true
-                    Layout.maximumWidth: 640
+                    Layout.maximumWidth: 680
                     spacing: 10
                     Link {
                         text: "‹ Wallet"
@@ -6154,16 +6204,11 @@ Item {
                             Layout.topMargin: 2
                             spacing: 8
                             Action {
-                                label: root.bridgeBusy && !root.bridgeConfirm ? "Checking…" : "Check"
-                                enabledNow: !root.bridgeBusy && root.cliPublic !== null && root.bridgeFrom !== ""
-                                onPressed: root.bridgeRun(false)
-                            }
-                            Action {
                                 visible: !root.bridgeConfirm
-                                label: "Bridge"
+                                label: root.bridgeBusy ? "Checking…" : "Review"
                                 strong: true
-                                enabledNow: !root.bridgeBusy && root.bridgePlanReady() && root.bridgePlanFor === root.bridgeAsked().join("|")
-                                onPressed: root.bridgeConfirm = true
+                                enabledNow: !root.bridgeBusy && root.cliPublic !== null && root.bridgeFrom !== "" && /^[0-9]+$/.test(root.bridgeAsked()[0])
+                                onPressed: { root.bridgeReview = true; root.bridgeRun(false) }
                             }
                         }
                         Hint {
@@ -6306,12 +6351,12 @@ Item {
                             Text { text: "Gas and minimums"; color: root.ink; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(15) }
                             Hint { font.pixelSize: root.px(14); text: "• Logos Blockchain fee: at most 100,000, paid from the key's other notes, not from the amount." }
                             Hint { font.pixelSize: root.px(14); text: "• The amount goes as one whole note. If no note holds exactly that, a split makes one first: a send from the key to itself, a fee of about 2,000, one block." }
-                            Hint { font.pixelSize: root.px(14); text: "• It arrives once the Logos Blockchain block is final: about 12 hours on the testnet. LEZ takes no fee to credit it." }
+                            Hint { font.pixelSize: root.px(13); text: "• It arrives once the Logos Blockchain block is final: expected about 12 hours on the testnet (the first deposits are still arriving)." }
                             Hint {
                                 visible: root.bridgeToPrivate
                                 font.pixelSize: root.px(14)
-                                text: root.cliOutdated ? "• Then moving it to private is proven on this computer, about 4 minutes."
-                                    : "• Then moving it to private is a private transaction: a fee of about 5,100,000, taken from what moves, and about 4 minutes of proving. To register a name privately you need " + root.grouped(root.shieldMinimum) + " there."
+                                text: root.cliOutdated ? "• Then moving it to private is proven on this computer, usually 5–12 minutes."
+                                    : "• Then moving it to private is a private transaction: a fee of about 5,100,000, taken from what moves, and 5–12 minutes of proving. To register a name privately you need " + root.grouped(root.shieldMinimum) + " there."
                             }
                         }
                     }
@@ -6395,7 +6440,7 @@ Item {
                         visible: root.boardAs !== "" && !(root.anonOn && !root.anonReady) && !root.boardAsMoving
                         Layout.fillWidth: true
                         text: root.heldPublicly(root.boardAs) ? "Public · about 30 seconds per post, a little gas"
-                            : "Private · about 4 minutes per post, free; the chain never learns your account"
+                            : "Private · usually 5–12 minutes per post, free; the chain never learns your account"
                         color: root.heldPublicly(root.boardAs) ? root.faint : root.brass
                         font.family: root.sans
                         font.pixelSize: root.px(14)
@@ -6709,7 +6754,7 @@ Item {
                     }
                     Hint { visible: root.anonName !== ""; text: "Anon name: " + root.anonName + (root.anonReady ? "" : " (being set up)") + ". Only your wallet links it to your main name." }
                     Part { text: "Your names" }
-                    Hint { font.pixelSize: root.px(14); text: "Private: the holder stays hidden, and each change is proved on this computer (about 4 min). Public: about 30 s and a little gas, the holder visible. Payments to the name stay private either way." }
+                    Hint { font.pixelSize: root.px(14); text: "Private: the holder stays hidden, and each change is proved on this computer (usually 5–12 min). Public: about 30 s and a little gas, the holder visible. Payments to the name stay private either way." }
                     Repeater {
                         model: root.cliPending
                         RowLayout {
@@ -6930,7 +6975,7 @@ Item {
                         onPressed: root.openGetTokens()
                     }
                     Part { text: "Connected apps" }
-                    Hint { text: root.appGrants.length === 0 ? "No other app can see your accounts. When one asks, you'll choose which accounts it sees, and approve each payment it asks for." : "These apps can see the accounts listed and ask you to approve payments. They can't send anything without you." }
+                    Hint { text: root.appGrants.length === 0 ? "Other apps can't see your accounts unless you share them here: when one asks, you choose which accounts it sees, and approve each payment it asks for. (An app installed under the Names app's own package name could, so install apps only from sources you trust.)" : "These apps can see the accounts listed and ask you to approve payments. They can't send anything without you." }
                     Repeater {
                         model: root.appGrants
                         RowLayout {
@@ -7231,7 +7276,7 @@ Item {
                                 var step = root.registerStepOf(root.missing)
                                 var under = root.cliPendingFor(root.missing)
                                 if (step === 1 && root.pending !== null)
-                                    return "about 4 min, " + Math.max(0, Math.floor((Math.max(root.clockTick, Date.now()) - root.pending.started) / 60000)) + " so far"
+                                    return "usually 5–12 min, " + Math.max(0, Math.floor((Math.max(root.clockTick, Date.now()) - root.pending.started) / 60000)) + " so far"
                                 if (step === 2 && under !== null) {
                                     var minutes = /about (\d+) minutes/.exec(under.state)
                                     return minutes ? minutes[1] + " min to go" : "about a minute to go"
@@ -7346,7 +7391,7 @@ Item {
                             font.pixelSize: root.px(14)
                             text: root.registerPublic
                                 ? "Registered privately first, so nobody sees who registered it, then moved to a new public account funded privately with 10,000,000 for gas. Posts take about 30 seconds; nothing links that account to you. About 10 more minutes."
-                                : "Posts take about 4 minutes each, free, and nobody can find which account holds it. You can make it public later in Settings."
+                                : "Posts take 5–12 minutes each, free, and nobody can find which account holds it. You can make it public later in Settings."
                         }
                         Action {
                             Layout.topMargin: 6
@@ -7569,7 +7614,7 @@ Item {
                         Hint {
                             visible: root.cliHeld && !root.busy
                             color: root.brass
-                            text: root.record !== null && root.heldPublicly(root.record.name) ? "Saving takes about 30 seconds." : "Saving takes about 4 minutes (private name); keep Basecamp open until it's done."
+                            text: root.record !== null && root.heldPublicly(root.record.name) ? "Saving takes about 30 seconds." : "Saving takes 5–12 minutes (private name); keep Basecamp open until it's done."
                         }
                         RowLayout {
                         visible: root.editTab === "profile"
