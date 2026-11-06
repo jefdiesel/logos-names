@@ -115,7 +115,7 @@ Item {
     // at install, but an older module can still be the one Basecamp loaded).
     readonly property string neededModule: "0.15.2"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.15.4"
+    readonly property string appVersion: "0.15.5"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -618,7 +618,7 @@ Item {
     }
 
     function chainAsked() {
-        return [chainFrom, sendTo.text.trim(), sendAmount.text.trim()]
+        return [chainFrom, sendToResolved(), sendAmount.text.trim()]
     }
 
     /// Checks the send and shows its plan; nothing is sent.
@@ -913,15 +913,24 @@ Item {
         walletView = "receive"
     }
 
+    /// What Send's To means: a bare LEZ account ID, as copied from a wallet, is that public
+    /// account (`Public/` added); a name can't have capitals, so it is never one.
+    function sendToResolved() {
+        var to = sendTo.text.trim()
+        if (sendKind !== "chain" && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(to) && /[A-Z]/.test(to))
+            return "Public/" + to
+        return to
+    }
+
     /// Whether a LEZ or token send goes to a name (so privately, from the private account).
     function sendToName() {
-        var to = sendTo.text.trim()
+        var to = sendToResolved()
         return to !== "" && !payIsAccount(to)
     }
 
     /// Why Send can't go as it stands, or "" (also "" while a field is empty).
     function sendProblem() {
-        var to = sendTo.text.trim()
+        var to = sendToResolved()
         var amount = sendAmount.text.trim()
         if (to === "" || amount === "")
             return ""
@@ -929,6 +938,8 @@ Item {
             var bad = Logic.chainToProblem(to)
             return bad !== "" ? bad : /^([0-9]+|[0-9]{1,3}(,[0-9]{3})+)$/.test(amount) ? "" : "Enter a whole amount, such as 1000 or 1,000."
         }
+        if (/^Private\//.test(to))
+            return "A private account can't be paid by its address: nobody but its holder knows its keys. Pay its name, or ask for a public account."
         if (sendKind === "token")
             return tokenSendProblem()
         if (payIsAccount(to))
@@ -938,7 +949,7 @@ Item {
 
     /// Shows the summary to confirm; a chain send is checked by the node first.
     function sendReview() {
-        if (sendProblem() !== "" || sendTo.text.trim() === "" || sendAmount.text.trim() === "")
+        if (sendProblem() !== "" || sendToResolved() === "" || sendAmount.text.trim() === "")
             return
         if (sendKind === "chain") {
             chainCheck()
@@ -2597,7 +2608,7 @@ Item {
     }
 
     function payName() {
-        var to = sendTo.text.trim()
+        var to = sendToResolved()
         var amount = sendAmount.text.trim()
         if (to === "" || amount === "")
             return
@@ -3263,7 +3274,7 @@ Item {
         if (tokenJob !== null)
             return ""
         var definition = sendDefinition
-        if (definition === "" || sendAmount.text.trim() === "" || sendTo.text.trim() === "")
+        if (definition === "" || sendAmount.text.trim() === "" || sendToResolved() === "")
             return ""
         if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(definition))
             return "The token is its ID: letters and digits. Pick one you hold above, or paste it."
@@ -3286,7 +3297,7 @@ Item {
             return
         var definition = sendDefinition
         var amount = sendAmount.text.trim().replace(/[,_]/g, "")
-        var to = sendTo.text.trim()
+        var to = sendToResolved()
         // The CLI checks the balance before it proves anything, and says so.
         tokenProblem = ""
         var label = "Sending " + grouped(amount) + " " + Logic.tokenShown(tokenNameOf(definition)) + " to " + to
@@ -5308,7 +5319,7 @@ Item {
                                 required property var modelData
                                 label: (modelData.kind === "chain" ? "Logos Blockchain · " + Logic.keyShown(modelData.key) : modelData.kind === "lez" ? "LEZ · " + modelData.title : modelData.title + " · " + (modelData.fromPrivate ? "Private" : "Public")) + "   " + root.amountShown(modelData.balance)
                                 current: modelData.kind === root.sendKind && modelData.definition === root.sendDefinition && (modelData.kind === "chain" ? modelData.key === root.chainFrom : modelData.fromPrivate === root.sendFromPrivate)
-                                onPressed: root.openSend(modelData, sendTo.text.trim())
+                                onPressed: root.openSend(modelData, sendToResolved())
                             }
                         }
                     }
@@ -5318,8 +5329,13 @@ Item {
                         id: sendTo
                         Layout.fillWidth: true
                         size: 19
-                        hint: root.sendKind === "chain" ? "A name, or a Logos Blockchain key (64 hex characters)" : "A name, such as ada, or Public/ and an account ID"
+                        hint: root.sendKind === "chain" ? "A name, or a Logos Blockchain key (64 hex characters)" : "A name, such as ada, or an account address"
                         onTextChanged: root.sendReviewing = false
+                    }
+                    Hint {
+                        visible: root.sendKind !== "chain" && root.sendToResolved() !== sendTo.text.trim()
+                        font.pixelSize: root.px(14)
+                        text: "That's a LEZ account address: it's paid as the public account " + Logic.keyShown(sendTo.text.trim()) + ", and everyone can see the payment."
                     }
                     Part { text: "Amount" }
                     Field {
@@ -5348,7 +5364,7 @@ Item {
                         visible: !root.sendReviewing
                         label: root.chainBusy ? "Checking…" : "Review"
                         strong: true
-                        enabledNow: sendTo.text.trim() !== "" && sendAmount.text.trim() !== "" && root.sendProblem() === "" && root.sendingLine() === ""
+                        enabledNow: sendToResolved() !== "" && sendAmount.text.trim() !== "" && root.sendProblem() === "" && root.sendingLine() === ""
                         onPressed: root.sendReview()
                     }
 
@@ -5361,7 +5377,7 @@ Item {
                             label: "To"
                             value: root.sendKind === "chain" && root.chainPlan !== null
                                 ? (root.chainPlan.name ? root.chainPlan.name + " · " : "") + Logic.keyShown(root.chainPlan.to)
-                                : sendTo.text.trim()
+                                : sendToResolved()
                         }
                         Fact { label: "Amount"; value: root.grouped(sendAmount.text.trim().replace(/,/g, "")) + (root.sendKind === "chain" ? "" : " " + root.sendTitle) }
                         Fact {

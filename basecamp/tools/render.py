@@ -220,6 +220,7 @@ SCENARIOS = {
     "wallet-account-main": 'root.openWallet("home"); Qt.callLater(function() { root.openAccount(root.walletGroups[0].rows[0]) })',
     "wallet-account-chain": 'root.openWallet("home"); Qt.callLater(function() { var g = root.walletGroups.filter(function(x) { return x.id === "chain" || (x.rows[0] && x.rows[0].kind === "chain") })[0]; root.openAccount(g.rows[0]) })',
     "wallet-activity-page": 'root.go("activity"); root.loadActivity()',
+    "wallet-send-address": 'root.openWallet("home"); Qt.callLater(function() { root.openSend(root.walletGroups[0].rows.filter(function(r) { return r.canSend && !r.fromPrivate })[0], ""); sendTo.text = "9uwkVJuXScDwLKVtQMcHFU9Hvb3uZjiEDVvDv4PYjCfM"; sendAmount.text = "69420000" })',
     "wallet-row-history": 'root.openWallet("home"); root.walletRowOpen = "chain-66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b"',
     "wallet-bridge-private": 'root.openWallet("home"); Qt.callLater(function() { root.openGetTokens(); root.bridgeToPrivate = true; bridgeAmountField.text = "1000000" })',
     "wallet-bridge-from-lez": 'root.openWallet("home"); Qt.callLater(function() { root.openBridgeFromLez("Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk") })',
