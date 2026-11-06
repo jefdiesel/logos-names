@@ -26,6 +26,7 @@ WRITES = {
     "cli_pay", "cli_pay_account", "cli_register", "cli_set_text", "cli_profile", "cli_set_page", "cli_shield",
     "cli_faucet", "cli_bridge", "cli_token_send", "cli_token_receive", "cli_account_new", "cli_account_label",
     "cli_account_use", "cli_create_wallet", "cli_restore_wallet", "cli_install", "cli_claim", "chain_claim",
+    "chain_send", "chain_split", "chain_bridge", "cli_bridge", "cli_bridge_to",
     "set_main_name", "set_token_program", "watch_token", "board_post", "board_toggle_like", "board_follow",
     "make_public", "register_name", "set_account", "set_text", "set_profile", "set_page", "transfer", "release",
     "keep", "approve_request", "deny_request", "request_access", "propose_transfer", "receive_privately",

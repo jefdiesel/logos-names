@@ -126,6 +126,12 @@ BRIDGE = r"""
                 { key: "5f9f8fd1696c6e6d85bb52fc4b61810a3f9c75422612b72a566ff3ef6a68ad12", balance: "0" }])
             if (method === "chain_stake") return ok({ staked: "34002373886", notes: 4538, keys: ["66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b"], epoch: 7,
                 next_epoch_in_s: 113623, claimable: "26280", vouchers: 2, reward_per_voucher: "13140" })
+            if (method === "chain_bridge") { var asked = String(args[2]).replace(/,/g, "")
+                return ok({ sent: !!args[3], hash: args[3] ? "ab".repeat(32) : null, to: "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", amount: asked,
+                    total: mock.exact ? asked : null, notes: mock.exact ? "1" : null, fee: "100000", note: mock.exact ? "e8ac" : null, needs_split: !mock.exact,
+                    channel: "01".repeat(32), lines: [] }) }
+            if (method === "chain_split") return ok({ from: args[0], amount: String(args[1]).replace(/,/g, ""), balance: "1191220464", exact: false,
+                hash: args[2] ? "cd".repeat(32) : null, fee: args[2] ? "2018" : null })
             if (method === "chain_send") return ok({ from: args[0], to: "8e3b0f4a2c71d95e6a0b4c8d2f1e7a3954c6b0d8e2f4a6c8b0d2e4f6a8c0b2d4", name: args[1] === "hopper" ? "hopper" : null,
                 forwarded_from: null, amount: String(args[2]).replace(/,/g, ""), balance: "1191220464", hash: args[3] ? "cd".repeat(32) : null })
             if (method === "cli_accounts" && mock.accountsError) return JSON.stringify({ success: false, value: null, error: mock.accountsError })
@@ -195,6 +201,8 @@ SCENARIOS = {
     "wallet-row": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); root.walletRowOpen = "chain-66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b"',
     "wallet-row-lez": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); root.walletRowOpen = "lez-Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z"',
     "wallet-hidden": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); root.walletHidden = true',
+    "wallet-bridge-split": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); Qt.callLater(function() { root.openGetTokens(); bridgeAmountField.text = "1000000"; root.bridgeRun(false) })',
+    "wallet-bridge-exact": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); Qt.callLater(function() { root.openGetTokens(); bridgeAmountField.text = "1000000"; root.bridgeRun(false) })',
     "wallet": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home")',
     "wallet-send": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); root.openSend({ id: "lez-private", kind: "lez", title: "LEZ", definition: "", fromPrivate: true }, "ada"); sendAmount.text = "1000"',
     "wallet-review": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); root.openSend({ id: "lez-private", kind: "lez", title: "LEZ", definition: "", fromPrivate: true }, "ada"); sendAmount.text = "1000"; root.sendReview()',
@@ -315,6 +323,7 @@ MOCKS = {
     "welcome-moved": {"private": "5000000", "public": "1000000"},
     "pay-account": {"private": "250000000", "public": "1250000"},
     "wallet-down": {"nodeDown": True},
+    "wallet-bridge-exact": {"exact": True},
     "settings-oldcli": {"status": {"outdated": True}, "accountsError": "Your names program is older than this app and can't do this yet: it comes with the LEZ 0.4 update. The rest of the app still works."},
     "wallet-waiting": {"tokenPending": [{"position": 21, "definition": "GoLDdef1nition11111111111111111111111111111", "name": "Gold", "amount": "50", "to": "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z"}]},
     "wallet-sending": {"private": "250000000", "public": "1250000"},

@@ -526,6 +526,31 @@ step("a send back lands: A gains 1,000 and B pays 1,000 plus the fee names repor
      r["ok"] and state == "in_block" and a4 == a3 + 1000 and back_fee is not None and b4 == b3 - 1000 - int(back_fee),
      f"state {state}, fee {back_fee}")
 
+# ── a split, for a bridge of an exact amount ──────────────────────────────
+say("\n== chain_split: 1,234 off A into a note of its own (a send from A to A)")
+before_split = {n["id"]: int(n["value"]) for n in node("wallet_get_notes", A, "")["value"]["notes"]}
+r = names("chain_split", A, "1,234", "true")
+show("names chain_split A 1,234", r)
+HS = (r["value"] or {}).get("hash") or "" if r["ok"] else ""
+state, deadline = None, time.time() + 120
+while HS and time.time() < deadline:
+    tx = names("chain_tx", HS)
+    state = tx["value"]["state"] if tx["ok"] else f"ERR {tx['error']}"
+    if state != "pending":
+        break
+    time.sleep(0.5)
+after_split = {n["id"]: int(n["value"]) for n in node("wallet_get_notes", A, "")["value"]["notes"]}
+say(f"    A's notes before {sorted(before_split.values())}, after {sorted(after_split.values())}; fee {r['value'].get('fee') if r['ok'] else None}")
+spent = set(before_split) - set(after_split)
+step("a split lands: the node takes a send from a key to itself, and A now holds a note of exactly 1,234",
+     r["ok"] and state == "in_block" and 1234 in after_split.values() and 1234 not in before_split.values() and len(spent) >= 1,
+     f"state {state}, spent {len(spent)} note(s)")
+plan = names("chain_bridge", A, "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "1,234", "false")
+show("names chain_bridge A 1,234 (plan only: nothing is deposited)", plan)
+step("the bridge plan then picks that exact note, with no split needed",
+     plan["ok"] and plan["value"]["needs_split"] is False and after_split.get(plan["value"]["note"]) == 1234,
+     f"note {plan['value'].get('note') if plan['ok'] else plan.get('error')}")
+
 # ── chain_claim ────────────────────────────────────────────────────────────
 say("\n== chain_claim")
 vou = node("wallet_get_claimable_vouchers")

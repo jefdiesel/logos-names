@@ -2961,6 +2961,21 @@ mod shortlist_tests {
     }
 }
 
+/// What a bridge deposit's metadata is: the Names module builds it from the account's 32
+/// bytes, so they must be exactly what `names bridge` sends (`borsh::to_vec(&to)`).
+#[cfg(test)]
+mod bridge_metadata_tests {
+    use super::{AccountId, parse_account};
+
+    #[test]
+    fn a_deposits_metadata_is_the_accounts_32_bytes_raw() {
+        let bytes: [u8; 32] = std::array::from_fn(|i| u8::try_from(i * 7 + 1).unwrap_or(0));
+        assert_eq!(borsh::to_vec(&AccountId::new(bytes)).expect("borsh"), bytes.to_vec(), "no length prefix, no tag");
+        let to = parse_account("Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk").expect("an account");
+        assert_eq!(borsh::to_vec(&to).expect("borsh").len(), 32);
+    }
+}
+
 #[cfg(test)]
 mod pay_tests {
     use super::{Profile, TextRecord, forward_of, pays_publicly, private_keys_of};

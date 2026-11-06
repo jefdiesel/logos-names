@@ -707,6 +707,28 @@ pub fn unhex(text: &str) -> Result<Vec<u8>, String> {
         .collect()
 }
 
+/// The Logos Blockchain channel LEZ takes deposits on, as the sequencer names it
+/// (`getChannelId`): 64 hex characters.
+#[cfg(not(test))]
+pub fn channel_id(sequencer: &str) -> Result<String, String> {
+    let response = ureq::post(sequencer)
+        .timeout(std::time::Duration::from_secs(15))
+        .send_json(json!({ "jsonrpc": "2.0", "id": 1, "method": "getChannelId", "params": {} }))
+        .map_err(|error| format!("could not reach LEZ to ask where deposits go: {error}"))?;
+    let reply: Value = response.into_json().map_err(|_| "LEZ's reply about deposits was unreadable".to_owned())?;
+    reply["result"]
+        .as_str()
+        .filter(|id| id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| "LEZ didn't say where deposits go. Try again later.".to_owned())
+}
+
+/// Tests know the channel: a fixed one, never the network.
+#[cfg(test)]
+pub fn channel_id(_sequencer: &str) -> Result<String, String> {
+    Ok("02".repeat(32))
+}
+
 /// A registry on one network: where to read it and which program it is.
 #[derive(Debug, Clone)]
 pub struct Registry {

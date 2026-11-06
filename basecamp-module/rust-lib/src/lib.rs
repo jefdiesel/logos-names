@@ -674,6 +674,27 @@ pub trait NamesModule: Send + 'static {
     /// nothing to claim.
     fn chain_claim(&mut self, send: bool) -> String;
 
+    /// Splits `amount` off the node key `from_key` into a note of its own, so a
+    /// bridge can deposit exactly that much: a send from the key to itself (its
+    /// change comes back as another note). Without `send` the plan `{from, amount,
+    /// balance, exact}`, `exact` true when a note of exactly `amount` is already
+    /// there (no split needed); with `send` the transfer is made and `hash` and
+    /// `fee` are added, followed by `chain_tx` like a send. The notes it spends
+    /// leave the stake, and the new ones join it within two epochs.
+    fn chain_split(&mut self, from_key: String, amount: String, send: bool) -> String;
+
+    /// Bridges exactly `amount` from the node key `from_key` into the LEZ public
+    /// account `to` (`Public/<id>`; empty is the names wallet's default public
+    /// one): one note of exactly that value is deposited on LEZ's channel through
+    /// Basecamp's node (`channel_deposit_with_notes`), its fee paid from the key's
+    /// other notes, at most `fee`. Without `send` the plan `{sent: false, hash:
+    /// null, to, amount, total, notes, fee, note, needs_split, channel, lines}`;
+    /// `needs_split` is true (and `note` null) when no note holds exactly
+    /// `amount`: `chain_split` first. With `send` the deposit is made (it cannot be
+    /// undone) and `sent`, `hash` are set; `chain_tx` follows it. LEZ credits it
+    /// once the block holding it is final.
+    fn chain_bridge(&mut self, from_key: String, to: String, amount: String, send: bool) -> String;
+
     // ── Wallet Provider SDK: for any app (docs/wallet/PROVIDER-SDK.md) ──
     //
     // Any app may ask; the person decides in the Names app. The asking app
@@ -956,7 +977,7 @@ const NAMES_APP: &str = "names_ui";
 /// `get_config` reports it so the Names app can refuse a module from another
 /// release (the app's own metadata asks for at least this at install, but an
 /// older module can still be the one loaded).
-const MODULE_VERSION: &str = "0.14.6";
+const MODULE_VERSION: &str = "0.14.7";
 
 /// Whether `caller` may use those methods. Basecamp gives each app its own
 /// credential, named after the app, so the module knows which app is calling.
@@ -3116,6 +3137,78 @@ impl NamesModule for Names {
         })())
     }
 
+    fn chain_split(&mut self, from_key: String, amount: String, send: bool) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let from = chain::parse_key(&from_key).ok_or("choose the key to send from")?;
+            let amount = chain::whole_amount(&amount)?;
+            let notes = chain::notes_of(&node::call("wallet_get_notes", json!([from, ""]), node::QUICK)?);
+            let exact = notes.values().any(|value| chain::amount(value) == u128::from(amount));
+            let balance = notes.values().map(chain::amount).sum::<u128>();
+            // The split pays its own fee, so the key needs more than the amount.
+            if balance <= u128::from(amount) {
+                return Err(format!("that key holds {balance}; splitting off {amount} needs a little more, for the fee"));
+            }
+            let mut plan = json!({ "from": from, "amount": amount.to_string(), "balance": balance.to_string(), "exact": exact });
+            if send {
+                let sent = node::call("wallet_transfer_funds", json!([from, [from], from, amount.to_string(), ""]), node::PROVING)?;
+                let hash = chain::hash_of(&sent);
+                let stored = hash.as_ref().and_then(|hash| node::call("get_transaction", json!([hash]), node::QUICK).ok());
+                let fee = stored.as_ref().and_then(|tx| chain::transfer_fee(tx, &notes));
+                if let (Some(hash), Some(tx)) = (&hash, &stored) {
+                    chain_sent_add(hash, json!({ "from": from, "inputs": chain::transfer_parts(tx).0, "fee": fee.map(|f| f.to_string()), "at": now() }));
+                }
+                plan["hash"] = hash.map_or(Value::Null, Value::from);
+                plan["fee"] = fee.map_or(Value::Null, |f| Value::from(f.to_string()));
+            }
+            Ok(plan)
+        })())
+    }
+
+    fn chain_bridge(&mut self, from_key: String, to: String, amount: String, send: bool) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let from = chain::parse_key(&from_key).ok_or("choose the key to send from")?;
+            let amount = chain::whole_amount(&amount)?;
+            let to = match to.trim() {
+                "" => cli::default_public(&self.cli_setup()?)?,
+                text => {
+                    let id = text.strip_prefix("Public/").ok_or("the bridge credits a public LEZ account: Public/ and its ID")?;
+                    registry::account_text(&registry::parse_account(id).map_err(|_| "that isn't a public LEZ account".to_owned())?)
+                }
+            };
+            let account = registry::parse_account(&to)?;
+            let notes = chain::notes_of(&node::call("wallet_get_notes", json!([from, ""]), node::QUICK)?);
+            let note = notes.iter().find(|(_, value)| chain::amount(value) == u128::from(amount)).map(|(id, _)| id.clone());
+            let channel = registry::channel_id(&self.sequencer)?;
+            let mut plan = json!({
+                "sent": false, "hash": null, "to": to, "amount": amount.to_string(),
+                "total": note.as_ref().map(|_| amount.to_string()), "notes": note.as_ref().map(|_| "1"),
+                "fee": BRIDGE_MAX_FEE.to_string(), "note": note, "needs_split": note.is_none(), "channel": channel, "lines": [],
+            });
+            if send {
+                let note = note.ok_or_else(|| format!("no note of that key holds exactly {amount}: split it off first"))?;
+                // The deposit's metadata is the LEZ account's 32 bytes, as `names bridge` sends it.
+                let deposited = node::call(
+                    "channel_deposit_with_notes",
+                    json!([channel, [note], registry::hex(&account), from, [from], BRIDGE_MAX_FEE.to_string(), ""]),
+                    node::PROVING,
+                )?;
+                let hash = chain::hash_of(&deposited);
+                if let Some(hash) = &hash {
+                    chain_sent_add(hash, json!({ "from": from, "inputs": [note], "fee": null, "at": now() }));
+                }
+                plan["sent"] = json!(true);
+                plan["hash"] = hash.map_or(Value::Null, Value::from);
+            }
+            Ok(plan)
+        })())
+    }
+
     fn chain_tx(&mut self, hash: String) -> String {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
@@ -3883,6 +3976,9 @@ mod program_registry {
     }
 }
 
+/// The most a bridge deposit's fee may be, as `names bridge` caps it by default.
+const BRIDGE_MAX_FEE: u64 = 100_000;
+
 /// The most tokens the wallet keeps added by address, per token program.
 const MAX_WATCHED_TOKENS: usize = 64;
 
@@ -4396,6 +4492,44 @@ mod tests {
         // A key the node lists but its wallet doesn't hold, as the M2 node does with three of six.
         node::ANSWERS.with(|answers| answers.borrow_mut().insert("wallet_get_balance".into(), json!({ "success": false, "error": "Unknown wallet address." })));
         assert_eq!(parsed(&names.chain_accounts())["value"], json!([]));
+    }
+
+    #[test]
+    fn a_split_is_a_send_to_the_same_key_and_a_bridge_deposits_one_exact_note() {
+        let mut names = fresh();
+        let asked_args = |method: &str| node::ASKED.with(|asked| asked.borrow().iter().rev().find(|(m, _)| m == method).map(|(_, a)| a.clone()));
+        // One big note: a split is needed, and the bridge says so instead of moving it all.
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "b271", "value": "131296018" }] }));
+        let split = parsed(&names.chain_split(NODE_KEY.into(), "1,000,000".into(), false));
+        assert_eq!(split["value"], json!({ "from": NODE_KEY, "amount": "1000000", "balance": "131296018", "exact": false }), "{split}");
+        let to = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
+        let plan = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), false));
+        assert_eq!((plan["value"]["needs_split"].as_bool(), plan["value"]["note"].clone()), (Some(true), Value::Null), "{plan}");
+        let refused = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), true));
+        assert!(refused["error"].as_str().unwrap().contains("split it off first"), "{refused}");
+        assert!(!node_asked().contains(&"channel_deposit_with_notes".to_owned()), "nothing deposited without an exact note");
+        // The split: from the key to itself, the change back to it.
+        node_answers("wallet_transfer_funds", json!("cd".repeat(32)));
+        node_answers("get_transaction", json!({ "mantle_tx": { "ops": [{ "opcode": 0, "payload": { "inputs": ["b271"], "outputs": [{ "value": 1000000 }, { "value": 130294000 }] } }] } }));
+        let made = parsed(&names.chain_split(NODE_KEY.into(), "1000000".into(), true));
+        assert_eq!(made["value"]["hash"], "cd".repeat(32), "{made}");
+        assert_eq!(made["value"]["fee"], "2018");
+        assert_eq!(asked_args("wallet_transfer_funds"), Some(json!([NODE_KEY, [NODE_KEY], NODE_KEY, "1000000", ""])));
+        // Now a note of exactly the amount: the bridge deposits just it, to the picked account.
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "c0de", "value": "130294000" }, { "id": "e8ac", "value": "1000000" }] }));
+        let ready = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), false));
+        assert_eq!((ready["value"]["note"].as_str(), ready["value"]["needs_split"].as_bool(), ready["value"]["total"].as_str()), (Some("e8ac"), Some(false), Some("1000000")), "{ready}");
+        node_answers("channel_deposit_with_notes", json!("ab".repeat(32)));
+        let sent = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), true));
+        assert_eq!((sent["value"]["sent"].as_bool(), sent["value"]["hash"].as_str()), (Some(true), Some("ab".repeat(32).as_str())), "{sent}");
+        let account = registry::parse_account(to).unwrap();
+        assert_eq!(
+            asked_args("channel_deposit_with_notes"),
+            Some(json!(["02".repeat(32), ["e8ac"], registry::hex(&account), NODE_KEY, [NODE_KEY], "100000", ""])),
+            "one exact note, the account's 32 bytes as metadata, the fee from the key's other notes"
+        );
+        // A private account is never a bridge's destination.
+        assert!(parsed(&names.chain_bridge(NODE_KEY.into(), format!("Private/{to}"), "1000000".into(), false))["error"].as_str().unwrap().contains("public LEZ account"));
     }
 
     #[test]

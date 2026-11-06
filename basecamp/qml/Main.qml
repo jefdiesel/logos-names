@@ -113,9 +113,9 @@ Item {
     property bool configKnown: false   // the names module has answered once
     // The names module this app needs: the same release (metadata.json asks for it
     // at install, but an older module can still be the one Basecamp loaded).
-    readonly property string neededModule: "0.14.6"
+    readonly property string neededModule: "0.14.7"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.14.11"
+    readonly property string appVersion: "0.14.12"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -1036,6 +1036,8 @@ Item {
     function bridgeInputProblem(asked) {
         if (!/^[0-9]+$/.test(asked[0]) || /^0+$/.test(asked[0]))
             return "Enter a whole amount, such as 1000."
+        if (bridgeSplitHash !== "")
+            return "Wait for the note to be made first."
         if (!/^[0-9a-f]{64}$/.test(asked[1]))
             return "Choose the node key to send from. If none is listed, start your node in Basecamp's Blockchain app."
         if (asked[2] !== "" && !/^https?:\/\/(127\.0\.0\.1|localhost):[0-9]{1,5}\/?$/.test(asked[2]))
@@ -1062,9 +1064,8 @@ Item {
             bridgeHash = ""
             bridgeSent = false
         }
-        var method = asked[3] !== "" ? "cli_bridge_to" : "cli_bridge"
-        var args = asked[3] !== "" ? [asked[0], asked[1], asked[3], asked[2], send] : [asked[0], asked[1], asked[2], send]
-        askLater(method, args, function(value) {
+        // Through Basecamp's own node, one note of exactly the amount (chain_bridge).
+        askLater("chain_bridge", [asked[1], asked[3], asked[0], send], function(value) {
             bridgeBusy = false
             bridgeConfirm = false
             bridgeKey = asked[1]
@@ -1087,16 +1088,47 @@ Item {
         }, 150000)
     }
 
+    property string bridgeSplitHash: ""  // the split under way: a send from the key to itself
+
+    /// Splits the amount off into a note of its own, then checks the bridge again once it lands.
+    function bridgeSplit() {
+        var asked = bridgeAsked()
+        bridgeError = ""
+        bridgeBusy = true
+        askLater("chain_split", [asked[1], asked[0], true], function(value) {
+            bridgeBusy = false
+            bridgeSplitHash = value && value.hash ? value.hash : ""
+            if (bridgeSplitHash === "")
+                bridgeError = "Your node took the split but gave no transaction to follow. Press Check in a minute."
+        }, function(message) {
+            bridgeBusy = false
+            bridgeError = sentence(message)
+        }, 240000)
+    }
+
+    Timer {
+        interval: 4000
+        repeat: true
+        running: root.bridgeSplitHash !== ""
+        onTriggered: root.askLater("chain_tx", [root.bridgeSplitHash], function(tx) {
+            if (tx.state === "in_block") {
+                root.bridgeSplitHash = ""
+                root.bridgeRun(false)
+            }
+        }, function(message) { console.log("names_ui: split:", message) }, 20000)
+    }
+
     /// The checked plan in plain words.
     function bridgePlanText() {
         if (bridgePlan === null)
             return ""
         var asked = bridgeAsked()[0]
-        var whole = bridgePlan.total && bridgePlan.total !== asked
-            ? " Whole notes are used, so that's " + grouped(bridgePlan.total) + " for the " + grouped(asked) + " you asked for." : ""
-        return "Ready: " + grouped(bridgePlan.total || asked) + " from " + (bridgePlan.notes || "?") + (bridgePlan.notes === "1" ? " note" : " notes")
-            + " of that key, into your LEZ public account." + whole
-            + (bridgePlan.fee ? " Network fee at most " + grouped(bridgePlan.fee) + "." : "") + " Nothing has been sent yet."
+        if (bridgePlan.needs_split)
+            return "No note on that key holds exactly " + grouped(asked) + ", and a bridge deposits whole notes. First split "
+                + grouped(asked) + " off into a note of its own: a send from the key to itself (a fee of about 2,000, in a block within a minute). "
+                + "The rest comes back as change. The notes it spends leave the stake, and the new ones join it within two epochs."
+        return "Ready: exactly " + grouped(asked) + " from one note of that key, into " + (bridgeTo !== "" ? Logic.keyShown(bridgeTo.substr(7)) : "your LEZ public account")
+            + ". Network fee at most " + grouped(bridgePlan.fee || "100000") + ", paid from the key's other notes. Nothing has been sent yet."
     }
 
     /// Whether the plan deposits more than twice what was asked (whole notes): worth a warning.
@@ -5440,7 +5472,7 @@ Item {
                         onAccepted: root.bridgeRun(false)
                     }
                     Link {
-                        visible: !root.bridgeOtherNode
+                        visible: false  // the bridge goes through Basecamp's own node now
                         text: "Another node…"
                         color: root.dim
                         font.pixelSize: root.px(14)
@@ -5468,7 +5500,7 @@ Item {
                             visible: !root.bridgeConfirm
                             label: "Bridge"
                             strong: true
-                            enabledNow: !root.bridgeBusy && root.bridgePlan !== null && root.bridgePlanFor === root.bridgeAsked().join("|")
+                            enabledNow: !root.bridgeBusy && root.bridgePlan !== null && !root.bridgePlan.needs_split && root.bridgePlanFor === root.bridgeAsked().join("|")
                             onPressed: root.bridgeConfirm = true
                         }
                     }
@@ -5477,18 +5509,26 @@ Item {
                         color: root.bridgePlanFor === root.bridgeAsked().join("|") ? root.ink : root.faint
                         text: root.bridgePlanFor === root.bridgeAsked().join("|") ? root.bridgePlanText() : "You changed something. Check again before you bridge."
                     }
+                    Action {
+                        visible: root.bridgePlan !== null && root.bridgePlan.needs_split && root.bridgePlanFor === root.bridgeAsked().join("|") && root.bridgeSplitHash === ""
+                        label: root.bridgeBusy ? "Making it…" : "Make a note of exactly " + root.grouped(root.bridgeAsked()[0])
+                        strong: true
+                        tint: root.orange
+                        enabledNow: !root.bridgeBusy
+                        onPressed: root.bridgeSplit()
+                    }
                     Hint {
-                        visible: root.bridgePlanFor === root.bridgeAsked().join("|") && root.bridgeOvershoots()
+                        visible: root.bridgeSplitHash !== ""
                         color: root.brass
                         font.pixelSize: root.px(16)
-                        text: "That's far more than you asked for: the bridge can only move whole notes, and that key's smallest is " + root.grouped(root.bridgePlan ? root.bridgePlan.total : "") + ". To bridge less, first send part of it to another of your node's keys (Send on the Logos Blockchain): that splits it into smaller notes."
+                        text: "Making the note: waiting for your node's next blocks. The bridge is checked again as soon as it lands."
                     }
                     Card {
                         visible: root.bridgeConfirm && root.bridgePlan !== null
                         Layout.fillWidth: true
                         Hint {
                             color: root.ink
-                            text: root.bridgePlan === null ? "" : "This moves " + root.grouped(root.bridgePlan.total || root.bridgeAsked()[0]) + " from your Logos Blockchain wallet into LEZ. It can't be undone. It arrives in about 12 hours."
+                            text: root.bridgePlan === null ? "" : "This moves exactly " + root.grouped(root.bridgeAsked()[0]) + " from your Logos Blockchain key into LEZ. It can't be undone. It arrives once the block holding it is final, about 12 hours on the testnet."
                         }
                         RowLayout {
                             spacing: 8
