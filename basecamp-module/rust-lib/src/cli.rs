@@ -1353,11 +1353,18 @@ pub fn run_with_input(setup: &Setup, command: Vec<String>, input: &str, patience
     Ok(out)
 }
 
-/// Why the CLI failed, in its own words.
+/// Why the CLI failed, in its own words; a CLI older than the command asked of it
+/// (clap's "unrecognized subcommand", whose last line only points at --help) says so.
 fn failure(err: &str, out: &str) -> String {
+    if err.contains("unrecognized subcommand") {
+        return OLDER_CLI.to_owned();
+    }
     let why = if last_line(err).is_empty() { last_line(out) } else { last_line(err) };
     format!("the names CLI failed: {why}")
 }
+
+/// What a names CLI too old for the command asked of it means to the person.
+pub const OLDER_CLI: &str = "Your names program is older than this app and can't do this yet: it comes with the LEZ 0.4 update. The rest of the app still works.";
 
 /// Runs `process` (the program at `program`) and waits for it, at most
 /// `patience`: its exit code, what it printed, and what it wrote to stderr.
@@ -2101,6 +2108,10 @@ mod tests {
         assert!(bridge_problem("Error: cannot reach the sequencer at https://testnet.lez.logos.co\n", node).contains("LEZ isn't answering"));
         assert_eq!(bridge_problem("Error: the node refused the deposit (HTTP 400): bad fee\n", node), "Your node refused the deposit: (HTTP 400): bad fee");
         assert_eq!(bridge_problem("Error: something new\n\nCaused by:\n    deep\n", node), "the names CLI failed: something new");
+        // A CLI without the command (the October testnet build has no `module`) says it's older.
+        let clap = "error: unrecognized subcommand 'module'\n\nUsage: names [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n";
+        assert_eq!(failure(clap, ""), OLDER_CLI);
+        assert_eq!(failure("Error: no such name\n", ""), "the names CLI failed: Error: no such name");
     }
 
     #[test]

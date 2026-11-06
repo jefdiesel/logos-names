@@ -429,7 +429,36 @@ else
   echo "(step 7 skipped: set LEZREG to the registry's lezreg CLI to check apps by publisher)"
 fi
 
+say "8. back and forth: B sends to F, and F's balance takes it"
+BB0=$(balance "$B"); FB0=$(balance "$F")
+transfer "$B" "$F" 1000
+BB1=$(balance "$B"); FB1=$(balance "$F")
+echo "B held $BB0, now $BB1; F held $FB0, now $FB1"
+[ "$FB1" -eq $((FB0 + 1000)) ] || fail "F was not credited by B"
+[ "$BB1" -le $((BB0 - 1000)) ] || fail "B was not debited"
+
+say "8. a name changes hands: R transfers $LOCKED to B"
+NR transfer "$LOCKED" "Public/$B" | grep -vE '^(Stored|Transaction data)' | cut -c1-200
+N resolve "$LOCKED" | grep -q "\"held_by\": \"$B\"" || fail "B does not hold $LOCKED after R's transfer"
+NR resolve "$LOCKED" | grep -q '"held_by": null' || fail "R still shows as holding $LOCKED"
+echo "$LOCKED: R -> B"
+
+say "8. the new holder is paid by the name: B publishes Public/B on $LOCKED, R pays $LOCKED"
+N set-account "$LOCKED" "Public/$B" | grep -vE '^(Stored|Transaction data)' | cut -c1-200
+N resolve "$LOCKED" | grep -q "\"public_account\": \"$B\"" || fail "$LOCKED does not resolve to B's account"
+BB2=$(balance "$B")
+NR pay "$LOCKED" 5000 --from "Public/$R" --public | grep -vE '^(Stored|Transaction data)' | cut -c1-200
+BB3=$(balance "$B")
+echo "B held $BB2, now $BB3"
+[ "$BB3" -eq $((BB2 + 5000)) ] || fail "paying $LOCKED by name did not reach its new holder"
+
+say "8. and back: B transfers $LOCKED to R, which clears what B published"
+N transfer "$LOCKED" "Public/$R" | grep -vE '^(Stored|Transaction data)' | cut -c1-200
+NR resolve "$LOCKED" | tee "$WORK/locked-back.json" | grep -q "\"held_by\": \"$R\"" || fail "R does not hold $LOCKED again"
+grep -q '"public_account": null' "$WORK/locked-back.json" || fail "the transfer back kept B's account on $LOCKED"
+echo "$LOCKED: B -> R, B's account cleared"
+
 say "the chain is still healthy"
 rpc getLastBlockId
 echo
-say "PASS: registry, payments, tokens, testimonial, accounts and fees, a drop and a restart${LEZREG:+, apps by publisher}${STORAGE_BIN:+ and by CID}, on a fresh rc1 standalone chain"
+say "PASS: registry, payments, tokens, testimonial, accounts and fees, a drop and a restart${LEZREG:+, apps by publisher}${STORAGE_BIN:+ and by CID}, sends back and forth, a name handed on and back, on a fresh rc1 standalone chain"

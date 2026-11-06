@@ -113,9 +113,9 @@ Item {
     property bool configKnown: false   // the names module has answered once
     // The names module this app needs: the same release (metadata.json asks for it
     // at install, but an older module can still be the one Basecamp loaded).
-    readonly property string neededModule: "0.14.1"
+    readonly property string neededModule: "0.14.2"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.14.4"
+    readonly property string appVersion: "0.14.5"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -5205,6 +5205,12 @@ Item {
                                 Text { text: myName.modelData.name; color: root.ink; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.Bold }
                                 Text { visible: myName.modelData.name === root.mainName; text: "main"; color: root.brass; font.family: root.sans; font.pixelSize: root.px(14) }
                                 Text {
+                                    text: myName.modelData["private"] === false ? "Public" : "Private"
+                                    color: myName.modelData["private"] === false ? root.dim : root.brass
+                                    font.family: root.sans
+                                    font.pixelSize: root.px(14)
+                                }
+                                Text {
                                     Layout.fillWidth: true
                                     text: myName.modelData.state || ""
                                     color: myName.modelData.lapsed ? root.alarm : root.dim
@@ -5212,6 +5218,7 @@ Item {
                                     font.pixelSize: root.px(14)
                                     elide: Text.ElideRight
                                 }
+                                Link { visible: myName.modelData["private"] !== false; text: "Make public…"; font.pixelSize: root.px(15); onPressed: { root.go("settings"); root.loadAccounts() } }
                                 Link { visible: myName.modelData.name !== root.mainName; text: "Make main"; font.pixelSize: root.px(15); onPressed: root.setMain(myName.modelData.name) }
                                 Link { text: "Open"; font.pixelSize: root.px(15); onPressed: { root.go("search"); root.show(myName.modelData.name) } }
                                 Link { text: "Copy"; font.pixelSize: root.px(15); onPressed: root.copy(myName.modelData.name, "Your name") }
@@ -5837,7 +5844,7 @@ Item {
                     }
                     Hint { visible: root.anonName !== ""; text: "Anon name: " + root.anonName + (root.anonReady ? "" : " (being set up)") + ". Only your wallet links it to your main name." }
                     Part { text: "Your names" }
-                    Hint { font.pixelSize: root.px(14); text: "Private: posts in about 4 min, free, holder hidden. Public: about 30 s, a little gas, holder visible. Payments stay private either way." }
+                    Hint { font.pixelSize: root.px(14); text: "Private: the holder stays hidden, and each change is proved on this computer (about 4 min). Public: about 30 s and a little gas, the holder visible. Payments to the name stay private either way." }
                     Repeater {
                         model: root.cliPending
                         RowLayout {
@@ -6019,10 +6026,10 @@ Item {
                             Action { label: "Cancel"; onPressed: root.accountNewKind = "" }
                         }
                     }
-                    Part { text: "Tokens" }
-                    Hint { text: "Bring tokens from your Logos Blockchain node into LEZ. They take about 12 hours to arrive." }
+                    Part { text: "Bridge" }
+                    Hint { text: "Moving tokens from your Logos Blockchain node into LEZ is in the Wallet. One way for now; about 12 hours to arrive." }
                     Action {
-                        label: "Get tokens"
+                        label: "Open the bridge"
                         enabledNow: root.cliPath !== ""
                         onPressed: root.openGetTokens()
                     }

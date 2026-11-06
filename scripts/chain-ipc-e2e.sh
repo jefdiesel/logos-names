@@ -236,8 +236,11 @@ for m in ("blockchain_module", "names"):
     say(f"    module load {m}: {out}")
     loaded[m] = loads(out) if rc == 0 else {}
 ok = all(isinstance(loaded[m], dict) and loaded[m].get("status") == "ok" for m in loaded)
-step("session loads blockchain_module 0.3.4 and names 0.13.0",
-     ok and loaded["blockchain_module"].get("version") == "0.3.4" and loaded["names"].get("version") == "0.13.0")
+# The names version is the package's own (its nix store path ends in -lgx-<version>).
+want = re.search(r"-lgx-([0-9.]+)$", os.path.realpath(os.environ["NAMES_LGX"]))
+want = want.group(1) if want else "?"
+step(f"session loads blockchain_module 0.3.4 and names {want}",
+     ok and loaded["blockchain_module"].get("version") == "0.3.4" and loaded["names"].get("version") == want)
 if not ok:
     abort("a module did not load")
 
@@ -502,6 +505,26 @@ step("the fee is inputs less outputs, and agrees with the node's notes and balan
      and sorted(int(n["value"]) for n in after["value"]["notes"]) == sorted(change)
      and not set(inputs) & {n["id"] for n in after["value"]["notes"]},
      f"names fee {rv.get('fee')}, node fee {fee}")
+
+# ── and back: B sends to A ─────────────────────────────────────────────────
+say("\n== chain_send back: B -> A 1,000")
+a3, b3 = balance(A), balance(B)
+r = names("chain_send", B, A, "1,000", "true")
+show("names chain_send B -> A", r)
+HB = (r["value"] or {}).get("hash") or "" if r["ok"] else ""
+state, deadline = None, time.time() + 120
+while HB and time.time() < deadline:
+    tx = names("chain_tx", HB)
+    state = tx["value"]["state"] if tx["ok"] else f"ERR {tx['error']}"
+    if state != "pending":
+        break
+    time.sleep(0.5)
+a4, b4 = balance(A), balance(B)
+back_fee = r["value"].get("fee") if r["ok"] else None
+say(f"    node balances: A {a3} -> {a4}, B {b3} -> {b4}; names fee {back_fee}")
+step("a send back lands: A gains 1,000 and B pays 1,000 plus the fee names reports",
+     r["ok"] and state == "in_block" and a4 == a3 + 1000 and back_fee is not None and b4 == b3 - 1000 - int(back_fee),
+     f"state {state}, fee {back_fee}")
 
 # ── chain_claim ────────────────────────────────────────────────────────────
 say("\n== chain_claim")
