@@ -310,16 +310,17 @@ pub fn parse_from(input: &str) -> Result<Origin, String> {
 }
 
 /// An amount in base units: a positive whole number that fits in 128 bits. `_` and `,`
-/// may group digits.
+/// may group digits in threes (`1,000`); `1,5` is refused, not read as 15 (SC-2).
 pub fn parse_amount(input: &str) -> Result<u128, String> {
-    let digits: String = input
-        .trim()
-        .chars()
-        .filter(|c| !matches!(c, '_' | ','))
-        .collect();
-    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+    let text = input.trim();
+    let groups: Vec<&str> = text.split([',', '_']).collect();
+    if groups.iter().any(|group| group.is_empty() || !group.chars().all(|c| c.is_ascii_digit())) {
         return Err(format!("{input} is not a whole number of base units"));
     }
+    if groups.len() > 1 && !((1..=3).contains(&groups[0].len()) && groups[1..].iter().all(|group| group.len() == 3)) {
+        return Err(format!("{input} isn't a whole number: commas go only between groups of three digits, such as 1,000"));
+    }
+    let digits = groups.concat();
     match digits.parse::<u128>() {
         Ok(0) => Err("the amount must be more than 0".to_owned()),
         Ok(amount) => Ok(amount),
@@ -1444,6 +1445,8 @@ mod tests {
         assert!(parse_amount("0").is_err());
         assert!(parse_amount("-1").is_err());
         assert!(parse_amount("1.5").is_err());
+        assert!(parse_amount("1,5").is_err());
+        assert!(parse_amount(",7").is_err());
         assert!(parse_amount("").is_err());
         assert!(
             parse_amount("340282366920938463463374607431768211456").is_err(),

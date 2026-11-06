@@ -2533,7 +2533,7 @@ impl NamesModule for Names {
             if !matches!(cli::pay_to(&account)?, cli::PayTo::Account(_)) {
                 return Err("that is a name; pay it as a name".to_owned());
             }
-            if !cli::is_amount(&amount.trim().replace(',', "")) {
+            if !cli::is_amount(&cli::ungrouped(&amount).unwrap_or_default()) {
                 return Err("enter a whole amount, such as 1000".to_owned());
             }
             self.wallet_job("pay_account", |setup| cli::pay_account_args(setup, &account, &amount, from_private))

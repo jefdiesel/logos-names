@@ -181,7 +181,7 @@ pub fn transfer_request(app: &str, asset_text: &str, amount: &str, destination: 
     let asset = asset(asset_text)?;
     let amount = match asset {
         Asset::Native => {
-            let amount = amount.trim().replace(',', "");
+            let amount = crate::cli::ungrouped(amount).unwrap_or_default();
             if !crate::cli::is_amount(&amount) {
                 return Err("the amount is a whole number of base units above zero, such as 1000".to_owned());
             }

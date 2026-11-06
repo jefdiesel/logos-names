@@ -278,8 +278,24 @@ enum Command {
     },
     /// Show this wallet's accounts and balances.
     Balance,
-    /// List the names this wallet holds.
-    Mine,
+    /// Claim the payments waiting for this wallet: a payment to your name's private keys
+    /// waits as a pending credit until you claim it. Each claim is a private transaction
+    /// (several minutes of proving) whose fee another private account of yours pays.
+    Receive {
+        /// The private account that pays each claim's fee; by default the one holding the most.
+        #[arg(long, value_parser = parse_account)]
+        fee_from: Option<AccountId>,
+        /// Only list what is waiting.
+        #[arg(long)]
+        list: bool,
+    },
+    /// List the names this wallet holds. A name someone transferred to you is listed
+    /// once you `--add` it: the chain is checked that this wallet holds it.
+    Mine {
+        /// A name this wallet holds but doesn't list yet, such as one transferred to it.
+        #[arg(long, value_parser = parse_name)]
+        add: Option<String>,
+    },
     /// Claim a name that is unregistered or has lapsed, paying the registry's price.
     Register {
         #[arg(value_parser = parse_name)]
@@ -522,7 +538,8 @@ enum Command {
     Pay {
         #[arg(value_parser = parse_name)]
         name: String,
-        /// Amount in base units.
+        /// Amount in base units, above zero; `1,000` may group it.
+        #[arg(value_parser = tokens::parse_amount)]
         amount: u128,
         /// Account to pay from; the wallet must hold its key. Defaults to the private
         /// account from `names setup`, which hides the payer too; a public one is seen
@@ -1791,6 +1808,16 @@ impl Client {
         let paying = vec![self.signer(from).balance()];
         let held = self.held_by(&paying).await;
         self.print_transfer_fee(from).await?;
+        // A payment to someone's private keys arrives as a pending credit, and claiming it
+        // is a private transaction of its own (SC-1): below its fee it is worth nothing.
+        let quote = self.wallet.client().get_fee_state().await?;
+        let claim = fees::private(&quote, self.wallet.config().private_fee_headroom_blocks);
+        if amount <= claim.about {
+            println!(
+                "note: claiming this costs the holder a private transaction (about {}, paid from another private account of theirs), more than the {amount} you are paying",
+                claim.about
+            );
+        }
         if self.is_private(from) {
             // From a private account neither side is seen: no sender, no recipient,
             // no amount.
@@ -1801,7 +1828,7 @@ impl Client {
                 .context("the sequencer did not accept the transfer")?;
             println!("submitted {hash}");
             let block = self.finish(hash).await.context("the transfer was not applied")?;
-            println!("included in block {block}; the recipient sees it after syncing their private accounts");
+            println!("included in block {block}; it waits for {name}{NAME_SUFFIX}'s holder as a pending credit, which they claim with `names receive`");
             if let Some(line) = fees::paid_line(held, self.held_by(&paying).await, amount) {
                 println!("{line}");
             }
@@ -1825,10 +1852,97 @@ impl Client {
             bail!("transfer {hash} was included in block {block} but {from} was not debited");
         }
         println!("included in block {block}; {from} was debited {debited} (the amount, plus any fee)");
-        println!("the recipient sees it after syncing their private accounts");
+        println!("it waits for {name}{NAME_SUFFIX}'s holder as a pending credit, which they claim with `names receive`");
         if let Some(line) = fees::paid_line(held, self.held_by(&paying).await, amount) {
             println!("{line}");
         }
+        Ok(())
+    }
+
+    /// Claims the native payments waiting for this wallet's private accounts (payments to
+    /// a name's private keys arrive this way). Each claim is a private transaction whose
+    /// fee comes from `fee_from`, or the private account of this wallet that holds the
+    /// most: the receiving account starts empty and can't pay it (SC-1).
+    async fn receive(&mut self, fee_from: Option<AccountId>, list: bool) -> Result<()> {
+        self.wallet.sync_to_latest_block().await.ok();
+        let pending: Vec<_> = self
+            .wallet
+            .owned_pending_messages()
+            .await
+            .context("cannot read pending payments")?
+            .into_iter()
+            .filter(|message| message.native_credit().is_some())
+            .collect();
+        if pending.is_empty() {
+            println!("nothing to receive");
+            return Ok(());
+        }
+        let total: u128 = pending.iter().filter_map(|message| message.native_credit()).sum();
+        println!("{} payment(s) waiting, {total} in all:", pending.len());
+        for message in &pending {
+            println!(
+                "  {} to Private/{} (position {})",
+                message.native_credit().unwrap_or(0),
+                message.body.to.account_id,
+                message.position
+            );
+        }
+        if list {
+            return Ok(());
+        }
+        let quote = self.wallet.client().get_fee_state().await?;
+        let fee = fees::private(&quote, self.wallet.config().private_fee_headroom_blocks);
+        let receivers: std::collections::BTreeSet<AccountId> =
+            pending.iter().map(|message| message.body.to.account_id).collect();
+        let private_balance = |client: &Self, id: AccountId| {
+            client
+                .wallet
+                .get_account_private(id)
+                .and_then(|account| account.data.native_balance().ok())
+                .unwrap_or(0)
+        };
+        let payer = match fee_from {
+            Some(account) => {
+                if !self.is_private(account) {
+                    bail!("a claim's fee is paid inside its proof, so --fee-from must be a private account of this wallet");
+                }
+                account
+            }
+            None => {
+                let ids: Vec<AccountId> =
+                    self.wallet.storage().key_chain().private_account_ids().map(|(id, _)| id).collect();
+                ids.into_iter()
+                    .filter(|id| !receivers.contains(id))
+                    .max_by_key(|id| private_balance(self, *id))
+                    .ok_or_else(|| {
+                        anyhow!("no other private account of this wallet can pay the claim fee; move some funds into one with `names setup --shield=<amount>`")
+                    })?
+            }
+        };
+        let can_pay = private_balance(self, payer);
+        if can_pay < fee.at_most {
+            bail!(
+                "a claim costs at most {} (about {}), paid from Private/{payer}, which holds {can_pay}; move more into a private account first (`names setup --shield=<amount>`)",
+                fee.at_most,
+                fee.about
+            );
+        }
+        println!("{}", fees::estimate_line(&fee, &format!("each claim, paid from Private/{payer} inside the proof")));
+        self.wallet.set_private_fee_payer(Some(payer));
+        for message in pending {
+            let amount = message.native_credit().unwrap_or(0);
+            let to = message.body.to.account_id;
+            println!("receiving {amount} into Private/{to}; proving it on this computer (several minutes)");
+            let (hash, _) = self
+                .wallet
+                .receive_pending_message(message)
+                .await
+                .context("the sequencer did not accept the claim")?;
+            println!("submitted {hash}");
+            let block = self.finish(hash).await.context("the claim was not applied")?;
+            println!("received in block {block}; Private/{to} now holds {}", private_balance(self, to));
+        }
+        quietly(|| self.wallet.store_persistent_data())?;
         Ok(())
     }
 
@@ -2135,6 +2249,7 @@ async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>)
             println!("  {mnemonic}");
             println!();
             quietly(|| wallet.store_persistent_data())?;
+            tighten_wallet_files();
             wallet
         };
         wallet.set_dry_run(dry_run);
@@ -2178,6 +2293,7 @@ fn write_default_wallet_files() -> Result<()> {
         std::fs::create_dir_all(home)
             .with_context(|| format!("failed to create the wallet home {}", home.display()))?;
     }
+    tighten_wallet_files();
     let mut config = serde_json::to_value(wallet::config::WalletConfig::default())?;
     if config_path.exists() {
         let existing: serde_json::Value = serde_json::from_slice(&std::fs::read(&config_path)?)
@@ -2191,15 +2307,47 @@ fn write_default_wallet_files() -> Result<()> {
         }
     }
     std::fs::write(&config_path, serde_json::to_vec_pretty(&config)?)?;
+    tighten_wallet_files();
     Ok(())
+}
+
+/// Makes the wallet home readable by its owner alone: the folder 0700, the wallet, its
+/// config and `names.json` 0600. Older CLIs left them 0644 in a 0755 folder (SF-4).
+fn tighten_wallet_files() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let Ok(storage) = fetch_persistent_storage_path() else { return };
+        let Some(home) = storage.parent() else { return };
+        let set = |path: &std::path::Path, mode: u32| {
+            if let Ok(meta) = std::fs::symlink_metadata(path) {
+                // Never through a symlink, and only what is too open.
+                if !meta.file_type().is_symlink() && meta.permissions().mode() & 0o077 != 0 {
+                    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+                }
+            }
+        };
+        set(home, 0o700);
+        for file in [storage.clone(), storage.with_file_name("names.json")] {
+            set(&file, 0o600);
+        }
+        if let Ok(config) = fetch_config_path() {
+            set(&config, 0o600);
+        }
+    }
 }
 
 /// Opens the wallet at the wallet home. Without one, makes a new wallet and saves it,
 /// or, for a lookup (`save` false), uses an empty one that is never saved or shown,
 /// so lookups need no setup and leave nothing behind.
-async fn open_wallet(overrides: Option<WalletConfigOverrides>, save: bool) -> Result<WalletCore<SequencerClient>> {
+async fn open_wallet(overrides: Option<WalletConfigOverrides>, save: bool, create: bool) -> Result<WalletCore<SequencerClient>> {
     write_default_wallet_files()?;
     let storage_path = fetch_persistent_storage_path()?;
+    // Only `names setup` makes a wallet: any other command that would then fail left a
+    // new wallet behind and its recovery phrase in whatever logged it (SC-4).
+    if save && !create && !storage_path.exists() {
+        bail!("there is no wallet here yet: run `names setup` first (it makes one and shows its recovery phrase once)");
+    }
     if storage_path.exists() {
         let password = read_password(&storage_path)?;
         match WalletCore::new_update_chain(fetch_config_path()?, storage_path.clone(), overrides.clone(), &password) {
@@ -2224,6 +2372,7 @@ async fn open_wallet(overrides: Option<WalletConfigOverrides>, save: bool) -> Re
     println!("  {mnemonic}");
     println!();
     quietly(|| wallet.store_persistent_data())?;
+    tighten_wallet_files();
     Ok(wallet)
 }
 
@@ -2521,6 +2670,7 @@ async fn main() -> Result<()> {
                             | module::Request::Fee
                     )
             ),
+            matches!(cli.command, Command::Setup { .. }),
         )
         .await?,
         program,
@@ -2573,9 +2723,33 @@ async fn main() -> Result<()> {
                 }
             }
             println!("private total: {total_private}");
+            // Payments to your name's private keys wait until you claim them (SC-1).
+            if let Ok(pending) = client.wallet.owned_pending_messages().await {
+                let credits: Vec<u128> = pending.iter().filter_map(|message| message.native_credit()).collect();
+                if !credits.is_empty() {
+                    println!(
+                        "waiting to be claimed: {} payment(s), {} in all; run `names receive`",
+                        credits.len(),
+                        credits.iter().sum::<u128>()
+                    );
+                }
+            }
             Ok(())
         }
-        Command::Mine => {
+        Command::Receive { fee_from, list } => client.receive(fee_from, list).await,
+        Command::Mine { add } => {
+            if let Some(name) = add {
+                let (Derived { id, .. }, record, _) = client.lookup(&name).await?;
+                client
+                    .holder(&name, &id, &record)
+                    .with_context(|| format!("this wallet doesn't hold {name}{NAME_SUFFIX}, so it isn't added"))?;
+                let mut defaults = load_defaults();
+                if !defaults.names.contains(&name) {
+                    defaults.names.push(name.clone());
+                    save_defaults(&defaults)?;
+                }
+                println!("added {name}{NAME_SUFFIX}: this wallet holds it");
+            }
             let defaults = load_defaults();
             for (name, pending) in &defaults.pending {
                 match &pending.failed {
@@ -2592,6 +2766,7 @@ async fn main() -> Result<()> {
             }
             if defaults.names.is_empty() && defaults.pending.is_empty() {
                 println!("no names yet; register one with `names register <name>`");
+                println!("(a name someone transferred to you shows here once you run `names mine --add <name>`)");
             }
             for name in defaults.names {
                 match client.lookup(&name).await {

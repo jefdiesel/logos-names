@@ -267,7 +267,7 @@ pub fn like_args(name: &str, post: &str, undo: bool) -> Result<Vec<String>, Stri
 /// `names pay`, privately from the CLI's private account.
 pub fn pay_args(name: &str, amount: &str) -> Result<Vec<String>, String> {
     let name = registry::parse_name(name)?;
-    let amount = amount.trim().replace(',', "");
+    let amount = ungrouped(amount).unwrap_or_default();
     if !is_amount(&amount) {
         return Err("enter a whole amount, such as 1000".to_owned());
     }
@@ -283,6 +283,19 @@ pub fn pay_from_public_args(setup: &Setup, name: &str, amount: &str) -> Result<V
 }
 
 /// A whole amount above zero, in decimal digits and nothing else.
+/// `text` without its digit grouping, if it is a whole number grouped the usual way:
+/// `1000`, `1,000` or `1_000`, never `1,5` (a decimal comma, which would pay ten times
+/// as much) or `,7`. Anything else is `None` (SC-2, A-2).
+pub fn ungrouped(text: &str) -> Option<String> {
+    let text = text.trim();
+    let groups: Vec<&str> = text.split([',', '_']).collect();
+    if groups.iter().any(|group| group.is_empty() || !group.bytes().all(|b| b.is_ascii_digit())) {
+        return None;
+    }
+    let grouped = groups.len() == 1 || ((1..=3).contains(&groups[0].len()) && groups[1..].iter().all(|group| group.len() == 3));
+    grouped.then(|| groups.concat())
+}
+
 pub fn is_amount(amount: &str) -> bool {
     !amount.is_empty() && amount.len() <= 30 && amount.bytes().all(|b| b.is_ascii_digit()) && !amount.bytes().all(|b| b == b'0')
 }
@@ -504,8 +517,7 @@ pub const DEFAULT_SHIELD: &str = "50000000";
 /// amount above zero and that much in the public account, that much moved to
 /// the private account. Empty is the CLI's default, 50,000,000.
 pub fn setup_args(shield: &str) -> Result<Vec<String>, String> {
-    let shield = shield.trim().replace(',', "");
-    let shield = if shield.is_empty() { DEFAULT_SHIELD.to_owned() } else { shield };
+    let shield = if shield.trim().is_empty() { DEFAULT_SHIELD.to_owned() } else { ungrouped(shield).unwrap_or_default() };
     if shield != "0" && !is_amount(&shield) {
         return Err("enter a whole amount, such as 50000000".to_owned());
     }
@@ -711,7 +723,7 @@ pub fn pay_account_args(setup: &Setup, to: &str, amount: &str, from_private: boo
     let PayTo::Account(to) = pay_to(to)? else {
         return Err("that is a name; pay it as a name".to_owned());
     };
-    let amount = amount.trim().replace(',', "");
+    let amount = ungrouped(amount).unwrap_or_default();
     if !is_amount(&amount) {
         return Err("enter a whole amount, such as 1000".to_owned());
     }
@@ -756,10 +768,9 @@ fn token_program_arg(program: &registry::AccountId) -> String {
 /// A token amount in base units: a whole number above zero that fits in 128
 /// bits (`,` and `_` may group digits), written plainly.
 pub fn token_amount(amount: &str) -> Result<String, String> {
-    let digits: String = amount.trim().chars().filter(|c| !matches!(c, ',' | '_')).collect();
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return Err("enter a whole amount of the token's base units, such as 1000".to_owned());
-    }
+    let Some(digits) = ungrouped(amount) else {
+        return Err("enter a whole amount of the token's base units, such as 1000 (commas only between groups of three digits)".to_owned());
+    };
     match digits.parse::<u128>() {
         Ok(0) => Err("enter an amount above zero".to_owned()),
         Ok(amount) => Ok(amount.to_string()),
@@ -2087,6 +2098,13 @@ mod tests {
         assert!(pay_args("ada", "0").is_err());
         assert!(pay_args("ada", "-5").is_err());
         assert!(pay_args("ada", "1e9").is_err());
+        // A decimal comma or a stray one is refused, not read as more (SC-2, A-2).
+        for bad in ["1,5", ",7", "1,,000", "1000,", "12,34", "1,0000"] {
+            assert!(pay_args("ada", bad).is_err(), "{bad}");
+            assert!(token_amount(bad).is_err(), "{bad}");
+        }
+        assert_eq!(pay_args("ada", "12,345,678").unwrap()[3], "12345678");
+        assert_eq!(token_amount("1_000").unwrap(), "1000");
     }
 
     #[test]
