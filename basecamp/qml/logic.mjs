@@ -270,7 +270,8 @@ export function subDigits(a, b) {
 /// canSend, account}`; `canSend` is false for a LEZ account that isn't the
 /// default of its kind (the CLI pays from the default).
 export function walletGroups(cliBalance, accounts, holdings, watched, tokenNames, chainAccounts, chainDown, stake, namesByNpk, mainName, mainLabel) {
-    // The account that pays and registers is shown as you: your main name's display name.
+    // The account that pays and registers is shown as you: your main name, the registered
+    // name itself (never its profile's display name, which anyone can set to anything).
     var you = String(mainLabel || mainName || "").trim()
     var groups = []
     var lez = []

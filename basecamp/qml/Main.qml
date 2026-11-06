@@ -115,7 +115,7 @@ Item {
     // at install, but an older module can still be the one Basecamp loaded).
     readonly property string neededModule: "0.15.3"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.15.6"
+    readonly property string appVersion: "0.15.7"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -737,7 +737,7 @@ Item {
 
     readonly property var walletGroups: Logic.walletGroups(cliBalance, cliAccounts, tokenProgram !== "" ? tokenHoldings : null, watchedTokens, watchedNames,
                                                            chainAccounts, chainAccounts === null && chainError !== "", chainStake, namesByNpk,
-                                                           mainName, mainName !== "" && boardPeople[mainName] && boardPeople[mainName].display ? boardPeople[mainName].display : mainName)
+                                                           mainName, mainName)
 
     /// The wallet's names by the npk their profiles publish: {npk: [name]}, from the lookups.
     readonly property var namesByNpk: {
@@ -4476,7 +4476,7 @@ Item {
                         spacing: 0
                         Text {
                             Layout.fillWidth: true
-                            text: root.mainName !== "" && root.boardPeople[root.mainName] && root.boardPeople[root.mainName].display !== "" ? root.boardPeople[root.mainName].display : (root.mainName !== "" ? root.mainName : "Welcome")
+                            text: root.mainName !== "" ? root.mainName : "Welcome"
                             textFormat: Text.PlainText
                             color: root.ink
                             font.family: root.sans
@@ -4486,7 +4486,7 @@ Item {
                         }
                         Text {
                             visible: root.mainName !== ""
-                            text: root.mainName
+                            text: "main name"
                             color: root.faint
                             font.family: root.sans
                             font.pixelSize: root.px(14)
