@@ -269,7 +269,9 @@ export function subDigits(a, b) {
 /// `{id, kind, title, sub, address, balance, fromPrivate, definition, key,
 /// canSend, account}`; `canSend` is false for a LEZ account that isn't the
 /// default of its kind (the CLI pays from the default).
-export function walletGroups(cliBalance, accounts, holdings, watched, tokenNames, chainAccounts, chainDown, stake, namesByNpk) {
+export function walletGroups(cliBalance, accounts, holdings, watched, tokenNames, chainAccounts, chainDown, stake, namesByNpk, mainName, mainLabel) {
+    // The account that pays and registers is shown as you: your main name's display name.
+    var you = String(mainLabel || mainName || "").trim()
     var groups = []
     var lez = []
     var named = 0
@@ -280,16 +282,16 @@ export function walletGroups(cliBalance, accounts, holdings, watched, tokenNames
             // The names this account receives for: their profiles publish its npk.
             var names = priv && a.npk && namesByNpk && namesByNpk[String(a.npk).toLowerCase()] ? namesByNpk[String(a.npk).toLowerCase()] : []
             named += names.length
-            var title = names.length > 0 ? names.join(", ") : label !== "" ? label : a["default"] ? (priv ? "Main" : "Public") : (priv ? "Private account" : "Public account")
+            var title = names.length > 0 ? names.join(", ") : label !== "" ? label : a["default"] ? (priv ? (you || "Main") : "Public") : (priv ? "Private account" : "Public account")
             var sub = (priv ? "Private" : "Public")
                 + (names.length > 0 ? " · receives payments to " + names.join(", ") : "")
                 + (a["default"] ? (priv ? " · pays and registers" : " · bridged tokens land here") : names.length > 0 ? "" : " · " + keyShown(a.account.replace(/^(Public|Private)\//, "")))
-            lez.push({ id: "lez-" + a.account, kind: "lez", title: title, sub: sub, name: names.length > 0 ? names[0] : "",
+            lez.push({ id: "lez-" + a.account, kind: "lez", title: title, sub: sub, name: names.length > 0 ? names[0] : priv && a["default"] && mainName ? mainName : "",
                        address: a.account, balance: a.balance === null || a.balance === undefined ? null : String(a.balance), fromPrivate: priv, definition: "", key: "",
                        canSend: !!a["default"], account: a.account })
         })
     } else if (cliBalance && typeof cliBalance === "object") {
-        lez.push({ id: "lez-private", kind: "lez", title: "Main", sub: "Private · pays and registers", address: cliBalance.account ? "Private/" + cliBalance.account : "",
+        lez.push({ id: "lez-private", kind: "lez", title: you || "Main", name: mainName || "", sub: "Private · pays and registers", address: cliBalance.account ? "Private/" + cliBalance.account : "",
                    balance: cliBalance.balance === undefined ? null : String(cliBalance.balance), fromPrivate: true, definition: "", key: "", canSend: true, account: "" })
         if (cliBalance["public"])
             lez.push({ id: "lez-public", kind: "lez", title: "Public", sub: "Public · bridged tokens land here", address: "Public/" + cliBalance["public"].account,

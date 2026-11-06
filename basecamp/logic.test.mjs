@@ -119,6 +119,9 @@ check("subDigits", [subDigits("1000", "1"), subDigits("210939029", "210939029"),
   const jefRow = withNames[0].rows.find(r => r.account === "Private/Jef1");
   check("walletGroups name row", [jefRow.title, jefRow.name, jefRow.sub], ["jefdiesel", "jefdiesel", "Private · receives payments to jefdiesel"]);
   check("walletGroups names count", withNames[0].note, "4 accounts · 1 name");
+  // The paying account is shown as you, by your main name's display name.
+  const asYou = walletGroups(null, accounts, null, [], {}, null, false, null, {}, "jefdiesel", "Jef");
+  check("walletGroups main as you", [asYou[0].rows[0].title, asYou[0].rows[0].name], ["Jef", "jefdiesel"]);
   check("stakeTable", stakeTable(stake, [{ key: KEY, balance: "215939029" }]), { held: "215939029", staked: "210939029", waiting: "5000000", claimable: "0", vouchers: 0 });
 }
 

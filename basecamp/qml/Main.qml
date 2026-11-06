@@ -115,7 +115,7 @@ Item {
     // at install, but an older module can still be the one Basecamp loaded).
     readonly property string neededModule: "0.14.5"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.14.8"
+    readonly property string appVersion: "0.14.9"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -735,7 +735,8 @@ Item {
     }
 
     readonly property var walletGroups: Logic.walletGroups(cliBalance, cliAccounts, tokenProgram !== "" ? tokenHoldings : null, watchedTokens, watchedNames,
-                                                           chainAccounts, chainAccounts === null && chainError !== "", chainStake, namesByNpk)
+                                                           chainAccounts, chainAccounts === null && chainError !== "", chainStake, namesByNpk,
+                                                           mainName, mainName !== "" && boardPeople[mainName] && boardPeople[mainName].display ? boardPeople[mainName].display : mainName)
 
     /// The wallet's names by the npk their profiles publish: {npk: [name]}, from the lookups.
     readonly property var namesByNpk: {
