@@ -115,7 +115,7 @@ Item {
     // at install, but an older module can still be the one Basecamp loaded).
     readonly property string neededModule: "0.14.7"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.14.12"
+    readonly property string appVersion: "0.14.13"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -4648,10 +4648,6 @@ Item {
                                 onClicked: root.walletHidden = !root.walletHidden
                             }
                         }
-                        Action {
-                            label: root.walletAnyOpen() ? "Just totals" : "Show every address"
-                            onPressed: root.walletSetAll(!root.walletAnyOpen())
-                        }
                     }
                     Hint { visible: root.sendingLine() !== ""; color: root.brass; font.pixelSize: root.px(16); text: root.sendingLine() }
                     Hint { visible: root.notice !== "" && root.sendingLine() === ""; color: root.noticeIsError ? root.alarm : root.dim; font.pixelSize: root.px(16); text: root.notice }
@@ -4722,7 +4718,17 @@ Item {
                                             font.pixelSize: root.px(24)
                                             font.weight: Font.Bold
                                         }
-                                        Text { text: groupCard.open ? "▾" : "▸"; color: root.dim; font.pixelSize: root.px(18); Layout.preferredWidth: root.px(18) }
+                                        // Press the card to open or close it.
+                                        Text {
+                                            text: "›"
+                                            rotation: groupCard.open ? 90 : 0
+                                            color: root.ink
+                                            font.family: root.sans
+                                            font.pixelSize: root.px(30)
+                                            Layout.preferredWidth: root.px(22)
+                                            horizontalAlignment: Text.AlignHCenter
+                                            Behavior on rotation { NumberAnimation { duration: 120 } }
+                                        }
                                     }
                                     MouseArea {
                                         id: groupArea
