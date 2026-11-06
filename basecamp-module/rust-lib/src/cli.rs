@@ -1315,8 +1315,26 @@ pub fn run_balance(setup: &Setup) -> Result<Value, String> {
     let mut balance = parse_balance(&output);
     if balance.is_object() {
         balance["public"] = parse_public_balance(&output);
+        balance["waiting"] = parse_waiting(&output);
     }
     Ok(balance)
+}
+
+/// The payments `names balance` says wait to be claimed, `{count, total}`, from its line
+/// `waiting to be claimed: N payment(s), T in all; ...`; null when none wait (or the CLI
+/// is older and doesn't say).
+pub fn parse_waiting(output: &str) -> Value {
+    output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("waiting to be claimed: "))
+        .and_then(|rest| {
+            let mut words = rest.split_whitespace();
+            let count = words.next()?;
+            let total = words.nth(1)?;
+            (count.bytes().all(|b| b.is_ascii_digit()) && total.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| json!({ "count": count, "total": total }))
+        })
+        .unwrap_or(Value::Null)
 }
 
 /// The default private account in `names balance` output:
@@ -2163,7 +2181,7 @@ mod tests {
         let setup = setup(&dir, "echo '  Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk  70  (default)'; echo '  Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z  250  (default)'");
         assert_eq!(
             run_balance(&setup).unwrap(),
-            json!({ "account": "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", "balance": "250", "public": { "account": PUBLIC, "balance": "70" } })
+            json!({ "account": "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", "balance": "250", "public": { "account": PUBLIC, "balance": "70" }, "waiting": null })
         );
         // A new CLI at the same path answers within BALANCE_FRESH from the last read; afresh after.
         let none = Setup { program: fake_cli(&dir, "echo 'private total: 0'"), ..setup };

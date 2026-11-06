@@ -88,8 +88,10 @@ BRIDGE = r"""
             if (method === "cli_balance") {
                 if (mock.balance === null) return JSON.stringify({ success: false, value: null, error: "there is no wallet in /Users/you/.lee/wallet yet" })
                 return ok({ account: "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", balance: mock.private !== undefined ? mock.private : root.missing === "pauper" ? "5000" : "250000000",
-                    public: { account: "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", balance: mock.public !== undefined ? mock.public : "1250000" } })
+                    public: { account: "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", balance: mock.public !== undefined ? mock.public : "1250000" },
+                    waiting: mock.waiting || null })
             }
+            if (method === "cli_receive") return ok({ id: "-wallet-1792000000009", name: "-wallet", kind: "receive", state: "running", started: Date.now() - 60000 })
             // Getting started. Stand-ins only: nothing is installed, no wallet is made.
             if (method === "cli_status") return ok(Object.assign({ cli: "/Users/you/.config/logos-names/bin/names", prover: true, installing: null, wallet_dir: "/Users/you/.lee/wallet",
                 wallet: true, public: "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", private: "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", busy: null }, mock.status || {}))
@@ -129,7 +131,7 @@ BRIDGE = r"""
             if (method === "chain_bridge") { var asked = String(args[2]).replace(/,/g, "")
                 return ok({ sent: !!args[3], hash: args[3] ? "ab".repeat(32) : null, to: "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", amount: asked,
                     total: mock.exact ? asked : null, notes: mock.exact ? "1" : null, fee: "100000", note: mock.exact ? "e8ac" : null, needs_split: !mock.exact,
-                    channel: "01".repeat(32), lines: [] }) }
+                    channel: "01".repeat(32), channel_known: !mock.noChannel, fee_short: !!mock.feeShort, others: mock.feeShort ? "0" : "130294000", lines: [] }) }
             if (method === "chain_split") return ok({ from: args[0], amount: String(args[1]).replace(/,/g, ""), balance: "1191220464", exact: false,
                 hash: args[2] ? "cd".repeat(32) : null, fee: args[2] ? "2018" : null })
             if (method === "chain_send") return ok({ from: args[0], to: "8e3b0f4a2c71d95e6a0b4c8d2f1e7a3954c6b0d8e2f4a6c8b0d2e4f6a8c0b2d4", name: args[1] === "hopper" ? "hopper" : null,
@@ -203,7 +205,12 @@ SCENARIOS = {
     "wallet-hidden": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); root.walletHidden = true',
     "wallet-bridge-split": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); Qt.callLater(function() { root.openGetTokens(); bridgeAmountField.text = "1000000"; root.bridgeRun(false) })',
     "wallet-bridge-exact": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); Qt.callLater(function() { root.openGetTokens(); bridgeAmountField.text = "1000000"; root.bridgeRun(false) })',
+    "wallet-bridge-nochannel": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); Qt.callLater(function() { root.openGetTokens(); bridgeAmountField.text = "1000000"; root.bridgeRun(false) })',
+    "wallet-bridge-feeshort": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); Qt.callLater(function() { root.openGetTokens(); bridgeAmountField.text = "1000000"; root.bridgeRun(false) })',
+    "wallet-bridge-confirm": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); Qt.callLater(function() { root.openGetTokens(); bridgeAmountField.text = "1000000"; root.bridgeRun(false); root.bridgeConfirm = true })',
     "wallet": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home")',
+    "wallet-claim": 'root.openWallet("home")',
+    "settings-network": 'root.section = "settings"; root.settingsOpen = true; sequencerField.text = "https://other.example"; root.networkConfirm = true',
     "wallet-send": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); root.openSend({ id: "lez-private", kind: "lez", title: "LEZ", definition: "", fromPrivate: true }, "ada"); sendAmount.text = "1000"',
     "wallet-review": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); root.openSend({ id: "lez-private", kind: "lez", title: "LEZ", definition: "", fromPrivate: true }, "ada"); sendAmount.text = "1000"; root.sendReview()',
     "wallet-review-public": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); root.openSend({ id: "lez-public", kind: "lez", title: "LEZ", definition: "", fromPrivate: false }, "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR"); sendAmount.text = "1000"; root.sendReview()',
@@ -323,7 +330,11 @@ MOCKS = {
     "welcome-moved": {"private": "5000000", "public": "1000000"},
     "pay-account": {"private": "250000000", "public": "1250000"},
     "wallet-down": {"nodeDown": True},
+    "wallet-claim": {"waiting": {"count": "2", "total": "4000000"}},
     "wallet-bridge-exact": {"exact": True},
+    "wallet-bridge-nochannel": {"exact": True, "noChannel": True},
+    "wallet-bridge-confirm": {"exact": True},
+    "wallet-bridge-feeshort": {"exact": True, "feeShort": True},
     "settings-oldcli": {"status": {"outdated": True}, "accountsError": "Your names program is older than this app and can't do this yet: it comes with the LEZ 0.4 update. The rest of the app still works."},
     "wallet-waiting": {"tokenPending": [{"position": 21, "definition": "GoLDdef1nition11111111111111111111111111111", "name": "Gold", "amount": "50", "to": "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z"}]},
     "wallet-sending": {"private": "250000000", "public": "1250000"},
@@ -348,13 +359,17 @@ def main():
             "registry": "null" if scenario == "unset" else json.dumps("DbYLkKwd2b13bQhceVj351mpPw7QmRzEjRT2EfU56CKH"),
             "mock": json.dumps(MOCKS.get(scenario, {})),
             "bridge_key": "" if scenario == "get-tokens" else "8e3b0f4a2c71d95e6a0b4c8d2f1e7a3954c6b0d8e2f4a6c8b0d2e4f6a8c0b2d4",
-            "scenario": SCENARIOS[scenario], "out": out, "height": 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "name", "settings-accounts", "settings-oldcli", "settings-account-new") else 1500 if scenario.startswith("get-tokens") or scenario.startswith("wallet") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
+            "scenario": SCENARIOS[scenario], "out": out, "height": 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "name", "settings-accounts", "settings-oldcli", "settings-account-new", "settings-network") else 1500 if scenario.startswith("get-tokens") or scenario.startswith("wallet") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
         }
         # Beside Main.qml, so its relative imports (logic.mjs) resolve.
         with tempfile.NamedTemporaryFile("w", suffix=".qml", delete=False, dir=os.path.join(HERE, "..", "qml")) as handle:
             handle.write(source.replace(marker, marker + bridge, 1))
         try:
             result = subprocess.run([qml, handle.name], capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            # One scenario that never quits doesn't stop the rest (M-8).
+            print(scenario, "FAILED", "  it didn't quit within 60 s", sep="\n")
+            continue
         finally:
             os.unlink(handle.name)  # never leave it beside Main.qml: the package build copies qml/ whole
         problems = [line for line in result.stderr.splitlines() if "qt.qpa.fonts" not in line and line.strip()]

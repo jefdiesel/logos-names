@@ -113,9 +113,9 @@ Item {
     property bool configKnown: false   // the names module has answered once
     // The names module this app needs: the same release (metadata.json asks for it
     // at install, but an older module can still be the one Basecamp loaded).
-    readonly property string neededModule: "0.14.7"
+    readonly property string neededModule: "0.15.0"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.14.13"
+    readonly property string appVersion: "0.15.0"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -1090,6 +1090,7 @@ Item {
         }, 150000)
     }
 
+    property bool networkConfirm: false   // Advanced: switching registry or sequencer awaits a yes
     property string bridgeSplitHash: ""  // the split under way: a send from the key to itself
     property int bridgeSplitTries: 0      // checks of it so far; it stops after about 4 minutes
 
@@ -1178,8 +1179,9 @@ Item {
     /// What a name's deposit takes.
     readonly property string nameDeposit: "1000000"
     /// The least worth moving to private: on LEZ 0.4 each private transaction reserves its
-    /// fee in the proof, about 5,400,000, and registering takes two, plus the deposit.
-    readonly property string shieldMinimum: "12000000"
+    /// fee in the proof, about 5,100,000, and registering takes two, plus the deposit. An
+    /// older names program (LEZ 0.3, no private fees) moves its own default, 5,000,000.
+    readonly property string shieldMinimum: cliOutdated ? "5000000" : "12000000"
     /// What a new wallet needs from the Names faucet: enough to register one name privately.
     readonly property string faucetAmount: shieldMinimum
     /// Everything the public account holds moves to private: names and payments use it there.
@@ -1402,6 +1404,42 @@ Item {
         })
     }
 
+    /// What `names balance` says waits to be claimed: {count, total}, or null.
+    readonly property var waitingPayments: cliBalance && cliBalance.waiting ? cliBalance.waiting : null
+    property var receiveJob: null        // the claim under way: {id, started}
+    property string receiveProblem: ""
+
+    function claimPayments() {
+        if (receiveJob !== null)
+            return
+        receiveProblem = ""
+        receiveJob = { id: "", started: Date.now() }
+        askLater("cli_receive", [], function(value) {
+            receiveJob = { id: value.id, started: value.started || Date.now() }
+        }, function(message) {
+            receiveJob = null
+            receiveProblem = sentence(message)
+        })
+    }
+
+    function checkReceive() {
+        var job = receiveJob
+        if (job === null || job.id === "" || job.asking)
+            return
+        job.asking = true
+        askLater("job", [job.id], function(value) {
+            job.asking = false
+            if (receiveJob !== job || value.state === "running")
+                return
+            receiveJob = null
+            if (value.state === "done")
+                say("Claimed. The payments are in your private account now.", false)
+            else
+                receiveProblem = value.problem ? value.problem : "Claiming didn't finish: " + lastLogLine(value.log_tail)
+            loadCliBalance()
+        }, function() { job.asking = false })
+    }
+
     function checkShield() {
         var job = shieldJob
         if (job === null || job.id === "" || job.asking)
@@ -1431,11 +1469,12 @@ Item {
     Timer {
         interval: 3000
         repeat: true
-        running: root.installJob !== null || root.shieldJob !== null
+        running: root.installJob !== null || root.shieldJob !== null || root.receiveJob !== null
         onTriggered: {
             root.clockTick = Date.now()
             root.checkInstall()
             root.checkShield()
+            root.checkReceive()
         }
     }
 
@@ -3206,7 +3245,8 @@ Item {
                 appError = ""
                 var choices = request.choices || []
                 var given = choices.filter(function(choice) { return choice.granted })
-                appChosen = given.length > 0 ? [given[0].account] : choices.length > 0 ? [choices[0].account] : []
+                // Nothing is ticked for an app that may be a fake: choosing is deliberate (M-2).
+                appChosen = appPublisherFailed(request) ? [] : given.length > 0 ? [given[0].account] : choices.length > 0 ? [choices[0].account] : []
             }
             if (request.kind === "transfer")
                 loadFee()
@@ -3253,7 +3293,16 @@ Item {
     /// A program call, or a token transfer, with warnings: its program's
     /// source isn't verified, it goes to the Names registry, the token has no name.
     function appRequestRisky(request) {
+        // An app whose publisher check failed may be a fake, whatever it asks (M-2).
+        if (appPublisherFailed(request))
+            return true
         return (request.kind === "call" || appIsToken(request)) && ((request.warnings || []).length > 0)
+    }
+
+    /// Whether the app claims a publisher that doesn't vouch for it.
+    function appPublisherFailed(request) {
+        var publisher = request ? request.publisher : null
+        return !!publisher && ["mismatch", "not_published", "no_such_name"].indexOf(publisher.status) >= 0
     }
 
     /// Whether a transfer request moves a token rather than LEZ.
@@ -4333,7 +4382,8 @@ Item {
                         visible: root.hasCliWallet && root.cliPublic !== null && !root.canShield && root.shieldJob === null && !root.hasPrivateFunds
                         font.pixelSize: root.px(16)
                         color: root.brass
-                        text: root.cliPublic === null ? "" : "Your public account holds " + root.grouped(root.cliPublic.balance) + ". It needs " + root.grouped(root.nameDeposit) + " first."
+                        text: root.cliPublic === null ? "" : "Your public account holds " + root.grouped(root.cliPublic.balance) + ". It needs at least " + root.grouped(root.shieldMinimum) + " first: "
+                            + (root.cliOutdated ? "a few names' deposits." : "a name's 1,000,000 deposit plus two private transactions' fees, about 5,100,000 each.")
                     }
                     Action {
                         label: root.shieldJob !== null ? "Moving…" : "Move to private"
@@ -4673,6 +4723,26 @@ Item {
                     }
                     Hint { visible: root.sendingLine() !== ""; color: root.brass; font.pixelSize: root.px(16); text: root.sendingLine() }
                     Hint { visible: root.notice !== "" && root.sendingLine() === ""; color: root.noticeIsError ? root.alarm : root.dim; font.pixelSize: root.px(16); text: root.notice }
+                    // Payments to your names' private keys wait until you claim them (SC-1).
+                    Card {
+                        visible: root.waitingPayments !== null || root.receiveJob !== null || root.receiveProblem !== ""
+                        Layout.fillWidth: true
+                        Hint {
+                            visible: root.waitingPayments !== null
+                            color: root.ink
+                            text: root.waitingPayments === null ? "" : (root.waitingPayments.count === "1" ? "A payment is" : root.waitingPayments.count + " payments are")
+                                + " to your names waiting: " + root.amountShown(root.waitingPayments.total) + ". Claiming takes a few minutes each and a fee of about 5,100,000, paid from your fullest private account."
+                        }
+                        Action {
+                            visible: root.waitingPayments !== null
+                            label: root.receiveJob !== null ? "Claiming…" : "Claim"
+                            strong: true
+                            enabledNow: root.receiveJob === null
+                            onPressed: root.claimPayments()
+                        }
+                        Hint { visible: root.receiveJob !== null; color: root.brass; font.pixelSize: root.px(15); text: "Proving the claim on this computer. Several minutes for each payment." }
+                        Hint { visible: root.receiveProblem !== "" && root.receiveJob === null; color: root.alarm; font.pixelSize: root.px(15); text: root.receiveProblem }
+                    }
                     Hint {
                         visible: root.walletGroups.length === 0
                         text: root.cliBalance === undefined ? "Reading your balances…" : "No balances yet. Make a wallet in Settings, or start your node in Basecamp's Blockchain app."
@@ -5597,7 +5667,6 @@ Item {
                     }
                     // No wallet yet (make one), or the move to private that follows a bridge.
                     Card {
-                        visible: root.cliPublic === null || !root.cliOutdated
                         Layout.fillWidth: true
                         Part { Layout.topMargin: 0; text: root.cliPublic === null ? "Your LEZ wallet" : "Then, to use it privately" }
                         Hint {
@@ -5640,8 +5709,8 @@ Item {
                             text: "Bridged tokens land here. To use them for names, move " + root.grouped(root.shieldAmount) + " of them to your private account."
                         }
                         Action {
-                            // The October testnet names program has no `shield`.
-                            visible: root.cliPublic !== null && !root.cliOutdated
+                            // Every names program has `setup --shield`, the October testnet one too (M-4).
+                            visible: root.cliPublic !== null
                             label: root.shieldJob !== null ? "Moving…" : "Move to private"
                             enabledNow: root.shieldJob === null && root.canShield
                             onPressed: root.moveToPrivate()
@@ -6315,7 +6384,6 @@ Item {
                         size: 17
                         text: root.registry
                         hint: "Program ID of the registry"
-                        onEdited: root.saveConfig(root.sequencer, registryField.text.trim())
                     }
                     Part { text: "Sequencer" }
                     Field {
@@ -6324,7 +6392,45 @@ Item {
                         size: 17
                         text: root.sequencer
                         hint: "https://testnet.lez.logos.co"
-                        onEdited: root.saveConfig(sequencerField.text.trim(), root.registry)
+                    }
+                    // Saved only on purpose: a slip here points every read and change elsewhere (M-7).
+                    RowLayout {
+                        visible: !root.networkConfirm
+                        spacing: 8
+                        Action {
+                            label: "Save"
+                            enabledNow: sequencerField.text.trim() !== root.sequencer || registryField.text.trim() !== root.registry
+                            onPressed: root.networkConfirm = true
+                        }
+                        Link {
+                            visible: sequencerField.text.trim() !== root.sequencer || registryField.text.trim() !== root.registry
+                            text: "Undo"
+                            font.pixelSize: root.px(16)
+                            onPressed: { sequencerField.text = root.sequencer; registryField.text = root.registry }
+                        }
+                    }
+                    Card {
+                        visible: root.networkConfirm
+                        Layout.fillWidth: true
+                        Hint {
+                            color: root.ink
+                            text: "Switch to " + (sequencerField.text.trim() !== root.sequencer ? "the sequencer " + sequencerField.text.trim() : "")
+                                + (sequencerField.text.trim() !== root.sequencer && registryField.text.trim() !== root.registry ? " and " : "")
+                                + (registryField.text.trim() !== root.registry ? "the registry " + Logic.keyShown(registryField.text.trim()) : "")
+                                + "? Names, balances and every change you make then go there. Only switch to one you trust."
+                        }
+                        RowLayout {
+                            spacing: 8
+                            Action {
+                                label: "Yes, switch"
+                                strong: true
+                                onPressed: { root.networkConfirm = false; root.saveConfig(sequencerField.text.trim(), registryField.text.trim()) }
+                            }
+                            Action {
+                                label: "Cancel"
+                                onPressed: { root.networkConfirm = false; sequencerField.text = root.sequencer; registryField.text = root.registry }
+                            }
+                        }
                     }
                     Part { text: "Wallet files" }
                     Hint { text: "Not used on this chain: your names program's own wallet signs for your names." }
@@ -6949,23 +7055,24 @@ Item {
                                     }
                                 }
                                 RowLayout {
-                                    readonly property bool shows: profileRow.modelData.key === "avatar" && !root.cliHeld && /^data:/.test(root.draftText("avatar"))
+                                    // A name the CLI holds shows its picture this way too, not as data: text (M-6).
+                                    readonly property bool shows: profileRow.modelData.key === "avatar" && /^data:/.test(root.draftText("avatar"))
                                     visible: shows
                                     Layout.fillWidth: true
                                     spacing: 12
                                     Text { text: "Picture set"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17) }
                                     Link {
-                                        text: "Remove"
+                                        text: root.cliHeld ? "Change or remove" : "Remove"
                                         font.pixelSize: root.px(16)
                                         onPressed: profileField.text = ""
                                     }
                                     Item { Layout.fillWidth: true }
                                 }
                                 RowLayout {
-                                    visible: profileRow.modelData.key === "avatar" && !root.cliHeld && root.draftText("avatar") === "" && root.profileText("avatar") !== ""
+                                    visible: profileRow.modelData.key === "avatar" && root.draftText("avatar") === "" && root.profileText("avatar") !== ""
                                     Layout.fillWidth: true
                                     spacing: 12
-                                    Text { text: "Picture removed when you save"; color: root.alarm; font.family: root.sans; font.pixelSize: root.px(17) }
+                                    Text { text: root.cliHeld ? "Picture removed when you save, unless you give a PNG file below" : "Picture removed when you save"; color: root.alarm; font.family: root.sans; font.pixelSize: root.px(17); wrapMode: Text.WordWrap; Layout.fillWidth: true }
                                     Link {
                                         text: "Undo"
                                         font.pixelSize: root.px(16)
@@ -6975,7 +7082,9 @@ Item {
                                 }
                                 Field {
                                     id: profileField
-                                    visible: profileRow.modelData.lines !== true && profileRow.modelData.choices === undefined && !(profileRow.modelData.key === "avatar" && !root.cliHeld && (/^data:/.test(root.draftText("avatar")) || root.profileText("avatar") !== ""))
+                                    visible: profileRow.modelData.lines !== true && profileRow.modelData.choices === undefined
+                                        && !(profileRow.modelData.key === "avatar" && !root.cliHeld && (/^data:/.test(root.draftText("avatar")) || root.profileText("avatar") !== ""))
+                                        && !(profileRow.modelData.key === "avatar" && root.cliHeld && /^data:/.test(root.draftText("avatar")))
                                     Layout.fillWidth: true
                                     Layout.maximumWidth: profileRow.modelData.swatches !== undefined ? 130 : 100000
                                     size: 19

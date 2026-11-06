@@ -490,6 +490,12 @@ pub trait NamesModule: Send + 'static {
     /// too).
     fn cli_pay_account(&mut self, account: String, amount: String, from_private: bool) -> String;
 
+    /// Claims the payments waiting for the wallet's private accounts (what `cli_balance`'s
+    /// `waiting` counts), as a wallet job: `names receive`. Each claim is a private
+    /// transaction, several minutes of proving, its fee paid by the wallet's private
+    /// account holding the most.
+    fn cli_receive(&mut self) -> String;
+
     /// How job `id` is going: `{id, name, kind, state, started, finished,
     /// exit, log_tail}`. `state` is `running`, `done` (the CLI exited 0: the
     /// change was sent and included; `resolve` shows it) or `failed`;
@@ -983,7 +989,7 @@ const NAMES_APP: &str = "names_ui";
 /// `get_config` reports it so the Names app can refuse a module from another
 /// release (the app's own metadata asks for at least this at install, but an
 /// older module can still be the one loaded).
-const MODULE_VERSION: &str = "0.14.7";
+const MODULE_VERSION: &str = "0.15.0";
 
 /// Whether `caller` may use those methods. Basecamp gives each app its own
 /// credential, named after the app, so the module knows which app is calling.
@@ -1620,6 +1626,10 @@ impl Names {
                         state[key.as_str()] = value.clone();
                     }
                 }
+            }
+            Some("receive") if !running && !done => {
+                let first = log.lines().map(str::trim).find(|line| line.starts_with("Error:")).unwrap_or_else(|| cli::last_line(&log));
+                state["problem"] = Value::from(format!("Claiming didn't finish: {}", first.trim_start_matches("Error:").trim()));
             }
             Some("pay_account") if !running && !done => {
                 let first = log.lines().map(str::trim).find(|line| line.starts_with("Error:")).unwrap_or_else(|| cli::last_line(&log));
@@ -2522,6 +2532,13 @@ impl NamesModule for Names {
                 Ok(command)
             })
         })())
+    }
+
+    fn cli_receive(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(self.wallet_job("receive", |_| Ok(vec!["receive".to_owned()])))
     }
 
     fn cli_pay_account(&mut self, account: String, amount: String, from_private: bool) -> String {
@@ -4845,6 +4862,11 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
         let junk = parsed(&fresh().board_thread("x".repeat(5000)));
+        assert_eq!(
+            cli::parse_waiting("private total: 0\nwaiting to be claimed: 2 payment(s), 4000000 in all; run `names receive`\n"),
+            json!({ "count": "2", "total": "4000000" })
+        );
+        assert_eq!(cli::parse_waiting("private total: 0\n"), Value::Null);
         assert!(junk["error"].as_str().unwrap().contains("not a post"), "{junk}");
     }
 
