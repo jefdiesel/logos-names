@@ -331,3 +331,65 @@ export function stakeTable(stake, chainAccounts) {
     var waiting = held === null ? null : subDigits(held, stake.staked)
     return { held: held, staked: String(stake.staked), waiting: waiting === null ? "0" : waiting, claimable: String(stake.claimable || "0"), vouchers: stake.vouchers || 0 }
 }
+
+// ── The Wallet's history (activity in the module) ─────────────────────
+
+/// An account, key or name in an activity line: short.
+function whoShown(text) {
+    var t = String(text || "")
+    var m = /^(Public|Private)\/(.+)$/.exec(t)
+    if (m)
+        return m[1] + " " + keyShown(m[2])
+    return /^[0-9a-f]{64}$/.test(t) ? "key " + keyShown(t) : t
+}
+
+/// How long ago `at` (ms) was, from `now` (ms).
+export function agoShown(at, now) {
+    // The module keeps seconds; milliseconds are taken too.
+    var when = Number(at) < 1e12 ? Number(at) * 1000 : Number(at)
+    var s = Math.max(0, Math.round((Number(now) - when) / 1000))
+    if (s < 60) return "just now"
+    if (s < 3600) return Math.round(s / 60) + " min ago"
+    if (s < 86400) return Math.round(s / 3600) + " h ago"
+    return Math.round(s / 86400) + " d ago"
+}
+
+/// One history entry in words: {title, sub, amount, sign, state, tone}. `sign` is "-" for
+/// what left, "+" for what came in, "" for a move between your own accounts; `tone` is
+/// "good", "warn", "bad" or "plain" for the state.
+export function activityLine(entry, now) {
+    var e = entry || {}
+    var amount = e.amount ? grouped(e.amount) : ""
+    var kind = String(e.kind || "")
+    var title = "", sub = "", sign = "-"
+    switch (kind) {
+    case "send": title = "Sent on the Logos Blockchain"; sub = "to " + (e.name ? e.name : whoShown(e.to)); break
+    case "split": title = "Made a note of exactly " + amount; sub = "on " + whoShown(e.from) + (e.fee ? " · fee " + grouped(e.fee) : ""); sign = ""; break
+    case "bridge": title = "Bridge to LEZ"; sub = "from " + whoShown(e.from) + " into " + whoShown(e.to); break
+    case "pay": title = "Paid " + (e.name || "a name"); sub = "on LEZ"; break
+    case "pay_account": title = "Paid " + whoShown(e.to); sub = e["private"] ? "on LEZ, from your private account" : "on LEZ, from your public account"; break
+    case "shield": title = "Moved to private"; sub = "on LEZ, from your public account"; sign = ""; break
+    case "receive": title = "Claimed waiting payments"; sub = "on LEZ, into your private accounts"; sign = "+"; break
+    case "token_send": title = "Sent a token"; sub = "to " + whoShown(e.to); break
+    case "arrived": title = "Arrived"; sub = "in " + whoShown(e.to) + (e.chain === "logos" ? " on the Logos Blockchain" : " on LEZ"); sign = "+"; break
+    default: title = kind; sub = ""
+    }
+    var stateText = "", tone = "plain"
+    switch (String(e.state || "")) {
+    case "sending": stateText = e.chain === "lez" ? "Proving…" : "Sending…"; tone = "warn"; break
+    case "in_block": stateText = kind === "bridge" ? "In a block · arrives in about 12 h" : "In a block"; tone = kind === "bridge" ? "warn" : "good"; break
+    case "arrived": stateText = kind === "bridge" ? "Arrived on LEZ" : ""; tone = "good"; break
+    case "done": stateText = "Done"; tone = "good"; break
+    case "failed": stateText = "Didn't go through"; tone = "bad"; break
+    }
+    if (e.fee && kind !== "split" && e.state !== "sending")
+        sub += " · fee " + grouped(e.fee)
+    return { title: title, sub: sub, amount: amount, sign: amount === "" ? "" : sign, state: stateText, tone: tone, ago: agoShown(e.at, now) }
+}
+
+/// The entries that involve `who` (a LEZ account, a node key or a name).
+export function activityFor(rows, who) {
+    var list = Array.isArray(rows) ? rows : []
+    return list.filter(function(e) { return e.from === who || e.to === who || e.name === who })
+}
+

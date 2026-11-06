@@ -1402,6 +1402,16 @@ fn balance_output(setup: &Setup) -> Result<String, String> {
     Ok(output)
 }
 
+/// Every account `names balance` lists and what it holds, `(Public/… or Private/…, balance)`,
+/// from the shared read (at most `BALANCE_FRESH` old).
+pub fn balances_now(setup: &Setup) -> Result<Vec<(String, u128)>, String> {
+    let output = balance_output(setup)?;
+    Ok(parse_all_balances(&output)
+        .into_iter()
+        .filter_map(|row| Some((row["account"].as_str()?.to_owned(), row["balance"].as_str()?.parse::<u128>().ok()?)))
+        .collect())
+}
+
 /// After the CLI changed the wallet, the next balance is read afresh.
 pub fn forget_balance() {
     *BALANCE_SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;

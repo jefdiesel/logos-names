@@ -32,6 +32,7 @@
 //! a job (`cli_*` and `job`; see `cli.rs`): its changes are proven on this
 //! machine with the CLI's own keys.
 
+mod activity;
 mod avatar;
 mod chain;
 mod changes;
@@ -495,6 +496,13 @@ pub trait NamesModule: Send + 'static {
     /// transaction, several minutes of proving, its fee paid by the wallet's private
     /// account holding the most.
     fn cli_receive(&mut self) -> String;
+
+    /// The Wallet's history, newest first: what this app sent on either chain (followed
+    /// until it settles: `sending`, `in_block`, `arrived` for a bridge credited on LEZ,
+    /// `done`/`failed` for a LEZ job) and money seen arriving (`arrived`: a balance that
+    /// rose between two reads). With `account` (a LEZ account, a node key or a name),
+    /// only what involves it. Kept on this computer; neither chain is asked for history.
+    fn activity(&mut self, account: String) -> String;
 
     /// How job `id` is going: `{id, name, kind, state, started, finished,
     /// exit, log_tail}`. `state` is `running`, `done` (the CLI exited 0: the
@@ -989,7 +997,7 @@ const NAMES_APP: &str = "names_ui";
 /// `get_config` reports it so the Names app can refuse a module from another
 /// release (the app's own metadata asks for at least this at install, but an
 /// older module can still be the one loaded).
-const MODULE_VERSION: &str = "0.15.0";
+const MODULE_VERSION: &str = "0.15.1";
 
 /// Whether `caller` may use those methods. Basecamp gives each app its own
 /// credential, named after the app, so the module knows which app is calling.
@@ -1034,6 +1042,26 @@ fn public_config(config: &Value) -> Value {
         "token_program": config["token_program"],
         "module_version": config["module_version"],
     })
+}
+
+/// Puts a LEZ job that started (its reply `out`) in the Wallet's history, as `entry` with
+/// the job's id; it settles when the job ends (`activity`).
+fn log_started(out: &str, mut entry: Value) {
+    let started: Value = serde_json::from_str(out).unwrap_or(Value::Null);
+    if started["success"] != true {
+        return;
+    }
+    if let (Some(dir), Some(job)) = (config_dir(), started["value"]["id"].as_str()) {
+        entry["job"] = Value::from(job);
+        activity::add(&dir, now(), entry);
+    }
+}
+
+/// Notes what `chain`'s accounts hold now in the Wallet's history (arrivals).
+fn note_balances(chain: &str, balances: &[(String, u128)]) {
+    if let Some(dir) = config_dir() {
+        activity::note_balances(&dir, now(), chain, balances);
+    }
 }
 
 fn reply(outcome: Result<Value, String>) -> String {
@@ -2389,7 +2417,14 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| cli::run_balance(&self.cli_setup()?))())
+        reply((|| {
+            let setup = self.cli_setup()?;
+            let balance = cli::run_balance(&setup)?;
+            if let Ok(rows) = cli::balances_now(&setup) {
+                note_balances("lez", &rows);
+            }
+            Ok(balance)
+        })())
     }
 
     fn cli_bridge(&mut self, amount: String, from_key: String, node: String, send: bool) -> String {
@@ -2522,7 +2557,7 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| {
+        let out = reply((|| {
             let command = cli::setup_args(&amount)?;
             if command[1] == "--shield=0" {
                 return Err("enter an amount above zero".to_owned());
@@ -2531,21 +2566,90 @@ impl NamesModule for Names {
                 cli::default_public(setup)?;
                 Ok(command)
             })
-        })())
+        })());
+        let moved = cli::setup_args(&amount).ok().and_then(|command| command[1].strip_prefix("--shield=").map(str::to_owned));
+        log_started(&out, json!({ "kind": "shield", "chain": "lez", "amount": moved }));
+        out
     }
 
     fn cli_receive(&mut self) -> String {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply(self.wallet_job("receive", |_| Ok(vec!["receive".to_owned()])))
+        let out = reply(self.wallet_job("receive", |_| Ok(vec!["receive".to_owned()])));
+        log_started(&out, json!({ "kind": "receive", "chain": "lez" }));
+        out
+    }
+
+    fn activity(&mut self, account: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let dir = config_dir().ok_or("no folder for the Wallet's history")?;
+            let lez_now: std::collections::HashMap<String, u128> =
+                self.cli_setup().ok().and_then(|setup| cli::balances_now(&setup).ok()).unwrap_or_default().into_iter().collect();
+            let mut rows = Vec::new();
+            for mut entry in activity::all(&dir).into_iter().filter(|entry| activity::involves(entry, &account)).take(100) {
+                let id = entry["id"].as_str().unwrap_or_default().to_owned();
+                let mut settled = Value::Null;
+                match (entry["chain"].as_str(), entry["state"].as_str()) {
+                    // On the Logos Blockchain: in a block once its input notes are spent.
+                    (Some("logos"), Some("sending")) => {
+                        if let Some(hash) = entry["hash"].as_str() {
+                            if let Ok(state) = chain_landed(hash) {
+                                if state {
+                                    settled = json!({ "state": "in_block" });
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                // A bridge in a block: arrived once its LEZ account holds what it did plus the amount.
+                if entry["kind"] == "bridge" && (entry["state"] == "in_block" || settled["state"] == "in_block") {
+                    let to = entry["to"].as_str().map(|to| if to.starts_with("Public/") { to.to_owned() } else { format!("Public/{to}") });
+                    let before = entry["to_before"].as_str().and_then(|text| text.parse::<u128>().ok());
+                    let amount = entry["amount"].as_str().and_then(|text| text.parse::<u128>().ok());
+                    if let (Some(to), Some(before), Some(amount)) = (to, before, amount) {
+                        if lez_now.get(&to).is_some_and(|now| *now >= before.saturating_add(amount)) {
+                            settled = json!({ "state": "arrived", "arrived_at": now() });
+                        }
+                    }
+                }
+                // A LEZ job: as the job ended.
+                if entry["chain"] == "lez" && entry["state"] == "sending" {
+                    if let (Some(job), Ok(jobs)) = (entry["job"].as_str(), self.jobs()) {
+                        match jobs.state(job) {
+                            Ok(state) if state["state"] != "running" => {
+                                settled = json!({
+                                    "state": if state["state"] == "done" { "done" } else { "failed" },
+                                    "fee": cli::parse_fee(&jobs.whole_log(job)),
+                                });
+                            }
+                            Ok(_) => {}
+                            // The job's files were cleared: it ended long ago, outcome unknown.
+                            Err(_) => settled = json!({ "state": "done" }),
+                        }
+                    }
+                }
+                if let Some(fields) = settled.as_object() {
+                    activity::update(&dir, &id, &settled);
+                    for (key, value) in fields {
+                        entry[key.as_str()] = value.clone();
+                    }
+                }
+                rows.push(entry);
+            }
+            Ok(Value::from(rows))
+        })())
     }
 
     fn cli_pay_account(&mut self, account: String, amount: String, from_private: bool) -> String {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| {
+        let out = reply((|| {
             // Checked before the CLI is looked for, so bad input fails the same way every time.
             if !matches!(cli::pay_to(&account)?, cli::PayTo::Account(_)) {
                 return Err("that is a name; pay it as a name".to_owned());
@@ -2554,7 +2658,9 @@ impl NamesModule for Names {
                 return Err("enter a whole amount, such as 1000".to_owned());
             }
             self.wallet_job("pay_account", |setup| cli::pay_account_args(setup, &account, &amount, from_private))
-        })())
+        })());
+        log_started(&out, json!({ "kind": "pay_account", "chain": "lez", "to": account.trim(), "amount": cli::ungrouped(&amount), "private": from_private }));
+        out
     }
 
     fn cli_register(&mut self, name: String, as_public: bool) -> String {
@@ -2794,7 +2900,9 @@ impl NamesModule for Names {
             Ok(command) => command,
             Err(error) => return reply(Err(error)),
         };
-        self.cli_job(&name, "pay", |_, _, _| Ok((command, None, Value::Null)))
+        let out = self.cli_job(&name, "pay", |_, _, _| Ok((command, None, Value::Null)));
+        log_started(&out, json!({ "kind": "pay", "chain": "lez", "name": registry::normalize_name(&name), "amount": cli::ungrouped(&amount) }));
+        out
     }
 
     fn board_follows(&mut self) -> String {
@@ -3030,7 +3138,7 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| {
+        let out = reply((|| {
             // Checked before the CLI is looked for, so bad input fails the same way every time.
             let program = self.token_program_set()?;
             let command = cli::token_send_args(&program, &definition, &amount, &to, from_private, to_public)?;
@@ -3043,7 +3151,9 @@ impl NamesModule for Names {
                 }
                 Ok(command)
             })
-        })())
+        })());
+        log_started(&out, json!({ "kind": "token_send", "chain": "lez", "to": to.trim(), "amount": cli::ungrouped(&amount), "token": definition.trim() }));
+        out
     }
 
     fn cli_token_receive(&mut self) -> String {
@@ -3140,6 +3250,15 @@ impl NamesModule for Names {
                     })
                     .collect::<Vec<_>>(),
             ))
+            .inspect(|rows| {
+                let held: Vec<(String, u128)> = rows
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|row| Some((row["key"].as_str()?.to_owned(), row["balance"].as_str()?.parse().ok()?)))
+                    .collect();
+                note_balances("logos", &held);
+            })
         })())
     }
 
@@ -3192,6 +3311,10 @@ impl NamesModule for Names {
                     let inputs = chain::transfer_parts(tx).0;
                     chain_sent_add(hash, json!({ "from": from, "inputs": inputs, "fee": fee.map(|f| f.to_string()), "at": now() }));
                 }
+                if let (Some(hash), Some(dir)) = (&hash, config_dir()) {
+                    activity::add(&dir, now(), json!({ "kind": "send", "chain": "logos", "from": from, "to": to_key, "name": target["name"],
+                        "amount": amount.to_string(), "hash": hash, "fee": fee.map(|f| f.to_string()) }));
+                }
                 plan["hash"] = hash.map_or(Value::Null, Value::from);
                 plan["fee"] = fee.map_or(Value::Null, |f| Value::from(f.to_string()));
             }
@@ -3232,6 +3355,9 @@ impl NamesModule for Names {
                 if let Some(hash) = &hash {
                     let inputs = stored.as_ref().map(|tx| chain::transfer_parts(tx).0).unwrap_or_default();
                     chain_sent_add(hash, json!({ "from": from, "inputs": inputs, "split": amount.to_string(), "fee": fee.map(|f| f.to_string()), "at": now() }));
+                    if let Some(dir) = config_dir() {
+                        activity::add(&dir, now(), json!({ "kind": "split", "chain": "logos", "from": from, "amount": amount.to_string(), "hash": hash, "fee": fee.map(|f| f.to_string()) }));
+                    }
                 }
                 plan["hash"] = hash.map_or(Value::Null, Value::from);
                 plan["fee"] = fee.map_or(Value::Null, |f| Value::from(f.to_string()));
@@ -3295,6 +3421,16 @@ impl NamesModule for Names {
                 let hash = chain::hash_of(&deposited);
                 if let Some(hash) = &hash {
                     chain_sent_add(hash, json!({ "from": from, "inputs": [note], "fee": null, "at": now() }));
+                    // What the LEZ account held before, so its arrival can be told (activity).
+                    let to_before = self
+                        .cli_setup()
+                        .ok()
+                        .and_then(|setup| cli::balances_now(&setup).ok())
+                        .and_then(|rows| rows.into_iter().find(|(account, _)| *account == format!("Public/{to}")).map(|(_, balance)| balance));
+                    if let Some(dir) = config_dir() {
+                        activity::add(&dir, now(), json!({ "kind": "bridge", "chain": "logos", "from": from, "to": format!("Public/{to}"),
+                            "amount": amount.to_string(), "hash": hash, "channel": channel, "to_before": to_before.map(|b| b.to_string()) }));
+                    }
                 }
                 plan["sent"] = json!(true);
                 plan["hash"] = hash.map_or(Value::Null, Value::from);
@@ -4114,6 +4250,20 @@ fn chain_sent() -> Map<String, Value> {
     config_dir().map(|dir| load_object(&dir.join("chain-sent.json"))).unwrap_or_default()
 }
 
+/// Whether a send made here (`chain_sent`) is in a block: its inputs are spent, or for a
+/// split whose inputs weren't known, its exact note is there.
+fn chain_landed(hash: &str) -> Result<bool, String> {
+    let Some(known) = chain_sent().remove(hash) else { return Err("not sent from here".to_owned()) };
+    let inputs: Vec<String> = known["inputs"].as_array().into_iter().flatten().filter_map(|i| i.as_str().map(str::to_owned)).collect();
+    let notes = chain::notes_of(&node::call("wallet_get_notes", json!([known["from"], ""]), node::QUICK)?);
+    Ok(if inputs.is_empty() {
+        let split = known["split"].as_str().and_then(|text| text.parse::<u128>().ok());
+        split.is_some_and(|split| notes.values().any(|value| chain::amount(value) == split))
+    } else {
+        chain::spent(&inputs, &notes)
+    })
+}
+
 /// Remembers a send; past `MAX_CACHED` sends the oldest is forgotten.
 fn chain_sent_add(hash: &str, sent: Value) {
     let Some(dir) = config_dir() else { return };
@@ -4646,6 +4796,11 @@ mod tests {
         let sent = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), true));
         assert_eq!((sent["value"]["sent"].as_bool(), sent["value"]["hash"].as_str()), (Some(true), Some("ab".repeat(32).as_str())), "{sent}");
         assert_eq!(sent["value"]["channel_known"], true);
+        // The split and the bridge are in the Wallet's history, the bridge with where it lands.
+        let history = activity::all(&config_dir().unwrap());
+        let bridge = history.iter().find(|e| e["kind"] == "bridge" && e["hash"] == "ab".repeat(32)).expect("the bridge is in the history");
+        assert_eq!((bridge["amount"].as_str(), bridge["to"].as_str(), bridge["state"].as_str()), (Some("1000000"), Some(format!("Public/{to}").as_str()), Some("sending")));
+        assert!(history.iter().any(|e| e["kind"] == "split" && e["hash"] == "cd".repeat(32)), "the split is in the history");
         let account = registry::parse_account(to).unwrap();
         assert_eq!(
             asked_args("channel_deposit_with_notes"),

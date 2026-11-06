@@ -113,9 +113,9 @@ Item {
     property bool configKnown: false   // the names module has answered once
     // The names module this app needs: the same release (metadata.json asks for it
     // at install, but an older module can still be the one Basecamp loaded).
-    readonly property string neededModule: "0.15.0"
+    readonly property string neededModule: "0.15.1"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.15.2"
+    readonly property string appVersion: "0.15.3"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -470,6 +470,7 @@ Item {
         cliBalance = undefined
         askLater("cli_balance", [], function(value) {
             cliBalance = value
+            loadActivity()
         }, function(message) {
             cliBalance = null
             console.log("names_ui: CLI balance:", message)
@@ -751,6 +752,28 @@ Item {
     }
 
     /// An amount as the Wallet shows it: grouped, a dash while unknown, dots when hidden.
+    // ── History (activity in the module) ───────────────────────────────
+    property var activityRows: []         // newest first, as `activity` gives it
+    property bool activityAll: false      // the Wallet's Activity shows every entry
+
+    function loadActivity() {
+        askLater("activity", [""], function(value) {
+            activityRows = Array.isArray(value) ? value : []
+        }, function(message) {
+            console.log("names_ui: activity:", message)
+        }, 30000)
+    }
+
+    /// Whether something in the history is still on its way (worth reading again).
+    readonly property bool activityMoving: activityRows.some(function(e) { return e.state === "sending" || (e.kind === "bridge" && e.state === "in_block") })
+
+    Timer {
+        interval: 30000
+        repeat: true
+        running: root.section === "wallet" && root.activityMoving
+        onTriggered: { root.loadActivity(); root.loadCliBalance() }
+    }
+
     function amountShown(value) {
         if (walletHidden)
             return "••••••"
@@ -786,6 +809,7 @@ Item {
     }
 
     function walletRefresh() {
+        loadActivity()
         loadCliBalance()
         loadAccounts()
         cliNames.forEach(function(entry) { boardLookUp(entry.name) })
@@ -3926,6 +3950,46 @@ Item {
         }
     }
 
+    /// One history entry: what, where, how much, how it stands, when.
+    component ActivityRow: RowLayout {
+        id: act
+        property var entry: ({})
+        property bool small: false
+        readonly property var line: Logic.activityLine(act.entry, Math.max(root.clockTick, Date.now()))
+        Layout.fillWidth: true
+        Layout.leftMargin: act.small ? 0 : root.px(6)
+        Layout.rightMargin: act.small ? 0 : root.px(6)
+        Layout.topMargin: root.px(act.small ? 4 : 6)
+        Layout.bottomMargin: root.px(act.small ? 4 : 6)
+        spacing: root.px(10)
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 1
+            Text { Layout.fillWidth: true; text: act.line.title; elide: Text.ElideRight; color: root.ink; font.family: root.sans; font.pixelSize: root.px(act.small ? 14 : 15) }
+            Text { Layout.fillWidth: true; text: act.line.sub + " · " + act.line.ago; elide: Text.ElideRight; color: root.dim; font.family: root.sans; font.pixelSize: root.px(12) }
+        }
+        ColumnLayout {
+            spacing: 1
+            Text {
+                Layout.alignment: Qt.AlignRight
+                visible: act.line.amount !== ""
+                text: root.walletHidden ? "••••••" : act.line.sign + act.line.amount
+                color: act.line.sign === "+" ? root.good : root.ink
+                font.family: root.sans
+                font.weight: Font.DemiBold
+                font.pixelSize: root.px(act.small ? 14 : 15)
+            }
+            Text {
+                Layout.alignment: Qt.AlignRight
+                visible: act.line.state !== ""
+                text: act.line.state
+                color: act.line.tone === "good" ? root.good : act.line.tone === "bad" ? root.alarm : act.line.tone === "warn" ? root.brass : root.dim
+                font.family: root.sans
+                font.pixelSize: root.px(12)
+            }
+        }
+    }
+
     component Tab: Rectangle {
         id: tab
         property string label: ""
@@ -5118,6 +5182,22 @@ Item {
                                                 onPressed: root.removeToken(addressRow.modelData.definition)
                                             }
                                         }
+                                        // This account's own history.
+                                        ColumnLayout {
+                                            readonly property var mine: Logic.activityFor(root.activityRows, addressRow.modelData.kind === "chain" ? addressRow.modelData.key : addressRow.modelData.account)
+                                            visible: addressRow.open && addressRow.modelData.kind !== "token"
+                                            Layout.fillWidth: true
+                                            Layout.leftMargin: root.px(64)
+                                            Layout.rightMargin: root.px(12)
+                                            Layout.bottomMargin: root.px(10)
+                                            spacing: 0
+                                            Text { text: "History"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(13); font.weight: Font.DemiBold }
+                                            Hint { visible: parent.mine.length === 0; font.pixelSize: root.px(13); text: "Nothing sent or received here yet, as far as this app has seen." }
+                                            Repeater {
+                                                model: parent.mine.slice(0, 5)
+                                                ActivityRow { required property var modelData; entry: modelData; small: true }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -5147,6 +5227,56 @@ Item {
                                 text: (root.tokenPending.length === 1 ? "1 token payment is" : root.tokenPending.length + " token payments are") + " waiting for you. Taking each in is proved on this computer, 7-12 minutes."
                             }
                             Action { label: "Take it in"; strong: true; enabledNow: root.tokenJob === null; onPressed: root.tokenReceive() }
+                        }
+                    }
+
+                    // Activity: what this app sent, on either chain, and money seen arriving.
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: activityList.implicitHeight + root.px(24)
+                        radius: 12
+                        color: root.card
+                        border.width: 1
+                        border.color: root.line
+                        ColumnLayout {
+                            id: activityList
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            anchors.margins: root.px(12)
+                            spacing: 2
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Layout.leftMargin: root.px(6)
+                                Layout.bottomMargin: root.px(4)
+                                Text { text: "Activity"; color: root.ink; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(18) }
+                                Item { Layout.fillWidth: true }
+                                Link {
+                                    visible: root.activityRows.length > 6
+                                    text: root.activityAll ? "Show less" : "Show all (" + root.activityRows.length + ")"
+                                    color: root.dim
+                                    font.pixelSize: root.px(14)
+                                    onPressed: root.activityAll = !root.activityAll
+                                }
+                            }
+                            Hint {
+                                visible: root.activityRows.length === 0
+                                Layout.leftMargin: root.px(6)
+                                font.pixelSize: root.px(14)
+                                text: "Nothing yet. What you send, bridge or receive shows here."
+                            }
+                            Repeater {
+                                model: root.activityAll ? root.activityRows : root.activityRows.slice(0, 6)
+                                ActivityRow { required property var modelData; entry: modelData }
+                            }
+                            Hint {
+                                visible: root.activityRows.length > 0
+                                Layout.leftMargin: root.px(6)
+                                Layout.topMargin: root.px(4)
+                                font.pixelSize: root.px(12)
+                                color: root.faint
+                                text: "Kept on this computer: what this app sent, followed until it settles, and money seen arriving between reads."
+                            }
                         }
                     }
 
@@ -5644,6 +5774,17 @@ Item {
                     }
                     Text { text: "Bridge"; color: root.ink; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(28) }
                     Hint { font.pixelSize: root.px(15); text: "Moves the native coin between the Logos Blockchain and LEZ. Tokens made on LEZ stay on LEZ: only the native coin crosses." }
+                    ColumnLayout {
+                        readonly property var bridges: root.activityRows.filter(function(e) { return e.kind === "bridge" || e.kind === "split" })
+                        visible: bridges.length > 0
+                        Layout.fillWidth: true
+                        spacing: 0
+                        Part { text: "Your bridges" }
+                        Repeater {
+                            model: parent.bridges.slice(0, 5)
+                            ActivityRow { required property var modelData; entry: modelData; small: true }
+                        }
+                    }
 
                     Part { text: "From" }
                     PickRow {

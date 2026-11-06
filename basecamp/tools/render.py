@@ -91,6 +91,12 @@ BRIDGE = r"""
                     public: { account: "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", balance: mock.public !== undefined ? mock.public : "1250000" },
                     waiting: mock.waiting || null })
             }
+            if (method === "activity") return ok(mock.activity || [
+                { id: "a1", at: Date.now() - 2 * 3600000, kind: "bridge", chain: "logos", from: "66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b", to: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", amount: "1000000", state: "in_block" },
+                { id: "a2", at: Date.now() - 2 * 3600000 - 120000, kind: "split", chain: "logos", from: "66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b", amount: "1000000", fee: "2018", state: "in_block" },
+                { id: "a3", at: Date.now() - 26 * 3600000, kind: "pay", chain: "lez", name: "ada", amount: "250000", fee: "4088", state: "done", job: "ada-1" },
+                { id: "a4", at: Date.now() - 30 * 3600000, kind: "arrived", chain: "lez", to: "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", amount: "5000000", state: "arrived" },
+                { id: "a5", at: Date.now() - 50 * 3600000, kind: "pay_account", chain: "lez", to: "Public/FaPur3GjBrXZoE5Yz6bNjLeqXJzEn6pzXEdE9MCJZsdg", amount: "1000", state: "failed" }])
             if (method === "cli_receive") return ok({ id: "-wallet-1792000000009", name: "-wallet", kind: "receive", state: "running", started: Date.now() - 60000 })
             // Getting started. Stand-ins only: nothing is installed, no wallet is made.
             if (method === "cli_status") return ok(Object.assign({ cli: "/Users/you/.config/logos-names/bin/names", prover: true, installing: null, wallet_dir: "/Users/you/.lee/wallet",
@@ -210,6 +216,8 @@ SCENARIOS = {
     "wallet-bridge-confirm": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); Qt.callLater(function() { root.openGetTokens(); bridgeAmountField.text = "1000000"; root.bridgeRun(false); root.bridgeConfirm = true })',
     "wallet": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home")',
     "wallet-claim": 'root.openWallet("home")',
+    "wallet-activity": 'root.openWallet("home")',
+    "wallet-row-history": 'root.openWallet("home"); root.walletRowOpen = "chain-66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b"',
     "wallet-bridge-private": 'root.openWallet("home"); Qt.callLater(function() { root.openGetTokens(); root.bridgeToPrivate = true; bridgeAmountField.text = "1000000" })',
     "wallet-bridge-from-lez": 'root.openWallet("home"); Qt.callLater(function() { root.openBridgeFromLez("Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk") })',
     "wallet-bridge-plain": 'root.openWallet("home"); Qt.callLater(function() { root.openGetTokens() })',
