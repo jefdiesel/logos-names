@@ -550,6 +550,29 @@ show("names chain_bridge A 1,234 (plan only: nothing is deposited)", plan)
 step("the bridge plan then picks that exact note, with no split needed",
      plan["ok"] and plan["value"]["needs_split"] is False and after_split.get(plan["value"]["note"]) == 1234,
      f"note {plan['value'].get('note') if plan['ok'] else plan.get('error')}")
+# The deposit channel is checked with the node (campaign finding CR-1): what the node says
+# for a channel it doesn't have, and that the plan carries the same answer.
+# (Channel IDs here have hex letters: logosctl would send an all-digit one as a number.)
+unknown = node("get_channel_state", "ab" * 32)
+show("node get_channel_state for a channel it doesn't have", unknown)
+step("the node refuses get_channel_state for a channel it doesn't have", not unknown["ok"], unknown.get("error"))
+channel = plan["value"].get("channel", "") if plan["ok"] else ""
+if any(c in "abcdef" for c in channel):
+    known_here = node("get_channel_state", channel)
+    show(f"node get_channel_state for the plan's channel {channel}", known_here)
+    step("the bridge plan's channel_known is the node's own answer for that channel",
+         plan["value"]["channel_known"] is known_here["ok"], f"channel_known {plan['value']['channel_known']}, node ok {known_here['ok']}")
+else:
+    # The sequencer names the public testnet's channel, which a solo node on its own chain lacks.
+    step(f"the bridge plan says the solo node doesn't know the testnet's channel {channel[:8]}…",
+         plan["ok"] and plan["value"]["channel_known"] is False, f"channel_known {plan['value'].get('channel_known') if plan['ok'] else plan.get('error')}")
+if plan["ok"] and not plan["value"]["channel_known"]:
+    refused = names("chain_bridge", A, "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "1,234", "true")
+    show("names chain_bridge A 1,234 send, into a channel the node doesn't know", refused)
+    after_refusal = {n["id"]: int(n["value"]) for n in node("wallet_get_notes", A, "")["value"]["notes"]}
+    step("refusal: no deposit into a channel the node doesn't know, and A's notes are untouched",
+         not refused["ok"] and "deposit channel" in (refused.get("error") or "") and after_refusal == after_split,
+         refused.get("error"))
 
 # ── chain_claim ────────────────────────────────────────────────────────────
 say("\n== chain_claim")
