@@ -41,6 +41,26 @@ target it. A `dev` wallet also cannot read today's testnet (`unknown field
 shards`), so the LEZ wallet PR (`--to-name`) can be tried live only once the
 testnet runs the new release.
 
+## Bridge: what comes after deposits
+
+The Wallet's Bridge moves the native coin from the Logos Blockchain into LEZ (a
+deposit into LEZ's channel, credited to a public account). Two directions are not
+possible yet:
+
+- **LEZ → Logos Blockchain (withdrawals).** LEZ's bridge program already has a
+  `Withdraw` message, but LEZ 0.4 rejects it ("Withdraws are disabled in the current
+  version of LEZ", `lez/programs/bridge/src/main.rs`). The Bridge screen lists LEZ as
+  a source and says so; it sends once a LEZ release turns withdrawals on.
+- **Tokens between LEZ zones.** LEZ 0.4 has a working lock-and-mint demo between two
+  LEZ zones: lock on zone A, a watcher carries the mint to zone B, whose indexer
+  re-derives and checks it before a wrapped token is minted
+  (`lez/cross_zone`, test `integration_tests/tests/cross_zone_bridge.rs`; local copy
+  in `~/logos/upstream/lez-0.4-rc1`). It is not the Logos Blockchain deposit path,
+  and not usable yet: the testnet has one zone, routes are set up by each zone's
+  operator, and the wrapped token trusts the route table rather than its sources
+  (LEZ issue #673). Revisit when a second zone runs; then the Bridge screen's From
+  and To would list zones, and tokens as well as the native coin.
+
 ## Temporary names
 
 Throwaway names like `orange-liquid-rhino.lez`: three random words, made by the
