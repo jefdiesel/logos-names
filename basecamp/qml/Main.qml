@@ -113,9 +113,9 @@ Item {
     property bool configKnown: false   // the names module has answered once
     // The names module this app needs: the same release (metadata.json asks for it
     // at install, but an older module can still be the one Basecamp loaded).
-    readonly property string neededModule: "0.14.2"
+    readonly property string neededModule: "0.14.3"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.14.5"
+    readonly property string appVersion: "0.14.6"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -472,6 +472,8 @@ Item {
 
     property var cliAccounts: null        // cli_accounts, sorted for Settings; null until read
     property string accountsError: ""
+    /// The names program is older than this app (the October testnet build): it can't list or make accounts.
+    readonly property bool cliOld: cliOutdated || /older than this app/.test(accountsError)
     property bool accountsBusy: false     // a change to the accounts is on its way
     property string accountRenaming: ""   // the account whose nickname is being edited
     property string accountNewKind: ""    // "public" or "private" while one is being made
@@ -4815,7 +4817,7 @@ Item {
                     RowLayout {
                         Layout.topMargin: 6
                         spacing: 10
-                        Action { label: "Add a token"; onPressed: { root.addTokenProblem = ""; root.walletView = "add"; addTokenField.forceActiveFocus() } }
+                        Action { visible: !root.cliOutdated; label: "Add a token"; onPressed: { root.addTokenProblem = ""; root.walletView = "add"; addTokenField.forceActiveFocus() } }
                         Item { Layout.fillWidth: true }
                     }
                     Hint {
@@ -5348,7 +5350,8 @@ Item {
                             text: "Bridged tokens land here. To use them for names, move " + root.grouped(root.shieldAmount) + " of them to your private account."
                         }
                         Action {
-                            visible: root.cliPublic !== null
+                            // The October testnet names program has no `shield`.
+                            visible: root.cliPublic !== null && !root.cliOutdated
                             label: root.shieldJob !== null ? "Moving…" : "Move to private"
                             enabledNow: root.shieldJob === null && root.canShield
                             onPressed: root.moveToPrivate()
@@ -5828,7 +5831,7 @@ Item {
                     spacing: 14
                     Text { text: "Settings"; color: root.ink; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(28) }
                     Part { text: "Main name" }
-                    Hint { text: "Your posts, likes and payments are made as this name." }
+                    Hint { text: "Payments, messages and your profile are made as this name." }
                     Flow {
                         Layout.fillWidth: true
                         spacing: 6
@@ -5928,7 +5931,7 @@ Item {
                         onPressed: root.openRegister()
                     }
                     Part { text: "Accounts" }
-                    Hint { text: "Your wallet's accounts. The one marked Pays is where payments and new names come from, one private and one public. Names you hold stay with the accounts holding them, and payments to a name still go where the name points." }
+                    Hint { visible: !root.cliOld; text: "Your wallet's accounts. The one marked Pays is where payments and new names come from, one private and one public. Names you hold stay with the accounts holding them, and payments to a name still go where the name points." }
                     Hint { visible: root.cliPath === ""; text: "Install Names on this computer first (Welcome) to see your accounts." }
                     Hint { visible: root.cliPath !== "" && root.cliAccounts === null && root.accountsError === ""; text: "Reading your accounts…" }
                     Repeater {
@@ -6001,9 +6004,29 @@ Item {
                             }
                         }
                     }
-                    Hint { visible: root.accountsError !== ""; color: root.alarm; text: root.accountsError }
+                    Hint { visible: root.accountsError !== "" && !root.cliOld; color: root.alarm; text: root.accountsError }
+                    // An older names program: the two accounts it pays from, and why there's no more.
+                    Fact {
+                        visible: root.cliOld && root.cliBalance !== undefined && root.cliBalance !== null
+                        label: "Private"
+                        code: true
+                        value: root.cliBalance ? root.shorten(root.cliBalance.account || "") + "   " + root.grouped(root.cliBalance.balance) : ""
+                        full: root.cliBalance && root.cliBalance.account ? "Private/" + root.cliBalance.account : ""
+                    }
+                    Fact {
+                        visible: root.cliOld && root.cliPublic !== null
+                        label: "Public"
+                        code: true
+                        value: root.cliPublic !== null ? root.shorten(root.cliPublic.account) + "   " + root.grouped(root.cliPublic.balance) : ""
+                        full: root.cliPublic !== null ? "Public/" + root.cliPublic.account : ""
+                    }
+                    Hint {
+                        visible: root.cliOld
+                        font.pixelSize: root.px(15)
+                        text: "These are the two accounts your names program pays from. Seeing every account, and making or naming more, comes with its LEZ 0.4 update."
+                    }
                     RowLayout {
-                        visible: root.accountNewKind === "" && root.cliPath !== ""
+                        visible: root.accountNewKind === "" && root.cliPath !== "" && !root.cliOld
                         spacing: 10
                         Action { label: "+  New private account"; enabledNow: !root.accountsBusy; onPressed: { root.accountNewKind = "private"; newAccountField.text = "" } }
                         Action { label: "+  New public account"; enabledNow: !root.accountsBusy; onPressed: { root.accountNewKind = "public"; newAccountField.text = "" } }

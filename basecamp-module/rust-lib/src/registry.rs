@@ -288,7 +288,7 @@ impl Settings {
     /// [u128; 2], claims_root, claims_until: u64, claims_program}`.
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         let mut reader = Reader { bytes };
-        let _version = reader.u8()?;
+        let version = reader.u8()?;
         let admin = reader.account()?;
         let treasury = reader.account()?;
         let mut prices = [0_u128; 3];
@@ -300,9 +300,9 @@ impl Settings {
         for deposit in &mut deposits {
             *deposit = reader.u128()?;
         }
-        let claims_root = reader.account()?;
-        let claims_until = reader.u64()?;
-        let claims_program = reader.account()?;
+        // Version 5 (the registry on the LEZ 0.3 testnet) has no claims list.
+        let (claims_root, claims_until, claims_program) =
+            if version < 6 { ([0; 32], 0, [0; 32]) } else { (reader.account()?, reader.u64()?, reader.account()?) };
         Ok(Self { admin, treasury, prices, mode, deposits, claims_root, claims_until, claims_program })
     }
 
@@ -563,11 +563,12 @@ impl Resolved {
     /// Decodes the on-chain record `{version, owner, expires, sealed, claimed}` and opens it.
     fn decode(bytes: &[u8], key: &[u8; 32], name: &str) -> Result<Self, String> {
         let mut reader = Reader { bytes };
-        let _version = reader.u8()?;
+        let version = reader.u8()?;
         let owner = reader.account()?;
         let expires = reader.u64()?;
         let sealed = reader.byte_vec()?;
-        let claimed = reader.u8()? != 0;
+        // Version 5 records (the LEZ 0.3 testnet) end at `sealed`: nothing was claimed there.
+        let claimed = version >= 6 && reader.u8()? != 0;
         Ok(Self { owner, expires, profile: Profile::open(key, sealed, name), claimed })
     }
 
@@ -670,7 +671,11 @@ pub const NATIVE_TOKEN: AccountId = [0; 32];
 /// The state of one actor as a sequencer's `getAccountView` reports it: a list of
 /// bytes under the program's ID, or nothing.
 fn actor_bytes(account: &Value, program: &AccountId) -> Result<Vec<u8>, String> {
-    match account["data"]["actor_states"][account_text(program)].as_array() {
+    // A LEZ 0.3 sequencer (the public testnet until it moves to 0.4) answers the same call
+    // with every program's shard under `shards`, in the same byte-list form.
+    let data = &account["data"];
+    let id = account_text(program);
+    match data["actor_states"][&id].as_array().or_else(|| data["shards"][&id].as_array()) {
         None => Ok(Vec::new()),
         Some(values) => values
             .iter()
@@ -863,7 +868,34 @@ mod tests {
 
     const PROGRAM: AccountId = [7; 32];
 
-    /// The profile sealed in SPEC.md's vector.
+    /// The LEZ 0.3 testnet: its sequencer answers with `shards`, its records are
+    /// version 5 (no `claimed`), its settings have no claims list. Read the same way.
+    #[test]
+    fn a_lez_0_3_registry_reads_as_well() {
+        let program = [7_u8; 32];
+        let reply = json!({ "nonce": 0, "data": { "shards": { account_text(&program): [5, 6], account_text(&[0; 32]): [1] } } });
+        assert_eq!(actor_bytes(&reply, &program).expect("reads"), vec![5, 6]);
+        assert_eq!(actor_bytes(&json!({ "data": { "shards": {} } }), &program).expect("reads"), Vec::<u8>::new());
+        let v04 = json!({ "data": { "actor_states": { account_text(&program): [9] } } });
+        assert_eq!(actor_bytes(&v04, &program).expect("reads"), vec![9]);
+
+        let v5 = unhex(&format!("05{}{}01000000ab", "01".repeat(32), "ff".repeat(8))).expect("hex");
+        let record = Resolved::decode(&v5, &[0; 32], "jefdiesel").expect("a v5 record decodes");
+        assert_eq!((record.owner, record.expires, record.claimed), ([1; 32], u64::MAX, false));
+
+        let live = unhex(&format!(
+            "05{admin}{admin}{}01{}{}",
+            "00".repeat(48),
+            "00e1f505000000000000000000000000",
+            "00943577000000000000000000000000",
+            admin = "b6b80d9b12a1f9e36d60476dd4e41b4a2d5412671592f7447827728f83557808",
+        ))
+        .expect("hex");
+        let settings = Settings::decode(&live).expect("the live v5 settings decode");
+        assert_eq!(settings.deposits, [100_000_000, 2_000_000_000]);
+        assert!(!settings.claims_open(0));
+    }
+
     /// SPEC.md §7, Forwarding: a valid other name, normalised, shown in `resolve`.
     #[test]
     fn a_record_says_where_it_forwards() {
@@ -881,6 +913,7 @@ mod tests {
         assert_eq!(Resolved { profile: sample_profile(), ..with("x") }.to_json()["forward"], Value::Null);
     }
 
+    /// The profile sealed in SPEC.md's vector.
     fn sample_profile() -> Profile {
         Profile {
             name: "jef".to_owned(),
