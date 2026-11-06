@@ -68,7 +68,8 @@ const rows = [
   { account: "Private/d", kind: "private", label: " ", default: true },
 ];
 check("accountsShown order", accountsShown(rows).map((r) => r.account), ["Private/d", "Private/b", "Public/c", "Public/a"]);
-check("accountTitle", rows.map(accountTitle), ["Public account", "Savings", "Main", "Private account"]);
+// Nicknames never title an account: only a registered name does (walletGroups).
+check("accountTitle", rows.map(accountTitle), ["Public account", "Private account", "Public account", "Private account"]);
 check("accountsShown not a list", accountsShown(null), []);
 // The approval sheet's publisher line (the Program Registry's verify_app).
 check("publisher verified", publisherLine({ status: "verified", publisher: "forumer" }), { text: "forumer ✓ verified publisher", tone: "good" });
@@ -106,7 +107,7 @@ check("subDigits", [subDigits("1000", "1"), subDigits("210939029", "210939029"),
   const stake = { staked: "210939029", claimable: "0", vouchers: 0 };
   const g = walletGroups(null, accounts, null, [], {}, [{ key: KEY, balance: "210939029" }], false, stake);
   check("walletGroups ids", g.map(x => x.id), ["lez", "chain"]);
-  check("walletGroups lez rows", g[0].rows.map(r => [r.title, r.canSend]), [["Main", true], ["Private account", false], ["Public", true]]);
+  check("walletGroups lez rows", g[0].rows.map(r => [r.title, r.canSend]), [["Private account", true], ["Private account", false], ["Public account", true]]);
   check("walletGroups lez total", g[0].total, "38899410170");
   check("walletGroups all staked", g[1].note, "1 key on your node · all staked");
   const more = walletGroups(null, accounts, null, [], {}, [{ key: KEY, balance: "215939029" }], false, stake);
@@ -121,7 +122,8 @@ check("subDigits", [subDigits("1000", "1"), subDigits("210939029", "210939029"),
   check("walletGroups names count", withNames[0].note, "4 accounts · 1 name");
   // The paying account is shown as you, by your main name's display name.
   const asYou = walletGroups(null, accounts, null, [], {}, null, false, null, {}, "jefdiesel", "Jef");
-  check("walletGroups main as you", [asYou[0].rows[0].title, asYou[0].rows[0].name], ["Jef", "jefdiesel"]);
+  // The paying account isn't the main name's: no name, no picture (only the account a name is paid into carries it).
+  check("walletGroups paying account unnamed", [asYou[0].rows[0].title, asYou[0].rows[0].name], ["Private account", ""]);
   check("stakeTable", stakeTable(stake, [{ key: KEY, balance: "215939029" }]), { held: "215939029", staked: "210939029", waiting: "5000000", claimable: "0", vouchers: 0 });
 }
 

@@ -115,7 +115,7 @@ Item {
     // at install, but an older module can still be the one Basecamp loaded).
     readonly property string neededModule: "0.15.3"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.15.8"
+    readonly property string appVersion: "0.15.9"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -522,7 +522,7 @@ Item {
 
     function useAccount(account) {
         accountChange("cli_account_use", [account], function(value) {
-            say(Logic.accountTitle(value) + " now pays and registers.", false)
+            say(Logic.accountTitle(value) + " " + Logic.keyShown(String(value.account || "").replace(/^(Public|Private)\//, "")) + " now pays and registers.", false)
         })
     }
 
@@ -1205,7 +1205,7 @@ Item {
         if (rows.length === 0 && cliPublic !== null)
             rows = [{ account: "Public/" + cliPublic.account, label: null, balance: cliPublic.balance, "default": true }]
         rows = rows.slice().sort(function(a, b) { return (b["default"] ? 1 : 0) - (a["default"] ? 1 : 0) })
-        return rows.map(function(entry) { return { account: entry.account, title: entry.label ? entry.label : entry["default"] ? "Public (where bridged tokens land)" : "Public · " + Logic.keyShown(entry.account.substr(7)), balance: entry.balance } })
+        return rows.map(function(entry) { return { account: entry.account, title: entry["default"] ? "Public account (your main one)" : "Public account · " + Logic.keyShown(entry.account.substr(7)), balance: entry.balance } })
     }
 
     /// The node key the bridge sends from: the one picked, if the node holds it, else its first.
@@ -6878,8 +6878,9 @@ Item {
                                     enabledNow: !root.accountsBusy
                                     onPressed: root.useAccount(accountRow.modelData.account)
                                 }
+                                // Accounts carry registered names only: no nicknames to set.
                                 Action {
-                                    visible: !root.cliOutdated
+                                    visible: false
                                     label: "Rename"
                                     enabledNow: !root.accountsBusy
                                     onPressed: {

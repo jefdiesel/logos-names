@@ -98,12 +98,12 @@ export function feePaid(fee) {
 
 /// An account as listed in Settings: its nickname, else its kind; the default
 /// account of each kind is the one the wallet pays and registers from.
+/// An account's title: only a registered name ever names an account, so without one it
+/// is "Private account" or "Public account" (nicknames and display names never title it).
 export function accountTitle(entry) {
     if (!entry)
         return ""
-    var kind = entry.kind === "private" ? "Private account" : "Public account"
-    var label = String(entry.label === null || entry.label === undefined ? "" : entry.label).trim()
-    return label !== "" ? label : kind
+    return entry.kind === "private" ? "Private account" : "Public account"
 }
 
 /// The accounts sorted for Settings: private ones first, the default of each
@@ -270,9 +270,8 @@ export function subDigits(a, b) {
 /// canSend, account}`; `canSend` is false for a LEZ account that isn't the
 /// default of its kind (the CLI pays from the default).
 export function walletGroups(cliBalance, accounts, holdings, watched, tokenNames, chainAccounts, chainDown, stake, namesByNpk, mainName, mainLabel) {
-    // The account that pays and registers is shown as you: your main name, the registered
-    // name itself (never its profile's display name, which anyone can set to anything).
-    var you = String(mainLabel || mainName || "").trim()
+    // Accounts are named by registered names only: the account a name is paid into carries
+    // it; the paying account is "Private account" unless a name is paid into it too.
     var groups = []
     var lez = []
     var named = 0
@@ -283,19 +282,20 @@ export function walletGroups(cliBalance, accounts, holdings, watched, tokenNames
             // The names this account receives for: their profiles publish its npk.
             var names = priv && a.npk && namesByNpk && namesByNpk[String(a.npk).toLowerCase()] ? namesByNpk[String(a.npk).toLowerCase()] : []
             named += names.length
-            var title = names.length > 0 ? names.join(", ") : label !== "" ? label : a["default"] ? (priv ? (you || "Main") : "Public") : (priv ? "Private account" : "Public account")
+            // Only a registered name names an account (the one its payments arrive at).
+            var title = names.length > 0 ? names.join(", ") : (priv ? "Private account" : "Public account")
             var sub = (priv ? "Private" : "Public")
                 + (names.length > 0 ? " · receives payments to " + names.join(", ") : "")
                 + (a["default"] ? (priv ? " · pays and registers" : " · your main public account") : names.length > 0 ? "" : " · " + keyShown(a.account.replace(/^(Public|Private)\//, "")))
-            lez.push({ id: "lez-" + a.account, kind: "lez", title: title, sub: sub, name: names.length > 0 ? names[0] : priv && a["default"] && mainName ? mainName : "",
+            lez.push({ id: "lez-" + a.account, kind: "lez", title: title, sub: sub, name: names.length > 0 ? names[0] : "",
                        address: a.account, balance: a.balance === null || a.balance === undefined ? null : String(a.balance), fromPrivate: priv, definition: "", key: "",
                        canSend: !!a["default"], account: a.account })
         })
     } else if (cliBalance && typeof cliBalance === "object") {
-        lez.push({ id: "lez-private", kind: "lez", title: you || "Main", name: mainName || "", sub: "Private · pays and registers", address: cliBalance.account ? "Private/" + cliBalance.account : "",
+        lez.push({ id: "lez-private", kind: "lez", title: "Private account", name: "", sub: "Private · pays and registers", address: cliBalance.account ? "Private/" + cliBalance.account : "",
                    balance: cliBalance.balance === undefined ? null : String(cliBalance.balance), fromPrivate: true, definition: "", key: "", canSend: true, account: "" })
         if (cliBalance["public"])
-            lez.push({ id: "lez-public", kind: "lez", title: "Public", sub: "Public · your main public account", address: "Public/" + cliBalance["public"].account,
+            lez.push({ id: "lez-public", kind: "lez", title: "Public account", sub: "Public · your main public account", address: "Public/" + cliBalance["public"].account,
                        balance: String(cliBalance["public"].balance), fromPrivate: false, definition: "", key: "", canSend: true, account: "" })
     }
     if (lez.length > 0) {
