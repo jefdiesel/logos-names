@@ -113,9 +113,9 @@ Item {
     property bool configKnown: false   // the names module has answered once
     // The names module this app needs: the same release (metadata.json asks for it
     // at install, but an older module can still be the one Basecamp loaded).
-    readonly property string neededModule: "0.14.4"
+    readonly property string neededModule: "0.14.5"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.14.7"
+    readonly property string appVersion: "0.14.8"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -228,12 +228,20 @@ Item {
         return reply.value
     }
 
+    readonly property string moduleBusy: "The names module is busy and didn't answer in time; it's asked again shortly."
+
     /// Asks the names module without holding the screen still, for anything
     /// that waits on the wallet. Exactly one of `done(value)` and
     /// `failed(message)` runs, later.
     function askLater(method, args, done, failed, patience) {
         function settle(reply) {
             lastReply = shownReply("names." + method, reply)
+            // No reply at all is a call that waited past its time: the module answers one
+            // call at a time, so a slow one (a wallet catching up) can hold the rest.
+            if (reply === undefined || reply === null || String(reply) === "") {
+                failed(moduleBusy)
+                return
+            }
             reply = parsed(reply)
             if (!reply || reply.success === undefined)
                 failed("The names module is missing or out of date. In Basecamp, open Applications, click Names and press Install.")
@@ -563,6 +571,13 @@ Item {
         openWallet("stake")
     }
 
+    // A chain read the busy module didn't get to in time is asked again, not shown as a stopped node.
+    Timer {
+        id: chainRetry
+        interval: 5000
+        onTriggered: root.loadChain()
+    }
+
     /// Reads the node's state, its keys and its stake.
     function loadChain() {
         if (chainReading)
@@ -584,10 +599,18 @@ Item {
                 }, 30000)
             }, function(message) {
                 chainReading = false
+                if (message === moduleBusy) {
+                    chainRetry.start()
+                    return
+                }
                 chainError = sentence(message)
             }, 60000)
         }, function(message) {
             chainReading = false
+            if (message === moduleBusy) {
+                chainRetry.start()
+                return
+            }
             chainStatus = null
             chainError = sentence(message)
         }, 20000)
@@ -707,7 +730,8 @@ Item {
     /// The rows a group shows: an empty account that isn't a default (a program's
     /// helper account, an unused one) only once asked for.
     function groupRows(group) {
-        return walletShowEmpty ? group.rows : group.rows.filter(function(row) { return row.balance !== "0" || row.canSend || row.kind !== "lez" })
+        // An account a name is paid into stays in view even while it holds nothing.
+        return walletShowEmpty ? group.rows : group.rows.filter(function(row) { return row.balance !== "0" || row.canSend || row.kind !== "lez" || (row.name !== undefined && row.name !== "") })
     }
 
     readonly property var walletGroups: Logic.walletGroups(cliBalance, cliAccounts, tokenProgram !== "" ? tokenHoldings : null, watchedTokens, watchedNames,
@@ -5954,7 +5978,7 @@ Item {
                     Hint { visible: root.cliPath === ""; text: "Install Names on this computer first (Welcome) to see your accounts." }
                     Hint { visible: root.cliPath !== "" && root.cliAccounts === null && root.accountsError === ""; text: "Reading your accounts…" }
                     Repeater {
-                        model: (root.cliAccounts || []).filter(function(entry) { return root.walletShowEmpty || entry.balance !== "0" || entry["default"] })
+                        model: (root.cliAccounts || []).filter(function(entry) { return root.walletShowEmpty || entry.balance !== "0" || entry["default"] || (entry.npk && root.namesByNpk[entry.npk]) })
                         ColumnLayout {
                             id: accountRow
                             required property var modelData
@@ -5967,7 +5991,7 @@ Item {
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: 40
                                 spacing: 12
-                                Text { Layout.preferredWidth: 170; text: Logic.accountTitle(accountRow.modelData); color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); elide: Text.ElideRight }
+                                Text { Layout.preferredWidth: 170; text: accountRow.modelData.npk && root.namesByNpk[accountRow.modelData.npk] ? root.namesByNpk[accountRow.modelData.npk].join(", ") : Logic.accountTitle(accountRow.modelData); color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); elide: Text.ElideRight }
                                 Text {
                                     text: root.accountShort(accountRow.modelData.account)
                                     color: root.dim
@@ -6026,7 +6050,7 @@ Item {
                         }
                     }
                     Link {
-                        readonly property int empties: (root.cliAccounts || []).filter(function(entry) { return entry.balance === "0" && !entry["default"] }).length
+                        readonly property int empties: (root.cliAccounts || []).filter(function(entry) { return entry.balance === "0" && !entry["default"] && !(entry.npk && root.namesByNpk[entry.npk]) }).length
                         visible: empties > 0
                         text: root.walletShowEmpty ? "Hide empty accounts" : "Show " + empties + (empties === 1 ? " empty account" : " empty accounts")
                         color: root.dim

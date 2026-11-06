@@ -1290,7 +1290,7 @@ pub fn run_mine(setup: &Setup) -> Result<Vec<Value>, String> {
 /// none. `public` is the default public account the same way, or null.
 pub fn run_balance(setup: &Setup) -> Result<Value, String> {
     setup.wallet_ready()?;
-    let output = run_text(setup, vec!["balance".to_owned()], BALANCE_PATIENCE)?;
+    let output = balance_output(setup)?;
     let mut balance = parse_balance(&output);
     if balance.is_object() {
         balance["public"] = parse_public_balance(&output);
@@ -1340,13 +1340,81 @@ pub fn parse_all_balances(output: &str) -> Vec<Value> {
     rows
 }
 
+/// The last `names balance` output, per wallet: the app asks for the balance, the
+/// wallet and the accounts at once, and each would run the CLI (and catch the wallet up
+/// with the chain, seconds) otherwise. The module answers one call at a time, so three
+/// of those in a row held every other call (the node's, the app grants) past its timeout.
+static BALANCE_SEEN: Mutex<Option<((PathBuf, PathBuf), Instant, String)>> = Mutex::new(None);
+
+/// How long one `names balance` answers for.
+const BALANCE_FRESH: Duration = Duration::from_secs(15);
+
+/// `names balance`'s output, at most `BALANCE_FRESH` old.
+fn balance_output(setup: &Setup) -> Result<String, String> {
+    let mut seen = BALANCE_SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let key = (setup.program.clone(), setup.wallet.clone());
+    if let Some((seen_key, at, output)) = seen.as_ref() {
+        if *seen_key == key && at.elapsed() < BALANCE_FRESH {
+            return Ok(output.clone());
+        }
+    }
+    let output = run_text(setup, vec!["balance".to_owned()], BALANCE_PATIENCE)?;
+    *seen = Some((key, Instant::now(), output.clone()));
+    Ok(output)
+}
+
+/// After the CLI changed the wallet, the next balance is read afresh.
+pub fn forget_balance() {
+    *BALANCE_SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+}
+
+/// Private accounts' npks, as an older CLI's `wallet account get --keys` prints them:
+/// they never change, so each is asked once.
+static NPKS: Mutex<std::collections::BTreeMap<String, String>> = Mutex::new(std::collections::BTreeMap::new());
+
+/// The private accounts `names wallet account list` names (`/1/0 Private/<id>`), in order.
+pub fn listed_private(output: &str) -> Vec<String> {
+    output
+        .split_whitespace()
+        .filter_map(|word| word.strip_prefix("Private/"))
+        .filter(|id| registry::parse_account(id).is_ok())
+        .map(|id| format!("Private/{id}"))
+        .collect()
+}
+
+/// The `npk <hex>` line of `names wallet account get --keys`.
+pub fn parse_npk(output: &str) -> Option<String> {
+    output.lines().find_map(|line| line.trim().strip_prefix("npk ")).map(str::trim)
+        .filter(|hex| hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())).map(str::to_ascii_lowercase)
+}
+
 /// Every account of the wallet: `module account-list`, or, from a CLI too old for
-/// it, what `names balance` lists.
+/// it, what `names balance` lists, with each private account's npk from
+/// `wallet account get --keys` (so names still find the account they're paid into).
 pub fn run_accounts_any(setup: &Setup) -> Result<Value, String> {
     match run_account_list(setup) {
         Err(problem) if problem == OLDER_CLI => {
-            let output = run_text(setup, vec!["balance".to_owned()], BALANCE_PATIENCE)?;
-            Ok(Value::from(parse_all_balances(&output)))
+            let mut rows = parse_all_balances(&balance_output(setup)?);
+            // `names balance` leaves out private accounts that hold nothing, a name's new
+            // receiving account among them; `wallet account list` has every one.
+            let listed = run_text(setup, vec!["wallet".to_owned(), "account".to_owned(), "list".to_owned()], QUICK_PATIENCE).unwrap_or_default();
+            for account in listed_private(&listed) {
+                if !rows.iter().any(|row| row["account"] == account.as_str()) {
+                    rows.push(json!({ "account": account, "kind": "private", "label": null, "balance": "0", "default": false, "public_key": null, "npk": null }));
+                }
+            }
+            for row in rows.iter_mut().filter(|row| row["kind"] == "private") {
+                let account = row["account"].as_str().unwrap_or_default().to_owned();
+                let known = NPKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&account).cloned();
+                let npk = known.or_else(|| {
+                    let args = vec!["wallet".to_owned(), "account".to_owned(), "get".to_owned(), format!("--account-id={account}"), "--keys".to_owned()];
+                    let npk = run_text(setup, args, QUICK_PATIENCE).ok().as_deref().and_then(parse_npk)?;
+                    NPKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(account.clone(), npk.clone());
+                    Some(npk)
+                });
+                row["npk"] = npk.map_or(Value::Null, Value::from);
+            }
+            Ok(Value::from(rows))
         }
         other => other,
     }
@@ -2057,7 +2125,9 @@ mod tests {
             run_balance(&setup).unwrap(),
             json!({ "account": "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", "balance": "250", "public": { "account": PUBLIC, "balance": "70" } })
         );
+        // A new CLI at the same path answers within BALANCE_FRESH from the last read; afresh after.
         let none = Setup { program: fake_cli(&dir, "echo 'private total: 0'"), ..setup };
+        forget_balance();
         assert_eq!(run_balance(&none).unwrap(), Value::Null);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -2155,6 +2225,11 @@ mod tests {
         assert_eq!(failure(clap, ""), OLDER_CLI);
         // That CLI's `names balance`, as it prints it, read as every account.
         let balance = "Latest block is 77650\npublic accounts (seen on chain):\n  Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk  38858810170  (default)\n  Public/FaPur3x8Y4YQ2t5x9KhV3F4cTn8u2Ym1Wq6Lr7Zs9Pd  44317823\nprivate accounts (only this wallet sees them):\n  Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z  40599000  (default)\n  Private/Z1NuMj9vQ3wK8mR5tY2pL6hX4cB7nF1dS3gA9eJ2uV5  777\nprivate total: 40600777\n";
+        assert_eq!(parse_npk("Balance 1000, nonce 2\nnpk 11CFF86C4bbd8f5d1e0e2b7c3a9f6d4e2c1b0a99887766554433221100ffeedd\nvpk d1c1\n").as_deref(),
+                   Some("11cff86c4bbd8f5d1e0e2b7c3a9f6d4e2c1b0a99887766554433221100ffeedd"));
+        assert_eq!(parse_npk("Balance 1000\n"), None);
+        let listed = "/ Private/52QsitjhXQF2KpNBTBqxLSz9XR6ofZVAsdwprxx9HHNR\n/0 Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z\n/2 Private/not-an-id\n";
+        assert_eq!(listed_private(listed), vec!["Private/52QsitjhXQF2KpNBTBqxLSz9XR6ofZVAsdwprxx9HHNR", "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z"]);
         let rows = parse_all_balances(balance);
         assert_eq!(rows.len(), 4, "{rows:?}");
         assert_eq!(rows[0]["account"], "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk");

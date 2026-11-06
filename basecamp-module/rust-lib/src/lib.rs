@@ -952,7 +952,7 @@ const NAMES_APP: &str = "names_ui";
 /// `get_config` reports it so the Names app can refuse a module from another
 /// release (the app's own metadata asks for at least this at install, but an
 /// older module can still be the one loaded).
-const MODULE_VERSION: &str = "0.14.4";
+const MODULE_VERSION: &str = "0.14.5";
 
 /// Whether `caller` may use those methods. Basecamp gives each app its own
 /// credential, named after the app, so the module knows which app is calling.
@@ -2726,6 +2726,8 @@ impl NamesModule for Names {
         // A change that ended may have changed its name: read it fresh next time.
         if let Ok(state) = &state {
             if state["state"] != "running" {
+                // It may have moved tokens: the next balance is read afresh.
+                cli::forget_balance();
                 if let Some(name) = state["name"].as_str() {
                     let name = name.to_owned();
                     self.forget_reads(&name);
