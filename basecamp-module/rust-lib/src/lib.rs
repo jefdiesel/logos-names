@@ -955,12 +955,18 @@ impl Default for Names {
 /// machine (a local dev chain). Plain http elsewhere would let anyone on the network
 /// swap name records and payment keys.
 fn is_http_url(url: &str) -> bool {
-    if url.starts_with("https://") {
-        return url.len() > "https://".len();
+    // Plain URL characters only, and no `user@` part: a backslash, a space or an `@` is
+    // read one way here and another by the HTTP library, which let `http://` reach any
+    // host (SF-2). A sequencer address never needs them.
+    let plain = |c: char| c.is_ascii_alphanumeric() || "-._~:/?#[]!$&'()*+,;=%".contains(c);
+    if url.is_empty() || !url.chars().all(plain) {
+        return false;
+    }
+    if let Some(rest) = url.strip_prefix("https://") {
+        return rest.split(['/', '?', '#']).next().is_some_and(|host| !host.is_empty());
     }
     let Some(rest) = url.strip_prefix("http://") else { return false };
     let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let host = host.rsplit_once('@').map_or(host, |(_, host)| host);
     let host = if let Some(bracketed) = host.strip_prefix('[') {
         bracketed.split(']').next().unwrap_or("")
     } else {
@@ -1012,6 +1018,16 @@ fn only_the_names_app() -> Result<(), String> {
     } else {
         Err(format!("only the Names app can do this; refused for {}", caller.describe_for_human()))
     }
+}
+
+/// The part of the configuration other apps may read: the network, not the person.
+fn public_config(config: &Value) -> Value {
+    json!({
+        "sequencer": config["sequencer"],
+        "registry": config["registry"],
+        "token_program": config["token_program"],
+        "module_version": config["module_version"],
+    })
 }
 
 fn reply(outcome: Result<Value, String>) -> String {
@@ -1395,6 +1411,8 @@ impl Names {
     fn forget_all_reads(&mut self) {
         self.read_cache.clear();
         self.board_reads.lock().expect("the board reads lock").clear();
+        // The balance was read from the old network (CR-3).
+        cli::forget_balance();
     }
 
     /// Answers a read about `typed` from the cache while it is fresh, else asks
@@ -1433,6 +1451,8 @@ impl Names {
     /// `cli_mine` waits for a fresh list.
     fn forget_mine(&self) {
         self.board_reads.lock().expect("the board reads lock").retain(|key, _| !key.starts_with("cli_mine:"));
+        // The wallet or its default account changed: so did the balance (CR-2).
+        cli::forget_balance();
     }
 
     /// Drops what the cache knows about `typed`, after a change to it.
@@ -1444,8 +1464,26 @@ impl Names {
     fn board_read(&self, key: String, fetch: impl FnOnce() -> Result<Value, String> + Send + 'static) -> Value {
         {
             let mut reads = self.board_reads.lock().expect("the board reads lock");
+            // Any app may read the board, so what one can make the module do is bounded
+            // (SF-1): so many answers kept, so many CLI runs at once.
+            let fetching = reads.values().filter(|read| read.updating).count();
+            if !reads.contains_key(&key) {
+                if fetching >= MAX_BOARD_FETCHES {
+                    return json!({ "posts": [], "updating": false, "error": "The board is busy; try again in a moment." });
+                }
+                let board = reads.keys().filter(|kept| is_board_key(kept)).count();
+                if board >= MAX_BOARD_READS {
+                    let spare = reads.iter().find(|(kept, read)| is_board_key(kept) && !read.updating).map(|(kept, _)| kept.clone());
+                    match spare {
+                        Some(spare) => {
+                            reads.remove(&spare);
+                        }
+                        None => return json!({ "posts": [], "updating": false, "error": "The board is busy; try again in a moment." }),
+                    }
+                }
+            }
             let read = reads.entry(key.clone()).or_default();
-            if !read.updating {
+            if !read.updating && fetching < MAX_BOARD_FETCHES {
                 read.updating = true;
                 let reads = std::sync::Arc::clone(&self.board_reads);
                 let key = key.clone();
@@ -2228,6 +2266,11 @@ impl NamesModule for Names {
     }
 
     fn get_config(&mut self) -> String {
+        // Another app sees only what any reader of the chain could know: who you follow,
+        // like and message, your main name and your files stay with the Names app (AUTH-1).
+        if only_the_names_app().is_err() {
+            return public_config(&self.shown_config()).to_string();
+        }
         self.shown_config().to_string()
     }
 
@@ -2536,6 +2579,8 @@ impl NamesModule for Names {
 
     fn board_thread(&mut self, post: String) -> String {
         reply((|| {
+            // Checked before it becomes a key: junk is refused, not kept (SF-1).
+            let post = cli::post_ref(&post)?;
             let setup = self.cli_setup()?;
             Ok(self.board_read(format!("thread:{post}"), move || cli::run_thread(&setup, &post)))
         })())
@@ -3152,13 +3197,24 @@ impl NamesModule for Names {
                 return Err(format!("that key holds {balance}; splitting off {amount} needs a little more, for the fee"));
             }
             let mut plan = json!({ "from": from, "amount": amount.to_string(), "balance": balance.to_string(), "exact": exact });
+            // A note of exactly the amount is already there: a split would only cost a fee
+            // and take notes out of the stake (CR-9).
+            if send && exact {
+                plan["hash"] = Value::Null;
+                plan["fee"] = Value::Null;
+                return Ok(plan);
+            }
             if send {
                 let sent = node::call("wallet_transfer_funds", json!([from, [from], from, amount.to_string(), ""]), node::PROVING)?;
                 let hash = chain::hash_of(&sent);
                 let stored = hash.as_ref().and_then(|hash| node::call("get_transaction", json!([hash]), node::QUICK).ok());
                 let fee = stored.as_ref().and_then(|tx| chain::transfer_fee(tx, &notes));
-                if let (Some(hash), Some(tx)) = (&hash, &stored) {
-                    chain_sent_add(hash, json!({ "from": from, "inputs": chain::transfer_parts(tx).0, "fee": fee.map(|f| f.to_string()), "at": now() }));
+                // Recorded even when the node can't show the transaction yet, so the Bridge
+                // screen can follow it: a split is in a block once a note of exactly the
+                // amount is in the key's wallet (CR-4).
+                if let Some(hash) = &hash {
+                    let inputs = stored.as_ref().map(|tx| chain::transfer_parts(tx).0).unwrap_or_default();
+                    chain_sent_add(hash, json!({ "from": from, "inputs": inputs, "split": amount.to_string(), "fee": fee.map(|f| f.to_string()), "at": now() }));
                 }
                 plan["hash"] = hash.map_or(Value::Null, Value::from);
                 plan["fee"] = fee.map_or(Value::Null, |f| Value::from(f.to_string()));
@@ -3184,14 +3240,35 @@ impl NamesModule for Names {
             let account = registry::parse_account(&to)?;
             let notes = chain::notes_of(&node::call("wallet_get_notes", json!([from, ""]), node::QUICK)?);
             let note = notes.iter().find(|(_, value)| chain::amount(value) == u128::from(amount)).map(|(id, _)| id.clone());
+            // The fee comes from the key's other notes: the exact one goes whole into the deposit.
+            let others: u128 = notes
+                .iter()
+                .filter(|(id, _)| note.as_ref() != Some(*id))
+                .map(|(_, value)| chain::amount(value))
+                .sum();
+            let fee_short = others < u128::from(BRIDGE_MAX_FEE);
             let channel = registry::channel_id(&self.sequencer)?;
+            // A deposit can't be undone: the channel the sequencer names has to be on the
+            // chain the node follows (CR-1).
+            let channel_known = node::call("get_channel_state", json!([channel]), node::QUICK).is_ok();
             let mut plan = json!({
                 "sent": false, "hash": null, "to": to, "amount": amount.to_string(),
                 "total": note.as_ref().map(|_| amount.to_string()), "notes": note.as_ref().map(|_| "1"),
-                "fee": BRIDGE_MAX_FEE.to_string(), "note": note, "needs_split": note.is_none(), "channel": channel, "lines": [],
+                "fee": BRIDGE_MAX_FEE.to_string(), "note": note, "needs_split": note.is_none(), "channel": channel,
+                "channel_known": channel_known, "fee_short": fee_short, "others": others.to_string(), "lines": [],
             });
             if send {
                 let note = note.ok_or_else(|| format!("no note of that key holds exactly {amount}: split it off first"))?;
+                if !channel_known {
+                    return Err(format!(
+                        "Your node doesn't know LEZ's deposit channel {channel}: it may still be syncing, or your sequencer is on another network. Nothing was sent."
+                    ));
+                }
+                if fee_short {
+                    return Err(format!(
+                        "The deposit fee (at most {BRIDGE_MAX_FEE}) comes from this key's other notes, which hold {others}. Mine or receive a little more first. Nothing was sent."
+                    ));
+                }
                 // The deposit's metadata is the LEZ account's 32 bytes, as `names bridge` sends it.
                 let deposited = node::call(
                     "channel_deposit_with_notes",
@@ -3226,9 +3303,16 @@ impl NamesModule for Names {
             };
             let inputs: Vec<String> = known["inputs"].as_array().into_iter().flatten().filter_map(|i| i.as_str().map(str::to_owned)).collect();
             let notes = chain::notes_of(&node::call("wallet_get_notes", json!([known["from"], ""]), node::QUICK)?);
+            // A split whose inputs weren't known is in a block once its exact note is there.
+            let landed = if inputs.is_empty() {
+                let split = known["split"].as_str().and_then(|text| text.parse::<u128>().ok());
+                split.is_some_and(|split| notes.values().any(|value| chain::amount(value) == split))
+            } else {
+                chain::spent(&inputs, &notes)
+            };
             Ok(json!({
                 "hash": hash,
-                "state": if chain::spent(&inputs, &notes) { "in_block" } else { "pending" },
+                "state": if landed { "in_block" } else { "pending" },
                 "fee": known["fee"],
             }))
         })())
@@ -3979,6 +4063,16 @@ mod program_registry {
 /// The most a bridge deposit's fee may be, as `names bridge` caps it by default.
 const BRIDGE_MAX_FEE: u64 = 100_000;
 
+/// The board answers kept at once (feeds, authors' pages, threads).
+const MAX_BOARD_READS: usize = 48;
+/// The board's CLI runs at once.
+const MAX_BOARD_FETCHES: usize = 3;
+
+/// Whether a `board_reads` key is a board answer (not the wallet's names or tokens).
+fn is_board_key(key: &str) -> bool {
+    ["feed:", "author:", "thread:"].iter().any(|kind| key.starts_with(kind))
+}
+
 /// The most tokens the wallet keeps added by address, per token program.
 const MAX_WATCHED_TOKENS: usize = 64;
 
@@ -4459,6 +4553,13 @@ mod tests {
         // userinfo before the host is skipped, so it can't smuggle a local-looking prefix
         assert!(!is_http_url("http://localhost@evil.test:3040"));
         assert!(is_http_url("https://testnet.lez.logos.co"));
+        // SF-2: read differently by the HTTP library, so refused outright.
+        assert!(!is_http_url("http://192.168.1.56:3478\\@127.0.0.1"));
+        assert!(!is_http_url("http://127.0.0.1@192.168.1.56"));
+        assert!(!is_http_url("http://127.0.0.1 .evil.test"));
+        assert!(!is_http_url("https://"));
+        assert!(!is_http_url("https://user@testnet.lez.logos.co"));
+        assert!(is_http_url("http://[::1]:3040/"));
         let mut names = fresh();
         assert!(!names.set_sequencer("http://evil.test".into()));
         assert_eq!(parsed(&names.get_config())["sequencer"], DEFAULT_SEQUENCER);
@@ -4520,8 +4621,14 @@ mod tests {
         let ready = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), false));
         assert_eq!((ready["value"]["note"].as_str(), ready["value"]["needs_split"].as_bool(), ready["value"]["total"].as_str()), (Some("e8ac"), Some(false), Some("1000000")), "{ready}");
         node_answers("channel_deposit_with_notes", json!("ab".repeat(32)));
+        // The node doesn't know the channel: nothing is deposited.
+        let unknown = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), true));
+        assert!(unknown["error"].as_str().unwrap().contains("deposit channel"), "{unknown}");
+        assert!(!node_asked().contains(&"channel_deposit_with_notes".to_owned()), "nothing deposited into an unknown channel");
+        node_answers("get_channel_state", json!({ "accredited_keys": [], "configuration_threshold": 3 }));
         let sent = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), true));
         assert_eq!((sent["value"]["sent"].as_bool(), sent["value"]["hash"].as_str()), (Some(true), Some("ab".repeat(32).as_str())), "{sent}");
+        assert_eq!(sent["value"]["channel_known"], true);
         let account = registry::parse_account(to).unwrap();
         assert_eq!(
             asked_args("channel_deposit_with_notes"),
@@ -4530,6 +4637,94 @@ mod tests {
         );
         // A private account is never a bridge's destination.
         assert!(parsed(&names.chain_bridge(NODE_KEY.into(), format!("Private/{to}"), "1000000".into(), false))["error"].as_str().unwrap().contains("public LEZ account"));
+    }
+
+
+    // ── From the code-review campaign of 2026-11-06 (CR-1..CR-9): each failed before its fix ──
+    const REVIEW_OTHER_PRIVATE: &str = "52QsitjhXQF2KpNBTBqxLSz9XR6ofZVAsdwprxx9HHNR";
+
+    /// RV1: after "Pay from this account" (cli_account_use) the balance is the NEW default's.
+    #[test]
+    fn review_balance_follows_the_new_default_after_account_use() {
+        let other = REVIEW_OTHER_PRIVATE;
+        let entry = format!(r#"{{"account":"Private/{other}","kind":"private","label":null,"balance":"999","default":true,"public_key":null}}"#);
+        let tail = format!(
+            "S=\"$(dirname \"$0\")/state\"\ncase \"$*\" in\n*\"module account-use\"*) echo B > \"$S\"; echo '{entry}' ;;\n*balance*) if [ \"$(cat \"$S\" 2>/dev/null)\" = B ]; then echo '  Private/{other}  999  (default)'; else echo '  Private/{PRIVATE}  250  (default)'; fi ;;\nesac"
+        );
+        let (mut names, dir) = with_wallet("review-use", &tail);
+        let before = parsed(&names.cli_balance());
+        assert_eq!(before["value"]["account"], PRIVATE, "{before}");
+        let used = parsed(&names.cli_account_use(format!("Private/{other}")));
+        assert_eq!(used["success"], true, "{used}");
+        let after = parsed(&names.cli_balance());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(after["value"]["account"], other, "cli_balance still reports the OLD default after cli_account_use: {after}");
+    }
+
+    /// RV2: after set_sequencer the balance is read from the new network, not the last one's output.
+    #[test]
+    fn review_balance_is_read_again_after_the_sequencer_changes() {
+        let tail = format!(
+            "case \"$*\" in\n*127.0.0.1:9*balance*) echo '  Private/{PRIVATE}  250  (default)' ;;\n*balance*) echo '  Private/{PRIVATE}  5  (default)' ;;\nesac"
+        );
+        let (mut names, dir) = with_wallet("review-seq", &tail);
+        assert_eq!(parsed(&names.cli_balance())["value"]["balance"], "250");
+        assert!(names.set_sequencer("https://other-network.example".into()));
+        let after = parsed(&names.cli_balance());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(after["value"]["balance"], "5", "the old network's balance is served after set_sequencer: {after}");
+    }
+
+    /// RV3: a split the node took is followable by chain_tx even when get_transaction
+    /// didn't answer right after it (the Bridge screen polls chain_tx until in_block, forever).
+    #[test]
+    fn review_a_split_can_be_followed_when_the_node_cant_show_it_yet() {
+        let mut names = fresh();
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "b271", "value": "131296018" }] }));
+        node_answers("wallet_transfer_funds", json!("ce".repeat(32)));
+        // get_transaction is not answered (node busy / not stored yet).
+        let made = parsed(&names.chain_split(NODE_KEY.into(), "1000000".into(), true));
+        assert_eq!(made["value"]["hash"], "ce".repeat(32), "{made}");
+        let followed = parsed(&names.chain_tx("ce".repeat(32)));
+        assert_eq!(followed["success"], true, "chain_tx can never report this split, so bridgeSplitHash never clears: {followed}");
+    }
+
+    /// RV4: no split (a fee, notes out of the stake) when a note of exactly the amount is already there.
+    #[test]
+    fn review_no_split_is_sent_when_an_exact_note_exists() {
+        let mut names = fresh();
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "e8ac", "value": "1000000" }, { "id": "c0de", "value": "5000000" }] }));
+        node_answers("wallet_transfer_funds", json!("cf".repeat(32)));
+        let made = parsed(&names.chain_split(NODE_KEY.into(), "1000000".into(), true));
+        assert!(!node_asked().contains(&"wallet_transfer_funds".to_owned()), "a split was sent though note e8ac already holds exactly 1000000: {made}");
+    }
+
+    /// RV5: a bridge plan isn't "ready" when the exact note is the key's only one (nothing pays the fee).
+    #[test]
+    fn review_a_bridge_plan_with_nothing_left_for_the_fee_is_not_ready() {
+        let mut names = fresh();
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "e8ac", "value": "1000000" }] }));
+        let to = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
+        let plan = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), false));
+        assert!(
+            plan["success"] == false || plan["value"]["needs_split"] == true || plan["value"]["fee_short"] == true,
+            "the plan says Ready although no other note of the key can pay the deposit fee: {plan}"
+        );
+    }
+
+    /// RV6: the bridge checks that LEZ's deposit channel exists on the node's chain before depositing.
+    #[test]
+    fn review_the_bridge_checks_the_channel_on_the_node_before_depositing() {
+        let mut names = fresh();
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "e8ac", "value": "1000000" }, { "id": "c0de", "value": "5000000" }] }));
+        node_answers("channel_deposit_with_notes", json!("ab".repeat(32)));
+        node_answers("get_channel_state", json!({ "configuration_threshold": 3 }));
+        let to = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
+        let _ = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), true));
+        let asked = node_asked();
+        let deposit = asked.iter().position(|m| m == "channel_deposit_with_notes");
+        let checked = asked.iter().position(|m| m == "get_channel_state");
+        assert!(deposit.is_none() || checked.is_some_and(|c| c < deposit.unwrap()), "deposited without asking the node for the channel: {asked:?}");
     }
 
     #[test]
@@ -4629,6 +4824,42 @@ mod tests {
         }
         assert!(node_asked().iter().all(|m| m == "get_cryptarchia_info"), "nothing was asked for the other app");
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+    }
+
+    #[test]
+    fn the_board_keeps_few_answers_and_runs_few_fetches_at_once() {
+        let names = fresh();
+        let slow = || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            Ok(json!([]))
+        };
+        for round in 0..3 {
+            for i in 0..100 {
+                let _ = names.board_read(format!("author:ada:{}", round * 100 + i), slow);
+            }
+            {
+                let reads = names.board_reads.lock().unwrap();
+                assert!(reads.len() <= MAX_BOARD_READS, "{} answers kept", reads.len());
+                assert!(reads.values().filter(|read| read.updating).count() <= MAX_BOARD_FETCHES);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        let junk = parsed(&fresh().board_thread("x".repeat(5000)));
+        assert!(junk["error"].as_str().unwrap().contains("not a post"), "{junk}");
+    }
+
+    #[test]
+    fn another_app_reads_only_the_network_part_of_the_config() {
+        let mut names = fresh();
+        names.main_name = Some("jef".into());
+        names.follows = vec!["ada".into()];
+        let own = parsed(&names.get_config());
+        assert_eq!(own["main_name"], "jef", "{own}");
+        as_caller(logos_rust_sdk::LogosCaller::Module { name: "evil_ui".into(), instance: None });
+        let other = parsed(&names.get_config());
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let keys: Vec<&String> = other.as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["module_version", "registry", "sequencer", "token_program"], "{other}");
     }
 
     #[test]

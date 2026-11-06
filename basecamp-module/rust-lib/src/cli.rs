@@ -1699,6 +1699,18 @@ impl Jobs {
                 _ => format!("a change to {name}{} is still being saved (job {running}); wait for it to finish", registry::NAME_SUFFIX),
             });
         }
+        // Every other job runs the CLI on the one wallet, and each saves the wallet when it
+        // ends from the copy it read at the start: two at once would undo one another's
+        // changes (a new account, a spent private note). So one wallet job at a time (A-1).
+        if name != INSTALL_JOB {
+            if let Some(job) = self.running().into_iter().find(|job| job["name"] != INSTALL_JOB) {
+                return Err(format!(
+                    "your wallet is busy with \"{}\" (job {}); wait for it to finish",
+                    job["kind"].as_str().unwrap_or("a change"),
+                    job["id"].as_str().unwrap_or_default()
+                ));
+            }
+        }
         self.forget_old();
         let mut id = format!("{name}-{}", now_ms());
         while self.path(&id, "json").exists() {
@@ -2357,8 +2369,11 @@ mod tests {
         jobs.start(&slow, &id, "jef", "set_page", args, Some(body.clone())).unwrap();
         assert_eq!(jobs.running_for("jef").as_deref(), Some(id.as_str()));
         assert!(jobs.prepare("jef").unwrap_err().contains("still being saved"));
-        // Another name is not held up.
-        assert!(jobs.prepare("ada").is_ok());
+        // Another name waits too: both would save the one wallet (A-1).
+        assert!(jobs.prepare("ada").unwrap_err().contains("your wallet is busy"));
+        assert!(jobs.prepare(WALLET_JOB).unwrap_err().contains("your wallet is busy"));
+        // Installing the CLI doesn't touch the wallet.
+        assert!(jobs.prepare(INSTALL_JOB).is_ok());
         assert_eq!(finished(&jobs, &id)["state"], "done");
         assert!(!body.exists());
         assert!(jobs.prepare("jef").is_ok());

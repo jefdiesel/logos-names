@@ -998,6 +998,8 @@ Item {
         bridgePlanFor = ""
         bridgeConfirm = false
         bridgeError = ""
+        bridgeSplitHash = ""
+        bridgeSplitTries = 0
         bridgeSent = false
         bridgeHash = ""
         // The key it was opened from, else the one used last, else the node's first.
@@ -1089,6 +1091,12 @@ Item {
     }
 
     property string bridgeSplitHash: ""  // the split under way: a send from the key to itself
+    property int bridgeSplitTries: 0      // checks of it so far; it stops after about 4 minutes
+
+    /// Whether the checked plan can be sent: an exact note, a channel the node knows, a fee.
+    function bridgePlanReady() {
+        return bridgePlan !== null && !bridgePlan.needs_split && bridgePlan.channel_known !== false && bridgePlan.fee_short !== true
+    }
 
     /// Splits the amount off into a note of its own, then checks the bridge again once it lands.
     function bridgeSplit() {
@@ -1097,9 +1105,10 @@ Item {
         bridgeBusy = true
         askLater("chain_split", [asked[1], asked[0], true], function(value) {
             bridgeBusy = false
+            bridgeSplitTries = 0
             bridgeSplitHash = value && value.hash ? value.hash : ""
             if (bridgeSplitHash === "")
-                bridgeError = "Your node took the split but gave no transaction to follow. Press Check in a minute."
+                bridgeRun(false)
         }, function(message) {
             bridgeBusy = false
             bridgeError = sentence(message)
@@ -1110,12 +1119,20 @@ Item {
         interval: 4000
         repeat: true
         running: root.bridgeSplitHash !== ""
-        onTriggered: root.askLater("chain_tx", [root.bridgeSplitHash], function(tx) {
-            if (tx.state === "in_block") {
+        onTriggered: {
+            root.bridgeSplitTries += 1
+            if (root.bridgeSplitTries > 60) {
                 root.bridgeSplitHash = ""
-                root.bridgeRun(false)
+                root.bridgeError = "The note hasn't shown up in your node's wallet yet. Press Check in a few minutes: nothing is lost."
+                return
             }
-        }, function(message) { console.log("names_ui: split:", message) }, 20000)
+            root.askLater("chain_tx", [root.bridgeSplitHash], function(tx) {
+                if (tx.state === "in_block") {
+                    root.bridgeSplitHash = ""
+                    root.bridgeRun(false)
+                }
+            }, function(message) { console.log("names_ui: split:", message) }, 20000)
+        }
     }
 
     /// The checked plan in plain words.
@@ -1123,10 +1140,15 @@ Item {
         if (bridgePlan === null)
             return ""
         var asked = bridgeAsked()[0]
+        if (bridgePlan.channel_known === false)
+            return "Your node doesn't know LEZ's deposit channel (" + Logic.keyShown(bridgePlan.channel || "") + "). It may still be syncing, or your sequencer is on another network. Nothing can be bridged until it does."
         if (bridgePlan.needs_split)
             return "No note on that key holds exactly " + grouped(asked) + ", and a bridge deposits whole notes. First split "
                 + grouped(asked) + " off into a note of its own: a send from the key to itself (a fee of about 2,000, in a block within a minute). "
                 + "The rest comes back as change. The notes it spends leave the stake, and the new ones join it within two epochs."
+        if (bridgePlan.fee_short === true)
+            return "That key holds a note of exactly " + grouped(asked) + ", but the deposit fee (at most " + grouped(bridgePlan.fee || "100000")
+                + ") comes from its other notes, which hold " + grouped(bridgePlan.others || "0") + ". Mine or receive a little more first."
         return "Ready: exactly " + grouped(asked) + " from one note of that key, into " + (bridgeTo !== "" ? Logic.keyShown(bridgeTo.substr(7)) : "your LEZ public account")
             + ". Network fee at most " + grouped(bridgePlan.fee || "100000") + ", paid from the key's other notes. Nothing has been sent yet."
     }
@@ -5506,7 +5528,7 @@ Item {
                             visible: !root.bridgeConfirm
                             label: "Bridge"
                             strong: true
-                            enabledNow: !root.bridgeBusy && root.bridgePlan !== null && !root.bridgePlan.needs_split && root.bridgePlanFor === root.bridgeAsked().join("|")
+                            enabledNow: !root.bridgeBusy && root.bridgePlanReady() && root.bridgePlanFor === root.bridgeAsked().join("|")
                             onPressed: root.bridgeConfirm = true
                         }
                     }
@@ -5534,7 +5556,7 @@ Item {
                         Layout.fillWidth: true
                         Hint {
                             color: root.ink
-                            text: root.bridgePlan === null ? "" : "This moves exactly " + root.grouped(root.bridgeAsked()[0]) + " from your Logos Blockchain key into LEZ. It can't be undone. It arrives once the block holding it is final, about 12 hours on the testnet."
+                            text: root.bridgePlan === null ? "" : "This moves exactly " + root.grouped(root.bridgeAsked()[0]) + " from your Logos Blockchain key into LEZ, through LEZ's deposit channel " + Logic.keyShown(root.bridgePlan.channel || "") + " (your node knows it). It can't be undone. It arrives once the block holding it is final, about 12 hours on the testnet."
                         }
                         RowLayout {
                             spacing: 8
