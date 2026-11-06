@@ -1310,6 +1310,48 @@ pub fn parse_public_balance(output: &str) -> Value {
     parse_default(output, "Public/")
 }
 
+/// Every account in `names balance` output, as `account-list` entries: the way an
+/// older CLI (the October testnet build, with no `module account-list`) tells them.
+/// It gives no nicknames and no keys, so those are null.
+pub fn parse_all_balances(output: &str) -> Vec<Value> {
+    let mut rows = Vec::new();
+    for line in output.lines() {
+        let line = line.trim();
+        let (private, rest) = match (line.strip_prefix("Private/"), line.strip_prefix("Public/")) {
+            (Some(rest), _) => (true, rest),
+            (_, Some(rest)) => (false, rest),
+            _ => continue,
+        };
+        let mut parts = rest.split_whitespace();
+        let (Some(account), Some(balance)) = (parts.next(), parts.next()) else { continue };
+        if registry::parse_account(account).is_err() || !balance.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        rows.push(json!({
+            "account": format!("{}/{account}", if private { "Private" } else { "Public" }),
+            "kind": if private { "private" } else { "public" },
+            "label": null,
+            "balance": balance,
+            "default": line.ends_with("(default)"),
+            "public_key": null,
+            "npk": null,
+        }));
+    }
+    rows
+}
+
+/// Every account of the wallet: `module account-list`, or, from a CLI too old for
+/// it, what `names balance` lists.
+pub fn run_accounts_any(setup: &Setup) -> Result<Value, String> {
+    match run_account_list(setup) {
+        Err(problem) if problem == OLDER_CLI => {
+            let output = run_text(setup, vec!["balance".to_owned()], BALANCE_PATIENCE)?;
+            Ok(Value::from(parse_all_balances(&output)))
+        }
+        other => other,
+    }
+}
+
 fn parse_default(output: &str, kind: &str) -> Value {
     for line in output.lines() {
         let line = line.trim();
@@ -2111,6 +2153,13 @@ mod tests {
         // A CLI without the command (the October testnet build has no `module`) says it's older.
         let clap = "error: unrecognized subcommand 'module'\n\nUsage: names [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n";
         assert_eq!(failure(clap, ""), OLDER_CLI);
+        // That CLI's `names balance`, as it prints it, read as every account.
+        let balance = "Latest block is 77650\npublic accounts (seen on chain):\n  Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk  38858810170  (default)\n  Public/FaPur3x8Y4YQ2t5x9KhV3F4cTn8u2Ym1Wq6Lr7Zs9Pd  44317823\nprivate accounts (only this wallet sees them):\n  Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z  40599000  (default)\n  Private/Z1NuMj9vQ3wK8mR5tY2pL6hX4cB7nF1dS3gA9eJ2uV5  777\nprivate total: 40600777\n";
+        let rows = parse_all_balances(balance);
+        assert_eq!(rows.len(), 4, "{rows:?}");
+        assert_eq!(rows[0]["account"], "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk");
+        assert_eq!((rows[0]["default"].as_bool(), rows[1]["default"].as_bool()), (Some(true), Some(false)));
+        assert_eq!((rows[2]["kind"].as_str(), rows[2]["balance"].as_str(), rows[3]["balance"].as_str()), (Some("private"), Some("40599000"), Some("777")));
         assert_eq!(failure("Error: no such name\n", ""), "the names CLI failed: Error: no such name");
     }
 

@@ -113,9 +113,9 @@ Item {
     property bool configKnown: false   // the names module has answered once
     // The names module this app needs: the same release (metadata.json asks for it
     // at install, but an older module can still be the one Basecamp loaded).
-    readonly property string neededModule: "0.14.3"
+    readonly property string neededModule: "0.14.4"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.14.6"
+    readonly property string appVersion: "0.14.7"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -702,6 +702,13 @@ Item {
     property bool walletHidden: false    // amounts shown as dots (the eye)
     property var walletOpen: ({})        // chain group id -> false when closed
     property string walletRowOpen: ""    // the address row whose actions are open
+    property bool walletShowEmpty: false // empty accounts that don't pay are listed too
+
+    /// The rows a group shows: an empty account that isn't a default (a program's
+    /// helper account, an unused one) only once asked for.
+    function groupRows(group) {
+        return walletShowEmpty ? group.rows : group.rows.filter(function(row) { return row.balance !== "0" || row.canSend || row.kind !== "lez" })
+    }
 
     readonly property var walletGroups: Logic.walletGroups(cliBalance, cliAccounts, tokenProgram !== "" ? tokenHoldings : null, watchedTokens, watchedNames,
                                                            chainAccounts, chainAccounts === null && chainError !== "", chainStake, namesByNpk)
@@ -4581,6 +4588,7 @@ Item {
                                 id: groupColumn
                                 width: parent.width
                                 spacing: 0
+                                readonly property int hiddenRows: groupCard.modelData.rows.length - root.groupRows(groupCard.modelData).length
                                 // The chain's line: press it to open or close.
                                 Rectangle {
                                     Layout.fillWidth: true
@@ -4645,9 +4653,20 @@ Item {
                                     Hint { font.pixelSize: root.px(15); text: "Start it in Basecamp's Blockchain app, then Refresh." }
                                     Action { label: "Open the Blockchain app"; onPressed: if (logos.request) logos.request("basecamp.apps.launch", { app: "blockchain_ui" }, function() { root.loadChain() }) }
                                 }
+                                // Empty accounts, folded away until asked for.
+                                Link {
+                                    visible: groupCard.open && (groupColumn.hiddenRows > 0 || (root.walletShowEmpty && groupCard.modelData.id === "lez"))
+                                    Layout.leftMargin: root.px(76)
+                                    Layout.topMargin: root.px(4)
+                                    Layout.bottomMargin: root.px(12)
+                                    text: root.walletShowEmpty ? "Hide empty accounts" : "Show " + groupColumn.hiddenRows + (groupColumn.hiddenRows === 1 ? " empty account" : " empty accounts")
+                                    color: root.dim
+                                    font.pixelSize: root.px(15)
+                                    onPressed: root.walletShowEmpty = !root.walletShowEmpty
+                                }
                                 // Its addresses.
                                 Repeater {
-                                    model: groupCard.open ? groupCard.modelData.rows : []
+                                    model: groupCard.open ? root.groupRows(groupCard.modelData) : []
                                     ColumnLayout {
                                         id: addressRow
                                         required property var modelData
@@ -4754,7 +4773,7 @@ Item {
                                                 onPressed: root.openSend(addressRow.modelData, "")
                                             }
                                             Action {
-                                                visible: !addressRow.modelData.canSend && addressRow.modelData.kind === "lez"
+                                                visible: !addressRow.modelData.canSend && addressRow.modelData.kind === "lez" && !root.cliOutdated
                                                 label: "Pay from this account"
                                                 onPressed: { root.useAccount(addressRow.modelData.account); root.loadAccounts() }
                                             }
@@ -5931,11 +5950,11 @@ Item {
                         onPressed: root.openRegister()
                     }
                     Part { text: "Accounts" }
-                    Hint { visible: !root.cliOld; text: "Your wallet's accounts. The one marked Pays is where payments and new names come from, one private and one public. Names you hold stay with the accounts holding them, and payments to a name still go where the name points." }
+                    Hint { visible: !root.cliOld || root.cliAccounts !== null; text: "Your wallet's accounts. The one marked Pays is where payments and new names come from, one private and one public. Names you hold stay with the accounts holding them, and payments to a name still go where the name points." }
                     Hint { visible: root.cliPath === ""; text: "Install Names on this computer first (Welcome) to see your accounts." }
                     Hint { visible: root.cliPath !== "" && root.cliAccounts === null && root.accountsError === ""; text: "Reading your accounts…" }
                     Repeater {
-                        model: root.cliAccounts || []
+                        model: (root.cliAccounts || []).filter(function(entry) { return root.walletShowEmpty || entry.balance !== "0" || entry["default"] })
                         ColumnLayout {
                             id: accountRow
                             required property var modelData
@@ -5965,12 +5984,14 @@ Item {
                                 Text { visible: accountRow.chosen; text: "Pays"; color: root.brass; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(15) }
                                 Item { Layout.fillWidth: true }
                                 Action {
-                                    visible: !accountRow.chosen
+                                    // Choosing and naming accounts need the names program's 0.4 update.
+                                    visible: !accountRow.chosen && !root.cliOutdated
                                     label: "Pay from this"
                                     enabledNow: !root.accountsBusy
                                     onPressed: root.useAccount(accountRow.modelData.account)
                                 }
                                 Action {
+                                    visible: !root.cliOutdated
                                     label: "Rename"
                                     enabledNow: !root.accountsBusy
                                     onPressed: {
@@ -6004,17 +6025,25 @@ Item {
                             }
                         }
                     }
+                    Link {
+                        readonly property int empties: (root.cliAccounts || []).filter(function(entry) { return entry.balance === "0" && !entry["default"] }).length
+                        visible: empties > 0
+                        text: root.walletShowEmpty ? "Hide empty accounts" : "Show " + empties + (empties === 1 ? " empty account" : " empty accounts")
+                        color: root.dim
+                        font.pixelSize: root.px(15)
+                        onPressed: root.walletShowEmpty = !root.walletShowEmpty
+                    }
                     Hint { visible: root.accountsError !== "" && !root.cliOld; color: root.alarm; text: root.accountsError }
                     // An older names program: the two accounts it pays from, and why there's no more.
                     Fact {
-                        visible: root.cliOld && root.cliBalance !== undefined && root.cliBalance !== null
+                        visible: root.cliOld && root.cliAccounts === null && root.cliBalance !== undefined && root.cliBalance !== null
                         label: "Private"
                         code: true
                         value: root.cliBalance ? root.shorten(root.cliBalance.account || "") + "   " + root.grouped(root.cliBalance.balance) : ""
                         full: root.cliBalance && root.cliBalance.account ? "Private/" + root.cliBalance.account : ""
                     }
                     Fact {
-                        visible: root.cliOld && root.cliPublic !== null
+                        visible: root.cliOld && root.cliAccounts === null && root.cliPublic !== null
                         label: "Public"
                         code: true
                         value: root.cliPublic !== null ? root.shorten(root.cliPublic.account) + "   " + root.grouped(root.cliPublic.balance) : ""
@@ -6023,7 +6052,8 @@ Item {
                     Hint {
                         visible: root.cliOld
                         font.pixelSize: root.px(15)
-                        text: "These are the two accounts your names program pays from. Seeing every account, and making or naming more, comes with its LEZ 0.4 update."
+                        text: root.cliAccounts === null ? "These are the two accounts your names program pays from. Seeing every account, and making or naming more, comes with its LEZ 0.4 update."
+                            : "Making, naming and choosing accounts comes with your names program's LEZ 0.4 update."
                     }
                     RowLayout {
                         visible: root.accountNewKind === "" && root.cliPath !== "" && !root.cliOld

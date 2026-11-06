@@ -952,7 +952,7 @@ const NAMES_APP: &str = "names_ui";
 /// `get_config` reports it so the Names app can refuse a module from another
 /// release (the app's own metadata asks for at least this at install, but an
 /// older module can still be the one loaded).
-const MODULE_VERSION: &str = "0.14.3";
+const MODULE_VERSION: &str = "0.14.4";
 
 /// Whether `caller` may use those methods. Basecamp gives each app its own
 /// credential, named after the app, so the module knows which app is calling.
@@ -2956,7 +2956,7 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| cli::run_account_list(&self.cli_setup()?))())
+        reply((|| cli::run_accounts_any(&self.cli_setup()?))())
     }
 
     fn cli_account_new(&mut self, kind: String, label: String) -> String {

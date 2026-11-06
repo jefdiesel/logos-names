@@ -54,7 +54,23 @@ fn parse_held(answer: &Value) -> Held {
 
 pub fn accounts(setup: &Setup) -> Result<Held, String> {
     setup.wallet_ready()?;
-    Ok(parse_held(&answer(&cli::run_text(setup, request(&["accounts"]), LOOK)?)?))
+    match cli::run_text(setup, request(&["accounts"]), LOOK) {
+        // A CLI too old for `module accounts` (the October testnet build) still lists
+        // every account and its balance in `names balance`.
+        Err(problem) if problem == cli::OLDER_CLI => {
+            let mut held = Held { public: Vec::new(), private: Vec::new() };
+            for row in cli::run_accounts_any(setup)?.as_array().into_iter().flatten() {
+                let Some((private, id)) = row["account"].as_str().and_then(|text| crate::provider::account_ref(text).ok()) else { continue };
+                if private {
+                    held.private.push((id, row["balance"].as_str().and_then(|b| b.parse().ok()).unwrap_or(0)));
+                } else {
+                    held.public.push(id);
+                }
+            }
+            Ok(held)
+        }
+        other => Ok(parse_held(&answer(&other?)?)),
+    }
 }
 
 /// The keys others use to pay the private account `choice`: an account ID, or
