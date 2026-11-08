@@ -764,6 +764,11 @@ fn balance_read(synced: bool, unread: usize) -> Result<()> {
     Ok(())
 }
 
+/// Whether `account` is the one a name's record (`owner`, its tag) is held by already.
+fn holds_already(id: &NameId, owner: &[u8; 32], account: &AccountId) -> bool {
+    owner_tag(id, account) == *owner
+}
+
 /// The new holder of a name: an account as `parse_account` reads it, written with its
 /// prefix once, and not one that was most likely mangled on the way, since a hand-over
 /// can't be undone: the all-zero account, or an ID whose letters are all one case
@@ -1528,6 +1533,11 @@ impl Client {
             bail!("that is the registry program's account, which can't hold a name");
         }
         let (Derived { id, .. }, record, _) = self.lookup_held(name).await?;
+        // To its own holder it would only cost a fee and clear the name's receiving keys
+        // and texts (transfer-to-self-wipes-receiving-keys).
+        if holds_already(&id, &record.owner, &new_owner) {
+            bail!("{new_owner} already holds {name}{NAME_SUFFIX}, so nothing was sent");
+        }
         let holder = self.holder(name, &id, &record)?;
         self.send(
             self.on_record_and_page(&id, holder),
@@ -3243,7 +3253,19 @@ mod bridge_metadata_tests {
 
 #[cfg(test)]
 mod new_owner_tests {
-    use super::parse_new_owner;
+    use super::{holds_already, owner_tag, parse_new_owner};
+
+    /// transfer-to-self-wipes-receiving-keys: `B transfer xferecho Public/<its holder>`
+    /// was applied (fee 378312) and cleared the name's receiving keys and texts.
+    #[test]
+    fn a_hand_over_to_the_holder_is_seen_as_one() {
+        let id = [9_u8; 32];
+        let holder = parse_new_owner("HE1J2z3HkZdk2KX4yGrrGM1cSbbfSdBmoLspqtTv8KUK").expect("an account");
+        let other = parse_new_owner("9A9G9ta7LZFgumdsBiWDdmCfvEmyYifnbfTLq4YEqhPs").expect("an account");
+        let owner = owner_tag(&id, &holder);
+        assert!(holds_already(&id, &owner, &holder));
+        assert!(!holds_already(&id, &owner, &other));
+    }
 
     /// transfer-case-mangled-id-loses-name: `names transfer xferalpha Public/<lower-cased
     /// id>` and the all-zero account reached the send (only the dry run stopped them).
