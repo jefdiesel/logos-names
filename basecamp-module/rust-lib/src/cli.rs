@@ -1735,6 +1735,20 @@ fn alive(pid: u64) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// How a job that ended while no one watched it (the module restarted) went, from its
+/// log: `done` when the CLI or the wallet printed that its change is in a block, else
+/// `unknown` (it may have landed after the log stopped). With the reason.
+pub fn ended_unwatched(log: &str) -> (&'static str, &'static str) {
+    let landed = log.lines().map(str::trim).any(|line| {
+        line.starts_with("applied in block ") || line.starts_with("Transaction is included in block ") || line.starts_with("ready: ")
+    });
+    if landed {
+        ("done", "the names module restarted while this ran; its log says it went through")
+    } else {
+        ("unknown", "the names module restarted while this ran, so how it ended is unknown; read the name or the balance again")
+    }
+}
+
 /// The jobs directory: `<id>.json` (what the job is and how it ended),
 /// `<id>.log` (the CLI's output) and, while it runs, the files it reads.
 pub struct Jobs {
@@ -1951,10 +1965,12 @@ impl Jobs {
                 // just finished has its outcome on disk now: read it again before deciding.
                 match self.record(id).filter(|again| again["state"] != "running") {
                     Some(ended) => record = ended,
-                    // Started before the module last restarted: nothing waits on it.
+                    // Started before the module last restarted: nothing waits on it, so how
+                    // it ended is read from what it printed, or is unknown, never "failed".
                     None => {
-                        record["state"] = Value::from("failed");
-                        record["error"] = Value::from("the names module restarted while this ran, so how it ended is unknown; read the name again");
+                        let (state, why) = ended_unwatched(&self.whole_log(id));
+                        record["state"] = Value::from(state);
+                        record["error"] = Value::from(why);
                     }
                 }
             }
@@ -2483,17 +2499,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// module-reload-mid-send-marks-landed-send-failed: a send whose module reloaded
+    /// while it ran was recorded failed for good, though its log said "Transaction is
+    /// included in block 14" and the 100 arrived. Now unknown, or done from its log.
     #[test]
-    fn a_job_nothing_waits_on_is_failed_once_its_process_is_gone() {
+    fn a_job_nothing_waits_on_is_settled_from_its_log_once_its_process_is_gone() {
         let dir = scratch_dir("orphan");
         let jobs = Jobs { dir: dir.clone() };
         // As left by a module that stopped mid-job: running, with a dead pid.
         jobs.write("jef-5", &json!({ "id": "jef-5", "name": "jef", "state": "running", "pid": 999_999_999_u64, "started": 1 }));
         std::fs::write(jobs.path("jef-5", "log"), "proving...\n").unwrap();
         let state = jobs.state("jef-5").unwrap();
-        assert_eq!(state["state"], "failed");
+        assert_eq!(state["state"], "unknown");
         assert!(last_line(state["log_tail"].as_str().unwrap()).contains("restarted"));
         assert!(jobs.running_for("jef").is_none());
+        jobs.write("-wallet-6", &json!({ "id": "-wallet-6", "name": "-wallet", "state": "running", "pid": 999_999_999_u64, "started": 1 }));
+        std::fs::write(jobs.path("-wallet-6", "log"), "Transaction is included in block 14\nTransaction data is Public(...)\n").unwrap();
+        assert_eq!(jobs.state("-wallet-6").unwrap()["state"], "done");
+        for log in ["submitted ab12\napplied in block 9\nfee paid: 4088\n", "ready: Private/x holds 5\n"] {
+            assert_eq!(ended_unwatched(log).0, "done", "{log}");
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 

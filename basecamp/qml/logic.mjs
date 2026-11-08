@@ -373,7 +373,7 @@ export function activityLine(entry, now) {
     case "receive": title = "Claimed waiting payments"; sub = "on LEZ, into your private accounts"; sign = "+"; break
     case "token_send": title = "Sent a token"; sub = "to " + whoShown(e.to); break
     case "transfer": title = "Gave " + (e.name || "a name") + " away"; sub = "to " + whoShown(e.to); sign = ""; break
-    case "arrived": title = "Arrived"; sub = "in " + whoShown(e.to) + (e.chain === "logos" ? " on the Logos Blockchain" : " on LEZ"); sign = "+"; break
+    case "arrived": title = "Arrived"; sub = "in " + whoShown(e.to) + (e.chain === "logos" ? " on the Logos Blockchain" : " on LEZ") + (!e.amount && e.at_least ? " · at least " + grouped(e.at_least) : ""); sign = "+"; break
     default: title = kind; sub = ""
     }
     var stateText = "", tone = "plain"
@@ -383,6 +383,8 @@ export function activityLine(entry, now) {
     case "arrived": stateText = kind === "bridge" ? "Arrived on LEZ" : ""; tone = "good"; break
     case "done": stateText = "Done"; tone = "good"; break
     case "failed": stateText = "Didn't go through"; tone = "bad"; break
+    // The module restarted while it ran, or its record is gone: it may have gone through.
+    case "unknown": stateText = "Outcome unknown · check the balance"; tone = "warn"; break
     }
     if (e.fee && kind !== "split" && e.state !== "sending")
         sub += " · fee " + grouped(e.fee)

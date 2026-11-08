@@ -2002,7 +2002,7 @@ impl Names {
                     match jobs.state(job) {
                         Ok(state) if state["state"] != "running" => {
                             settled = json!({
-                                "state": if state["state"] == "done" { "done" } else { "failed" },
+                                "state": match state["state"].as_str() { Some("done") => "done", Some("unknown") => "unknown", _ => "failed" },
                                 "fee": cli::parse_fee(&jobs.whole_log(job)),
                             });
                         }
