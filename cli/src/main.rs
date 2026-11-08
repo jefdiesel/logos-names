@@ -2629,6 +2629,45 @@ fn bridge(
     Ok(())
 }
 
+/// The public payer and the amount of `wallet auth-transfer send --from=Public/<id>
+/// --to=… --amount=N` (either flag form), when it pays another account.
+fn native_send_parts(args: &[String]) -> Option<(String, u128)> {
+    if !args.windows(2).any(|pair| pair[0] == "auth-transfer" && pair[1] == "send") {
+        return None;
+    }
+    let value = |flag: &str| -> Option<String> {
+        let long = format!("--{flag}");
+        args.iter().enumerate().find_map(|(at, arg)| match arg.strip_prefix(&format!("{long}=")) {
+            Some(value) => Some(value.to_owned()),
+            None if *arg == long => args.get(at + 1).cloned(),
+            None => None,
+        })
+    };
+    let from = value("from")?.strip_prefix("Public/")?.to_owned();
+    if value("to").is_some_and(|to| to.strip_prefix("Public/").unwrap_or(&to) == from) {
+        return None;
+    }
+    Some((from, value("amount")?.parse().ok()?))
+}
+
+/// A native balance from a sequencer's `getAccountView` result (16 little-endian bytes
+/// under the native program; null or none is 0).
+fn native_balance_of(result: &serde_json::Value) -> Option<u128> {
+    let native = "11111111111111111111111111111111";
+    let state = &result["data"]["actor_states"][native];
+    if result.is_null() || state.is_null() {
+        return Some(0);
+    }
+    let bytes: Vec<u8> = state.as_array()?.iter().map(|b| b.as_u64().and_then(|b| u8::try_from(b).ok())).collect::<Option<_>>()?;
+    Some(u128::from_le_bytes(bytes.try_into().ok()?))
+}
+
+/// What the public account `id` (base58) holds, read from the sequencer at `rpc`.
+fn public_balance_at(rpc: &str, id: &str) -> Option<u128> {
+    let params = serde_json::json!([{ "account_id": id, "program_account_id": "11111111111111111111111111111111" }]);
+    native_balance_of(&rpc_call(rpc, "getAccountView", params).ok()?)
+}
+
 fn rpc_call(rpc: &str, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
     let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
     let reply: serde_json::Value = serde_json::from_str(
@@ -2677,7 +2716,17 @@ async fn main() -> Result<()> {
             if args.iter().any(|arg| arg == "auth-transfer") && overrides.gas_limit.is_none() {
                 overrides.gas_limit = Some(NATIVE_TRANSFER_GAS_LIMIT);
             }
-            return run_wallet(args, Some(overrides)).await;
+            // A public send says what it paid, as the names commands do: the wallet prints
+            // no fee, and LEZ 0.4 keeps no receipt of one (jobs-report-no-fee-paid).
+            let paying = cli.rpc.clone().zip(native_send_parts(&args));
+            let before = paying.as_ref().and_then(|(rpc, (from, _))| public_balance_at(rpc, from));
+            let sent = run_wallet(args, Some(overrides)).await;
+            if let (Ok(()), Some((rpc, (from, amount))), Some(before)) = (&sent, &paying, before) {
+                if let Some(line) = public_balance_at(rpc, from).and_then(|after| fees::paid_line(before, after, *amount)) {
+                    println!("{line}");
+                }
+            }
+            return sent;
         }
         Command::Bridge { amount, to, from_key, node, max_fee, yes } => {
             let rpc = cli.rpc.as_deref().unwrap_or(DEFAULT_RPC);
@@ -3281,6 +3330,30 @@ mod new_owner_tests {
             assert!(parse_new_owner(&bad).is_err(), "{bad}");
         }
         assert!(parse_new_owner(&format!("Private/Public/{held}")).is_err(), "a prefix is written once");
+    }
+}
+
+#[cfg(test)]
+mod paid_tests {
+    use super::{native_balance_of, native_send_parts};
+
+    /// jobs-report-no-fee-paid: the module's pay_account (`wallet auth-transfer send`)
+    /// printed no fee, so its entries said fee None while the chain took 4088.
+    #[test]
+    fn a_public_send_is_told_apart_and_its_balance_read() {
+        let args = |list: &[&str]| list.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>();
+        let f = "6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV";
+        assert_eq!(
+            native_send_parts(&args(&["auth-transfer", "send", &format!("--from=Public/{f}"), "--to=Public/8eh", "--amount=5000"])),
+            Some((f.to_owned(), 5000))
+        );
+        assert_eq!(native_send_parts(&args(&["auth-transfer", "send", "--from", &format!("Public/{f}"), "--to-pk", "ab", "--amount", "7"])), Some((f.to_owned(), 7)));
+        assert_eq!(native_send_parts(&args(&["auth-transfer", "send", &format!("--from=Private/{f}"), "--to=Public/8eh", "--amount=5"])), None, "a private payer's fee is in its proof");
+        assert_eq!(native_send_parts(&args(&["auth-transfer", "send", &format!("--from=Public/{f}"), &format!("--to=Public/{f}"), "--amount=5"])), None);
+        assert_eq!(native_send_parts(&args(&["account", "get", "--account-id", "Public/x"])), None);
+        let view = serde_json::json!({ "nonce": 1, "data": { "actor_states": { "11111111111111111111111111111111": [120, 123, 114, 78, 24, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] } } });
+        assert_eq!(native_balance_of(&view), Some(9_999_999_990_648));
+        assert_eq!(native_balance_of(&serde_json::Value::Null), Some(0), "an account never used holds nothing");
     }
 }
 
