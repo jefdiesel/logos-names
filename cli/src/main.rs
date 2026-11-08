@@ -1660,11 +1660,15 @@ impl Client {
     /// spent and a new one made: it is recorded here, or the next private change would
     /// spend the old note and be refused.
     async fn finish(&mut self, hash: HashType) -> Result<u64> {
-        let (tx, block_id) = self
-            .wallet
-            .poll_transaction(hash)
-            .await
-            .context("the transaction was not included in a block")?;
+        // Bounded here: the wallet's own poll waited 11m48s for a change the sequencer had
+        // dropped (another from the same account took its nonce) and then said only "not
+        // found in preconfigured amount of blocks" (second-concurrent-transfer-hangs).
+        let polled = tokio::time::timeout(std::time::Duration::from_secs(INCLUSION_WAIT_S), self.wallet.poll_transaction(hash)).await;
+        let (tx, block_id) = match polled {
+            Ok(Ok(found)) => found,
+            Ok(Err(error)) => return Err(anyhow!(not_included(hash, None))).context(error.to_string()),
+            Err(_) => bail!(not_included(hash, Some(INCLUSION_WAIT_S))),
+        };
         let block = self
             .wallet
             .get_block(block_id)
@@ -2629,6 +2633,19 @@ fn bridge(
     Ok(())
 }
 
+/// How long a change sent is waited for before it is said not to be in a block.
+const INCLUSION_WAIT_S: u64 = 120;
+
+/// Why a change sent as `hash` is not in a block, after `waited` seconds (or when the
+/// wallet gave up): most often another change from the same account went first and
+/// took its nonce, and the sequencer dropped this one.
+fn not_included(hash: HashType, waited: Option<u64>) -> String {
+    let when = waited.map_or_else(|| "it was not found in a block".to_owned(), |s| format!("it was not in a block after {s} s"));
+    format!(
+        "{hash} was not applied: {when}. Most often another change from the same account was sent at the same time and took its place (then it was dropped and charged nothing). Check with `names resolve` before trying again: a slow chain may still apply it."
+    )
+}
+
 /// The public payer and the amount of `wallet auth-transfer send --from=Public/<id>
 /// --to=… --amount=N` (either flag form), when it pays another account.
 fn native_send_parts(args: &[String]) -> Option<(String, u128)> {
@@ -3330,6 +3347,20 @@ mod new_owner_tests {
             assert!(parse_new_owner(&bad).is_err(), "{bad}");
         }
         assert!(parse_new_owner(&format!("Private/Public/{held}")).is_err(), "a prefix is written once");
+    }
+}
+
+#[cfg(test)]
+mod inclusion_tests {
+    /// second-concurrent-transfer-hangs: the loser of two changes from one signer
+    /// waited 11m48s and said only "Transaction not found in preconfigured amount of blocks".
+    #[test]
+    fn a_change_not_in_a_block_names_the_likely_cause() {
+        let hash = super::HashType([0xf3; 32]);
+        let text = super::not_included(hash, Some(super::INCLUSION_WAIT_S));
+        assert!(text.contains("after 120 s") && text.contains("another change from the same account"), "{text}");
+        assert!(super::not_included(hash, None).contains("not found in a block"));
+        assert!(super::INCLUSION_WAIT_S <= 180);
     }
 }
 
