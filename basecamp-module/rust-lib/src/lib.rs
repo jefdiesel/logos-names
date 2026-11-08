@@ -3483,11 +3483,18 @@ impl NamesModule for Names {
             };
             let account = registry::parse_account(&to)?;
             let notes = chain::notes_of(&node::call("wallet_get_notes", json!([from, ""]), node::QUICK)?);
-            let note = notes.iter().find(|(_, value)| chain::amount(value) == u128::from(amount)).map(|(id, _)| id.clone());
+            // A note a send from here still spends (not in a block yet) is not this one's:
+            // two deposits of one note both got a hash and only one could land.
+            let busy = chain_notes_in_use(&from);
+            let note = notes
+                .iter()
+                .find(|(id, value)| chain::amount(value) == u128::from(amount) && !busy.contains(*id))
+                .map(|(id, _)| id.clone());
+            let exact_busy = note.is_none() && notes.iter().any(|(id, value)| chain::amount(value) == u128::from(amount) && busy.contains(id));
             // The fee comes from the key's other notes: the exact one goes whole into the deposit.
             let others: u128 = notes
                 .iter()
-                .filter(|(id, _)| note.as_ref() != Some(*id))
+                .filter(|(id, _)| note.as_ref() != Some(*id) && !busy.contains(*id))
                 .map(|(_, value)| chain::amount(value))
                 .sum();
             let fee_short = others < u128::from(BRIDGE_MAX_FEE);
@@ -3501,7 +3508,16 @@ impl NamesModule for Names {
                 "fee": BRIDGE_MAX_FEE.to_string(), "note": note, "needs_split": note.is_none(), "channel": channel,
                 "channel_known": channel_known, "fee_short": fee_short, "others": others.to_string(), "lines": [],
             });
+            if exact_busy {
+                plan["needs_split"] = json!(false);
+                plan["busy"] = json!(true);
+            }
             if send {
+                if exact_busy {
+                    return Err(format!(
+                        "Another transfer from this key is still using its note of exactly {amount}: wait for it to land (a minute or so), then try again. Nothing was sent."
+                    ));
+                }
                 let note = note.ok_or_else(|| format!("no note of that key holds exactly {amount}: split it off first"))?;
                 if !channel_known {
                     return Err(format!(
@@ -3521,7 +3537,14 @@ impl NamesModule for Names {
                 )?;
                 let hash = chain::hash_of(&deposited);
                 if let Some(hash) = &hash {
-                    chain_sent_add(hash, json!({ "from": from, "inputs": [note], "fee": null, "at": now() }));
+                    // Every note it spends, the fee's too, so it counts as in a block only
+                    // once they are all spent (not just once the deposit's note left).
+                    let stored = node::call("get_transaction", json!([hash]), node::QUICK).ok();
+                    let mut inputs = stored.as_ref().map(chain::all_inputs).unwrap_or_default();
+                    if !inputs.contains(&note) {
+                        inputs.push(note.clone());
+                    }
+                    chain_sent_add(hash, json!({ "from": from, "inputs": inputs, "fee": null, "at": now() }));
                     // What the LEZ account held before, so its arrival can be told (activity).
                     let to_before = self
                         .cli_setup()
@@ -4365,6 +4388,22 @@ fn chain_landed(hash: &str) -> Result<bool, String> {
     })
 }
 
+/// How long a send made here holds the notes it spends for itself: once in a block they
+/// are gone anyway; one that never lands lets them go after this.
+const NOTES_HELD_S: u64 = 15 * 60;
+
+/// The notes of `from` that a recent send made here spends (`chain_sent` inputs), which
+/// another transfer must not pick while it may still land.
+fn chain_notes_in_use(from: &str) -> std::collections::HashSet<String> {
+    let at = now();
+    chain_sent()
+        .values()
+        .filter(|sent| sent["from"].as_str() == Some(from) && at.saturating_sub(sent["at"].as_u64().unwrap_or(0)) < NOTES_HELD_S)
+        .flat_map(|sent| sent["inputs"].as_array().cloned().unwrap_or_default())
+        .filter_map(|input| input.as_str().map(str::to_owned))
+        .collect()
+}
+
 /// Remembers a send; past `MAX_CACHED` sends the oldest is forgotten.
 fn chain_sent_add(hash: &str, sent: Value) {
     let Some(dir) = config_dir() else { return };
@@ -4917,9 +4956,24 @@ mod tests {
         assert!(unknown["error"].as_str().unwrap().contains("deposit channel"), "{unknown}");
         assert!(!node_asked().contains(&"channel_deposit_with_notes".to_owned()), "nothing deposited into an unknown channel");
         node_answers("get_channel_state", json!({ "accredited_keys": [], "configuration_threshold": 3 }));
+        // The deposit as the node stores it: the exact note, and a note for its fee.
+        node_answers("get_transaction", json!({ "mantle_tx": { "ops": [
+            { "opcode": 5, "payload": { "inputs": ["e8ac"] } },
+            { "opcode": 0, "payload": { "inputs": ["c0de"], "outputs": [{ "value": 130292386 }] } }] } }));
         let sent = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), true));
         assert_eq!((sent["value"]["sent"].as_bool(), sent["value"]["hash"].as_str()), (Some(true), Some("ab".repeat(32).as_str())), "{sent}");
         assert_eq!(sent["value"]["channel_known"], true);
+        // double-bridge-false-in-block: a second deposit of that note before the first is
+        // in a block got a hash too and could never land. Now it is refused, and the plan says why.
+        let again = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), true));
+        assert!(again["error"].as_str().unwrap().contains("still using its note"), "{again}");
+        let plan = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), false));
+        assert_eq!((plan["value"]["busy"].as_bool(), plan["value"]["needs_split"].as_bool()), (Some(true), Some(false)), "{plan}");
+        // In a block only once every note it spends is gone, the fee's too.
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "c0de", "value": "130294000" }] }));
+        assert_eq!(parsed(&names.chain_tx("ab".repeat(32)))["value"]["state"], "pending");
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "f00d", "value": "130292386" }] }));
+        assert_eq!(parsed(&names.chain_tx("ab".repeat(32)))["value"]["state"], "in_block");
         // The split and the bridge are in the Wallet's history, the bridge with where it lands.
         let history = activity::all(&config_dir().unwrap());
         let bridge = history.iter().find(|e| e["kind"] == "bridge" && e["hash"] == "ab".repeat(32)).expect("the bridge is in the history");
@@ -5012,8 +5066,8 @@ mod tests {
     #[test]
     fn review_the_bridge_checks_the_channel_on_the_node_before_depositing() {
         let mut names = fresh();
-        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "e8ac", "value": "1000000" }, { "id": "c0de", "value": "5000000" }] }));
-        node_answers("channel_deposit_with_notes", json!("ab".repeat(32)));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "e9ac", "value": "1000000" }, { "id": "c1de", "value": "5000000" }] }));
+        node_answers("channel_deposit_with_notes", json!("ac".repeat(32)));
         node_answers("get_channel_state", json!({ "configuration_threshold": 3 }));
         let to = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
         let _ = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), true));

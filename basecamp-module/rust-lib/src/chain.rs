@@ -232,6 +232,17 @@ pub fn transfer_fee(transaction: &Value, notes: &serde_json::Map<String, Value>)
     held?.checked_sub(paid)
 }
 
+/// Every note id a stored transaction spends, over all its ops: a deposit's note and
+/// the notes that fund its fee.
+pub fn all_inputs(transaction: &Value) -> Vec<String> {
+    transaction["mantle_tx"]["ops"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|op| op["payload"]["inputs"].as_array().into_iter().flatten().filter_map(|i| i.as_str().map(str::to_owned)))
+        .collect()
+}
+
 /// Whether none of `inputs` is among the wallet's notes any more. The node's wallet
 /// follows the chain, not the mempool (and the node stores a transaction as soon as it
 /// takes it), so this is when a transfer is in a block.
