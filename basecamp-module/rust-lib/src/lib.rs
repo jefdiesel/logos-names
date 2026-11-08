@@ -1066,6 +1066,24 @@ fn log_started(out: &str, mut entry: Value) {
     }
 }
 
+/// Refuses to pay the public account `to` (base58) by its ID when it is another wallet's
+/// and LEZ has never seen it: the wallet's send to such an account lands, keeps its fee
+/// and credits nothing (pay_account-to-unseen, F2X). One of this wallet's own accounts
+/// is paid either way; a sequencer that can't be asked leaves the send to it.
+fn payable_account(setup: &cli::Setup, to: &str) -> Result<(), String> {
+    let own = cli::balances_now(setup).is_ok_and(|rows| rows.iter().any(|(account, _)| *account == format!("Public/{to}")));
+    if own {
+        return Ok(());
+    }
+    let id = registry::parse_account(to)?;
+    match registry::account_seen(&setup.sequencer, &id) {
+        Ok(false) => Err(format!(
+            "Public/{to} has never been used on LEZ, so it can't be paid by its ID: the payment would cost its fee and credit nothing. Check the ID, or pay its holder's name instead."
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Notes what `chain`'s accounts hold now, as read from `scope` (the sequencer, for LEZ),
 /// in the Wallet's history (arrivals).
 fn note_balances(chain: &str, scope: &str, balances: &[(String, u128)]) {
@@ -2701,11 +2719,14 @@ impl NamesModule for Names {
         }
         let out = reply((|| {
             // Checked before the CLI is looked for, so bad input fails the same way every time.
-            if !matches!(cli::pay_to(&account)?, cli::PayTo::Account(_)) {
+            let cli::PayTo::Account(to) = cli::pay_to(&account)? else {
                 return Err("that is a name; pay it as a name".to_owned());
-            }
+            };
             if !cli::is_amount(&cli::ungrouped(&amount).unwrap_or_default()) {
                 return Err("enter a whole amount, such as 1000".to_owned());
+            }
+            if let Ok(setup) = self.cli_setup() {
+                payable_account(&setup, &to)?;
             }
             self.wallet_job("pay_account", |setup| cli::pay_account_args(setup, &account, &amount, from_private))
         })());
@@ -5296,6 +5317,13 @@ mod tests {
         for (to, amount) in [("jef", "5"), (other, "5"), ("Public/nope", "5"), (&format!("Public/{other}") as &str, "0")] {
             assert_eq!(parsed(&names.cli_pay_account(to.into(), amount.into(), false))["success"], false, "{to} {amount}");
         }
+        // Another wallet's account LEZ has never seen: refused, nothing runs (F2X: the
+        // send landed, kept a fee of 12088 and credited nothing, logged done).
+        registry::UNSEEN.with(|unseen| unseen.borrow_mut().push(registry::parse_account(other).unwrap()));
+        let refused = parsed(&names.cli_pay_account(format!("Public/{other}"), "1000".into(), false));
+        assert!(refused["error"].as_str().unwrap().contains("never been used on LEZ"), "{refused}");
+        assert!(parsed(&names.cli_pay_account(format!("Public/{other}"), "1000".into(), true))["error"].as_str().unwrap().contains("never been used"));
+        registry::UNSEEN.with(|unseen| unseen.borrow_mut().clear());
         let paid = parsed(&names.cli_pay_account(format!("Public/{other}"), "1000".into(), false));
         let id = paid["value"]["id"].as_str().expect("a job").to_owned();
         let ended = job_end(&mut names, &id);

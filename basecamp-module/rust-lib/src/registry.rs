@@ -729,6 +729,44 @@ pub fn channel_id(_sequencer: &str) -> Result<String, String> {
     Ok("02".repeat(32))
 }
 
+/// Whether the sequencer at `sequencer` has ever seen `account`: `getAccountView`
+/// answers null for an account no transaction has touched. LEZ can't pay such an
+/// account of another wallet by its ID (the send lands, keeps its fee and credits
+/// nothing), and a hand-over to one is most likely to a mistyped ID.
+#[cfg(not(test))]
+pub fn account_seen(sequencer: &str, account: &AccountId) -> Result<bool, String> {
+    let response = ureq::post(sequencer)
+        .timeout(std::time::Duration::from_secs(15))
+        .send_json(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getAccountView",
+            "params": [{ "account_id": account_text(account), "program_account_id": account_text(&NATIVE_TOKEN) }],
+        }))
+        .map_err(|error| format!("could not reach the sequencer: {error}"))?;
+    let reply: Value = response.into_json().map_err(|_| "the sequencer sent an unreadable reply".to_owned())?;
+    if let Some(error) = reply.get("error") {
+        return Err(format!("the sequencer refused the read: {error}"));
+    }
+    match reply.get("result") {
+        Some(Value::Null) => Ok(false),
+        Some(_) => Ok(true),
+        None => Err("the sequencer sent an unreadable reply".to_owned()),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The accounts a test's sequencer has never seen.
+    pub static UNSEEN: std::cell::RefCell<Vec<AccountId>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Tests say which accounts are unseen: never the network.
+#[cfg(test)]
+pub fn account_seen(_sequencer: &str, account: &AccountId) -> Result<bool, String> {
+    Ok(!UNSEEN.with(|unseen| unseen.borrow().contains(account)))
+}
+
 /// A registry on one network: where to read it and which program it is.
 #[derive(Debug, Clone)]
 pub struct Registry {
