@@ -955,6 +955,12 @@ pub fn token_outcome(log: &str) -> Value {
     })
 }
 
+/// Whether a `names receive` run claimed nothing: it said so ("nothing to receive", or
+/// "nothing worth claiming" when every credit was worth less than claiming it).
+pub fn claimed_nothing(log: &str) -> bool {
+    log.lines().map(str::trim).any(|line| line == "nothing to receive" || line == "nothing worth claiming")
+}
+
 /// The fee lines a CLI run printed (`cli/src/fees.rs` in the names CLI): `{about, at_most,
 /// paid}`, decimal text, or null if it printed none. A run that sent several changes
 /// prints one estimate and one fee paid for each; they are added up. `paid` is null

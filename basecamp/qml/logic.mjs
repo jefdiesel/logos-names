@@ -372,7 +372,7 @@ export function activityLine(entry, now) {
     case "pay": title = "Paid " + (e.name || "a name"); sub = "on LEZ"; break
     case "pay_account": title = "Paid " + whoShown(e.to); sub = e["private"] ? "on LEZ, from your private account" : "on LEZ, from your public account"; break
     case "shield": title = "Moved to private"; sub = "on LEZ, from your public account"; sign = ""; break
-    case "receive": title = "Claimed waiting payments"; sub = "on LEZ, into your private accounts"; sign = "+"; break
+    case "receive": title = e.claimed === false ? "Nothing claimed" : "Claimed waiting payments"; sub = e.claimed === false ? "on LEZ, what waits is worth less than claiming it costs" : "on LEZ, into your private accounts"; sign = "+"; break
     case "token_send": title = "Sent a token"; sub = "to " + whoShown(e.to); break
     case "transfer": title = "Gave " + (e.name || "a name") + " away"; sub = "to " + whoShown(e.to); sign = ""; break
     case "receive_privately": title = "Private payments to " + (e.name || "a name"); sub = "on LEZ, new receiving keys"; sign = ""; break

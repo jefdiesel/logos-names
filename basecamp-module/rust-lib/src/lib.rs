@@ -306,8 +306,8 @@ pub trait NamesModule: Send + 'static {
     /// Starts `names set-text`; an empty value removes the entry.
     fn cli_set_text(&mut self, name: String, key: String, value: String) -> String;
 
-    /// Hands a name the names CLI holds to `new_owner` (`Public/…`, `Private/…` or a bare
-    /// account ID), as a job: `names transfer`. Its receiving keys, text entries and page
+    /// Hands a name the names CLI holds to `new_owner` (`Public/…` or `Private/…` and its
+    /// ID), as a job: `names transfer`. Its receiving keys, text entries and page
     /// are cleared; the new holder runs `receive-privately`. It can't be undone.
     fn cli_transfer(&mut self, name: String, new_owner: String) -> String;
 
@@ -505,6 +505,11 @@ pub trait NamesModule: Send + 'static {
     /// transaction, several minutes of proving, its fee paid by the wallet's private
     /// account holding the most.
     fn cli_receive(&mut self) -> String;
+
+    /// `cli_receive` that claims every credit, also those worth less than claiming them
+    /// costs (`cli_balance`'s `small`: a private fee's refund, most often), as a wallet
+    /// job: `names receive --all`. Each claim's fee is more than it brings in.
+    fn cli_receive_all(&mut self) -> String;
 
     /// The Wallet's history, newest first: what this app sent on either chain (followed
     /// until it settles: `sending`, `in_block`, `arrived` for a bridge credited on LEZ,
@@ -2011,10 +2016,15 @@ impl Names {
                 if let (Some(job), Ok(jobs)) = (entry["job"].as_str(), self.jobs()) {
                     match jobs.state(job) {
                         Ok(state) if state["state"] != "running" => {
+                            let log = jobs.whole_log(job);
                             settled = json!({
                                 "state": match state["state"].as_str() { Some("done") => "done", Some("unknown") => "unknown", _ => "failed" },
-                                "fee": cli::parse_fee(&jobs.whole_log(job)),
+                                "fee": cli::parse_fee(&log),
                             });
+                            // A receive that claimed nothing is told apart from one that did.
+                            if entry["kind"] == "receive" && cli::claimed_nothing(&log) {
+                                settled["claimed"] = json!(false);
+                            }
                         }
                         Ok(_) => {}
                         // The job's files were cleared: it ended long ago, outcome unknown
@@ -2739,6 +2749,15 @@ impl NamesModule for Names {
         }
         let out = reply(self.wallet_job("receive", |_| Ok(vec!["receive".to_owned()])));
         log_started(&out, json!({ "kind": "receive", "chain": "lez" }));
+        out
+    }
+
+    fn cli_receive_all(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let out = reply(self.wallet_job("receive", |_| Ok(vec!["receive".to_owned(), "--all".to_owned()])));
+        log_started(&out, json!({ "kind": "receive", "chain": "lez", "all": true }));
         out
     }
 
@@ -4853,6 +4872,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// sub-fee-credits-unclaimable-through-module: cli_receive never passes --all, so
+    /// credits worth less than claiming them could not be claimed from the app, and a
+    /// receive that claimed nothing was logged as a done receive.
+    #[test]
+    fn credits_worth_less_than_a_claim_can_be_claimed_and_nothing_claimed_is_told() {
+        let (mut names, dir) = with_fake_cli("receiveall", "echo 'left waiting: 3169135 to Private/x: claiming it costs about 5070616, more than it holds'; echo 'nothing worth claiming'");
+        let started = parsed(&names.cli_receive());
+        let job = started["value"]["id"].as_str().expect("a job").to_owned();
+        job_end(&mut names, &job);
+        let rows = parsed(&names.activity(String::new()));
+        let row = rows["value"].as_array().unwrap().iter().find(|e| e["job"] == job.as_str()).cloned().expect("logged");
+        assert_eq!((row["state"].as_str(), row["claimed"].as_bool()), (Some("done"), Some(false)), "{row}");
+        let all = parsed(&names.cli_receive_all());
+        let job = all["value"]["id"].as_str().expect("a job").to_owned();
+        let ended = job_end(&mut names, &job);
+        assert!(ended["log_tail"].as_str().unwrap().contains("[receive]\n[--all]"), "{ended}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     fn job_end(names: &mut Names, id: &str) -> Value {
         for _ in 0..200 {
             let state = parsed(&names.job(id.to_owned()));
@@ -5432,7 +5470,9 @@ mod tests {
         assert_eq!(paid["success"], false, "{paid}");
         assert!(paid["error"].as_str().unwrap().contains("only the Names app"), "{paid}");
         for refused in [names.cli_create_wallet(), names.set_main_name("attacker".into()), names.set_chat_name("peer".into(), "attacker".into()),
-                        names.cli_status(), names.wallet(), names.job("victim-1".into()), names.board_feed(true)] {
+                        names.cli_status(), names.wallet(), names.job("victim-1".into()), names.board_feed(true),
+                        names.cli_receive(), names.cli_receive_all(), names.cli_receive_privately("victim".into()),
+                        names.cli_transfer("victim".into(), "Private/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR".into()), names.activity(String::new())] {
             assert_eq!(parsed(&refused)["success"], false, "{refused}");
         }
         assert!(!names.set_cli("/bin/sh".into()));
