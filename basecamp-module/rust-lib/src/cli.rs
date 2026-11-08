@@ -472,6 +472,19 @@ pub fn bridge_problem(output: &str, node: &str) -> String {
     format!("the names CLI failed: {}", first.unwrap_or("no reason given").trim_start_matches("Error:").trim())
 }
 
+/// The public LEZ account a bridge credits, as typed: `Public/` and its ID, written once
+/// (`Public/Private/<id>` was read as `Public/<id>`), as base58; `None` when empty (the
+/// wallet's default).
+pub fn bridge_to(to: &str) -> Result<Option<String>, String> {
+    let to = to.trim();
+    if to.is_empty() {
+        return Ok(None);
+    }
+    let id = to.strip_prefix("Public/").ok_or("the bridge credits a public LEZ account: Public/ and its ID")?;
+    let account = registry::bare_account(id).map_err(|_| "that isn't a public LEZ account: Public/ once, then its ID".to_owned())?;
+    Ok(Some(registry::account_text(&account)))
+}
+
 /// Runs `names bridge` (only the plan unless `send`) to the wallet's default
 /// public account and returns what `parse_bridge` makes of it, or why it failed.
 pub fn run_bridge(setup: &Setup, amount: &str, from_key: &str, node: &str, send: bool) -> Result<Value, String> {
@@ -485,11 +498,9 @@ pub fn run_bridge_to(setup: &Setup, amount: &str, from_key: &str, to: &str, node
     let node = bridge_node(node)?;
     bridge_amount(amount)?;
     bridge_key(from_key)?;
-    let to = if to.trim().is_empty() {
-        default_public(setup)?
-    } else {
-        let id = to.trim().strip_prefix("Public/").ok_or("the bridge credits a public LEZ account: Public/ and its ID")?;
-        registry::account_text(&registry::parse_account(id).map_err(|_| "that isn't a public LEZ account".to_owned())?)
+    let to = match bridge_to(to)? {
+        Some(to) => to,
+        None => default_public(setup)?,
     };
     let args = bridge_args(amount, &to, from_key, &node, send)?;
     let (code, out, err) = run_capture(setup, args, BRIDGE_PATIENCE)?;
@@ -2174,6 +2185,12 @@ mod tests {
         assert_eq!(transfer_args("Ada", &format!("Public/{to}")).unwrap(), strings(&["transfer", "--", "ada", &format!("Public/{to}")]));
         assert_eq!(transfer_args("ada", &format!("Private/{to}")).unwrap()[3], format!("Private/{to}"));
         assert!(transfer_args("ada", "bob").is_err(), "a name is not a holder");
+        // account-prefix-double-strip: a second prefix inside was dropped and the rest sent.
+        assert_eq!(bridge_to(&format!("Public/{to}")).unwrap(), Some(to.to_owned()));
+        assert_eq!(bridge_to("  ").unwrap(), None);
+        for bad in [format!("Public/Private/{to}"), format!("Public/Public/{to}"), format!("Private/{to}"), to.to_owned()] {
+            assert!(bridge_to(&bad).is_err(), "{bad}");
+        }
         assert_eq!(receive_privately_args("Ada").unwrap(), strings(&["receive-privately", "--", "ada"]));
         // A decimal comma or a stray one is refused, not read as more (SC-2, A-2).
         for bad in ["1,5", ",7", "1,,000", "1000,", "12,34", "1,0000"] {

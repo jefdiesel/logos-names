@@ -3478,12 +3478,9 @@ impl NamesModule for Names {
         reply((|| {
             let from = chain::parse_key(&from_key).ok_or("choose the key to send from")?;
             let amount = chain::whole_amount(&amount)?;
-            let to = match to.trim() {
-                "" => cli::default_public(&self.cli_setup()?)?,
-                text => {
-                    let id = text.strip_prefix("Public/").ok_or("the bridge credits a public LEZ account: Public/ and its ID")?;
-                    registry::account_text(&registry::parse_account(id).map_err(|_| "that isn't a public LEZ account".to_owned())?)
-                }
+            let to = match cli::bridge_to(&to)? {
+                Some(to) => to,
+                None => cli::default_public(&self.cli_setup()?)?,
             };
             let account = registry::parse_account(&to)?;
             let notes = chain::notes_of(&node::call("wallet_get_notes", json!([from, ""]), node::QUICK)?);
@@ -5018,6 +5015,8 @@ mod tests {
         );
         // A private account is never a bridge's destination.
         assert!(parsed(&names.chain_bridge(NODE_KEY.into(), format!("Private/{to}"), "1000000".into(), false))["error"].as_str().unwrap().contains("public LEZ account"));
+        // Nor one with a second prefix inside (account-prefix-double-strip: sent to the node as Public/<id>).
+        assert!(parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/Private/{to}"), "1000000".into(), false))["error"].as_str().unwrap().contains("Public/ once"));
     }
 
 
