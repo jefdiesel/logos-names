@@ -221,13 +221,22 @@ pub fn bridges_arrived(entries: &[Value], lez_now: &std::collections::HashMap<St
             .map(|entry| effect(entry, to).0)
             .sum();
         let mut needed = i128::try_from(number(&list[start]["to_before"]).unwrap_or(0)).unwrap_or(i128::MAX).saturating_add(moved);
-        for bridge in &list[start..] {
-            needed = needed.saturating_add(i128::try_from(number(&bridge["amount"]).unwrap_or(0)).unwrap_or(i128::MAX));
-            if now < needed {
-                break;
-            }
-            arrived.extend(bridge["id"].as_str().map(str::to_owned));
-        }
+        let thresholds: Vec<i128> = list[start..]
+            .iter()
+            .map(|bridge| {
+                needed = needed.saturating_add(i128::try_from(number(&bridge["amount"]).unwrap_or(0)).unwrap_or(i128::MAX));
+                needed
+            })
+            .collect();
+        // All of them, once the account holds at least what they all bring; short of
+        // that only the first few whose credits it holds exactly (LEZ credits a deposit
+        // whole), so a credit from elsewhere is never taken for a bridge's.
+        let count = if thresholds.last().is_some_and(|last| now >= *last) {
+            thresholds.len()
+        } else {
+            thresholds.iter().rposition(|needed| now == *needed).map_or(0, |at| at + 1)
+        };
+        arrived.extend(list[start..start + count].iter().filter_map(|bridge| bridge["id"].as_str().map(str::to_owned)));
     }
     arrived
 }
@@ -452,9 +461,15 @@ mod tests {
         let now = |held: u128| std::collections::HashMap::from([("Public/T".to_owned(), held)]);
         assert!(bridges_arrived(&entries, &now(0)).is_empty());
         assert!(bridges_arrived(&entries, &now(1_000_000)).is_empty(), "less than the first");
+        assert!(bridges_arrived(&entries, &now(3_500_000)).is_empty(), "more than the first, but not its credit alone");
         assert_eq!(bridges_arrived(&entries, &now(3_000_000)), ["1-bridge"]);
         assert_eq!(bridges_arrived(&entries, &now(5_000_000)), ["1-bridge", "2-bridge"]);
         assert_eq!(bridges_arrived(&entries, &now(5_700_000)).len(), 3);
+        assert_eq!(bridges_arrived(&entries, &now(9_000_000)).len(), 3, "all of them once it holds at least what they bring");
+        // br/f2: bridges of 700,000, 3,000,000 and 2,000,000 and one credit of 3,000,000 from elsewhere: none.
+        let f2 = vec![bridge(1, "700000"), bridge(2, "3000000"), bridge(3, "2000000")];
+        assert!(bridges_arrived(&f2, &now(3_000_000)).is_empty());
+        assert_eq!(bridges_arrived(&f2, &now(700_000)), ["1-bridge"]);
         // A logged payment out of the account since then is allowed for.
         entries.push(json!({ "id": "4-pay_account", "at": 4, "kind": "pay_account", "chain": "lez", "from": "Public/T", "to": "Public/Q", "amount": "500000", "fee": { "paid": "4000" }, "state": "done" }));
         assert_eq!(bridges_arrived(&entries, &now(2_496_000)), ["1-bridge"]);
