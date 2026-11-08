@@ -233,9 +233,20 @@ pub fn post_ref(post: &str) -> Result<String, String> {
     Ok(format!("{name}/{n}"))
 }
 
+/// Refuses text with a control character in it other than a line break or a tab: a
+/// NUL can't be passed to a program at all (the spawn failed with an OS error naming
+/// the CLI's path), and the rest only hide what a post or entry says.
+pub fn plain_text(text: &str, what: &str) -> Result<(), String> {
+    if text.chars().any(|c| c.is_control() && c != '\n' && c != '\t') {
+        return Err(format!("{what} can't hold control characters (such as a NUL); remove them and try again"));
+    }
+    Ok(())
+}
+
 /// `names post`.
 pub fn post_args(name: &str, text: &str, cids: &[String], reply: &str) -> Result<Vec<String>, String> {
     let name = registry::parse_name(name)?;
+    plain_text(text, "a post")?;
     if text.len() > 1024 {
         return Err("a post holds at most 1,024 bytes of text".to_owned());
     }
@@ -1160,6 +1171,7 @@ pub fn set_text_args(name: &str, key: &str, value: &str) -> Result<Vec<String>, 
     let name = registry::parse_name(name)?;
     let key = key.trim();
     check_text(key, value)?;
+    plain_text(value, "an entry")?;
     Ok(vec!["set-text".to_owned(), "--".to_owned(), name, key.to_owned(), value.to_owned()])
 }
 
@@ -1898,6 +1910,8 @@ impl Jobs {
                 if let Some(scratch) = &scratch {
                     let _ = std::fs::remove_file(scratch);
                 }
+                // No job was made, so no log of one is left either.
+                let _ = std::fs::remove_file(self.path(id, "log"));
                 return Err(format!("could not run {what}: {error}"));
             }
         };
@@ -2172,6 +2186,12 @@ mod tests {
         assert!(post_args("jef", "hi", &["a b".into()], "").is_err());
         assert!(post_args("jef", "hi", &[], "ada").is_err());
         assert!(post_args("jef; rm", "hi", &[], "").is_err());
+        // nul-in-post-text-raw-error: a NUL reached the spawn (an OS error naming the CLI's path).
+        for bad in ["a\u{0}b", "bell\u{7}", "esc\u{1b}[2J"] {
+            assert!(post_args("carol", bad, &[], "").unwrap_err().contains("control characters"), "{bad:?}");
+            assert!(set_text_args("carol", "bio", bad).unwrap_err().contains("control characters"), "{bad:?}");
+        }
+        assert!(post_args("carol", "two\nlines\tand a tab", &[], "").is_ok());
         assert_eq!(like_args("jef", "@ada/0", true).unwrap(), strings(&["like", "--as=jef", "--undo", "--", "ada/0"]));
         assert_eq!(hide_args("jef/2").unwrap(), ("jef".to_owned(), strings(&["hide", "--", "jef/2"])));
         assert!(hide_args("jef/x").is_err());
@@ -2552,6 +2572,7 @@ mod tests {
         let error = jobs.start(&missing, &id, "jef", "set_page", vec!["clear-page".into()], Some(body.clone())).unwrap_err();
         assert!(error.contains("could not run the names CLI"));
         assert!(!body.exists());
+        assert!(!jobs.path(&id, "log").exists(), "no orphan log (nul-in-post-text-raw-error)");
         assert!(jobs.running_for("jef").is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
