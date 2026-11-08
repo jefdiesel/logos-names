@@ -2589,6 +2589,9 @@ impl NamesModule for Names {
             cli::bridge_amount(&amount)?;
             let key = cli::bridge_key(&from_key)?;
             let node = cli::bridge_node(&node)?;
+            // The destination too, before anything is remembered: a refused call leaves
+            // config.json as it was (bridge-to-saves-before-validating).
+            cli::bridge_to(&to)?;
             let setup = self.cli_setup()?;
             if self.bridge_key.as_deref() != Some(key.as_str()) || self.bridge_node.as_deref() != Some(node.as_str()) {
                 self.bridge_key = Some(key.clone());
@@ -4760,6 +4763,19 @@ mod tests {
         let rows = parsed(&names.activity("xferecho".into()));
         let row = rows["value"].as_array().unwrap().iter().find(|e| e["job"] == job.as_str()).cloned().expect("in the history");
         assert_eq!((row["kind"].as_str(), row["state"].as_str(), row["fee"]["paid"].as_str()), (Some("receive_privately"), Some("done"), Some("417376")), "{row}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// bridge-to-saves-before-validating: a cli_bridge_to refused for its 'to' had
+    /// already saved its key and node to config.json.
+    #[test]
+    fn a_refused_bridge_to_remembers_nothing() {
+        let (mut names, dir) = with_fake_cli("bridgeto", "exit 0");
+        names.bridge_key = Some("ab".repeat(32));
+        names.bridge_node = Some("http://127.0.0.1:8080".into());
+        let refused = parsed(&names.cli_bridge_to("5".into(), "12".repeat(32), "NOT-AN-ACCOUNT".into(), "http://127.0.0.1:4321".into(), false));
+        assert_eq!(refused["error"], "the bridge credits a public LEZ account: Public/ and its ID", "{refused}");
+        assert_eq!((names.bridge_key.clone(), names.bridge_node.clone()), (Some("ab".repeat(32)), Some("http://127.0.0.1:8080".to_owned())));
         let _ = std::fs::remove_dir_all(dir);
     }
 
