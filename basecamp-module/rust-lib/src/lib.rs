@@ -2007,8 +2007,9 @@ impl Names {
                             });
                         }
                         Ok(_) => {}
-                        // The job's files were cleared: it ended long ago, outcome unknown.
-                        Err(_) => settled = json!({ "state": "done" }),
+                        // The job's files were cleared: it ended long ago, outcome unknown
+                        // (a failed send was shown done once its record was pruned).
+                        Err(_) => settled = json!({ "state": "unknown" }),
                     }
                 }
             }
@@ -4728,6 +4729,19 @@ mod tests {
         let id = started["value"]["id"].as_str().expect("a job").to_owned();
         assert_eq!(job_end(&mut names, &id)["state"], "done");
         registry::UNSEEN.with(|list| list.borrow_mut().clear());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// failed-send-becomes-done-after-job-prune: a send that failed (exit 1) was shown
+    /// done once its job record was pruned after 7 days.
+    #[test]
+    fn a_send_whose_job_record_is_gone_is_unknown_not_done() {
+        let (mut names, dir) = with_fake_cli("pruned", "exit 1");
+        let history = config_dir().unwrap();
+        let id = activity::add(&history, now(), json!({ "kind": "pay_account", "chain": "lez", "to": "Public/GAj", "amount": "99999999999999999", "job": "-wallet-17" }));
+        let rows = parsed(&names.activity(String::new()));
+        let row = rows["value"].as_array().unwrap().iter().find(|e| e["id"] == id.as_str()).cloned().expect("listed");
+        assert_eq!(row["state"], "unknown", "{row}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
