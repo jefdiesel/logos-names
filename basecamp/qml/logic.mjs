@@ -292,8 +292,10 @@ export function walletGroups(cliBalance, accounts, holdings, watched, tokenNames
                        canSend: !!a["default"], account: a.account })
         })
     } else if (cliBalance && typeof cliBalance === "object") {
-        lez.push({ id: "lez-private", kind: "lez", title: "Private account", name: "", sub: "Private · pays and registers", address: cliBalance.account ? "Private/" + cliBalance.account : "",
-                   balance: cliBalance.balance === undefined ? null : String(cliBalance.balance), fromPrivate: true, definition: "", key: "", canSend: true, account: "" })
+        // No default private account (account null): only the public one is shown.
+        if (cliBalance.account)
+            lez.push({ id: "lez-private", kind: "lez", title: "Private account", name: "", sub: "Private · pays and registers", address: "Private/" + cliBalance.account,
+                       balance: cliBalance.balance === undefined || cliBalance.balance === null ? null : String(cliBalance.balance), fromPrivate: true, definition: "", key: "", canSend: true, account: "" })
         if (cliBalance["public"])
             lez.push({ id: "lez-public", kind: "lez", title: "Public account", sub: "Public · your main public account", address: "Public/" + cliBalance["public"].account,
                        balance: String(cliBalance["public"].balance), fromPrivate: false, definition: "", key: "", canSend: true, account: "" })

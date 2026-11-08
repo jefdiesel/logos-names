@@ -1364,13 +1364,51 @@ pub fn run_mine(setup: &Setup) -> Result<Vec<Value>, String> {
 /// none. `public` is the default public account the same way, or null.
 pub fn run_balance(setup: &Setup) -> Result<Value, String> {
     setup.wallet_ready()?;
-    let output = balance_output(setup)?;
-    let mut balance = parse_balance(&output);
-    if balance.is_object() {
-        balance["public"] = parse_public_balance(&output);
-        balance["waiting"] = parse_waiting(&output);
+    Ok(balance_reply(&balance_output(setup)?))
+}
+
+/// `run_balance`'s answer from `names balance` output: `{account, balance, public,
+/// waiting, small}`. With no default private account, `account` and `balance` are null
+/// and the rest are still told (they were all null: cli-balance-null-without-default-private).
+/// `small` is what waits but is worth less than claiming it costs, `{count, total, claim}`.
+pub fn balance_reply(output: &str) -> Value {
+    let mut balance = parse_balance(output);
+    if !balance.is_object() {
+        balance = json!({ "account": null, "balance": null });
     }
-    Ok(balance)
+    balance["public"] = parse_public_balance(output);
+    balance["waiting"] = parse_waiting(output);
+    balance["small"] = parse_small_credits(output);
+    // Every account it lists, `{account, kind, balance, default}`, default or not.
+    let accounts: Vec<Value> = parse_all_balances(output)
+        .into_iter()
+        .map(|row| json!({ "account": row["account"], "kind": row["kind"], "balance": row["balance"], "default": row["default"] }))
+        .collect();
+    // Nothing at all to tell (no accounts yet): null, as before.
+    if accounts.is_empty() && ["account", "public", "waiting", "small"].iter().all(|field| balance[*field].is_null()) {
+        return Value::Null;
+    }
+    balance["accounts"] = Value::from(accounts);
+    balance
+}
+
+/// The line `also waiting, worth less than claiming costs (about C): N credit(s), T in all`
+/// as `{count, total, claim}`, or null.
+pub fn parse_small_credits(output: &str) -> Value {
+    output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("also waiting, worth less than claiming costs (about "))
+        .and_then(|rest| {
+            let (claim, rest) = rest.split_once("): ")?;
+            let mut words = rest.split_whitespace();
+            let count = words.next()?;
+            let total = words.nth(1)?;
+            [claim, count, total]
+                .iter()
+                .all(|text| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| json!({ "count": count, "total": total, "claim": claim }))
+        })
+        .unwrap_or(Value::Null)
 }
 
 /// The payments `names balance` says wait to be claimed, `{count, total}`, from its line
@@ -2303,7 +2341,9 @@ mod tests {
         let setup = setup(&dir, "echo '  Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk  70  (default)'; echo '  Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z  250  (default)'");
         assert_eq!(
             run_balance(&setup).unwrap(),
-            json!({ "account": "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", "balance": "250", "public": { "account": PUBLIC, "balance": "70" }, "waiting": null })
+            json!({ "account": "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", "balance": "250", "public": { "account": PUBLIC, "balance": "70" }, "waiting": null, "small": null,
+                    "accounts": [{ "account": format!("Public/{PUBLIC}"), "kind": "public", "balance": "70", "default": true },
+                                 { "account": "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", "kind": "private", "balance": "250", "default": true }] })
         );
         // A new CLI at the same path answers within BALANCE_FRESH from the last read; afresh after.
         let none = Setup { program: fake_cli(&dir, "echo 'private total: 0'"), ..setup };
@@ -2575,6 +2615,21 @@ mod tests {
         assert!(!jobs.path(&id, "log").exists(), "no orphan log (nul-in-post-text-raw-error)");
         assert!(jobs.running_for("jef").is_none());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// cli-balance-null-without-default-private: with names.json's private set to null,
+    /// cli_balance answered value null, though `names balance` listed a public account,
+    /// three private ones and credits waiting.
+    #[test]
+    fn the_balance_is_told_without_a_default_private_account() {
+        let output = "public accounts (seen on chain):\n  Public/HE1J2z3HkZdk2KX4yGrrGM1cSbbfSdBmoLspqtTv8KUK  66977128\nprivate accounts (only this wallet sees them):\n  Private/E3j7HPx3ZhoqRnB9BtMsGjWixbms3n9kamGKXKkjiuy5  31760249\nprivate total: 59806708\nalso waiting, worth less than claiming costs (about 5070616): 3 credit(s), 11457780 in all\n";
+        let reply = balance_reply(output);
+        assert_eq!((reply["account"].clone(), reply["balance"].clone(), reply["public"].clone(), reply["waiting"].clone()), (Value::Null, Value::Null, Value::Null, Value::Null), "{reply}");
+        assert_eq!(reply["small"], json!({ "count": "3", "total": "11457780", "claim": "5070616" }));
+        let listed: Vec<(&str, &str)> = reply["accounts"].as_array().unwrap().iter().map(|a| (a["account"].as_str().unwrap(), a["balance"].as_str().unwrap())).collect();
+        assert_eq!(listed, [("Public/HE1J2z3HkZdk2KX4yGrrGM1cSbbfSdBmoLspqtTv8KUK", "66977128"), ("Private/E3j7HPx3ZhoqRnB9BtMsGjWixbms3n9kamGKXKkjiuy5", "31760249")]);
+        let with = balance_reply(&output.replace("31760249", "31760249  (default)").replace("66977128", "66977128  (default)"));
+        assert_eq!((with["account"].as_str(), with["balance"].as_str(), with["public"]["balance"].as_str()), (Some("E3j7HPx3ZhoqRnB9BtMsGjWixbms3n9kamGKXKkjiuy5"), Some("31760249"), Some("66977128")), "{with}");
     }
 
     // ── Getting started without a terminal ──────────────────────────────

@@ -113,6 +113,8 @@ check("subDigits", [subDigits("1000", "1"), subDigits("210939029", "210939029"),
   const more = walletGroups(null, accounts, null, [], {}, [{ key: KEY, balance: "215939029" }], false, stake);
   check("walletGroups not counted yet", more[1].note, "1 key on your node · 5,000,000 not counted yet");
   check("walletGroups fallback", walletGroups({ balance: "5", account: "a", public: { account: "b", balance: "7" } }, null, null, [], {}, null, false, null).map(x => [x.id, x.total]), [["lez", "12"]]);
+  // cli_balance with no default private account: account and balance null, the public one still shown.
+  check("walletGroups fallback no private", walletGroups({ balance: null, account: null, public: { account: "b", balance: "7" }, waiting: null }, null, null, [], {}, null, false, null).map(x => [x.id, x.total, x.rows.map(r => r.id)]), [["lez", "7", ["lez-public"]]]);
   check("walletGroups node down", walletGroups(null, null, null, [], {}, null, true, null).map(x => [x.id, x.total, x.note]), [["chain", null, "Node not running"]]);
   // A name is matched to the account its profile's npk points at.
   const npkAccounts = accounts.concat([{ account: "Private/Jef1", kind: "private", label: null, balance: "7", default: false, npk: "AB".repeat(32) }]);

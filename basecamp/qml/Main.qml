@@ -1396,7 +1396,7 @@ Item {
     property string claimLine: ""
     /// When names from the earlier chain stop being claimable, in chain time, or null.
     property var claimsUntil: null
-    readonly property bool hasPrivateFunds: cliBalance !== undefined && cliBalance !== null && !/^0*$/.test(String(cliBalance.balance))
+    readonly property bool hasPrivateFunds: cliBalance !== undefined && cliBalance !== null && cliBalance.balance !== null && cliBalance.balance !== undefined && !/^0*$/.test(String(cliBalance.balance))
 
     /// Reads where the CLI stands (nothing is run), and picks up an install
     /// or a move to private that was under way.
@@ -7363,7 +7363,7 @@ Item {
                         Text {
                             Layout.fillWidth: true
                             text: root.cliBalance === undefined ? "Checking your private account…"
-                                : root.cliBalance === null ? "No private account found. Run names setup in a terminal first."
+                                : root.cliBalance === null || !root.cliBalance.account ? "No private account found. Run names setup in a terminal first."
                                 : "From your private account (balance " + root.grouped(root.cliBalance.balance) + ")"
                             color: root.cliBalance === null || !root.cliCanPay() ? root.alarm : root.dim
                             font.family: root.sans
