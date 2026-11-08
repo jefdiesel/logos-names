@@ -82,31 +82,150 @@ pub fn involves(entry: &Value, account: &str) -> bool {
     account.is_empty() || ["from", "to", "name"].iter().any(|field| entry[*field].as_str() == Some(account))
 }
 
-/// Notes what `chain`'s accounts hold now, `(account, balance)`: every account that holds
-/// more than it did at the last read gets an `arrived` entry for the difference. The
-/// first read of an account only sets its mark. Returns the entries added.
-pub fn note_balances(dir: &Path, at: u64, chain: &str, balances: &[(String, u128)]) -> Vec<String> {
-    let mut seen = load(&balances_file(dir));
-    let mut added = Vec::new();
-    let mut changed = false;
-    for (account, balance) in balances {
-        let key = format!("{chain}:{account}");
-        let before = seen.get(&key).and_then(Value::as_str).and_then(|text| text.parse::<u128>().ok());
-        if before != Some(*balance) {
-            changed = true;
-            seen.insert(key, Value::from(balance.to_string()));
+/// How long a bridge in a block holds its LEZ account's mark while it waits to arrive
+/// (it takes about 12 hours); past this it is taken as never arriving.
+pub const BRIDGE_WAIT_S: u64 = 2 * 24 * 3600;
+
+/// A number an entry carries as decimal text.
+fn number(value: &Value) -> Option<u128> {
+    value.as_str().and_then(|text| text.parse().ok())
+}
+
+/// The fee an entry paid: decimal text (Logos Blockchain sends) or `{paid}` (`cli::parse_fee`).
+fn fee_paid(entry: &Value) -> Option<u128> {
+    number(&entry["fee"]).or_else(|| number(&entry["fee"]["paid"]))
+}
+
+/// Whether `entry`'s effect on `account` may or may not be in a balance read yet: it is
+/// still being sent, or it is a bridge in a block that hasn't reached its LEZ account.
+fn in_flight(entry: &Value, account: &str, now: u64) -> bool {
+    match entry["state"].as_str() {
+        Some("sending") => true,
+        Some("in_block") => {
+            entry["kind"] == "bridge" && entry["to"].as_str() == Some(account) && now.saturating_sub(entry["at"].as_u64().unwrap_or(0)) < BRIDGE_WAIT_S
         }
-        if let Some(before) = before {
-            if *balance > before {
-                added.push(add(
-                    dir,
-                    at,
-                    json!({ "kind": "arrived", "chain": chain, "to": account, "amount": (balance - before).to_string(), "state": "arrived" }),
-                ));
-            }
+        _ => false,
+    }
+}
+
+/// What a settled `entry` did to `account`'s balance, and whether that is known: what
+/// it moved in or out of it (in the native token) and the fee it paid from it.
+fn effect(entry: &Value, account: &str) -> (i128, bool) {
+    let state = entry["state"].as_str().unwrap_or_default();
+    let to = entry["to"].as_str() == Some(account);
+    let from = entry["from"].as_str() == Some(account);
+    if state == "failed" {
+        return (0, true);
+    }
+    // A bridge that never arrived moved nothing into its LEZ account.
+    if to && !from && entry["kind"] == "bridge" && state != "arrived" {
+        return (0, true);
+    }
+    let kind = entry["kind"].as_str().unwrap_or_default();
+    // A split pays itself; a token send moves a token, not the native one; a transfer moves a name.
+    let native = !matches!(kind, "split" | "token_send" | "transfer" | "receive_privately");
+    let amount = number(&entry["amount"]);
+    let mut certain = state != "unknown" && (amount.is_some() || !native || !(to || from));
+    let mut delta: i128 = 0;
+    if native {
+        let amount = i128::try_from(amount.unwrap_or(0)).unwrap_or(i128::MAX);
+        if to {
+            delta += amount;
+        }
+        if from {
+            delta -= amount;
         }
     }
-    if changed {
+    // A shield's fee is paid inside its proof, from the private account it moves to.
+    let payer = if kind == "shield" { to } else { from };
+    if payer && kind != "arrived" {
+        match fee_paid(entry) {
+            Some(fee) => delta -= i128::try_from(fee).unwrap_or(i128::MAX),
+            None => certain = false,
+        }
+    }
+    (delta, certain)
+}
+
+/// Notes what `chain`'s accounts hold now, `(account, balance)`, as read from `scope`
+/// (the sequencer, for LEZ): an account that holds more than its last mark plus what the
+/// entries settled since then moved in, less what they moved out and paid, gets an
+/// `arrived` entry for the rest. Its `amount` is null (and `at_least` says how much)
+/// when a fee or an outcome among those entries isn't known. An account that some entry
+/// is still moving money for keeps its mark until that settles; the first read of an
+/// account only sets its mark; a public LEZ account read as 0 that its entries don't
+/// explain is not believed (an older CLI printed 0 when the sequencer didn't answer).
+/// Returns the entries added.
+pub fn note_balances(dir: &Path, at: u64, chain: &str, scope: &str, balances: &[(String, u128)]) -> Vec<String> {
+    let mut seen = load(&balances_file(dir));
+    let mut all = load(&file(dir));
+    let mut added = Vec::new();
+    let mut marks_changed = false;
+    let mut entries_changed = false;
+    for (account, balance) in balances {
+        let key = if scope.is_empty() { format!("{chain}:{account}") } else { format!("{chain}@{scope}:{account}") };
+        let touching: Vec<String> = all
+            .iter()
+            .filter(|(_, entry)| entry["from"].as_str() == Some(account) || entry["to"].as_str() == Some(account))
+            .filter(|(_, entry)| !entry["counted"].as_array().is_some_and(|counted| counted.iter().any(|c| c.as_str() == Some(account))))
+            .map(|(id, _)| id.clone())
+            .collect();
+        if touching.iter().any(|id| in_flight(&all[id], account, at)) {
+            continue;
+        }
+        let before = seen.get(&key).and_then(Value::as_str).and_then(|text| text.parse::<u128>().ok());
+        if let Some(before) = before {
+            let mut expected = i128::try_from(before).unwrap_or(i128::MAX);
+            let mut certain = true;
+            for id in &touching {
+                let (delta, known) = effect(&all[id], account);
+                expected = expected.saturating_add(delta);
+                certain &= known;
+            }
+            let now = i128::try_from(*balance).unwrap_or(i128::MAX);
+            if *balance == 0 && expected > 0 && account.starts_with("Public/") && chain == "lez" {
+                continue;
+            }
+            if now > expected {
+                let rise = (now - expected).to_string();
+                let mut id = format!("{at}-arrived");
+                while all.contains_key(&id) {
+                    id.push('1');
+                }
+                let mut entry = json!({ "id": id, "at": at, "kind": "arrived", "chain": chain, "to": account, "state": "arrived", "counted": [account] });
+                if certain {
+                    entry["amount"] = Value::from(rise);
+                } else {
+                    entry["amount"] = Value::Null;
+                    entry["at_least"] = Value::from(rise);
+                }
+                all.insert(id.clone(), entry);
+                added.push(id);
+                entries_changed = true;
+            }
+        }
+        for id in &touching {
+            if let Some(counted) = all.get_mut(id).and_then(|entry| entry.as_object_mut()) {
+                let list = counted.entry("counted").or_insert_with(|| Value::Array(Vec::new()));
+                if let Some(list) = list.as_array_mut() {
+                    list.push(Value::from(account.as_str()));
+                    entries_changed = true;
+                }
+            }
+        }
+        if before != Some(*balance) {
+            marks_changed = true;
+            seen.insert(key, Value::from(balance.to_string()));
+        }
+    }
+    if entries_changed {
+        while all.len() > MAX_ENTRIES {
+            let Some(oldest) = all.iter().min_by_key(|(_, e)| e["at"].as_u64().unwrap_or(0)).map(|(k, _)| k.clone()) else { break };
+            all.remove(&oldest);
+        }
+        save(&file(dir), &all);
+    }
+    if marks_changed {
         save(&balances_file(dir), &seen);
     }
     added
@@ -137,16 +256,104 @@ mod tests {
         let _ = std::fs::remove_dir_all(d);
     }
 
+    const SEQ: &str = "http://127.0.0.1:3800";
+
+    fn note(d: &Path, at: u64, rows: &[(&str, u128)]) -> Vec<String> {
+        let rows: Vec<(String, u128)> = rows.iter().map(|(a, b)| ((*a).to_owned(), *b)).collect();
+        note_balances(d, at, "lez", SEQ, &rows)
+    }
+
+    fn arrivals(d: &Path) -> Vec<Value> {
+        all(d).into_iter().filter(|e| e["kind"] == "arrived").collect()
+    }
+
     #[test]
     fn a_rise_in_a_balance_is_an_arrival_and_the_first_read_only_sets_the_mark() {
         let d = dir("arrive");
-        assert!(note_balances(&d, 1, "lez", &[("Public/X".into(), 100)]).is_empty());
-        assert!(note_balances(&d, 2, "lez", &[("Public/X".into(), 100)]).is_empty());
-        assert!(note_balances(&d, 3, "lez", &[("Public/X".into(), 40)]).is_empty(), "a fall is not an arrival");
-        let added = note_balances(&d, 4, "lez", &[("Public/X".into(), 1_000_040)]);
+        assert!(note(&d, 1, &[("Public/X", 100)]).is_empty());
+        assert!(note(&d, 2, &[("Public/X", 100)]).is_empty());
+        assert!(note(&d, 3, &[("Public/X", 40)]).is_empty(), "a fall is not an arrival");
+        let added = note(&d, 4, &[("Public/X", 1_000_040)]);
         assert_eq!(added.len(), 1);
         let rows = all(&d);
         assert_eq!((rows[0]["kind"].as_str(), rows[0]["amount"].as_str(), rows[0]["to"].as_str()), (Some("arrived"), Some("1000000"), Some("Public/X")));
+        assert!(note(&d, 5, &[("Public/X", 1_000_040)]).is_empty(), "an arrival is counted once");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// act-repro F4: one read with the sequencer down (an older CLI printed 0 for every
+    /// public account) set every mark to 0, and the next read logged each whole balance.
+    #[test]
+    fn a_public_balance_read_as_zero_that_nothing_explains_leaves_the_mark() {
+        let d = dir("zero");
+        note(&d, 1, &[("Public/F", 9_999_998_718_094), ("Public/A", 1_005_123), ("Private/P", 0)]);
+        assert!(note(&d, 2, &[("Public/F", 0), ("Public/A", 0), ("Private/P", 0)]).is_empty());
+        assert!(note(&d, 3, &[("Public/F", 9_999_998_718_094), ("Public/A", 1_005_123), ("Private/P", 0)]).is_empty(), "{:?}", arrivals(&d));
+        // A send of everything it held does explain a 0.
+        add(&d, 4, json!({ "kind": "pay_account", "chain": "lez", "from": "Public/A", "to": "Public/Z", "amount": "1000000", "fee": { "paid": "5123" }, "state": "done" }));
+        note(&d, 5, &[("Public/A", 0)]);
+        add(&d, 6, json!({ "kind": "arrived", "chain": "lez", "to": "Public/A", "amount": "7", "state": "arrived", "counted": ["Public/A"] }));
+        assert_eq!(note(&d, 7, &[("Public/A", 70)]).len(), 1, "the mark moved to 0 with the send");
+        assert_eq!(arrivals(&d)[0]["amount"], "70");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// act-repro F1: a send between the wallet's own accounts was logged as a pay_account
+    /// and also as money that arrived.
+    #[test]
+    fn a_send_between_own_accounts_is_not_an_arrival() {
+        let d = dir("own");
+        note(&d, 1, &[("Public/F", 9_999_998_995_648), ("Public/A2", 1_000_000)]);
+        let pay = add(&d, 2, json!({ "kind": "pay_account", "chain": "lez", "from": "Public/F", "to": "Public/A2", "amount": "5000" }));
+        // Landed, but the job isn't settled yet: neither mark moves.
+        assert!(note(&d, 3, &[("Public/F", 9_999_998_986_560), ("Public/A2", 1_005_000)]).is_empty());
+        update(&d, &pay, &json!({ "state": "done", "fee": { "about": "4000", "at_most": "6464000", "paid": "4088" } }));
+        assert!(note(&d, 4, &[("Public/F", 9_999_998_986_560), ("Public/A2", 1_005_000)]).is_empty(), "{:?}", arrivals(&d));
+        assert!(note(&d, 5, &[("Public/F", 9_999_998_986_560), ("Public/A2", 1_005_000)]).is_empty());
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// act-repro F3: the arrival carried the net change (75648) instead of what came in
+    /// (100000), the account having paid 20000 and a fee in the same window.
+    #[test]
+    fn an_arrival_is_what_came_in_not_the_net_change() {
+        let d = dir("net");
+        note(&d, 1, &[("Public/F", 1_000_000), ("Public/A3", 0)]);
+        add(&d, 2, json!({ "kind": "pay_account", "chain": "lez", "from": "Public/F", "to": "Public/A3", "amount": "20000", "fee": { "paid": "4352" }, "state": "done" }));
+        note(&d, 3, &[("Public/F", 1_000_000 - 24_352 + 100_000), ("Public/A3", 20_000)]);
+        let came = arrivals(&d);
+        assert_eq!((came.len(), came[0]["amount"].as_str(), came[0]["to"].as_str()), (1, Some("100000"), Some("Public/F")), "{came:?}");
+        // Not knowing the fee, it claims no figure, only a least one.
+        add(&d, 4, json!({ "kind": "pay_account", "chain": "lez", "from": "Public/F", "to": "Public/Q", "amount": "20000", "fee": null, "state": "done" }));
+        note(&d, 5, &[("Public/F", 1_075_648 - 24_352 + 100_000)]);
+        let came = arrivals(&d);
+        assert_eq!((came.len(), came[0]["amount"].clone(), came[0]["at_least"].as_str()), (2, Value::Null, Some("95648")), "{came:?}");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// act-repro F7: marks were keyed `lez:<account>`, so the same wallet pointed at
+    /// another sequencer logged the difference as an arrival.
+    #[test]
+    fn marks_are_per_sequencer() {
+        let d = dir("seq");
+        note(&d, 1, &[("Public/F", 9_999_998_718_094)]);
+        assert!(note_balances(&d, 2, "lez", "http://127.0.0.1:3802", &[("Public/F".into(), 10_000_000_000_000)]).is_empty());
+        assert!(note(&d, 3, &[("Public/F", 9_999_998_718_094)]).is_empty(), "back on the first: its own mark");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// act-repro F8: a bridge that reached its LEZ account was logged as the bridge
+    /// arriving and also as an arrival of the same amount.
+    #[test]
+    fn a_bridge_that_arrives_is_not_also_an_arrival() {
+        let d = dir("bridge");
+        note(&d, 1, &[("Public/G", 20_010)]);
+        let bridge = add(&d, 2, json!({ "kind": "bridge", "chain": "logos", "from": "k".repeat(64), "to": "Public/G", "amount": "3000", "to_before": "20010", "state": "in_block" }));
+        assert!(note(&d, 3, &[("Public/G", 23_010)]).is_empty(), "the bridge in a block holds the mark");
+        update(&d, &bridge, &json!({ "state": "arrived" }));
+        assert!(note(&d, 4, &[("Public/G", 23_010)]).is_empty(), "{:?}", arrivals(&d));
+        assert_eq!(note(&d, 5, &[("Public/G", 24_010)]).len(), 1, "later money is still an arrival");
+        assert_eq!(arrivals(&d)[0]["amount"], "1000");
         let _ = std::fs::remove_dir_all(d);
     }
 

@@ -1066,10 +1066,11 @@ fn log_started(out: &str, mut entry: Value) {
     }
 }
 
-/// Notes what `chain`'s accounts hold now in the Wallet's history (arrivals).
-fn note_balances(chain: &str, balances: &[(String, u128)]) {
+/// Notes what `chain`'s accounts hold now, as read from `scope` (the sequencer, for LEZ),
+/// in the Wallet's history (arrivals).
+fn note_balances(chain: &str, scope: &str, balances: &[(String, u128)]) {
     if let Some(dir) = config_dir() {
-        activity::note_balances(&dir, now(), chain, balances);
+        activity::note_balances(&dir, now(), chain, scope, balances);
     }
 }
 
@@ -1937,6 +1938,58 @@ impl Names {
             memory.save();
         }
     }
+
+    /// Settles the history's entries still on their way, from the chain and the jobs:
+    /// `lez_now` is what the wallet's LEZ accounts hold now (empty when unread).
+    fn settle_activity(&self, dir: &std::path::Path, lez_now: &std::collections::HashMap<String, u128>) {
+        for entry in activity::all(dir).into_iter().filter(|entry| entry["state"] == "sending" || entry["state"] == "in_block") {
+            let id = entry["id"].as_str().unwrap_or_default().to_owned();
+            let mut settled = Value::Null;
+            match (entry["chain"].as_str(), entry["state"].as_str()) {
+                // On the Logos Blockchain: in a block once its input notes are spent.
+                (Some("logos"), Some("sending")) => {
+                    if let Some(hash) = entry["hash"].as_str() {
+                        if let Ok(state) = chain_landed(hash) {
+                            if state {
+                                settled = json!({ "state": "in_block" });
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            // A bridge in a block: arrived once its LEZ account holds what it did plus the amount.
+            if entry["kind"] == "bridge" && (entry["state"] == "in_block" || settled["state"] == "in_block") {
+                let to = entry["to"].as_str().map(|to| if to.starts_with("Public/") { to.to_owned() } else { format!("Public/{to}") });
+                let before = entry["to_before"].as_str().and_then(|text| text.parse::<u128>().ok());
+                let amount = entry["amount"].as_str().and_then(|text| text.parse::<u128>().ok());
+                if let (Some(to), Some(before), Some(amount)) = (to, before, amount) {
+                    if lez_now.get(&to).is_some_and(|now| *now >= before.saturating_add(amount)) {
+                        settled = json!({ "state": "arrived", "arrived_at": now() });
+                    }
+                }
+            }
+            // A LEZ job: as the job ended.
+            if entry["chain"] == "lez" && entry["state"] == "sending" {
+                if let (Some(job), Ok(jobs)) = (entry["job"].as_str(), self.jobs()) {
+                    match jobs.state(job) {
+                        Ok(state) if state["state"] != "running" => {
+                            settled = json!({
+                                "state": if state["state"] == "done" { "done" } else { "failed" },
+                                "fee": cli::parse_fee(&jobs.whole_log(job)),
+                            });
+                        }
+                        Ok(_) => {}
+                        // The job's files were cleared: it ended long ago, outcome unknown.
+                        Err(_) => settled = json!({ "state": "done" }),
+                    }
+                }
+            }
+            if settled.is_object() {
+                activity::update(dir, &id, &settled);
+            }
+        }
+    }
 }
 
 /// What registering a name of `tier` takes under `settings`, for `deposit`.
@@ -2457,7 +2510,12 @@ impl NamesModule for Names {
             let setup = self.cli_setup()?;
             let balance = cli::run_balance(&setup)?;
             if let Ok(rows) = cli::balances_now(&setup) {
-                note_balances("lez", &rows);
+                // What settled first, so a send between the wallet's own accounts is not
+                // also taken for money that arrived.
+                if let Some(dir) = config_dir() {
+                    self.settle_activity(&dir, &rows.iter().cloned().collect());
+                }
+                note_balances("lez", &setup.sequencer, &rows);
             }
             Ok(balance)
         })())
@@ -2626,61 +2684,14 @@ impl NamesModule for Names {
         }
         reply((|| {
             let dir = config_dir().ok_or("no folder for the Wallet's history")?;
-            let lez_now: std::collections::HashMap<String, u128> =
-                self.cli_setup().ok().and_then(|setup| cli::balances_now(&setup).ok()).unwrap_or_default().into_iter().collect();
-            let mut rows = Vec::new();
-            for mut entry in activity::all(&dir).into_iter().filter(|entry| activity::involves(entry, &account)).take(100) {
-                let id = entry["id"].as_str().unwrap_or_default().to_owned();
-                let mut settled = Value::Null;
-                match (entry["chain"].as_str(), entry["state"].as_str()) {
-                    // On the Logos Blockchain: in a block once its input notes are spent.
-                    (Some("logos"), Some("sending")) => {
-                        if let Some(hash) = entry["hash"].as_str() {
-                            if let Ok(state) = chain_landed(hash) {
-                                if state {
-                                    settled = json!({ "state": "in_block" });
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-                // A bridge in a block: arrived once its LEZ account holds what it did plus the amount.
-                if entry["kind"] == "bridge" && (entry["state"] == "in_block" || settled["state"] == "in_block") {
-                    let to = entry["to"].as_str().map(|to| if to.starts_with("Public/") { to.to_owned() } else { format!("Public/{to}") });
-                    let before = entry["to_before"].as_str().and_then(|text| text.parse::<u128>().ok());
-                    let amount = entry["amount"].as_str().and_then(|text| text.parse::<u128>().ok());
-                    if let (Some(to), Some(before), Some(amount)) = (to, before, amount) {
-                        if lez_now.get(&to).is_some_and(|now| *now >= before.saturating_add(amount)) {
-                            settled = json!({ "state": "arrived", "arrived_at": now() });
-                        }
-                    }
-                }
-                // A LEZ job: as the job ended.
-                if entry["chain"] == "lez" && entry["state"] == "sending" {
-                    if let (Some(job), Ok(jobs)) = (entry["job"].as_str(), self.jobs()) {
-                        match jobs.state(job) {
-                            Ok(state) if state["state"] != "running" => {
-                                settled = json!({
-                                    "state": if state["state"] == "done" { "done" } else { "failed" },
-                                    "fee": cli::parse_fee(&jobs.whole_log(job)),
-                                });
-                            }
-                            Ok(_) => {}
-                            // The job's files were cleared: it ended long ago, outcome unknown.
-                            Err(_) => settled = json!({ "state": "done" }),
-                        }
-                    }
-                }
-                if let Some(fields) = settled.as_object() {
-                    activity::update(&dir, &id, &settled);
-                    for (key, value) in fields {
-                        entry[key.as_str()] = value.clone();
-                    }
-                }
-                rows.push(entry);
+            let setup = self.cli_setup().ok();
+            let read = setup.as_ref().and_then(|setup| cli::balances_now(setup).ok());
+            let lez_now: std::collections::HashMap<String, u128> = read.clone().unwrap_or_default().into_iter().collect();
+            self.settle_activity(&dir, &lez_now);
+            if let (Some(setup), Some(rows)) = (&setup, &read) {
+                note_balances("lez", &setup.sequencer, rows);
             }
-            Ok(Value::from(rows))
+            Ok(Value::from(activity::all(&dir).into_iter().filter(|entry| activity::involves(entry, &account)).take(100).collect::<Vec<_>>()))
         })())
     }
 
@@ -3303,7 +3314,7 @@ impl NamesModule for Names {
                     .flatten()
                     .filter_map(|row| Some((row["key"].as_str()?.to_owned(), row["balance"].as_str()?.parse().ok()?)))
                     .collect();
-                note_balances("logos", &held);
+                note_balances("logos", "", &held);
             })
         })())
     }
