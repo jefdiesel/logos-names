@@ -292,7 +292,9 @@ pub fn ungrouped(text: &str) -> Option<String> {
     if groups.iter().any(|group| group.is_empty() || !group.bytes().all(|b| b.is_ascii_digit())) {
         return None;
     }
-    let grouped = groups.len() == 1 || ((1..=3).contains(&groups[0].len()) && groups[1..].iter().all(|group| group.len() == 3));
+    // A first group starting with 0 (`0,001`, `00,001`) is no grouping either: refused like `1,5`.
+    let grouped = groups.len() == 1
+        || ((1..=3).contains(&groups[0].len()) && !groups[0].starts_with('0') && groups[1..].iter().all(|group| group.len() == 3));
     grouped.then(|| groups.concat())
 }
 
@@ -2193,7 +2195,7 @@ mod tests {
         }
         assert_eq!(receive_privately_args("Ada").unwrap(), strings(&["receive-privately", "--", "ada"]));
         // A decimal comma or a stray one is refused, not read as more (SC-2, A-2).
-        for bad in ["1,5", ",7", "1,,000", "1000,", "12,34", "1,0000"] {
+        for bad in ["1,5", ",7", "1,,000", "1000,", "12,34", "1,0000", "0,001", "0,100", "00,001", "0_001"] {
             assert!(pay_args("ada", bad).is_err(), "{bad}");
             assert!(token_amount(bad).is_err(), "{bad}");
         }

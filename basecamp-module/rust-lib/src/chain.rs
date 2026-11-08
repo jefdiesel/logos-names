@@ -154,7 +154,9 @@ pub fn whole_amount(text: &str) -> Result<u64, String> {
     if text.is_empty() || !groups.iter().all(|group| group.bytes().all(|b| b.is_ascii_digit())) {
         return Err("enter a whole amount, such as 1000".to_owned());
     }
-    let grouped = groups.len() == 1 || ((1..=3).contains(&groups[0].len()) && groups[1..].iter().all(|group| group.len() == 3));
+    // A first group starting with 0 (`0,001`) is no grouping either.
+    let grouped = groups.len() == 1
+        || ((1..=3).contains(&groups[0].len()) && !groups[0].starts_with('0') && groups[1..].iter().all(|group| group.len() == 3));
     if !grouped {
         return Err(format!("{text} isn't a whole amount: commas go only between groups of three digits, such as 1,000"));
     }
@@ -363,6 +365,10 @@ mod tests {
             assert_eq!(whole_amount(text), Err("enter a whole amount, such as 1000".to_owned()), "{text}");
         }
         assert_eq!(whole_amount("000"), Err("enter an amount above zero".to_owned()));
+        // grouped-amount-leading-zero: chain_split 0,001 reached the node call; now refused like 1,5.
+        for bad in ["0,001", "0,100", "00,001", "1,5"] {
+            assert!(whole_amount(bad).unwrap_err().contains("groups of three"), "{bad}");
+        }
         assert_eq!(whole_amount("99999999999999999999999"), Err("that amount is too large".to_owned()));
     }
 

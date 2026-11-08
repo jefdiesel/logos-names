@@ -317,7 +317,8 @@ pub fn parse_amount(input: &str) -> Result<u128, String> {
     if groups.iter().any(|group| group.is_empty() || !group.chars().all(|c| c.is_ascii_digit())) {
         return Err(format!("{input} is not a whole number of base units"));
     }
-    if groups.len() > 1 && !((1..=3).contains(&groups[0].len()) && groups[1..].iter().all(|group| group.len() == 3)) {
+    // A first group starting with 0 (`0,001`) is no thousands grouping either.
+    if groups.len() > 1 && !((1..=3).contains(&groups[0].len()) && !groups[0].starts_with('0') && groups[1..].iter().all(|group| group.len() == 3)) {
         return Err(format!("{input} isn't a whole number: commas go only between groups of three digits, such as 1,000"));
     }
     let digits = groups.concat();
@@ -1443,6 +1444,10 @@ mod tests {
         assert_eq!(parse_amount("1_000,000"), Ok(1_000_000));
         assert_eq!(parse_amount(&u128::MAX.to_string()), Ok(u128::MAX));
         assert!(parse_amount("0").is_err());
+        // grouped-amount-leading-zero: refused like 1,5, not read as 1.
+        for bad in ["0,001", "0,100", "00,001", "0_001", "1,5"] {
+            assert!(parse_amount(bad).unwrap_err().contains("groups of three"), "{bad}");
+        }
         assert!(parse_amount("-1").is_err());
         assert!(parse_amount("1.5").is_err());
         assert!(parse_amount("1,5").is_err());
