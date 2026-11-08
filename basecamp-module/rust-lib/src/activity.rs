@@ -147,6 +147,46 @@ fn effect(entry: &Value, account: &str) -> (i128, bool) {
     (delta, certain)
 }
 
+/// The bridges in a block among `entries` that have reached their LEZ account, by what
+/// the accounts hold now (`lez_now`). Per account they arrive in the order they were
+/// sent: each once the account holds what it did before the first of them was sent
+/// (`to_before`), plus what the logged entries settled since then moved in or out, plus
+/// its amount and those of the bridges before it. One credit never marks several
+/// bridges arrived, nor one bridge a credit smaller than it.
+pub fn bridges_arrived(entries: &[Value], lez_now: &std::collections::HashMap<String, u128>) -> Vec<String> {
+    let mut pending: std::collections::BTreeMap<&str, Vec<&Value>> = std::collections::BTreeMap::new();
+    for entry in entries {
+        if entry["kind"] == "bridge" && entry["state"] == "in_block" && number(&entry["amount"]).is_some() {
+            if let Some(to) = entry["to"].as_str() {
+                pending.entry(to).or_default().push(entry);
+            }
+        }
+    }
+    let mut arrived = Vec::new();
+    for (to, mut list) in pending {
+        let Some(now) = lez_now.get(to).and_then(|now| i128::try_from(*now).ok()) else { continue };
+        list.sort_by_key(|entry| (entry["at"].as_u64().unwrap_or(0), entry["id"].as_str().unwrap_or_default().to_owned()));
+        // Followed from the first that says what the account held; one that doesn't can't be.
+        let Some(start) = list.iter().position(|entry| number(&entry["to_before"]).is_some()) else { continue };
+        let since = list[start]["at"].as_u64().unwrap_or(0);
+        let moved: i128 = entries
+            .iter()
+            .filter(|entry| entry["kind"] != "bridge" && entry["at"].as_u64().unwrap_or(0) >= since)
+            .filter(|entry| !matches!(entry["state"].as_str(), Some("sending")))
+            .map(|entry| effect(entry, to).0)
+            .sum();
+        let mut needed = i128::try_from(number(&list[start]["to_before"]).unwrap_or(0)).unwrap_or(i128::MAX).saturating_add(moved);
+        for bridge in &list[start..] {
+            needed = needed.saturating_add(i128::try_from(number(&bridge["amount"]).unwrap_or(0)).unwrap_or(i128::MAX));
+            if now < needed {
+                break;
+            }
+            arrived.extend(bridge["id"].as_str().map(str::to_owned));
+        }
+    }
+    arrived
+}
+
 /// Notes what `chain`'s accounts hold now, `(account, balance)`, as read from `scope`
 /// (the sequencer, for LEZ): an account that holds more than its last mark plus what the
 /// entries settled since then moved in, less what they moved out and paid, gets an
@@ -355,6 +395,29 @@ mod tests {
         assert_eq!(note(&d, 5, &[("Public/G", 24_010)]).len(), 1, "later money is still an arrival");
         assert_eq!(arrivals(&d)[0]["amount"], "1000");
         let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// false-arrival-second-bridge: bridges of 2,000,000, 700,000 and 3,000,000 to one
+    /// account all flipped to arrived on one credit of 3,000,000 (each tested alone
+    /// against `to_before + amount`).
+    #[test]
+    fn one_credit_marks_bridges_arrived_in_order_and_only_as_far_as_it_goes() {
+        let bridge = |at: u64, amount: &str| json!({ "id": format!("{at}-bridge"), "at": at, "kind": "bridge", "chain": "logos", "to": "Public/T", "amount": amount, "to_before": "0", "state": "in_block" });
+        let mut entries = vec![bridge(1, "3000000"), bridge(2, "2000000"), bridge(3, "700000")];
+        let now = |held: u128| std::collections::HashMap::from([("Public/T".to_owned(), held)]);
+        assert!(bridges_arrived(&entries, &now(0)).is_empty());
+        assert!(bridges_arrived(&entries, &now(1_000_000)).is_empty(), "less than the first");
+        assert_eq!(bridges_arrived(&entries, &now(3_000_000)), ["1-bridge"]);
+        assert_eq!(bridges_arrived(&entries, &now(5_000_000)), ["1-bridge", "2-bridge"]);
+        assert_eq!(bridges_arrived(&entries, &now(5_700_000)).len(), 3);
+        // A logged payment out of the account since then is allowed for.
+        entries.push(json!({ "id": "4-pay_account", "at": 4, "kind": "pay_account", "chain": "lez", "from": "Public/T", "to": "Public/Q", "amount": "500000", "fee": { "paid": "4000" }, "state": "done" }));
+        assert_eq!(bridges_arrived(&entries, &now(2_496_000)), ["1-bridge"]);
+        // Once the first has arrived, the next is followed from where it was sent.
+        entries[0]["state"] = json!("arrived");
+        entries[1]["to_before"] = json!("3000000");
+        assert!(bridges_arrived(&entries, &now(3_000_000)).is_empty(), "{:?}", bridges_arrived(&entries, &now(3_000_000)));
+        assert_eq!(bridges_arrived(&entries, &now(4_496_000)), ["2-bridge"]);
     }
 
     #[test]

@@ -1996,17 +1996,6 @@ impl Names {
                 }
                 _ => {}
             }
-            // A bridge in a block: arrived once its LEZ account holds what it did plus the amount.
-            if entry["kind"] == "bridge" && (entry["state"] == "in_block" || settled["state"] == "in_block") {
-                let to = entry["to"].as_str().map(|to| if to.starts_with("Public/") { to.to_owned() } else { format!("Public/{to}") });
-                let before = entry["to_before"].as_str().and_then(|text| text.parse::<u128>().ok());
-                let amount = entry["amount"].as_str().and_then(|text| text.parse::<u128>().ok());
-                if let (Some(to), Some(before), Some(amount)) = (to, before, amount) {
-                    if lez_now.get(&to).is_some_and(|now| *now >= before.saturating_add(amount)) {
-                        settled = json!({ "state": "arrived", "arrived_at": now() });
-                    }
-                }
-            }
             // A LEZ job: as the job ended.
             if entry["chain"] == "lez" && entry["state"] == "sending" {
                 if let (Some(job), Ok(jobs)) = (entry["job"].as_str(), self.jobs()) {
@@ -2026,6 +2015,13 @@ impl Names {
             if settled.is_object() {
                 activity::update(dir, &id, &settled);
             }
+        }
+        // Bridges in a block arrive in the order they were sent, each once its LEZ account
+        // holds what it did before the first of them, plus those before it and itself, and
+        // what logged payments moved since: one credit never marks several (false-arrival).
+        let at = now();
+        for id in activity::bridges_arrived(&activity::all(dir), lez_now) {
+            activity::update(dir, &id, &json!({ "state": "arrived", "arrived_at": at }));
         }
     }
 }
