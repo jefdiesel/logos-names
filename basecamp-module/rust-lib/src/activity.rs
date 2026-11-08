@@ -83,6 +83,8 @@ pub fn add(dir: &Path, at: u64, mut entry: Value) -> String {
     }
     entry["id"] = Value::from(id.clone());
     entry["at"] = Value::from(at);
+    // Entries made in the same second keep the order they were made in.
+    entry["seq"] = Value::from(next_seq(&all));
     if entry["state"].is_null() {
         entry["state"] = Value::from("sending");
     }
@@ -106,10 +108,15 @@ pub fn update(dir: &Path, id: &str, fields: &Value) {
     }
 }
 
-/// Every entry, newest first.
+/// One more than any entry's `seq`.
+fn next_seq(all: &Map<String, Value>) -> u64 {
+    all.values().filter_map(|entry| entry["seq"].as_u64()).max().map_or(0, |seq| seq + 1)
+}
+
+/// Every entry, newest first (by time, then by the order made).
 pub fn all(dir: &Path) -> Vec<Value> {
     let mut rows: Vec<Value> = load(&file(dir)).into_values().collect();
-    rows.sort_by_key(|entry| std::cmp::Reverse(entry["at"].as_u64().unwrap_or(0)));
+    rows.sort_by_key(|entry| std::cmp::Reverse((entry["at"].as_u64().unwrap_or(0), entry["seq"].as_u64().unwrap_or(0))));
     rows
 }
 
@@ -270,7 +277,7 @@ pub fn note_balances(dir: &Path, at: u64, chain: &str, scope: &str, balances: &[
                 while all.contains_key(&id) {
                     id.push('1');
                 }
-                let mut entry = json!({ "id": id, "at": at, "kind": "arrived", "chain": chain, "to": account, "state": "arrived", "counted": [account] });
+                let mut entry = json!({ "id": id, "at": at, "seq": next_seq(&all), "kind": "arrived", "chain": chain, "to": account, "state": "arrived", "counted": [account] });
                 if certain {
                     entry["amount"] = Value::from(rise);
                 } else {
@@ -477,6 +484,19 @@ mod tests {
         assert!(damaged(&d).is_none(), "told once");
         let kept: Vec<String> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("activity.json.corrupt-")).collect();
         assert_eq!(std::fs::read_to_string(d.join(&kept[0])).unwrap(), whole[..whole.len() - 1], "the four entries are kept as they were");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// activity-same-second-order: three pays 0.25 s apart (1, 2, 3) were listed 2, 3, 1.
+    #[test]
+    fn entries_made_in_the_same_second_are_newest_first() {
+        let d = dir("second");
+        add(&d, 1794168079, json!({ "kind": "pay_account", "amount": "1" }));
+        add(&d, 1794168080, json!({ "kind": "pay_account", "amount": "2" }));
+        add(&d, 1794168080, json!({ "kind": "pay_account", "amount": "3" }));
+        add(&d, 1794168080, json!({ "kind": "bridge", "amount": "4" }));
+        let order: Vec<String> = all(&d).iter().map(|e| e["amount"].as_str().unwrap().to_owned()).collect();
+        assert_eq!(order, ["4", "3", "2", "1"]);
         let _ = std::fs::remove_dir_all(d);
     }
 
