@@ -2729,6 +2729,10 @@ impl NamesModule for Names {
             if let (Some(setup), Some(rows)) = (&setup, &read) {
                 note_balances("lez", &setup.sequencer, rows);
             }
+            // A history file that couldn't be read was kept aside, never written over: say so once.
+            if let Some(why) = activity::damaged(&dir) {
+                return Err(why);
+            }
             Ok(Value::from(activity::all(&dir).into_iter().filter(|entry| activity::involves(entry, &account)).take(100).collect::<Vec<_>>()))
         })())
     }

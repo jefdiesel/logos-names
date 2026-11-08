@@ -23,12 +23,50 @@ fn balances_file(dir: &Path) -> std::path::PathBuf {
     dir.join("activity-balances.json")
 }
 
+/// What a file of ours holds. One that is there but can't be read is never written over:
+/// it is set aside as `<file>.corrupt-<time>` and an empty one started; `damaged` tells.
 fn load(path: &Path) -> Map<String, Value> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .and_then(|saved| saved.as_object().cloned())
-        .unwrap_or_default()
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Map::new(),
+        Err(_) => String::new(),
+    };
+    match serde_json::from_str::<Value>(&text) {
+        Ok(Value::Object(saved)) => saved,
+        _ => {
+            let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+            let mut aside = path.with_file_name(format!("{name}{CORRUPT}{at}"));
+            while aside.exists() {
+                aside = aside.with_extension(format!("{}1", aside.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default()));
+            }
+            let _ = std::fs::rename(path, &aside);
+            Map::new()
+        }
+    }
+}
+
+/// What a file set aside is called after its own name.
+const CORRUPT: &str = ".corrupt-";
+
+/// The history files found damaged since this was last asked (each told once): why,
+/// in words, or `None`.
+pub fn damaged(dir: &Path) -> Option<String> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("activity") && name.contains(CORRUPT) && !name.ends_with(".told") {
+            let _ = std::fs::rename(entry.path(), dir.join(format!("{name}.told")));
+            found.push(format!("{name}.told"));
+        }
+    }
+    (!found.is_empty()).then(|| {
+        format!(
+            "The Wallet's history file couldn't be read, so it was kept aside ({}, in {}) and a new history started.",
+            found.join(", "),
+            dir.display()
+        )
+    })
 }
 
 fn save(path: &Path, object: &Map<String, Value>) {
@@ -418,6 +456,28 @@ mod tests {
         entries[1]["to_before"] = json!("3000000");
         assert!(bridges_arrived(&entries, &now(3_000_000)).is_empty(), "{:?}", bridges_arrived(&entries, &now(3_000_000)));
         assert_eq!(bridges_arrived(&entries, &now(4_496_000)), ["2-bridge"]);
+    }
+
+    /// corrupt-activity-file-silently-erases-history: a truncated activity.json read as
+    /// empty, and the next send wrote a history of one entry over the other four.
+    #[test]
+    fn a_history_that_cant_be_read_is_kept_aside_and_told_never_overwritten() {
+        let d = dir("corrupt");
+        for at in 1..=4 {
+            add(&d, at, json!({ "kind": "pay_account", "amount": "11" }));
+        }
+        let whole = std::fs::read_to_string(file(&d)).unwrap();
+        std::fs::write(file(&d), &whole[..whole.len() - 1]).unwrap();
+        std::fs::write(balances_file(&d), "{\"lez@x:Public/F\":\"5").unwrap();
+        add(&d, 5, json!({ "kind": "pay_account", "amount": "12" }));
+        note(&d, 6, &[("Public/F", 9)]);
+        assert_eq!(all(&d).len(), 1, "a new history");
+        let why = damaged(&d).expect("told");
+        assert!(why.contains("activity.json.corrupt-") && why.contains("activity-balances.json.corrupt-"), "{why}");
+        assert!(damaged(&d).is_none(), "told once");
+        let kept: Vec<String> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("activity.json.corrupt-")).collect();
+        assert_eq!(std::fs::read_to_string(d.join(&kept[0])).unwrap(), whole[..whole.len() - 1], "the four entries are kept as they were");
+        let _ = std::fs::remove_dir_all(d);
     }
 
     #[test]
