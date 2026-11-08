@@ -373,6 +373,7 @@ export function activityLine(entry, now) {
     case "receive": title = "Claimed waiting payments"; sub = "on LEZ, into your private accounts"; sign = "+"; break
     case "token_send": title = "Sent a token"; sub = "to " + whoShown(e.to); break
     case "transfer": title = "Gave " + (e.name || "a name") + " away"; sub = "to " + whoShown(e.to); sign = ""; break
+    case "receive_privately": title = "Private payments to " + (e.name || "a name"); sub = "on LEZ, new receiving keys"; sign = ""; break
     case "arrived": title = "Arrived"; sub = "in " + whoShown(e.to) + (e.chain === "logos" ? " on the Logos Blockchain" : " on LEZ") + (!e.amount && e.at_least ? " · at least " + grouped(e.at_least) : ""); sign = "+"; break
     default: title = kind; sub = ""
     }
@@ -386,8 +387,10 @@ export function activityLine(entry, now) {
     // The module restarted while it ran, or its record is gone: it may have gone through.
     case "unknown": stateText = "Outcome unknown · check the balance"; tone = "warn"; break
     }
-    if (e.fee && kind !== "split" && e.state !== "sending")
-        sub += " · fee " + grouped(e.fee)
+    // A LEZ job's fee is {about, at_most, paid}; a Logos Blockchain send's is the paid fee itself.
+    var fee = e.fee && typeof e.fee === "object" ? e.fee.paid : e.fee
+    if (fee && kind !== "split" && e.state !== "sending")
+        sub += " · fee " + grouped(fee)
     return { title: title, sub: sub, amount: amount, sign: amount === "" ? "" : sign, state: stateText, tone: tone, ago: agoShown(e.at, now) }
 }
 

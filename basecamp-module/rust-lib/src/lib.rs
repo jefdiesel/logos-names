@@ -2526,7 +2526,10 @@ impl NamesModule for Names {
             Ok(command) => command,
             Err(error) => return reply(Err(error)),
         };
-        self.cli_job(&name, "receive_privately", |_, _, _| Ok((command, None, Value::Null)))
+        let out = self.cli_job(&name, "receive_privately", |_, _, _| Ok((command, None, Value::Null)));
+        // In the history like a transfer, with the fee it paid once it ends.
+        log_started(&out, json!({ "kind": "receive_privately", "chain": "lez", "name": registry::normalize_name(&name) }));
+        out
     }
 
     fn cli_set_text(&mut self, name: String, key: String, value: String) -> String {
@@ -4746,6 +4749,20 @@ mod tests {
         let rows = parsed(&names.activity(String::new()));
         let row = rows["value"].as_array().unwrap().iter().find(|e| e["id"] == id.as_str()).cloned().expect("listed");
         assert_eq!(row["state"], "unknown", "{row}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// receive-privately-not-in-activity: a receive_privately job (fee paid 417376)
+    /// never appeared in the history.
+    #[test]
+    fn receiving_privately_is_in_the_history_with_its_fee() {
+        let (mut names, dir) = with_fake_cli("privately", "echo 'applied in block 439'; echo 'fee paid: 417376'");
+        let started = parsed(&names.cli_receive_privately("XferEcho".into()));
+        let job = started["value"]["id"].as_str().expect("a job").to_owned();
+        job_end(&mut names, &job);
+        let rows = parsed(&names.activity("xferecho".into()));
+        let row = rows["value"].as_array().unwrap().iter().find(|e| e["job"] == job.as_str()).cloned().expect("in the history");
+        assert_eq!((row["kind"].as_str(), row["state"].as_str(), row["fee"]["paid"].as_str()), (Some("receive_privately"), Some("done"), Some("417376")), "{row}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
