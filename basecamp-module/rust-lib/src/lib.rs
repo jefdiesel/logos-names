@@ -2021,7 +2021,17 @@ impl Names {
         // holds what it did before the first of them, plus those before it and itself, and
         // what logged payments moved since: one credit never marks several (false-arrival).
         let at = now();
-        for id in activity::bridges_arrived(&activity::all(dir), lez_now) {
+        let entries = activity::all(dir);
+        // A bridge to an account the wallet doesn't hold is followed from the sequencer.
+        let mut held = lez_now.clone();
+        for entry in entries.iter().filter(|entry| entry["kind"] == "bridge" && entry["state"] == "in_block") {
+            if let Some(to) = entry["to"].as_str().filter(|to| !held.contains_key(*to)) {
+                if let Some(balance) = registry::parse_account(to).ok().and_then(|id| registry::public_balance(&self.sequencer, &id).ok()) {
+                    held.insert(to.to_owned(), balance);
+                }
+            }
+        }
+        for id in activity::bridges_arrived(&entries, &held) {
             activity::update(dir, &id, &json!({ "state": "arrived", "arrived_at": at }));
         }
     }
@@ -3537,6 +3547,15 @@ impl NamesModule for Names {
                         "The deposit fee (at most {BRIDGE_MAX_FEE}) comes from this key's other notes, which hold {others}. Mine or receive a little more first. Nothing was sent."
                     ));
                 }
+                // What the LEZ account holds before the deposit, so its arrival can be told
+                // (activity): the wallet's own read, or the sequencer's for an account the
+                // wallet doesn't hold (bridge-to-foreign-account-to-before-null).
+                let to_before = self
+                    .cli_setup()
+                    .ok()
+                    .and_then(|setup| cli::balances_now(&setup).ok())
+                    .and_then(|rows| rows.into_iter().find(|(account, _)| *account == format!("Public/{to}")).map(|(_, balance)| balance))
+                    .or_else(|| registry::public_balance(&self.sequencer, &account).ok());
                 // The deposit's metadata is the LEZ account's 32 bytes, as `names bridge` sends it.
                 let deposited = node::call(
                     "channel_deposit_with_notes",
@@ -3556,15 +3575,10 @@ impl NamesModule for Names {
                     let fee = stored.as_ref().and_then(|tx| chain::deposit_fee(tx, &notes, u128::from(amount)));
                     plan["fee"] = fee.map_or(Value::Null, |fee| Value::from(fee.to_string()));
                     chain_sent_add(hash, json!({ "from": from, "inputs": inputs, "fee": fee.map(|f| f.to_string()), "at": now() }));
-                    // What the LEZ account held before, so its arrival can be told (activity).
-                    let to_before = self
-                        .cli_setup()
-                        .ok()
-                        .and_then(|setup| cli::balances_now(&setup).ok())
-                        .and_then(|rows| rows.into_iter().find(|(account, _)| *account == format!("Public/{to}")).map(|(_, balance)| balance));
                     if let Some(dir) = config_dir() {
                         activity::add(&dir, now(), json!({ "kind": "bridge", "chain": "logos", "from": from, "to": format!("Public/{to}"),
-                            "amount": amount.to_string(), "hash": hash, "channel": channel, "to_before": to_before.map(|b| b.to_string()), "fee": plan["fee"] }));
+                            "amount": amount.to_string(), "hash": hash, "channel": channel, "to_before": to_before.map(|b| b.to_string()),
+                            "followed": to_before.is_some(), "fee": plan["fee"] }));
                     }
                 }
                 plan["sent"] = json!(true);
@@ -5023,6 +5037,7 @@ mod tests {
         assert!(unknown["error"].as_str().unwrap().contains("deposit channel"), "{unknown}");
         assert!(!node_asked().contains(&"channel_deposit_with_notes".to_owned()), "nothing deposited into an unknown channel");
         node_answers("get_channel_state", json!({ "accredited_keys": [], "configuration_threshold": 3 }));
+        registry::BALANCES.with(|held| held.borrow_mut().push((registry::parse_account(to).unwrap(), 250)));
         // The deposit as the node stores it: the exact note, and a note for its fee.
         node_answers("get_transaction", json!({ "mantle_tx": { "ops": [
             { "opcode": 5, "payload": { "inputs": ["e8ac"] } },
@@ -5047,6 +5062,8 @@ mod tests {
         // The split and the bridge are in the Wallet's history, the bridge with where it lands.
         let history = activity::all(&config_dir().unwrap());
         let bridge = history.iter().find(|e| e["kind"] == "bridge" && e["hash"] == "ab".repeat(32)).expect("the bridge is in the history");
+        // Not the wallet's account: what it held is asked of the sequencer, so its arrival can be followed.
+        assert_eq!((bridge["to_before"].as_str(), bridge["followed"].as_bool()), (Some("250"), Some(true)), "{bridge}");
         assert_eq!(bridge["fee"], "1614", "the paid fee is in the history");
         assert_eq!((bridge["amount"].as_str(), bridge["to"].as_str(), bridge["state"].as_str()), (Some("1000000"), Some(format!("Public/{to}").as_str()), Some("sending")));
         assert!(history.iter().any(|e| e["kind"] == "split" && e["hash"] == "cd".repeat(32)), "the split is in the history");

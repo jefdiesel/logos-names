@@ -380,7 +380,9 @@ export function activityLine(entry, now) {
     var stateText = "", tone = "plain"
     switch (String(e.state || "")) {
     case "sending": stateText = e.chain === "lez" ? "Proving…" : "Sending…"; tone = "warn"; break
-    case "in_block": stateText = kind === "bridge" ? "In a block · arrives in about 12 h" : "In a block"; tone = kind === "bridge" ? "warn" : "good"; break
+    case "in_block":
+        stateText = kind !== "bridge" ? "In a block" : e.followed === false ? "In a block · its arrival on LEZ can't be followed here" : "In a block · arrives in about 12 h"
+        tone = kind === "bridge" ? "warn" : "good"; break
     case "arrived": stateText = kind === "bridge" ? "Arrived on LEZ" : ""; tone = "good"; break
     case "done": stateText = "Done"; tone = "good"; break
     case "failed": stateText = "Didn't go through"; tone = "bad"; break

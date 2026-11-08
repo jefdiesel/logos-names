@@ -780,6 +780,25 @@ pub fn account_seen(sequencer: &str, account: &AccountId) -> Result<bool, String
     }
 }
 
+/// What the public account `account` holds, read from the sequencer at `sequencer`:
+/// any account, not only the wallet's.
+#[cfg(not(test))]
+pub fn public_balance(sequencer: &str, account: &AccountId) -> Result<u128, String> {
+    Registry { sequencer: sequencer.to_owned(), program: NATIVE_TOKEN }.balance(account)
+}
+
+/// Tests say what an account holds: never the network.
+#[cfg(test)]
+pub fn public_balance(_sequencer: &str, account: &AccountId) -> Result<u128, String> {
+    BALANCES.with(|held| held.borrow().iter().find(|(id, _)| id == account).map(|(_, balance)| *balance)).ok_or_else(|| "not reached".to_owned())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What the accounts of a test's sequencer hold.
+    pub static BALANCES: std::cell::RefCell<Vec<(AccountId, u128)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 #[cfg(test)]
 thread_local! {
     /// The accounts a test's sequencer has never seen.
