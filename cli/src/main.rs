@@ -751,6 +751,19 @@ fn parse_account(input: &str) -> Result<AccountId, String> {
         .map_err(|_| format!("not an account ID: {input}"))
 }
 
+/// How `names balance` ends: an error when it could not catch up with the chain or read
+/// a public account (`unread` of them), so a script never takes `unknown` (or a 0) for
+/// what an account holds.
+fn balance_read(synced: bool, unread: usize) -> Result<()> {
+    if unread > 0 {
+        bail!("the sequencer didn't answer, so {unread} public balance(s) are unknown; try again when it is reachable");
+    }
+    if !synced {
+        bail!("could not catch up with the chain (the sequencer didn't answer); the balances above may be out of date");
+    }
+    Ok(())
+}
+
 fn parse_color(input: &str) -> Result<String, String> {
     let ok = input.len() == 7 && input.starts_with('#') && input[1..].chars().all(|c| c.is_ascii_hexdigit());
     if ok { Ok(input.to_ascii_lowercase()) } else { Err("colour must be #rrggbb".to_owned()) }
@@ -2716,17 +2729,25 @@ async fn main() -> Result<()> {
         }
         Command::Module(request) => client.module(request).await,
         Command::Balance => {
-            client.wallet.sync_to_latest_block().await.ok();
+            // A sequencer that doesn't answer is said so, never read as balances of 0: the
+            // Basecamp module takes every rise between two reads for money that arrived.
+            let synced = client.wallet.sync_to_latest_block().await;
             let defaults = load_defaults();
             let key_chain = client.wallet.storage().key_chain();
             let publics: Vec<AccountId> = key_chain.public_account_ids().map(|(id, _)| id).collect();
             let privates: Vec<AccountId> = key_chain.private_account_ids().map(|(id, _)| id).collect();
             let mut total_private = 0_u128;
+            let mut unread = 0_usize;
             println!("public accounts (seen on chain):");
             for id in publics {
-                let balance = client.wallet.get_account_balance(id).await.unwrap_or(0);
                 let tag = if defaults.public.as_deref() == Some(&id.to_string()) { "  (default)" } else { "" };
-                println!("  Public/{id}  {balance}{tag}");
+                match client.wallet.get_account_balance(id).await {
+                    Ok(balance) => println!("  Public/{id}  {balance}{tag}"),
+                    Err(_) => {
+                        unread += 1;
+                        println!("  Public/{id}  unknown{tag}");
+                    }
+                }
             }
             println!("private accounts (only this wallet sees them):");
             for id in privates {
@@ -2766,7 +2787,7 @@ async fn main() -> Result<()> {
                     );
                 }
             }
-            Ok(())
+            balance_read(synced.is_ok(), unread)
         }
         Command::Receive { fee_from, list, all } => client.receive(fee_from, list, all).await,
         Command::Mine { add } => {
@@ -3189,6 +3210,21 @@ mod bridge_metadata_tests {
         assert_eq!(borsh::to_vec(&AccountId::new(bytes)).expect("borsh"), bytes.to_vec(), "no length prefix, no tag");
         let to = parse_account("Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk").expect("an account");
         assert_eq!(borsh::to_vec(&to).expect("borsh").len(), 32);
+    }
+}
+
+#[cfg(test)]
+mod balance_tests {
+    use super::balance_read;
+
+    /// The Basecamp module logged every account's whole balance as an arrival after one
+    /// `names balance` with the sequencer down printed 0 for each and exited 0.
+    #[test]
+    fn a_balance_the_sequencer_did_not_give_fails_the_command() {
+        assert!(balance_read(true, 0).is_ok());
+        let unread = balance_read(true, 3).expect_err("unknown balances fail").to_string();
+        assert!(unread.contains("3 public balance(s) are unknown"), "{unread}");
+        assert!(balance_read(false, 0).is_err(), "not caught up with the chain fails too");
     }
 }
 
