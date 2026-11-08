@@ -1992,6 +1992,16 @@ impl Names {
                                 settled = json!({ "state": "in_block" });
                             }
                         }
+                    } else if let (Some(note), Some(from)) = (entry["note"].as_str(), entry["from"].as_str()) {
+                        // A deposit whose call was cut off: made once its note is spent, not
+                        // made if the note is still there once nothing holds it any more.
+                        if let Ok(notes) = node::call("wallet_get_notes", json!([from, ""]), node::QUICK).map(|reply| chain::notes_of(&reply)) {
+                            if !notes.contains_key(note) {
+                                settled = json!({ "state": "in_block" });
+                            } else if now().saturating_sub(entry["at"].as_u64().unwrap_or(0)) >= NOTES_HELD_S {
+                                settled = json!({ "state": "failed" });
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -3556,12 +3566,37 @@ impl NamesModule for Names {
                     .and_then(|setup| cli::balances_now(&setup).ok())
                     .and_then(|rows| rows.into_iter().find(|(account, _)| *account == format!("Public/{to}")).map(|(_, balance)| balance))
                     .or_else(|| registry::public_balance(&self.sequencer, &account).ok());
+                // Recorded before the node is asked: a call cut off (the module unloaded while the
+                // node proved) still leaves the deposit in the history and its note held, to be
+                // settled by the note (deposit-lost-from-activity-on-unload).
+                let pending = format!("pending-{}-{note}", now());
+                chain_sent_add(&pending, json!({ "from": from, "inputs": [note], "fee": null, "at": now(), "pending": true }));
+                let entry = config_dir().map(|dir| {
+                    let id = activity::add(&dir, now(), json!({ "kind": "bridge", "chain": "logos", "from": from, "to": format!("Public/{to}"),
+                        "amount": amount.to_string(), "hash": null, "note": note, "channel": channel, "to_before": to_before.map(|b| b.to_string()),
+                        "followed": to_before.is_some() }));
+                    (dir, id)
+                });
                 // The deposit's metadata is the LEZ account's 32 bytes, as `names bridge` sends it.
-                let deposited = node::call(
+                let deposited = match node::call(
                     "channel_deposit_with_notes",
                     json!([channel, [note], registry::hex(&account), from, [from], BRIDGE_MAX_FEE.to_string(), ""]),
                     node::PROVING,
-                )?;
+                ) {
+                    Ok(deposited) => deposited,
+                    Err(error) => {
+                        // Refused: nothing was made. Cut off waiting: it may have been, so the
+                        // record stays for the note to settle.
+                        if !error.to_ascii_lowercase().contains("time") {
+                            chain_sent_remove(&pending);
+                            if let Some((dir, id)) = &entry {
+                                activity::update(dir, id, &json!({ "state": "failed" }));
+                            }
+                        }
+                        return Err(error);
+                    }
+                };
+                chain_sent_remove(&pending);
                 let hash = chain::hash_of(&deposited);
                 if let Some(hash) = &hash {
                     // Every note it spends, the fee's too, so it counts as in a block only
@@ -3575,10 +3610,8 @@ impl NamesModule for Names {
                     let fee = stored.as_ref().and_then(|tx| chain::deposit_fee(tx, &notes, u128::from(amount)));
                     plan["fee"] = fee.map_or(Value::Null, |fee| Value::from(fee.to_string()));
                     chain_sent_add(hash, json!({ "from": from, "inputs": inputs, "fee": fee.map(|f| f.to_string()), "at": now() }));
-                    if let Some(dir) = config_dir() {
-                        activity::add(&dir, now(), json!({ "kind": "bridge", "chain": "logos", "from": from, "to": format!("Public/{to}"),
-                            "amount": amount.to_string(), "hash": hash, "channel": channel, "to_before": to_before.map(|b| b.to_string()),
-                            "followed": to_before.is_some(), "fee": plan["fee"] }));
+                    if let Some((dir, id)) = &entry {
+                        activity::update(dir, id, &json!({ "hash": hash, "fee": plan["fee"] }));
                     }
                 }
                 plan["sent"] = json!(true);
@@ -4440,6 +4473,15 @@ fn in_flight_refusal(error: String, from: &str, notes: &Map<String, Value>) -> S
     error
 }
 
+/// Forgets a record `chain_sent_add` made (a deposit's pending one, once it has its hash).
+fn chain_sent_remove(key: &str) {
+    let Some(dir) = config_dir() else { return };
+    let mut all = chain_sent();
+    if all.remove(key).is_some() {
+        save_object(&dir.join("chain-sent.json"), &all);
+    }
+}
+
 /// Remembers a send; past `MAX_CACHED` sends the oldest is forgotten.
 fn chain_sent_add(hash: &str, sent: Value) {
     let Some(dir) = config_dir() else { return };
@@ -5198,6 +5240,36 @@ mod tests {
         node_answers("wallet_get_notes", json!({ "notes": [{ "id": "c07e", "value": "500" }] }));
         let short = parsed(&names.chain_send(key, "39".repeat(32), "400".into(), true));
         assert_eq!(short["error"], "That key doesn't hold enough for this and its fee.", "{short}");
+    }
+
+    /// deposit-lost-from-activity-on-unload: names unloaded while chain_bridge waited on
+    /// the node: the exact note was spent, and neither chain-sent nor the history had it.
+    #[test]
+    fn a_deposit_cut_off_mid_call_is_kept_and_settled_by_its_note() {
+        let mut names = fresh();
+        let key = "4d".repeat(32);
+        let to = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "a640", "value": "640080" }, { "id": "fee1", "value": "5000000" }] }));
+        node_answers("get_channel_state", json!({ "configuration_threshold": 3 }));
+        node_refuses("channel_deposit_with_notes", "the call timed out");
+        let cut = parsed(&names.chain_bridge(key.clone(), format!("Public/{to}"), "640,080".into(), true));
+        assert_eq!(cut["success"], false, "{cut}");
+        let mine = |names: &mut Names| parsed(&names.activity(key.clone()))["value"].as_array().unwrap().iter().find(|e| e["amount"] == "640080").cloned();
+        let kept = mine(&mut names).expect("the deposit is in the history");
+        assert_eq!((kept["state"].as_str(), kept["note"].as_str(), kept["hash"].clone()), (Some("sending"), Some("a640"), Value::Null), "{kept}");
+        // Its note stays held: it isn't deposited twice.
+        let again = parsed(&names.chain_bridge(key.clone(), format!("Public/{to}"), "640,080".into(), true));
+        assert!(again["error"].as_str().unwrap().contains("still using its note"), "{again}");
+        // The node spent the note: the deposit was made.
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "fee2", "value": "4998386" }] }));
+        assert_eq!(mine(&mut names).unwrap()["state"], "in_block");
+        // A refusal, by contrast, leaves no record and holds nothing.
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "b700", "value": "700000" }, { "id": "fee3", "value": "5000000" }] }));
+        node_refuses("channel_deposit_with_notes", "invalid public key");
+        assert_eq!(parsed(&names.chain_bridge(key.clone(), format!("Public/{to}"), "700,000".into(), true))["success"], false);
+        let refused = parsed(&names.activity(key.clone()))["value"].as_array().unwrap().iter().find(|e| e["amount"] == "700000").cloned().unwrap();
+        assert_eq!(refused["state"], "failed", "{refused}");
+        assert!(!chain_notes_in_use(&key).contains("b700"));
     }
 
     #[test]
