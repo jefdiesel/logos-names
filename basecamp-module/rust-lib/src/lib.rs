@@ -904,10 +904,13 @@ fn config_dir() -> Option<std::path::PathBuf> {
     Some(std::path::Path::new(&home).join(".config/logos-names"))
 }
 
-/// Tests keep theirs in a folder of their own, never the person's.
+/// Tests keep theirs in a folder of their own, never the person's: one per test (its
+/// thread), since tests run at once and the history and sends files are read, changed
+/// and written whole.
 #[cfg(test)]
 fn config_dir() -> Option<std::path::PathBuf> {
-    Some(std::env::temp_dir().join(format!("logos-names-test-config-{}", std::process::id())))
+    let thread = format!("{:?}", std::thread::current().id()).chars().filter(char::is_ascii_digit).collect::<String>();
+    Some(std::env::temp_dir().join(format!("logos-names-test-config-{}-{thread}", std::process::id())))
 }
 
 /// The installer `cli_install` runs: the official one, built in.
