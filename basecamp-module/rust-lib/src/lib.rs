@@ -3607,9 +3607,10 @@ impl NamesModule for Names {
                 ) {
                     Ok(deposited) => deposited,
                     Err(error) => {
-                        // Refused: nothing was made. Cut off waiting: it may have been, so the
-                        // record stays for the note to settle.
-                        if !error.to_ascii_lowercase().contains("time") {
+                        // Refused by the node: nothing was made. No answer (the module was
+                        // unloaded mid-call, the node stopped, the wait ran out): it may have
+                        // been, so the record stays for the note to settle.
+                        if !error.contains("didn't answer") {
                             chain_sent_remove(&pending);
                             if let Some((dir, id)) = &entry {
                                 activity::update(dir, id, &json!({ "state": "failed" }));
@@ -5292,7 +5293,9 @@ mod tests {
         let to = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
         node_answers("wallet_get_notes", json!({ "notes": [{ "id": "a640", "value": "640080" }, { "id": "fee1", "value": "5000000" }] }));
         node_answers("get_channel_state", json!({ "configuration_threshold": 3 }));
-        node_refuses("channel_deposit_with_notes", "the call timed out");
+        // No answer, as when names is unloaded while the node proves (the real run's error
+        // was the node "didn't answer", and the deposit had been made).
+        node::ANSWERS.with(|answers| answers.borrow_mut().remove("channel_deposit_with_notes"));
         let cut = parsed(&names.chain_bridge(key.clone(), format!("Public/{to}"), "640,080".into(), true));
         assert_eq!(cut["success"], false, "{cut}");
         let mine = |names: &mut Names| parsed(&names.activity(key.clone()))["value"].as_array().unwrap().iter().find(|e| e["amount"] == "640080").cloned();
