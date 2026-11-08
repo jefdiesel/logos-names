@@ -3509,7 +3509,7 @@ impl NamesModule for Names {
             let mut plan = json!({
                 "sent": false, "hash": null, "to": to, "amount": amount.to_string(),
                 "total": note.as_ref().map(|_| amount.to_string()), "notes": note.as_ref().map(|_| "1"),
-                "fee": BRIDGE_MAX_FEE.to_string(), "note": note, "needs_split": note.is_none(), "channel": channel,
+                "fee": BRIDGE_MAX_FEE.to_string(), "fee_reserve": BRIDGE_MAX_FEE.to_string(), "note": note, "needs_split": note.is_none(), "channel": channel,
                 "channel_known": channel_known, "fee_short": fee_short, "others": others.to_string(), "lines": [],
             });
             if exact_busy {
@@ -3548,7 +3548,10 @@ impl NamesModule for Names {
                     if !inputs.contains(&note) {
                         inputs.push(note.clone());
                     }
-                    chain_sent_add(hash, json!({ "from": from, "inputs": inputs, "fee": null, "at": now() }));
+                    // What it paid, read back from the node as chain_send does (the cap, 100,000, is not it).
+                    let fee = stored.as_ref().and_then(|tx| chain::deposit_fee(tx, &notes, u128::from(amount)));
+                    plan["fee"] = fee.map_or(Value::Null, |fee| Value::from(fee.to_string()));
+                    chain_sent_add(hash, json!({ "from": from, "inputs": inputs, "fee": fee.map(|f| f.to_string()), "at": now() }));
                     // What the LEZ account held before, so its arrival can be told (activity).
                     let to_before = self
                         .cli_setup()
@@ -3557,7 +3560,7 @@ impl NamesModule for Names {
                         .and_then(|rows| rows.into_iter().find(|(account, _)| *account == format!("Public/{to}")).map(|(_, balance)| balance));
                     if let Some(dir) = config_dir() {
                         activity::add(&dir, now(), json!({ "kind": "bridge", "chain": "logos", "from": from, "to": format!("Public/{to}"),
-                            "amount": amount.to_string(), "hash": hash, "channel": channel, "to_before": to_before.map(|b| b.to_string()) }));
+                            "amount": amount.to_string(), "hash": hash, "channel": channel, "to_before": to_before.map(|b| b.to_string()), "fee": plan["fee"] }));
                     }
                 }
                 plan["sent"] = json!(true);
@@ -5007,6 +5010,9 @@ mod tests {
         let sent = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), true));
         assert_eq!((sent["value"]["sent"].as_bool(), sent["value"]["hash"].as_str()), (Some(true), Some("ab".repeat(32).as_str())), "{sent}");
         assert_eq!(sent["value"]["channel_known"], true);
+        // bridge-fee-reported-as-max: the fee paid, read back (130294000 + 1000000 in, 130292386 back, 1000000 deposited).
+        assert_eq!((sent["value"]["fee"].as_str(), sent["value"]["fee_reserve"].as_str()), (Some("1614"), Some("100000")), "{sent}");
+        assert_eq!(parsed(&names.chain_tx("ab".repeat(32)))["value"]["fee"], "1614");
         // double-bridge-false-in-block: a second deposit of that note before the first is
         // in a block got a hash too and could never land. Now it is refused, and the plan says why.
         let again = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), true));
@@ -5021,6 +5027,7 @@ mod tests {
         // The split and the bridge are in the Wallet's history, the bridge with where it lands.
         let history = activity::all(&config_dir().unwrap());
         let bridge = history.iter().find(|e| e["kind"] == "bridge" && e["hash"] == "ab".repeat(32)).expect("the bridge is in the history");
+        assert_eq!(bridge["fee"], "1614", "the paid fee is in the history");
         assert_eq!((bridge["amount"].as_str(), bridge["to"].as_str(), bridge["state"].as_str()), (Some("1000000"), Some(format!("Public/{to}").as_str()), Some("sending")));
         assert!(history.iter().any(|e| e["kind"] == "split" && e["hash"] == "cd".repeat(32)), "the split is in the history");
         let account = registry::parse_account(to).unwrap();

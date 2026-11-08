@@ -245,6 +245,18 @@ pub fn all_inputs(transaction: &Value) -> Vec<String> {
         .collect()
 }
 
+/// What a deposit paid in fees: what all its inputs held (from the sender's notes before
+/// it sent) less what its transfer op pays back as change, less the deposit itself;
+/// `None` if any input isn't among those notes.
+pub fn deposit_fee(transaction: &Value, notes: &serde_json::Map<String, Value>, deposit: u128) -> Option<u128> {
+    let inputs = all_inputs(transaction);
+    if inputs.is_empty() {
+        return None;
+    }
+    let held: Option<u128> = inputs.iter().map(|id| notes.get(id).map(amount)).sum();
+    held?.checked_sub(transfer_parts(transaction).1)?.checked_sub(deposit)
+}
+
 /// Whether none of `inputs` is among the wallet's notes any more. The node's wallet
 /// follows the chain, not the mempool (and the node stores a transaction as soon as it
 /// takes it), so this is when a transfer is in a block.
@@ -261,6 +273,19 @@ pub fn not_held(error: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// bridge-fee-reported-as-max: the node took 1614 (inputs 104298274, change
+    /// 99296660, deposit 5000000) while the reply said 100000, the cap.
+    #[test]
+    fn a_deposits_fee_is_its_inputs_less_its_change_and_the_deposit() {
+        let notes = json!({ "notes": [{ "id": "d1", "value": "5000000" }, { "id": "f1", "value": "99298274" }] });
+        let tx = json!({ "mantle_tx": { "ops": [
+            { "opcode": 5, "payload": { "inputs": ["d1"] } },
+            { "opcode": 0, "payload": { "inputs": ["f1"], "outputs": [{ "value": 99296660 }] } }] } });
+        assert_eq!(all_inputs(&tx), ["d1", "f1"]);
+        assert_eq!(deposit_fee(&tx, &notes_of(&notes), 5_000_000), Some(1614));
+        assert_eq!(deposit_fee(&tx, &serde_json::Map::new(), 5_000_000), None, "inputs not known");
+    }
 
     const KEY: &str = "66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b";
 
