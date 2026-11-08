@@ -1114,18 +1114,26 @@ pub fn mine_args() -> Vec<String> {
     vec!["mine".to_owned()]
 }
 
-/// `names transfer <name> <new holder>`: the new holder is a LEZ account, `Public/…`,
-/// `Private/…` or a bare account ID. Only a tag of it reaches the chain.
+/// `names transfer <name> <new holder>`: the new holder is a LEZ account, `Public/…` or
+/// `Private/…` and its ID, written once. Only a tag of it reaches the chain, and a
+/// hand-over can't be undone, so a bare ID (public or private?), the empty account and
+/// an ID re-typed in one case are refused.
 pub fn transfer_args(name: &str, new_owner: &str) -> Result<Vec<String>, String> {
     let name = registry::parse_name(name)?;
     let owner = new_owner.trim();
     let (kind, id) = match (owner.strip_prefix("Public/"), owner.strip_prefix("Private/")) {
         (Some(id), _) => ("Public", id),
         (_, Some(id)) => ("Private", id),
-        _ => ("Public", owner),
+        _ if registry::parse_account(owner).is_ok() => {
+            return Err("write Public/ or Private/ before the new holder's ID, so it is clear which kind of account gets the name".to_owned())
+        }
+        _ => return Err("the new holder is a LEZ account: Public/ or Private/ and its ID".to_owned()),
     };
-    let id = registry::parse_account(id).map_err(|_| "the new holder is a LEZ account: Public/ or Private/ and its ID, or a pasted account address".to_owned())?;
-    Ok(vec!["transfer".to_owned(), "--".to_owned(), name, format!("{kind}/{}", registry::account_text(&id))])
+    let account = registry::bare_account(id).map_err(|error| {
+        if id.contains('/') { error } else { "the new holder is a LEZ account: Public/ or Private/ and its ID".to_owned() }
+    })?;
+    registry::plausible_holder(id, &account)?;
+    Ok(vec!["transfer".to_owned(), "--".to_owned(), name, format!("{kind}/{}", registry::account_text(&account))])
 }
 
 /// `names receive-privately <name>`: payments to a name this wallet holds (one handed
@@ -2147,7 +2155,7 @@ mod tests {
         assert!(pay_args("ada", "-5").is_err());
         assert!(pay_args("ada", "1e9").is_err());
         let to = "9uwkVJuXScDwLKVtQMcHFU9Hvb3uZjiEDVvDv4PYjCfM";
-        assert_eq!(transfer_args("Ada", to).unwrap(), strings(&["transfer", "--", "ada", &format!("Public/{to}")]));
+        assert_eq!(transfer_args("Ada", &format!("Public/{to}")).unwrap(), strings(&["transfer", "--", "ada", &format!("Public/{to}")]));
         assert_eq!(transfer_args("ada", &format!("Private/{to}")).unwrap()[3], format!("Private/{to}"));
         assert!(transfer_args("ada", "bob").is_err(), "a name is not a holder");
         assert_eq!(receive_privately_args("Ada").unwrap(), strings(&["receive-privately", "--", "ada"]));
@@ -2158,6 +2166,30 @@ mod tests {
         }
         assert_eq!(pay_args("ada", "12,345,678").unwrap()[3], "12345678");
         assert_eq!(token_amount("1_000").unwrap(), "1000");
+    }
+
+    /// transfer-case-mangled-id-loses-name: a lower-cased ID that still decoded to 32
+    /// bytes (9dk3pqd4…) and the all-zero account were sent, and the name ended held by
+    /// nobody. account-prefix-double-strip: `Private/Public/<id>` went out as
+    /// `Private/<id>`, and a bare ID as `Public/<id>`.
+    #[test]
+    fn a_hand_over_refuses_mangled_empty_doubled_and_bare_holders() {
+        let held = "9Dk3PQD467hXAbsbMzrFYVPu5HFvUqKkU7VdoQD9oirA";
+        assert!(transfer_args("xferalpha", &format!("Public/{held}")).is_ok());
+        let lower = held.to_ascii_lowercase();
+        assert!(registry::parse_account(&lower).is_ok(), "the mangled ID still decodes, so decoding is no check");
+        for (bad, why) in [
+            (format!("Public/{lower}"), "all one case"),
+            (format!("Private/{lower}"), "all one case"),
+            ("Public/11111111111111111111111111111111".to_owned(), "empty account"),
+            (format!("Private/Public/{held}"), "once"),
+            (format!("Public/Private/{held}"), "once"),
+            (format!("Public/Public/{held}"), "once"),
+            (held.to_owned(), "Public/ or Private/ before"),
+        ] {
+            let error = transfer_args("xferalpha", &bad).expect_err(&bad);
+            assert!(error.contains(why), "{bad}: {error}");
+        }
     }
 
     #[test]

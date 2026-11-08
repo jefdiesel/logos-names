@@ -1957,6 +1957,26 @@ impl Names {
         }
     }
 
+    /// Refuses a hand-over to `to` (`Public/<id>` or `Private/<id>`) that would most
+    /// likely leave the name held by nobody: a program's account (the registry's, the
+    /// token program's), or a public account LEZ has never seen that isn't this wallet's
+    /// (a mistyped ID can't be told from a new account otherwise).
+    fn may_hold(&self, to: &str) -> Result<(), String> {
+        let id = registry::parse_account(to)?;
+        if Some(id) == self.program || Some(id) == self.token_program {
+            return Err("that is a program's account, which can't hold a name".to_owned());
+        }
+        if let (Some(bare), Ok(setup)) = (to.strip_prefix("Public/"), self.cli_setup()) {
+            let own = cli::balances_now(&setup).is_ok_and(|rows| rows.iter().any(|(account, _)| account == to));
+            if !own && registry::account_seen(&setup.sequencer, &id) == Ok(false) {
+                return Err(format!(
+                    "Public/{bare} has never been used on LEZ: check the ID, since a mistyped one would leave the name held by nobody. A new account can receive any payment first."
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Settles the history's entries still on their way, from the chain and the jobs:
     /// `lez_now` is what the wallet's LEZ accounts hold now (empty when unread).
     fn settle_activity(&self, dir: &std::path::Path, lez_now: &std::collections::HashMap<String, u128>) {
@@ -2491,6 +2511,9 @@ impl NamesModule for Names {
             Err(error) => return reply(Err(error)),
         };
         let to = command[3].clone();
+        if let Err(refused) = self.may_hold(&to) {
+            return reply(Err(refused));
+        }
         let out = self.cli_job(&name, "transfer", |_, _, _| Ok((command, None, Value::Null)));
         log_started(&out, json!({ "kind": "transfer", "chain": "lez", "name": registry::normalize_name(&name), "to": to }));
         // The names it holds change: read them afresh.
@@ -4648,6 +4671,29 @@ mod tests {
         names.cli_wallet = Some(wallet.to_string_lossy().into_owned());
         names.jobs_dir = Some(dir.join("jobs"));
         (names, dir)
+    }
+
+    /// transfer-case-mangled-id-loses-name: the module handed a name to an ID nobody
+    /// holds. A program's account and an unseen public one are refused before any job.
+    #[test]
+    fn a_hand_over_to_a_program_or_an_unseen_public_account_is_refused() {
+        let (mut names, dir) = with_fake_cli("handover", "exit 0");
+        let registry_id = registry::account_text(&[7; 32]);
+        let refused = parsed(&names.cli_transfer("xferalpha".into(), format!("Public/{registry_id}")));
+        assert!(refused["error"].as_str().unwrap().contains("program's account"), "{refused}");
+        let unseen = "9Dk3PQD467hXAbsbMzrFYVPu5HFvUqKkU7VdoQD9oirA";
+        registry::UNSEEN.with(|list| list.borrow_mut().push(registry::parse_account(unseen).unwrap()));
+        let refused = parsed(&names.cli_transfer("xferalpha".into(), format!("Public/{unseen}")));
+        assert!(refused["error"].as_str().unwrap().contains("never been used on LEZ"), "{refused}");
+        let lower = parsed(&names.cli_transfer("xferalpha".into(), format!("Public/{}", unseen.to_ascii_lowercase())));
+        assert!(lower["error"].as_str().unwrap().contains("all one case"), "{lower}");
+        assert!(!dir.join("jobs").exists() || std::fs::read_dir(dir.join("jobs")).unwrap().count() == 0, "nothing ran");
+        // A private account is never on the chain to be seen: it goes.
+        let started = parsed(&names.cli_transfer("xferalpha".into(), format!("Private/{unseen}")));
+        let id = started["value"]["id"].as_str().expect("a job").to_owned();
+        assert_eq!(job_end(&mut names, &id)["state"], "done");
+        registry::UNSEEN.with(|list| list.borrow_mut().clear());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn job_end(names: &mut Names, id: &str) -> Value {

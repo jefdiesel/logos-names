@@ -501,7 +501,7 @@ enum Command {
         #[arg(value_parser = parse_name)]
         name: String,
         /// The new holder, public or private. Only a tag of it reaches the chain.
-        #[arg(value_parser = parse_account)]
+        #[arg(value_parser = parse_new_owner)]
         new_owner: AccountId },
     /// Show a name in your browser: a profile card made from its entries, linking to
     /// its page (served at `/page`) when it has one. It is read from the chain
@@ -762,6 +762,31 @@ fn balance_read(synced: bool, unread: usize) -> Result<()> {
         bail!("could not catch up with the chain (the sequencer didn't answer); the balances above may be out of date");
     }
     Ok(())
+}
+
+/// The new holder of a name: an account as `parse_account` reads it, written with its
+/// prefix once, and not one that was most likely mangled on the way, since a hand-over
+/// can't be undone: the all-zero account, or an ID whose letters are all one case
+/// (base58 IDs mix both; a lower-cased one can still decode to 32 bytes).
+fn parse_new_owner(input: &str) -> Result<AccountId, String> {
+    let bare = input
+        .strip_prefix("Public/")
+        .or_else(|| input.strip_prefix("Private/"))
+        .unwrap_or(input);
+    if bare.contains('/') {
+        return Err(format!("not an account ID: {input} (write Public/ or Private/ once, then the ID)"));
+    }
+    let account = parse_account(input)?;
+    if account.value().iter().all(|byte| *byte == 0) {
+        return Err("that is the empty account (all 1s), which no one holds".to_owned());
+    }
+    let letters: Vec<char> = bare.chars().filter(char::is_ascii_alphabetic).collect();
+    if letters.len() >= 8 && (letters.iter().all(char::is_ascii_lowercase) || letters.iter().all(char::is_ascii_uppercase)) {
+        return Err(format!(
+            "{input} is all one case, so it was probably changed when it was copied (account IDs mix upper and lower case); paste it exactly as it was given"
+        ));
+    }
+    Ok(account)
 }
 
 fn parse_color(input: &str) -> Result<String, String> {
@@ -1499,6 +1524,9 @@ impl Client {
 
     /// Hands `name` to `new_owner`, clearing what the current owner set on it.
     async fn transfer(&mut self, name: &str, new_owner: AccountId) -> Result<()> {
+        if new_owner == self.program {
+            bail!("that is the registry program's account, which can't hold a name");
+        }
         let (Derived { id, .. }, record, _) = self.lookup_held(name).await?;
         let holder = self.holder(name, &id, &record)?;
         self.send(
@@ -3210,6 +3238,27 @@ mod bridge_metadata_tests {
         assert_eq!(borsh::to_vec(&AccountId::new(bytes)).expect("borsh"), bytes.to_vec(), "no length prefix, no tag");
         let to = parse_account("Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk").expect("an account");
         assert_eq!(borsh::to_vec(&to).expect("borsh").len(), 32);
+    }
+}
+
+#[cfg(test)]
+mod new_owner_tests {
+    use super::parse_new_owner;
+
+    /// transfer-case-mangled-id-loses-name: `names transfer xferalpha Public/<lower-cased
+    /// id>` and the all-zero account reached the send (only the dry run stopped them).
+    #[test]
+    fn a_new_holder_that_was_mangled_or_is_empty_is_refused() {
+        let held = "9Dk3PQD467hXAbsbMzrFYVPu5HFvUqKkU7VdoQD9oirA";
+        assert!(parse_new_owner(&format!("Public/{held}")).is_ok());
+        assert!(parse_new_owner(&format!("Private/{held}")).is_ok());
+        assert!(parse_new_owner(held).is_ok(), "the CLI still takes a bare ID");
+        let lower = held.to_ascii_lowercase();
+        assert!(lower.parse::<super::AccountId>().is_ok(), "it still decodes");
+        for bad in [format!("Public/{lower}"), lower.clone(), held.to_ascii_uppercase(), "11111111111111111111111111111111".to_owned()] {
+            assert!(parse_new_owner(&bad).is_err(), "{bad}");
+        }
+        assert!(parse_new_owner(&format!("Private/Public/{held}")).is_err(), "a prefix is written once");
     }
 }
 

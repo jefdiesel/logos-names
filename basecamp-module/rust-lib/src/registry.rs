@@ -133,6 +133,31 @@ pub fn parse_account(text: &str) -> Result<AccountId, String> {
         .ok_or_else(|| format!("not an account ID: {text}"))
 }
 
+/// The ID typed after an account's `Public/` or `Private/`: an ID and nothing else, so
+/// `Private/Public/<id>` is refused rather than read as `Private/<id>`.
+pub fn bare_account(id: &str) -> Result<AccountId, String> {
+    let id = id.trim();
+    if id.contains('/') || id.contains(char::is_whitespace) {
+        return Err("that isn't an account ID: write Public/ or Private/ once, then the ID".to_owned());
+    }
+    parse_account(id)
+}
+
+/// Refuses an ID no one can hold, or one that was most likely mangled on the way: the
+/// all-zero account (`1111…`), and an ID whose letters are all one case (base58 IDs mix
+/// both, so this is an ID re-typed in lower or upper case, which may still decode).
+/// For hand-overs, which can't be undone.
+pub fn plausible_holder(id: &str, account: &AccountId) -> Result<(), String> {
+    if account.iter().all(|byte| *byte == 0) {
+        return Err("that is the empty account (all 1s), which no one holds".to_owned());
+    }
+    let letters: Vec<char> = id.chars().filter(char::is_ascii_alphabetic).collect();
+    if letters.len() >= 8 && (letters.iter().all(char::is_ascii_lowercase) || letters.iter().all(char::is_ascii_uppercase)) {
+        return Err("that account ID is all one case, so it was probably changed when it was copied (IDs mix upper and lower case); paste it exactly as it was given".to_owned());
+    }
+    Ok(())
+}
+
 pub fn account_text(account: &AccountId) -> String {
     bs58::encode(account).into_string()
 }
