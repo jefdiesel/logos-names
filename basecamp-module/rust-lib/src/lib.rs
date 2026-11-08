@@ -3501,6 +3501,9 @@ impl NamesModule for Names {
                 .filter(|(id, _)| note.as_ref() != Some(*id) && !busy.contains(*id))
                 .map(|(_, value)| chain::amount(value))
                 .sum();
+            // Without an exact note, a split makes it from these same notes first: the fee is
+            // then paid from what is left of them, less the split's own fee (needs-split-plan).
+            let others = if note.is_none() && !exact_busy { others.saturating_sub(u128::from(amount)) } else { others };
             let fee_short = others < u128::from(BRIDGE_MAX_FEE);
             let channel = registry::channel_id(&self.sequencer)?;
             // A deposit can't be undone: the channel the sequencer names has to be on the
@@ -5100,6 +5103,20 @@ mod tests {
         node_answers("wallet_transfer_funds", json!("cf".repeat(32)));
         let made = parsed(&names.chain_split(NODE_KEY.into(), "1000000".into(), true));
         assert!(!node_asked().contains(&"wallet_transfer_funds".to_owned()), "a split was sent though note e8ac already holds exactly 1000000: {made}");
+    }
+
+    /// needs-split-plan-ignores-fee-after-split: KB held 150100; the plan for 100,000 said
+    /// needs_split, fee_short false; after paying for the split the bridge was refused as fee_short.
+    #[test]
+    fn a_plan_that_needs_a_split_counts_the_fee_from_what_the_split_leaves() {
+        let mut names = fresh();
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "k150", "value": "150100" }] }));
+        let to = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
+        let plan = parsed(&names.chain_bridge("39".repeat(32), format!("Public/{to}"), "100,000".into(), false));
+        assert_eq!((plan["value"]["needs_split"].as_bool(), plan["value"]["fee_short"].as_bool(), plan["value"]["others"].as_str()), (Some(true), Some(true), Some("50100")), "{plan}");
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "k250", "value": "250100" }] }));
+        let plan = parsed(&names.chain_bridge("39".repeat(32), format!("Public/{to}"), "100,000".into(), false));
+        assert_eq!((plan["value"]["needs_split"].as_bool(), plan["value"]["fee_short"].as_bool()), (Some(true), Some(false)), "{plan}");
     }
 
     /// RV5: a bridge plan isn't "ready" when the exact note is the key's only one (nothing pays the fee).
