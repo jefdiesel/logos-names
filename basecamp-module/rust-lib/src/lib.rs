@@ -3410,7 +3410,8 @@ impl NamesModule for Names {
             });
             if send {
                 let before = chain::notes_of(&node::call("wallet_get_notes", json!([from, ""]), node::QUICK)?);
-                let sent = node::call("wallet_transfer_funds", json!([from, [from], to_key, amount.to_string(), ""]), node::PROVING)?;
+                let sent = node::call("wallet_transfer_funds", json!([from, [from], to_key, amount.to_string(), ""]), node::PROVING)
+                    .map_err(|error| in_flight_refusal(error, &from, &before))?;
                 let hash = chain::hash_of(&sent);
                 // Sent: from here nothing fails, so the hash always comes back.
                 let stored = hash.as_ref().and_then(|hash| node::call("get_transaction", json!([hash]), node::QUICK).ok());
@@ -4414,6 +4415,17 @@ fn chain_notes_in_use(from: &str) -> std::collections::HashSet<String> {
         .collect()
 }
 
+/// A node's "not enough" for `from` while a send made here still spends some of its notes
+/// (`notes`, the key's now): the key holds enough, its notes are in flight
+/// (send-refusal-wording-concurrent: "doesn't hold enough" though it held 100,000).
+fn in_flight_refusal(error: String, from: &str, notes: &Map<String, Value>) -> String {
+    let short = error == chain::problem("wallet_transfer_funds", "not enough");
+    if short && chain_notes_in_use(from).iter().any(|note| notes.contains_key(note)) {
+        return "Another transfer from this key is still waiting to land, and its notes can't be spent twice. Try again in a minute. Nothing was sent.".to_owned();
+    }
+    error
+}
+
 /// Remembers a send; past `MAX_CACHED` sends the oldest is forgotten.
 fn chain_sent_add(hash: &str, sent: Value) {
     let Some(dir) = config_dir() else { return };
@@ -4959,6 +4971,11 @@ mod tests {
         node::ANSWERS.with(|answers| answers.borrow_mut().insert(method.to_owned(), json!({ "success": true, "value": value, "error": null })));
     }
 
+    /// The node answers `method` with a refusal.
+    fn node_refuses(method: &str, error: &str) {
+        node::ANSWERS.with(|answers| answers.borrow_mut().insert(method.to_owned(), json!({ "success": false, "value": null, "error": error })));
+    }
+
     fn node_asked() -> Vec<String> {
         node::ASKED.with(|asked| asked.borrow().iter().map(|(method, _)| method.clone()).collect())
     }
@@ -5145,6 +5162,25 @@ mod tests {
         let deposit = asked.iter().position(|m| m == "channel_deposit_with_notes");
         let checked = asked.iter().position(|m| m == "get_channel_state");
         assert!(deposit.is_none() || checked.is_some_and(|c| c < deposit.unwrap()), "deposited without asking the node for the channel: {asked:?}");
+    }
+
+    #[test]
+    fn a_send_refused_while_another_still_spends_the_keys_notes_says_so() {
+        let mut names = fresh();
+        let key = "e3".repeat(32);
+        node_answers("wallet_get_balance", json!("100000"));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "f08a", "value": "100000" }] }));
+        node_answers("wallet_transfer_funds", json!("d1".repeat(32)));
+        node_answers("get_transaction", json!({ "mantle_tx": { "ops": [{ "opcode": 0, "payload": { "inputs": ["f08a"], "outputs": [{ "value": 1000 }, { "value": 98166 }] } }] } }));
+        assert!(parsed(&names.chain_send(key.clone(), "39".repeat(32), "1,000".into(), true))["success"] == true);
+        // The node, its one note in flight, says it hasn't enough.
+        node_refuses("wallet_transfer_funds", "Wallet does not have enough funds, available=0");
+        let second = parsed(&names.chain_send(key.clone(), "39".repeat(32), "1,000".into(), true));
+        assert!(second["error"].as_str().unwrap().contains("still waiting to land"), "{second}");
+        // Once that note is spent, the node's words are kept.
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "c07e", "value": "500" }] }));
+        let short = parsed(&names.chain_send(key, "39".repeat(32), "400".into(), true));
+        assert_eq!(short["error"], "That key doesn't hold enough for this and its fee.", "{short}");
     }
 
     #[test]
