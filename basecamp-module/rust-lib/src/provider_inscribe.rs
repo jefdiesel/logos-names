@@ -51,12 +51,20 @@ impl Names {
         if pending.is_empty() {
             return Ok(json!([]));
         }
-        let choices = chain_choices()?;
+        // Without the node (stopped, say) the requests are still listed, with no choices and
+        // why, so the person can see and turn them down (pending-inscriptions-fails-node-stopped).
+        let (choices, node) = match chain_choices() {
+            Ok(choices) => (choices, None),
+            Err(error) => (json!([]), Some(error)),
+        };
         let mut views = Vec::new();
         for mut request in pending {
             let app = request["app"].as_str().unwrap_or_default().to_owned();
             request["publisher"] = self.publisher_of(&app);
             request["choices"] = choices.clone();
+            if let Some(node) = &node {
+                request["node"] = Value::from(node.as_str());
+            }
             views.push(request);
         }
         Ok(Value::from(views))
@@ -194,6 +202,37 @@ mod tests {
         assert_eq!(status["value"]["text"], "good wallet");
         as_app("host");
         assert!(parsed(&names.approve_inscription(id, FROM.into()))["error"].as_str().unwrap().contains("done already"));
+    }
+
+    /// pending-inscriptions-fails-node-stopped: with the node stopped, pending_inscriptions
+    /// failed outright, so the sheet couldn't list (or reject) a waiting request.
+    #[test]
+    fn waiting_requests_are_listed_while_the_node_is_stopped() {
+        solo_node("x");
+        let mut names = Names::default();
+        as_app("testimonial_ui");
+        let id = parsed(&names.propose_inscription("still waiting".into()))["value"]["request"].as_str().unwrap().to_owned();
+        as_app("host");
+        crate::node::ANSWERS.with(|a| {
+            a.borrow_mut().insert("wallet_get_known_addresses".into(), json!({ "success": false, "value": null, "error": "node is not running" }))
+        });
+        let pending = parsed(&names.pending_inscriptions());
+        assert_eq!(pending["success"], true, "{pending}");
+        let shown = &pending["value"][0];
+        assert_eq!((shown["id"].as_str(), shown["text"].as_str()), (Some(id.as_str()), Some("still waiting")), "{pending}");
+        assert_eq!(shown["choices"], json!([]));
+        assert_eq!(shown["node"], "Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.");
+        // The person can still turn it down.
+        assert_eq!(parsed(&names.reject_request(id.clone()))["value"]["state"], "rejected");
+        assert_eq!(parsed(&names.pending_inscriptions())["value"], json!([]));
+        // With the node running, choices again and no node field.
+        as_app("testimonial_ui");
+        parsed(&names.propose_inscription("again".into()));
+        as_app("host");
+        answer("wallet_get_known_addresses", json!([FROM]));
+        let pending = parsed(&names.pending_inscriptions());
+        assert_eq!(pending["value"][0]["choices"], json!([{ "key": FROM, "balance": "100000" }]), "{pending}");
+        assert!(pending["value"][0].get("node").is_none(), "{pending}");
     }
 
     #[test]

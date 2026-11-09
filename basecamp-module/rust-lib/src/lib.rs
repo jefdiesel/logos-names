@@ -848,7 +848,8 @@ pub trait NamesModule: Send + 'static {
 
     /// The inscription requests waiting for the person, oldest first: `[{id, app, text,
     /// says, submission, publisher, choices: [{key, balance}]}]`, the choices the keys
-    /// the node's wallet holds. The fee for a choice is `chain_inscribe(key, text,
+    /// the node's wallet holds. When the node can't list them (stopped, say), each request
+    /// is still listed, with `choices` empty and `node` saying why, so it can be rejected. The fee for a choice is `chain_inscribe(key, text,
     /// false)`'s `fee_estimate`, which holds that key's notes for a while (see
     /// `chain_inscribe`): ask it for the chosen key, not every choice. Names app only.
     fn pending_inscriptions(&mut self) -> String;
