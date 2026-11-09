@@ -829,7 +829,12 @@ pub trait NamesModule: Send + 'static {
     /// and its own channel (`sha256("lp-0022:testimonial:" || signer)`), which the first
     /// inscription creates and later ones extend. Without `send` the plan `{from, balance,
     /// signer, channel, parent, first, submission, text, bytes, msg_id, fee_estimate}`
-    /// (the fee the node's funding asks now; nothing is moved or held); with `send` the
+    /// (the fee the node's funding asks now). A plan moves nothing, but it does hold
+    /// notes: the node keeps the notes that funding uses for it until they are spent or
+    /// 10 more blocks are final (31.6 s measured on a solo node). The send of the same
+    /// inscription uses that funding; any other send, split or inscription from the key
+    /// meanwhile is refused as held (not short), and a plan for another key holds that
+    /// key's notes too, so price only the key the person picks. With `send` the
     /// inscription is signed and sent (it cannot be undone) and `hash` and `fee` (what
     /// it pays) are set; `chain_tx` follows it. Names app only.
     fn chain_inscribe(&mut self, from_key: String, text: String, send: bool) -> String;
@@ -844,7 +849,8 @@ pub trait NamesModule: Send + 'static {
     /// The inscription requests waiting for the person, oldest first: `[{id, app, text,
     /// says, submission, publisher, choices: [{key, balance}]}]`, the choices the keys
     /// the node's wallet holds. The fee for a choice is `chain_inscribe(key, text,
-    /// false)`'s `fee_estimate`. Names app only.
+    /// false)`'s `fee_estimate`, which holds that key's notes for a while (see
+    /// `chain_inscribe`): ask it for the chosen key, not every choice. Names app only.
     fn pending_inscriptions(&mut self) -> String;
 
     /// Approves inscription request `request_id` with the node key `from_key`: it is
@@ -4718,6 +4724,10 @@ fn in_flight_refusal(error: String, from: &str, notes: &Map<String, Value>) -> S
     let short = error == chain::problem("wallet_transfer_funds", "not enough");
     if short && chain_notes_in_use(from).iter().any(|note| notes.contains_key(note)) {
         return IN_FLIGHT.to_owned();
+    }
+    // Held by the node for an inscription priced here (chain_inscribe.rs), not short.
+    if short && chain_inscribe::plan_holds_notes_of(from, notes) {
+        return chain_inscribe::HELD.to_owned();
     }
     error
 }

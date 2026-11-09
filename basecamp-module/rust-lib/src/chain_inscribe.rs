@@ -45,7 +45,8 @@ pub const FUNDED_FILE: &str = "chain-inscribe-funded.json";
 /// How long a kept funding is used: the node lets its notes go after 10 final blocks.
 pub const FUNDED_FOR_S: u64 = 15 * 60;
 /// Said when the node holds a key's notes for an inscription priced a moment ago.
-pub const HELD: &str = "Your node is holding this key's notes for the inscription it priced a moment ago, and lets them go once 10 more blocks are final (under a minute on a test node, a few minutes on the testnet). Try again then. Nothing was sent.";
+/// The time given is the one measured (a solo test node); on a network it is 10 of its blocks.
+pub const HELD: &str = "Your node is holding this key's notes for an inscription priced here a moment ago: they aren't short. It lets them go once 10 more blocks are final (about 30 seconds on a solo test node), or spends them when that inscription is sent. Try again then. Nothing was sent.";
 /// The parent of a channel's first message.
 pub const ZERO: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -265,8 +266,7 @@ pub fn run(from_key: &str, text: &str, send: bool) -> Result<Value, String> {
     // The funding a plan of this same inscription got, while its notes are still there;
     // otherwise the node funds it now (and holds the notes it uses).
     let kept_path = dir.join(FUNDED_FILE);
-    let mut kept = crate::activity::load(&kept_path);
-    kept.retain(|_, entry| at.saturating_sub(entry["at"].as_u64().unwrap_or(0)) < FUNDED_FOR_S);
+    let mut kept = kept_fundings(&kept_path, at);
     let key_op = op.to_string();
     let reused = kept.get(&key_op).filter(|entry| entry["from"] == from.as_str()).map(|entry| entry["funded"].clone()).filter(|funded| {
         let (inputs, _) = chain::transfer_parts(&json!({ "mantle_tx": funded["funded_tx"] }));
@@ -283,7 +283,7 @@ pub fn run(from_key: &str, text: &str, send: bool) -> Result<Value, String> {
                 }
                 if crate::chain_notes_in_use(&from).iter().any(|note| notes.contains_key(note)) {
                     crate::IN_FLIGHT.to_owned()
-                } else if kept.values().any(|entry| entry["from"] == from.as_str()) {
+                } else if holds_notes(&kept, &from, &notes) {
                     HELD.to_owned()
                 } else {
                     error
@@ -328,6 +328,30 @@ pub fn run(from_key: &str, text: &str, send: bool) -> Result<Value, String> {
     plan["hash"] = Value::from(ours);
     plan["fee"] = fee.map_or(Value::Null, |f| Value::from(f.to_string()));
     Ok(plan)
+}
+
+/// The fundings kept for plans (`FUNDED_FILE`), those still young enough to use.
+fn kept_fundings(path: &Path, at: u64) -> Map<String, Value> {
+    let mut kept = crate::activity::load(path);
+    kept.retain(|_, entry| at.saturating_sub(entry["at"].as_u64().unwrap_or(0)) < FUNDED_FOR_S);
+    kept
+}
+
+/// Whether a kept funding from `from` spends any of its notes now (`notes`): the node may
+/// be holding them for that plan.
+fn holds_notes(kept: &Map<String, Value>, from: &str, notes: &Map<String, Value>) -> bool {
+    kept.values().filter(|entry| entry["from"] == from).any(|entry| {
+        let (inputs, _) = chain::transfer_parts(&json!({ "mantle_tx": entry["funded"]["funded_tx"] }));
+        inputs.iter().any(|input| notes.contains_key(input))
+    })
+}
+
+/// Whether an inscription priced here (a plan, `send` false) may have the node holding
+/// notes of `from` (its notes now: `notes`), so that a node's "not enough" for another
+/// send or split from it means held, not short (plan-holds-notes-other-ops-say-short).
+pub fn plan_holds_notes_of(from: &str, notes: &Map<String, Value>) -> bool {
+    let Some(dir) = crate::config_dir() else { return false };
+    holds_notes(&kept_fundings(&dir.join(FUNDED_FILE), crate::now()), from, notes)
 }
 
 pub fn hex(bytes: &[u8]) -> String {
@@ -482,6 +506,34 @@ mod tests {
         run(FROM, "first", false).unwrap();
         refuse("wallet_fund_tx", "Failed to fund tx: Wallet does not have enough funds, available=0");
         assert_eq!(run(FROM, "second", false).unwrap_err(), HELD);
+    }
+
+    /// plan-holds-notes-other-ops-say-short: an inscription plan's funding holds the key's
+    /// notes on the node, and a send or split from the key right after was refused "That
+    /// key doesn't hold enough" though it held 100,000 (solo node, verify/adv.sh V1).
+    #[test]
+    fn a_send_or_split_while_a_plan_holds_the_keys_notes_says_held_not_short() {
+        use crate::NamesModule as _;
+        let to = "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225";
+        solo_node("hold test");
+        run(FROM, "hold test", false).unwrap();
+        // From here the node refuses any other funding from FROM, as it did on the solo node.
+        refuse("wallet_transfer_funds", "Failed to fund tx: Wallet does not have enough funds, available=0");
+        let mut names = crate::Names::default();
+        let sent: Value = serde_json::from_str(&names.chain_send(FROM.into(), to.into(), "1,000".into(), true)).unwrap();
+        assert_eq!(sent["error"], HELD, "{sent}");
+        let split: Value = serde_json::from_str(&names.chain_split(FROM.into(), "1,000".into(), true)).unwrap();
+        assert_eq!(split["error"], HELD, "{split}");
+        // No plan holds them: the node's "not enough" is said as before.
+        solo_node("hold test");
+        refuse("wallet_transfer_funds", "Failed to fund tx: Wallet does not have enough funds, available=0");
+        let short: Value = serde_json::from_str(&names.chain_send(FROM.into(), to.into(), "1,000".into(), true)).unwrap();
+        assert_eq!(short["error"], "That key doesn't hold enough for this and its fee.", "{short}");
+        // A plan whose note has left the wallet holds nothing any more.
+        run(FROM, "hold test", false).unwrap();
+        answer("wallet_get_notes", json!({ "notes": [{ "id": "c0de", "value": "98914" }] }));
+        let gone: Value = serde_json::from_str(&names.chain_send(FROM.into(), to.into(), "1,000".into(), true)).unwrap();
+        assert_eq!(gone["error"], "That key doesn't hold enough for this and its fee.", "{gone}");
     }
 
     #[test]
