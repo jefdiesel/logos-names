@@ -35,6 +35,7 @@
 mod activity;
 mod avatar;
 mod chain;
+mod chain_inscribe;
 mod changes;
 mod cli;
 mod page_view;
@@ -820,6 +821,17 @@ pub trait NamesModule: Send + 'static {
 
     /// Takes back all access `app` was given. Names app only.
     fn revoke_app(&mut self, app: String) -> String;
+
+    /// Inscribes a testimonial (`{"submission": "lp-0022:names-wallet", "text"}`, text
+    /// 1-1024 bytes) on the Logos Blockchain from the node key `from_key`, which pays the
+    /// fee. Each key has its own Ed25519 inscription key, made here once and kept 0600,
+    /// and its own channel (`sha256("lp-0022:testimonial:" || signer)`), which the first
+    /// inscription creates and later ones extend. Without `send` the plan `{from, balance,
+    /// signer, channel, parent, first, submission, text, bytes, msg_id, fee_estimate}`
+    /// (the fee the node's funding asks now; nothing is moved or held); with `send` the
+    /// inscription is signed and sent (it cannot be undone) and `hash` and `fee` (what
+    /// it pays) are set; `chain_tx` follows it. Names app only.
+    fn chain_inscribe(&mut self, from_key: String, text: String, send: bool) -> String;
 
     /// Called once the module is wired to the host.
     fn on_context_ready(&mut self, _ctx: &RustModuleContext) {}
@@ -4066,6 +4078,13 @@ impl NamesModule for Names {
         let revoked = store.revoke(app.trim());
         store.save();
         reply(Ok(json!({ "revoked": revoked })))
+    }
+
+    fn chain_inscribe(&mut self, from_key: String, text: String, send: bool) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(chain_inscribe::run(&from_key, &text, send))
     }
 }
 

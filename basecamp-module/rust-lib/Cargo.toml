@@ -21,6 +21,10 @@ aes-gcm = "0.10"
 # Argon2id derives a name's identifier and key (registry v5, SPEC.md section 3).
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 bs58 = "0.5"
+# A testimonial inscribed on the Logos Blockchain (chain_inscribe.rs): the Mantle
+# transaction hash is blake2b-256, the inscription is signed with Ed25519.
+blake2 = "0.10"
+ed25519-dalek = "=2.2.0"
 getrandom = "0.2"
 # Decodes a name's avatar for apps that may not load `data:` URLs (avatar.rs).
 png = "0.18"
