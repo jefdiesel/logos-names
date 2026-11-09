@@ -805,6 +805,15 @@ fn balance_read(synced: bool, unread: usize) -> Result<()> {
     Ok(())
 }
 
+/// How `names mine` ends: an error when the sequencer didn't give the record of `unread`
+/// names, so a script never takes a name it couldn't read for one gone.
+fn mine_read(unread: usize) -> Result<()> {
+    if unread > 0 {
+        bail!("the sequencer didn't answer, so {unread} name(s) are unknown; try again when it is reachable");
+    }
+    Ok(())
+}
+
 /// Whether `account` is the one a name's record (`owner`, its tag) is held by already.
 fn holds_already(id: &NameId, owner: &[u8; 32], account: &AccountId) -> bool {
     owner_tag(id, account) == *owner
@@ -3429,9 +3438,21 @@ async fn main() -> Result<()> {
                 println!("no names yet; register one with `names register <name>`");
                 println!("(a name someone transferred to you shows here once you run `names mine --add <name>`)");
             }
+            // A name whose record the sequencer didn't give is unknown, never "no longer
+            // held": an app takes that for a name gone (cli-mine-empty-list-when-account-views-fail).
+            let mut unread = 0_usize;
             for name in defaults.names {
-                match client.lookup(&name).await {
-                    Ok((Derived { id, .. }, record, _)) if client.holder(&name, &id, &record).is_ok() => {
+                let id = derive(&name).id;
+                let record = match client.record(&id).await {
+                    Ok(record) => record.filter(|record| local_now() < record.expires.saturating_add(GRACE_MS)),
+                    Err(_) => {
+                        unread += 1;
+                        println!("{name}{NAME_SUFFIX}  unknown: the sequencer didn't answer");
+                        continue;
+                    }
+                };
+                match record {
+                    Some(record) if client.holder(&name, &id, &record).is_ok() => {
                         // Apps read this suffix to tell a private holder from a public one.
                         let by = match client.holder(&name, &id, &record) {
                             Ok(account) if client.is_private(account) => "; held privately",
@@ -3447,7 +3468,7 @@ async fn main() -> Result<()> {
                     _ => println!("{name}{NAME_SUFFIX}  no longer held by this wallet"),
                 }
             }
-            Ok(())
+            mine_read(unread)
         }
         Command::Register {
             name,
@@ -3904,6 +3925,16 @@ mod balance_tests {
         let unread = balance_read(true, 3).expect_err("unknown balances fail").to_string();
         assert!(unread.contains("3 public balance(s) are unknown"), "{unread}");
         assert!(balance_read(false, 0).is_err(), "not caught up with the chain fails too");
+    }
+
+    /// cli-mine-empty-list-when-account-views-fail: with the sequencer failing account
+    /// reads, `names mine` said each name was "no longer held by this wallet" and exited
+    /// 0, and the module answered an empty list. A name not read is unknown and fails it.
+    #[test]
+    fn a_name_the_sequencer_did_not_give_fails_names_mine() {
+        assert!(super::mine_read(0).is_ok());
+        let unread = super::mine_read(2).expect_err("unknown names fail").to_string();
+        assert!(unread.contains("2 name(s) are unknown"), "{unread}");
     }
 }
 
