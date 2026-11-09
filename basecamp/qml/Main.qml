@@ -812,6 +812,8 @@ Item {
     function sendState(row) {
         if (!row)
             return { enabled: false, reason: "", switchFirst: false }
+        if (row.later)   // a Logos Blockchain account the node takes at its next start: the note says why
+            return { enabled: false, reason: "", switchFirst: false }
         if (row.balance === null || row.balance === undefined)
             return { enabled: false, reason: "Its balance isn't known yet.", switchFirst: false }
         if (/^0*$/.test(String(row.balance)))
@@ -6077,7 +6079,8 @@ Item {
                         }
                     }
                     Fact {
-                        visible: accountPage.row !== null && accountPage.row.address !== undefined && accountPage.row.address !== ""
+                        // Not for an account the node takes at its next start: what reaches it before then isn't seen.
+                        visible: accountPage.row !== null && accountPage.row.address !== undefined && accountPage.row.address !== "" && !accountPage.row.later
                         label: "Address"
                         code: true
                         value: accountPage.row ? (accountPage.row.address.length > 50 ? Logic.keyShown(accountPage.row.address) : accountPage.row.address) : ""
@@ -6093,9 +6096,9 @@ Item {
                             enabledNow: accountPage.send.enabled && !root.accountsBusy
                             onPressed: root.sendFrom(accountPage.row)
                         }
-                        Action { label: "Receive"; onPressed: root.openReceive(accountPage.row) }
+                        Action { visible: accountPage.row !== null && !accountPage.row.later; label: "Receive"; onPressed: root.openReceive(accountPage.row) }
                         Action {
-                            visible: accountPage.row !== null && (accountPage.row.kind === "chain" || accountPage.row.kind === "lez")
+                            visible: accountPage.row !== null && (accountPage.row.kind === "chain" || accountPage.row.kind === "lez") && !accountPage.row.later
                             label: "Bridge"
                             onPressed: accountPage.row.kind === "chain" ? root.openGetTokens(accountPage.row.key) : root.openBridgeFromLez(root.rowAccount(accountPage.row))
                         }
@@ -6119,6 +6122,7 @@ Item {
                         }
                     }
                     Hint { visible: accountPage.send.reason !== ""; font.pixelSize: root.px(14); text: accountPage.send.reason }
+                    Hint { visible: accountPage.row !== null && !!accountPage.row.later; font.pixelSize: root.px(14); text: Logic.chainLaterNote() }
                     Hint { visible: accountPage.send.switchFirst; font.pixelSize: root.px(14); text: "Send makes this the account payments come from, then opens the form." }
                     Hint { visible: root.accountsError !== ""; color: root.alarm; font.pixelSize: root.px(14); text: root.accountsError }
                     Part { text: "History" }

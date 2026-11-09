@@ -316,7 +316,8 @@ export function walletGroups(cliBalance, accounts, holdings, watched, tokenNames
     if (chainAccounts || chainDown) {
         var keys = (chainAccounts || []).map(function(a) {
             return { id: "chain-" + a.key, kind: "chain", title: chainKeyTitle(a), sub: chainKeySub(a), address: a.key,
-                     balance: a.balance === null || a.balance === undefined ? null : String(a.balance), fromPrivate: false, definition: "", key: a.key, canSend: a.ready !== false, account: "" }
+                     balance: a.balance === null || a.balance === undefined ? null : String(a.balance), fromPrivate: false, definition: "", key: a.key, canSend: a.ready !== false,
+                     later: a.ready === false, account: "" }
         })
         var later = keys.filter(function(r) { return !r.canSend }).length
         var total = chainAccounts ? keys.reduce(function(sum, r) { return sum === null || r.balance === null ? sum : addDigits(sum, r.balance) }, "0") : null
@@ -339,6 +340,13 @@ export function chainKeyTitle(a) {
 /// A Logos Blockchain account's second line: the key, and when the node uses it.
 export function chainKeySub(a) {
     return "Public · " + keyShown(a.key) + (a.ready === false ? " · your node uses it from its next start" : "")
+}
+
+/// Why an account the node takes at its next start offers no address, Receive or Bridge yet.
+export function chainLaterNote() {
+    return "Your node uses this account from its next start: stop and start it in Basecamp's Blockchain app. "
+        + "Until then it can't send, and don't have anything sent to it: what reaches it before your node uses it isn't seen. "
+        + "Its address, Receive and Bridge show here once your node uses it."
 }
 
 /// The chain_accounts rows the node uses now (not one it takes at its next start), or

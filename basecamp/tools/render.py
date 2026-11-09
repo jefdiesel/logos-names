@@ -132,7 +132,7 @@ BRIDGE = r"""
             if (method === "chain_accounts") return mock.nodeDown ? JSON.stringify({ success: false, value: null, error: "Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app." }) : ok([
                 { key: "66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b", balance: "1191220464", label: "Main", ready: true },
                 { key: "73058ad5edb0e72b66c3e05ae90471382c3bb4d61314db995ef40e674dbf591e", balance: "25000000" },
-                { key: "5f9f8fd1696c6e6d85bb52fc4b61810a3f9c75422612b72a566ff3ef6a68ad12", balance: "0" }].concat(String(root.chainAccountNote).indexOf("Made") === 0 ? [
+                { key: "5f9f8fd1696c6e6d85bb52fc4b61810a3f9c75422612b72a566ff3ef6a68ad12", balance: "0" }].concat(mock.notReady || String(root.chainAccountNote).indexOf("Made") === 0 ? [
                 { key: "e613268c7dd432c972e872d03fff5f79d6a3cbcc8103f34afc2b33fef998bf1d", balance: null, title: "names-1", label: "Savings", ready: false }] : []))
             if (method === "chain_account_new") {
                 return ok({ key: "e613268c7dd432c972e872d03fff5f79d6a3cbcc8103f34afc2b33fef998bf1d", title: "names-1", label: args[0], ready: false,
@@ -221,6 +221,8 @@ SCENARIOS = {
     "wallet-bridge-confirm": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); Qt.callLater(function() { root.openGetTokens(); bridgeAmountField.text = "1000000"; root.bridgeRun(false); root.bridgeConfirm = true })',
     "wallet": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home")',
     "wallet-chain-account-new": 'root.openWallet("home"); root.chainAccountNew("Savings")',
+    "wallet-chain-notready-page": 'root.openWallet("home"); Qt.callLater(function() { var g = root.walletGroups.filter(function(x) { return x.id === "chain" })[0]; root.openAccount(g.rows[g.rows.length - 1]) })',
+    "wallet-chain-ready-page": 'root.openWallet("home"); Qt.callLater(function() { var g = root.walletGroups.filter(function(x) { return x.id === "chain" })[0]; root.openAccount(g.rows[0]) })',
     "wallet-claim": 'root.openWallet("home")',
     "wallet-account-low": 'root.openWallet("home"); Qt.callLater(function() { root.openAccount(root.walletGroups[0].rows[1]) })',
     "wallet-account-main": 'root.openWallet("home"); Qt.callLater(function() { root.openAccount(root.walletGroups[0].rows[0]) })',
@@ -354,6 +356,8 @@ MOCKS = {
     "welcome-moved": {"private": "5000000", "public": "1000000"},
     "pay-account": {"private": "250000000", "public": "1250000"},
     "wallet-down": {"nodeDown": True},
+    "wallet-chain-notready-page": {"notReady": True},
+    "wallet-chain-ready-page": {"notReady": True},
     "wallet-claim": {"waiting": {"count": "2", "total": "4000000"}},
     "wallet-bridge-exact": {"exact": True},
     "wallet-bridge-nochannel": {"exact": True, "noChannel": True},
