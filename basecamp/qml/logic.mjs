@@ -365,6 +365,9 @@ function proven(e) {
     return e["private"] === true || /^Private\//.test(String(e.from || ""))
 }
 
+/// How long a bridge takes to reach LEZ once it is in a block.
+var BRIDGE_ARRIVES_MS = 12 * 3600 * 1000
+
 /// One history entry in words: {title, sub, amount, sign, state, tone}. `sign` is "-" for
 /// what left, "+" for what came in, "" for a move between your own accounts; `tone` is
 /// "good", "warn", "bad" or "plain" for the state.
@@ -392,7 +395,12 @@ export function activityLine(entry, now) {
     // Only a private change is proven; a public one on LEZ is only sent (activity-public-send-says-proving).
     case "sending": stateText = proven(e) ? "Proving…" : "Sending…"; tone = "warn"; break
     case "in_block":
-        stateText = kind !== "bridge" ? "In a block" : e.followed === false ? "In a block · its arrival on LEZ can't be followed here" : "In a block · arrives in about 12 h"
+        // Past its window a bridge is overdue, not still "about 12 h" away (activity-bridge-row-wording).
+        var sent = Number(e.at) < 1e12 ? Number(e.at) * 1000 : Number(e.at)
+        stateText = kind !== "bridge" ? "In a block"
+            : e.followed === false ? "In a block · its arrival on LEZ can't be followed here"
+            : Number(now) - sent > BRIDGE_ARRIVES_MS ? "In a block · should have arrived by now; check the balance"
+            : "In a block · arrives in about 12 h"
         tone = kind === "bridge" ? "warn" : "good"; break
     case "arrived": stateText = kind === "bridge" ? "Arrived on LEZ" : ""; tone = "good"; break
     case "done": stateText = "Done"; tone = "good"; break

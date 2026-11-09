@@ -152,6 +152,8 @@ check("subDigits", [subDigits("1000", "1"), subDigits("210939029", "210939029"),
   // activity-public-send-says-proving: a public send in flight said "Proving…".
   const flying = (fields) => activityLine(Object.assign({ chain: "lez", state: "sending", to: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", amount: "1000", at: Math.floor(now / 1000) }, fields), now).state;
   check("activityLine public sends are sending", [flying({ kind: "pay_account", private: false }), flying({ kind: "token_send", from: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk" }), flying({ kind: "pay_account", private: true }), flying({ kind: "shield" }), flying({ kind: "receive" }), flying({ kind: "pay", from: "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z" }), activityLine({ kind: "send", chain: "logos", state: "sending", at: now }, now).state], ["Sending…", "Sending…", "Proving…", "Proving…", "Proving…", "Proving…", "Sending…"]);
+  // activity-bridge-row-wording: 2 h, 3 d and 1090 d old all said "arrives in about 12 h".
+  check("activityLine bridge overdue", [activityLine(bridge, now).state, activityLine(Object.assign({}, bridge, { at: Math.floor(now / 1000) - 259200 }), now).state, activityLine(Object.assign({}, bridge, { at: 1700000000 }), now).state], ["In a block · arrives in about 12 h", "In a block · should have arrived by now; check the balance", "In a block · should have arrived by now; check the balance"]);
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");

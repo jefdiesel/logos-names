@@ -4111,10 +4111,18 @@ Item {
             Layout.fillWidth: true
             spacing: 1
             Text { Layout.fillWidth: true; text: act.line.title; elide: Text.ElideRight; color: root.ink; font.family: root.sans; font.pixelSize: root.px(act.small ? 14 : 15) }
-            Text { Layout.fillWidth: true; text: act.line.sub + " · " + act.line.ago; elide: Text.ElideRight; color: root.dim; font.family: root.sans; font.pixelSize: root.px(12) }
+            // The age always shows: a long account is shortened in its middle instead.
+            Item {
+                id: subRow
+                Layout.fillWidth: true
+                implicitHeight: subText.implicitHeight
+                Text { id: subText; width: Math.max(0, Math.min(implicitWidth, subRow.width - agoText.implicitWidth)); text: act.line.sub; elide: Text.ElideMiddle; color: root.dim; font.family: root.sans; font.pixelSize: root.px(12) }
+                Text { id: agoText; x: subText.width; text: " · " + act.line.ago; color: root.dim; font.family: root.sans; font.pixelSize: root.px(12) }
+            }
         }
         ColumnLayout {
             spacing: 1
+            Layout.maximumWidth: root.px(240)
             Text {
                 Layout.alignment: Qt.AlignRight
                 visible: act.line.amount !== ""
@@ -4126,8 +4134,11 @@ Item {
             }
             Text {
                 Layout.alignment: Qt.AlignRight
+                Layout.maximumWidth: root.px(240)
                 visible: act.line.state !== ""
                 text: act.line.state
+                wrapMode: Text.WordWrap
+                horizontalAlignment: Text.AlignRight
                 color: act.line.tone === "good" ? root.good : act.line.tone === "bad" ? root.alarm : act.line.tone === "warn" ? root.brass : root.dim
                 font.family: root.sans
                 font.pixelSize: root.px(12)
