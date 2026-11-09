@@ -871,8 +871,16 @@ pub fn sequencer_reachable(sequencer: &str) -> Result<(), String> {
 }
 
 /// Asks `sequencer` for its last block, and is Ok only for a JSON-RPC reply carrying one.
+/// Its own wait is said as the health check's: a call that read for longer before it gave up
+/// never says the sequencer had only 5 s (job-start-says-5-s-after-9).
 pub fn probe_sequencer(sequencer: &str) -> Result<(), String> {
-    let result = rpc(sequencer, "getLastBlockId", json!([]), Deadline::after(PROBE_WAIT))?;
+    let result = rpc(sequencer, "getLastBlockId", json!([]), Deadline::after(PROBE_WAIT)).map_err(|why| {
+        if why.starts_with("could not reach the sequencer: it didn't answer within") {
+            format!("could not reach the sequencer: it didn't answer a health check within {} s. Try again shortly", PROBE_WAIT.as_secs())
+        } else {
+            why
+        }
+    })?;
     result.as_u64().map(|_| ()).ok_or_else(|| "could not reach the sequencer: it sent no block number".to_owned())
 }
 
@@ -1437,6 +1445,12 @@ mod tests {
     fn an_account_read_tells_a_sequencer_that_only_says_its_last_block() {
         let probe_only = stub_rpc(|request| if request["method"] == "getLastBlockId" { rpc_ok(json!(7)) } else { (503, "upstream 503".into()) });
         assert_eq!(probe_sequencer(&probe_only), Ok(()));
+        // A health check that times out says it was the health check, and its own 5 s.
+        let hung = stub_rpc(|_| {
+            std::thread::sleep(Duration::from_secs(30));
+            rpc_ok(json!(7))
+        });
+        assert_eq!(probe_sequencer(&hung), Err("could not reach the sequencer: it didn't answer a health check within 5 s. Try again shortly".to_owned()));
         let refused = view_readable(&probe_only, &[1; 32], Deadline::after(READ_BUDGET)).expect_err("503");
         assert_eq!(refused, "could not reach the sequencer: it answered HTTP 503 instead of a reading");
         let answers = stub_rpc(|_| rpc_ok(Value::Null));
