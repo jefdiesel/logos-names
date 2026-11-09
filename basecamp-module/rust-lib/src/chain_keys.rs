@@ -104,17 +104,42 @@ pub fn next_title(keystore: &Keystore) -> String {
         .expect("a free title")
 }
 
-/// A label as a person writes it: trimmed, at most `MAX_LABEL` characters, no control
-/// characters. Empty means no label.
+/// A label as a person writes it: trimmed, at most `MAX_LABEL` characters, one visible
+/// line. Refused: control characters, line and paragraph separators, characters that
+/// turn text around (bidi embeddings, overrides, isolates and marks) or show nothing
+/// (zero-width space, word joiner, BOM, soft hyphen, Hangul fillers, tag characters,
+/// invisible operators), and a label with nothing visible (only joiners or variation
+/// selectors). ZWJ, ZWNJ and variation selectors are kept inside a label, for emoji such
+/// as 👩‍💻 and for scripts that need them. Empty means no label.
 pub fn label_input(text: &str) -> Result<String, String> {
     let label = text.trim();
     if label.chars().count() > MAX_LABEL {
         return Err(format!("a label is at most {MAX_LABEL} characters"));
     }
-    if label.chars().any(char::is_control) {
-        return Err("a label is one line of text".to_owned());
+    if label.chars().any(|c| c.is_control() || unseen(c)) {
+        return Err("a label is one line of visible text".to_owned());
+    }
+    if !label.is_empty() && label.chars().all(|c| c.is_whitespace() || joins(c)) {
+        return Err("a label is one line of visible text".to_owned());
     }
     Ok(label.to_owned())
+}
+
+/// Characters that show nothing, break the line or turn the text around (Unicode Cf,
+/// Zl and Zp, and the fillers that render blank), except the emoji joiners (`joins`).
+fn unseen(c: char) -> bool {
+    matches!(c,
+        '\u{00AD}' | '\u{034F}' | '\u{061C}' | '\u{0600}'..='\u{0605}' | '\u{06DD}' | '\u{070F}' | '\u{08E2}'
+        | '\u{115F}' | '\u{1160}' | '\u{17B4}' | '\u{17B5}' | '\u{180E}' | '\u{200B}' | '\u{200E}' | '\u{200F}'
+        | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{3164}' | '\u{FEFF}' | '\u{FFA0}' | '\u{FFF9}'..='\u{FFFB}'
+        | '\u{110BD}' | '\u{110CD}' | '\u{13430}'..='\u{1343F}' | '\u{1BCA0}'..='\u{1BCA3}' | '\u{1D173}'..='\u{1D17A}'
+        | '\u{E0001}' | '\u{E0020}'..='\u{E007F}')
+}
+
+/// The zero-width characters kept inside a label, for emoji and scripts that need them:
+/// ZWJ, ZWNJ (Persian, Indic) and variation selectors.
+fn joins(c: char) -> bool {
+    matches!(c, '\u{200C}' | '\u{200D}' | '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}')
 }
 
 /// The node's folders to try, from this process's arguments: beside
@@ -469,6 +494,20 @@ mod tests {
         assert!(label_input(&"x".repeat(41)).is_err());
         assert!(label_input("a\nb").is_err());
         assert_eq!(label_input(&"é".repeat(40)).map(|l| l.chars().count()), Ok(40));
+    }
+
+    /// adv V2: '\u{202E}evil\u{202C}' (shown reversed), '\u{200B}' (shown as nothing) and
+    /// 'a\u{2028}b' (two lines) were stored as labels. A label is one visible line.
+    #[test]
+    fn labels_that_render_invisibly_reversed_or_on_two_lines_are_refused() {
+        for bad in ["\u{202E}evil\u{202C}", "\u{200B}", "a\u{2028}b", "a\u{2029}b", "\u{2066}x\u{2069}", "x\u{200F}", "\u{FEFF}",
+            "\u{2060}", "\u{3164}", "pay\u{E0041}", "\u{200D}", "\u{FE0F}\u{200D}", "\u{200C}", "a\u{00AD}b"] {
+            assert_eq!(label_input(bad), Err("a label is one line of visible text".to_owned()), "{bad:?}");
+        }
+        // Emoji with joiners and variation selectors, and accents, stay.
+        for good in ["Épargne 💰", "👩\u{200D}💻 work", "❤\u{FE0F}", "名前", "1,5", "Savings", "می\u{200C}خواهم"] {
+            assert_eq!(label_input(good), Ok(good.to_owned()), "{good:?}");
+        }
     }
 
     #[test]
