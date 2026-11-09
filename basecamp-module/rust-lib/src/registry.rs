@@ -748,18 +748,79 @@ pub fn channel_id(sequencer: &str) -> Result<String, String> {
         .ok_or_else(|| "LEZ didn't say where deposits go. Try again later.".to_owned())
 }
 
-/// Whether the sequencer at `sequencer` answers at all (any reply, even a refusal, is an
-/// answer). An older CLI (the October testnet build) prints a public balance of 0 and
-/// every name as "no longer held by this wallet" when it can't reach it, and exits 0.
+/// Whether the sequencer at `sequencer` answers honestly. An older CLI (the October
+/// testnet build) prints a public balance of 0 and every name as "no longer held by this
+/// wallet" when it can't read the chain, and exits 0, so its 0 and its empty list are
+/// believed only when the sequencer itself answers `getLastBlockId` with a block number
+/// right now. A 503 from a proxy, a 200 page of HTML, an empty or error reply are no
+/// answer (balance-marks-written-from-503-false-arrivals).
 #[cfg(not(test))]
 pub fn sequencer_reachable(sequencer: &str) -> Result<(), String> {
-    match ureq::post(sequencer)
+    probe_sequencer(sequencer)
+}
+
+/// Asks `sequencer` for its last block, and is Ok only for a JSON-RPC reply carrying one.
+pub fn probe_sequencer(sequencer: &str) -> Result<(), String> {
+    let unreachable = |why: String| format!("could not reach the sequencer: {why}");
+    let response = ureq::post(sequencer)
         .timeout(std::time::Duration::from_secs(10))
         .send_json(json!({ "jsonrpc": "2.0", "id": 1, "method": "getLastBlockId", "params": [] }))
-    {
-        Ok(_) | Err(ureq::Error::Status(..)) => Ok(()),
-        Err(error) => Err(format!("could not reach the sequencer: {error}")),
+        .map_err(|error| unreachable(error.to_string()))?;
+    let body = response.into_string().map_err(|error| unreachable(error.to_string()))?;
+    last_block_answer(&body).map(|_| ()).map_err(unreachable)
+}
+
+/// The block number in a `getLastBlockId` reply, or why the reply isn't one.
+pub fn last_block_answer(body: &str) -> Result<u64, String> {
+    let reply: Value = serde_json::from_str(body.trim())
+        .map_err(|_| "it sent a reply that isn't JSON-RPC".to_owned())?;
+    if let Some(error) = reply.get("error").filter(|error| !error.is_null()) {
+        let message = error["message"].as_str().map_or_else(|| error.to_string(), str::to_owned);
+        return Err(format!("it answered with an error: {message}"));
     }
+    reply["result"].as_u64().ok_or_else(|| "it sent no block number".to_owned())
+}
+
+/// An HTTP server on loopback that answers each of its first `connections` requests with
+/// `reply` (status line, headers and body): a stand-in sequencer for tests.
+#[cfg(test)]
+pub fn stub_http(reply: &'static str, connections: usize) -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
+    let address = listener.local_addr().expect("address");
+    std::thread::spawn(move || {
+        for stream in listener.incoming().take(connections) {
+            let Ok(mut stream) = stream else { continue };
+            // The whole request is read first: closing on unread bytes resets the
+            // connection, and the client would see that instead of the reply.
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let Ok(read) = stream.read(&mut buffer) else { break };
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                let text = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let length = text.lines().find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|value| value.trim().parse::<usize>().ok()).unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let _ = stream.write_all(reply.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+    format!("http://{address}/")
+}
+
+/// A `200 OK` HTTP reply carrying `body` as JSON, for `stub_http`.
+#[cfg(test)]
+pub fn json_reply(body: &str) -> &'static str {
+    Box::leak(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).into_boxed_str())
 }
 
 #[cfg(test)]
@@ -1011,6 +1072,26 @@ mod tests {
     use super::*;
 
     const PROGRAM: AccountId = [7; 32];
+
+    /// A proxy in front of a sequencer that is down answers 503, or a 200 page of HTML,
+    /// or nothing: none of those is the sequencer answering, so a CLI's 0 balances and
+    /// empty name list read meanwhile aren't believed (balance-marks-written-from-503-false-arrivals,
+    /// mine-balance-accounts-believe-degraded-sequencer-503-and-200-garbage).
+    #[test]
+    fn only_a_block_number_is_a_sequencer_answer() {
+        assert_eq!(probe_sequencer(&stub_http(json_reply(r#"{"jsonrpc":"2.0","id":1,"result":79401}"#), 1)), Ok(()));
+        let unavailable = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let problem = probe_sequencer(&stub_http(unavailable, 1)).expect_err("a 503 is no answer");
+        assert!(problem.starts_with("could not reach the sequencer"), "{problem}");
+        let html = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 37\r\nConnection: close\r\n\r\n<html><body>Bad gateway</body></html>";
+        let problem = probe_sequencer(&stub_http(html, 1)).expect_err("HTML is no answer");
+        assert!(problem.contains("isn't JSON-RPC"), "{problem}");
+        let empty = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        assert!(probe_sequencer(&stub_http(empty, 1)).is_err());
+        assert!(last_block_answer(r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}"#).is_err());
+        assert!(last_block_answer(r#"{"jsonrpc":"2.0","id":1,"result":null}"#).is_err());
+        assert_eq!(last_block_answer(r#"{"jsonrpc":"2.0","id":1,"result":5}"#), Ok(5));
+    }
 
     /// The LEZ 0.3 testnet: its sequencer answers with `shards`, its records are
     /// version 5 (no `claimed`), its settings have no claims list. Read the same way.
