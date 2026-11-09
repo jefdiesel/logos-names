@@ -836,7 +836,10 @@ pub trait NamesModule: Send + 'static {
     /// meanwhile is refused as held (not short), and a plan for another key holds that
     /// key's notes too, so price only the key the person picks. With `send` the
     /// inscription is signed and sent (it cannot be undone) and `hash` and `fee` (what
-    /// it pays) are set; `chain_tx` follows it. Names app only.
+    /// it pays) are set; `chain_tx` follows it. Names app only. Through logosctl, write
+    /// a text or key that is only digits, or `true`/`false`, as `str:2026`:
+    /// logosctl 0.3.2 sends it as a number or boolean otherwise, and the host refuses the
+    /// call ("dispatch_failed: expected string") before names runs.
     fn chain_inscribe(&mut self, from_key: String, text: String, send: bool) -> String;
 
     /// Any app: asks for `text` (a testimonial, 1-1024 bytes) to be inscribed on the
@@ -844,6 +847,8 @@ pub trait NamesModule: Send + 'static {
     /// it and pays its fee, and approves it in the Names app. No LEZ access is needed
     /// first: the request names no account. Answers as `request_status` does, kind
     /// `inscribe`; once done, `tx` is the transaction's hash and `account` the chain key.
+    /// Through logosctl, a text of only digits or `true`/`false` is written
+    /// `str:<text>` (see `chain_inscribe`).
     fn propose_inscription(&mut self, text: String) -> String;
 
     /// The inscription requests waiting for the person, oldest first: `[{id, app, text,
