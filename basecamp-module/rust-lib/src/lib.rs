@@ -5397,6 +5397,24 @@ mod tests {
         assert_eq!(up["value"]["public"]["balance"], "0", "{up}");
     }
 
+    /// first-call-no-result-field-slow-cli-exceeds-host-timeout: on a wallet behind the chain
+    /// the first cli_accounts / cli_balance ran the CLI past the host's 20 s call limit, so
+    /// the caller got METHOD_FAILED with no result. A call now waits a bounded time and is
+    /// told the read goes on; the next call takes its result.
+    #[test]
+    fn a_slow_balance_read_answers_within_the_call_and_the_next_call_takes_it() {
+        let tail = format!("case \"$*\" in\n*balance*) sleep 7; echo '  Private/{PRIVATE}  250  (default)' ;;\nesac");
+        let (mut names, dir) = with_wallet("balance-slow", &tail);
+        let started = std::time::Instant::now();
+        let first = parsed(&names.cli_balance());
+        assert!(started.elapsed() < std::time::Duration::from_secs(6), "answered within the call: {:?}", started.elapsed());
+        assert_eq!(first["error"], cli::STILL_READING, "{first}");
+        let second = parsed(&names.cli_balance());
+        assert!(started.elapsed() < std::time::Duration::from_secs(14), "one CLI run, not two: {:?}", started.elapsed());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(second["value"]["balance"], "250", "{second}");
+    }
+
     /// RV2: after set_sequencer the balance is read from the new network, not the last one's output.
     #[test]
     fn review_balance_is_read_again_after_the_sequencer_changes() {

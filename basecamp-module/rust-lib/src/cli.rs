@@ -1080,10 +1080,73 @@ fn account_entry(entry: &Value) -> Result<Value, String> {
     }))
 }
 
+/// How long a call waits for a slow read (the CLI catching the wallet up with the chain)
+/// before it answers that the read goes on: the host gives a call 20 s.
+#[cfg(not(test))]
+const CALL_WAIT: Duration = Duration::from_secs(12);
+#[cfg(test)]
+const CALL_WAIT: Duration = Duration::from_secs(5);
+/// How long a slow read's result, nobody having taken it, still answers the next call.
+const SLOW_RESULT_FRESH: Duration = Duration::from_secs(120);
+
+/// What a call that waited `CALL_WAIT` for a slow read answers.
+pub const STILL_READING: &str = "The wallet is still catching up with the chain; this answers in a moment. Try again shortly.";
+
+/// A slow read on its own thread: its result once it ends, and when.
+type SlowRead = std::sync::Arc<(Mutex<Option<(Instant, Result<String, String>)>>, std::sync::Condvar)>;
+
+/// The slow reads under way or ended and not yet taken, by wallet and command.
+static SLOW_READS: Mutex<std::collections::BTreeMap<String, SlowRead>> = Mutex::new(std::collections::BTreeMap::new());
+
+/// `run_text` for a read that may take longer than a call may wait (the first `names
+/// balance` or account list of a wallet behind the chain): it runs on its own thread, and
+/// a call waits at most `CALL_WAIT` for it; past that the call is told `STILL_READING`
+/// and the read goes on, its result kept for the next call (first-call-no-result-field-slow-cli-exceeds-host-timeout).
+fn run_text_bounded(setup: &Setup, command: Vec<String>, patience: Duration) -> Result<String, String> {
+    let key = format!("{}\u{0}{}\u{0}{}", setup.program.display(), setup.wallet.display(), command.join("\u{0}"));
+    let read = {
+        let mut reads = SLOW_READS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A result nobody took for long is no answer now.
+        let stale = reads.get(&key).is_some_and(|read| {
+            read.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().is_some_and(|(at, _)| at.elapsed() > SLOW_RESULT_FRESH)
+        });
+        if stale {
+            reads.remove(&key);
+        }
+        reads
+            .entry(key.clone())
+            .or_insert_with(|| {
+                let read: SlowRead = std::sync::Arc::new((Mutex::new(None), std::sync::Condvar::new()));
+                let (setup, command, slot) = (setup.clone(), command, read.clone());
+                std::thread::spawn(move || {
+                    let result = run_text(&setup, command, patience);
+                    *slot.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((Instant::now(), result));
+                    slot.1.notify_all();
+                });
+                read
+            })
+            .clone()
+    };
+    let (slot, ended) = &*read;
+    let guard = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut guard, _) = ended.wait_timeout_while(guard, CALL_WAIT, |result| result.is_none()).unwrap_or_else(std::sync::PoisonError::into_inner);
+    match guard.take() {
+        Some((_, result)) => {
+            drop(guard);
+            let mut reads = SLOW_READS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if reads.get(&key).is_some_and(|kept| std::sync::Arc::ptr_eq(kept, &read)) {
+                reads.remove(&key);
+            }
+            result
+        }
+        None => Err(STILL_READING.to_owned()),
+    }
+}
+
 /// `names module account-list`: every account of the wallet.
 pub fn run_account_list(setup: &Setup) -> Result<Value, String> {
     setup.wallet_ready()?;
-    let output = run_text(setup, vec!["module".to_owned(), "account-list".to_owned()], ACCOUNTS_PATIENCE)?;
+    let output = run_text_bounded(setup, vec!["module".to_owned(), "account-list".to_owned()], ACCOUNTS_PATIENCE)?;
     let list = answer(&output, "account list")?;
     let rows = list.as_array().ok_or("the names CLI's account list is not a list")?;
     Ok(Value::Array(rows.iter().map(account_entry).collect::<Result<_, _>>()?))
@@ -1550,7 +1613,7 @@ fn balance_output(setup: &Setup) -> Result<String, String> {
             return Ok(output.clone());
         }
     }
-    let output = run_text(setup, vec!["balance".to_owned()], BALANCE_PATIENCE)?;
+    let output = run_text_bounded(setup, vec!["balance".to_owned()], BALANCE_PATIENCE)?;
     // The October CLI prints 0 for every public account when the sequencer doesn't
     // answer, and exits 0: a 0 is believed only from a sequencer that answers
     // (october-cli-balance-zero-when-sequencer-down).
