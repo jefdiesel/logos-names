@@ -646,11 +646,9 @@ impl Client {
         println!("funded in block {block}");
         let mut defaults = load_defaults();
         defaults.anon = Some(name.clone());
-        if public && !defaults.then_public.contains(&name) {
-            defaults.then_public.push(name.clone());
-        }
         save_defaults(&defaults)?;
-        self.register(&name, account, 1, None, false, rpc).await?;
+        // Made public by the registration that asks for it, once registered, never queued.
+        self.register(&name, account, 1, None, false, public, rpc).await?;
         let mut defaults = load_defaults();
         if !defaults.names.contains(&name) {
             defaults.names.push(name.clone());

@@ -1307,6 +1307,9 @@ impl Client {
     /// Registers `name` with a first profile that holds the name and its receiving keys.
     /// Registers `name`: commit, wait, reveal. Without `wait` it returns `false` once
     /// the commitment is made, leaving the rest to a background `names register`.
+    /// `public` asks for the name to be made public once registered: it belongs to this
+    /// registration only, never queued for a later one (then-public-survives-refused-register).
+    #[allow(clippy::too_many_arguments)]
     async fn register(
         &mut self,
         name: &str,
@@ -1314,6 +1317,7 @@ impl Client {
         term: u8,
         now: Option<u64>,
         wait: bool,
+        public: bool,
         rpc: Option<&str>,
     ) -> Result<bool> {
         let Derived { id, key } = derive(name);
@@ -1374,7 +1378,6 @@ impl Client {
         // as it sends it.
         if resumed.is_none() {
             if self.is_private(owner) {
-                let public = defaults.then_public.iter().any(|queued| queued == name);
                 let steps = self.registration_steps(name, owner, fee, deposit, public).await?;
                 let job = if public { format!("registering {name}{NAME_SUFFIX} and making it public") } else { format!("registering {name}{NAME_SUFFIX}") };
                 self.plan_private(&job, &steps).await?;
@@ -1420,7 +1423,7 @@ impl Client {
         // Step 2: reveal, once the commitment is old enough.
         let ready = made.saturating_add(MIN_COMMIT_AGE_MS);
         if !wait {
-            let log = self.finish_in_background(name, owner, term, rpc)?;
+            let log = self.finish_in_background(name, owner, term, public, rpc)?;
             println!(
                 "{name}{NAME_SUFFIX} is committed; it finishes by itself in about {} minutes, from {}",
                 MIN_COMMIT_AGE_MS / 60_000 + 5,
@@ -1519,14 +1522,14 @@ impl Client {
     }
 
     /// Starts `names register <name> --wait` detached from this terminal, logging to
-    /// a file next to the wallet. It resumes the saved commitment.
-    fn finish_in_background(&self, name: &str, owner: AccountId, term: u8, rpc: Option<&str>) -> Result<PathBuf> {
+    /// a file next to the wallet. It resumes the saved commitment, and makes the name public
+    /// once registered when this registration asked for it (`public`).
+    fn finish_in_background(&self, name: &str, owner: AccountId, term: u8, public: bool, rpc: Option<&str>) -> Result<PathBuf> {
         let log = register_log(name)?;
         let file = std::fs::File::create(&log).with_context(|| format!("cannot write {}", log.display()))?;
-        let term = ["30d", "1y", "5y"][usize::from(term)];
         let mut command = std::process::Command::new(std::env::current_exe()?);
         command
-            .args(["register", name, "--owner", &owner.to_string(), "--term", term, "--wait"])
+            .args(finisher_args(name, owner, term, public))
             .env("LOGOS_NAMES_PROGRAM", self.program.to_string())
             .stdin(std::process::Stdio::null())
             .stdout(file.try_clone()?)
@@ -2911,6 +2914,45 @@ const REVEAL_CYCLES: u64 = 165_000;
 /// A profile change's or a hand-over's cycles (see [`call_cycles`]).
 const CHANGE_CYCLES: u64 = 65_590;
 
+/// The arguments of the background `names register` that finishes a registration: the same
+/// name, holder and term, `--public` only when this registration asked for it.
+fn finisher_args(name: &str, owner: AccountId, term: u8, public: bool) -> Vec<String> {
+    let term = ["30d", "1y", "5y"][usize::from(term)];
+    let mut args: Vec<String> = ["register", name, "--owner", &owner.to_string(), "--term", term, "--wait"].iter().map(|arg| (*arg).to_owned()).collect();
+    if public {
+        args.push("--public".to_owned());
+    }
+    args
+}
+
+impl Defaults {
+    /// `name` is registered to this wallet. Asked to be public (`public`), it is kept as
+    /// asked until it is (`names mine` says "not public yet"); registered without it, no
+    /// earlier request for it stays.
+    fn registered(&mut self, name: &str, public: bool) {
+        if !self.names.iter().any(|known| known == name) {
+            self.names.push(name.to_owned());
+        }
+        if public {
+            if !self.then_public.iter().any(|queued| queued == name) {
+                self.then_public.push(name.to_owned());
+            }
+        } else {
+            self.then_public.retain(|queued| queued != name);
+            self.public_failed.remove(name);
+        }
+    }
+
+    /// A registration of `name` was refused or failed: a request to make it public goes
+    /// with it, unless the name is this wallet's (then it stays for `names make-public`).
+    fn registration_failed(&mut self, name: &str) {
+        if !self.names.iter().any(|known| known == name) {
+            self.then_public.retain(|queued| queued != name);
+            self.public_failed.remove(name);
+        }
+    }
+}
+
 /// Who funds a name's gas when it is made public: its holder if it holds `PUBLIC_GAS_FUND`
 /// (`holds`), else the main private account (an anon's own account holds only its deposit).
 fn gas_payer(holder: AccountId, holds: u128, main: AccountId) -> AccountId {
@@ -3781,26 +3823,19 @@ async fn main() -> Result<()> {
                 Some(owner) => owner,
                 None => default_private()?,
             };
-            if public {
-                let mut defaults = load_defaults();
-                if !defaults.then_public.contains(&name) {
-                    defaults.then_public.push(name.clone());
-                    save_defaults(&defaults)?;
-                }
-            }
+            // `--public` belongs to this registration: nothing is queued for a later one, and a
+            // refusal or failure leaves no request behind (then-public-survives-refused-register).
             let finished = async {
-                if !client.register(&name, owner, term, now, wait, cli.rpc.as_deref()).await? {
+                if !client.register(&name, owner, term, now, wait, public, cli.rpc.as_deref()).await? {
                     return Ok(());
                 }
                 let mut defaults = load_defaults();
-                if !defaults.names.contains(&name) {
-                    defaults.names.push(name.clone());
-                }
+                defaults.registered(&name, public);
                 save_defaults(&defaults)?;
                 // Registered privately first, so nothing showed who registered it; now moved to a
-                // public account that a private transfer funds. The request stays queued until it
-                // is done, and a stop is kept for `names mine` (register-as-public-silently-stays-private).
-                if defaults.then_public.contains(&name) {
+                // public account that a private transfer funds. The request stays until it is
+                // done, and a stop is kept for `names mine` (register-as-public-silently-stays-private).
+                if public {
                     if let Err(error) = client.make_public(&name).await {
                         let why = format!("{error:#}").trim_end_matches('.').to_owned();
                         let mut defaults = load_defaults();
@@ -3814,6 +3849,11 @@ async fn main() -> Result<()> {
                 Ok::<(), anyhow::Error>(())
             }
             .await;
+            if finished.is_err() {
+                let mut defaults = load_defaults();
+                defaults.registration_failed(&name);
+                save_defaults(&defaults)?;
+            }
             // A registration finishing in the background is no longer running.
             if wait {
                 let mut defaults = load_defaults();
@@ -4577,6 +4617,47 @@ mod wallet_storage_tests {
 #[cfg(test)]
 mod job_ties_and_failed_reads {
     use super::*;
+    use clap::Parser as _;
+
+    /// then-public-survives-refused-register: a refused `names register vpubname --public`
+    /// left vpubname queued to be made public, so a later plain `names register vpubname`
+    /// would have been made public. The request now belongs to the registration that asks.
+    #[test]
+    fn a_request_to_make_a_name_public_goes_with_its_registration() {
+        let mut defaults = Defaults::default();
+        // Left queued by an older CLI's refused registration: a refusal clears it.
+        defaults.then_public.push("vpubname".to_owned());
+        defaults.registration_failed("vpubname");
+        assert!(defaults.then_public.is_empty());
+        // A plain registration is private, and clears any request left from before.
+        defaults.then_public.push("vpubname".to_owned());
+        defaults.public_failed.insert("vpubname".to_owned(), "stopped".to_owned());
+        defaults.registered("vpubname", false);
+        assert!(defaults.then_public.is_empty() && defaults.public_failed.is_empty());
+        assert_eq!(defaults.names, ["vpubname"]);
+        // Registered as asked to be public: kept until it is, for `names mine`; making it
+        // public stopping after the registration keeps it for `names make-public`.
+        defaults.registered("other", true);
+        defaults.public_failed.insert("other".to_owned(), "stopped".to_owned());
+        defaults.registration_failed("other");
+        assert_eq!(defaults.then_public, ["other"]);
+        assert!(defaults.public_failed.contains_key("other"));
+    }
+
+    /// The registration that finishes in the background makes the name public only when the
+    /// one that started it asked, by its own argument, never by a queue in names.json.
+    #[test]
+    fn the_background_finish_carries_its_own_request() {
+        let owner = AccountId::new([5; 32]);
+        let plain = finisher_args("vpubname", owner, 1, false);
+        assert_eq!(plain, ["register", "vpubname", "--owner", &owner.to_string(), "--term", "1y", "--wait"]);
+        let public = finisher_args("vpubname", owner, 2, true);
+        assert_eq!(public.last().map(String::as_str), Some("--public"));
+        assert_eq!(public[5], "5y");
+        // What the finisher is started with parses as the command it is.
+        let parsed = Cli::try_parse_from(std::iter::once("names".to_owned()).chain(public)).expect("parses");
+        assert!(matches!(parsed.command, Command::Register { public: true, wait: true, .. }));
+    }
 
     /// setup-unreachable-says-holds-0: with the sequencer unreachable, `names setup` said
     /// "holds 0; send it at least …" of an account holding 86,000,000.
