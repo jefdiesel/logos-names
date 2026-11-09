@@ -895,6 +895,8 @@ struct BoardRead {
     updating: bool,
     /// When the last read ended (only kept by `read_in_background`).
     fetched: Option<std::time::Instant>,
+    /// When `value` was read: how old a list kept through failed reads is.
+    read_at: Option<std::time::Instant>,
 }
 
 /// Where this module keeps what it remembers between runs.
@@ -1092,6 +1094,21 @@ fn payable_account(setup: &cli::Setup, to: &str) -> Result<(), String> {
     }
 }
 
+/// Refuses a job while the sequencer doesn't answer, before anything is made or started: a
+/// job that fails at its first read has already changed the wallet (`receive-privately`
+/// made a new private account each time:
+/// receive-privately-during-outage-leaves-orphan-private-accounts). The sequencer must say
+/// its last block and, for a job about a name, read the registry's record of it (a
+/// sequencer can do the first and fail account reads).
+fn chain_answers(setup: &cli::Setup, about: Option<(&registry::AccountId, &str)>) -> Result<(), String> {
+    let refused = |why: String| format!("{}. Nothing was started; try again when it answers.", why.trim().trim_end_matches(['.', ' ']));
+    registry::sequencer_reachable(&setup.sequencer).map_err(refused)?;
+    if let Some((program, name)) = about {
+        registry::name_readable(&setup.sequencer, program, name).map_err(refused)?;
+    }
+    Ok(())
+}
+
 /// Notes what `chain`'s accounts hold now, as read from `scope` (the sequencer, for LEZ),
 /// in the Wallet's history (arrivals).
 fn note_balances(chain: &str, scope: &str, balances: &[(String, u128)]) {
@@ -1106,6 +1123,38 @@ fn reply(outcome: Result<Value, String>) -> String {
         Err(error) => json!({ "success": false, "value": null, "error": error }),
     }
     .to_string()
+}
+
+/// `reply`, with `marks` (an object, or null for none) beside a success: what a read that
+/// is partial or stale says about itself, `{partial, unread, stale, as_of, warning}`, so it
+/// is never mistaken for a whole, fresh one.
+fn reply_marked(outcome: Result<(Value, Value), String>) -> String {
+    match outcome {
+        Ok((value, marks)) => merged(json!({ "success": true, "value": value, "error": null }), &marks).to_string(),
+        Err(error) => reply(Err(error)),
+    }
+}
+
+/// A span of time as a sentence says it: "40 s", "3 min", "2 h".
+fn age_text(ms: u64) -> String {
+    match ms / 1000 {
+        secs @ 0..=89 => format!("{} s", secs.max(1)),
+        secs @ 90..=5399 => format!("{} min", (secs + 30) / 60),
+        secs => format!("{} h", (secs + 1800) / 3600),
+    }
+}
+
+/// What a list kept from an earlier read says beside it while reading it again fails:
+/// `{stale, as_of, warning}` (cli-mine-stale-list-unmarked-during-outage).
+fn stale_marks(why: &str, age_ms: u64, what: &str) -> Value {
+    let why = why.trim().trim_end_matches(['.', ' ']);
+    let mut letters = why.chars();
+    let why = letters.next().map_or_else(String::new, |first| first.to_uppercase().chain(letters).collect());
+    json!({
+        "stale": true,
+        "as_of": now().saturating_sub(age_ms),
+        "warning": format!("{what} as read {} ago. {why}.", age_text(age_ms)),
+    })
 }
 
 /// Adds the fields of `extra`, when it is an object, to `value`.
@@ -1514,7 +1563,15 @@ impl Names {
 
     fn remember_mine(&self, key: &str, list: Value) {
         let mut reads = self.board_reads.lock().expect("the board reads lock");
-        reads.entry(key.to_owned()).or_default().value = Some(list);
+        let read = reads.entry(key.to_owned()).or_default();
+        read.value = Some(list);
+        read.read_at = Some(std::time::Instant::now());
+    }
+
+    /// How long ago the value kept under `key` was read, in ms (0 if never told).
+    fn read_age_ms(&self, key: &str) -> u64 {
+        let reads = self.board_reads.lock().expect("the board reads lock");
+        reads.get(key).and_then(|read| read.read_at).map_or(0, |at| u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX))
     }
 
     /// The CLI's names changed (a registration or transfer ended): the next
@@ -1566,6 +1623,7 @@ impl Names {
                         Ok(value) => {
                             read.value = Some(value);
                             read.error = None;
+                            read.read_at = Some(std::time::Instant::now());
                         }
                         Err(error) => read.error = Some(error),
                     }
@@ -1629,6 +1687,7 @@ impl Names {
         let setup = self.cli_setup()?;
         setup.wallet_ready()?;
         let command = build(&setup)?;
+        chain_answers(&setup, None)?;
         let jobs = self.jobs()?;
         let id = jobs.prepare(cli::WALLET_JOB)?;
         jobs.start(&setup, &id, cli::WALLET_JOB, kind, command, None)
@@ -1729,6 +1788,7 @@ impl Names {
             let name = registry::parse_name(typed)?;
             let setup = self.cli_setup()?;
             setup.wallet_ready()?;
+            chain_answers(&setup, self.program.as_ref().map(|program| (program, name.as_str())))?;
             let jobs = self.jobs()?;
             let id = jobs.prepare(&name)?;
             let (command, scratch, extra) = build(&jobs, &name, &id)?;
@@ -2552,19 +2612,21 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| {
+        reply_marked((|| {
             let setup = self.cli_setup()?;
             // The CLI reads every name it holds from the chain, which takes seconds:
             // answer with the last list and refresh it on its own thread.
             // Kept per wallet: another wallet holds other names.
             let key = format!("cli_mine:{}", setup.wallet.display());
             if self.mine_known(&key) {
-                let cached = self.board_read(key, move || cli::run_mine(&setup).map(Value::from));
-                return Ok(cached["posts"].clone());
+                let cached = self.board_read(key.clone(), move || cli::run_mine(&setup).map(Value::from));
+                // A refresh that failed leaves the last list, said to be from then.
+                let marks = cached["error"].as_str().map_or(Value::Null, |why| stale_marks(why, self.read_age_ms(&key), "Your names"));
+                return Ok((cached["posts"].clone(), marks));
             }
             let fresh = Value::from(cli::run_mine(&setup)?);
             self.remember_mine(&key, fresh.clone());
-            Ok(fresh)
+            Ok((fresh, Value::Null))
         })())
     }
 
@@ -2666,10 +2728,14 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| {
+        reply_marked((|| {
             let setup = self.cli_setup()?;
-            let balance = cli::run_balance(&setup)?;
-            if let Ok(rows) = cli::balances_now(&setup) {
+            setup.wallet_ready()?;
+            let read = cli::balance_read(&setup, std::time::Instant::now() + cli::CALL_BUDGET)?;
+            // Only a read in which the sequencer gave every balance moves the History: an
+            // unread balance is never a 0 (selective-degradation-cold-read-false-arrivals).
+            if read.complete() {
+                let rows = read.balances();
                 // What settled first, so a send between the wallet's own accounts is not
                 // also taken for money that arrived.
                 if let Some(dir) = config_dir() {
@@ -2677,7 +2743,7 @@ impl NamesModule for Names {
                 }
                 note_balances("lez", &setup.sequencer, &rows);
             }
-            Ok(balance)
+            Ok((read.reply(), read.marks()))
         })())
     }
 
@@ -3432,7 +3498,13 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| cli::run_accounts_any(&self.cli_setup()?))())
+        // Accounts whose balance the sequencer didn't give are listed with it null, and
+        // named beside the list (balance-accounts-zeroed-with-success-on-partial-failure).
+        reply_marked((|| {
+            let read = cli::run_accounts_any(&self.cli_setup()?)?;
+            let marks = read.marks();
+            Ok((Value::from(read.rows), marks))
+        })())
     }
 
     fn cli_account_new(&mut self, kind: String, label: String) -> String {
@@ -5167,14 +5239,52 @@ mod tests {
     #[test]
     fn names_are_not_taken_as_gone_when_the_sequencer_doesnt_answer() {
         let (mut names, dir) = with_fake_cli("mine-down", "echo 'jefdiesel  no longer held by this wallet'; echo 'anon-frost-frog  no longer held by this wallet'");
-        registry::SEQUENCER_DOWN.with(|down| down.set(true));
+        // The sequencer says its last block (the old check passed) but fails account reads.
+        names.sequencer = registry::stub_rpc(|request| if request["method"] == "getLastBlockId" { registry::rpc_ok(json!(7)) } else { (503, "upstream 503".into()) });
         let down = parsed(&names.cli_mine());
-        registry::SEQUENCER_DOWN.with(|down| down.set(false));
         assert_eq!(down["success"], false, "{down}");
-        assert!(down["error"].as_str().unwrap().contains("could not reach the sequencer"), "{down}");
-        // With the sequencer answering, the names really are gone.
+        let error = down["error"].as_str().unwrap();
+        assert!(error.contains("didn't give the record of jefdiesel, anon-frost-frog") && error.contains("HTTP 503"), "{down}");
+        // With the sequencer answering that neither has a record, they really are gone.
+        names.sequencer = registry::stub_rpc(|_| registry::rpc_ok(Value::Null));
         assert_eq!(parsed(&names.cli_mine())["value"], json!([]));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// cli-mine-empty-list-when-account-views-fail / cli-mine-stale-list-unmarked-during-outage:
+    /// once a list was read, a refresh that couldn't read the names replaced it with []
+    /// (the October CLI calls each "no longer held"), and during an outage the last list
+    /// came back as a plain success. Now the last list stays, said to be stale and why.
+    #[test]
+    fn a_refresh_that_cant_read_the_names_keeps_the_list_and_says_its_stale() {
+        let (mut names, dir) = with_fake_cli("mine-stale", "cat \"$(dirname \"$0\")/mine.txt\"");
+        std::fs::write(dir.join("mine.txt"), "jefdiesel  held by a deposit (no expiry)\nanon-frost-frog  held by a deposit (no expiry)\n").unwrap();
+        let healthy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let answers = healthy.clone();
+        names.sequencer = registry::stub_rpc(move |_| {
+            if answers.load(std::sync::atomic::Ordering::SeqCst) { registry::rpc_ok(Value::Null) } else { (503, "upstream 503".into()) }
+        });
+        let first = parsed(&names.cli_mine());
+        assert_eq!(first["value"].as_array().map(Vec::len), Some(2), "{first}");
+        assert_eq!(first["stale"], Value::Null, "{first}");
+        // The outage: the CLI calls both gone, the sequencer gives neither record.
+        healthy.store(false, std::sync::atomic::Ordering::SeqCst);
+        std::fs::write(dir.join("mine.txt"), "jefdiesel  no longer held by this wallet\nanon-frost-frog  no longer held by this wallet\n").unwrap();
+        let mut seen = parsed(&names.cli_mine());
+        for _ in 0..40 {
+            if seen["stale"] == true {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            seen = parsed(&names.cli_mine());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(seen["success"], true, "{seen}");
+        assert_eq!(seen["value"].as_array().map(Vec::len), Some(2), "the last list stays: {seen}");
+        assert_eq!(seen["stale"], true, "{seen}");
+        let warning = seen["warning"].as_str().unwrap();
+        assert!(warning.starts_with("Your names as read ") && warning.contains("HTTP 503"), "{warning}");
+        assert!(seen["as_of"].as_u64().is_some(), "{seen}");
     }
 
     #[test]
@@ -5383,15 +5493,194 @@ mod tests {
             "case \"$*\" in\n*balance*) echo '  Public/{PUBLIC}  0  (default)'; echo '  Public/{OTHER}  0'; echo '  Private/{PRIVATE}  250  (default)' ;;\nesac"
         );
         let (mut names, dir) = with_wallet("balance-down", &tail);
-        registry::SEQUENCER_DOWN.with(|down| down.set(true));
+        names.sequencer = "http://127.0.0.1:9/".into();
         let down = parsed(&names.cli_balance());
-        registry::SEQUENCER_DOWN.with(|down| down.set(false));
         assert_eq!(down["success"], false, "{down}");
         assert!(down["error"].as_str().unwrap().contains("could not reach the sequencer"), "{down}");
         // Answering, a 0 is a 0.
+        names.sequencer = registry::stub_rpc(|_| registry::rpc_ok(registry::view_holding(0)));
         let up = parsed(&names.cli_balance());
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(up["value"]["public"]["balance"], "0", "{up}");
+        assert_eq!(up["partial"], Value::Null, "{up}");
+    }
+
+    /// The October CLI's balance read with some account reads failing (a proxy answering
+    /// 503 to getAccountBalance, or one read in three), and getLastBlockId answering.
+    fn october_balance(label: &str, failing: &'static [&'static str]) -> (Names, std::path::PathBuf) {
+        let tail = format!(
+            "case \"$*\" in\n*balance*) echo 'public accounts (seen on chain):'; echo '  Public/{PUBLIC}  0  (default)'; echo '  Public/{OTHER}  0'; echo '  Private/{PRIVATE}  250  (default)'; echo 'private total: 250' ;;\nesac"
+        );
+        let (mut names, dir) = with_wallet(label, &tail);
+        names.sequencer = registry::stub_rpc(move |request| {
+            let account = registry::asked_account(request);
+            if failing.contains(&account.as_str()) {
+                (503, "upstream 503".into())
+            } else if account == PUBLIC {
+                registry::rpc_ok(registry::view_holding(39_733_291_875))
+            } else {
+                registry::rpc_ok(registry::view_holding(10_000_001))
+            }
+        });
+        (names, dir)
+    }
+
+    /// selective-degradation-cold-read-false-arrivals / balance-accounts-zeroed-with-success-on-partial-failure:
+    /// with getAccountBalance failing and getLastBlockId answering, the October CLI printed
+    /// the main public account (39,733,291,875) and 9W9h.. (10,000,001) as 0 and exited 0;
+    /// cli_balance said success with those 0s, and on a first read (no marks yet) the 0s
+    /// became marks, so the next good read logged both as money that arrived. Now each 0 is
+    /// read again: what the sequencer gives replaces it, what it doesn't is unknown and
+    /// named, and a read with an unknown balance moves no mark.
+    #[test]
+    fn an_unread_balance_is_never_a_zero_and_moves_no_mark() {
+        let (mut names, dir) = october_balance("balance-partial", &[PUBLIC]);
+        let marks = config_dir().unwrap().join("activity-balances.json");
+        let _ = std::fs::remove_file(&marks);
+        let partial = parsed(&names.cli_balance());
+        assert_eq!(partial["success"], true, "{partial}");
+        assert_eq!(partial["partial"], true, "{partial}");
+        assert_eq!(partial["unread"], json!([format!("Public/{PUBLIC}")]), "{partial}");
+        assert_eq!(partial["value"]["public"]["balance"], Value::Null, "the main account is unknown, not 0: {partial}");
+        let other = partial["value"]["accounts"].as_array().unwrap().iter().find(|row| row["account"] == format!("Public/{OTHER}")).cloned();
+        assert_eq!(other.unwrap()["balance"], "10000001", "the CLI's 0 is replaced by what the sequencer says: {partial}");
+        let warning = partial["warning"].as_str().unwrap();
+        assert!(warning.contains("Public/CCVd…pKnk") && warning.contains("HTTP 503") && warning.contains("unknown"), "{warning}");
+        assert!(!marks.exists(), "a partial read wrote balance marks");
+        // The sequencer is back: the first whole read sets the marks, and nothing arrived.
+        cli::forget_balance();
+        let (back, back_dir) = october_balance("balance-partial-back", &[]);
+        names.sequencer = back.sequencer.clone();
+        let _ = std::fs::remove_dir_all(back_dir);
+        let whole = parsed(&names.cli_balance());
+        assert_eq!(whole["value"]["public"]["balance"], "39733291875", "{whole}");
+        assert_eq!(whole["partial"], Value::Null, "{whole}");
+        let history = activity::all(&config_dir().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(marks.exists(), "a whole read sets the marks");
+        assert!(!history.iter().any(|entry| entry["kind"] == "arrived"), "no money arrived: {history:?}");
+    }
+
+    /// Every public balance unread is no reading: the call fails and says why.
+    #[test]
+    fn a_balance_read_with_no_public_balance_is_a_failure() {
+        let (mut names, dir) = october_balance("balance-none", &[PUBLIC, OTHER]);
+        let failed = parsed(&names.cli_balance());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(failed["success"], false, "{failed}");
+        assert!(failed["error"].as_str().unwrap().contains("HTTP 503"), "{failed}");
+    }
+
+    /// The 0.4 CLI says `unknown` for a balance it couldn't read and exits 1: the rest of
+    /// its read still answers, the unknown named.
+    #[test]
+    fn a_cli_that_says_unknown_gives_a_partial_read() {
+        let tail = format!(
+            "case \"$*\" in\n*balance*) echo '  Public/{PUBLIC}  unknown  (default)'; echo '  Public/{OTHER}  7'; echo '  Private/{PRIVATE}  250  (default)'; echo 'Error: the sequencer didn'\"'\"'t answer, so 1 public balance(s) are unknown; try again when it is reachable' >&2; exit 1 ;;\nesac"
+        );
+        let (mut names, dir) = with_wallet("balance-unknown", &tail);
+        let partial = parsed(&names.cli_balance());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(partial["success"], true, "{partial}");
+        assert_eq!(partial["unread"], json!([format!("Public/{PUBLIC}")]), "{partial}");
+        assert_eq!(partial["value"]["balance"], "250", "{partial}");
+    }
+
+    /// balance-accounts-zeroed-with-success-on-partial-failure, for cli_accounts: an account
+    /// the CLI couldn't read (null) is named beside the list, never a plain success.
+    #[test]
+    fn accounts_the_sequencer_didnt_give_are_named() {
+        let list = format!(
+            r#"[{{"account":"Public/{PUBLIC}","kind":"public","label":null,"balance":null,"default":true,"public_key":null,"npk":null}},{{"account":"Public/{OTHER}","kind":"public","label":null,"balance":"5","default":false,"public_key":null,"npk":null}}]"#
+        );
+        let (mut names, dir) = with_wallet("accounts-partial", &format!("case \"$*\" in\n*account-list*) echo '{list}' ;;\nesac"));
+        let read = parsed(&names.cli_accounts());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(read["success"], true, "{read}");
+        assert_eq!(read["partial"], true, "{read}");
+        assert_eq!(read["unread"], json!([format!("Public/{PUBLIC}")]), "{read}");
+        assert_eq!(read["value"][0]["balance"], Value::Null, "{read}");
+    }
+
+    /// still-reading-message-wrong-for-a-hung-sequencer: with the sequencer accepting and
+    /// never answering, a read past the call's wait was "still catching up with the chain;
+    /// this answers in a moment", which never came. It now says the sequencer doesn't
+    /// answer, and the read is stopped rather than left hanging.
+    #[test]
+    fn a_read_held_by_a_sequencer_that_doesnt_answer_says_so_and_stops() {
+        let tail = format!("case \"$*\" in\n*balance*) sleep 8; touch \"$(dirname \"$0\")/finished\"; echo '  Private/{PRIVATE}  250  (default)' ;;\nesac");
+        let (mut names, dir) = with_wallet("balance-hung", &tail);
+        registry::SEQUENCER_DOWN.with(|down| down.set(true));
+        let started = std::time::Instant::now();
+        let first = parsed(&names.cli_balance());
+        registry::SEQUENCER_DOWN.with(|down| down.set(false));
+        assert!(started.elapsed() < std::time::Duration::from_secs(7), "{:?}", started.elapsed());
+        assert_eq!(first["success"], false, "{first}");
+        let error = first["error"].as_str().unwrap();
+        assert!(error.contains("could not reach the sequencer") && !error.contains("catching up"), "{error}");
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        let finished = dir.join("finished").exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!finished, "the read was left running");
+    }
+
+    /// slow-read-error-survives-recovery: a read that failed while the sequencer was slow
+    /// was kept and given, in 0.2 s, to the first call after it came back. A failed read is
+    /// never kept: the next call reads afresh.
+    #[test]
+    fn a_failed_slow_read_is_not_the_next_calls_answer() {
+        let tail = format!(
+            "case \"$*\" in\n*balance*) if [ -e \"$(dirname \"$0\")/slow\" ]; then sleep 6; echo 'Error: the names CLI took more than 90 s' >&2; exit 1; fi; echo '  Private/{PRIVATE}  250  (default)' ;;\nesac"
+        );
+        let (mut names, dir) = with_wallet("balance-recover", &tail);
+        std::fs::write(dir.join("slow"), "").unwrap();
+        let first = parsed(&names.cli_balance());
+        assert_eq!(first["error"], cli::STILL_READING, "{first}");
+        // The read fails meanwhile; the sequencer is back.
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        std::fs::remove_file(dir.join("slow")).unwrap();
+        let second = parsed(&names.cli_balance());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(second["success"], true, "the old failure was served: {second}");
+        assert_eq!(second["value"]["balance"], "250", "{second}");
+    }
+
+    /// receive-privately-during-outage-leaves-orphan-private-accounts: with the sequencer
+    /// down, each cli_receive_privately started a job whose CLI made a new private account
+    /// before it failed. A job is now refused before anything starts.
+    #[test]
+    fn no_job_starts_while_the_sequencer_doesnt_answer() {
+        let (mut names, dir) = with_wallet("job-down", &format!("touch \"$(dirname \"$0\")/ran\""));
+        registry::SEQUENCER_DOWN.with(|down| down.set(true));
+        let refused = parsed(&names.cli_receive_privately("jefdiesel".into()));
+        let paid = parsed(&names.cli_set_text("jefdiesel".into(), "chat".into(), "x".into()));
+        registry::SEQUENCER_DOWN.with(|down| down.set(false));
+        let ran = dir.join("ran").exists();
+        let jobs = std::fs::read_dir(dir.join("jobs")).map_or(0, |entries| entries.count());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(refused["success"], false, "{refused}");
+        let error = refused["error"].as_str().unwrap();
+        assert!(error.contains("could not reach the sequencer") && error.contains("Nothing was started"), "{error}");
+        assert_eq!(paid["success"], false, "{paid}");
+        assert!(!ran, "the CLI ran");
+        assert_eq!(jobs, 0, "a job was made");
+    }
+
+    /// resolve-slow-sequencer-exceeds-host-timeout-no-result: a resolve on a sequencer that
+    /// takes long answers inside the call, with a result field, saying it was slow.
+    #[test]
+    fn a_resolve_on_a_slow_sequencer_answers_within_the_call() {
+        let mut names = fresh();
+        names.program = Some([7; 32]);
+        names.sequencer = registry::stub_rpc(|_| {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            registry::rpc_ok(Value::Null)
+        });
+        let started = std::time::Instant::now();
+        let slow = parsed(&names.resolve("slowpoke".into()));
+        assert!(started.elapsed() < registry::READ_BUDGET + std::time::Duration::from_secs(1), "{:?}", started.elapsed());
+        assert_eq!(slow["success"], false, "{slow}");
+        assert!(slow["error"].as_str().unwrap().contains("didn't answer within"), "{slow}");
     }
 
     /// first-call-no-result-field-slow-cli-exceeds-host-timeout: on a wallet behind the chain
