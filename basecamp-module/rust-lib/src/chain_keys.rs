@@ -322,9 +322,36 @@ pub fn records_path(dir: &Path) -> PathBuf {
     dir.join("chain-accounts.json")
 }
 
-/// The module's records of accounts (`{key: {title?, label, at?}}`); empty if none.
-pub fn records() -> Map<String, Value> {
-    crate::config_dir().map(|dir| crate::activity::load(&records_path(&dir))).unwrap_or_default()
+/// Drops the records of accounts made here whose key the node's `keystore` no longer
+/// holds (taken out outside the Names app); labels on other keys stay. Whether any went.
+pub fn prune(records: &mut Map<String, Value>, keystore: &Keystore) -> bool {
+    let before = records.len();
+    records.retain(|key, record| record.get("title").is_none() || keystore.find(key).is_some());
+    records.len() != before
+}
+
+/// Checks `records` against the node's keystore when one made here is for a key the
+/// running node doesn't list: a key it takes at its next start is in the keystore, a key
+/// taken out of it isn't, and would otherwise be shown as "from its next start" forever.
+/// Those are dropped (`prune`). Nothing is dropped unless exactly one keystore holding
+/// every listed key is found. Whether any went.
+pub fn check(ask: &mut Ask, candidates: &[NodeFiles], known: &[String], records: &mut Map<String, Value>) -> bool {
+    let unlisted = records.iter().any(|(key, record)| record.get("title").is_some() && !known.contains(key));
+    unlisted && the_nodes(ask, candidates, known).is_ok_and(|(_, keystore)| prune(records, &keystore))
+}
+
+/// The module's records of accounts (`{key: {title?, label, at?, hidden?}}`), checked
+/// against Basecamp's node's keystore (`check`, saved when it dropped any); empty if none.
+pub fn records(known: &[String]) -> Map<String, Value> {
+    let Some(dir) = crate::config_dir() else { return Map::new() };
+    let path = records_path(&dir);
+    let mut records = crate::activity::load(&path);
+    let args: Vec<String> = std::env::args().collect();
+    let mut ask = |method: &str, args: Value| crate::node::call(method, args, crate::node::QUICK);
+    if check(&mut ask, &node_files(&args), known, &mut records) {
+        crate::save_object(&path, &records);
+    }
+    records
 }
 
 /// Runs `edit` against Basecamp's node (its keystore found from this process's
@@ -626,6 +653,39 @@ mod tests {
         let made = make(&mut |m, a| node.ask(m, a), &two, &mut records, "", 1).unwrap();
         assert_eq!(made["key"], NEW);
         assert_eq!(node.asked[3].1, json!(["/data/blockchain_module/84156c14d2d2/keystore.yaml", "zk", "names-1"]));
+    }
+
+    /// adv2 D4: names-3 (Ext) was taken out with the node's remove_key and the node
+    /// restarted; chain_accounts still showed it as "your node uses it from its next
+    /// start". A record whose key the node's keystore no longer holds is dropped.
+    #[test]
+    fn a_key_gone_from_the_keystore_is_not_shown_for_the_next_start() {
+        let ext = "e3".repeat(32);
+        let mut records = Map::new();
+        records.insert(NEW.into(), json!({ "title": "names-1", "label": "Later", "at": 1 }));
+        records.insert(ext.clone(), json!({ "title": "names-3", "label": "Ext", "at": 2 }));
+        records.insert(A.into(), json!({ "label": "Main" }));
+        // The node lists neither; the keystore holds NEW (taken at the next start), not ext.
+        let mut node = Node::new(&[("read_accounts", Ok(read(&[("names-1", NEW)])))]);
+        assert!(check(&mut |m, a| node.ask(m, a), &files(), &[A.into(), B.into(), LF.into()], &mut records));
+        assert_eq!(records.keys().cloned().collect::<Vec<_>>(), {
+            let mut keys = vec![A.to_owned(), NEW.to_owned()];
+            keys.sort();
+            keys
+        });
+        let shown = annotate(json!([{ "key": A, "balance": "5" }]), &[A.into(), B.into(), LF.into()], &records);
+        assert_eq!(shown, json!([
+            { "key": A, "balance": "5", "label": "Main", "ready": true },
+            { "key": NEW, "balance": null, "title": "names-1", "label": "Later", "ready": false },
+        ]));
+        // Every record listed by the node: the keystore isn't read.
+        let mut node = Node::new(&[]);
+        assert!(!check(&mut |m, a| node.ask(m, a), &files(), &[A.into(), NEW.into()], &mut records));
+        assert!(node.asked.is_empty());
+        // No single keystore of the node's found: nothing dropped.
+        let mut node = Node::new(&[("read_accounts", Ok(read(&[])))]);
+        assert!(!check(&mut |m, a| node.ask(m, a), &files(), &[A.into(), "cd".repeat(32)], &mut records));
+        assert!(records.contains_key(NEW));
     }
 
     #[test]

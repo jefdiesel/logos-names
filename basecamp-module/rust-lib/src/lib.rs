@@ -3532,7 +3532,7 @@ impl NamesModule for Names {
                     .collect::<Vec<_>>(),
             ))
             // Labels, and the accounts made here (no notes yet, or not used before the node restarts).
-            .map(|rows| chain_keys::annotate(rows, &known, &chain_keys::records()))
+            .map(|rows| chain_keys::annotate(rows, &known, &chain_keys::records(&known)))
             .inspect(|rows| {
                 let held: Vec<(String, u128)> = rows
                     .as_array()
