@@ -35,6 +35,7 @@
 mod activity;
 mod avatar;
 mod chain;
+mod chain_keys;
 mod changes;
 mod cli;
 mod page_view;
@@ -660,8 +661,13 @@ pub trait NamesModule: Send + 'static {
     /// last final block's slot, `mode` the node's (`Online` once synced).
     fn chain_status(&mut self) -> String;
 
-    /// The keys the node's wallet holds: `[{key, balance}]`, `balance`
-    /// decimal text or null if it couldn't be read.
+    /// The keys the node's wallet holds: `[{key, balance, label?, title?,
+    /// ready?}]`, `balance` decimal text or null if it couldn't be read.
+    /// `label` is the one given with `chain_account_label`/`_new`; an account
+    /// made with `chain_account_new` also has its keystore `title` and `ready`
+    /// (false, balance null, until the node uses it from its next start). A
+    /// hidden account (`chain_account_remove`) is left out while the node shows
+    /// it holding nothing.
     fn chain_accounts(&mut self) -> String;
 
     /// Stake: `{staked, notes, keys, epoch, next_epoch_in_s, claimable,
@@ -722,6 +728,24 @@ pub trait NamesModule: Send + 'static {
     /// undone) and `sent`, `hash` are set; `chain_tx` follows it. LEZ credits it
     /// once the block holding it is final.
     fn chain_bridge(&mut self, from_key: String, to: String, amount: String, send: bool) -> String;
+
+    /// Makes a new account on the node: a key in its keystore, labelled
+    /// `label` (at most 40 characters; empty for none): `{key, title, label,
+    /// ready, note}`. The node uses it from its next start (`ready` false
+    /// until then; `note` says so). Its secret stays in the node's keystore.
+    fn chain_account_new(&mut self, label: String) -> String;
+
+    /// Labels the node key `key` (empty takes the label off): `{key, label}`.
+    /// Labels are kept by this module, and shown by `chain_accounts`.
+    fn chain_account_label(&mut self, key: String, label: String) -> String;
+
+    /// Hides an account made with `chain_account_new` once the node uses it
+    /// and it holds nothing: `{key, title, hidden, note}`. Its key stays in the
+    /// node's keystore (the node can't say what is on its way to a key, so no
+    /// secret is deleted), and it is listed again once the node shows it
+    /// holding anything (what reached it before the node used it isn't seen).
+    /// Refused for any other key, and for one holding anything.
+    fn chain_account_remove(&mut self, key: String) -> String;
 
     // ── Wallet Provider SDK: for any app (docs/wallet/PROVIDER-SDK.md) ──
     //
@@ -3501,6 +3525,7 @@ impl NamesModule for Names {
         reply((|| {
             let keys = node::call("wallet_get_known_addresses", json!([]), node::QUICK)?;
             let keys: Vec<String> = keys.as_array().map(|k| k.iter().filter_map(|k| k.as_str().and_then(chain::parse_key)).collect()).unwrap_or_default();
+            let known = keys.clone();
             // The node lists some keys its wallet can't spend from; those are left out.
             Ok(Value::from(
                 keys.into_iter()
@@ -3512,6 +3537,8 @@ impl NamesModule for Names {
                     })
                     .collect::<Vec<_>>(),
             ))
+            // Labels, and the accounts made here (no notes yet, or not used before the node restarts).
+            .map(|rows| chain_keys::annotate(rows, &known, &chain_keys::records(&known)))
             .inspect(|rows| {
                 let held: Vec<(String, u128)> = rows
                     .as_array()
@@ -3855,6 +3882,27 @@ impl NamesModule for Names {
             let fee = stored.as_ref().and_then(|tx| chain::transfer_fee(tx, &before));
             Ok(chain::claim_result(hash, &vouchers, fee))
         })())
+    }
+
+    fn chain_account_new(&mut self, label: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(chain_keys::with_node(|ask, files, records| chain_keys::make(ask, files, records, &label, now())))
+    }
+
+    fn chain_account_label(&mut self, key: String, label: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(chain_keys::with_node(|ask, _, records| chain_keys::relabel(ask, records, &key, &label)))
+    }
+
+    fn chain_account_remove(&mut self, key: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(chain_keys::with_node(|ask, _, records| chain_keys::remove(ask, records, &key)))
     }
 
     // ── Wallet Provider SDK ─────────────────────────────────────────────
@@ -6791,5 +6839,39 @@ mod tests {
         assert_eq!(parsed(&bad.cli_fee())["success"], false);
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(other);
+    }
+
+    /// LP-0022 accounts: the new methods are the Names app's alone, a new account is
+    /// listed (with its label) before the node uses it, and without the node's keystore
+    /// beside the module's data nothing is made.
+    #[test]
+    fn chain_accounts_are_the_names_apps_and_list_the_ones_made_here() {
+        let mut names = fresh();
+        let dir = config_dir().unwrap();
+        let _ = std::fs::remove_file(chain_keys::records_path(&dir));
+        as_caller(logos_rust_sdk::LogosCaller::Module { name: "evil_ui".into(), instance: None });
+        for refused in [names.chain_account_new("x".into()), names.chain_account_label(NODE_KEY.into(), "x".into()), names.chain_account_remove(NODE_KEY.into())] {
+            assert!(parsed(&refused)["error"].as_str().unwrap().contains("only the Names app"), "{refused}");
+        }
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert!(node_asked().is_empty(), "nothing was asked for the other app");
+        node_answers("wallet_get_known_addresses", json!([NODE_KEY]));
+        node_answers("wallet_get_balance", json!("7"));
+        // The test process has no --instance-persistence-path: no keystore, nothing made.
+        assert_eq!(parsed(&names.chain_account_new("Savings".into()))["error"], chain_keys::NO_KEYSTORE);
+        assert!(!node_asked().contains(&"generate_key".to_owned()));
+        let made = "ab".repeat(32);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(chain_keys::records_path(&dir), json!({ made.clone(): { "title": "names-1", "label": "Savings", "at": 1 } }).to_string()).unwrap();
+        let labelled = parsed(&names.chain_account_label(NODE_KEY.into(), "Main".into()));
+        assert_eq!(labelled["value"], json!({ "key": NODE_KEY, "label": "Main" }), "{labelled}");
+        let shown = parsed(&names.chain_accounts());
+        assert_eq!(shown["value"], json!([
+            { "key": NODE_KEY, "balance": "7", "label": "Main", "ready": true },
+            { "key": made, "balance": null, "title": "names-1", "label": "Savings", "ready": false },
+        ]), "{shown}");
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(chain_keys::records_path(&dir)).unwrap().permissions().mode() & 0o777, 0o600);
+        let _ = std::fs::remove_file(chain_keys::records_path(&dir));
     }
 }

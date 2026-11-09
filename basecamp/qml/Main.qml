@@ -554,6 +554,9 @@ Item {
 
     property var chainStatus: null       // chain_status, or null
     property var chainAccounts: null     // chain_accounts: [{key, balance}]; null until read
+    // The keys the node uses now: an account made since it started can't send, and what
+    // reaches it before the node uses it isn't seen, so it isn't offered to pay or receive.
+    readonly property var chainUsable: Logic.chainUsable(chainAccounts)
     property var chainStake: null        // chain_stake, or null
     property string chainError: ""       // why the node couldn't be read
     property bool chainReading: false
@@ -565,6 +568,28 @@ Item {
     property var chainSent: null         // the last send: {hash, amount, to, name, state, fee}
     property double chainSentAt: 0
     property string chainClaimed: ""     // the last claim's transaction, "" if none
+    property string chainAccountNote: "" // what the last New account did, or why it couldn't
+    property bool chainAccountNoteIsError: false
+
+    /// Makes a new account on the node (chain_account_new), labelled `label`, and reads the keys again.
+    function chainAccountNew(label) {
+        if (chainBusy)
+            return
+        chainBusy = true
+        chainAccountNote = ""
+        askLater("chain_account_new", [String(label || "").trim()], function(value) {
+            chainBusy = false
+            chainAccountNoteIsError = false
+            chainAccountNote = "Made " + (value.label ? value.label + " (" + Logic.keyShown(value.key) + ")" : "account " + Logic.keyShown(value.key)) + "."
+                + (value.note ? " " + value.note : "")
+            // Read the keys again now, even while a fuller read (loadChain) is on its way.
+            askLater("chain_accounts", [], function(keys) { chainAccounts = keys }, function(message) { console.log("names_ui: accounts:", message) }, 30000)
+        }, function(message) {
+            chainBusy = false
+            chainAccountNoteIsError = true
+            chainAccountNote = sentence(message)
+        }, 30000)
+    }
 
     /// Opens Blockchain and reads the node.
     function openChain() {
@@ -589,8 +614,9 @@ Item {
             chainError = ""
             askLater("chain_accounts", [], function(keys) {
                 chainAccounts = keys
-                if (chainFrom === "" && keys.length > 0)
-                    chainFrom = keys[0].key
+                var usable = Logic.chainUsable(keys)
+                if (chainFrom === "" && usable.length > 0)
+                    chainFrom = usable[0].key
                 askLater("chain_stake", [], function(stake) {
                     chainStake = stake
                     chainReading = false
@@ -785,6 +811,8 @@ Item {
     /// Whether Send works for `row`, and if not why: {enabled, reason, switchFirst}.
     function sendState(row) {
         if (!row)
+            return { enabled: false, reason: "", switchFirst: false }
+        if (row.later)   // a Logos Blockchain account the node takes at its next start: the note says why
             return { enabled: false, reason: "", switchFirst: false }
         if (row.balance === null || row.balance === undefined)
             return { enabled: false, reason: "Its balance isn't known yet.", switchFirst: false }
@@ -1128,7 +1156,7 @@ Item {
         bridgeSent = false
         bridgeHash = ""
         // The key it was opened from, else the one used last, else the node's first.
-        bridgeFromKey = fromKey ? fromKey : bridgeKey !== "" ? bridgeKey : chainAccounts !== null && chainAccounts.length > 0 ? chainAccounts[0].key : ""
+        bridgeFromKey = fromKey ? fromKey : bridgeKey !== "" ? bridgeKey : chainUsable !== null && chainUsable.length > 0 ? chainUsable[0].key : ""
         bridgeFromLez = ""
         bridgeTo = ""
         bridgeToPrivate = false
@@ -1224,7 +1252,7 @@ Item {
 
     /// The node key the bridge sends from: the one picked, if the node holds it, else its first.
     readonly property string bridgeFrom: {
-        var keys = (chainAccounts || []).map(function(entry) { return entry.key })
+        var keys = (chainUsable || []).map(function(entry) { return entry.key })
         return keys.indexOf(bridgeFromKey) >= 0 ? bridgeFromKey : keys.length > 0 ? keys[0] : ""
     }
 
@@ -5371,6 +5399,27 @@ Item {
                                         }
                                     }
                                 }
+                                // The Logos Blockchain: a new account (a key on the node), with a label.
+                                ColumnLayout {
+                                    visible: groupCard.open && groupCard.modelData.id === "chain" && groupCard.modelData.tone !== "alarm"
+                                    Layout.fillWidth: true
+                                    Layout.leftMargin: root.px(30)
+                                    Layout.rightMargin: root.px(18)
+                                    Layout.topMargin: root.px(8)
+                                    Layout.bottomMargin: root.px(14)
+                                    spacing: 8
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 10
+                                        Field { id: chainNewLabel; Layout.fillWidth: true; size: 15; hint: "Label (optional), such as Savings"; onAccepted: root.chainAccountNew(chainNewLabel.text) }
+                                        Action {
+                                            label: root.chainBusy ? "Making…" : "New account"
+                                            enabledNow: !root.chainBusy
+                                            onPressed: root.chainAccountNew(chainNewLabel.text)
+                                        }
+                                    }
+                                    Hint { visible: root.chainAccountNote !== ""; font.pixelSize: root.px(15); color: root.chainAccountNoteIsError ? root.alarm : root.dim; textFormat: Text.PlainText; text: root.chainAccountNote }
+                                }
                             }
                         }
                     }
@@ -5575,7 +5624,7 @@ Item {
                     }
 
                     Repeater {
-                        model: root.receiveKind === "chain" && root.chainAccounts !== null ? root.chainAccounts : []
+                        model: root.receiveKind === "chain" && root.chainUsable !== null ? root.chainUsable : []
                         Card {
                             id: keyCard
                             required property var modelData
@@ -6030,7 +6079,8 @@ Item {
                         }
                     }
                     Fact {
-                        visible: accountPage.row !== null && accountPage.row.address !== undefined && accountPage.row.address !== ""
+                        // Not for an account the node takes at its next start: what reaches it before then isn't seen.
+                        visible: accountPage.row !== null && accountPage.row.address !== undefined && accountPage.row.address !== "" && !accountPage.row.later
                         label: "Address"
                         code: true
                         value: accountPage.row ? (accountPage.row.address.length > 50 ? Logic.keyShown(accountPage.row.address) : accountPage.row.address) : ""
@@ -6046,9 +6096,9 @@ Item {
                             enabledNow: accountPage.send.enabled && !root.accountsBusy
                             onPressed: root.sendFrom(accountPage.row)
                         }
-                        Action { label: "Receive"; onPressed: root.openReceive(accountPage.row) }
+                        Action { visible: accountPage.row !== null && !accountPage.row.later; label: "Receive"; onPressed: root.openReceive(accountPage.row) }
                         Action {
-                            visible: accountPage.row !== null && (accountPage.row.kind === "chain" || accountPage.row.kind === "lez")
+                            visible: accountPage.row !== null && (accountPage.row.kind === "chain" || accountPage.row.kind === "lez") && !accountPage.row.later
                             label: "Bridge"
                             onPressed: accountPage.row.kind === "chain" ? root.openGetTokens(accountPage.row.key) : root.openBridgeFromLez(root.rowAccount(accountPage.row))
                         }
@@ -6072,6 +6122,7 @@ Item {
                         }
                     }
                     Hint { visible: accountPage.send.reason !== ""; font.pixelSize: root.px(14); text: accountPage.send.reason }
+                    Hint { visible: accountPage.row !== null && !!accountPage.row.later; font.pixelSize: root.px(14); text: Logic.chainLaterNote() }
                     Hint { visible: accountPage.send.switchFirst; font.pixelSize: root.px(14); text: "Send makes this the account payments come from, then opens the form." }
                     Hint { visible: root.accountsError !== ""; color: root.alarm; font.pixelSize: root.px(14); text: root.accountsError }
                     Part { text: "History" }
@@ -6123,7 +6174,7 @@ Item {
                         Layout.leftMargin: root.px(14)
                         spacing: 4
                         Repeater {
-                            model: root.chainAccounts || []
+                            model: root.chainUsable || []
                             PickRow {
                                 required property var modelData
                                 title: "Logos Blockchain"

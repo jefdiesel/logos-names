@@ -315,16 +315,44 @@ export function walletGroups(cliBalance, accounts, holdings, watched, tokenNames
 
     if (chainAccounts || chainDown) {
         var keys = (chainAccounts || []).map(function(a) {
-            return { id: "chain-" + a.key, kind: "chain", title: "Node key", sub: "Public · " + keyShown(a.key), address: a.key,
-                     balance: a.balance === null || a.balance === undefined ? null : String(a.balance), fromPrivate: false, definition: "", key: a.key, canSend: true, account: "" }
+            return { id: "chain-" + a.key, kind: "chain", title: chainKeyTitle(a), sub: chainKeySub(a), address: a.key,
+                     balance: a.balance === null || a.balance === undefined ? null : String(a.balance), fromPrivate: false, definition: "", key: a.key, canSend: a.ready !== false,
+                     later: a.ready === false, account: "" }
         })
+        var later = keys.filter(function(r) { return !r.canSend }).length
         var total = chainAccounts ? keys.reduce(function(sum, r) { return sum === null || r.balance === null ? sum : addDigits(sum, r.balance) }, "0") : null
         var waiting = stake && total !== null ? subDigits(total, stake.staked) : null
         var note = chainDown ? "Node not running" : (keys.length === 1 ? "1 key on your node" : keys.length + " keys on your node")
+            + (later === 0 ? "" : " · " + later + " from its next start")
             + (stake === null || stake === undefined || total === null ? "" : waiting === "0" ? " · all staked" : waiting !== null ? " · " + grouped(waiting) + " not counted yet" : " · " + grouped(stake.staked) + " staked")
         groups.push({ id: "chain", title: "Logos Blockchain", letter: "B", total: total, note: note, tone: chainDown ? "alarm" : stake ? "stake" : "plain", rows: keys })
     }
     return groups
+}
+
+/// A Logos Blockchain account's title: its label, else what it is.
+/// `a` is a chain_accounts row ({key, balance, label?, title?, ready?}).
+export function chainKeyTitle(a) {
+    var label = String(a && a.label ? a.label : "").trim()
+    return label !== "" ? label : a && a.title ? "Account" : "Node key"
+}
+
+/// A Logos Blockchain account's second line: the key, and when the node uses it.
+export function chainKeySub(a) {
+    return "Public · " + keyShown(a.key) + (a.ready === false ? " · your node uses it from its next start" : "")
+}
+
+/// Why an account the node takes at its next start offers no address, Receive or Bridge yet.
+export function chainLaterNote() {
+    return "Your node uses this account from its next start: stop and start it in Basecamp's Blockchain app. "
+        + "Until then it can't send, and don't have anything sent to it: what reaches it before your node uses it isn't seen. "
+        + "Its address, Receive and Bridge show here once your node uses it."
+}
+
+/// The chain_accounts rows the node uses now (not one it takes at its next start), or
+/// null while they haven't been read.
+export function chainUsable(chainAccounts) {
+    return chainAccounts ? chainAccounts.filter(function(a) { return a.ready !== false }) : null
 }
 
 /// The Staking table: what the node holds, what is staked, what isn't counted yet.
