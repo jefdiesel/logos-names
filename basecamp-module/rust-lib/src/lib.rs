@@ -3695,6 +3695,13 @@ impl NamesModule for Names {
             // A send made here is in a block once its input notes leave the sender's wallet
             // (the node stores a transaction as soon as it takes it, so finding it says nothing).
             let Some(known) = chain_sent().remove(&hash) else {
+                // A send in the Wallet's history whose record here was lost: the node says
+                // what it spends.
+                let logged = config_dir().and_then(|dir| activity::all(&dir).into_iter().find(|entry| entry["chain"] == "logos" && entry["hash"] == hash.as_str()));
+                if let Some(from) = logged.as_ref().and_then(|entry| entry["from"].as_str()) {
+                    let landed = chain_landed_asked(&hash, from)?;
+                    return Ok(json!({ "hash": hash, "state": if landed { "in_block" } else { "pending" }, "fee": logged.as_ref().map_or(Value::Null, |entry| entry["fee"].clone()) }));
+                }
                 // Not sent from here: the node is asked, so a node that is down or has no
                 // record of it says so. Even when it has it, which key it spends from (and
                 // so whether it is in a block) isn't known here.
@@ -4496,8 +4503,10 @@ fn save_tokens_watched(program: &AccountId, list: &[Value]) -> Result<(), String
 
 /// Sends made from this device, by hash: `{from, inputs, fee, at}`, for `chain_tx`.
 /// Kept on disk, so a send is still followed after the module restarts.
+/// The Logos Blockchain sends made here. A file that can't be read is set aside and told,
+/// never written over by the next send (chain-sent-corrupt-file-silently-overwritten).
 fn chain_sent() -> Map<String, Value> {
-    config_dir().map(|dir| load_object(&dir.join("chain-sent.json"))).unwrap_or_default()
+    config_dir().map(|dir| activity::load(&dir.join("chain-sent.json"))).unwrap_or_default()
 }
 
 /// Whether a send made here (`chain_sent`) is in a block: its inputs are spent, or for a
@@ -5364,6 +5373,28 @@ mod tests {
         assert_eq!(shown["value"][0]["amount"], "12345", "{shown}");
         assert!(shown["warning"].as_str().unwrap().contains("activity-balances.json.corrupt-"), "{shown}");
         assert!(parsed(&names.activity(String::new()))["warning"].is_null(), "told once");
+    }
+
+    /// chain-sent-corrupt-file-silently-overwritten (L5): a damaged chain-sent.json was read
+    /// as empty and written over by the next send, with no set-aside and no warning, and
+    /// the send in flight was forgotten.
+    #[test]
+    fn a_damaged_record_of_sends_is_kept_aside_and_told_and_its_send_still_followed() {
+        let mut names = fresh();
+        let dir = config_dir().unwrap();
+        let hash = "c1".repeat(32);
+        activity::add(&dir, now(), json!({ "kind": "send", "chain": "logos", "from": NODE_KEY, "to": "39".repeat(32), "amount": "111", "hash": hash }));
+        std::fs::write(dir.join("chain-sent.json"), "{\"x\":").unwrap();
+        chain_sent_add(&"c2".repeat(32), json!({ "from": NODE_KEY, "inputs": ["n112"], "at": now() }));
+        let kept: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("chain-sent.json.corrupt-")).collect();
+        assert_eq!(kept.len(), 1, "set aside");
+        assert_eq!(std::fs::read_to_string(dir.join(&kept[0])).unwrap(), "{\"x\":", "kept as it was");
+        node_answers("get_transaction", json!({ "mantle_tx": { "ops": [{ "opcode": 0, "payload": { "inputs": ["n111"] } }] } }));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "n112", "value": "5" }] }));
+        let shown = parsed(&names.activity(String::new()));
+        assert!(shown["warning"].as_str().unwrap().contains("chain-sent.json.corrupt-"), "{shown}");
+        assert_eq!(shown["value"][0]["state"], "in_block", "{shown}");
+        assert_eq!(parsed(&names.chain_tx(hash))["value"]["state"], "in_block");
     }
 
     /// logos-send-stuck-sending-without-chain-sent-record (L4): a send of 700 that landed

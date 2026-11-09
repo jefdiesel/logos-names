@@ -25,7 +25,8 @@ fn balances_file(dir: &Path) -> std::path::PathBuf {
 
 /// What a file of ours holds. One that is there but can't be read is never written over:
 /// it is set aside as `<file>.corrupt-<time>` and an empty one started; `damaged` tells.
-fn load(path: &Path) -> Map<String, Value> {
+/// The module's record of Logos Blockchain sends (`chain-sent.json`) is read this way too.
+pub fn load(path: &Path) -> Map<String, Value> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Map::new(),
@@ -62,14 +63,14 @@ pub fn damage(dir: &Path) -> Option<(bool, String)> {
     let mut found: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with("activity") && name.contains(CORRUPT) && !name.ends_with(".told") {
+        if (name.starts_with("activity") || name.starts_with("chain-sent")) && name.contains(CORRUPT) && !name.ends_with(".told") {
             let _ = std::fs::rename(entry.path(), dir.join(format!("{name}.told")));
             found.push(format!("{name}.told"));
         }
     }
     found.sort();
     let of = |prefix: &str| found.iter().filter(|name| name.starts_with(prefix)).cloned().collect::<Vec<_>>();
-    let (history, marks) = (of("activity.json"), of("activity-balances.json"));
+    let (history, marks, sends) = (of("activity.json"), of("activity-balances.json"), of("chain-sent.json"));
     let mut why = Vec::new();
     if !history.is_empty() {
         why.push(format!(
@@ -82,6 +83,13 @@ pub fn damage(dir: &Path) -> Option<(bool, String)> {
         why.push(format!(
             "The file of what each account held at the last read couldn't be read, so it was kept aside ({}, in {}); the history is intact, and money that arrived before this read may not be listed.",
             marks.join(", "),
+            dir.display()
+        ));
+    }
+    if !sends.is_empty() {
+        why.push(format!(
+            "The record of the Logos Blockchain sends made here couldn't be read, so it was kept aside ({}, in {}); a send still on its way is followed through the node.",
+            sends.join(", "),
             dir.display()
         ));
     }
