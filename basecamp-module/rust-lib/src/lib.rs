@@ -2054,8 +2054,11 @@ impl Names {
                 }
             }
         }
-        for id in activity::bridges_arrived(&entries, &held) {
-            activity::update(dir, &id, &json!({ "state": "arrived", "arrived_at": at }));
+        for (id, mut fields) in activity::bridge_updates(&entries, &held) {
+            if fields["state"] == "arrived" {
+                fields["arrived_at"] = json!(at);
+            }
+            activity::update(dir, &id, &fields);
         }
     }
 }

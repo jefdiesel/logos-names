@@ -199,6 +199,16 @@ fn effect(entry: &Value, account: &str) -> (i128, bool) {
 /// its amount and those of the bridges before it. One credit never marks several
 /// bridges arrived, nor one bridge a credit smaller than it.
 pub fn bridges_arrived(entries: &[Value], lez_now: &std::collections::HashMap<String, u128>) -> Vec<String> {
+    bridge_updates(entries, lez_now).into_iter().filter(|(_, fields)| fields["state"] == "arrived").map(|(id, _)| id).collect()
+}
+
+/// What settling the bridges in a block among `entries` changes, `(id, fields)`: each that
+/// arrived becomes `arrived`, and the next one still waiting for that account gets the
+/// mark it is followed from moved up past the credits just used (`to_before`). Its own
+/// mark was read when it was sent, before those earlier bridges were credited; judged
+/// against it alone, the earlier bridge's credit was taken for its own
+/// (false-arrival-second-bridge-regressed).
+pub fn bridge_updates(entries: &[Value], lez_now: &std::collections::HashMap<String, u128>) -> Vec<(String, Value)> {
     let mut pending: std::collections::BTreeMap<&str, Vec<&Value>> = std::collections::BTreeMap::new();
     for entry in entries {
         if entry["kind"] == "bridge" && entry["state"] == "in_block" && number(&entry["amount"]).is_some() {
@@ -207,20 +217,25 @@ pub fn bridges_arrived(entries: &[Value], lez_now: &std::collections::HashMap<St
             }
         }
     }
-    let mut arrived = Vec::new();
+    let mut updates = Vec::new();
     for (to, mut list) in pending {
         let Some(now) = lez_now.get(to).and_then(|now| i128::try_from(*now).ok()) else { continue };
         list.sort_by_key(|entry| (entry["at"].as_u64().unwrap_or(0), entry["id"].as_str().unwrap_or_default().to_owned()));
         // Followed from the first that says what the account held; one that doesn't can't be.
         let Some(start) = list.iter().position(|entry| number(&entry["to_before"]).is_some()) else { continue };
         let since = list[start]["at"].as_u64().unwrap_or(0);
-        let moved: i128 = entries
-            .iter()
-            .filter(|entry| entry["kind"] != "bridge" && entry["at"].as_u64().unwrap_or(0) >= since)
-            .filter(|entry| !matches!(entry["state"].as_str(), Some("sending")))
-            .map(|entry| effect(entry, to).0)
-            .sum();
-        let mut needed = i128::try_from(number(&list[start]["to_before"]).unwrap_or(0)).unwrap_or(i128::MAX).saturating_add(moved);
+        // What the logged entries settled from `since` (and before `until`) moved in or out of `to`.
+        let moved_between = |until: u64| -> i128 {
+            entries
+                .iter()
+                .filter(|entry| entry["kind"] != "bridge" && (since..until).contains(&entry["at"].as_u64().unwrap_or(0)))
+                .filter(|entry| !matches!(entry["state"].as_str(), Some("sending")))
+                .map(|entry| effect(entry, to).0)
+                .sum()
+        };
+        let moved = moved_between(u64::MAX);
+        let base = i128::try_from(number(&list[start]["to_before"]).unwrap_or(0)).unwrap_or(i128::MAX);
+        let mut needed = base.saturating_add(moved);
         let thresholds: Vec<i128> = list[start..]
             .iter()
             .map(|bridge| {
@@ -236,9 +251,21 @@ pub fn bridges_arrived(entries: &[Value], lez_now: &std::collections::HashMap<St
         } else {
             thresholds.iter().rposition(|needed| now == *needed).map_or(0, |at| at + 1)
         };
-        arrived.extend(list[start..start + count].iter().filter_map(|bridge| bridge["id"].as_str().map(str::to_owned)));
+        updates.extend(list[start..start + count].iter().filter_map(|bridge| Some((bridge["id"].as_str()?.to_owned(), json!({ "state": "arrived" })))));
+        // The next one waiting is followed from the mark the arrived ones reached: what the
+        // account held when the first was sent, what moved before the next was sent, and the
+        // credits just used. Its own mark may already hold some of them (an earlier credit
+        // that landed before it was sent but was seen only now), so the larger of the two.
+        if let (true, Some(next)) = (count > 0, list.get(start + count)) {
+            let used: i128 = list[start..start + count].iter().map(|bridge| i128::try_from(number(&bridge["amount"]).unwrap_or(0)).unwrap_or(i128::MAX)).sum();
+            let reached = base.saturating_add(moved_between(next["at"].as_u64().unwrap_or(0))).saturating_add(used);
+            let own = number(&next["to_before"]).and_then(|own| i128::try_from(own).ok());
+            if let (Some(id), true) = (next["id"].as_str(), own.is_none_or(|own| own < reached)) {
+                updates.push((id.to_owned(), json!({ "to_before": reached.max(0).to_string(), "followed": true })));
+            }
+        }
     }
-    arrived
+    updates
 }
 
 /// Notes what `chain`'s accounts hold now, `(account, balance)`, as read from `scope`
@@ -478,6 +505,42 @@ mod tests {
         entries[1]["to_before"] = json!("3000000");
         assert!(bridges_arrived(&entries, &now(3_000_000)).is_empty(), "{:?}", bridges_arrived(&entries, &now(3_000_000)));
         assert_eq!(bridges_arrived(&entries, &now(4_496_000)), ["2-bridge"]);
+    }
+
+    /// false-arrival-second-bridge-regressed (f2b): bridges of 3,000,000 then 2,000,000 to
+    /// one account, both sent before either was credited (each `to_before` 0). LEZ credited
+    /// 3,000,000: the first poll marked the 3,000,000 arrived, the next poll marked the
+    /// 2,000,000 arrived too (judged alone against its own mark, 0 + 2,000,000 <= 3,000,000).
+    #[test]
+    fn a_second_bridge_is_not_taken_as_arrived_on_the_first_ones_credit() {
+        let d = dir("second-bridge");
+        let first = add(&d, 10, json!({ "kind": "bridge", "chain": "logos", "to": "Public/T", "amount": "3000000", "to_before": "0", "state": "in_block" }));
+        let second = add(&d, 11, json!({ "kind": "bridge", "chain": "logos", "to": "Public/T", "amount": "2000000", "to_before": "0", "state": "in_block" }));
+        let held = std::collections::HashMap::from([("Public/T".to_owned(), 3_000_000_u128)]);
+        let poll = |d: &Path| {
+            for (id, fields) in bridge_updates(&all(d), &held) {
+                update(d, &id, &fields);
+            }
+            let rows = all(d);
+            let state = |id: &str| rows.iter().find(|e| e["id"] == id).map(|e| e["state"].as_str().unwrap_or_default().to_owned()).unwrap();
+            (state(&first), state(&second))
+        };
+        assert_eq!(poll(&d), ("arrived".to_owned(), "in_block".to_owned()));
+        for _ in 0..3 {
+            assert_eq!(poll(&d), ("arrived".to_owned(), "in_block".to_owned()), "a later poll on the same credit");
+        }
+        // Read back from the file (a reload): the second now waits for its own 2,000,000.
+        assert_eq!(all(&d).iter().find(|e| e["id"] == second).unwrap()["to_before"], "3000000");
+        let held = std::collections::HashMap::from([("Public/T".to_owned(), 5_000_000_u128)]);
+        assert_eq!(bridges_arrived(&all(&d), &held), [second.clone()]);
+        // A mark already past the first one's credit (it landed before the second was sent) is kept.
+        let entries = vec![
+            json!({ "id": "1-bridge", "at": 1, "kind": "bridge", "to": "Public/U", "amount": "3000000", "to_before": "0", "state": "in_block" }),
+            json!({ "id": "2-bridge", "at": 2, "kind": "bridge", "to": "Public/U", "amount": "2000000", "to_before": "3000000", "state": "in_block" }),
+        ];
+        let held = std::collections::HashMap::from([("Public/U".to_owned(), 3_000_000_u128)]);
+        assert_eq!(bridge_updates(&entries, &held), [("1-bridge".to_owned(), json!({ "state": "arrived" }))]);
+        let _ = std::fs::remove_dir_all(d);
     }
 
     /// corrupt-activity-file-silently-erases-history: a truncated activity.json read as
