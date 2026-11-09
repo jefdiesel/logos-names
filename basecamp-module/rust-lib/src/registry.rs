@@ -877,6 +877,71 @@ pub fn account_seen(sequencer: &str, account: &AccountId) -> Result<bool, String
     }
 }
 
+/// LEZ's bridge program: `SHA-256("/LEE-BuiltinProgram/v1/AccountId" ‖ "bridge")`.
+pub fn bridge_program() -> AccountId {
+    sha256(&[b"/LEE-BuiltinProgram/v1/AccountId", b"bridge"])
+}
+
+/// The account in which LEZ's bridge marks the Logos Blockchain deposit `op_id` as minted
+/// (its receipt): written in the same LEZ transaction that credits the deposit, exactly
+/// once per deposit, and never by anything else.
+pub fn deposit_receipt(op_id: &[u8; 32]) -> AccountId {
+    pda(&bridge_program(), &sha256(&[b"/LEZ/v0.3/BridgeDepositReceipt/0", op_id]))
+}
+
+/// Whether LEZ has minted the deposit whose receipt is `receipt`: the bridge's state on it
+/// is written. `null` for an account nothing wrote is a real "not yet"; a reply that says
+/// neither (an error, a page of HTML, no `result`) is no answer.
+#[cfg(not(test))]
+pub fn deposit_minted(sequencer: &str, receipt: &AccountId) -> Result<bool, String> {
+    let response = ureq::post(sequencer)
+        .timeout(std::time::Duration::from_secs(15))
+        .send_json(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getAccountView",
+            "params": [{ "account_id": account_text(receipt), "program_account_id": account_text(&bridge_program()) }],
+        }))
+        .map_err(|error| format!("could not reach the sequencer: {error}"))?;
+    let mut body = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(response.into_reader(), MAX_REPLY_LEN as u64 + 1), &mut body)
+        .map_err(|error| format!("the sequencer's reply broke off: {error}"))?;
+    let reply: Value = serde_json::from_slice(&body).map_err(|_| "the sequencer sent an unreadable reply".to_owned())?;
+    minted_in(&reply)
+}
+
+/// What a `getAccountView` reply for a receipt says (`deposit_minted`).
+pub fn minted_in(reply: &Value) -> Result<bool, String> {
+    if let Some(error) = reply.get("error") {
+        return Err(format!("the sequencer refused the read: {error}"));
+    }
+    match reply.get("result") {
+        Some(Value::Null) => Ok(false),
+        Some(account @ Value::Object(_)) => Ok(!actor_bytes(account, &bridge_program())?.is_empty()),
+        _ => Err("the sequencer sent an unreadable reply".to_owned()),
+    }
+}
+
+/// Tests say which deposits LEZ minted (`MINTED`), and that it didn't answer (`MINTED_UNREAD`).
+#[cfg(test)]
+pub fn deposit_minted(_sequencer: &str, receipt: &AccountId) -> Result<bool, String> {
+    if MINTED_UNREAD.with(std::cell::Cell::get) {
+        return Err("could not reach the sequencer".to_owned());
+    }
+    let asked = MINTED_ASKED.with(|asked| asked.replace(asked.get() + 1));
+    Ok(MINTED.with(|minted| minted.borrow().iter().any(|(minted, from)| minted == receipt && asked >= *from)))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The deposit receipts a test's sequencer holds, each from the how-many-th ask on
+    /// (`MINTED_ASKED` counts them): 0, from the start.
+    pub static MINTED: std::cell::RefCell<Vec<(AccountId, usize)>> = const { std::cell::RefCell::new(Vec::new()) };
+    pub static MINTED_ASKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Whether a test's sequencer doesn't answer receipt reads.
+    pub static MINTED_UNREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// What the public account `account` holds, read from the sequencer at `sequencer`:
 /// any account, not only the wallet's.
 #[cfg(not(test))]
@@ -1072,6 +1137,27 @@ mod tests {
     use super::*;
 
     const PROGRAM: AccountId = [7; 32];
+
+    /// A LEZ 0.4 rc1 sequencer started fresh mints its genesis supply as deposits whose op
+    /// id is `"/LEZ/v0.3/GenesisDeposit" ‖ index (u64 LE)`: `getAccountView` of the receipt
+    /// this derives, under the bridge program 99GUy…7qp4, answered `actor_states: [1]` for
+    /// index 0, and `null` for the receipt of op id 00…00.
+    #[test]
+    fn a_deposits_receipt_is_where_lez_marks_it_minted() {
+        assert_eq!(account_text(&bridge_program()), "99GUyPapsAwpRKEoEQKFNAT4WJtJJyCdBnSby7Ht7qp4");
+        let mut genesis = [0_u8; 32];
+        genesis[..24].copy_from_slice(b"/LEZ/v0.3/GenesisDeposit");
+        assert_eq!(account_text(&deposit_receipt(&genesis)), "G2VEcgxXRc3KE7snS2dUQt8CYeX3CHee1n487AtxoKGb");
+        genesis[24] = 1;
+        assert_eq!(account_text(&deposit_receipt(&genesis)), "3skigWsvTNC7QmbJNtj9b1bP1KzoE118TuVkWsVhF6Xj");
+        let program = account_text(&bridge_program());
+        assert_eq!(minted_in(&json!({ "result": { "nonce": 0, "data": { "actor_states": { program.clone(): [1] } } } })), Ok(true));
+        assert_eq!(minted_in(&json!({ "result": null })), Ok(false), "nothing wrote it: not minted yet");
+        assert_eq!(minted_in(&json!({ "result": { "nonce": 0, "data": { "actor_states": {} } } })), Ok(false));
+        assert!(minted_in(&json!({ "error": { "code": -32603 } })).is_err());
+        assert!(minted_in(&json!({ "jsonrpc": "2.0" })).is_err(), "no result is no answer");
+        assert!(minted_in(&json!({ "result": "<html>" })).is_err());
+    }
 
     /// A proxy in front of a sequencer that is down answers 503, or a 200 page of HTML,
     /// or nothing: none of those is the sequencer answering, so a CLI's 0 balances and

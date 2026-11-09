@@ -198,6 +198,40 @@ pub fn hash_of(reply: &Value) -> Option<String> {
     parse_key(text)
 }
 
+/// The identity of a channel deposit on the Logos Blockchain (its `op_id`), which LEZ
+/// mints it under: `Blake2b-256("OPERATION_ID_V1" ‖ op)`, the op encoded canonically as
+/// the channel's 32 bytes, the input notes (a one-byte count, then each note's 32 bytes as
+/// the node writes them in hex), and the metadata (a four-byte little-endian length, then
+/// its bytes). Everything in it is known before the deposit is sent: the channel, the one
+/// exact note, and the LEZ account it credits. `None` for an input that isn't 32 bytes of hex.
+pub fn deposit_op_id(channel: &[u8; 32], inputs: &[String], metadata: &[u8]) -> Option<[u8; 32]> {
+    use blake2::Digest;
+    let mut op = channel.to_vec();
+    op.push(u8::try_from(inputs.len()).ok()?);
+    for note in inputs {
+        op.extend(<[u8; 32]>::try_from(crate::registry::unhex(note).ok()?).ok()?);
+    }
+    op.extend(u32::try_from(metadata.len()).ok()?.to_le_bytes());
+    op.extend(metadata);
+    let mut hasher = blake2::Blake2b::<blake2::digest::consts::U32>::new();
+    hasher.update(b"OPERATION_ID_V1");
+    hasher.update(&op);
+    Some(hasher.finalize().into())
+}
+
+/// The hash of the transaction that made the deposit `op_id`, from a block's events as
+/// `get_block_events` gives them (`[{Tx: {tx_hash, op_id: [32 bytes], payload: {Deposit: …}}}]`).
+pub fn deposit_in_events(events: &Value, op_id: &[u8; 32]) -> Option<String> {
+    events.as_array()?.iter().map(|event| &event["Tx"]).find_map(|tx| {
+        let bytes: Vec<u8> = match &tx["op_id"] {
+            Value::Array(items) => items.iter().map(|b| b.as_u64().and_then(|b| u8::try_from(b).ok())).collect::<Option<_>>()?,
+            Value::String(text) => crate::registry::unhex(text).ok()?,
+            _ => return None,
+        };
+        (bytes == op_id && tx["payload"].get("Deposit").is_some()).then(|| tx["tx_hash"].as_str().and_then(parse_key)).flatten()
+    })
+}
+
 /// A wallet's notes as `{id: value}`, from `wallet_get_notes` (`{notes: [{id, value}]}`)
 /// or the HTTP balance's `{notes: {id: value}}`.
 pub fn notes_of(reply: &Value) -> serde_json::Map<String, Value> {
@@ -273,6 +307,25 @@ pub fn not_held(error: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The op id the solo node's `get_block_events` gave for a real deposit of 123,457 on
+    /// channel 00…00 (tx 7ad07d57…0126, its note 57d9047d…7107, credited to
+    /// Public/Aehr1ysPT9qXFigUq5BWNav5hKUgJePo3DqbJiv7ai53): the module derives the same.
+    #[test]
+    fn a_deposits_op_id_is_the_one_the_node_reports() {
+        let account = crate::registry::parse_account("Aehr1ysPT9qXFigUq5BWNav5hKUgJePo3DqbJiv7ai53").unwrap();
+        let op = deposit_op_id(&[0; 32], &["57d9047d2f813bb5683df31a79f0281650e86bf8c42f866d23da1172d4907107".to_owned()], &account);
+        let node: [u8; 32] = [34, 35, 124, 247, 60, 14, 230, 112, 48, 154, 176, 128, 34, 72, 97, 4, 73, 66, 38, 239, 10, 201, 239, 203, 11, 42, 139, 225, 5, 153, 68, 63];
+        assert_eq!(op, Some(node));
+        assert_ne!(deposit_op_id(&[0; 32], &["57d9047d2f813bb5683df31a79f0281650e86bf8c42f866d23da1172d4907108".to_owned()], &account), Some(node), "another note");
+        assert_eq!(deposit_op_id(&[0; 32], &["not hex".to_owned()], &account), None);
+        // The block's events as the node gave them: the deposit is found by its op id.
+        let events = json!([{ "Tx": { "tx_hash": "7ad07d571d2bf3e5debcd354f84b12908addf7d01a6df70bdec57e48f8010126", "op_id": node,
+            "payload": { "Deposit": { "channel_id": "00".repeat(32), "amount": 123457 } } } }]);
+        assert_eq!(deposit_in_events(&events, &node).as_deref(), Some("7ad07d571d2bf3e5debcd354f84b12908addf7d01a6df70bdec57e48f8010126"));
+        assert_eq!(deposit_in_events(&events, &[1; 32]), None);
+        assert_eq!(deposit_in_events(&json!([]), &node), None);
+    }
 
     /// bridge-fee-reported-as-max: the node took 1614 (inputs 104298274, change
     /// 99296660, deposit 5000000) while the reply said 100000, the cap.
