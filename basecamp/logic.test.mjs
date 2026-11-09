@@ -1,6 +1,6 @@
 // Checks the view's own logic (qml/logic.mjs, which qml/Main.qml imports), since the QML
 // engine cannot run in CI. Run with: node basecamp/logic.test.mjs
-import { atLeast, someAmount, entryShown, tokenAmountProblem, tokenToProblem, tokenSendProves, tokenShown, feeEstimate, feePaid, accountTitle, accountsShown, publisherLine, durationWords, keyShown, chainToProblem, stakeLines, rewardsLine, grouped, addDigits, walletAssets, subDigits, walletGroups, stakeTable, activityLine, activityFor, agoShown, readNote } from "./qml/logic.mjs";
+import { atLeast, someAmount, entryShown, amountRead, amountProblem, amountDigits, AMOUNT_MAX, CHAIN_AMOUNT_MAX, jobProblem, tokenToProblem, tokenSendProves, tokenShown, feeEstimate, feePaid, accountTitle, accountsShown, publisherLine, durationWords, keyShown, chainToProblem, stakeLines, rewardsLine, grouped, addDigits, walletAssets, subDigits, walletGroups, stakeTable, activityLine, activityFor, agoShown, readNote } from "./qml/logic.mjs";
 import { readFileSync } from "node:fs";
 
 let failures = 0;
@@ -48,10 +48,21 @@ check("stakeLines one key", stakeLines({ staked: "34002373886", notes: 4538, key
 check("stakeLines no epoch length", stakeLines({ staked: "0", notes: 0, keys: [], epoch: 7, next_epoch_in_s: null })[1], "Epoch 7. New tokens join the stake at an epoch boundary, up to two epochs after they arrive.");
 check("rewardsLine", [rewardsLine({ vouchers: 0 }), rewardsLine({ vouchers: 2, claimable: "26280" }), rewardsLine({ vouchers: 1722, claimable: "65436", reward_per_voucher: "38" })], ["Nothing to claim. Each block your node leads earns a reward to claim here.", "26,280 to claim from 2 blocks your node led.", "65,436 to claim from 1722 blocks your node led. Each claim cashes one block's reward (38) and pays its own fee, which can be more than that."]);
 
-// Tokens: amounts are 128-bit, so they're checked as text.
+// Every amount field reads amounts as the names CLI and the module do, from the same
+// table (amount-comma-stripped-in-bridge-token-send: "1,5" was sent as 15).
+const amounts = JSON.parse(readFileSync(new URL("../basecamp-module/rust-lib/src/amounts.json", import.meta.url), "utf8"));
+const misread = amounts.accept.filter(([typed, want]) => JSON.stringify(amountRead(typed)) !== JSON.stringify({ digits: want, problem: "" }))
+  .concat(amounts.refuse.filter(([typed, want]) => JSON.stringify(amountRead(typed)) !== JSON.stringify({ digits: "", problem: want })));
+check("amounts.json read as the CLI and the module read it (" + (amounts.accept.length + amounts.refuse.length) + " cases)", misread, []);
+check("amount null", amountRead(null), { digits: "", problem: "Enter an amount, such as 1,000." });
+check("amount helpers", [amountDigits("1,000"), amountDigits("1,5"), amountProblem("1,000"), amountProblem("1,5")], ["1000", "", "", "1,5 isn't a whole number: commas go only between groups of three digits, such as 1,000."]);
+check("amount Logos Blockchain max", [amountDigits("18,446,744,073,709,551,615", CHAIN_AMOUNT_MAX), amountProblem("18446744073709551616", CHAIN_AMOUNT_MAX)], ["18446744073709551615", "18446744073709551616 is more than an amount can be."]);
+check("amount max", amountDigits(AMOUNT_MAX), AMOUNT_MAX);
 const ok = (problem) => problem === "";
-check("tokenAmount good", ["1", "1,000", "1_000", " 007 ", "340282366920938463463374607431768211455"].map((a) => ok(tokenAmountProblem(a))), [true, true, true, true, true]);
-check("tokenAmount bad", ["", "0", "000", "-1", "1.5", "1e3", "340282366920938463463374607431768211456", "9".repeat(40), null].map((a) => ok(tokenAmountProblem(a))), [false, false, false, false, false, false, false, false, false]);
+// transfer-failure-text-is-last-cause-line: a failed job told its last cause line.
+const downLog = "Error: failed to read the account from the sequencer\n\nCaused by:\n    0: client error (Connect)\n    1: tcp connect error\n    2: Connection refused (os error 61)\n";
+check("jobProblem", [jobProblem({ problem: "The payment didn't go through: boom", log_tail: downLog }, "x"), jobProblem({ log_tail: downLog }, "It didn't go through"), jobProblem({ log_tail: "killed\n" }, "It didn't go through"), jobProblem({}, "It didn't go through")],
+  ["The payment didn't go through: boom", "It didn't go through: failed to read the account from the sequencer", "It didn't go through: killed", "It didn't go through: it stopped without saying why"]);
 const id = "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk";
 check("tokenTo good", ["ada", "Jef.lez", "@ada", "Public/" + id, "Private/" + id].map((t) => ok(tokenToProblem(t))), [true, true, true, true, true]);
 check("tokenTo bad", ["", id, "Public/nope", "Public/" + id + "/x", "a b", "$(id)"].map((t) => ok(tokenToProblem(t))), [false, false, false, false, false, false]);
@@ -203,7 +214,25 @@ check("subDigits", [subDigits("1000", "1"), subDigits("210939029", "210939029"),
   check("payment on the payee's page", onPage(paid, A), [["Received from Private yGrPEbP3…fe4Z", "+1,000", "on LEZ"]]);
   check("payment on the payer's page", onPage(paid, P), [["Paid Public CCVd76Tk…pKnk", "-1,000", "on LEZ, from your private account · fee 70,000"]]);
   check("token on the payee's page", onPage({ kind: "token_send", chain: "lez", from: P, to: A, amount: "50", state: "done", at: 1794200000 }, A)[0].slice(0, 2), ["Received a token from Private yGrPEbP3…fe4Z", "+50"]);
-  check("bridge on the LEZ account's page", onPage(Object.assign({}, bridge, { to: A, fee: "100000" }), A)[0].slice(1), ["+1,000,000", "from key 7a6223ab…2a2a into Public CCVd76Tk…pKnk"]);
+  // A bridge in a block hasn't reached LEZ yet: no "+" until it arrives.
+  check("bridge on the LEZ account's page", onPage(Object.assign({}, bridge, { to: A, fee: "100000" }), A)[0].slice(1), ["1,000,000", "from key 7a6223ab…2a2a into Public CCVd76Tk…pKnk"]);
+  check("bridge arrived on the LEZ account's page", onPage(Object.assign({}, bridge, { to: A, state: "arrived" }), A)[0][1], "+1,000,000");
+  // payee-page-failed-or-pending-payment-reads-received-plus: a payment that didn't land
+  // read "Received from … +1,000 · Didn't go through" on the payee's page.
+  const row = (fields) => { const l = activityLine(Object.assign({}, paid, fields), 1794205600000, A); return [l.title, l.sign + l.amount, l.state]; };
+  check("payee page: sending, failed, unknown", [row({ state: "sending" }), row({ state: "failed" }), row({ state: "unknown" })], [
+    ["Payment from Private yGrPEbP3…fe4Z", "1,000", "Proving…"],
+    ["Payment from Private yGrPEbP3…fe4Z", "1,000", "Didn't go through"],
+    ["Payment from Private yGrPEbP3…fe4Z", "1,000", "Outcome unknown · check the balance"]]);
+  check("payee page: a token that failed", onPage({ kind: "token_send", chain: "lez", from: P, to: A, amount: "50", state: "failed", at: 1794200000 }, A)[0].slice(0, 2), ["Token payment from Private yGrPEbP3…fe4Z", "50"]);
+  check("payee page: a failed bridge", onPage(Object.assign({}, bridge, { to: A, state: "failed" }), A)[0][1], "1,000,000");
+  const failedClaim = Object.assign({}, claim, { state: "failed" });
+  check("credited page: a failed claim", onPage(failedClaim, "Private/9drrc1ARLeTXhHrgV8r54iNiWDD6Rj3yUMxQJTditnaK"), [["Claim of waiting payments", "2,000,000", "on LEZ, into your private accounts"]]);
+  check("wallet history: a failed claim and a failed send", [activityLine(failedClaim, 1794205600000).sign, activityLine(Object.assign({}, paid, { state: "failed" }), 1794205600000).sign], ["", ""]);
+  check("payer page: a payment in flight still leaves", onPage(Object.assign({}, paid, { state: "sending" }), P)[0][1], "-1,000");
+  check("Logos Blockchain send into a key: in a block is received", onPage({ kind: "send", chain: "logos", from: KEY, to: "39".repeat(32), amount: "700", state: "in_block", at: 1794200000 }, "39".repeat(32))[0].slice(0, 2), ["Received on the Logos Blockchain", "+700"]);
+  // account-page-address-line-useless: the prefix ate the shown characters.
+  check("keyShown account", [keyShown(A), keyShown(P), keyShown("Public/11111111111111111111111111111111")], ["Public/CCVd76Tk…pKnk", "Private/yGrPEbP3…fe4Z", "Public/11111111…1111"]);
   check("bridge on the key's page", onPage(Object.assign({}, bridge, { to: A }), bridge.from)[0][1], "-1,000,000");
 }
 

@@ -145,26 +145,11 @@ pub fn send_input(from_key: &str, to_key: &str, amount: &str) -> Result<(String,
     Ok((from, to, whole_amount(amount)?))
 }
 
-/// An amount as a person writes it: digits, with commas only between groups of three
-/// (`1000` or `1,000`). Any other comma (`1,5`, a decimal comma) is refused, since
-/// dropping it would read `1,5` as 15.
+/// An amount as a person writes it, read as every amount is (`cli::amount`), that a
+/// Logos Blockchain note can hold (64 bits).
 pub fn whole_amount(text: &str) -> Result<u64, String> {
-    let text = text.trim();
-    let groups: Vec<&str> = text.split(',').collect();
-    if text.is_empty() || !groups.iter().all(|group| group.bytes().all(|b| b.is_ascii_digit())) {
-        return Err("enter a whole amount, such as 1000".to_owned());
-    }
-    // A first group starting with 0 (`0,001`) is no grouping either.
-    let grouped = groups.len() == 1
-        || ((1..=3).contains(&groups[0].len()) && !groups[0].starts_with('0') && groups[1..].iter().all(|group| group.len() == 3));
-    if !grouped {
-        return Err(format!("{text} isn't a whole amount: commas go only between groups of three digits, such as 1,000"));
-    }
-    let amount: u64 = groups.concat().parse().map_err(|_| "that amount is too large".to_owned())?;
-    if amount == 0 {
-        return Err("enter an amount above zero".to_owned());
-    }
-    Ok(amount)
+    let amount = crate::cli::amount(text)?;
+    u64::try_from(amount).map_err(|_| format!("{} is more than an amount can be.", text.trim()))
 }
 
 /// What one `leader_claim` did: `{hash, claimed, fee, vouchers_left, claimable_left}`,
@@ -430,24 +415,16 @@ mod tests {
     }
 
     /// Commas group thousands and nothing else: `1,5` was read as 15 (a verifier's find).
+    /// The rules are every amount's (amounts.json); a note holds 64 bits.
     #[test]
     fn a_comma_only_groups_thousands() {
-        for (text, want) in [("1000", 1000), ("1,000", 1000), ("10,000", 10_000), ("100,001", 100_001), ("1,000,000", 1_000_000), (" 3,000 ", 3000)] {
+        for (text, want) in [("1000", 1000), ("1,000", 1000), ("1,000,000", 1_000_000), (" 3,000 ", 3000), ("18,446,744,073,709,551,615", u64::MAX)] {
             assert_eq!(whole_amount(text), Ok(want), "{text}");
         }
-        for text in ["1,5", "1,00", "0,", ",100", "1,,000", "1000,000", "1,0000"] {
-            let refused = whole_amount(text).unwrap_err();
-            assert!(refused.contains("commas go only between groups of three digits"), "{text}: {refused}");
+        for bad in ["1,5", "0,001", "1,00", "", "-5", "000"] {
+            assert_eq!(whole_amount(bad), crate::cli::amount(bad).map(|_| 0), "{bad}");
         }
-        for text in ["", "1.5", "-5", "1.5x", "\"1.5\""] {
-            assert_eq!(whole_amount(text), Err("enter a whole amount, such as 1000".to_owned()), "{text}");
-        }
-        assert_eq!(whole_amount("000"), Err("enter an amount above zero".to_owned()));
-        // grouped-amount-leading-zero: chain_split 0,001 reached the node call; now refused like 1,5.
-        for bad in ["0,001", "0,100", "00,001", "1,5"] {
-            assert!(whole_amount(bad).unwrap_err().contains("groups of three"), "{bad}");
-        }
-        assert_eq!(whole_amount("99999999999999999999999"), Err("that amount is too large".to_owned()));
+        assert_eq!(whole_amount("18446744073709551616"), Err("18446744073709551616 is more than an amount can be.".to_owned()));
     }
 
     /// The claim a solo 0.3.4 node made over logosctl (a4b15b78…): 1722 vouchers of 38,

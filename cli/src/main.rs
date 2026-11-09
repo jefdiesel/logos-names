@@ -300,9 +300,9 @@ enum Command {
         /// How much of the public account's tokens to move to the private account.
         /// The default covers a few names' deposits and private changes: on LEZ 0.4 each
         /// private transaction reserves its fee in the proof, about 5,400,000 at the
-        /// lowest base fees.
-        #[arg(long, default_value_t = 50_000_000, value_parser = parse_shield)]
-        shield: u128,
+        /// lowest base fees. Default 50,000,000; asked for and not made, it is an error.
+        #[arg(long, value_parser = parse_shield, allow_hyphen_values = true)]
+        shield: Option<u128>,
     },
     /// Show this wallet's accounts and balances.
     Balance,
@@ -570,7 +570,7 @@ enum Command {
         #[arg(value_parser = parse_payee_name)]
         name: String,
         /// Amount in base units, above zero; `1,000` may group it.
-        #[arg(value_parser = tokens::parse_amount, allow_negative_numbers = true)]
+        #[arg(value_parser = tokens::parse_amount, allow_hyphen_values = true)]
         amount: u128,
         /// Account to pay from; the wallet must hold its key. Defaults to the private
         /// account from `names setup`, which hides the payer too; a public one is seen
@@ -601,7 +601,7 @@ enum Command {
     Bridge {
         /// How much to move, in base units, above zero (`1,000` may group it); whole notes
         /// are used, so it may be a little more.
-        #[arg(value_parser = tokens::parse_amount, allow_negative_numbers = true)]
+        #[arg(value_parser = tokens::parse_amount, allow_hyphen_values = true)]
         amount: u128,
         /// The LEZ public account to credit, such as `Public/<id>`.
         #[arg(long)]
@@ -783,9 +783,10 @@ fn parse_account(input: &str) -> Result<AccountId, String> {
 }
 
 /// `names setup --shield`: an amount as every other amount is written (`5,000,000`), or 0
-/// to only make the accounts.
+/// (`00` too) to only make the accounts.
 fn parse_shield(input: &str) -> Result<u128, String> {
-    if input.trim() == "0" {
+    let typed = input.trim();
+    if !typed.is_empty() && typed.bytes().all(|b| b == b'0') {
         return Ok(0);
     }
     tokens::parse_amount(input)
@@ -795,7 +796,11 @@ fn parse_shield(input: &str) -> Result<u128, String> {
 /// (cli-message-wording-bundle).
 fn parse_payee_name(input: &str) -> Result<String, String> {
     let text = input.trim();
-    if text.starts_with("Public/") || text.starts_with("Private/") {
+    if text.starts_with("Private/") {
+        // Nobody but its holder knows a private account's keys, so it can't be paid by its ID.
+        return Err(format!("{text} is a private account, which can't be paid by its ID. Pay its name, or ask for a public account."));
+    }
+    if text.starts_with("Public/") {
         return Err(format!(
             "{text} is an account, not a name; pay a public account with `names wallet auth-transfer send --from <your account> --to {text} --amount <amount>`"
         ));
@@ -2826,6 +2831,16 @@ fn sequencer_overrides(cli: &Cli) -> Result<Option<WalletConfigOverrides>> {
     Ok(Some(overrides))
 }
 
+/// What `names setup` says when the public account `public` holds `balance`, less than
+/// the `shield` to move (the Basecamp module reads its "holds" and "at least" figures).
+fn unfunded_setup(public: AccountId, balance: u128, shield: u128) -> String {
+    format!(
+        "Public/{public} holds {}; send it at least {} testnet tokens from your LEZ wallet (or with `names bridge`), then run `names setup` again. A name is held by a refundable deposit (`names settings` shows it), so the private account needs at least that. Nothing was moved.",
+        chain::grouped(balance),
+        chain::grouped(shield)
+    )
+}
+
 /// How many times `register` sends its reveal before giving up.
 const REVEAL_ATTEMPTS: u32 = 4;
 
@@ -2910,9 +2925,15 @@ impl Client {
 /// the whole limit is reserved from the sender while the transfer runs.
 const NATIVE_TRANSFER_GAS_LIMIT: u64 = 1_000;
 
+/// The move to private `names setup` makes when `--shield` isn't given.
+const DEFAULT_SHIELD: u128 = 50_000_000;
+
 /// `names setup`: a public and a private account, and, once the public one is funded,
-/// some of its tokens moved to the private account so names can be held and paid privately.
-async fn setup(client: &mut Client, shield: u128) -> Result<()> {
+/// some of its tokens moved to the private account so names can be held and paid
+/// privately. A `--shield` asked for (`asked`) that
+/// the public account can't cover is an error; the default one only says what to do.
+async fn setup(client: &mut Client, asked: Option<u128>) -> Result<()> {
+    let shield = asked.unwrap_or(DEFAULT_SHIELD);
     let mut defaults = load_defaults();
     let public: AccountId = match defaults.public.as_deref().and_then(|id| id.parse().ok()) {
         Some(id) => id,
@@ -2931,11 +2952,12 @@ async fn setup(client: &mut Client, shield: u128) -> Result<()> {
 
     let balance = client.wallet.get_account_balance(public).await.unwrap_or(0);
     if balance < shield {
-        println!(
-            "Public/{public} holds {balance}; send it at least {shield} testnet tokens from your LEZ \
-             wallet (or with `names bridge`), then run `names setup` again. A name is held by a \
-             refundable deposit (`names settings` shows it), so the private account needs at least that"
-        );
+        let short = unfunded_setup(public, balance, shield);
+        // Asked for and not made, it is an error, so a script never takes it for done.
+        if asked.is_some() {
+            bail!(short);
+        }
+        println!("{short}");
         return Ok(());
     }
     if shield > 0 {
@@ -3055,6 +3077,26 @@ fn refused_or(error: impl Into<anyhow::Error>, context: &'static str) -> anyhow:
 /// Most notes one deposit may spend: the node signs at most 32 items per transaction.
 const MAX_DEPOSIT_NOTES: usize = 30;
 
+/// The notes a deposit of `amount` spends, at most `most` of them, and what they hold
+/// together: whole notes are deposited, so the least that covers it. While no single
+/// note covers what is still needed the largest is taken (fewest notes); then the
+/// smallest note that covers the rest, an exact one when there is one
+/// (cli-bridge-spends-largest-note-not-nearest: 1,000 spent a 1,000,000 note beside an
+/// exact 1,000 one). Short of `amount` when the notes can't cover it.
+fn pick_notes(mut notes: Vec<(String, u128)>, amount: u128, most: usize) -> (Vec<String>, u128) {
+    // Smallest first, ties by ID, so the same notes are picked every time.
+    notes.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    let (mut picked, mut total) = (Vec::new(), 0_u128);
+    while total < amount && picked.len() < most && !notes.is_empty() {
+        let needed = amount - total;
+        let at = notes.iter().position(|(_, value)| *value >= needed).unwrap_or(notes.len() - 1);
+        let (id, value) = notes.remove(at);
+        total += value;
+        picked.push(id);
+    }
+    (picked, total)
+}
+
 /// Deposits whole notes of `from_key` into the LEZ channel through the user's own node,
 /// with the LEZ account as the deposit's metadata: the sequencer reads it as
 /// `borsh(AccountId)` and credits that account once the deposit is final.
@@ -3071,7 +3113,7 @@ fn bridge(
 ) -> Result<()> {
     let node = node.trim_end_matches('/');
     if amount == 0 {
-        bail!("the amount must be more than 0");
+        bail!("Enter an amount above 0.");
     }
     let to = bridge_destination(to, programs).map_err(|error| anyhow!(error))?;
     let from_key = from_key.trim().to_lowercase();
@@ -3093,22 +3135,13 @@ fn bridge(
             .read_to_string()?,
     )
     .context("the node's wallet reply is not JSON")?;
-    let mut notes: Vec<(String, u128)> = wallet["notes"]
+    let notes: Vec<(String, u128)> = wallet["notes"]
         .as_object()
         .ok_or_else(|| anyhow!("the node lists no notes for {from_key}"))?
         .iter()
         .filter_map(|(id, value)| Some((id.clone(), value.as_u64()? as u128)))
         .collect();
-    notes.sort_by(|a, b| b.1.cmp(&a.1));
-    let mut picked = Vec::new();
-    let mut total = 0_u128;
-    for (id, value) in notes {
-        if total >= amount || picked.len() == MAX_DEPOSIT_NOTES {
-            break;
-        }
-        total += value;
-        picked.push(id);
-    }
+    let (picked, total) = pick_notes(notes, amount, MAX_DEPOSIT_NOTES);
     if total < amount {
         bail!(
             "{} note(s) of {from_key} hold {total}, less than {amount}; one deposit spends at most {MAX_DEPOSIT_NOTES} notes, so bridge in smaller steps",
@@ -3160,6 +3193,29 @@ fn not_included(hash: HashType, waited: Option<u64>) -> String {
     format!(
         "{hash} was not applied: {when}. Most often another change from the same account was sent at the same time and took its place (then it was dropped and charged nothing). Check with `names resolve` before trying again: a slow chain may still apply it."
     )
+}
+
+/// `names wallet` arguments with every `--amount` read as every other amount is
+/// (`tokens::parse_amount`) and written plainly: `1,000` is sent as 1000; 0, `-5` and
+/// `1,5` are refused before anything is sent (wallet-auth-transfer-send-amount-not-unified:
+/// `--amount 0` posted a transfer that moved nothing and still paid its fee).
+fn wallet_amounts(mut args: Vec<String>) -> Result<Vec<String>, String> {
+    let mut at = 0;
+    while at < args.len() {
+        if args[at] == "--" {
+            break;
+        }
+        if let Some(value) = args[at].strip_prefix("--amount=") {
+            args[at] = format!("--amount={}", tokens::parse_amount(value)?);
+        } else if args[at] == "--amount" {
+            if let Some(value) = args.get(at + 1) {
+                args[at + 1] = tokens::parse_amount(value)?.to_string();
+                at += 1;
+            }
+        }
+        at += 1;
+    }
+    Ok(args)
 }
 
 /// The public payer and the amount of `wallet auth-transfer send --from=Public/<id>
@@ -3321,11 +3377,19 @@ fn landing(position: usize, charged: &[bool], reverted: &[u64], summary: Option<
 }
 
 /// Why a public send of `amount` from `from` (holding `balance`) is refused before it is
-/// sent: the fee reserve, up to `reserve`, leaves the payer before the transfer runs.
+/// sent: more than it holds, or too little left beside it for the fee reserve (up to
+/// `reserve`), which leaves the payer before the transfer runs.
 fn send_shortfall(from: &str, balance: u128, amount: u128, reserve: u128) -> Option<String> {
+    let shown = chain::grouped;
+    if balance < amount {
+        return Some(format!("Public/{from} holds {}, less than {}. Nothing was sent.", shown(balance), shown(amount)));
+    }
     (balance < amount.saturating_add(reserve)).then(|| {
         format!(
-            "Public/{from} holds {balance}; sending {amount} also needs up to {reserve} held for the fee while it runs. Nothing was sent."
+            "Public/{from} holds {}; sending {} also needs up to {} held for the fee while it runs. Send a little less. Nothing was sent.",
+            shown(balance),
+            shown(amount),
+            shown(reserve)
         )
     })
 }
@@ -3392,6 +3456,8 @@ async fn main() -> Result<()> {
     let overrides = sequencer_overrides(&cli)?;
     match cli.command {
         Command::Wallet { args } => {
+            // Every --amount is read as every other amount, before anything is sent.
+            let args = wallet_amounts(args).map_err(|problem| anyhow!(problem))?;
             // Native-token transfers meter no execution gas, and the whole limit is
             // reserved while one runs, so keep the limit tiny for them.
             let mut overrides = overrides.unwrap_or_default();
@@ -4112,7 +4178,27 @@ mod inclusion_tests {
 
 #[cfg(test)]
 mod paid_tests {
-    use super::{native_balance_of, native_send_parts};
+    use super::{native_balance_of, native_send_parts, wallet_amounts};
+
+    /// wallet-auth-transfer-send-amount-not-unified: `--amount 0` posted a transfer and
+    /// paid its fee; `1,000` and `-5` got clap's raw errors.
+    #[test]
+    fn a_wallet_amount_is_read_as_every_amount() {
+        let args = |list: &[&str]| list.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>();
+        let send = |amount: &str| wallet_amounts(args(&["auth-transfer", "send", "--from", "Public/F", "--to", "Public/G", "--amount", amount]));
+        assert_eq!(send("1,000").unwrap()[7], "1000");
+        assert_eq!(send("0"), Err("Enter an amount above 0.".to_owned()));
+        assert_eq!(send("-5"), Err("-5 is negative. Enter an amount above 0.".to_owned()));
+        assert!(send("1,5").unwrap_err().contains("groups of three"));
+        assert_eq!(wallet_amounts(args(&["auth-transfer", "send", "--amount=1_000"])).unwrap()[2], "--amount=1000");
+        assert_eq!(wallet_amounts(args(&["auth-transfer", "send", "--amount=0"])), Err("Enter an amount above 0.".to_owned()));
+        assert_eq!(wallet_amounts(args(&["account", "list"])).unwrap(), args(&["account", "list"]));
+        // What follows a bare `--` is left to the wallet.
+        assert_eq!(wallet_amounts(args(&["x", "--", "--amount", "0"])).unwrap()[3], "0");
+        // The parsed form is what the fee and shortfall checks read.
+        let read = send("20,000").unwrap();
+        assert_eq!(native_send_parts(&read), Some(("F".to_owned(), 20_000)));
+    }
 
     /// jobs-report-no-fee-paid: the module's pay_account (`wallet auth-transfer send`)
     /// printed no fee, so its entries said fee None while the chain took 4088.
@@ -4287,10 +4373,27 @@ mod input_tests {
         assert_eq!(sinks.len(), 6);
         // Nothing reached the network: the unreachable node and sequencer were never asked.
         let zero = bridge("http://127.0.0.1:9", "http://127.0.0.1:9", 0, &format!("Public/{someone}"), &[registry], &"66".repeat(32), 100_000, true);
-        assert_eq!(zero.unwrap_err().to_string(), "the amount must be more than 0");
+        assert_eq!(zero.unwrap_err().to_string(), "Enter an amount above 0.");
         let private = bridge("http://127.0.0.1:9", "http://127.0.0.1:9", 1_000, &format!("Private/{someone}"), &[registry], &"66".repeat(32), 100_000, true);
         assert_eq!(private.unwrap_err().to_string(), "the bridge credits a public account: give --to as Public/<id>");
-        assert_eq!(Cli::try_parse_from(["names", "bridge", "0", "--to", someone, "--from-key", "k"]).err().map(|e| e.to_string().contains("the amount must be more than 0")), Some(true));
+        assert_eq!(Cli::try_parse_from(["names", "bridge", "0", "--to", someone, "--from-key", "k"]).err().map(|e| e.to_string().contains("Enter an amount above 0.")), Some(true));
+    }
+
+    /// cli-bridge-spends-largest-note-not-nearest: notes 1,000,000 / 500,000 / 1,000 and a
+    /// bridge of 1,000 spent the 1,000,000 note.
+    #[test]
+    fn a_bridge_spends_the_least_that_covers_it() {
+        let notes = || vec![("aa".to_owned(), 1_000_000), ("bb".to_owned(), 500_000), ("cc".to_owned(), 1_000)];
+        let ids = |list: &[&str]| list.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+        assert_eq!(pick_notes(notes(), 1_000, 30), (ids(&["cc"]), 1_000), "the exact note");
+        assert_eq!(pick_notes(notes(), 900, 30), (ids(&["cc"]), 1_000), "the smallest that covers it");
+        assert_eq!(pick_notes(notes(), 400_000, 30), (ids(&["bb"]), 500_000));
+        assert_eq!(pick_notes(notes(), 600_000, 30), (ids(&["aa"]), 1_000_000));
+        assert_eq!(pick_notes(notes(), 1_200_000, 30), (ids(&["aa", "bb"]), 1_500_000), "the largest, then what covers the rest");
+        assert_eq!(pick_notes(notes(), 1_001_000, 30), (ids(&["aa", "cc"]), 1_001_000));
+        assert_eq!(pick_notes(notes(), 2_000_000, 30).1, 1_501_000, "short: every note, still less");
+        assert_eq!(pick_notes(notes(), 1_200_000, 1), (ids(&["aa"]), 1_000_000), "at most one note");
+        assert_eq!(pick_notes(Vec::new(), 1, 30), (Vec::new(), 0));
     }
 
     /// cli-message-wording-bundle: clap's raw errors for `pay hopper -5`, `pay Public/<id>`,
@@ -4298,12 +4401,22 @@ mod input_tests {
     #[test]
     fn every_amount_reads_the_same_way_and_an_account_is_not_a_name() {
         let refused = |args: &[&str]| Cli::try_parse_from(args).err().map(|e| e.to_string()).unwrap_or_default();
-        assert!(refused(&["names", "pay", "hopper", "-5"]).contains("-5 is negative; the amount must be more than 0"), "{}", refused(&["names", "pay", "hopper", "-5"]));
+        assert!(refused(&["names", "pay", "hopper", "-5"]).contains("-5 is negative. Enter an amount above 0."), "{}", refused(&["names", "pay", "hopper", "-5"]));
+        // cli-wording-leftovers: `-1,000` and `setup --shield -5` were clap's "unexpected argument".
+        for args in [&["names", "pay", "hopper", "-1,000"][..], &["names", "setup", "--shield", "-5"], &["names", "bridge", "-1,000", "--to", "x", "--from-key", "k"]] {
+            let said = refused(args);
+            assert!(said.contains("is negative. Enter an amount above 0."), "{args:?}: {said}");
+        }
+        assert!(matches!(Cli::try_parse_from(["names", "setup", "--shield", "00"]).map(|cli| cli.command), Ok(Command::Setup { shield: Some(0) })));
+        assert!(matches!(Cli::try_parse_from(["names", "setup"]).map(|cli| cli.command), Ok(Command::Setup { shield: None })));
+        assert!(matches!(Cli::try_parse_from(["names", "pay", "hopper", "100", "--public"]).map(|cli| cli.command), Ok(Command::Pay { amount: 100, public: true, .. })));
+        let private = refused(&["names", "pay", "Private/FNZ3fvu5mRwYEtr3Rf7fSbFJUKXKPFnAT1rSQkkDHyBE", "100"]);
+        assert!(private.contains("is a private account, which can't be paid by its ID. Pay its name") && !private.contains("auth-transfer"), "{private}");
         let id = "Public/FNZ3fvu5mRwYEtr3Rf7fSbFJUKXKPFnAT1rSQkkDHyBE";
         assert!(refused(&["names", "pay", id, "100"]).contains("is an account, not a name; pay a public account with `names wallet auth-transfer send"), "{}", refused(&["names", "pay", id, "100"]));
         assert!(matches!(Cli::try_parse_from(["names", "bridge", "1,000", "--to", "x", "--from-key", "k"]).map(|cli| cli.command), Ok(Command::Bridge { amount: 1_000, .. })));
-        assert!(matches!(Cli::try_parse_from(["names", "setup", "--shield", "5,000,000"]).map(|cli| cli.command), Ok(Command::Setup { shield: 5_000_000 })));
-        assert!(matches!(Cli::try_parse_from(["names", "setup", "--shield", "0"]).map(|cli| cli.command), Ok(Command::Setup { shield: 0 })));
+        assert!(matches!(Cli::try_parse_from(["names", "setup", "--shield", "5,000,000"]).map(|cli| cli.command), Ok(Command::Setup { shield: Some(5_000_000) })));
+        assert!(matches!(Cli::try_parse_from(["names", "setup", "--shield", "0"]).map(|cli| cli.command), Ok(Command::Setup { shield: Some(0) })));
         assert!(matches!(Cli::try_parse_from(["names", "pay", "hopper", "1,000"]).map(|cli| cli.command), Ok(Command::Pay { amount: 1_000, .. })));
         assert!(matches!(Cli::try_parse_from(["names", "pay", "hopper", "--public", "100"]).map(|cli| cli.command), Ok(Command::Pay { amount: 100, public: true, .. })), "a flag is still a flag");
     }
@@ -4357,8 +4470,10 @@ mod send_fee_tests {
     fn a_send_the_payer_cant_hold_with_its_fee_is_refused_and_a_revert_fails() {
         use super::{landing, reverted_send, send_shortfall};
         let short = send_shortfall("H", 100_000, 100_000, 13_000).expect("refused");
-        assert!(short.contains("holds 100000") && short.ends_with("Nothing was sent."), "{short}");
+        assert_eq!(short, "Public/H holds 100,000; sending 100,000 also needs up to 13,000 held for the fee while it runs. Send a little less. Nothing was sent.");
         assert_eq!(send_shortfall("H", 113_000, 100_000, 13_000), None);
+        // cli-wording-leftovers: an amount above the balance is said as that, not as the fee.
+        assert_eq!(send_shortfall("H", 100_000, 99_999_999, 18_000).as_deref(), Some("Public/H holds 100,000, less than 99,999,999. Nothing was sent."));
         let block = Some(super::BlockFees { gas_used_exec: 1_000, gas_used_stor: 511, revenue_base: 12_088, revenue_tip: 0 });
         assert_eq!(landing(0, &[true], &[0], block, Some((511, 0))), super::Landed { reverted: true, fee: Some(12_088) });
         assert!(!landing(1, &[true, true], &[0], None, None).reverted, "another transaction reverted");

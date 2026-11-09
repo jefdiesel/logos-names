@@ -1772,32 +1772,32 @@ impl Names {
                 }
             }
             Some("receive") if !running && !done => {
-                let first = log.lines().map(str::trim).find(|line| line.starts_with("Error:")).unwrap_or_else(|| cli::last_line(&log));
-                // The CLI says what landed and what stopped; a run that claimed some is partly done.
+                // The CLI says what landed and what stopped; a run that claimed some is partly
+                // done, and says so (partial-claim-job-and-pages-say-nothing-true). One that
+                // claimed nothing fails like every other job, below.
                 let whole = state["id"].as_str().and_then(|id| self.jobs().ok().map(|jobs| jobs.whole_log(id))).unwrap_or_else(|| log.clone());
                 let (_, claims) = cli::parse_claims(&whole);
-                let what = if claims.is_empty() { "Claiming didn't finish" } else { "Claiming finished only in part" };
-                state["problem"] = Value::from(format!("{what}: {}", first.trim_start_matches("Error:").trim()));
-            }
-            Some("pay_account") if !running && !done => {
-                let first = log.lines().map(str::trim).find(|line| line.starts_with("Error:")).unwrap_or_else(|| cli::last_line(&log));
-                state["problem"] = Value::from(format!("The payment didn't go through: {}", first.trim_start_matches("Error:").trim()));
+                if !claims.is_empty() {
+                    state["problem"] = Value::from(format!("Claiming finished only in part: {}", cli::failure_cause(&log)));
+                }
             }
             Some("token_send" | "token_receive") if !running => {
-                let what = if state["kind"] == "token_send" { "The token transfer didn't go through" } else { "Receiving didn't finish" };
                 if let Some(fields) = cli::token_outcome(&log).as_object() {
                     for (key, value) in fields {
                         state[key.as_str()] = value.clone();
                     }
                 }
-                if !done {
-                    let first = log.lines().map(str::trim).find(|line| line.starts_with("Error:")).unwrap_or_else(|| cli::last_line(&log));
-                    state["problem"] = Value::from(format!("{what}: {}", first.trim_start_matches("Error:").trim()));
-                }
                 // What the wallet holds has changed.
                 self.forget_tokens();
             }
             _ => {}
+        }
+        // Every job that failed says what didn't happen and why in one line, built from
+        // the CLI's error, never its last cause line (transfer-failure-text-is-last-cause-line).
+        let failed = !running && !done && state["state"] != "unknown";
+        if failed && !state["problem"].as_str().is_some_and(|problem| !problem.is_empty()) {
+            let kind = state["kind"].as_str().unwrap_or_default().to_owned();
+            state["problem"] = Value::from(cli::job_problem(&kind, &log));
         }
     }
 
@@ -2833,7 +2833,7 @@ impl NamesModule for Names {
         }
         reply((|| {
             // Everything is checked before anything is remembered or run.
-            cli::bridge_amount(&amount)?;
+            cli::amount(&amount)?;
             let key = cli::bridge_key(&from_key)?;
             let node = cli::bridge_node(&node)?;
             let setup = self.cli_setup()?;
@@ -2851,7 +2851,7 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         reply((|| {
-            cli::bridge_amount(&amount)?;
+            cli::amount(&amount)?;
             let key = cli::bridge_key(&from_key)?;
             let node = cli::bridge_node(&node)?;
             // The destination too, before anything is remembered: a refused call leaves
@@ -2966,10 +2966,11 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         let out = reply((|| {
-            let command = cli::setup_args(&amount)?;
-            if command[1] == "--shield=0" {
-                return Err("enter an amount above zero".to_owned());
+            // An amount like every other, never 0; empty is setup's default.
+            if !amount.trim().is_empty() {
+                cli::amount(&amount)?;
             }
+            let command = cli::setup_args(&amount)?;
             self.wallet_job("shield", |setup| {
                 cli::default_public(setup)?;
                 Ok(command)
@@ -3049,9 +3050,7 @@ impl NamesModule for Names {
             let cli::PayTo::Account(to) = cli::pay_to(&account)? else {
                 return Err("that is a name; pay it as a name".to_owned());
             };
-            if !cli::is_amount(&cli::ungrouped(&amount).unwrap_or_default()) {
-                return Err("enter a whole amount, such as 1000".to_owned());
-            }
+            cli::amount(&amount)?;
             // A program's account and the empty one are refused as cli_bridge_to and
             // cli_transfer refuse them (pay-account-accepts-program-account).
             self.not_a_sink(&registry::parse_account(&to)?, "take a payment")?;
@@ -3063,7 +3062,7 @@ impl NamesModule for Names {
         let from = self.cli_setup().ok().and_then(|setup| {
             if from_private { cli::default_private(&setup).ok().map(|id| format!("Private/{id}")) } else { cli::default_public(&setup).ok().map(|id| format!("Public/{id}")) }
         });
-        log_started(&out, json!({ "kind": "pay_account", "chain": "lez", "from": from, "to": account.trim(), "amount": cli::ungrouped(&amount), "private": from_private }));
+        log_started(&out, json!({ "kind": "pay_account", "chain": "lez", "from": from, "to": account.trim(), "amount": cli::amount_text(&amount).ok(), "private": from_private }));
         out
     }
 
@@ -3306,7 +3305,7 @@ impl NamesModule for Names {
         };
         let out = self.cli_job(&name, "pay", |_, _, _| Ok((command, None, Value::Null)));
         let from = self.cli_setup().ok().and_then(|setup| cli::default_private(&setup).ok()).map(|id| format!("Private/{id}"));
-        log_started(&out, json!({ "kind": "pay", "chain": "lez", "from": from, "name": registry::normalize_name(&name), "amount": cli::ungrouped(&amount) }));
+        log_started(&out, json!({ "kind": "pay", "chain": "lez", "from": from, "name": registry::normalize_name(&name), "amount": cli::amount_text(&amount).ok() }));
         out
     }
 
@@ -3560,7 +3559,7 @@ impl NamesModule for Names {
         let from = self.cli_setup().ok().and_then(|setup| {
             if from_private { cli::default_private(&setup).ok().map(|id| format!("Private/{id}")) } else { cli::default_public(&setup).ok().map(|id| format!("Public/{id}")) }
         });
-        log_started(&out, json!({ "kind": "token_send", "chain": "lez", "from": from, "to": to.trim(), "amount": cli::ungrouped(&amount), "token": definition.trim() }));
+        log_started(&out, json!({ "kind": "token_send", "chain": "lez", "from": from, "to": to.trim(), "amount": cli::amount_text(&amount).ok(), "token": definition.trim() }));
         out
     }
 
@@ -4506,8 +4505,7 @@ impl Names {
                 Some(state) if state["state"] == "done" => Some((true, String::new())),
                 Some(state) if state["state"] == "failed" => {
                     let log = state["log_tail"].as_str().unwrap_or_default();
-                    let first = log.lines().map(str::trim).find(|line| line.starts_with("Error:")).unwrap_or_else(|| cli::last_line(log));
-                    Some((false, provider::clean_text(first.trim_start_matches("Error:").trim(), 300)))
+                    Some((false, provider::clean_text(&cli::failure_cause(log), 300)))
                 }
                 _ => None,
             };
@@ -6647,7 +6645,7 @@ mod tests {
         // No accounts yet: refused before anything runs.
         assert!(parsed(&names.cli_shield(String::new()))["error"].as_str().unwrap().contains("create your wallet"));
         std::fs::write(wallet.join("names.json"), format!("{{\"public\":\"{public}\",\"private\":\"yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z\"}}")).unwrap();
-        assert!(parsed(&names.cli_shield("0".into()))["error"].as_str().unwrap().contains("above zero"));
+        assert_eq!(parsed(&names.cli_shield("0".into()))["error"], "Enter an amount above 0.");
         let started = parsed(&names.cli_shield(String::new()));
         assert_eq!(started["value"]["kind"], "shield", "{started}");
         let id = started["value"]["id"].as_str().unwrap().to_owned();

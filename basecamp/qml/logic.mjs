@@ -32,21 +32,49 @@ export function someAmount(digits) {
     return digits !== null && digits !== undefined && !/^0*$/.test(String(digits))
 }
 
-/// The largest token amount: token balances are 128-bit numbers.
-const TOKEN_MAX = "340282366920938463463374607431768211455"
+/// The largest amount: LEZ and token balances are 128-bit numbers.
+export const AMOUNT_MAX = "340282366920938463463374607431768211455"
+/// The largest Logos Blockchain amount: its notes hold 64-bit numbers.
+export const CHAIN_AMOUNT_MAX = "18446744073709551615"
 
-/// Why `text` isn't a token amount (whole base units, 1 to 2^128 - 1, `,` and
-/// `_` may group digits), or "" if it is one.
-export function tokenAmountProblem(text) {
-    var digits = String(text === null || text === undefined ? "" : text).trim().replace(/[,_]/g, "")
-    if (!/^[0-9]+$/.test(digits))
-        return "Enter a whole amount of the token's base units, such as 1000."
-    digits = digits.replace(/^0+/, "")
+/// Every amount a person types, in every field: `{digits, problem}`. `digits` is the
+/// amount written plainly ("1000"), or "" when `problem` says why it isn't one. The
+/// rules and the words are the names CLI's (`tokens::parse_amount`) and the module's
+/// (`cli::amount`), checked against the same table (basecamp-module/rust-lib/src/
+/// amounts.json): whole numbers above 0, `,` or `_` only between groups of three
+/// digits, so "1,5" is refused and never read as 15. `max` (decimal text) defaults to
+/// AMOUNT_MAX.
+export function amountRead(text, max) {
+    var typed = String(text === null || text === undefined ? "" : text).trim()
+    var refuse = function(problem) { return { digits: "", problem: problem } }
+    if (typed === "")
+        return refuse("Enter an amount, such as 1,000.")
+    if (/^-[0-9]/.test(typed))
+        return refuse(typed + " is negative. Enter an amount above 0.")
+    if (!/^[0-9,_]*[0-9][0-9,_]*$/.test(typed))
+        return refuse(typed + " isn't a whole number. Enter digits only, such as 1000 or 1,000.")
+    var groups = typed.split(/[,_]/)
+    // A first group starting with 0 (0,001) is no thousands grouping either.
+    if (groups.length > 1 && !(groups[0].length >= 1 && groups[0].length <= 3 && groups[0].charAt(0) !== "0"
+                               && groups.slice(1).every(function(group) { return group.length === 3 })))
+        return refuse(typed + " isn't a whole number: commas go only between groups of three digits, such as 1,000.")
+    var digits = groups.join("").replace(/^0+/, "")
     if (digits === "")
-        return "Enter an amount above zero."
-    if (digits.length > TOKEN_MAX.length || (digits.length === TOKEN_MAX.length && digits > TOKEN_MAX))
-        return "That is more than a token amount can be."
-    return ""
+        return refuse("Enter an amount above 0.")
+    var most = String(max || AMOUNT_MAX)
+    if (digits.length > most.length || (digits.length === most.length && digits > most))
+        return refuse(typed + " is more than an amount can be.")
+    return { digits: digits, problem: "" }
+}
+
+/// Why `text` isn't an amount, or "" when it is one (amountRead).
+export function amountProblem(text, max) {
+    return amountRead(text, max).problem
+}
+
+/// `text` as the amount it is, written plainly, or "" when it isn't one (amountRead).
+export function amountDigits(text, max) {
+    return amountRead(text, max).digits
 }
 
 /// Why `text` can't be where a token goes (a name, `Public/<id>` or one of
@@ -107,6 +135,19 @@ export function feePaid(fee) {
     return "Fee paid: " + groupDigits(fee.paid) + "."
 }
 
+/// What a job that failed says, in one line: the module's `problem` (built from the CLI's
+/// error), else `lead` and the CLI's `Error:` line, never the last line of its cause chain
+/// ("2: Connection refused (os error 61)", transfer-failure-text-is-last-cause-line).
+export function jobProblem(job, lead) {
+    var value = job || {}
+    if (value.problem)
+        return String(value.problem)
+    var lines = String(value.log_tail || "").split("\n").map(function(line) { return line.trim() }).filter(function(line) { return line !== "" })
+    var error = lines.filter(function(line) { return /^Error:/.test(line) })[0]
+    var why = error !== undefined ? error.replace(/^Error:\s*/, "") : lines.length > 0 ? lines[lines.length - 1] : ""
+    return lead + ": " + (why !== "" ? why : "it stopped without saying why")
+}
+
 /// An account as listed in Settings: its nickname, else its kind; the default
 /// account of each kind is the one the wallet pays and registers from.
 /// An account's title: only a registered name ever names an account, so without one it
@@ -161,9 +202,14 @@ export function durationWords(seconds) {
     return (s / 86400).toFixed(1) + " days"
 }
 
-/// A Logos Blockchain key cut down for a line of text: `66ecf4bc…a81b`.
+/// A key or account ID cut down for a line of text: `66ecf4bc…a81b`. An account written
+/// with its kind keeps it whole and cuts only the ID (`Public/CCVd76Tk…pKnk`), so the
+/// prefix never eats what tells two accounts apart (account-page-address-line-useless).
 export function keyShown(key) {
     var text = String(key || "")
+    var account = /^(Public|Private)\/(.+)$/.exec(text)
+    if (account)
+        return account[1] + "/" + keyShown(account[2])
     return text.length > 16 ? text.substr(0, 8) + "…" + text.substr(text.length - 4) : text
 }
 
@@ -403,7 +449,7 @@ export function activityLine(entry, now, account) {
     case "pay": title = "Paid " + (e.name || "a name"); sub = "on LEZ"; break
     case "pay_account": title = "Paid " + whoShown(e.to); sub = e["private"] ? "on LEZ, from your private account" : "on LEZ, from your public account"; break
     case "shield": title = "Moved to private"; sub = "on LEZ, from your public account"; sign = ""; break
-    case "receive": title = e.claimed === false ? "Nothing claimed" : "Claimed waiting payments"; sub = e.claimed === false ? "on LEZ, what waits is worth less than claiming it costs" : "on LEZ, into your private accounts"; sign = "+"
+    case "receive": title = e.claimed === false ? "Nothing claimed" : landedIn(e) ? "Claimed waiting payments" : "Claim of waiting payments"; sub = e.claimed === false ? "on LEZ, what waits is worth less than claiming it costs" : "on LEZ, into your private accounts"; sign = "+"
         if (e.claimed !== false && e.left && typeof e.left === "object" && Object.keys(e.left).length > 0)
             sub += " · some still wait"
         break
@@ -443,7 +489,24 @@ export function activityLine(entry, now, account) {
     var fee = e.fee && typeof e.fee === "object" ? e.fee.paid : e.fee
     if (fee && kind !== "split" && e.state !== "sending")
         sub += " · fee " + grouped(fee)
+    // Money came in only once it landed; a failed or unknown change moved nothing known.
+    if ((sign === "+" && !landedIn(e)) || e.state === "failed" || e.state === "unknown")
+        sign = ""
     return { title: title, sub: sub, amount: amount, sign: amount === "" ? "" : sign, state: stateText, tone: tone, ago: agoShown(e.at, now) }
+}
+
+/// Whether entry `e`'s money landed: a change done, a bridge arrived on LEZ, a Logos
+/// Blockchain send in a block, an arrival. Only then is it received.
+function landedIn(e) {
+    var state = String(e.state || "")
+    switch (String(e.kind || "")) {
+    case "arrived": return true
+    case "bridge": return state === "arrived"
+    case "send": return state === "in_block" || state === "done"
+    // A claim that stopped partway credited the accounts in its `received`: those landed.
+    case "receive": return state === "done" || state === "partial"
+    }
+    return state === "done"
 }
 
 /// How `page` (an account or key) sees entry `e` when that differs from the wallet's view:
@@ -461,13 +524,18 @@ function accountSide(e, kind, page) {
             line.sign = ""
             return line
         }
+    // Sending, failed or unknown, money into the page isn't called received and carries
+    // no "+"; its state says what happened (payee-page-failed-or-pending-payment-reads-received-plus).
+    var landed = landedIn(e)
     if (kind === "receive" && e.claimed !== false) {
         var credit = received[page]
         if (credit)
             // Credited here: this account's own amount; the fee is told only where it was paid.
             return function(line) {
                 line.amount = grouped(credit)
-                line.sign = "+"
+                line.sign = landed ? "+" : ""
+                if (!landed)
+                    line.title = "Claim of waiting payments"
                 if (e.from !== page && fee)
                     line.sub = line.sub.replace(" · fee " + grouped(fee), "")
                 return line
@@ -487,17 +555,18 @@ function accountSide(e, kind, page) {
     if (incoming && e.to === page && e.from !== page)
         // Money into this account: received, and its fee was the payer's.
         return function(line) {
-            if (kind === "pay_account" || kind === "token_send")
-                line.title = (kind === "token_send" ? "Received a token" : "Received") + (e.from ? " from " + whoShown(e.from) : "")
-            else if (kind === "send")
-                line.title = "Received on the Logos Blockchain"
+            var from = e.from ? " from " + whoShown(e.from) : ""
             if (kind === "pay_account")
-                line.sub = "on LEZ"
+                line.title = (landed ? "Received" : "Payment") + from
             else if (kind === "token_send")
+                line.title = (landed ? "Received a token" : "Token payment") + from
+            else if (kind === "send")
+                line.title = landed ? "Received on the Logos Blockchain" : "Payment on the Logos Blockchain"
+            if (kind === "pay_account" || kind === "token_send")
                 line.sub = "on LEZ"
             else if (fee)
                 line.sub = line.sub.replace(" · fee " + grouped(fee), "")
-            line.sign = line.amount === "" ? "" : "+"
+            line.sign = line.amount === "" || !landed ? "" : "+"
             return line
         }
     return null
