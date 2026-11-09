@@ -370,11 +370,19 @@ var BRIDGE_ARRIVES_MS = 12 * 3600 * 1000
 
 /// One history entry in words: {title, sub, amount, sign, state, tone}. `sign` is "-" for
 /// what left, "+" for what came in, "" for a move between your own accounts; `tone` is
-/// "good", "warn", "bad" or "plain" for the state.
-export function activityLine(entry, now) {
+/// "good", "warn", "bad" or "plain" for the state. `account`, when given, is the account
+/// whose page shows the entry: the direction and amount are then that account's own
+/// (claim-entry-not-on-credited-accounts-page-and-shown-as-credit-on-payer).
+export function activityLine(entry, now, account) {
     var e = entry || {}
-    var amount = e.amount ? grouped(e.amount) : ""
+    var page = String(account || "")
     var kind = String(e.kind || "")
+    if (page !== "") {
+        var own = accountSide(e, kind, page)
+        if (own)
+            return own(activityLine(e, now))
+    }
+    var amount = e.amount ? grouped(e.amount) : ""
     var title = "", sub = "", sign = "-"
     switch (kind) {
     case "send": title = "Sent on the Logos Blockchain"; sub = "to " + (e.name ? e.name : whoShown(e.to)); break
@@ -415,9 +423,43 @@ export function activityLine(entry, now) {
     return { title: title, sub: sub, amount: amount, sign: amount === "" ? "" : sign, state: stateText, tone: tone, ago: agoShown(e.at, now) }
 }
 
-/// The entries that involve `who` (a LEZ account, a node key or a name).
+/// How `page` (an account or key) sees entry `e` when that differs from the wallet's view:
+/// a function that turns the wallet's line into the page's, or null.
+function accountSide(e, kind, page) {
+    var received = e.received && typeof e.received === "object" ? e.received : {}
+    var fee = e.fee && typeof e.fee === "object" ? e.fee.paid : e.fee
+    if (kind === "receive" && e.claimed !== false) {
+        var credit = received[page]
+        if (credit)
+            // Credited here: this account's own amount; the fee is told only where it was paid.
+            return function(line) {
+                line.amount = grouped(credit)
+                line.sign = "+"
+                if (e.from !== page && fee)
+                    line.sub = line.sub.replace(" · fee " + grouped(fee), "")
+                return line
+            }
+        if (e.from === page)
+            // The payer only paid the claim's fee.
+            return function(line) {
+                line.title = "Paid the fee to claim waiting payments"
+                line.sub = "on LEZ, into your other private accounts"
+                line.amount = fee ? grouped(fee) : ""
+                line.sign = fee ? "-" : ""
+                return line
+            }
+        return null
+    }
+    return null
+}
+
+/// The entries that involve `who` (a LEZ account, a node key or a name): as payer, payee,
+/// name, or an account a claim credited.
 export function activityFor(rows, who) {
     var list = Array.isArray(rows) ? rows : []
-    return list.filter(function(e) { return e.from === who || e.to === who || e.name === who })
+    return list.filter(function(e) {
+        var credited = e.received && typeof e.received === "object" && Object.prototype.hasOwnProperty.call(e.received, who)
+        return e.from === who || e.to === who || e.name === who || credited
+    })
 }
 

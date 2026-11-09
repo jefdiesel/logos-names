@@ -4092,7 +4092,9 @@ Item {
         id: act
         property var entry: ({})
         property bool small: false
-        readonly property var line: Logic.activityLine(act.entry, Math.max(root.clockTick, Date.now()))
+        // The account whose page shows the row, if any: its own direction and amount.
+        property string account: ""
+        readonly property var line: Logic.activityLine(act.entry, Math.max(root.clockTick, Date.now()), act.account)
         Layout.fillWidth: true
         Layout.leftMargin: act.small ? 0 : root.px(6)
         Layout.rightMargin: act.small ? 0 : root.px(6)
@@ -6055,7 +6057,7 @@ Item {
                     Hint { visible: accountPage.mine.length === 0; font.pixelSize: root.px(14); text: "Nothing sent or received here yet, as far as this app has seen." }
                     Repeater {
                         model: accountPage.mine
-                        ActivityRow { required property var modelData; entry: modelData }
+                        ActivityRow { required property var modelData; entry: modelData; account: root.rowAccount(accountPage.row) }
                     }
                 }
 
