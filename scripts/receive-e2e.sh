@@ -27,6 +27,10 @@
 # rc1, the succinct receipt's last stage), just above guard.sh's default MAX_RSS_GB=6, which
 # killed it before it was sent. A running rc1 sequencer starts short `r0vm` executors of its
 # own, so `pgrep r0vm` is not empty while one runs: check the r0vm's parent, never `names`.
+# On a machine with no r0vm at all (the Mac mini since 2026-11-09), build the sequencer with
+# `--features standalone,prove` so it runs programs in-process (a plain one panics at genesis:
+# "No such file or directory"); a `names` built without local-prove then refuses every call
+# that would run a program, before anything is sent ("no r0vm was found …").
 #
 #   SEQ_BIN=… SEQ_CONFIG=… NAMES=… WORK=<new dir> RPC_PORT=3250 METRICS_PORT=9250 scripts/receive-e2e.sh
 set -euo pipefail

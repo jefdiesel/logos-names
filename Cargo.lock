@@ -5710,6 +5710,8 @@ dependencies = [
  "names_accountlog",
  "names_core",
  "names_seal",
+ "risc0-zkvm",
+ "rzup",
  "sequencer_service_rpc",
  "serde",
  "serde_json",

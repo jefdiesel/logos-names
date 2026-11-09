@@ -625,6 +625,7 @@ impl Client {
         if name.is_empty() {
             bail!("could not find a free anonymous name; try again");
         }
+        crate::prover::to_prove()?;
         let from = default_private()?;
         let id = derive(&name).id;
         let tier = length_proof(&id)?.1;

@@ -750,6 +750,7 @@ mod chain;
 mod fees;
 mod plan;
 mod module;
+mod prover;
 mod tokens;
 
 /// The text entry that points a name to another (SPEC.md §7, Forwarding).
@@ -1096,6 +1097,7 @@ impl Client {
     /// them, before the first is proven (`plan`); refuses in words when they can't. A job of
     /// several steps says what it takes in all.
     async fn plan_private(&mut self, job: &str, steps: &[plan::Step<AccountId>]) -> Result<plan::Costed<AccountId>> {
+        prover::to_prove()?;
         let holdings = self.private_holdings().await?;
         let costed = match plan::check(&holdings, steps) {
             Ok(costed) => costed,
@@ -1756,6 +1758,9 @@ impl Client {
     ) -> Result<()> {
         let dry_run = std::env::var_os("LOGOS_NAMES_DRY_RUN").is_some();
         let private = mentions.iter().any(|mention| mention.identity.is_private());
+        if private {
+            prover::to_prove()?;
+        }
         let paying = mentions.clone();
         let before = if private { None } else { Some(self.held_by(&paying).await) };
         let wealth = if private { self.private_wealth().await } else { None };
@@ -1899,6 +1904,7 @@ impl Client {
         message: &[u8],
         programs: Vec<(AccountId, Program)>,
     ) -> Result<u64> {
+        prover::to_run()?;
         let actors: Vec<Actor> = mentions.iter().map(AccountMention::actor).collect();
         let mut states = std::collections::HashMap::new();
         for actor in &actors {
@@ -1994,6 +2000,9 @@ impl Client {
             bail!("{name}{NAME_SUFFIX}'s public account {to} has never been used on this chain, and LEZ can't credit it without its owner's public key; {how}");
         }
 
+        if self.is_private(from) {
+            prover::to_prove()?;
+        }
         println!("paying {amount} to {name}{NAME_SUFFIX} ({to})");
         let paying = vec![self.signer(from).balance()];
         let held = self.held_by(&paying).await;
@@ -2059,6 +2068,7 @@ impl Client {
 
     /// Pays `amount` to the private receiving keys `name` publishes.
     async fn pay_private(&mut self, name: &str, amount: u128, from: AccountId) -> Result<()> {
+        prover::to_prove()?;
         let (_, _, profile) = self.lookup(name).await?;
         let recipient = private_keys_of(name, &profile)?;
         let paying = vec![self.signer(from).balance()];
@@ -2175,6 +2185,7 @@ impl Client {
             println!("nothing worth claiming");
             return Ok(());
         }
+        prover::to_prove()?;
         // The largest first: when the payer can't pay for every claim, the most arrives.
         let mut pending = pending;
         pending.sort_by_key(|message| std::cmp::Reverse(message.native_credit().unwrap_or(0)));
@@ -3430,25 +3441,11 @@ fn rpc_call(rpc: &str, method: &str, params: serde_json::Value) -> Result<serde_
     Ok(reply["result"].clone())
 }
 
-/// Private changes are proven by RISC Zero's `r0vm`. The installer puts it next to
-/// `names`; use that copy unless `RISC0_SERVER_PATH` names another.
-fn use_bundled_prover() {
-    if std::env::var_os("RISC0_SERVER_PATH").is_some() {
-        return;
-    }
-    let bundled = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.canonicalize().ok())
-        .and_then(|exe| Some(exe.parent()?.join("r0vm")));
-    if let Some(r0vm) = bundled.filter(|path| path.is_file()) {
-        // SAFETY: called first thing in main, before any other thread starts.
-        unsafe { std::env::set_var("RISC0_SERVER_PATH", r0vm) };
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    use_bundled_prover();
+    // Where programs run and proofs are made: the r0vm the installer puts next to `names`
+    // unless RISC0_SERVER_PATH names another, or in-process in a local-prove build (`prover`).
+    prover::start();
     let cli = Cli::parse();
     if let Command::Man { dir } = &cli.command {
         return write_man_pages(dir);
