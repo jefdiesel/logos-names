@@ -124,6 +124,19 @@ export function feePaid(fee) {
     return "Fee paid: " + groupDigits(fee.paid) + "."
 }
 
+/// What a job that failed says, in one line: the module's `problem` (built from the CLI's
+/// error), else `lead` and the CLI's `Error:` line, never the last line of its cause chain
+/// ("2: Connection refused (os error 61)", transfer-failure-text-is-last-cause-line).
+export function jobProblem(job, lead) {
+    var value = job || {}
+    if (value.problem)
+        return String(value.problem)
+    var lines = String(value.log_tail || "").split("\n").map(function(line) { return line.trim() }).filter(function(line) { return line !== "" })
+    var error = lines.filter(function(line) { return /^Error:/.test(line) })[0]
+    var why = error !== undefined ? error.replace(/^Error:\s*/, "") : lines.length > 0 ? lines[lines.length - 1] : ""
+    return lead + ": " + (why !== "" ? why : "it stopped without saying why")
+}
+
 /// An account as listed in Settings: its nickname, else its kind; the default
 /// account of each kind is the one the wallet pays and registers from.
 /// An account's title: only a registered name ever names an account, so without one it

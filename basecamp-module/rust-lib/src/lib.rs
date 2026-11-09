@@ -1691,29 +1691,23 @@ impl Names {
                     }
                 }
             }
-            Some("receive") if !running && !done => {
-                let first = log.lines().map(str::trim).find(|line| line.starts_with("Error:")).unwrap_or_else(|| cli::last_line(&log));
-                state["problem"] = Value::from(format!("Claiming didn't finish: {}", first.trim_start_matches("Error:").trim()));
-            }
-            Some("pay_account") if !running && !done => {
-                let first = log.lines().map(str::trim).find(|line| line.starts_with("Error:")).unwrap_or_else(|| cli::last_line(&log));
-                state["problem"] = Value::from(format!("The payment didn't go through: {}", first.trim_start_matches("Error:").trim()));
-            }
             Some("token_send" | "token_receive") if !running => {
-                let what = if state["kind"] == "token_send" { "The token transfer didn't go through" } else { "Receiving didn't finish" };
                 if let Some(fields) = cli::token_outcome(&log).as_object() {
                     for (key, value) in fields {
                         state[key.as_str()] = value.clone();
                     }
                 }
-                if !done {
-                    let first = log.lines().map(str::trim).find(|line| line.starts_with("Error:")).unwrap_or_else(|| cli::last_line(&log));
-                    state["problem"] = Value::from(format!("{what}: {}", first.trim_start_matches("Error:").trim()));
-                }
                 // What the wallet holds has changed.
                 self.forget_tokens();
             }
             _ => {}
+        }
+        // Every job that failed says what didn't happen and why in one line, built from
+        // the CLI's error, never its last cause line (transfer-failure-text-is-last-cause-line).
+        let failed = !running && !done && state["state"] != "unknown";
+        if failed && !state["problem"].as_str().is_some_and(|problem| !problem.is_empty()) {
+            let kind = state["kind"].as_str().unwrap_or_default().to_owned();
+            state["problem"] = Value::from(cli::job_problem(&kind, &log));
         }
     }
 
@@ -4358,8 +4352,7 @@ impl Names {
                 Some(state) if state["state"] == "done" => Some((true, String::new())),
                 Some(state) if state["state"] == "failed" => {
                     let log = state["log_tail"].as_str().unwrap_or_default();
-                    let first = log.lines().map(str::trim).find(|line| line.starts_with("Error:")).unwrap_or_else(|| cli::last_line(log));
-                    Some((false, provider::clean_text(first.trim_start_matches("Error:").trim(), 300)))
+                    Some((false, provider::clean_text(&cli::failure_cause(log), 300)))
                 }
                 _ => None,
             };

@@ -712,8 +712,7 @@ pub fn shield_outcome(log: &str, done: bool) -> Value {
         // "Stored persistent accounts" lines; "ready:" ends a setup that moved.
         return json!({ "moved": log.contains("moving ") || log.contains("ready: "), "problem": null });
     }
-    let first = log.lines().map(str::trim).find(|line| line.starts_with("Error:")).unwrap_or_else(|| last_line(log));
-    json!({ "moved": false, "problem": format!("Moving to private didn't go through: {}", first.trim_start_matches("Error:").trim()) })
+    json!({ "moved": false, "problem": job_problem("shield", log) })
 }
 
 /// Digits grouped in threes: 5000000 is 5,000,000.
@@ -1442,6 +1441,49 @@ pub fn parse_mine(output: &str) -> Vec<Value> {
 }
 
 /// The last line of `text` that says something.
+/// Why a CLI run that failed failed, in one line built from its error: the `Error:` line
+/// (the CLI's own words), never the last line of its cause chain ("2: Connection refused
+/// (os error 61)"). When the causes show the sequencer couldn't be reached at all, that is
+/// what it says, with what to do (transfer-failure-text-is-last-cause-line).
+pub fn failure_cause(log: &str) -> String {
+    let lines: Vec<&str> = log.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    let error = lines.iter().position(|line| line.starts_with("Error:"));
+    // The error and the causes under it; without one, the last thing said.
+    let told = match error {
+        Some(at) => &lines[at..],
+        None => &lines[lines.len().saturating_sub(1)..],
+    };
+    const UNREACHABLE: [&str; 6] = ["Connection refused", "tcp connect error", "client error (Connect)", "dns error", "cannot reach the sequencer", "Network is unreachable"];
+    if told.iter().any(|line| UNREACHABLE.iter().any(|mark| line.contains(mark))) {
+        return "couldn't reach the sequencer. Check that it is running and reachable, then try again".to_owned();
+    }
+    let first = told.first().map_or("", |line| line.trim_start_matches("Error:").trim());
+    if first.is_empty() { "it stopped without saying why".to_owned() } else { first.to_owned() }
+}
+
+/// What a CLI job of `kind` that failed says: what didn't happen, then why
+/// ([`failure_cause`]). Every job kind fails the same way.
+pub fn job_problem(kind: &str, log: &str) -> String {
+    let what = match kind {
+        "pay" | "pay_account" => "The payment didn't go through",
+        "token_send" => "The token transfer didn't go through",
+        "token_receive" => "Receiving didn't finish",
+        "receive" => "Claiming didn't finish",
+        "shield" => "Moving to private didn't go through",
+        "transfer" => "Giving the name away didn't go through",
+        "register" => "Registering the name didn't finish",
+        "claim" => "Taking the name back didn't finish",
+        "receive_privately" => "Setting up private payments didn't finish",
+        "profile" | "set_text" => "Saving the profile didn't finish",
+        "set_page" => "Publishing the page didn't finish",
+        "make_public" => "Making it public didn't finish",
+        "post" => "Posting didn't go through",
+        "like" | "hide" => "It didn't go through",
+        _ => "It didn't go through",
+    };
+    format!("{what}: {}", failure_cause(log))
+}
+
 pub fn last_line(text: &str) -> &str {
     text.lines().rev().map(str::trim).find(|line| !line.is_empty()).unwrap_or("")
 }
@@ -2845,6 +2887,22 @@ mod tests {
         let refused = run_create_wallet(&setup).unwrap_err();
         assert!(refused.contains("no space") && !refused.contains("abandon"), "{refused}");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// transfer-failure-text-is-last-cause-line: a transfer with the sequencer down told
+    /// "It didn't go through: 2: Connection refused (os error 61)."
+    #[test]
+    fn a_failed_job_says_its_error_not_its_last_cause() {
+        let down = "Error: failed to read the account from the sequencer\n\nCaused by:\n    0: client error (Connect)\n    1: tcp connect error\n    2: Connection refused (os error 61)\n";
+        assert_eq!(job_problem("transfer", down), "Giving the name away didn't go through: couldn't reach the sequencer. Check that it is running and reachable, then try again");
+        let refused = "Synced to block 9\nError: Public/CCVd holds 0 Demo, less than 5\n\nCaused by:\n    0: the token program said no\n";
+        assert_eq!(job_problem("token_send", refused), "The token transfer didn't go through: Public/CCVd holds 0 Demo, less than 5");
+        assert_eq!(job_problem("pay_account", "Error: Failed to get data from sequencer\n"), "The payment didn't go through: Failed to get data from sequencer");
+        // A "connection refused" retried before the run went on is not the failure.
+        assert_eq!(failure_cause("retrying: Connection refused\nError: the name is taken\n"), "the name is taken");
+        assert_eq!(failure_cause("killed by signal 9\n"), "killed by signal 9");
+        assert_eq!(failure_cause(""), "it stopped without saying why");
+        assert_eq!(job_problem("something_new", "Error: boom\n"), "It didn't go through: boom");
     }
 
     #[test]

@@ -1479,7 +1479,7 @@ Item {
                 installWarning = value.warning ? value.warning : ""
                 loadConfig()
             } else {
-                installProblem = value.problem ? value.problem : "The install stopped: " + lastLogLine(value.log_tail)
+                installProblem = Logic.jobProblem(value, "The install stopped")
             }
         }, function() { job.asking = false })
     }
@@ -1557,7 +1557,7 @@ Item {
                 return
             claimJob = null
             claimBusy = false
-            claimLine = value.state === "done" ? job.name + " is yours again." : sentence(lastLogLine(value.log_tail))
+            claimLine = value.state === "done" ? job.name + " is yours again." : sentence(Logic.jobProblem(value, "Taking the name back didn't finish"))
             loadCliMine()
         }, function() {})
     }
@@ -1639,7 +1639,7 @@ Item {
             if (value.state === "done")
                 say("Claimed. The payments are in your private account now.", false)
             else
-                receiveProblem = value.problem ? value.problem : "Claiming didn't finish: " + lastLogLine(value.log_tail)
+                receiveProblem = Logic.jobProblem(value, "Claiming didn't finish")
             loadCliBalance()
         }, function() { job.asking = false })
     }
@@ -1657,7 +1657,7 @@ Item {
             if (value.state === "done" && value.moved)
                 shieldMoved = true
             else
-                shieldProblem = value.problem ? value.problem : "Moving to private didn't go through: " + lastLogLine(value.log_tail)
+                shieldProblem = Logic.jobProblem(value, "Moving to private didn't go through")
             loadCliBalance()
         }, function() { job.asking = false })
     }
@@ -2152,7 +2152,7 @@ Item {
                 say(settled ? (typeof job.done === "function" ? job.done(null) : job.done)
                     : "The names CLI finished, but the change does not show yet. Look the name up again in a moment.", !settled)
             } else {
-                say("The names CLI could not save it: " + lastLogLine(value.log_tail), true)
+                say(sentence(Logic.jobProblem(value, "The names CLI could not save it")), true)
             }
         }, function(message) {
             job.asking = false
@@ -2918,10 +2918,9 @@ Item {
                     job.after()
                 boardLoad()
             } else {
-                // The module's own words when it has them, never the CLI's "Error:" prefix
-                // (send-failure-text-raw-and-no-balance-check).
-                var why = value.problem ? String(value.problem) : "It didn't go through: " + lastLogLine(value.log_tail)
-                say(sentence(why.replace(/(^|: )Error: /, "$1")), true)
+                // The module's own words, never the CLI's "Error:" prefix or its last cause line
+                // (send-failure-text-raw-and-no-balance-check, transfer-failure-text-is-last-cause-line).
+                say(sentence(Logic.jobProblem(value, "It didn't go through")), true)
             }
         }, function() { job.asking = false })
     }
@@ -3434,7 +3433,7 @@ Item {
                 if (job.after)
                     job.after()
             } else {
-                tokenProblem = value.problem ? sentence(value.problem) : "It didn't go through: " + lastLogLine(value.log_tail)
+                tokenProblem = sentence(Logic.jobProblem(value, "It didn't go through"))
             }
             loadTokens()
         }, function() { job.asking = false })
