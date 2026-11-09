@@ -992,6 +992,33 @@ pub fn channel_id(_sequencer: &str) -> Result<String, String> {
     Ok("02".repeat(32))
 }
 
+/// Which LEZ the sequencer at `sequencer` runs (`deposit::lez_of`), so a deposit carries
+/// metadata it decodes. An answer that tells neither is refused (`deposit::UNKNOWN_LEZ`):
+/// a deposit can't be undone, so it is never made on a guess.
+#[cfg(not(test))]
+pub fn lez_version(sequencer: &str) -> Result<crate::deposit::Lez, String> {
+    let request = json!({ "jsonrpc": "2.0", "id": 1, "method": crate::deposit::PROBE_METHOD, "params": [crate::deposit::PROBE_ACCOUNT] });
+    let response = match ureq::post(sequencer).timeout(REQUEST_CAP).send_json(request) {
+        Ok(response) | Err(ureq::Error::Status(_, response)) => response,
+        Err(error) => return Err(request_problem(error, REQUEST_CAP)),
+    };
+    let reply: Value = response.into_json().unwrap_or(Value::Null);
+    crate::deposit::lez_of(&reply).ok_or_else(|| crate::deposit::UNKNOWN_LEZ.to_owned())
+}
+
+/// Tests say which LEZ answers (`LEZ`; `None` tells neither).
+#[cfg(test)]
+pub fn lez_version(_sequencer: &str) -> Result<crate::deposit::Lez, String> {
+    LEZ.with(std::cell::Cell::get).ok_or_else(|| crate::deposit::UNKNOWN_LEZ.to_owned())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// 0.3 unless a test sets it: the bridge tests about notes, fees and history were written
+    /// against 0.3's metadata (the account's bytes, needing no key); the 0.4 ones set it.
+    pub static LEZ: std::cell::Cell<Option<crate::deposit::Lez>> = const { std::cell::Cell::new(Some(crate::deposit::Lez::V03)) };
+}
+
 /// Whether the sequencer at `sequencer` has ever seen `account`: `getAccountView`
 /// answers null for an account no transaction has touched. LEZ can't pay such an
 /// account of another wallet by its ID (the send lands, keeps its fee and credits
@@ -1002,16 +1029,16 @@ pub fn account_seen(sequencer: &str, account: &AccountId) -> Result<bool, String
     Ok(!rpc(sequencer, "getAccountView", params, Instant::now() + REQUEST_CAP, REQUEST_CAP)?.is_null())
 }
 
-/// LEZ's bridge program: `SHA-256("/LEE-BuiltinProgram/v1/AccountId" ‖ "bridge")`.
+/// LEZ's bridge program (`deposit::bridge_program`).
 pub fn bridge_program() -> AccountId {
-    sha256(&[b"/LEE-BuiltinProgram/v1/AccountId", b"bridge"])
+    crate::deposit::bridge_program()
 }
 
 /// The account in which LEZ's bridge marks the Logos Blockchain deposit `op_id` as minted
-/// (its receipt): written in the same LEZ transaction that credits the deposit, exactly
-/// once per deposit, and never by anything else.
+/// (its receipt, `deposit::receipt`): written in the same LEZ transaction that credits the
+/// deposit, exactly once per deposit, and never by anything else.
 pub fn deposit_receipt(op_id: &[u8; 32]) -> AccountId {
-    pda(&bridge_program(), &sha256(&[b"/LEZ/v0.3/BridgeDepositReceipt/0", op_id]))
+    crate::deposit::receipt(op_id)
 }
 
 /// Whether LEZ has minted the deposit whose receipt is `receipt`: the bridge's state on it

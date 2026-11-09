@@ -284,14 +284,19 @@ pub fn bridge_receipt(entry: &Value) -> Option<crate::registry::AccountId> {
 }
 
 /// A bridge's deposit op id (`chain::deposit_op_id`): the one it recorded, or the one its
-/// channel, note and destination give.
+/// channel, note and metadata give. The op id hashes the metadata sent, so it is the one
+/// recorded with the bridge (`metadata`); a bridge recorded without it was made before the
+/// metadata depended on LEZ's version, and sent the destination's 32 bytes.
 pub fn bridge_op_id(entry: &Value) -> Option<[u8; 32]> {
     if let Some(op) = entry["op_id"].as_str() {
         return <[u8; 32]>::try_from(crate::registry::unhex(op).ok()?).ok();
     }
     let channel = <[u8; 32]>::try_from(crate::registry::unhex(entry["channel"].as_str()?).ok()?).ok()?;
-    let to = crate::registry::parse_account(entry["to"].as_str()?.strip_prefix("Public/")?).ok()?;
-    crate::chain::deposit_op_id(&channel, &[entry["note"].as_str()?.to_owned()], &to)
+    let metadata = match entry["metadata"].as_str() {
+        Some(metadata) => crate::registry::unhex(metadata).ok()?,
+        None => crate::registry::parse_account(entry["to"].as_str()?.strip_prefix("Public/")?).ok()?.to_vec(),
+    };
+    crate::chain::deposit_op_id(&channel, &[entry["note"].as_str()?.to_owned()], &metadata)
 }
 
 /// How long a bridge's receipt is still asked after it was sent: an overdue one may still

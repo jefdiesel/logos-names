@@ -184,24 +184,12 @@ pub fn hash_of(reply: &Value) -> Option<String> {
 }
 
 /// The identity of a channel deposit on the Logos Blockchain (its `op_id`), which LEZ
-/// mints it under: `Blake2b-256("OPERATION_ID_V1" ‖ op)`, the op encoded canonically as
-/// the channel's 32 bytes, the input notes (a one-byte count, then each note's 32 bytes as
-/// the node writes them in hex), and the metadata (a four-byte little-endian length, then
-/// its bytes). Everything in it is known before the deposit is sent: the channel, the one
-/// exact note, and the LEZ account it credits. `None` for an input that isn't 32 bytes of hex.
+/// mints it under (`deposit::op_id`), with the input notes as the node writes them (hex).
+/// `metadata` is the very bytes sent (`deposit::metadata`): the op id changes with them.
+/// `None` for an input that isn't 32 bytes of hex.
 pub fn deposit_op_id(channel: &[u8; 32], inputs: &[String], metadata: &[u8]) -> Option<[u8; 32]> {
-    use blake2::Digest;
-    let mut op = channel.to_vec();
-    op.push(u8::try_from(inputs.len()).ok()?);
-    for note in inputs {
-        op.extend(<[u8; 32]>::try_from(crate::registry::unhex(note).ok()?).ok()?);
-    }
-    op.extend(u32::try_from(metadata.len()).ok()?.to_le_bytes());
-    op.extend(metadata);
-    let mut hasher = blake2::Blake2b::<blake2::digest::consts::U32>::new();
-    hasher.update(b"OPERATION_ID_V1");
-    hasher.update(&op);
-    Some(hasher.finalize().into())
+    let notes: Option<Vec<[u8; 32]>> = inputs.iter().map(|note| <[u8; 32]>::try_from(crate::registry::unhex(note).ok()?).ok()).collect();
+    crate::deposit::op_id(channel, &notes?, metadata)
 }
 
 /// The hash of the transaction that made the deposit `op_id`, from a block's events as

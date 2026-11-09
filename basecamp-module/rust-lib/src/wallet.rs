@@ -25,6 +25,9 @@ const SEND: Duration = Duration::from_secs(120);
 pub struct Held {
     pub public: Vec<AccountId>,
     pub private: Vec<(AccountId, u128)>,
+    /// Each public account's public key, when the CLI tells them (none from an older one):
+    /// what LEZ 0.4 needs to credit a bridge to it. Only a key that is the account's.
+    pub keys: Vec<(AccountId, [u8; 32])>,
 }
 
 fn request(words: &[&str]) -> Vec<String> {
@@ -49,7 +52,36 @@ fn parse_held(answer: &Value) -> Held {
                 Some((id(&entry["account"])?, balance))
             })
             .collect(),
+        keys: answer["keys"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(account, key)| Some((registry::parse_account(account).ok()?, crate::deposit::public_key_text(key.as_str()?)?)))
+            .filter(|(account, key)| crate::deposit::key_account(key) == *account)
+            .collect(),
     }
+}
+
+/// The public key of `account` when this wallet holds it (`Held::keys`): what LEZ 0.4
+/// needs to credit a bridge to it. `None` for an account it doesn't hold, or when the CLI
+/// is too old to tell keys.
+pub fn public_key(setup: &Setup, account: &AccountId) -> Result<Option<[u8; 32]>, String> {
+    held_key(&accounts(setup)?, account)
+}
+
+/// `public_key` from what the wallet holds: an account it holds without a key (an older
+/// CLI) is said so, not taken for another's.
+fn held_key(held: &Held, account: &AccountId) -> Result<Option<[u8; 32]>, String> {
+    if let Some((_, key)) = held.keys.iter().find(|(held, _)| held == account) {
+        return Ok(Some(*key));
+    }
+    if held.public.contains(account) {
+        return Err(
+            "Your names CLI is too old to give this account's public key, which LEZ needs to credit a bridge. Update the Names app, then try again. Nothing was sent."
+                .to_owned(),
+        );
+    }
+    Ok(None)
 }
 
 pub fn accounts(setup: &Setup) -> Result<Held, String> {
@@ -58,7 +90,7 @@ pub fn accounts(setup: &Setup) -> Result<Held, String> {
         // A CLI too old for `module accounts` (the October testnet build) still lists
         // every account and its balance in `names balance`.
         Err(problem) if problem == cli::OLDER_CLI => {
-            let mut held = Held { public: Vec::new(), private: Vec::new() };
+            let mut held = Held::default();
             for row in &cli::run_accounts_any(setup)?.rows {
                 let Some((private, id)) = row["account"].as_str().and_then(|text| crate::provider::account_ref(text).ok()) else { continue };
                 if private {
@@ -132,7 +164,24 @@ mod tests {
         );
         assert_eq!(held.public, vec![[1; 32]]);
         assert_eq!(held.private, vec![([2; 32], 7)]);
+        assert!(held.keys.is_empty(), "an older CLI tells no keys");
         assert!(answer("no json here").is_err());
+    }
+
+    /// A public account's key, as `module accounts` gives it, is kept only when it is that
+    /// account's (what a bridge to it on LEZ 0.4 carries).
+    #[test]
+    fn a_public_accounts_key_is_kept_only_when_it_is_the_accounts() {
+        let key = "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
+        let mine = crate::deposit::key_account(&crate::deposit::public_key_text(key).unwrap());
+        let held = parse_held(&json!({ "public": [registry::account_text(&mine), registry::account_text(&[3; 32])], "private": [],
+            "keys": { registry::account_text(&mine): key, registry::account_text(&[3; 32]): key } }));
+        assert_eq!(held.keys, vec![(mine, crate::deposit::public_key_text(key).unwrap())]);
+        assert_eq!(held_key(&held, &mine).unwrap(), crate::deposit::public_key_text(key));
+        // Held, but no key told (the key given was another account's): said, not guessed.
+        assert!(held_key(&held, &[3; 32]).unwrap_err().contains("too old"));
+        // Not held: no key, for the caller to refuse (`deposit::Refusal::NeedsKey`).
+        assert_eq!(held_key(&held, &[4; 32]).unwrap(), None);
     }
 
     #[test]

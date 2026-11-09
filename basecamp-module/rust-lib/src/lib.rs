@@ -37,6 +37,7 @@ mod avatar;
 mod chain;
 mod changes;
 mod cli;
+mod deposit;
 mod page_view;
 mod provider;
 mod spell;
@@ -2860,7 +2861,7 @@ impl NamesModule for Names {
             // The destination too, before anything is remembered: a refused call leaves
             // config.json as it was (bridge-to-saves-before-validating).
             if let Some(to) = cli::bridge_to(&to)? {
-                self.not_a_sink(&registry::parse_account(&to)?, "take a bridge")?;
+                self.not_a_sink(&registry::parse_account(&to.account)?, "take a bridge")?;
             }
             let setup = self.cli_setup()?;
             if self.bridge_key.as_deref() != Some(key.as_str()) || self.bridge_node.as_deref() != Some(node.as_str()) {
@@ -3801,11 +3802,22 @@ impl NamesModule for Names {
             let amount = chain::whole_amount(&amount)?;
             let to = match cli::bridge_to(&to)? {
                 Some(to) => to,
-                None => cli::default_public(&self.cli_setup()?)?,
+                None => cli::BridgeTo { account: cli::default_public(&self.cli_setup()?)?, key: None },
             };
-            let account = registry::parse_account(&to)?;
+            let account = registry::parse_account(&to.account)?;
+            let (to, given_key) = (to.account, to.key);
             // As a transfer refuses them: a deposit to either lands and nobody can use it.
             self.not_a_sink(&account, "take a bridge")?;
+            // What the deposit carries: the metadata the sequencer's LEZ decodes, or the
+            // deposit is never credited (real-bridges-to-lez-0.4-never-mint). LEZ 0.4 needs the
+            // account's public key: given as the destination, or this wallet's own. Refused
+            // here, before anything is recorded or sent, when it can't be made.
+            let lez = registry::lez_version(&self.sequencer)?;
+            let key = match (lez, given_key) {
+                (deposit::Lez::V04, None) => wallet::public_key(&self.cli_setup()?, &account)?,
+                (_, key) => key,
+            };
+            let metadata = deposit::metadata(lez, &account, key.map(deposit::Evidence::Key).as_ref()).map_err(|refusal| refusal.words(&registry::account_text))?;
             let notes = chain::notes_of(&node::call("wallet_get_notes", json!([from, ""]), node::QUICK)?);
             // A note a send from here still spends (not in a block yet) is not this one's:
             // two deposits of one note both got a hash and only one could land.
@@ -3870,7 +3882,8 @@ impl NamesModule for Names {
                 // is needed, so none is read: a destination LEZ has never seen (`null`) is
                 // fine (chain-bridge-null-destination-read-taken-as-zero-strands-bridge).
                 let channel_bytes = <[u8; 32]>::try_from(registry::unhex(&channel)?).map_err(|_| "LEZ named a channel that isn't 32 bytes".to_owned())?;
-                let op_id = chain::deposit_op_id(&channel_bytes, std::slice::from_ref(&note), &account).ok_or("the note to deposit isn't 32 bytes of hex")?;
+                // Worked out from the very metadata sent: the op id changes with it.
+                let op_id = chain::deposit_op_id(&channel_bytes, std::slice::from_ref(&note), &metadata).ok_or("the note to deposit isn't 32 bytes of hex")?;
                 let receipt = registry::account_text(&registry::deposit_receipt(&op_id));
                 plan["op_id"] = json!(registry::hex(&op_id));
                 plan["receipt"] = json!(receipt);
@@ -3883,13 +3896,13 @@ impl NamesModule for Names {
                 let entry = config_dir().map(|dir| {
                     let id = activity::add(&dir, now(), json!({ "kind": "bridge", "chain": "logos", "from": from, "to": format!("Public/{to}"),
                         "amount": amount.to_string(), "hash": null, "note": note, "channel": channel, "op_id": registry::hex(&op_id),
-                        "receipt": receipt, "followed": true }));
+                        "metadata": registry::hex(&metadata), "receipt": receipt, "followed": true }));
                     (dir, id)
                 });
-                // The deposit's metadata is the LEZ account's 32 bytes, as `names bridge` sends it.
+                // The metadata as `names bridge` sends it too (`deposit::metadata`).
                 let deposited = match node::call(
                     "channel_deposit_with_notes",
-                    json!([channel, [note], registry::hex(&account), from, [from], BRIDGE_MAX_FEE.to_string(), ""]),
+                    json!([channel, [note], registry::hex(&metadata), from, [from], BRIDGE_MAX_FEE.to_string(), ""]),
                     node::PROVING,
                 ) {
                     Ok(deposited) => deposited,
@@ -5233,7 +5246,7 @@ mod tests {
         names.bridge_key = Some("ab".repeat(32));
         names.bridge_node = Some("http://127.0.0.1:8080".into());
         let refused = parsed(&names.cli_bridge_to("5".into(), "12".repeat(32), "NOT-AN-ACCOUNT".into(), "http://127.0.0.1:4321".into(), false));
-        assert_eq!(refused["error"], "the bridge credits a public LEZ account: Public/ and its ID", "{refused}");
+        assert_eq!(refused["error"], "the bridge credits a public LEZ account: Public/ and its ID, or the account's public key (64 hex characters)", "{refused}");
         assert_eq!((names.bridge_key.clone(), names.bridge_node.clone()), (Some("ab".repeat(32)), Some("http://127.0.0.1:8080".to_owned())));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -5657,6 +5670,66 @@ mod tests {
         assert!(parsed(&names.chain_bridge(NODE_KEY.into(), format!("Private/{to}"), "1000000".into(), false))["error"].as_str().unwrap().contains("public LEZ account"));
         // Nor one with a second prefix inside (account-prefix-double-strip: sent to the node as Public/<id>).
         assert!(parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/Private/{to}"), "1000000".into(), false))["error"].as_str().unwrap().contains("Public/ once"));
+    }
+
+    /// real-bridges-to-lez-0.4-never-mint: the module sent the account's 32 bytes as the
+    /// deposit's metadata, which LEZ 0.4 can't decode, so no bridge was ever credited. On 0.4
+    /// a deposit carries the account's public key (tag 1, Key evidence): the wallet's own,
+    /// or one given as the destination. Without it, or when LEZ's version can't be told,
+    /// nothing is recorded or sent. The op id and receipt are worked out from those bytes.
+    #[test]
+    fn a_bridge_to_lez_0_4_carries_the_accounts_key_and_is_refused_without_it() {
+        const E8: &str = "e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8";
+        const KEY: &str = "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
+        let key = deposit::public_key_text(KEY).unwrap();
+        let mine = deposit::key_account(&key);
+        let other = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
+        // The wallet holds `mine` (its key told by `module accounts`), not `other`.
+        let accounts = json!({ "public": [registry::account_text(&mine)], "private": [], "keys": { registry::account_text(&mine): KEY } });
+        let (mut names, dir) = with_fake_cli("bridge-04", &format!("echo '{accounts}'"));
+        registry::LEZ.with(|lez| lez.set(Some(deposit::Lez::V04)));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": E8, "value": "1000000" }, { "id": "c0de", "value": "5000000" }] }));
+        node_answers("get_channel_state", json!({ "configuration_threshold": 3 }));
+        node_answers("channel_deposit_with_notes", json!("ab".repeat(32)));
+        let history = || activity::all(&config_dir().unwrap()).len();
+        let before = history();
+        // Another's account by its ID: refused, plan or send, before anything is recorded.
+        for send in [false, true] {
+            let refused = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{other}"), "1000000".into(), send));
+            let said = refused["error"].as_str().unwrap();
+            assert!(said.contains(&format!("doesn't hold Public/{other}")) && said.contains("public key") && said.ends_with("Nothing was sent."), "{said}");
+        }
+        // LEZ's version can't be told: refused the same way.
+        registry::LEZ.with(|lez| lez.set(None));
+        let unknown = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{}", registry::account_text(&mine)), "1000000".into(), true));
+        assert_eq!(unknown["error"], deposit::UNKNOWN_LEZ);
+        registry::LEZ.with(|lez| lez.set(Some(deposit::Lez::V04)));
+        assert!(!node_asked().contains(&"channel_deposit_with_notes".to_owned()), "nothing deposited");
+        assert_eq!(history(), before, "nothing recorded");
+        // The wallet's own account by its ID: its key, from the wallet, is the evidence.
+        let sent = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{}", registry::account_text(&mine)), "1000000".into(), true));
+        assert_eq!(sent["value"]["sent"], true, "{sent}");
+        let metadata = [&[1_u8, 0][..], &key[..]].concat();
+        let asked = node::ASKED.with(|asked| asked.borrow().iter().rev().find(|(m, _)| m == "channel_deposit_with_notes").map(|(_, a)| a.clone())).unwrap();
+        assert_eq!(asked[2], registry::hex(&metadata), "tag 1, Key, the account's key: {asked}");
+        assert_eq!(deposit::credited(deposit::Lez::V04, &metadata), Some(mine));
+        // Followed by the receipt of the op id of exactly those bytes.
+        let op = chain::deposit_op_id(&[2; 32], &[E8.to_owned()], &metadata).unwrap();
+        assert_eq!(sent["value"]["op_id"], registry::hex(&op));
+        assert_eq!(sent["value"]["receipt"], registry::account_text(&registry::deposit_receipt(&op)));
+        let entry = activity::all(&config_dir().unwrap()).into_iter().find(|e| e["kind"] == "bridge" && e["hash"] == "ab".repeat(32)).unwrap();
+        assert_eq!(entry["metadata"], registry::hex(&metadata));
+        // Recomputed from what it recorded (as for an entry that lost its op id), the same.
+        let mut bare = entry.clone();
+        bare["op_id"] = Value::Null;
+        assert_eq!(activity::bridge_op_id(&bare), Some(op));
+        // Another's account by its public key: that key is the evidence.
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "e9".repeat(32), "value": "1000000" }, { "id": "c1de", "value": "5000000" }] }));
+        let theirs = "dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659";
+        let by_key = parsed(&names.chain_bridge(NODE_KEY.into(), theirs.into(), "1000000".into(), false));
+        let their_account = deposit::key_account(&deposit::public_key_text(theirs).unwrap());
+        assert_eq!(by_key["value"]["to"], registry::account_text(&their_account), "{by_key}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
 

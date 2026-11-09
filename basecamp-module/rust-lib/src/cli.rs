@@ -394,10 +394,14 @@ pub fn bridge_node(node: &str) -> Result<String, String> {
 /// plan; with it, `--yes`, and the deposit is made and cannot be undone.
 pub fn bridge_args(amount: &str, to: &str, from_key: &str, node: &str, send: bool) -> Result<Vec<String>, String> {
     let amount = amount_text(amount)?;
-    let to = registry::account_text(&registry::parse_account(to)?);
+    // An account, or its public key (`BridgeTo::arg`), which the CLI takes as it is.
+    let to = match crate::deposit::public_key_text(to) {
+        Some(key) => registry::hex(&key),
+        None => format!("Public/{}", registry::account_text(&registry::parse_account(to)?)),
+    };
     let mut args = vec![
         "bridge".to_owned(),
-        format!("--to=Public/{to}"),
+        format!("--to={to}"),
         format!("--from-key={}", bridge_key(from_key)?),
         format!("--node={}", bridge_node(node)?),
     ];
@@ -474,6 +478,11 @@ pub fn parse_bridge(output: &str, sent: bool) -> Value {
 /// Why `names bridge` failed, in plain words, from what it wrote.
 pub fn bridge_problem(output: &str, node: &str) -> String {
     let text = output;
+    // A refusal from the deposit's metadata (`deposit::Refusal`, `deposit::UNKNOWN_LEZ`) is
+    // already in plain words.
+    if let Some(line) = text.lines().map(str::trim).find(|line| line.ends_with("Nothing was sent.")) {
+        return line.trim_start_matches("Error:").trim().to_owned();
+    }
     if text.contains("cannot reach your Logos Blockchain node") {
         // The node answered, but not with the key's notes (ureq: `http status: 404`).
         let status = text.split_once("http status: ").and_then(|(_, rest)| rest.split_whitespace().next());
@@ -513,17 +522,42 @@ pub fn bridge_problem(output: &str, node: &str) -> String {
     format!("the names CLI failed: {}", first.unwrap_or("no reason given").trim_start_matches("Error:").trim())
 }
 
+/// Where a bridge goes: the public LEZ account (base58) and, when it was given by its
+/// public key, that key. LEZ 0.4 credits a bridge only to an account named by its key
+/// (`deposit::metadata`), which the wallet has for its own accounts and only the owner can
+/// give for another's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeTo {
+    pub account: String,
+    pub key: Option<[u8; 32]>,
+}
+
+impl BridgeTo {
+    /// How `names bridge --to` takes it: the key when there is one (it names the account).
+    pub fn arg(&self) -> String {
+        self.key.map_or_else(|| format!("Public/{}", self.account), |key| registry::hex(&key))
+    }
+}
+
 /// The public LEZ account a bridge credits, as typed: `Public/` and its ID, written once
-/// (`Public/Private/<id>` was read as `Public/<id>`), as base58; `None` when empty (the
-/// wallet's default).
-pub fn bridge_to(to: &str) -> Result<Option<String>, String> {
+/// (`Public/Private/<id>` was read as `Public/<id>`), as base58, or the account's public
+/// key (64 hex characters, a point LEZ accepts); `None` when empty (the wallet's default).
+pub fn bridge_to(to: &str) -> Result<Option<BridgeTo>, String> {
     let to = to.trim();
     if to.is_empty() {
         return Ok(None);
     }
-    let id = to.strip_prefix("Public/").ok_or("the bridge credits a public LEZ account: Public/ and its ID")?;
+    if let Some(key) = crate::deposit::public_key_text(to) {
+        if !crate::deposit::valid_public_key(&key) {
+            return Err(crate::deposit::Refusal::NotAKey { key }.words(&registry::account_text));
+        }
+        return Ok(Some(BridgeTo { account: registry::account_text(&crate::deposit::key_account(&key)), key: Some(key) }));
+    }
+    let id = to
+        .strip_prefix("Public/")
+        .ok_or("the bridge credits a public LEZ account: Public/ and its ID, or the account's public key (64 hex characters)")?;
     let account = registry::bare_account(id).map_err(|_| "that isn't a public LEZ account: Public/ once, then its ID".to_owned())?;
-    Ok(Some(registry::account_text(&account)))
+    Ok(Some(BridgeTo { account: registry::account_text(&account), key: None }))
 }
 
 /// Runs `names bridge` (only the plan unless `send`) to the wallet's default
@@ -540,7 +574,7 @@ pub fn run_bridge_to(setup: &Setup, amount: &str, from_key: &str, to: &str, node
     self::amount(amount)?;
     bridge_key(from_key)?;
     let to = match bridge_to(to)? {
-        Some(to) => to,
+        Some(to) => to.arg(),
         None => default_public(setup)?,
     };
     let args = bridge_args(amount, &to, from_key, &node, send)?;
@@ -2862,8 +2896,18 @@ mod tests {
         assert_eq!(transfer_args("ada", &format!("Private/{to}")).unwrap()[3], format!("Private/{to}"));
         assert!(transfer_args("ada", "bob").is_err(), "a name is not a holder");
         // account-prefix-double-strip: a second prefix inside was dropped and the rest sent.
-        assert_eq!(bridge_to(&format!("Public/{to}")).unwrap(), Some(to.to_owned()));
+        assert_eq!(bridge_to(&format!("Public/{to}")).unwrap(), Some(BridgeTo { account: to.to_owned(), key: None }));
         assert_eq!(bridge_to("  ").unwrap(), None);
+        // By the account's public key (what LEZ 0.4 needs for an account the wallet doesn't
+        // hold): the account is the key's, and the CLI is given the key.
+        let key = "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
+        let by_key = bridge_to(key).unwrap().unwrap();
+        assert_eq!(by_key.account, registry::account_text(&crate::deposit::key_account(&crate::deposit::public_key_text(key).unwrap())));
+        assert_eq!(by_key.arg(), key);
+        assert_eq!(bridge_args("5", &by_key.arg(), &"39".repeat(32), "", false).unwrap()[1], format!("--to={key}"));
+        // A key LEZ would not accept is refused before anything runs (BIP-340 vector 5).
+        let off = bridge_to("eefdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34").unwrap_err();
+        assert!(off.contains("isn't a public key LEZ accepts") && off.ends_with("Nothing was sent."), "{off}");
         for bad in [format!("Public/Private/{to}"), format!("Public/Public/{to}"), format!("Private/{to}"), to.to_owned()] {
             assert!(bridge_to(&bad).is_err(), "{bad}");
         }
@@ -3147,6 +3191,10 @@ mod tests {
         assert!(bridge_problem("Error: cannot reach the sequencer at https://testnet.lez.logos.co\n", node).contains("LEZ isn't answering"));
         assert_eq!(bridge_problem("Error: the node refused the deposit (HTTP 400): bad fee\n", node), "Your node refused the deposit: (HTTP 400): bad fee");
         assert_eq!(bridge_problem("Error: something new\n\nCaused by:\n    deep\n", node), "the names CLI failed: something new");
+        // The CLI's refusals from the deposit's metadata are said as it said them.
+        assert_eq!(bridge_problem(&format!("Error: {}\n", crate::deposit::UNKNOWN_LEZ), node), crate::deposit::UNKNOWN_LEZ);
+        let needs = crate::deposit::Refusal::NeedsKey { account: [5; 32] }.words(&registry::account_text);
+        assert_eq!(bridge_problem(&format!("Error: {needs}\n"), node), needs);
         // A CLI without the command (the October testnet build has no `module`) says it's older.
         let clap = "error: unrecognized subcommand 'module'\n\nUsage: names [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n";
         assert_eq!(failure(clap, ""), OLDER_CLI);
