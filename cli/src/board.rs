@@ -629,7 +629,7 @@ impl Client {
         let id = derive(&name).id;
         let tier = length_proof(&id)?.1;
         let fee = self.registration_cost(tier, from, 1).await?.amount;
-        let have = self.spendable(from).await;
+        let have = self.spendable(from).await?;
         if have < fee {
             bail!("your private account holds {have}, less than the {fee} deposit an anonymous name takes; add funds first");
         }
@@ -707,8 +707,15 @@ impl Client {
         // used again: funding another would spend its 10,000,000 and fee a second time.
         let mut funded = None;
         if let Some(public) = load_defaults().gas_accounts.get(name).and_then(|id| id.parse::<AccountId>().ok()) {
+            // A read that failed is not an empty account: funding another would spend the
+            // 10,000,000 and its fee a second time.
             if self.wallet.get_account_public_signing_key(public).is_some()
-                && self.wallet.get_account_balance(public).await.unwrap_or(0) >= PUBLIC_GAS_FUND / 2
+                && self
+                    .wallet
+                    .get_account_balance(public)
+                    .await
+                    .with_context(|| format!("could not read Public/{public}, which an earlier try funded for {name}{NAME_SUFFIX}'s gas, so nothing was sent"))?
+                    >= PUBLIC_GAS_FUND / 2
             {
                 funded = Some(public);
             }
@@ -716,7 +723,7 @@ impl Client {
         // The gas comes from the holder if it can pay, else from the main private
         // account (an anon's own account holds only its deposit). Either way it
         // leaves the private pool, so the chain can't see which account paid.
-        let gas_from = gas_payer(holder, self.spendable(holder).await, default_private()?);
+        let gas_from = gas_payer(holder, self.spendable(holder).await?, default_private()?);
         let mut steps = self.public_steps(name, holder, gas_from).await?;
         if funded.is_some() {
             steps.remove(0);

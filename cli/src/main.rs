@@ -1046,16 +1046,21 @@ impl Client {
     }
 
     /// What `account` can spend: a private account's balance as this wallet
-    /// knows it after catching up with the chain, or a public one's on chain.
-    async fn spendable(&mut self, account: AccountId) -> u128 {
+    /// knows it after catching up with the chain, or a public one's on chain. A read that
+    /// fails says so, never 0 (setup-unreachable-says-holds-0).
+    async fn spendable(&mut self, account: AccountId) -> Result<u128> {
         if self.is_private(account) {
-            self.wallet.sync_to_latest_block().await.ok();
             self.wallet
+                .sync_to_latest_block()
+                .await
+                .context("could not catch the wallet up with the chain to read its private accounts")?;
+            Ok(self
+                .wallet
                 .get_account_private(account)
                 .and_then(|found| found.data.native_balance().ok())
-                .unwrap_or(0)
+                .unwrap_or(0))
         } else {
-            self.wallet.get_account_balance(account).await.unwrap_or(0)
+            self.wallet.get_account_balance(account).await.with_context(|| format!("could not read what Public/{account} holds"))
         }
     }
 
@@ -1066,8 +1071,12 @@ impl Client {
     /// The wallet's regular private accounts as a job starts, in the order the wallet picks a
     /// fee payer from them: each one's note and the credits waiting for it (`plan`).
     async fn private_holdings(&mut self) -> Result<Vec<plan::Holding<AccountId>>> {
-        self.wallet.sync_to_latest_block().await.ok();
-        let pending = self.wallet.owned_pending_messages().await.unwrap_or_default();
+        // Read, or the plan says why it couldn't: never a plan made from no credits.
+        self.wallet
+            .sync_to_latest_block()
+            .await
+            .context("could not catch the wallet up with the chain to read its private accounts")?;
+        let pending = self.wallet.owned_pending_messages().await.context("could not read the payments waiting for this wallet")?;
         Ok(self
             .wallet
             .storage()
@@ -1370,7 +1379,7 @@ impl Client {
                 let job = if public { format!("registering {name}{NAME_SUFFIX} and making it public") } else { format!("registering {name}{NAME_SUFFIX}") };
                 self.plan_private(&job, &steps).await?;
             } else if fee > 0 {
-                let have = self.spendable(owner).await;
+                let have = self.spendable(owner).await?;
                 if have < fee {
                     bail!(
                         "{owner} holds {have}, less than the {fee} that registering {name}{NAME_SUFFIX} takes; add funds to it first"
@@ -1723,7 +1732,12 @@ impl Client {
         let holder = self.holder(name, &id, &record)?;
         // The deposit account's whole balance comes back to whoever releases.
         let held = deposit_address(&self.program, &id);
-        let refund = self.wallet.get_account_balance(held).await.unwrap_or(0);
+        // A read that failed is no refund of 0: the release would leave the deposit behind.
+        let refund = self
+            .wallet
+            .get_account_balance(held)
+            .await
+            .with_context(|| format!("could not read {name}{NAME_SUFFIX}'s deposit, so nothing was released"))?;
         let mut mentions = self.on_record_and_page(&id, holder);
         if refund > 0 {
             println!("releasing {name}{NAME_SUFFIX}; its deposit of {refund} comes back to you");
@@ -1810,7 +1824,7 @@ impl Client {
         println!("applied in block {block}");
         match before {
             Some(before) => {
-                if let Some(line) = fees::paid_line(before, self.held_by(&paying).await, spent) {
+                if let Some(line) = fees::paid_line_of(before, self.held_by(&paying).await, spent) {
                     println!("{line}");
                 }
             }
@@ -1826,7 +1840,8 @@ impl Client {
     /// signing public accounts this wallet holds keys for, read from the chain, and every private account of this
     /// wallet, as the wallet last saw them. Measured before and after a change, the
     /// difference less what it moved is its fee (LEZ 0.4 keeps no receipt of fees).
-    async fn held_by(&self, mentions: &[AccountMention]) -> u128 {
+    /// `None` when a public balance couldn't be read: the fee is unknown then.
+    async fn held_by(&self, mentions: &[AccountMention]) -> Option<u128> {
         let mut held = 0_u128;
         let key_chain = self.wallet.storage().key_chain();
         for (id, _) in key_chain.private_account_ids() {
@@ -1842,9 +1857,9 @@ impl Client {
             .filter(|account| self.wallet.get_account_public_signing_key(*account).is_some())
             .collect();
         for id in signers {
-            held = held.saturating_add(self.wallet.get_account_balance(id).await.unwrap_or(0));
+            held = held.saturating_add(self.wallet.get_account_balance(id).await.ok()?);
         }
-        held
+        Some(held)
     }
 
     /// Waits for `hash` to be included and returns its block. A block includes reverted
@@ -2039,7 +2054,7 @@ impl Client {
             bail!("transfer {hash} was included in block {block} but {name} was not credited");
         }
         println!("paid in block {block}");
-        if let Some(line) = fees::paid_line(held, self.held_by(&paying).await, amount) {
+        if let Some(line) = fees::paid_line_of(held, self.held_by(&paying).await, amount) {
             println!("{line}");
         }
         Ok(())
@@ -2085,7 +2100,7 @@ impl Client {
             println!("submitted {hash}");
             let block = self.finish(hash).await.context("the transfer was not applied")?;
             println!("included in block {block}; it waits for {name}{NAME_SUFFIX}'s holder as a pending credit, which they claim with `names receive`");
-            if let Some(line) = fees::paid_line(held, self.held_by(&paying).await, amount) {
+            if let Some(line) = fees::paid_line_of(held, self.held_by(&paying).await, amount) {
                 println!("{line}");
             }
             return Ok(());
@@ -2109,7 +2124,7 @@ impl Client {
         }
         println!("included in block {block}; {from} was debited {debited} (the amount, plus any fee)");
         println!("it waits for {name}{NAME_SUFFIX}'s holder as a pending credit, which they claim with `names receive`");
-        if let Some(line) = fees::paid_line(held, self.held_by(&paying).await, amount) {
+        if let Some(line) = fees::paid_line_of(held, self.held_by(&paying).await, amount) {
             println!("{line}");
         }
         Ok(())
@@ -2831,6 +2846,22 @@ fn sequencer_overrides(cli: &Cli) -> Result<Option<WalletConfigOverrides>> {
     Ok(Some(overrides))
 }
 
+/// What `names setup` says of the public account before moving `shield` to private, from the
+/// read of its balance (`None`: nothing to move, nothing read): nothing when it holds enough,
+/// what to send when it doesn't, and an error when the read failed, never "holds 0"
+/// (setup-unreachable-says-holds-0: an account holding 86,000,000 was said to hold 0).
+fn setup_short<E: std::fmt::Display>(public: AccountId, read: Option<Result<u128, E>>, shield: u128) -> Result<Option<String>> {
+    match read {
+        None => Ok(None),
+        Some(Err(error)) => bail!(
+            "the accounts are made, but what Public/{public} holds could not be read ({}), so nothing was moved. Run `names setup` again when the sequencer answers.",
+            error.to_string().trim().trim_end_matches('.')
+        ),
+        Some(Ok(balance)) if balance < shield => Ok(Some(unfunded_setup(public, balance, shield))),
+        Some(Ok(_)) => Ok(None),
+    }
+}
+
 /// What `names setup` says when the public account `public` holds `balance`, less than
 /// the `shield` to move (the Basecamp module reads its "holds" and "at least" figures).
 fn unfunded_setup(public: AccountId, balance: u128, shield: u128) -> String {
@@ -2950,9 +2981,9 @@ async fn setup(client: &mut Client, asked: Option<u128>) -> Result<()> {
     println!("public account   Public/{public}");
     println!("private account  Private/{private}");
 
-    let balance = client.wallet.get_account_balance(public).await.unwrap_or(0);
-    if balance < shield {
-        let short = unfunded_setup(public, balance, shield);
+    // Accounts only: nothing to read.
+    let read = if shield > 0 { Some(client.wallet.get_account_balance(public).await) } else { None };
+    if let Some(short) = setup_short(public, read, shield)? {
         // Asked for and not made, it is an error, so a script never takes it for done.
         if asked.is_some() {
             bail!(short);
@@ -4540,5 +4571,26 @@ mod wallet_storage_tests {
         assert!(made.iter().all(|id| saved.contains(id)), "every account made is still in the wallet: {made:?} vs {saved:?}");
         assert_eq!(saved.len(), before + 4);
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod job_ties_and_failed_reads {
+    use super::*;
+
+    /// setup-unreachable-says-holds-0: with the sequencer unreachable, `names setup` said
+    /// "holds 0; send it at least …" of an account holding 86,000,000.
+    #[test]
+    fn setup_says_a_failed_read_failed_never_0() {
+        let public = AccountId::new([5; 32]);
+        let failed = setup_short(public, Some(Err("could not reach the sequencer")), 14_000_000).expect_err("a failed read");
+        let failed = failed.to_string();
+        assert!(failed.contains("could not be read (could not reach the sequencer)") && failed.contains("nothing was moved"), "{failed}");
+        assert!(!failed.contains("holds 0"), "{failed}");
+        let short = setup_short::<String>(public, Some(Ok(1_000)), 14_000_000).expect("read").expect("short");
+        assert!(short.contains("holds 1,000; send it at least 14,000,000"), "{short}");
+        assert_eq!(setup_short::<String>(public, Some(Ok(14_000_000)), 14_000_000).expect("read"), None);
+        // Accounts only: nothing is read, nothing can fail.
+        assert_eq!(setup_short::<String>(public, None, 0).expect("nothing read"), None);
     }
 }
