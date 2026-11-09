@@ -57,10 +57,39 @@ pub fn fee_of(funded: &Value, held: u128) -> Option<u128> {
     held.checked_sub(paid)
 }
 
+/// What the node said a send would cost (as the module's `chain_fee::Estimate`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Estimate {
+    /// Its fee, at the node's gas prices now.
+    Fee(u128),
+    /// The key's notes can't pay the amount and its fee: they hold no more than the
+    /// amount, or the node said "not enough" for every set of the largest of them.
+    Short,
+    /// The node didn't say (not reachable, or refused the request for another reason).
+    Unknown,
+}
+
+impl Estimate {
+    pub fn fee(self) -> Option<u128> {
+        match self {
+            Self::Fee(fee) => Some(fee),
+            _ => None,
+        }
+    }
+
+    /// The plan's fee line (`names chain send` without --yes), for the key `from` (shortened).
+    pub fn line(self, from: &str) -> String {
+        match self {
+            Self::Fee(fee) => format!("  fee: about {} (the node's own figure at today's gas prices; paid from {from}'s notes)", crate::chain::grouped(fee)),
+            Self::Short => format!("  fee: {from}'s notes can't pay this amount and its fee: send a little less"),
+            Self::Unknown => "  fee: the node couldn't say in advance; it is shown once sent".to_owned(),
+        }
+    }
+}
+
 /// The node's fee for sending `amount` to `to` from notes holding `notes`: the fewest
-/// largest that cover it. `ask` posts one body to `/wallet/fund`. `None` when the notes
-/// can't cover it or the node didn't say.
-pub fn estimate(from: &str, to: &str, amount: u64, notes: &[u128], mut ask: impl FnMut(&Value) -> anyhow::Result<Value>) -> Option<u128> {
+/// largest that cover it. `ask` posts one body to `/wallet/fund`.
+pub fn estimate(from: &str, to: &str, amount: u64, notes: &[u128], mut ask: impl FnMut(&Value) -> anyhow::Result<Value>) -> Estimate {
     let mut values = notes.to_vec();
     values.sort_unstable_by(|a, b| b.cmp(a));
     for count in 1..=values.len().min(MAX_INPUTS) {
@@ -69,12 +98,12 @@ pub fn estimate(from: &str, to: &str, amount: u64, notes: &[u128], mut ask: impl
             continue;
         }
         match ask(&transfer_request(from, to, amount, &values[..count])) {
-            Ok(funded) => return fee_of(&funded, held),
+            Ok(funded) => return fee_of(&funded, held).map_or(Estimate::Unknown, Estimate::Fee),
             Err(error) if error.to_string().contains("not have enough funds") => continue,
-            Err(_) => return None,
+            Err(_) => return Estimate::Unknown,
         }
     }
-    None
+    Estimate::Short
 }
 
 #[cfg(test)]
@@ -98,15 +127,26 @@ mod tests {
     #[test]
     fn the_estimate_is_the_nodes_fee_for_the_same_shape() {
         let funded = |outs: &[u64]| json!({ "funded_tx": { "ops": [{ "opcode": 0, "payload": { "inputs": ["01"], "outputs": outs.iter().map(|v| json!({ "value": v })).collect::<Vec<_>>() } }] } });
-        assert_eq!(estimate(A, B, 3000, &[100_000], |_| Ok(funded(&[3000, 96166]))), Some(834));
+        assert_eq!(estimate(A, B, 3000, &[100_000], |_| Ok(funded(&[3000, 96166]))), Estimate::Fee(834));
         let mut asked = Vec::new();
         let fee = estimate(A, B, 94_198, &[1234, 94_098], |body| {
             asked.push(body["tx_builder"]["ledger_inputs"].as_array().unwrap().len());
             Ok(funded(&[94_198, 268]))
         });
-        assert_eq!((fee, asked), (Some(866), vec![2]));
+        assert_eq!((fee, asked), (Estimate::Fee(866), vec![2]));
+    }
+
+    /// adv.py H7: B holds one note of 100, a plan to send 0. The node says "not enough"
+    /// for it, and the plan says the key can't pay, apart from a node that didn't say.
+    #[test]
+    fn a_key_that_cant_pay_is_told_apart_from_a_node_that_didnt_say() {
         let short = || anyhow::anyhow!("the node refused /wallet/fund (HTTP 500): Failed to fund tx: Wallet does not have enough funds, available=0");
-        assert_eq!(estimate(A, B, 3000, &[3500], |_| Err(short())), None);
-        assert_eq!(estimate(A, B, 3000, &[100_000], |_| Err(anyhow::anyhow!("cannot reach your node"))), None);
+        assert_eq!(estimate(B, A, 0, &[100], |_| Err(short())), Estimate::Short);
+        assert_eq!(estimate(A, B, 3000, &[3500], |_| Err(short())), Estimate::Short);
+        assert_eq!(estimate(A, B, 3000, &[2000], |_| unreachable!()), Estimate::Short, "less than the amount, nothing asked");
+        assert_eq!(estimate(A, B, 3000, &[100_000], |_| Err(anyhow::anyhow!("cannot reach your node"))), Estimate::Unknown);
+        assert_eq!(Estimate::Short.line("39e16b43…3225"), "  fee: 39e16b43…3225's notes can't pay this amount and its fee: send a little less");
+        assert_eq!(Estimate::Unknown.line("x"), "  fee: the node couldn't say in advance; it is shown once sent");
+        assert_eq!(Estimate::Fee(834).line("x"), "  fee: about 834 (the node's own figure at today's gas prices; paid from x's notes)");
     }
 }

@@ -408,22 +408,20 @@ pub fn run(command: ChainCommand, resolved: Option<(String, String)>) -> Result<
             };
             // About what it will cost, asked of the node with stand-ins of these notes (chain_fee.rs).
             let fee_about = if yes {
-                None
+                crate::chain_fee::Estimate::Unknown
             } else {
                 let values: Vec<u128> = notes_before.values().map(amount).collect();
                 crate::chain_fee::estimate(&from, &to_key, value, &values, |body| node.post("/wallet/fund", Some(body)))
             };
             if !yes && json {
-                println!("{}", json!({ "plan": true, "from": from, "to": to_key, "name": name, "amount": value.to_string(), "change": change, "balance": held.to_string(), "fee_about": fee_about.map(|f| f.to_string()) }));
+                let cannot_pay_fee = fee_about == crate::chain_fee::Estimate::Short;
+                println!("{}", json!({ "plan": true, "from": from, "to": to_key, "name": name, "amount": value.to_string(), "change": change, "balance": held.to_string(), "fee_about": fee_about.fee().map(|f| f.to_string()), "cannot_pay_fee": cannot_pay_fee }));
                 return Ok(());
             }
             if !yes {
                 println!("send {} from {} to {target}", grouped(value.into()), short(&from));
                 println!("  change back to {}, through {}", short(&change), node.url);
-                match fee_about {
-                    Some(fee) => println!("  fee: about {} (the node's own figure at today's gas prices; paid from {}'s notes)", grouped(fee), short(&from)),
-                    None => println!("  fee: the node couldn't say in advance (or this key can't pay the amount and its fee); it is shown once sent"),
-                }
+                println!("{}", fee_about.line(&short(&from)));
                 println!("nothing sent; run again with --yes to send (it cannot be undone)");
                 return Ok(());
             }
