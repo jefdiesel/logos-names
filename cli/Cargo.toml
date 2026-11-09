@@ -8,6 +8,15 @@ license.workspace = true
 name = "names"
 path = "src/main.rs"
 
+[features]
+default = []
+# `local-prove`: with RISC0_PROVER=local, private proofs run inside this process, capped by
+# RAYON_NUM_THREADS, never through the external r0vm (whose all-core run panicked the Mac
+# mini on 2026-11-06). For testing on a shared machine only: release builds leave it off and
+# prove with the bundled r0vm as before. Note that with it built in, risc0 proves locally
+# even when RISC0_PROVER is unset.
+local-prove = ["lee/prove"]
+
 [dependencies]
 names_core.workspace = true
 names_seal.workspace = true

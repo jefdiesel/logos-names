@@ -15,6 +15,19 @@
 # Each private step proves on this machine for several minutes: on the Mac mini, run it only
 # when no other proof runs.
 #
+# Proving on a shared machine (the Mac mini): build the CLI with the `local-prove` feature so
+# proofs run inside the `names` process, capped by RAYON_NUM_THREADS, instead of in the
+# external r0vm, whose all-core run panicked the Mini (2026-11-06). Release builds leave it off.
+#   cargo build --release -j 4 -p names_cli --features local-prove
+#   RISC0_PROVER=local RAYON_NUM_THREADS=4 <memory guard, e.g. rfp-022's scripts/guard.sh> scripts/receive-e2e.sh
+# With the feature, risc0 proves in-process even without RISC0_PROVER; without it,
+# RISC0_PROVER=local is refused ("Unsupported prover"). The proof's memory is then in the
+# `names` process itself, where a guard sees it: a move to private (14,000,000, Public to
+# Private) reached peak_rss 6215 MB with RAYON_NUM_THREADS=4 and 6232 MB with 2 (2026-11-09,
+# rc1, the succinct receipt's last stage), just above guard.sh's default MAX_RSS_GB=6, which
+# killed it before it was sent. A running rc1 sequencer starts short `r0vm` executors of its
+# own, so `pgrep r0vm` is not empty while one runs: check the r0vm's parent, never `names`.
+#
 #   SEQ_BIN=… SEQ_CONFIG=… NAMES=… WORK=<new dir> RPC_PORT=3250 METRICS_PORT=9250 scripts/receive-e2e.sh
 set -euo pipefail
 for v in SEQ_BIN SEQ_CONFIG NAMES WORK RPC_PORT METRICS_PORT; do [ -n "${!v:-}" ] || { echo "set $v" >&2; exit 2; }; done
