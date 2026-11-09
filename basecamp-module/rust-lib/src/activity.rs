@@ -262,10 +262,17 @@ pub fn bridges_arrived(entries: &[Value], lez_now: &std::collections::HashMap<St
 }
 
 /// What settling the bridges in a block among `entries` changes, `(id, fields)`. LEZ credits
-/// a deposit whole, so a bridge arrives only on a credit of exactly its amount: the account
-/// holds exactly what it did before the first followed bridge was sent (`to_before`), plus
-/// what the logged entries settled since moved in or out, plus the amounts of the bridges
-/// up to this one (the bridges arrive in the order they were sent).
+/// a deposit whole, so a bridge arrives only on a credit of exactly its amount, seen one of
+/// two ways:
+///
+/// - the account holds exactly what it did before the first followed bridge was sent
+///   (`to_before`), plus what the logged entries settled since moved in or out, plus the
+///   amounts of the bridges up to this one (the bridges arrive in the order they were sent);
+/// - between two quiet reads (nothing logged in flight) it rose, beyond what the logged
+///   entries explain, by exactly this bridge's amount, or the amounts of the first few
+///   waiting: a spend the history doesn't log no longer holds it back
+///   (bridge-stuck-in-block-after-unlogged-spend-from-destination). The reads are kept on
+///   the waiting bridges (`seen`, `seen_moved`).
 ///
 /// A credit larger than the amounts is never taken for them: a 700,000 payment from
 /// elsewhere marked a 500,001 bridge arrived (single-bridge-false-arrival-on-foreign-credit-at-least-amount).
@@ -318,6 +325,33 @@ pub fn bridge_updates(entries: &[Value], lez_now: &std::collections::HashMap<Str
                 maybe |= at > 0;
             }
         }
+        // By the rise since the last quiet read: what the account holds less all that the
+        // logged entries moved, against the same at that read.
+        let quiet = !entries.iter().any(|entry| entry["state"] == "sending" && (entry["from"].as_str() == Some(to) || entry["to"].as_str() == Some(to)));
+        let moved_now = moved_between(0, u64::MAX);
+        let last_read = list.iter().find_map(|bridge| {
+            let seen = number(&bridge["seen"]).and_then(|seen| i128::try_from(seen).ok())?;
+            Some((seen, bridge["seen_moved"].as_str()?.parse::<i128>().ok()?))
+        });
+        if quiet && arrived.is_empty() {
+            if let Some((seen, seen_moved)) = last_read {
+                let rise = (now - moved_now) - (seen - seen_moved);
+                if rise > 0 {
+                    if let Some(one) = list.iter().position(|bridge| amount(bridge) == rise) {
+                        arrived.push(one);
+                    } else {
+                        let mut total = 0_i128;
+                        if let Some(count) = list.iter().position(|bridge| {
+                            total = total.saturating_add(amount(bridge));
+                            total == rise
+                        }) {
+                            arrived.extend(0..=count);
+                            maybe = true;
+                        }
+                    }
+                }
+            }
+        }
         for at in &arrived {
             if let Some(id) = list[*at]["id"].as_str() {
                 let fields = if maybe { json!({ "state": "arrived", "maybe": true }) } else { json!({ "state": "arrived" }) };
@@ -334,13 +368,17 @@ pub fn bridge_updates(entries: &[Value], lez_now: &std::collections::HashMap<Str
                 next_mark = Some(reached.max(0).to_string());
             }
         }
-        // The next one waiting gets its new mark.
+        // The read is kept on those still waiting, when nothing logged was in flight.
         for (index, bridge) in waiting.iter().enumerate() {
             let Some(id) = bridge["id"].as_str() else { continue };
             let mut fields = serde_json::Map::new();
             if let (0, Some(mark)) = (index, &next_mark) {
                 fields.insert("to_before".to_owned(), json!(mark));
                 fields.insert("followed".to_owned(), json!(true));
+            }
+            if quiet && (number(&bridge["seen"]) != u128::try_from(now).ok() || bridge["seen_moved"].as_str() != Some(moved_now.to_string().as_str())) {
+                fields.insert("seen".to_owned(), json!(now.max(0).to_string()));
+                fields.insert("seen_moved".to_owned(), json!(moved_now.to_string()));
             }
             if !fields.is_empty() {
                 updates.push((id.to_owned(), Value::Object(fields)));
@@ -680,7 +718,7 @@ mod tests {
         json!({ "id": format!("{at}-bridge"), "at": at, "kind": "bridge", "chain": "logos", "to": to, "amount": amount, "to_before": to_before, "state": "in_block" })
     }
 
-    /// single-bridge-false-arrival-on-foreign-credit-at-least-amount (S8, S7): one payment
+    /// single-bridge-false-arrival-on-foreign-credit-at-least-amount (S8, S7, S4): one payment
     /// of 700,000 from elsewhere marked a 500,001 bridge arrived; one of 1,200,006 marked three.
     #[test]
     fn a_credit_from_elsewhere_is_not_a_bridges_arrival() {
@@ -693,11 +731,45 @@ mod tests {
         };
         // S8: 0, then a payment of 700,000 from elsewhere.
         assert_eq!(arrived(&[0, 700_000], vec![bridge_to(1, "Public/T", "500001", Some("0"))]), [("in_block".to_owned(), false)]);
+        // S4: 1,000 from elsewhere first, then the bridge's own credit.
+        assert_eq!(arrived(&[0, 1_000, 501_001], vec![bridge_to(1, "Public/T", "500001", Some("0"))]), [("arrived".to_owned(), false)]);
         // S7: three bridges and one payment of exactly their total: it can't be told from
         // their credits, so they arrive hedged.
         let three = vec![bridge_to(1, "Public/T", "300003", Some("0")), bridge_to(2, "Public/T", "400002", Some("0")), bridge_to(3, "Public/T", "500001", Some("0"))];
         assert_eq!(arrived(&[0, 1_200_006], three.clone()), vec![("arrived".to_owned(), true); 3]);
         assert_eq!(arrived(&[0, 1_300_006], three), vec![("in_block".to_owned(), false); 3], "more than their total");
+    }
+
+    /// bridge-stuck-in-block-after-unlogged-spend-from-destination (S5): T held 20,000, spent
+    /// 4,788 outside the History, then the bridge's 500,001 came: it stayed in a block.
+    #[test]
+    fn a_bridge_arrives_on_its_own_credit_after_an_unlogged_spend() {
+        let mut entries = vec![bridge_to(1, "Public/T", "500001", Some("20000"))];
+        for held in [20_000, 15_212] {
+            poll(&mut entries, "Public/T", held);
+        }
+        assert_eq!(states(&entries), [("in_block".to_owned(), false)]);
+        poll(&mut entries, "Public/T", 515_213);
+        assert_eq!(states(&entries), [("arrived".to_owned(), false)]);
+        // A logged send between the reads is allowed for.
+        let mut entries = vec![bridge_to(1, "Public/V", "500001", Some("20000"))];
+        poll(&mut entries, "Public/V", 20_000);
+        entries.push(json!({ "id": "2-pay", "at": 2, "kind": "pay_account", "chain": "lez", "from": "Public/V", "to": "Public/Q", "amount": "5000", "fee": { "paid": "100" }, "state": "done" }));
+        poll(&mut entries, "Public/V", 514_901);
+        assert_eq!(states(&entries), [("arrived".to_owned(), false)]);
+    }
+
+    /// bridge-with-unread-to_before-never-arrives (S6b): a bridge sent while its account
+    /// couldn't be read (to_before null), then a second one: the first's credit marked the
+    /// second arrived.
+    #[test]
+    fn an_unfollowed_bridges_credit_is_not_taken_for_a_later_ones() {
+        let mut entries = vec![bridge_to(1, "Public/T", "500001", None), bridge_to(2, "Public/T", "400002", Some("0"))];
+        poll(&mut entries, "Public/T", 0);
+        poll(&mut entries, "Public/T", 500_001);
+        assert_eq!(states(&entries), [("arrived".to_owned(), false), ("in_block".to_owned(), false)]);
+        poll(&mut entries, "Public/T", 900_003);
+        assert_eq!(states(&entries), [("arrived".to_owned(), false), ("arrived".to_owned(), false)]);
     }
 
     /// corrupt-activity-file-silently-erases-history: a truncated activity.json read as
