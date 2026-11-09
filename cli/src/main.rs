@@ -2874,6 +2874,26 @@ fn shield_fee_line(moved: u128, before: u128, after: u128) -> String {
 /// Most notes one deposit may spend: the node signs at most 32 items per transaction.
 const MAX_DEPOSIT_NOTES: usize = 30;
 
+/// The notes a deposit of `amount` spends, at most `most` of them, and what they hold
+/// together: whole notes are deposited, so the least that covers it. While no single
+/// note covers what is still needed the largest is taken (fewest notes); then the
+/// smallest note that covers the rest, an exact one when there is one
+/// (cli-bridge-spends-largest-note-not-nearest: 1,000 spent a 1,000,000 note beside an
+/// exact 1,000 one). Short of `amount` when the notes can't cover it.
+fn pick_notes(mut notes: Vec<(String, u128)>, amount: u128, most: usize) -> (Vec<String>, u128) {
+    // Smallest first, ties by ID, so the same notes are picked every time.
+    notes.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    let (mut picked, mut total) = (Vec::new(), 0_u128);
+    while total < amount && picked.len() < most && !notes.is_empty() {
+        let needed = amount - total;
+        let at = notes.iter().position(|(_, value)| *value >= needed).unwrap_or(notes.len() - 1);
+        let (id, value) = notes.remove(at);
+        total += value;
+        picked.push(id);
+    }
+    (picked, total)
+}
+
 /// Deposits whole notes of `from_key` into the LEZ channel through the user's own node,
 /// with the LEZ account as the deposit's metadata: the sequencer reads it as
 /// `borsh(AccountId)` and credits that account once the deposit is final.
@@ -2912,22 +2932,13 @@ fn bridge(
             .read_to_string()?,
     )
     .context("the node's wallet reply is not JSON")?;
-    let mut notes: Vec<(String, u128)> = wallet["notes"]
+    let notes: Vec<(String, u128)> = wallet["notes"]
         .as_object()
         .ok_or_else(|| anyhow!("the node lists no notes for {from_key}"))?
         .iter()
         .filter_map(|(id, value)| Some((id.clone(), value.as_u64()? as u128)))
         .collect();
-    notes.sort_by(|a, b| b.1.cmp(&a.1));
-    let mut picked = Vec::new();
-    let mut total = 0_u128;
-    for (id, value) in notes {
-        if total >= amount || picked.len() == MAX_DEPOSIT_NOTES {
-            break;
-        }
-        total += value;
-        picked.push(id);
-    }
+    let (picked, total) = pick_notes(notes, amount, MAX_DEPOSIT_NOTES);
     if total < amount {
         bail!(
             "{} note(s) of {from_key} hold {total}, less than {amount}; one deposit spends at most {MAX_DEPOSIT_NOTES} notes, so bridge in smaller steps",
@@ -4090,6 +4101,23 @@ mod input_tests {
         let private = bridge("http://127.0.0.1:9", "http://127.0.0.1:9", 1_000, &format!("Private/{someone}"), &[registry], &"66".repeat(32), 100_000, true);
         assert_eq!(private.unwrap_err().to_string(), "the bridge credits a public account: give --to as Public/<id>");
         assert_eq!(Cli::try_parse_from(["names", "bridge", "0", "--to", someone, "--from-key", "k"]).err().map(|e| e.to_string().contains("Enter an amount above 0.")), Some(true));
+    }
+
+    /// cli-bridge-spends-largest-note-not-nearest: notes 1,000,000 / 500,000 / 1,000 and a
+    /// bridge of 1,000 spent the 1,000,000 note.
+    #[test]
+    fn a_bridge_spends_the_least_that_covers_it() {
+        let notes = || vec![("aa".to_owned(), 1_000_000), ("bb".to_owned(), 500_000), ("cc".to_owned(), 1_000)];
+        let ids = |list: &[&str]| list.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+        assert_eq!(pick_notes(notes(), 1_000, 30), (ids(&["cc"]), 1_000), "the exact note");
+        assert_eq!(pick_notes(notes(), 900, 30), (ids(&["cc"]), 1_000), "the smallest that covers it");
+        assert_eq!(pick_notes(notes(), 400_000, 30), (ids(&["bb"]), 500_000));
+        assert_eq!(pick_notes(notes(), 600_000, 30), (ids(&["aa"]), 1_000_000));
+        assert_eq!(pick_notes(notes(), 1_200_000, 30), (ids(&["aa", "bb"]), 1_500_000), "the largest, then what covers the rest");
+        assert_eq!(pick_notes(notes(), 1_001_000, 30), (ids(&["aa", "cc"]), 1_001_000));
+        assert_eq!(pick_notes(notes(), 2_000_000, 30).1, 1_501_000, "short: every note, still less");
+        assert_eq!(pick_notes(notes(), 1_200_000, 1), (ids(&["aa"]), 1_000_000), "at most one note");
+        assert_eq!(pick_notes(Vec::new(), 1, 30), (Vec::new(), 0));
     }
 
     /// cli-message-wording-bundle: clap's raw errors for `pay hopper -5`, `pay Public/<id>`,
