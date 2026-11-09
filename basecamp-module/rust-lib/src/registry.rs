@@ -764,6 +764,12 @@ pub fn sequencer_reachable(sequencer: &str) -> Result<(), String> {
 
 #[cfg(test)]
 thread_local! {
+    /// The name records a test's registry holds, by name identifier.
+    pub static RECORDS: std::cell::RefCell<Vec<(NameId, Resolved)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+thread_local! {
     /// Whether a test's sequencer is down.
     pub static SEQUENCER_DOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -914,6 +920,10 @@ impl Registry {
 
     /// The record of `name` exactly as the chain holds it, lapsed or not.
     pub fn record(&self, name: &str, derived: &Derived) -> Result<Option<Resolved>, String> {
+        #[cfg(test)]
+        if let Some(found) = RECORDS.with(|records| records.borrow().iter().find(|(id, _)| *id == derived.id).map(|(_, record)| record.clone())) {
+            return Ok(Some(found));
+        }
         let bytes = self.state(&record_address(&self.program, &derived.id))?;
         if bytes.is_empty() {
             return Ok(None);

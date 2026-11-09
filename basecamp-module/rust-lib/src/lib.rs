@@ -1983,6 +1983,21 @@ impl Names {
         Ok(())
     }
 
+    /// The wallet's account that holds `name` (`Public/…` or `Private/…`), found as the CLI
+    /// finds it: the one whose tag the name's record holds. `None` when it can't be told
+    /// (no record, the sequencer or the CLI not answering, an account `names balance`
+    /// doesn't list).
+    fn holder_of(&mut self, name: &str) -> Option<String> {
+        let name = registry::parse_name(name).ok()?;
+        let registry = self.registry().ok()?;
+        let derived = self.derived(&name);
+        let record = registry.record(&name, &derived).ok()??;
+        let rows = cli::balances_now(&self.cli_setup().ok()?).ok()?;
+        rows.into_iter()
+            .map(|(account, _)| account)
+            .find(|account| registry::parse_account(account).is_ok_and(|id| registry::owner_tag(&derived.id, &id) == record.owner))
+    }
+
     /// Refuses an account nobody can use what is sent to it: the empty account (all 1s)
     /// and a program's own (the registry's, the token program's). `what` is what it
     /// would be given, in words ("hold a name", "take a bridge").
@@ -2581,9 +2596,11 @@ impl NamesModule for Names {
             Ok(command) => command,
             Err(error) => return reply(Err(error)),
         };
+        // The holder pays the fee, so its page lists it (receive-privately-entry-no-paying-account).
+        let from = self.holder_of(&name);
         let out = self.cli_job(&name, "receive_privately", |_, _, _| Ok((command, None, Value::Null)));
         // In the history like a transfer, with the fee it paid once it ends.
-        log_started(&out, json!({ "kind": "receive_privately", "chain": "lez", "name": registry::normalize_name(&name) }));
+        log_started(&out, json!({ "kind": "receive_privately", "chain": "lez", "name": registry::normalize_name(&name), "from": from }));
         out
     }
 
@@ -5383,6 +5400,24 @@ mod tests {
         assert_eq!(shown["value"][0]["amount"], "12345", "{shown}");
         assert!(shown["warning"].as_str().unwrap().contains("activity-balances.json.corrupt-"), "{shown}");
         assert!(parsed(&names.activity(String::new()))["warning"].is_null(), "told once");
+    }
+
+    /// receive-privately-entry-no-paying-account: the receive_privately entry had no
+    /// `from`, so the holder account that paid its fee (479,472) showed nothing.
+    #[test]
+    fn a_receive_privately_entry_names_the_holder_that_pays() {
+        let tail = format!("case \"$*\" in\n*balance*) echo '  Public/{PUBLIC}  267605984  (default)'; echo '  Private/{PRIVATE}  250  (default)' ;;\nesac");
+        let (mut names, dir) = with_wallet("rp-holder", &tail);
+        let derived = registry::derive("probealpha");
+        let holder = registry::parse_account(PUBLIC).unwrap();
+        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner: registry::owner_tag(&derived.id, &holder), expires: registry::NEVER, profile: registry::Profile::default(), claimed: false })));
+        let started = parsed(&names.cli_receive_privately("probealpha".into()));
+        assert_eq!(started["success"], true, "{started}");
+        let history = activity::all(&config_dir().unwrap());
+        let entry = history.iter().find(|e| e["kind"] == "receive_privately").expect("logged");
+        assert_eq!(entry["from"], format!("Public/{PUBLIC}"), "{entry}");
+        assert!(activity::involves(entry, &format!("Public/{PUBLIC}")));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// receive-on-october-cli-starts-failing-job: the October CLI has no `receive`, and
