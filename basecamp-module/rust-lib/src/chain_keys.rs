@@ -22,8 +22,11 @@
 //! The module finds the keystore beside its own data: Basecamp and logosctl give each
 //! module `<data>/<module>/<instance>` (`--instance-persistence-path` on the host
 //! process), so the node's is `<data>/blockchain_module/<instance>/`. It writes only to
-//! a keystore whose keys include every key the running node lists, so never to another
-//! node's. Labels are the module's own (`chain-accounts.json`), never in the keystore.
+//! a keystore whose keys include every key the running node lists, and only when exactly
+//! one folder there has such a keystore: a copy of the node's folder (a backup, an older
+//! instance) holds the same keys, and nothing the node answers says which one it runs
+//! from, so then it refuses and names the folders. Labels are the module's own
+//! (`chain-accounts.json`), never in the keystore.
 
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
@@ -142,21 +145,39 @@ pub fn known(ask: &mut Ask) -> Result<Vec<String>, String> {
     Ok(keys.as_array().into_iter().flatten().filter_map(|k| k.as_str().and_then(chain::parse_key)).collect())
 }
 
-/// The keystore of the running node, among `candidates`: the first whose keys include
-/// every key the node lists. Refuses when none does, never guessing: `RESTART_FIRST` when
-/// one holds some of the listed keys but not all (a key taken out of the keystore since
-/// the node started: the node lists it until it restarts), else `NO_KEYSTORE`.
+/// The keystore of the running node, among `candidates`: the one whose keys include
+/// every key the node lists. Refuses, never guessing, when none does (`RESTART_FIRST`
+/// when one holds some of the listed keys but not all: a key taken out of the keystore
+/// since the node started, which the node lists until it restarts; else `NO_KEYSTORE`)
+/// and when more than one does (a copy of the node's folder beside it: the node uses
+/// only one, and nothing says which).
 pub fn the_nodes(ask: &mut Ask, candidates: &[NodeFiles], known: &[String]) -> Result<(NodeFiles, Keystore), String> {
     let mut some_of_them = false;
+    let mut found: Vec<(NodeFiles, Keystore)> = Vec::new();
     for files in candidates {
         let Ok(reply) = ask("read_accounts", json!([files.config.to_string_lossy()])) else { continue };
         let read = keystore(&reply);
         if read.is_the_nodes(known) {
-            return Ok((files.clone(), read));
+            found.push((files.clone(), read));
+        } else {
+            some_of_them |= known.iter().any(|key| read.find(key).is_some());
         }
-        some_of_them |= known.iter().any(|key| read.find(key).is_some());
     }
-    Err(if some_of_them { RESTART_FIRST } else { NO_KEYSTORE }.to_owned())
+    match found.len() {
+        1 => Ok(found.remove(0)),
+        0 => Err(if some_of_them { RESTART_FIRST } else { NO_KEYSTORE }.to_owned()),
+        _ => {
+            let folders: Vec<String> = found
+                .iter()
+                .filter_map(|(files, _)| files.config.parent().map(|dir| dir.to_string_lossy().into_owned()))
+                .collect();
+            Err(format!(
+                "More than one folder holds your node's keys ({}), and the Names app can't tell which one your node uses, so it changes none. \
+                 Move the copies out of the Blockchain app's data, keeping the folder your node runs from, then try again.",
+                folders.join(", ")
+            ))
+        }
+    }
 }
 
 /// Why no account can be made when the keystore lacks a key the node lists: the
@@ -576,6 +597,35 @@ mod tests {
         assert!(refused.contains("Stop and start your node"), "{refused}");
         assert!(!refused.contains("couldn't find"), "{refused}");
         assert!(!node.methods().contains(&"generate_key"));
+    }
+
+    /// adv2 D1: a copy of the node's folder that sorts first (000000000000) holds every
+    /// key the node lists too; the new key went into the copy, and the running node never
+    /// used it. With more than one such folder nothing is made, and the folders are named.
+    #[test]
+    fn two_folders_holding_the_nodes_keys_make_nothing() {
+        let two = vec![
+            NodeFiles { config: "/data/blockchain_module/000000000000/user_config.yaml".into(), keystore: "/data/blockchain_module/000000000000/keystore.yaml".into() },
+            NodeFiles { config: "/data/blockchain_module/84156c14d2d2/user_config.yaml".into(), keystore: "/data/blockchain_module/84156c14d2d2/keystore.yaml".into() },
+        ];
+        let mut node = Node::new(&[("wallet_get_known_addresses", known_ab()), ("read_accounts", Ok(read(&[])))]);
+        let mut records = Map::new();
+        let refused = make(&mut |m, a| node.ask(m, a), &two, &mut records, "Decoy", 1).unwrap_err();
+        assert!(refused.contains("/data/blockchain_module/000000000000") && refused.contains("/data/blockchain_module/84156c14d2d2"), "{refused}");
+        assert!(refused.contains("can't tell which one"), "{refused}");
+        assert!(!node.methods().contains(&"generate_key"), "{:?}", node.methods());
+        assert!(records.is_empty());
+        // One of them another node's (it lacks a listed key): the one that holds them all.
+        let mut node = Node::new(&[
+            ("wallet_get_known_addresses", known_ab()),
+            ("read_accounts", Ok(json!({ "accounts": [], "keystore_keys": [] }))),
+            ("read_accounts", Ok(read(&[]))),
+            ("read_accounts", Ok(read(&[("names-1", NEW)]))),
+            ("generate_key", Ok(json!(NEW))),
+        ]);
+        let made = make(&mut |m, a| node.ask(m, a), &two, &mut records, "", 1).unwrap();
+        assert_eq!(made["key"], NEW);
+        assert_eq!(node.asked[3].1, json!(["/data/blockchain_module/84156c14d2d2/keystore.yaml", "zk", "names-1"]));
     }
 
     #[test]
