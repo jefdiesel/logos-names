@@ -1754,10 +1754,7 @@ impl Names {
         let program = self
             .program
             .ok_or("no registry is configured; call set_registry with its program ID")?;
-        Ok(Registry {
-            sequencer: self.sequencer.clone(),
-            program,
-        })
+        Ok(Registry::new(&self.sequencer, program))
     }
 
     /// The identifier and key of `name`, derived the first time it is asked for.
@@ -4399,7 +4396,7 @@ impl Names {
             let balance = read["value"]["balance"].clone();
             merged(read, &json!({ "value": balance }))
         } else {
-            let registry = Registry { sequencer: self.sequencer.clone(), program: self.program.unwrap_or([0; 32]) };
+            let registry = Registry::new(&self.sequencer, self.program.unwrap_or([0; 32]));
             self.read_in_background(format!("provider:balance:{}", registry::account_text(&id)), BALANCE_EVERY, move || {
                 registry.balance(&id).map(|balance| json!(balance.to_string()))
             })
