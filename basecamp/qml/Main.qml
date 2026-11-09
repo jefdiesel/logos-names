@@ -6035,7 +6035,7 @@ Item {
                         visible: accountPage.row !== null && accountPage.row.address !== undefined && accountPage.row.address !== ""
                         label: "Address"
                         code: true
-                        value: accountPage.row ? (accountPage.row.address.length > 50 ? Logic.keyShown(accountPage.row.address) : accountPage.row.address) : ""
+                        value: accountPage.row ? Logic.keyShown(accountPage.row.address) : ""
                         full: accountPage.row ? accountPage.row.address : ""
                     }
                     Flow {

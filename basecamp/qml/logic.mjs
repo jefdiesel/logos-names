@@ -178,9 +178,14 @@ export function durationWords(seconds) {
     return (s / 86400).toFixed(1) + " days"
 }
 
-/// A Logos Blockchain key cut down for a line of text: `66ecf4bc…a81b`.
+/// A key or account ID cut down for a line of text: `66ecf4bc…a81b`. An account written
+/// with its kind keeps it whole and cuts only the ID (`Public/CCVd76Tk…pKnk`), so the
+/// prefix never eats what tells two accounts apart (account-page-address-line-useless).
 export function keyShown(key) {
     var text = String(key || "")
+    var account = /^(Public|Private)\/(.+)$/.exec(text)
+    if (account)
+        return account[1] + "/" + keyShown(account[2])
     return text.length > 16 ? text.substr(0, 8) + "…" + text.substr(text.length - 4) : text
 }
 
@@ -420,7 +425,7 @@ export function activityLine(entry, now, account) {
     case "pay": title = "Paid " + (e.name || "a name"); sub = "on LEZ"; break
     case "pay_account": title = "Paid " + whoShown(e.to); sub = e["private"] ? "on LEZ, from your private account" : "on LEZ, from your public account"; break
     case "shield": title = "Moved to private"; sub = "on LEZ, from your public account"; sign = ""; break
-    case "receive": title = e.claimed === false ? "Nothing claimed" : "Claimed waiting payments"; sub = e.claimed === false ? "on LEZ, what waits is worth less than claiming it costs" : "on LEZ, into your private accounts"; sign = "+"; break
+    case "receive": title = e.claimed === false ? "Nothing claimed" : landedIn(e) ? "Claimed waiting payments" : "Claim of waiting payments"; sub = e.claimed === false ? "on LEZ, what waits is worth less than claiming it costs" : "on LEZ, into your private accounts"; sign = "+"; break
     case "token_send": title = "Sent a token"; sub = "to " + whoShown(e.to); break
     case "transfer": title = "Gave " + (e.name || "a name") + " away"; sub = "to " + whoShown(e.to); sign = ""; break
     case "receive_privately": title = "Private payments to " + (e.name || "a name"); sub = "on LEZ, new receiving keys"; sign = ""; break
@@ -451,7 +456,22 @@ export function activityLine(entry, now, account) {
     var fee = e.fee && typeof e.fee === "object" ? e.fee.paid : e.fee
     if (fee && kind !== "split" && e.state !== "sending")
         sub += " · fee " + grouped(fee)
+    // Money came in only once it landed; a failed or unknown change moved nothing known.
+    if ((sign === "+" && !landedIn(e)) || e.state === "failed" || e.state === "unknown")
+        sign = ""
     return { title: title, sub: sub, amount: amount, sign: amount === "" ? "" : sign, state: stateText, tone: tone, ago: agoShown(e.at, now) }
+}
+
+/// Whether entry `e`'s money landed: a change done, a bridge arrived on LEZ, a Logos
+/// Blockchain send in a block, an arrival. Only then is it received.
+function landedIn(e) {
+    var state = String(e.state || "")
+    switch (String(e.kind || "")) {
+    case "arrived": return true
+    case "bridge": return state === "arrived"
+    case "send": return state === "in_block" || state === "done"
+    }
+    return state === "done"
 }
 
 /// How `page` (an account or key) sees entry `e` when that differs from the wallet's view:
@@ -459,13 +479,18 @@ export function activityLine(entry, now, account) {
 function accountSide(e, kind, page) {
     var received = e.received && typeof e.received === "object" ? e.received : {}
     var fee = e.fee && typeof e.fee === "object" ? e.fee.paid : e.fee
+    // Sending, failed or unknown, money into the page isn't called received and carries
+    // no "+"; its state says what happened (payee-page-failed-or-pending-payment-reads-received-plus).
+    var landed = landedIn(e)
     if (kind === "receive" && e.claimed !== false) {
         var credit = received[page]
         if (credit)
             // Credited here: this account's own amount; the fee is told only where it was paid.
             return function(line) {
                 line.amount = grouped(credit)
-                line.sign = "+"
+                line.sign = landed ? "+" : ""
+                if (!landed)
+                    line.title = "Claim of waiting payments"
                 if (e.from !== page && fee)
                     line.sub = line.sub.replace(" · fee " + grouped(fee), "")
                 return line
@@ -485,17 +510,18 @@ function accountSide(e, kind, page) {
     if (incoming && e.to === page && e.from !== page)
         // Money into this account: received, and its fee was the payer's.
         return function(line) {
-            if (kind === "pay_account" || kind === "token_send")
-                line.title = (kind === "token_send" ? "Received a token" : "Received") + (e.from ? " from " + whoShown(e.from) : "")
-            else if (kind === "send")
-                line.title = "Received on the Logos Blockchain"
+            var from = e.from ? " from " + whoShown(e.from) : ""
             if (kind === "pay_account")
-                line.sub = "on LEZ"
+                line.title = (landed ? "Received" : "Payment") + from
             else if (kind === "token_send")
+                line.title = (landed ? "Received a token" : "Token") + from
+            else if (kind === "send")
+                line.title = landed ? "Received on the Logos Blockchain" : "Payment on the Logos Blockchain"
+            if (kind === "pay_account" || kind === "token_send")
                 line.sub = "on LEZ"
             else if (fee)
                 line.sub = line.sub.replace(" · fee " + grouped(fee), "")
-            line.sign = line.amount === "" ? "" : "+"
+            line.sign = line.amount === "" || !landed ? "" : "+"
             return line
         }
     return null
