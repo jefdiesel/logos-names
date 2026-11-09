@@ -276,13 +276,15 @@ pub fn relabel(ask: &mut Ask, records: &mut Map<String, Value>, key: &str, label
 }
 
 /// What a hidden account's reply says.
-pub const HIDDEN: &str = "Hidden from your accounts. Its key stays in your node's keystore, so nothing sent to it is lost: if it ever holds anything, it shows again.";
+pub const HIDDEN: &str = "Hidden from your accounts. Its key stays in your node's keystore, so its secret is never lost. It shows again if your node sees it holding anything; what reached it before your node used it isn't seen, so that stays hidden.";
 
 /// Hides an account the module made, once the running node shows it holds nothing:
 /// `{key, title, hidden, note}`. The key stays in the node's keystore: the node can't
 /// say what the chain holds or will hold for a key (a payment on its way, or one that
 /// reached it before the node used it), so no secret is ever deleted here. A hidden
-/// account that comes to hold anything is listed again. Refused for a key the Names app
+/// account is listed again once the node shows it holding anything (a payment that was
+/// on its way); one the node never sees funds on (paid before the node used it) stays
+/// hidden, its secret kept, and there is no method to show it again. Refused for a key the Names app
 /// didn't make, one the node doesn't list yet, and one holding anything.
 pub fn remove(ask: &mut Ask, records: &mut Map<String, Value>, key: &str) -> Result<Value, String> {
     let key = chain::parse_key(key).ok_or("choose the account to remove")?;
@@ -316,7 +318,8 @@ fn hidden(records: &Map<String, Value>, key: &str) -> bool {
 /// `ready` on the keys it has a record for, and the accounts it made that the rows lack,
 /// as `{key, balance, title, label, ready}`: balance "0" for one the node lists (a key
 /// with no notes), null with `ready: false` for one it takes at its next start. A hidden
-/// account is left out while it holds nothing, and shown again once it holds anything.
+/// account is left out while the node shows it holding nothing (no row, or "0"), and
+/// shown again once the node shows it holding anything.
 pub fn annotate(rows: Value, known: &[String], records: &Map<String, Value>) -> Value {
     let mut rows = rows.as_array().cloned().unwrap_or_default();
     rows.retain(|row| !(row["key"].as_str().is_some_and(|key| hidden(records, key)) && row["balance"].as_str() == Some("0")));
@@ -629,6 +632,15 @@ mod tests {
         // ...and shows it again once the payment that was on its way lands (adv2 D2: 1,000).
         assert_eq!(annotate(json!([{ "key": NEW, "balance": "1000" }]), &[NEW.into()], &records),
             json!([{ "key": NEW, "balance": "1000", "title": "names-1", "label": "x", "ready": true }]));
+    }
+
+    /// The hide note said "nothing sent to it is lost: if it ever holds anything, it shows
+    /// again", but adv V8's Early (1,000 on chain, paid before the node used it) is never
+    /// seen by the wallet, so it never shows again. The note promises what the node sees.
+    #[test]
+    fn the_hide_note_promises_only_what_the_node_sees() {
+        assert!(!HIDDEN.contains("nothing sent to it is lost"), "{HIDDEN}");
+        assert!(HIDDEN.contains("if your node sees it holding anything") && HIDDEN.contains("isn't seen"), "{HIDDEN}");
     }
 
     /// adv2 D3: after a removal the keystore no longer held a key the running node lists,

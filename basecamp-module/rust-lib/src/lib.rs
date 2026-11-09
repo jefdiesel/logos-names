@@ -666,7 +666,8 @@ pub trait NamesModule: Send + 'static {
     /// `label` is the one given with `chain_account_label`/`_new`; an account
     /// made with `chain_account_new` also has its keystore `title` and `ready`
     /// (false, balance null, until the node uses it from its next start). A
-    /// hidden account (`chain_account_remove`) is left out while it holds nothing.
+    /// hidden account (`chain_account_remove`) is left out while the node shows
+    /// it holding nothing.
     fn chain_accounts(&mut self) -> String;
 
     /// Stake: `{staked, notes, keys, epoch, next_epoch_in_s, claimable,
@@ -741,7 +742,8 @@ pub trait NamesModule: Send + 'static {
     /// Hides an account made with `chain_account_new` once the node uses it
     /// and it holds nothing: `{key, title, hidden, note}`. Its key stays in the
     /// node's keystore (the node can't say what is on its way to a key, so no
-    /// secret is deleted), and it is listed again once it holds anything.
+    /// secret is deleted), and it is listed again once the node shows it
+    /// holding anything (what reached it before the node used it isn't seen).
     /// Refused for any other key, and for one holding anything.
     fn chain_account_remove(&mut self, key: String) -> String;
 
