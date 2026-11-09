@@ -2556,8 +2556,13 @@ Item {
     function holderChip() {
         if (record === null)
             return ""
-        if (cliHeld)
+        if (cliHeld) {
+            // Asked to be public, still private: cli_mine says why (register-as-public-silently-stays-private).
+            for (var i = 0; i < cliNames.length; i++)
+                if (cliNames[i].name === record.name && cliNames[i].not_public)
+                    return "Yours · held privately · not public yet: " + cliNames[i].not_public
             return "Yours · held privately"
+        }
         if (mine)
             return "Yours · public"
         return "Holder not shown"
