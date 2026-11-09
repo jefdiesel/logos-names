@@ -178,15 +178,19 @@ pub fn with_busy(shape: &Shape, from: &str, free: &[u128], busy: &[u128], mut as
     })
 }
 
-/// The key and note a claim's stand-in is made of: the largest note any key holds, so it
-/// pays the claim's fee in one input as the leader funding key's note does. The first key
-/// with notes was used before: a key whose largest note can't pay a claim's fee (the
-/// fixture's B holds 100) leaves the plan with no estimate, as a solo node's did while
-/// 1,161 vouchers waited.
-pub fn claim_stand_in(held: &[(String, Vec<u128>)]) -> Option<(String, u128)> {
+/// About what one claim costs. Its fee is paid from the node's leader funding key, which
+/// names can't tell from the others, with that key's notes, largest first, as many as it
+/// takes; each input adds its bytes to the fee. So every key's own notes are priced (a
+/// claim's stand-in from them, as `estimate` picks them) and the most any key would pay
+/// is the figure: whichever key funds it, the claim costs no more at these gas prices.
+/// The largest single note of any key was used before, so a funding key holding small
+/// notes paid more than the plan said: 3 x 1,100 on a solo node, 2,028 planned, 2,092
+/// paid for two inputs (fees-claim-estimate-single-input). A key that can't pay one, or
+/// that the node won't price, is left out; `None` when no key can be priced.
+pub fn claim_estimate(held: &[(String, Vec<u128>)], mut ask: impl FnMut(String) -> Result<Value, String>) -> Option<u128> {
     held.iter()
-        .filter_map(|(key, notes)| notes.iter().max().map(|largest| (key.clone(), *largest)))
-        .max_by_key(|(_, largest)| *largest)
+        .filter_map(|(key, notes)| estimate(&Shape::Claim, key, notes, &mut ask).ok()?.fee())
+        .max()
 }
 
 /// A claim's estimate beside the reward it cashes: a warning when it costs more.
@@ -322,13 +326,26 @@ mod tests {
         assert_eq!(unique.len(), ids.len(), "the deposit's and the claim's stand-ins are not a transfer's");
     }
 
-    /// The solo node's keys at the claim run: B with 100, the leader funding key with
-    /// 5,000, A with 94,166, in any order. The stand-in is A's note.
+    /// The verifier's claim run (claimv.log): A 94,198, the leader funding key 3 x 1,100, B
+    /// 100. The claim spent two of the funding key's notes and paid 2,092; one input of A's
+    /// priced it at 2,028. Each key is priced with its own notes, and the most is the figure.
     #[test]
-    fn a_claim_stand_in_is_the_largest_note_any_key_holds() {
-        let held = vec![(B.to_owned(), vec![100]), ("63f1".repeat(16), vec![5000]), (A.to_owned(), vec![94_166]), ("0d".repeat(32), vec![])];
-        assert_eq!(claim_stand_in(&held), Some((A.to_owned(), 94_166)));
-        assert_eq!(claim_stand_in(&[(B.to_owned(), vec![])]), None);
+    fn a_claim_is_priced_with_each_keys_own_notes_and_the_most_is_the_figure() {
+        let lf = "2d8fc4d28283ff0ddf9ad3166394da0bcab2d7df099d77ed18414f51c4e5e41a".to_owned();
+        let held = vec![(A.to_owned(), vec![94_198]), (lf, vec![1100, 1100, 1100]), (B.to_owned(), vec![100]), ("0d".repeat(32), vec![])];
+        let short = crate::chain::problem("wallet_fund_tx", "Failed to fund tx: Wallet does not have enough funds, available=0");
+        let node = |request: String| {
+            let request: Value = serde_json::from_str(&request).unwrap();
+            let values: Vec<u128> = request["tx_builder"]["ledger_inputs"].as_array().unwrap().iter().map(|i| u128::from(i["note"]["value"].as_u64().unwrap())).collect();
+            // At storage price 2: 2,028 for one input, 2,092 for two (32 bytes x 2 more).
+            let fee = 2028 + 64 * (values.len() as u128 - 1);
+            let held: u128 = values.iter().sum();
+            if held > fee { Ok(funded(&[(held - fee) as u64])) } else { Err(short.clone()) }
+        };
+        assert_eq!(claim_estimate(&held, node), Some(2092), "the funding key's two inputs, not A's one");
+        assert_eq!(claim_estimate(&held[..1], node), Some(2028));
+        assert_eq!(claim_estimate(&held[2..], node), None, "no key can pay a claim");
+        assert_eq!(claim_estimate(&held, |_| Err("Basecamp's Logos Blockchain node didn't answer.".into())), None);
     }
 
     #[test]

@@ -4735,9 +4735,9 @@ fn chain_fee_about(plan: &mut Value, field: &str, shape: &chain_fee::Shape, from
     Ok(())
 }
 
-/// About what one `leader_claim` will cost: its LeaderClaim op and a transfer of one input
-/// (the node's leader funding key, which names can't read, pays it; the fee depends on the
-/// shape, not the key, so the largest note any key holds stands in for its note).
+/// About what one `leader_claim` will cost: its LeaderClaim op and a transfer from the
+/// node's leader funding key, which names can't tell from the others, so the most any
+/// key would pay with its own notes (chain_fee::claim_estimate).
 fn chain_claim_fee_about() -> Value {
     let keys = node::call("wallet_get_known_addresses", json!([]), node::QUICK).unwrap_or_default();
     let held: Vec<(String, Vec<u128>)> = keys
@@ -4751,11 +4751,7 @@ fn chain_claim_fee_about() -> Value {
             Some((key.to_owned(), notes.values().map(chain::amount).collect()))
         })
         .collect();
-    let Some((key, largest)) = chain_fee::claim_stand_in(&held) else { return Value::Null };
-    chain_fee::estimate(&chain_fee::Shape::Claim, &key, &[largest], |request| node::call("wallet_fund_tx", json!([request]), node::QUICK))
-        .ok()
-        .and_then(|estimate| estimate.fee())
-        .map_or(Value::Null, |fee| Value::from(fee.to_string()))
+    chain_fee::claim_estimate(&held, |request| node::call("wallet_fund_tx", json!([request]), node::QUICK)).map_or(Value::Null, |fee| Value::from(fee.to_string()))
 }
 
 /// Basecamp's Logos Blockchain node (`blockchain_module`), for the chain methods.
