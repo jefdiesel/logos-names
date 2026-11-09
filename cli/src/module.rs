@@ -213,12 +213,7 @@ impl Client {
     async fn module_account_new(&mut self, kind: &str, label: &str) -> Result<()> {
         let label = checked_label(label)?;
         let private = kind == "private";
-        let id = if private {
-            self.wallet.create_new_account_private(None).0
-        } else {
-            self.wallet.create_new_account_public(None).0
-        };
-        quietly(|| self.wallet.store_persistent_data())?;
+        let id = crate::new_account_saved(&mut self.wallet, private)?;
         let mut defaults = load_defaults();
         let account = format!("{}/{id}", if private { "Private" } else { "Public" });
         if !label.is_empty() {

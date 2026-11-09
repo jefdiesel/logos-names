@@ -1130,7 +1130,7 @@ impl Client {
         if !fetch_persistent_storage_path()?.exists() {
             bail!("there is no wallet yet; make one with `names wallet account new public`");
         }
-        let (account, _) = self.wallet.create_new_account_private(None);
+        let account = new_account_saved(&mut self.wallet, true)?;
         let keys = &self
             .wallet
             .storage()
@@ -1139,7 +1139,6 @@ impl Client {
             .context("the new private account is missing from the wallet")?
             .key_chain;
         let (npk, vpk) = (keys.nullifier_public_key.0, keys.viewing_public_key.to_bytes().to_vec());
-        quietly(|| self.wallet.store_persistent_data())?;
         Ok((account, npk, vpk))
     }
 
@@ -1684,7 +1683,7 @@ impl Client {
             let key_chain = self.wallet.storage_mut().key_chain_mut();
             let mut index = key_chain.build_latest_nullifier_index();
             key_chain.follow_transaction(&tx.message, reverted, false, &mut index);
-            quietly(|| self.wallet.store_persistent_data())?;
+            save_wallet(&mut self.wallet)?;
         }
         if reverted {
             bail!("{hash} was included in block {block_id} but reverted: it failed on chain or raced with another change; its fee was charged and nothing else applied");
@@ -2016,7 +2015,7 @@ impl Client {
             let block = self.finish(hash).await.context("the claim was not applied")?;
             println!("received in block {block}; Private/{to} now holds {}", private_balance(self, to));
         }
-        quietly(|| self.wallet.store_persistent_data())?;
+        save_wallet(&mut self.wallet)?;
         Ok(())
     }
 
@@ -2311,7 +2310,7 @@ async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>)
 
     if let Some(command) = command {
         let mut wallet = if storage_path.exists() {
-            let password = read_password(&storage_path)?;
+            let password = wallet_password(&storage_path)?;
             WalletCore::new_update_chain(config_path, storage_path, overrides, &password).context(OLD_WALLET)?
         } else {
             let (mut wallet, mnemonic) =
@@ -2337,7 +2336,7 @@ async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>)
             }
         }
     } else if continuous_run {
-        let password = read_password(&storage_path)?;
+        let password = wallet_password(&storage_path)?;
         let mut wallet = WalletCore::new_update_chain(config_path, storage_path, overrides, &password).context(OLD_WALLET)?;
         execute_continuous_run(&mut wallet).await?;
     } else {
@@ -2361,6 +2360,94 @@ fn new_wallet_password() -> String {
 /// itself, but announces it on stdout, which would spoil the JSON that lookups print
 /// there. A config from LEZ v0.3.0, which listed `sequencers` where v0.3.1 has one
 /// `sequencer`, is rewritten in the new form, keeping its first sequencer.
+/// The wallet's password, read once (`read_password` may ask at the terminal): each save
+/// opens the stored wallet again to take in what other processes added (`save_wallet`).
+fn wallet_password(storage_path: &std::path::Path) -> Result<String> {
+    static READ: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    if let Some(password) = READ.get() {
+        return Ok(password.clone());
+    }
+    let password = read_password(storage_path)?.to_string();
+    Ok(READ.get_or_init(|| password).clone())
+}
+
+/// Holds the wallet's storage for this process alone until dropped: an exclusive lock on
+/// `names-wallet.lock` beside it. Every names command that makes an account or saves the
+/// wallet takes it, so two never read-modify-write the storage at once.
+fn wallet_lock(storage_path: &std::path::Path) -> Result<std::fs::File> {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let path = storage_path.with_file_name("names-wallet.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(&path)
+        .with_context(|| format!("cannot open {}", path.display()))?;
+    // SAFETY: a plain flock on a descriptor this function owns.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        bail!("cannot lock {}: {}", path.display(), std::io::Error::last_os_error());
+    }
+    Ok(file)
+}
+
+/// Takes into `wallet` the accounts another process saved since this one read the storage.
+/// Each process loads the storage when it starts and saves it whole, and accounts come
+/// from a key tree, the next one at the first free place: a long command (a background
+/// registration, a move to private) saved its old copy over an account another had
+/// made, and that same account was then made again and handed out to three names
+/// (concurrent-cli-processes-clobber-wallet-storage-shared-receiving-account). The
+/// missing ones are made again here, in the order the tree gives them, which is how they
+/// were made. Call it holding `wallet_lock`.
+fn take_in_saved_accounts<C: wallet::WalletSequencerClient>(wallet: &mut WalletCore<C>) -> Result<()> {
+    let path = wallet.storage_path().clone();
+    if !path.exists() {
+        return Ok(());
+    }
+    let (saved, _) = wallet::storage::Storage::from_path(&path, &wallet_password(&path)?)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    let saved = saved.key_chain();
+    for private in [true, false] {
+        let held = |wallet: &WalletCore<C>| -> std::collections::BTreeSet<AccountId> {
+            let keys = wallet.storage().key_chain();
+            if private { keys.private_account_ids().map(|(id, _)| id).collect() } else { keys.public_account_ids().map(|(id, _)| id).collect() }
+        };
+        let on_disk: Vec<AccountId> = if private {
+            saved.private_account_ids().filter(|(_, at)| at.is_some()).map(|(id, _)| id).collect()
+        } else {
+            saved.public_account_ids().filter(|(_, at)| at.is_some()).map(|(id, _)| id).collect()
+        };
+        let mine = held(wallet);
+        let missing: std::collections::BTreeSet<AccountId> = on_disk.into_iter().filter(|id| !mine.contains(id)).collect();
+        for _ in 0..missing.len() {
+            let made = if private { wallet.create_new_account_private(None).0 } else { wallet.create_new_account_public(None).0 };
+            if !missing.contains(&made) {
+                eprintln!("warning: the wallet's saved accounts were not made in order; {made} was added while taking them in");
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Saves `wallet`, keeping the accounts other processes saved meanwhile.
+fn save_wallet<C: wallet::WalletSequencerClient>(wallet: &mut WalletCore<C>) -> Result<()> {
+    let _lock = wallet_lock(wallet.storage_path())?;
+    take_in_saved_accounts(wallet)?;
+    quietly(|| wallet.store_persistent_data())
+}
+
+/// Makes a new private (or public) account in `wallet` and saves it, after taking in what
+/// other processes saved: the next free place in the key tree is then really free.
+fn new_account_saved<C: wallet::WalletSequencerClient>(wallet: &mut WalletCore<C>, private: bool) -> Result<AccountId> {
+    let _lock = wallet_lock(wallet.storage_path())?;
+    take_in_saved_accounts(wallet)?;
+    let made = if private { wallet.create_new_account_private(None).0 } else { wallet.create_new_account_public(None).0 };
+    quietly(|| wallet.store_persistent_data())?;
+    Ok(made)
+}
+
 fn write_default_wallet_files() -> Result<()> {
     let config_path = fetch_config_path()?;
     if let Some(home) = config_path.parent() {
@@ -2423,7 +2510,7 @@ async fn open_wallet(overrides: Option<WalletConfigOverrides>, save: bool, creat
         bail!("there is no wallet here yet: run `names setup` first (it makes one and shows its recovery phrase once)");
     }
     if storage_path.exists() {
-        let password = read_password(&storage_path)?;
+        let password = wallet_password(&storage_path)?;
         match WalletCore::new_update_chain(fetch_config_path()?, storage_path.clone(), overrides.clone(), &password) {
             Ok(wallet) => return Ok(wallet),
             Err(error) if save => return Err(error).context(OLD_WALLET),
@@ -2500,13 +2587,13 @@ async fn setup(client: &mut Client, shield: u128) -> Result<()> {
     let mut defaults = load_defaults();
     let public: AccountId = match defaults.public.as_deref().and_then(|id| id.parse().ok()) {
         Some(id) => id,
-        None => client.wallet.create_new_account_public(None).0,
+        None => new_account_saved(&mut client.wallet, false)?,
     };
     let private: AccountId = match defaults.private.as_deref().and_then(|id| id.parse().ok()) {
         Some(id) => id,
-        None => client.wallet.create_new_account_private(None).0,
+        None => new_account_saved(&mut client.wallet, true)?,
     };
-    quietly(|| client.wallet.store_persistent_data())?;
+    save_wallet(&mut client.wallet)?;
     defaults.public = Some(public.to_string());
     defaults.private = Some(private.to_string());
     save_defaults(&defaults)?;
@@ -2535,7 +2622,7 @@ async fn setup(client: &mut Client, shield: u128) -> Result<()> {
             .context("the sequencer did not accept the transfer")?;
         client.finish(hash).await.context("the transfer was not applied")?;
         client.wallet.sync_to_latest_block().await?;
-        quietly(|| client.wallet.store_persistent_data())?;
+        save_wallet(&mut client.wallet)?;
     }
     println!("ready: `names register <name>` holds a name privately, `names pay <name> <amount>` pays one");
     Ok(())
@@ -3435,5 +3522,51 @@ mod pay_tests {
         assert!(private_keys_of("alice", &public_only).is_err(), "and there are none");
         let keys_only = Profile { npk: Some([1; 32]), vpk: vec![2; 33], ..Profile::default() };
         assert!(!pays_publicly(&keys_only, false, false));
+    }
+}
+
+#[cfg(test)]
+mod wallet_storage_tests {
+    use super::{AccountId, WalletCore, new_account_saved, save_wallet};
+    use sequencer_service_rpc::SequencerClient;
+
+    fn wallet_at(dir: &std::path::Path) -> WalletCore<SequencerClient> {
+        WalletCore::new_update_chain(dir.join("wallet_config.json"), dir.join("storage.json"), None, "").expect("the wallet opens")
+    }
+
+    fn saved_private(dir: &std::path::Path) -> Vec<AccountId> {
+        wallet_at(dir).storage().key_chain().private_account_ids().map(|(id, _)| id).collect()
+    }
+
+    /// concurrent-cli-processes-clobber-wallet-storage-shared-receiving-account and
+    /// background-registrations-share-one-receiving-account: each names process loaded the
+    /// wallet when it started and saved it whole; two background registrations and a
+    /// receive-privately made the same "new" private account (8Z31…) for three names, and
+    /// a move to private saved over it in between.
+    #[test]
+    fn processes_that_each_make_an_account_get_their_own_and_keep_each_others() {
+        let dir = std::env::temp_dir().join(format!("names-wallet-storage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("wallet_config.json"), serde_json::to_vec(&wallet::config::WalletConfig::default()).unwrap()).unwrap();
+        let (first, _) = WalletCore::<SequencerClient>::new_init_storage(dir.join("wallet_config.json"), dir.join("storage.json"), None, "").unwrap();
+        first.store_persistent_data().unwrap();
+        let before = saved_private(&dir).len();
+        // Three processes start from the same saved wallet.
+        let (mut register_one, mut register_two, mut shield) = (wallet_at(&dir), wallet_at(&dir), wallet_at(&dir));
+        let one = new_account_saved(&mut register_one, true).unwrap();
+        let two = new_account_saved(&mut register_two, true).unwrap();
+        // The long one saves its old copy at its end.
+        save_wallet(&mut shield).unwrap();
+        // A fourth, started before all that, makes one too.
+        let mut late = wallet_at(&dir);
+        let three = new_account_saved(&mut wallet_at(&dir), true).unwrap();
+        let four = new_account_saved(&mut late, true).unwrap();
+        let made = [one, two, three, four];
+        assert_eq!(made.iter().collect::<std::collections::BTreeSet<_>>().len(), 4, "each its own account: {made:?}");
+        let saved = saved_private(&dir);
+        assert!(made.iter().all(|id| saved.contains(id)), "every account made is still in the wallet: {made:?} vs {saved:?}");
+        assert_eq!(saved.len(), before + 4);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

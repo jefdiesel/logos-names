@@ -635,7 +635,7 @@ impl Client {
         // A fresh private account holds the name, funded privately: the chain shows no
         // link between it and the account that paid.
         let (account, _) = self.wallet.create_new_account_private(None);
-        quietly(|| self.wallet.store_persistent_data())?;
+        crate::save_wallet(&mut self.wallet)?;
         println!("{name}: making its private account and funding it privately (about 4 minutes)");
         let (hash, _) = NativeTokenTransfer(&self.wallet)
             .transfer(self.signer(from), self.signer(account), fee, CreditDelivery::Automatic)
@@ -685,7 +685,7 @@ impl Client {
             bail!("your private account holds less than the {PUBLIC_GAS_FUND} a public name needs for gas; add funds first");
         }
         let (public, _) = self.wallet.create_new_account_public(None);
-        quietly(|| self.wallet.store_persistent_data())?;
+        crate::save_wallet(&mut self.wallet)?;
         println!("step 1 of 3: funding Public/{public} with {PUBLIC_GAS_FUND} for gas, privately (about 4 minutes)");
         let (hash, _) = NativeTokenTransfer(&self.wallet)
             .transfer(self.signer(payer), AccountIdentity::Public(public), PUBLIC_GAS_FUND, CreditDelivery::Automatic)

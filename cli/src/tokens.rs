@@ -1064,7 +1064,7 @@ impl Client {
         )
         .await?;
         let (definition, _) = self.wallet.create_new_account_public(None);
-        crate::quietly(|| self.wallet.store_persistent_data())?;
+        crate::save_wallet(&mut self.wallet)?;
         println!("creating {name} at {definition}, {supply} to {to}");
         let call = tokens.codec.create(definition, name, supply, authority, to);
         self.token_call(
