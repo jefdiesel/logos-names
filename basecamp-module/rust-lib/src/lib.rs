@@ -734,9 +734,11 @@ pub trait NamesModule: Send + 'static {
     /// Labels are kept by this module, and shown by `chain_accounts`.
     fn chain_account_label(&mut self, key: String, label: String) -> String;
 
-    /// Removes an account made with `chain_account_new` once the node uses it
-    /// and it holds nothing: `{key, title, removed, note}`. Refused for any
-    /// other key, and for one holding anything.
+    /// Hides an account made with `chain_account_new` once the node uses it
+    /// and it holds nothing: `{key, title, hidden, note}`. Its key stays in the
+    /// node's keystore (the node can't say what is on its way to a key, so no
+    /// secret is deleted), and it is listed again once it holds anything.
+    /// Refused for any other key, and for one holding anything.
     fn chain_account_remove(&mut self, key: String) -> String;
 
     // ── Wallet Provider SDK: for any app (docs/wallet/PROVIDER-SDK.md) ──
@@ -3894,7 +3896,7 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply(chain_keys::with_node(|ask, files, records| chain_keys::remove(ask, files, records, &key)))
+        reply(chain_keys::with_node(|ask, _, records| chain_keys::remove(ask, records, &key)))
     }
 
     // ── Wallet Provider SDK ─────────────────────────────────────────────

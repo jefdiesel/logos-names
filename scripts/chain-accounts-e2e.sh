@@ -448,11 +448,30 @@ step("a key the Names app didn't make is not removed", not r["ok"] and "made in 
 r = names("chain_account_remove", K2)
 show("names chain_account_remove K2 (empty)", r)
 after_titles = keystore_read()[1]
-step("an empty account made here is removed from the node's keystore, the others untouched",
-     r["ok"] and "names-2" not in after_titles and all(after_titles.get(t) == k for t, k in before_titles.items() if t != "names-2"),
+step("an empty account made here is hidden, its key kept in the node's keystore (no secret is ever deleted)",
+     r["ok"] and r["value"].get("hidden") is True and "removed" not in r["value"] and after_titles == before_titles,
      f"keystore {len(before_titles)} -> {len(after_titles)} keys")
 s = names("chain_accounts")
 step("chain_accounts no longer lists it", s["ok"] and K2 not in [x["key"] for x in s["value"]])
+nw = names("chain_account_new", "After")
+show("names chain_account_new After (right after the hide, node not restarted)", nw)
+K4 = (nw["value"] or {}).get("key", "") if nw["ok"] else ""
+accounts4, titles4 = keystore_read()
+step("a new account is made right after one is hidden, under a new title, the others untouched",
+     nw["ok"] and accounts4.get(nw["value"]["title"]) == K4 and all(titles4.get(t) == k for t, k in before_titles.items()) and len(titles4) == len(before_titles) + 1,
+     f"title {nw['value'].get('title') if nw['ok'] else nw['error']}")
+
+say("\n== a hidden account that is paid shows again")
+r = names("chain_send", A, K2, "1,200", "true")
+show("names chain_send A -> K2 1,200", r)
+h = (r["value"] or {}).get("hash") if r["ok"] else None
+st = wait_landed(h) if h else None
+k2b = balance(K2)
+s = names("chain_accounts")
+row = next((x for x in (s["value"] or []) if x.get("key") == K2), None) if s["ok"] else None
+say(f"    node: K2 balance {k2b}; chain_accounts row {json.dumps(row)}")
+step("what reaches a hidden account is kept: the node shows K2 holding 1,200 and chain_accounts lists it again",
+     st == "in_block" and k2b == 1200 and row is not None and row.get("balance") == "1200", f"state {st}")
 
 say("\n== refusals: unknown keys")
 other = "cd" * 32
@@ -463,9 +482,10 @@ for label, x in (("label of a key never seen", r1), ("remove of a key never seen
     show(f"names {label}", x)
 step("an unknown or malformed key is refused, in plain words", not r1["ok"] and r1["error"] == "Your node doesn't hold that key."
      and not r2["ok"] and "made in the Names app" in r2["error"] and not r3["ok"] and r3["error"] == "choose the account to label")
+titles_before_r4 = keystore_read()[1]
 r4 = names("chain_account_new", "x" * 41)
 show("names chain_account_new with a 41-character label", r4)
-step("a label over 40 characters is refused before the node is asked", not r4["ok"] and "at most 40" in r4["error"] and "names-4" not in keystore_read()[0])
+step("a label over 40 characters is refused before the node is asked", not r4["ok"] and "at most 40" in r4["error"] and keystore_read()[1] == titles_before_r4)
 
 results.close()
 fails = sum(1 for line in open(os.path.join(W, ".results")) if line.startswith("FAIL"))

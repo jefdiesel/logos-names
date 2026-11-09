@@ -15,6 +15,9 @@
 //! - A key with no notes answers `wallet_get_balance` "Unknown wallet address."; its
 //!   balance is then 0.
 //! - `remove_key(keystore, title)` deletes the key, secret and all.
+//! - The node can't say what the chain holds or will hold for a key: a payment on its
+//!   way, or one that reached the key before the node used it, isn't in its balance. So
+//!   the module never removes a key: `remove` hides the account and the secret stays.
 //!
 //! The module finds the keystore beside its own data: Basecamp and logosctl give each
 //! module `<data>/<module>/<instance>` (`--instance-persistence-path` on the host
@@ -217,11 +220,16 @@ pub fn relabel(ask: &mut Ask, records: &mut Map<String, Value>, key: &str, label
     Ok(json!({ "key": key, "label": label }))
 }
 
-/// Removes an account the module made, once the running node shows it holds nothing:
-/// `{key, title, removed, note}`. Refused for a key the Names app didn't make, a key
-/// with a role, one the node doesn't list yet (it can't say what it holds), and one
-/// holding anything.
-pub fn remove(ask: &mut Ask, candidates: &[NodeFiles], records: &mut Map<String, Value>, key: &str) -> Result<Value, String> {
+/// What a hidden account's reply says.
+pub const HIDDEN: &str = "Hidden from your accounts. Its key stays in your node's keystore, so nothing sent to it is lost: if it ever holds anything, it shows again.";
+
+/// Hides an account the module made, once the running node shows it holds nothing:
+/// `{key, title, hidden, note}`. The key stays in the node's keystore: the node can't
+/// say what the chain holds or will hold for a key (a payment on its way, or one that
+/// reached it before the node used it), so no secret is ever deleted here. A hidden
+/// account that comes to hold anything is listed again. Refused for a key the Names app
+/// didn't make, one the node doesn't list yet, and one holding anything.
+pub fn remove(ask: &mut Ask, records: &mut Map<String, Value>, key: &str) -> Result<Value, String> {
     let key = chain::parse_key(key).ok_or("choose the account to remove")?;
     let Some(title) = records.get(&key).and_then(|r| r["title"].as_str()).map(str::to_owned) else {
         return Err("Only accounts made in the Names app can be removed here.".to_owned());
@@ -236,31 +244,27 @@ pub fn remove(ask: &mut Ask, candidates: &[NodeFiles], records: &mut Map<String,
         Err(error) => return Err(error),
     };
     if held > 0 {
-        return Err(format!("That account holds {held}. Send it all to another account first: removing a key loses what it holds."));
+        return Err(format!("That account holds {held}. Send it all to another account first."));
     }
-    let (files, before) = the_nodes(ask, candidates, &known)?;
-    match before.find(&key) {
-        Some((t, roles)) if t == title && roles.is_empty() => {}
-        Some((_, roles)) if !roles.is_empty() => return Err(format!("The node uses that key for {}: it can't be removed.", roles.join(", "))),
-        _ => return Err(format!("The keystore doesn't hold that key as {title}: nothing was removed.")),
+    if let Some(record) = records.get_mut(&key) {
+        record["hidden"] = Value::Bool(true);
     }
-    ask("remove_key", json!([files.keystore.to_string_lossy(), title]))?;
-    let after = keystore(&ask("read_accounts", json!([files.config.to_string_lossy()]))?);
-    let others: Vec<(String, String)> = before.titles.iter().filter(|(t, _)| *t != title).cloned().collect();
-    if after.find(&key).is_some() || !others.iter().all(|entry| after.titles.contains(entry)) {
-        return Err("the node said the key was removed, but its keystore doesn't show that: check the keystore".to_owned());
-    }
-    records.remove(&key);
-    Ok(json!({ "key": key, "title": title, "removed": true,
-        "note": "Removed from the keystore. Your node stops watching it at its next start; don't send to it." }))
+    Ok(json!({ "key": key, "title": title, "hidden": true, "note": HIDDEN }))
+}
+
+/// Whether the module's record of `key` hides it.
+fn hidden(records: &Map<String, Value>, key: &str) -> bool {
+    records.get(key).is_some_and(|r| r["hidden"] == Value::Bool(true))
 }
 
 /// `chain_accounts`' rows with what the module knows of each: `label`, `title` and
 /// `ready` on the keys it has a record for, and the accounts it made that the rows lack,
 /// as `{key, balance, title, label, ready}`: balance "0" for one the node lists (a key
-/// with no notes), null with `ready: false` for one it takes at its next start.
+/// with no notes), null with `ready: false` for one it takes at its next start. A hidden
+/// account is left out while it holds nothing, and shown again once it holds anything.
 pub fn annotate(rows: Value, known: &[String], records: &Map<String, Value>) -> Value {
     let mut rows = rows.as_array().cloned().unwrap_or_default();
+    rows.retain(|row| !(row["key"].as_str().is_some_and(|key| hidden(records, key)) && row["balance"].as_str() == Some("0")));
     for row in rows.iter_mut() {
         if let Some(record) = row["key"].as_str().and_then(|key| records.get(key)) {
             row["label"] = record["label"].clone();
@@ -270,7 +274,7 @@ pub fn annotate(rows: Value, known: &[String], records: &Map<String, Value>) -> 
             row["ready"] = Value::Bool(true);
         }
     }
-    let mut made: Vec<(&String, &Value)> = records.iter().filter(|(_, r)| r.get("title").is_some()).collect();
+    let mut made: Vec<(&String, &Value)> = records.iter().filter(|(key, r)| r.get("title").is_some() && !hidden(records, key)).collect();
     made.sort_by_key(|(_, r)| r["at"].as_u64().unwrap_or(0));
     for (key, record) in made {
         if rows.iter().any(|row| row["key"].as_str() == Some(key)) {
@@ -489,45 +493,61 @@ mod tests {
         assert!(records.is_empty());
     }
 
+    /// adv V8 / adv2 D2: the node showed nothing for a key the chain had paid (a payment
+    /// before the node used the key, or one still on its way), and remove_key deleted its
+    /// only secret. Now "remove" hides the account: the node is never asked to remove it.
     #[test]
-    fn only_an_empty_account_the_names_app_made_is_removed() {
+    fn removing_an_empty_account_hides_it_and_keeps_its_key() {
         let mut records = Map::new();
         records.insert(NEW.into(), json!({ "title": "names-1", "label": "x", "at": 1 }));
         // Not made here.
         let mut node = Node::new(&[]);
-        assert!(remove(&mut |m, a| node.ask(m, a), &files(), &mut records, A).unwrap_err().contains("made in the Names app"));
+        assert!(remove(&mut |m, a| node.ask(m, a), &mut records, A).unwrap_err().contains("made in the Names app"));
         // Not yet used by the node.
         let mut node = Node::new(&[("wallet_get_known_addresses", known_ab())]);
-        assert!(remove(&mut |m, a| node.ask(m, a), &files(), &mut records, NEW).unwrap_err().contains("restart your node"));
+        assert!(remove(&mut |m, a| node.ask(m, a), &mut records, NEW).unwrap_err().contains("restart your node"));
         // Holding something.
         let mut node = Node::new(&[("wallet_get_known_addresses", Ok(json!([A, B, LF, NEW]))), ("wallet_get_balance", Ok(json!("5000")))]);
-        let held = remove(&mut |m, a| node.ask(m, a), &files(), &mut records, NEW).unwrap_err();
+        let held = remove(&mut |m, a| node.ask(m, a), &mut records, NEW).unwrap_err();
         assert!(held.contains("holds 5000"), "{held}");
-        assert!(!node.methods().contains(&"remove_key"));
-        // Empty (the node's "Unknown wallet address." for a key with no notes): removed and read back.
+        assert!(records[NEW].get("hidden").is_none());
+        // Empty as the node sees it ("Unknown wallet address."): hidden, and its key is not removed.
         let mut node = Node::new(&[
             ("wallet_get_known_addresses", Ok(json!([A, B, LF, NEW]))),
             ("wallet_get_balance", Err("Unknown wallet address.".to_owned())),
             ("read_accounts", Ok(read(&[("names-1", NEW)]))),
-            ("read_accounts", Ok(read(&[]))),
             ("remove_key", Ok(Value::Null)),
         ]);
-        let gone = remove(&mut |m, a| node.ask(m, a), &files(), &mut records, NEW).unwrap();
-        assert_eq!(gone["removed"], true);
-        assert_eq!(node.asked.iter().find(|(m, _)| m == "remove_key").unwrap().1, json!(["/data/blockchain_module/1/keystore.yaml", "names-1"]));
-        assert!(records.is_empty());
+        let gone = remove(&mut |m, a| node.ask(m, a), &mut records, NEW).unwrap();
+        assert_eq!(gone, json!({ "key": NEW, "title": "names-1", "hidden": true, "note": HIDDEN }));
+        assert!(!node.methods().contains(&"remove_key"), "the key's secret is never deleted: {:?}", node.methods());
+        assert_eq!(records[NEW], json!({ "title": "names-1", "label": "x", "at": 1, "hidden": true }));
+        // chain_accounts leaves it out while it holds nothing (no row, or a "0" row)...
+        assert_eq!(annotate(json!([{ "key": A, "balance": "9" }]), &[A.into(), NEW.into()], &records), json!([{ "key": A, "balance": "9" }]));
+        assert_eq!(annotate(json!([{ "key": NEW, "balance": "0" }]), &[NEW.into()], &records), json!([]));
+        // ...and shows it again once the payment that was on its way lands (adv2 D2: 1,000).
+        assert_eq!(annotate(json!([{ "key": NEW, "balance": "1000" }]), &[NEW.into()], &records),
+            json!([{ "key": NEW, "balance": "1000", "title": "names-1", "label": "x", "ready": true }]));
     }
 
+    /// adv2 D3: after a removal the keystore no longer held a key the running node lists,
+    /// so every later new account and removal was refused until the node restarted.
+    /// Hiding changes nothing in the keystore: the next account is made at once.
     #[test]
-    fn a_key_with_a_role_or_another_title_is_not_removed() {
+    fn an_account_is_made_right_after_one_is_hidden() {
         let mut records = Map::new();
-        records.insert(LF.into(), json!({ "title": "LeaderFunding", "label": "", "at": 1 }));
-        let mut node = Node::new(&[("wallet_get_known_addresses", known_ab()), ("wallet_get_balance", Ok(json!("0"))), ("read_accounts", Ok(read(&[])))]);
-        assert!(remove(&mut |m, a| node.ask(m, a), &files(), &mut records, LF).unwrap_err().contains("leader_funding"));
-        records.insert(B.into(), json!({ "title": "names-9", "label": "", "at": 1 }));
-        let mut node = Node::new(&[("wallet_get_known_addresses", known_ab()), ("wallet_get_balance", Ok(json!("0"))), ("read_accounts", Ok(read(&[])))]);
-        assert!(remove(&mut |m, a| node.ask(m, a), &files(), &mut records, B).unwrap_err().contains("nothing was removed"));
-        assert!(!node.methods().contains(&"remove_key"));
+        records.insert(NEW.into(), json!({ "title": "names-1", "label": "", "at": 1 }));
+        let mut node = Node::new(&[("wallet_get_known_addresses", Ok(json!([A, B, LF, NEW]))), ("wallet_get_balance", Err("Unknown wallet address.".to_owned()))]);
+        remove(&mut |m, a| node.ask(m, a), &mut records, NEW).unwrap();
+        let next = "cd".repeat(32);
+        let mut node = Node::new(&[
+            ("wallet_get_known_addresses", Ok(json!([A, B, LF, NEW]))),
+            ("read_accounts", Ok(read(&[("names-1", NEW)]))),
+            ("read_accounts", Ok(read(&[("names-1", NEW), ("names-2", next.as_str())]))),
+            ("generate_key", Ok(json!(next.as_str()))),
+        ]);
+        let made = make(&mut |m, a| node.ask(m, a), &files(), &mut records, "After", 2).unwrap();
+        assert_eq!(made["title"], "names-2", "the hidden account's title stays taken: {made}");
     }
 
     #[test]
