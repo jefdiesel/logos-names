@@ -3564,7 +3564,7 @@ impl NamesModule for Names {
                 "balance": balance.to_string(),
             });
             if !send {
-                plan["fee_about"] = chain_fee_about(&chain_fee::Shape::Transfer { to: to_key.clone(), amount }, &from, None);
+                chain_fee_about(&mut plan, "fee_about", &chain_fee::Shape::Transfer { to: to_key.clone(), amount }, &from, None);
             }
             if send {
                 let before = chain::notes_of(&node::call("wallet_get_notes", json!([from, ""]), node::QUICK)?);
@@ -3612,7 +3612,11 @@ impl NamesModule for Names {
             }
             let mut plan = json!({ "from": from, "amount": amount.to_string(), "balance": balance.to_string(), "exact": exact });
             if !send {
-                plan["fee_about"] = if exact { json!("0") } else { chain_fee_about(&chain_fee::Shape::Transfer { to: from.clone(), amount }, &from, None) };
+                if exact {
+                    plan["fee_about"] = json!("0");
+                } else {
+                    chain_fee_about(&mut plan, "fee_about", &chain_fee::Shape::Transfer { to: from.clone(), amount }, &from, None);
+                }
             }
             // A note of exactly the amount is already there: a split would only cost a fee
             // and take notes out of the stake (CR-9).
@@ -3697,12 +3701,12 @@ impl NamesModule for Names {
             }
             if !send {
                 let deposit = chain_fee::Shape::Deposit { channel: channel.clone(), metadata: registry::hex(&account).len() / 2 };
-                plan["fee_about"] = match &note {
-                    Some(note) => chain_fee_about(&deposit, &from, Some(note)),
-                    None => Value::Null,
-                };
+                match &note {
+                    Some(note) => chain_fee_about(&mut plan, "fee_about", &deposit, &from, Some(note)),
+                    None => plan["fee_about"] = Value::Null,
+                }
                 if needs_split {
-                    plan["split_fee_about"] = chain_fee_about(&chain_fee::Shape::Transfer { to: from.clone(), amount }, &from, None);
+                    chain_fee_about(&mut plan, "split_fee_about", &chain_fee::Shape::Transfer { to: from.clone(), amount }, &from, None);
                 }
             }
             if exact_busy {
@@ -4710,17 +4714,20 @@ fn chain_sent_add(hash: &str, sent: Value) {
     save_object(&dir.join("chain-sent.json"), &all);
 }
 
-/// About what `shape` will cost paid from `from` (decimal text, or null when the node
-/// can't say): asked of the node with stand-ins of the key's notes, less `skip` and those
-/// a send from here still spends, so no real note is reserved (chain_fee.rs).
-fn chain_fee_about(shape: &chain_fee::Shape, from: &str, skip: Option<&str>) -> Value {
-    let Ok(notes) = node::call("wallet_get_notes", json!([from, ""]), node::QUICK).map(|reply| chain::notes_of(&reply)) else {
-        return Value::Null;
-    };
+/// About what `shape` will cost paid from `from`, set in `plan` as `field` (decimal text, or
+/// null when the node can't say), with `cannot_pay_fee: true` when the key's notes can't
+/// pay it and its fee: asked of the node with stand-ins of the key's notes, less `skip` and
+/// those a send from here still spends, so no real note is reserved (chain_fee.rs).
+fn chain_fee_about(plan: &mut Value, field: &str, shape: &chain_fee::Shape, from: &str, skip: Option<&str>) {
+    plan[field] = Value::Null;
+    let Ok(notes) = node::call("wallet_get_notes", json!([from, ""]), node::QUICK).map(|reply| chain::notes_of(&reply)) else { return };
     let busy = chain_notes_in_use(from);
     let values: Vec<u128> = notes.iter().filter(|(id, _)| !busy.contains(*id) && skip != Some(id.as_str())).map(|(_, value)| chain::amount(value)).collect();
-    chain_fee::estimate(shape, from, &values, |request| node::call("wallet_fund_tx", json!([request]), node::QUICK))
-        .map_or(Value::Null, |fee| Value::from(fee.to_string()))
+    match chain_fee::estimate(shape, from, &values, |request| node::call("wallet_fund_tx", json!([request]), node::QUICK)) {
+        chain_fee::Estimate::Fee(fee) => plan[field] = Value::from(fee.to_string()),
+        chain_fee::Estimate::Short => plan["cannot_pay_fee"] = Value::Bool(true),
+        chain_fee::Estimate::Unknown => {}
+    }
 }
 
 /// About what one `leader_claim` will cost: its LeaderClaim op and a transfer of one input
@@ -4732,6 +4739,7 @@ fn chain_claim_fee_about() -> Value {
         let Ok(notes) = node::call("wallet_get_notes", json!([key, ""]), node::QUICK).map(|reply| chain::notes_of(&reply)) else { continue };
         let Some(largest) = notes.values().map(chain::amount).max() else { continue };
         return chain_fee::estimate(&chain_fee::Shape::Claim, key, &[largest], |request| node::call("wallet_fund_tx", json!([request]), node::QUICK))
+            .fee()
             .map_or(Value::Null, |fee| Value::from(fee.to_string()));
     }
     Value::Null
@@ -6874,7 +6882,16 @@ mod tests {
         node_refuses("wallet_fund_tx", "Failed to parse fund request: missing field `tx_builder`");
         let plan = parsed(&names.chain_send(NODE_KEY.into(), to.into(), "3,000".into(), false));
         assert_eq!((plan["success"].clone(), plan["value"]["fee_about"].clone()), (json!(true), Value::Null), "{plan}");
+        assert_eq!(plan["value"]["cannot_pay_fee"], Value::Null, "a node that didn't say is not a short key");
+        // The node says no set of the key's notes can pay it with its fee (the proof run:
+        // 1,268 in two notes, a plan for 1,000): the plan says so instead of a figure.
+        node_answers("wallet_get_balance", json!("1268"));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "a1", "value": "1000" }, { "id": "a2", "value": "268" }] }));
+        node_refuses("wallet_fund_tx", "Failed to fund tx: Wallet does not have enough funds, available=0");
+        let plan = parsed(&names.chain_send(NODE_KEY.into(), to.into(), "1,000".into(), false));
+        assert_eq!((plan["value"]["fee_about"].clone(), plan["value"]["cannot_pay_fee"].clone()), (Value::Null, json!(true)), "{plan}");
         // A note a send from here still spends is left out, as the node's wallet leaves it out.
+        node_answers("wallet_get_balance", json!("1000000"));
         node_answers("wallet_get_notes", json!({ "notes": [{ "id": "busy", "value": "900000" }, { "id": "free", "value": "100000" }] }));
         chain_sent_add(&"ee".repeat(32), json!({ "from": NODE_KEY, "inputs": ["busy"], "fee": null, "at": now() }));
         node_answers("wallet_fund_tx", json!({ "funded_tx": { "ops": [{ "opcode": 0, "payload": { "inputs": ["01"], "outputs": [{ "value": 3000 }, { "value": 96166 }] } }] } }));

@@ -490,6 +490,8 @@ export function activityFor(rows, who) {
 export function chainFeeLine(plan) {
     if (!plan)
         return ""
+    if (plan.cannot_pay_fee === true)
+        return "That key's notes can't pay this amount and its fee: send a little less."
     if (/^\d+$/.test(String(plan.fee_about)))
         return "About " + groupDigits(plan.fee_about) + ", paid from the key's notes: your node's figure at its gas prices now. The fee paid is shown once it's sent."
     return "Your node couldn't say in advance. The fee paid is shown once it's sent."

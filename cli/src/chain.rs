@@ -422,7 +422,7 @@ pub fn run(command: ChainCommand, resolved: Option<(String, String)>) -> Result<
                 println!("  change back to {}, through {}", short(&change), node.url);
                 match fee_about {
                     Some(fee) => println!("  fee: about {} (the node's own figure at today's gas prices; paid from {}'s notes)", grouped(fee), short(&from)),
-                    None => println!("  fee: the node couldn't say in advance; it is shown once sent"),
+                    None => println!("  fee: the node couldn't say in advance (or this key can't pay the amount and its fee); it is shown once sent"),
                 }
                 println!("nothing sent; run again with --yes to send (it cannot be undone)");
                 return Ok(());

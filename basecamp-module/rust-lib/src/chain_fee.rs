@@ -97,11 +97,30 @@ pub fn fee_of(funded: &Value, held: u128) -> Option<u128> {
     held.checked_sub(paid)
 }
 
+/// What the node said a transaction would cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Estimate {
+    /// Its fee, at the node's gas prices now.
+    Fee(u128),
+    /// The key's notes can't pay it and its fee (the node said so for every set of them).
+    Short,
+    /// The node didn't say (not running, or refused the request).
+    Unknown,
+}
+
+impl Estimate {
+    pub fn fee(self) -> Option<u128> {
+        match self {
+            Self::Fee(fee) => Some(fee),
+            _ => None,
+        }
+    }
+}
+
 /// The node's fee for `shape` paid from `from`, whose spendable notes hold `notes`: the
 /// fewest largest notes that cover it, as the node's wallet picks them. `ask` sends one
-/// `wallet_fund_tx` request (its JSON text) and gives the node's reply. `None` when the
-/// notes can't cover it or the node didn't say.
-pub fn estimate(shape: &Shape, from: &str, notes: &[u128], mut ask: impl FnMut(String) -> Result<Value, String>) -> Option<u128> {
+/// `wallet_fund_tx` request (its JSON text) and gives the node's reply.
+pub fn estimate(shape: &Shape, from: &str, notes: &[u128], mut ask: impl FnMut(String) -> Result<Value, String>) -> Estimate {
     let mut values = notes.to_vec();
     values.sort_unstable_by(|a, b| b.cmp(a));
     let floor = match shape {
@@ -115,13 +134,13 @@ pub fn estimate(shape: &Shape, from: &str, notes: &[u128], mut ask: impl FnMut(S
             continue;
         }
         match ask(request(shape, from, &values[..count]).to_string()) {
-            Ok(funded) => return fee_of(&funded, held),
+            Ok(funded) => return fee_of(&funded, held).map_or(Estimate::Unknown, Estimate::Fee),
             // These notes can't pay it with its fee: one more, as the wallet would.
             Err(error) if error == short => continue,
-            Err(_) => return None,
+            Err(_) => return Estimate::Unknown,
         }
     }
-    None
+    Estimate::Short
 }
 
 /// A claim's estimate beside the reward it cashes: a warning when it costs more.
@@ -188,16 +207,20 @@ mod tests {
             // As the solo node answered (exp2 si-2in): two inputs, 94,198 + 268 out.
             if count < 2 { Err(short.clone()) } else { Ok(funded(&[94_198, 268])) }
         });
-        assert_eq!(fee, Some(866));
+        assert_eq!(fee, Estimate::Fee(866));
         assert_eq!(asked, [2], "one note of 94,098 can't pay 94,198, so it isn't asked");
         let mut asked = 0;
         let fee = estimate(&Shape::Transfer { to: B.into(), amount: 3000 }, A, &[3500, 100], |_| {
             asked += 1;
             Err(short.clone())
         });
-        assert_eq!((fee, asked), (None, 2), "nothing covers it: no estimate");
-        assert_eq!(estimate(&Shape::Claim, A, &[50_000], |_| Err("Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.".into())), None);
-        assert_eq!(estimate(&Shape::Claim, A, &[], |_| unreachable!()), None, "no notes, nothing asked");
+        assert_eq!((fee, asked), (Estimate::Short, 2), "nothing covers it with its fee");
+        // The proof run's case: 1,268 in two notes can't send 1,000 and a fee of 866.
+        assert_eq!(estimate(&Shape::Transfer { to: B.into(), amount: 1000 }, A, &[1000, 268], |_| Err(short.clone())), Estimate::Short);
+        assert_eq!(estimate(&Shape::Transfer { to: B.into(), amount: 1000 }, A, &[900], |_| unreachable!()), Estimate::Short, "less than the amount");
+        let down = estimate(&Shape::Claim, A, &[50_000], |_| Err("Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.".into()));
+        assert_eq!(down, Estimate::Unknown, "a node that didn't say is not a short key");
+        assert_eq!(estimate(&Shape::Claim, A, &[], |_| unreachable!()), Estimate::Short, "no notes, nothing asked");
     }
 
     /// Every stand-in id read as a little-endian field element stays below the BN254
