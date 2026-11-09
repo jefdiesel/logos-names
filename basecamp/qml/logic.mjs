@@ -10,6 +10,17 @@ export function atLeast(a, b) {
     return a.length !== b.length ? a.length > b.length : a >= b
 }
 
+/// What a read says about itself beside its value, to show with it: a partial read (some
+/// balances the sequencer didn't give, shown as unknown) or a stale one (the last list,
+/// kept while reading it again fails). "" for a whole, fresh read or no reply.
+export function readNote(reply) {
+    if (!reply || typeof reply !== "object" || reply.success !== true)
+        return ""
+    if (reply.partial !== true && reply.stale !== true && !reply.warning)
+        return ""
+    return String(reply.warning || (reply.stale ? "This may be out of date." : "Some balances are unknown."))
+}
+
 /// An entry's value for reading: a long unbroken value is shortened in the middle.
 export function entryShown(value) {
     var text = String(value)

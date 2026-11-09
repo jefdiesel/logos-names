@@ -1,6 +1,6 @@
 // Checks the view's own logic (qml/logic.mjs, which qml/Main.qml imports), since the QML
 // engine cannot run in CI. Run with: node basecamp/logic.test.mjs
-import { atLeast, someAmount, entryShown, tokenAmountProblem, tokenToProblem, tokenSendProves, tokenShown, feeEstimate, feePaid, accountTitle, accountsShown, publisherLine, durationWords, keyShown, chainToProblem, stakeLines, rewardsLine, grouped, addDigits, walletAssets, subDigits, walletGroups, stakeTable, activityLine, activityFor, agoShown } from "./qml/logic.mjs";
+import { atLeast, someAmount, entryShown, tokenAmountProblem, tokenToProblem, tokenSendProves, tokenShown, feeEstimate, feePaid, accountTitle, accountsShown, publisherLine, durationWords, keyShown, chainToProblem, stakeLines, rewardsLine, grouped, addDigits, walletAssets, subDigits, walletGroups, stakeTable, activityLine, activityFor, agoShown, readNote } from "./qml/logic.mjs";
 import { readFileSync } from "node:fs";
 
 let failures = 0;
@@ -28,6 +28,16 @@ const KEY = "66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b";
 check("durationWords", [30, 600, 113980, 400000].map(durationWords), ["30 s", "10 min", "31.7 h", "4.6 days"]);
 check("keyShown", keyShown(KEY), "66ecf4bc…a81b");
 check("grouped", [grouped("34002373886"), grouped(999), grouped("")], ["34,002,373,886", "999", ""]);
+
+// A read the sequencer only partly answered, or a list kept from before, says so beside its
+// value (cli-mine-stale-list-unmarked-during-outage, balance-accounts-zeroed-with-success-on-partial-failure).
+check("readNote whole read", readNote({ success: true, value: [], error: null }), "");
+check("readNote failure", readNote({ success: false, value: null, error: "could not reach the sequencer" }), "");
+check("readNote no reply", [readNote(null), readNote(undefined)], ["", ""]);
+check("readNote partial", readNote({ success: true, value: {}, partial: true, unread: ["Public/x"], warning: "The sequencer didn't give the balance of Public/CCVd…pKnk (it answered HTTP 503 instead of a reading), so its balance shows as unknown. Try again shortly." }),
+  "The sequencer didn't give the balance of Public/CCVd…pKnk (it answered HTTP 503 instead of a reading), so its balance shows as unknown. Try again shortly.");
+check("readNote stale", readNote({ success: true, value: [], stale: true, as_of: 1, warning: "Your names as read 3 min ago. The sequencer didn't answer." }), "Your names as read 3 min ago. The sequencer didn't answer.");
+check("readNote stale without words", readNote({ success: true, value: [], stale: true }), "This may be out of date.");
 check("chainTo good", [KEY, "0x" + KEY, "alice", "@Alice", "alice.lez"].map((t) => chainToProblem(t)), ["", "", "", "", ""]);
 check("chainTo short key", chainToProblem(KEY.substr(0, 60)), "A Logos Blockchain key is 64 hex characters; that one has 60.");
 check("chainTo empty", chainToProblem("  "), "Enter a key or a name.");
