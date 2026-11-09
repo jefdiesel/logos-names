@@ -2154,7 +2154,13 @@ impl Names {
                 }
             }
             match fresh.filter(|_| certain) {
-                Some(balance) => rows[at_row].1 = balance,
+                Some(balance) => {
+                    rows[at_row].1 = balance;
+                    // The wallet's next read must be no older than this one, or the
+                    // account would seem to fall back and rise again, and the bridge's
+                    // credit be told a second time as money that arrived.
+                    cli::forget_balance();
+                }
                 None => {
                     rows.remove(at_row);
                 }
