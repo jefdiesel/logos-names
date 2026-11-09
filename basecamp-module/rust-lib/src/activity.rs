@@ -151,7 +151,12 @@ pub fn all(dir: &Path) -> Vec<Value> {
 /// key, or a name).
 pub fn involves(entry: &Value, account: &str) -> bool {
     let account = account.trim();
-    account.is_empty() || ["from", "to", "name"].iter().any(|field| entry[*field].as_str() == Some(account))
+    account.is_empty() || ["from", "to", "name"].iter().any(|field| entry[*field].as_str() == Some(account)) || received(entry, account).is_some()
+}
+
+/// What a claim (`receive`) credited `account` with, from its `received` map.
+fn received(entry: &Value, account: &str) -> Option<u128> {
+    number(&entry["received"][account])
 }
 
 /// How long a bridge in a block holds its LEZ account's mark while it waits to arrive
@@ -213,6 +218,19 @@ fn effect(entry: &Value, account: &str) -> (i128, bool) {
     let amount = number(&entry["amount"]);
     let mut certain = state != "unknown" && (amount.is_some() || !native || !(to || from));
     let mut delta: i128 = 0;
+    // A claim credits what waited to each account it names, and its payer pays only the fee.
+    if kind == "receive" {
+        let credited = received(entry, account);
+        let mut delta = i128::try_from(credited.unwrap_or(0)).unwrap_or(i128::MAX);
+        let mut known = true;
+        if from {
+            match fee_paid(entry) {
+                Some(fee) => delta -= i128::try_from(fee).unwrap_or(i128::MAX),
+                None => known = false,
+            }
+        }
+        return (delta, known);
+    }
     if native {
         let amount = i128::try_from(amount.unwrap_or(0)).unwrap_or(i128::MAX);
         if to {
@@ -328,7 +346,7 @@ pub fn note_balances(dir: &Path, at: u64, chain: &str, scope: &str, balances: &[
         let key = if scope.is_empty() { format!("{chain}:{account}") } else { format!("{chain}@{scope}:{account}") };
         let touching: Vec<String> = all
             .iter()
-            .filter(|(_, entry)| entry["from"].as_str() == Some(account) || entry["to"].as_str() == Some(account))
+            .filter(|(_, entry)| entry["from"].as_str() == Some(account) || entry["to"].as_str() == Some(account) || received(entry, account).is_some())
             .filter(|(_, entry)| !entry["counted"].as_array().is_some_and(|counted| counted.iter().any(|c| c.as_str() == Some(account))))
             .map(|(id, _)| id.clone())
             .collect();
@@ -546,6 +564,21 @@ mod tests {
         entries[1]["to_before"] = json!("3000000");
         assert!(bridges_arrived(&entries, &now(3_000_000)).is_empty(), "{:?}", bridges_arrived(&entries, &now(3_000_000)));
         assert_eq!(bridges_arrived(&entries, &now(4_496_000)), ["2-bridge"]);
+    }
+
+    /// receive-entry-has-no-account-amount: a claim's entry named no account, so the payer
+    /// BF (36,929,384 -> 23,619,017) and the credited 9Dk3 (954,121 -> 4,123,256) showed nothing.
+    #[test]
+    fn a_claim_is_on_its_payers_and_its_credited_accounts_pages_and_explains_their_balances() {
+        let d = dir("claim");
+        note(&d, 1, &[("Private/BF", 36_929_384), ("Private/9Dk3", 954_121)]);
+        add(&d, 2, json!({ "kind": "receive", "chain": "lez", "all": true, "from": "Private/BF", "amount": "3169135",
+            "received": { "Private/9Dk3": "3169135" }, "fee": { "about": "5070616", "paid": "10141232" }, "state": "done" }));
+        let entry = all(&d).remove(0);
+        assert!(involves(&entry, "Private/BF") && involves(&entry, "Private/9Dk3") && !involves(&entry, "Private/X"));
+        // The credit is the claim's, not money that arrived; the payer's fall is no arrival either.
+        assert!(note(&d, 3, &[("Private/BF", 23_619_017), ("Private/9Dk3", 4_123_256)]).is_empty(), "{:?}", arrivals(&d));
+        let _ = std::fs::remove_dir_all(d);
     }
 
     /// failed-send-becomes-done-after-job-prune-regressed (G2): a send of

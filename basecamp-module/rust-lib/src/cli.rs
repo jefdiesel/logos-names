@@ -986,6 +986,30 @@ pub fn claimed_nothing(log: &str) -> bool {
     log.lines().map(str::trim).any(|line| line == "nothing to receive" || line == "nothing worth claiming")
 }
 
+/// What a `names receive` run claimed, from its log: the private account that paid the fee
+/// (`fee paid from Private/<id>`) and each claim that landed, `(Private/<id>, amount)`, from
+/// `receiving N into Private/<id>` followed by `received in block …`.
+pub fn parse_claims(log: &str) -> (Option<String>, Vec<(String, u128)>) {
+    let mut payer = None;
+    let mut claims = Vec::new();
+    let mut going: Option<(String, u128)> = None;
+    for line in log.lines().map(str::trim) {
+        if let Some(rest) = line.strip_prefix("receiving ") {
+            let mut words = rest.split_whitespace();
+            let amount = words.next().and_then(|amount| amount.parse::<u128>().ok());
+            let into = words.nth(1).map(|to| to.trim_end_matches(';'));
+            going = amount.zip(into.filter(|to| to.starts_with("Private/") && registry::parse_account(to).is_ok())).map(|(amount, to)| (to.to_owned(), amount));
+        } else if line.starts_with("received in block ") {
+            claims.extend(going.take());
+        } else if let Some(account) = line.strip_prefix("fee paid from ") {
+            if account.starts_with("Private/") && registry::parse_account(account).is_ok() {
+                payer = Some(account.to_owned());
+            }
+        }
+    }
+    (payer, claims)
+}
+
 /// The fee lines a CLI run printed (`cli/src/fees.rs` in the names CLI): `{about, at_most,
 /// paid}`, decimal text, or null if it printed none. A run that sent several changes
 /// prints one estimate and one fee paid for each; they are added up. `paid` is null
@@ -2109,6 +2133,18 @@ impl Jobs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_claims_payer_and_credits_are_read_from_its_log() {
+        let a = "Private/DetM9mjtAHfGp4rqpRNVWBkMjUr2rtEdCUGq3T8rNCdQ";
+        let b = "Private/9Dk3Yx4ZQnHxAZ2c4pkuDZ7cHKu8M1NC2vWqzTzS2r8q";
+        let log = format!(
+            "fee: about 5070616, at most 8239751 (each claim, paid from {a} inside the proof)\nreceiving 1000 into {b}; proving it on this computer (several minutes)\nsubmitted ab\nreceived in block 969; {b} now holds 955121\nreceiving 5 into {a}; proving it\nError: the claim was not applied\nfee paid: 5070616\nfee paid from {a}\n"
+        );
+        let (payer, claims) = parse_claims(&log);
+        assert_eq!(payer.as_deref(), Some(a));
+        assert_eq!(claims, vec![(b.to_owned(), 1000)], "only the claim that landed");
+    }
 
     #[test]
     fn fee_lines_add_up_and_nothing_else_counts() {

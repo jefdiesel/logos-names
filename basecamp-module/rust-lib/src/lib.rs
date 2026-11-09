@@ -2075,6 +2075,26 @@ impl Names {
                             if entry["kind"] == "receive" && cli::claimed_nothing(&log) {
                                 settled["claimed"] = json!(false);
                             }
+                            // Which account paid and which were credited, so their pages show
+                            // the claim (receive-entry-has-no-account-amount).
+                            if entry["kind"] == "receive" {
+                                let (payer, claims) = cli::parse_claims(&log);
+                                if let Some(payer) = payer {
+                                    settled["from"] = json!(payer);
+                                }
+                                if !claims.is_empty() {
+                                    let mut received = Map::new();
+                                    for (to, amount) in &claims {
+                                        let had = received.get(to).and_then(Value::as_str).and_then(|text| text.parse::<u128>().ok()).unwrap_or(0);
+                                        received.insert(to.clone(), json!((had + amount).to_string()));
+                                    }
+                                    settled["amount"] = json!(claims.iter().map(|(_, amount)| amount).sum::<u128>().to_string());
+                                    if received.len() == 1 {
+                                        settled["to"] = json!(claims[0].0);
+                                    }
+                                    settled["received"] = Value::Object(received);
+                                }
+                            }
                         }
                         Ok(_) => {}
                         // The job's files were cleared: it ended long ago, outcome unknown
