@@ -273,7 +273,7 @@ enum Command {
         /// The default covers a few names' deposits and private changes: on LEZ 0.4 each
         /// private transaction reserves its fee in the proof, about 5,400,000 at the
         /// lowest base fees.
-        #[arg(long, default_value_t = 50_000_000)]
+        #[arg(long, default_value_t = 50_000_000, value_parser = parse_shield)]
         shield: u128,
     },
     /// Show this wallet's accounts and balances.
@@ -539,10 +539,10 @@ enum Command {
     /// `--public`, or when the name has only a public account, it is an ordinary
     /// public transfer to that account.
     Pay {
-        #[arg(value_parser = parse_name)]
+        #[arg(value_parser = parse_payee_name)]
         name: String,
         /// Amount in base units, above zero; `1,000` may group it.
-        #[arg(value_parser = tokens::parse_amount)]
+        #[arg(value_parser = tokens::parse_amount, allow_negative_numbers = true)]
         amount: u128,
         /// Account to pay from; the wallet must hold its key. Defaults to the private
         /// account from `names setup`, which hides the payer too; a public one is seen
@@ -751,6 +751,27 @@ fn parse_account(input: &str) -> Result<AccountId, String> {
         .unwrap_or(input);
     bare.parse()
         .map_err(|_| format!("not an account ID: {input}"))
+}
+
+/// `names setup --shield`: an amount as every other amount is written (`5,000,000`), or 0
+/// to only make the accounts.
+fn parse_shield(input: &str) -> Result<u128, String> {
+    if input.trim() == "0" {
+        return Ok(0);
+    }
+    tokens::parse_amount(input)
+}
+
+/// The name `names pay` pays; an account ID is pointed at the command that pays one
+/// (cli-message-wording-bundle).
+fn parse_payee_name(input: &str) -> Result<String, String> {
+    let text = input.trim();
+    if text.starts_with("Public/") || text.starts_with("Private/") {
+        return Err(format!(
+            "{text} is an account, not a name; pay a public account with `names wallet auth-transfer send --from <your account> --to {text} --amount <amount>`"
+        ));
+    }
+    parse_name(input)
 }
 
 /// The LEZ account `names bridge` credits: a public one (`Public/<id>` or bare) that
@@ -3946,6 +3967,21 @@ mod input_tests {
         let private = bridge("http://127.0.0.1:9", "http://127.0.0.1:9", 1_000, &format!("Private/{someone}"), &[registry], &"66".repeat(32), 100_000, true);
         assert_eq!(private.unwrap_err().to_string(), "the bridge credits a public account: give --to as Public/<id>");
         assert_eq!(Cli::try_parse_from(["names", "bridge", "0", "--to", someone, "--from-key", "k"]).err().map(|e| e.to_string().contains("the amount must be more than 0")), Some(true));
+    }
+
+    /// cli-message-wording-bundle: clap's raw errors for `pay hopper -5`, `pay Public/<id>`,
+    /// `bridge 1,000` and `setup --shield 5,000,000`.
+    #[test]
+    fn every_amount_reads_the_same_way_and_an_account_is_not_a_name() {
+        let refused = |args: &[&str]| Cli::try_parse_from(args).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(refused(&["names", "pay", "hopper", "-5"]).contains("-5 is negative; the amount must be more than 0"), "{}", refused(&["names", "pay", "hopper", "-5"]));
+        let id = "Public/FNZ3fvu5mRwYEtr3Rf7fSbFJUKXKPFnAT1rSQkkDHyBE";
+        assert!(refused(&["names", "pay", id, "100"]).contains("is an account, not a name; pay a public account with `names wallet auth-transfer send"), "{}", refused(&["names", "pay", id, "100"]));
+        assert!(matches!(Cli::try_parse_from(["names", "bridge", "1,000", "--to", "x", "--from-key", "k"]).map(|cli| cli.command), Ok(Command::Bridge { amount: 1_000, .. })));
+        assert!(matches!(Cli::try_parse_from(["names", "setup", "--shield", "5,000,000"]).map(|cli| cli.command), Ok(Command::Setup { shield: 5_000_000 })));
+        assert!(matches!(Cli::try_parse_from(["names", "setup", "--shield", "0"]).map(|cli| cli.command), Ok(Command::Setup { shield: 0 })));
+        assert!(matches!(Cli::try_parse_from(["names", "pay", "hopper", "1,000"]).map(|cli| cli.command), Ok(Command::Pay { amount: 1_000, .. })));
+        assert!(matches!(Cli::try_parse_from(["names", "pay", "hopper", "--public", "100"]).map(|cli| cli.command), Ok(Command::Pay { amount: 100, public: true, .. })), "a flag is still a flag");
     }
 
 }

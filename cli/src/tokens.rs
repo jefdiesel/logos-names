@@ -313,6 +313,9 @@ pub fn parse_from(input: &str) -> Result<Origin, String> {
 /// may group digits in threes (`1,000`); `1,5` is refused, not read as 15 (SC-2).
 pub fn parse_amount(input: &str) -> Result<u128, String> {
     let text = input.trim();
+    if text.starts_with('-') && text.len() > 1 {
+        return Err(format!("{text} is negative; the amount must be more than 0"));
+    }
     let groups: Vec<&str> = text.split([',', '_']).collect();
     if groups.iter().any(|group| group.is_empty() || !group.chars().all(|c| c.is_ascii_digit())) {
         return Err(format!("{input} is not a whole number of base units"));
