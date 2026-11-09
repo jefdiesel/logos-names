@@ -1010,6 +1010,21 @@ pub fn parse_claims(log: &str) -> (Option<String>, Vec<(String, u128)>) {
     (payer, claims)
 }
 
+/// What a `names receive` run left waiting, from its log: `(Private/<id>, amount)` for each
+/// `left waiting: N to Private/<id>: …` line, whether it was worth less than claiming it, its
+/// payer couldn't also pay for it, or the run stopped before it.
+pub fn parse_left(log: &str) -> Vec<(String, u128)> {
+    log.lines()
+        .map(str::trim)
+        .filter_map(|line| {
+            let mut words = line.strip_prefix("left waiting: ")?.split_whitespace();
+            let amount = words.next()?.parse::<u128>().ok()?;
+            let to = words.nth(1)?.trim_end_matches([':', ',']);
+            (to.starts_with("Private/") && registry::parse_account(to).is_ok()).then(|| (to.to_owned(), amount))
+        })
+        .collect()
+}
+
 /// The fee lines a CLI run printed (`cli/src/fees.rs` in the names CLI): `{about, at_most,
 /// paid}`, decimal text, or null if it printed none. A run that sent several changes
 /// prints one estimate and one fee paid for each; they are added up. `paid` is null
@@ -1398,6 +1413,8 @@ pub fn profile_args(name: &str, entries: &[(String, String)], replace: bool) -> 
 pub fn parse_mine(output: &str) -> Vec<Value> {
     let mut seen = BTreeSet::new();
     let mut names = Vec::new();
+    // A name asked to be public that is still private: why, by name (`<name>  not public yet: …`).
+    let mut not_public = std::collections::BTreeMap::new();
     for line in output.lines() {
         let Some((shown, state)) = line.trim().split_once("  ") else { continue };
         // Older CLIs write `jef.lez`, newer ones `jef`.
@@ -1408,6 +1425,10 @@ pub fn parse_mine(output: &str) -> Vec<Value> {
             continue;
         }
         let state = state.trim();
+        if let Some(why) = state.strip_prefix("not public yet: ") {
+            not_public.insert(name, why.to_owned());
+            continue;
+        }
         let (lapsed, registering, failed) = if state.starts_with("held ") {
             (false, false, false)
         } else if state.starts_with("lapsed ") {
@@ -1440,7 +1461,15 @@ pub fn parse_mine(output: &str) -> Vec<Value> {
                 "registering": registering,
                 "failed": failed,
                 "private": private,
+                "not_public": null,
             }));
+        }
+    }
+    // Registered and held privately though asked to be public (register-as-public-silently-
+    // stays-private): `not_public` says why, in the CLI's words; null for every other name.
+    for entry in &mut names {
+        if let Some(why) = entry["name"].as_str().and_then(|name| not_public.get(name)) {
+            entry["not_public"] = Value::from(why.clone());
         }
     }
     names
@@ -1926,6 +1955,68 @@ impl Jobs {
 /// A job's id: the name, then when it started. Only these characters reach a path.
 fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 96 && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// The registrations the names CLI is finishing in the background for the wallet in `wallet`
+/// (`names register` without `--wait` leaves one running, which proves and saves the wallet):
+/// each as a running job, `{id, name, kind: "register", state: "running", started, background:
+/// true}`. Only a process that still runs and is a `names register` counts, so one that died
+/// (the computer was switched off) never holds the wallet.
+pub fn background_registrations(wallet: &Path) -> Vec<Value> {
+    let saved: Value = std::fs::read_to_string(wallet.join("names.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(Value::Null);
+    let Some(running) = saved["background"].as_object() else { return Vec::new() };
+    running
+        .iter()
+        .filter_map(|(name, pid)| {
+            let name = registry::parse_name(name).ok()?;
+            let pid = pid.as_u64()?;
+            if !alive(pid) || !is_registering(pid, &name) {
+                return None;
+            }
+            Some(json!({
+                "id": format!("register-{name}-background"),
+                "name": name,
+                "kind": "register",
+                "state": "running",
+                "started": saved["pending"][&name]["made"].clone(),
+                "background": true,
+            }))
+        })
+        .collect()
+}
+
+/// Whether process `pid` is a `names register <name>`, not some other process that got its id.
+fn is_registering(pid: u64, name: &str) -> bool {
+    Command::new("/bin/ps")
+        .args(["-o", "command=", "-p", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .is_ok_and(|out| {
+            let command = String::from_utf8_lossy(&out.stdout);
+            let words: Vec<&str> = command.split_whitespace().collect();
+            words.windows(2).any(|pair| pair[0] == "register" && pair[1] == name)
+        })
+}
+
+/// What to say when the wallet is busy with `job` (a running job, or a registration finishing
+/// in the background), so nothing else that saves the wallet starts meanwhile.
+pub fn busy_with(job: &Value) -> String {
+    if job["background"] == true {
+        return format!(
+            "your wallet is busy finishing the registration of {}{}: it proves its last step on this computer and saves the wallet; wait for it to finish (`cli_mine` says when)",
+            job["name"].as_str().unwrap_or("a name"),
+            registry::NAME_SUFFIX
+        );
+    }
+    format!(
+        "your wallet is busy with \"{}\" (job {}); wait for it to finish",
+        job["kind"].as_str().unwrap_or("a change"),
+        job["id"].as_str().unwrap_or_default()
+    )
 }
 
 fn alive(pid: u64) -> bool {
@@ -2468,6 +2559,69 @@ mod tests {
         assert_eq!(parse_balance("private total: 0\n"), Value::Null);
         assert!(register_args("--help", false).is_err());
         assert!(parse_mine("no names yet; register one with `names register <name>`\n").is_empty());
+    }
+
+    /// register-as-public-silently-stays-private: the name was registered, making it public
+    /// stopped, and nothing the app read said so. `cli_mine` now carries the CLI's reason.
+    #[test]
+    fn a_name_asked_to_be_public_that_stayed_private_says_why() {
+        let output = "r4pubrace  held by a deposit (no expiry); held privately\n\
+                      r4pubrace  not public yet: making it public stopped: the wallet refused this change before sending it; `names make-public r4pubrace` tries again\n\
+                      other  held by a deposit (no expiry); held privately\n";
+        let names = parse_mine(output);
+        assert_eq!(names.len(), 2);
+        assert_eq!(names[0]["private"], true);
+        assert!(names[0]["not_public"].as_str().unwrap().starts_with("making it public stopped: the wallet refused"), "{}", names[0]);
+        assert_eq!(names[1]["not_public"], Value::Null);
+    }
+
+    /// partial-claim-job-and-pages-say-nothing-true: what a claim left waiting is read from its
+    /// log, so the waiting account's page shows it.
+    #[test]
+    fn what_a_claim_left_waiting_is_read_from_its_log() {
+        let r2 = &format!("Private/{PUBLIC}");
+        let log = format!(
+            "left waiting: 3169135 to Private/9Dk3Yx4ZQnHxAZ2c4pkuDZ7cHKu8M1NC2vWqzTzS2r8q, a fee's refund: claiming it costs about 5070616\n\
+             left waiting: 1000000 to {r2}: not claimed\n\
+             left waiting: junk to {r2}: not claimed\n\
+             left waiting: 5 to Public/{PUBLIC}: no\n"
+        );
+        assert_eq!(parse_left(&log), vec![("Private/9Dk3Yx4ZQnHxAZ2c4pkuDZ7cHKu8M1NC2vWqzTzS2r8q".to_owned(), 3_169_135), (r2.to_owned(), 1_000_000)]);
+    }
+
+    /// wallet-job-allowed-while-detached-registration-pending: a registration the CLI finishes
+    /// in the background holds the wallet while its process runs, and only then.
+    #[test]
+    fn a_registration_finishing_in_the_background_holds_the_wallet_while_it_runs() {
+        let dir = scratch_dir("background");
+        // A script run as `names register racea --wait`: ps shows it with those words.
+        let script = dir.join("names");
+        std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let mut sleeper = Command::new(&script).args(["register", "racea", "--wait"]).spawn().unwrap();
+        let write = |pid: u32| {
+            let saved = json!({ "pending": { "racea": { "made": 7 } }, "background": { "racea": pid, "Bad Name": pid } });
+            std::fs::write(dir.join("names.json"), saved.to_string()).unwrap();
+        };
+        write(sleeper.id());
+        std::thread::sleep(Duration::from_millis(200));
+        let running = background_registrations(&dir);
+        let shown = is_registering(u64::from(sleeper.id()), "racea");
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
+        // Some systems show `sleep` for the process whatever it was started as: then only the
+        // liveness half is checked here.
+        if shown {
+            assert_eq!(running.len(), 1, "{running:?}");
+            assert_eq!((running[0]["name"].as_str(), running[0]["kind"].as_str(), running[0]["started"].as_u64()), (Some("racea"), Some("register"), Some(7)));
+            assert!(busy_with(&running[0]).contains("finishing the registration of racea"));
+        }
+        // Once the process is gone, the wallet is free again.
+        assert!(background_registrations(&dir).is_empty());
+        // Another process that got the id is not taken for it.
+        write(std::process::id());
+        assert!(background_registrations(&dir).is_empty());
+        assert!(busy_with(&json!({ "kind": "shield", "id": "-wallet-1" })).contains("busy with \"shield\" (job -wallet-1)"));
     }
 
     const KEY: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
