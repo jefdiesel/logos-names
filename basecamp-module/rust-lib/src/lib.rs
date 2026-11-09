@@ -1971,9 +1971,7 @@ impl Names {
     /// (a mistyped ID can't be told from a new account otherwise).
     fn may_hold(&self, to: &str) -> Result<(), String> {
         let id = registry::parse_account(to)?;
-        if Some(id) == self.program || Some(id) == self.token_program {
-            return Err("that is a program's account, which can't hold a name".to_owned());
-        }
+        self.not_a_sink(&id, "hold a name")?;
         if let (Some(bare), Ok(setup)) = (to.strip_prefix("Public/"), self.cli_setup()) {
             let own = cli::balances_now(&setup).is_ok_and(|rows| rows.iter().any(|(account, _)| account == to));
             if !own && registry::account_seen(&setup.sequencer, &id) == Ok(false) {
@@ -1981,6 +1979,19 @@ impl Names {
                     "Public/{bare} has never been used on LEZ: check the ID, since a mistyped one would leave the name held by nobody. A new account can receive any payment first."
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// Refuses an account nobody can use what is sent to it: the empty account (all 1s)
+    /// and a program's own (the registry's, the token program's). `what` is what it
+    /// would be given, in words ("hold a name", "take a bridge").
+    fn not_a_sink(&self, id: &AccountId, what: &str) -> Result<(), String> {
+        if id.iter().all(|byte| *byte == 0) {
+            return Err("that is the empty account (all 1s), which no one holds".to_owned());
+        }
+        if Some(*id) == self.program || Some(*id) == self.token_program {
+            return Err(format!("that is a program's account, which can't {what}"));
         }
         Ok(())
     }
@@ -2627,7 +2638,9 @@ impl NamesModule for Names {
             let node = cli::bridge_node(&node)?;
             // The destination too, before anything is remembered: a refused call leaves
             // config.json as it was (bridge-to-saves-before-validating).
-            cli::bridge_to(&to)?;
+            if let Some(to) = cli::bridge_to(&to)? {
+                self.not_a_sink(&registry::parse_account(&to)?, "take a bridge")?;
+            }
             let setup = self.cli_setup()?;
             if self.bridge_key.as_deref() != Some(key.as_str()) || self.bridge_node.as_deref() != Some(node.as_str()) {
                 self.bridge_key = Some(key.clone());
@@ -3532,6 +3545,8 @@ impl NamesModule for Names {
                 None => cli::default_public(&self.cli_setup()?)?,
             };
             let account = registry::parse_account(&to)?;
+            // As a transfer refuses them: a deposit to either lands and nobody can use it.
+            self.not_a_sink(&account, "take a bridge")?;
             let notes = chain::notes_of(&node::call("wallet_get_notes", json!([from, ""]), node::QUICK)?);
             // A note a send from here still spends (not in a block yet) is not this one's:
             // two deposits of one note both got a hash and only one could land.
@@ -5302,6 +5317,32 @@ mod tests {
         node_answers("wallet_get_notes", json!({ "notes": [{ "id": "a1", "value": "410000" }, { "id": "a2", "value": "300000" }] }));
         let plan = parsed(&names.chain_bridge("39".repeat(32), format!("Public/{to}"), "599600".into(), false));
         assert_eq!((plan["value"]["fee_short"].as_bool(), plan["value"]["others"].as_str()), (Some(false), Some("100400")), "{plan}");
+    }
+
+    /// bridge-destination-empty-or-program-account-accepted: chain_bridge and cli_bridge_to
+    /// took the all-1s account and the registry's own as the LEZ destination (a real
+    /// deposit to the empty account landed), while cli_transfer refused both.
+    #[test]
+    fn a_bridge_to_the_empty_account_or_a_programs_is_refused() {
+        let empty = "Public/11111111111111111111111111111111".to_owned();
+        let mut names = fresh();
+        names.program = Some([7; 32]);
+        let program = format!("Public/{}", registry::account_text(&[7; 32]));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "e8ac", "value": "5000000" }, { "id": "c0de", "value": "900000" }] }));
+        for send in [false, true] {
+            let refused = parsed(&names.chain_bridge(NODE_KEY.into(), empty.clone(), "5000000".into(), send));
+            assert_eq!(refused["error"], "that is the empty account (all 1s), which no one holds", "{refused}");
+            let refused = parsed(&names.chain_bridge(NODE_KEY.into(), program.clone(), "5000000".into(), send));
+            assert_eq!(refused["error"], "that is a program's account, which can't take a bridge", "{refused}");
+        }
+        assert!(!node_asked().contains(&"channel_deposit_with_notes".to_owned()), "nothing deposited");
+        let (mut names, dir) = with_fake_cli("bridge-sink", "echo 'ok bridge'");
+        for to in [empty, format!("Public/{}", registry::account_text(&[7; 32]))] {
+            let refused = parsed(&names.cli_bridge_to("5000".into(), NODE_KEY.into(), to.clone(), "http://127.0.0.1:9".into(), false));
+            assert_eq!(refused["success"], false, "{to}: {refused}");
+        }
+        assert_eq!((names.bridge_key.clone(), names.bridge_node.clone()), (None, None), "nothing saved");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// RV5: a bridge plan isn't "ready" when the exact note is the key's only one (nothing pays the fee).
