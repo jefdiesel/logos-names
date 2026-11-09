@@ -2037,7 +2037,7 @@ Item {
         var to = transferToField.text.trim()
         transferConfirm = false
         boardStart("cli_transfer", [name, to], "Transferring " + name, function() {
-            say(name + " now belongs to " + Logic.keyShown(to.replace(/^(Public|Private)\//, "")) + ". They set it up with Got a name from someone? (or names receive-privately).", false)
+            say(name + " now belongs to " + Logic.keyShown(to.replace(/^(Public|Private)\//, "")) + ". They set it up under Names, in Got a name from someone, or with names receive-privately.", false)
             transferTarget = ""
             loadCliMine()
             loadActivity()
