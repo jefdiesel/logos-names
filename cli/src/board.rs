@@ -90,7 +90,8 @@ impl Client {
             (self.program, self.program().await?),
         ];
         let message = borsh::to_vec(&BoardMessage::Instruction(instruction.clone()))?;
-        self.transact(mentions, message, programs, 0).await
+        // A board call also runs the registry's holder check: about a profile change's cycles.
+        self.transact(mentions, message, programs, 0, 65_590).await
     }
 
     /// Posts `text` as `name`, starting a thread or, with `parent`, replying.
@@ -663,13 +664,38 @@ impl Client {
 
 /// How much a name made public gets for its posting gas: each public change holds
 /// about 1.8M while it runs and pays a fraction of that.
-const PUBLIC_GAS_FUND: u128 = 10_000_000;
+pub(crate) const PUBLIC_GAS_FUND: u128 = 10_000_000;
 
 impl Client {
     /// Moves `name` from the private account that holds it to a new public account
     /// in this wallet, so its posts take one block (and pay gas) instead of a
     /// proof. The new account is funded for gas from the private account; the
     /// name keeps its profile, page and private receiving keys.
+    /// The private steps of making `name` public: funding a new public account for its gas from
+    /// `gas_from`, then `holder` handing the name to it. Each at the fee a worst case allows:
+    /// they run after one another, and a stop between them leaves the job half done.
+    pub(crate) async fn public_steps(&self, name: &str, holder: AccountId, gas_from: AccountId) -> Result<Vec<plan::Step<AccountId>>> {
+        let hand_over = crate::CHANGE_CYCLES;
+        Ok(vec![
+            plan::Step {
+                what: format!("funding a new public account with {} for {name}{NAME_SUFFIX}'s gas", plan::grouped(PUBLIC_GAS_FUND)),
+                acts_for: gas_from,
+                moves_out: PUBLIC_GAS_FUND,
+                credits: 0,
+                payer: None,
+                fee: self.private_fee(0).await?,
+            },
+            plan::Step {
+                what: format!("handing {name}{NAME_SUFFIX} to that account"),
+                acts_for: holder,
+                moves_out: 0,
+                credits: 0,
+                payer: None,
+                fee: self.private_fee(crate::gas_limit_for(hand_over)).await?,
+            },
+        ])
+    }
+
     pub async fn make_public(&mut self, name: &str) -> Result<()> {
         let (Derived { id, .. }, record, profile) = self.lookup_held(name).await?;
         let holder = self.holder(name, &id, &record)?;
@@ -677,24 +703,64 @@ impl Client {
             bail!("{name}{NAME_SUFFIX} is already held by a public account");
         }
         let page = self.page(name).await?;
+        // A public account an earlier try funded, and stopped before handing the name to, is
+        // used again: funding another would spend its 10,000,000 and fee a second time.
+        let mut funded = None;
+        if let Some(public) = load_defaults().gas_accounts.get(name).and_then(|id| id.parse::<AccountId>().ok()) {
+            if self.wallet.get_account_public_signing_key(public).is_some()
+                && self.wallet.get_account_balance(public).await.unwrap_or(0) >= PUBLIC_GAS_FUND / 2
+            {
+                funded = Some(public);
+            }
+        }
         // The gas comes from the holder if it can pay, else from the main private
         // account (an anon's own account holds only its deposit). Either way it
         // leaves the private pool, so the chain can't see which account paid.
-        let payer = if self.spendable(holder).await >= PUBLIC_GAS_FUND { holder } else { default_private()? };
-        if self.spendable(payer).await < PUBLIC_GAS_FUND {
-            bail!("your private account holds less than the {PUBLIC_GAS_FUND} a public name needs for gas; add funds first");
+        let gas_from = gas_payer(holder, self.spendable(holder).await, default_private()?);
+        let mut steps = self.public_steps(name, holder, gas_from).await?;
+        if funded.is_some() {
+            steps.remove(0);
         }
-        let (public, _) = self.wallet.create_new_account_public(None);
-        crate::save_wallet(&mut self.wallet)?;
-        println!("step 1 of 3: funding Public/{public} with {PUBLIC_GAS_FUND} for gas, privately (about 4 minutes)");
-        let (hash, _) = NativeTokenTransfer(&self.wallet)
-            .transfer(self.signer(payer), AccountIdentity::Public(public), PUBLIC_GAS_FUND, CreditDelivery::Automatic)
-            .await
-            .context("the sequencer did not accept the transfer")?;
-        let block = self.finish(hash).await.context("the transfer was not applied")?;
-        println!("funded in block {block}");
+        // Both steps checked before the first, as the wallet will pay them: the funding moves
+        // 10,000,000 out of its payer besides the fee reserve.
+        let costed = self.plan_private(&format!("making {name}{NAME_SUFFIX} public"), &steps).await?;
+        let public = match funded {
+            Some(public) => {
+                println!("step 1 of 3: Public/{public}, funded by an earlier try, already holds its gas");
+                public
+            }
+            None => {
+                let (public, _) = self.wallet.create_new_account_public(None);
+                crate::save_wallet(&mut self.wallet)?;
+                let mut defaults = load_defaults();
+                defaults.gas_accounts.insert(name.to_owned(), public.to_string());
+                save_defaults(&defaults)?;
+                let payer = costed.payers.first().copied().unwrap_or(gas_from);
+                println!("{}", crate::fees::estimate_line(&steps[0].fee /* the funding step: kept when nothing was funded before */, &format!("paid inside the proof, from Private/{payer}")));
+                println!("step 1 of 3: funding Public/{public} with {PUBLIC_GAS_FUND} for gas, privately (about 4 minutes)");
+                let before = self.private_wealth().await;
+                let (hash, _) = NativeTokenTransfer(&self.wallet)
+                    .transfer(self.signer(gas_from), AccountIdentity::Public(public), PUBLIC_GAS_FUND, CreditDelivery::Automatic)
+                    .await
+                    .map_err(|error| crate::refused_or(error, "the sequencer did not accept the transfer"))?;
+                let (block, block_fee) = self.finish_landed(hash).await.context("the transfer was not applied")?;
+                println!("funded in block {block}");
+                let after = self.private_wealth().await;
+                println!("{}", crate::private_fee_line(block_fee, crate::private_fee_paid(before.as_ref(), after.as_ref(), 0, PUBLIC_GAS_FUND)));
+                public
+            }
+        };
         println!("step 2 of 3: moving {name}{NAME_SUFFIX} to it (about 4 minutes)");
-        self.transfer(name, public).await?;
+        self.transfer(name, public).await.map_err(|error| {
+            error.context(format!(
+                "Public/{public} holds {name}{NAME_SUFFIX}'s gas, but the name was not handed to it; `names make-public {name}` tries again and uses that account"
+            ))
+        })?;
+        let mut defaults = load_defaults();
+        defaults.gas_accounts.remove(name);
+        defaults.then_public.retain(|queued| queued != name);
+        defaults.public_failed.remove(name);
+        save_defaults(&defaults)?;
         // A transfer empties the profile and page; put them back as they were,
         // receiving keys included, now signed by the public holder (one block each).
         println!("step 3 of 3: putting back its profile and page");

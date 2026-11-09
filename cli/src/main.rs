@@ -61,9 +61,22 @@ struct Defaults {
     /// `register` picks up where it stopped.
     #[serde(default)]
     pending: std::collections::BTreeMap<String, Pending>,
-    /// Names to make public as soon as their registration finishes (`--public`).
+    /// Names to make public as soon as their registration finishes (`--public`). A name stays
+    /// here until it is public, so a conversion that stopped is not forgotten.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     then_public: Vec<String>,
+    /// Why making a name public stopped, by name, for `names mine` and the app.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    public_failed: std::collections::BTreeMap<String, String>,
+    /// The public account funded for a name's gas by a `make-public` that stopped before
+    /// handing the name to it, by name: the next try uses it instead of funding another.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    gas_accounts: std::collections::BTreeMap<String, String>,
+    /// Registrations finishing in the background (`names register` without `--wait`), by
+    /// name: the process's id, until it ends. The Basecamp module counts them as busy, since
+    /// they prove and save the wallet (wallet-job-allowed-while-detached-registration-pending).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    background: std::collections::BTreeMap<String, u32>,
     /// This wallet's anonymous name, held by its own private account (`names anon`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     anon: Option<String>,
@@ -720,6 +733,7 @@ mod board;
 mod claims;
 mod chain;
 mod fees;
+mod plan;
 mod module;
 mod tokens;
 
@@ -1020,6 +1034,75 @@ impl Client {
         self.wallet.resolve_private_account(account).is_some()
     }
 
+    /// The wallet's regular private accounts as a job starts, in the order the wallet picks a
+    /// fee payer from them: each one's note and the credits waiting for it (`plan`).
+    async fn private_holdings(&mut self) -> Result<Vec<plan::Holding<AccountId>>> {
+        self.wallet.sync_to_latest_block().await.ok();
+        let pending = self.wallet.owned_pending_messages().await.unwrap_or_default();
+        Ok(self
+            .wallet
+            .storage()
+            .key_chain()
+            .private_accounts()
+            .filter(|found| *found.kind == PrivateAccountKind::Regular)
+            .map(|found| {
+                let id = AccountId::from((&found.key_chain.nullifier_public_key, &found.key_chain.viewing_public_key));
+                plan::Holding {
+                    id,
+                    note: found.account.data.native_balance().unwrap_or(0),
+                    credits: credits_to(&pending, id).into_iter().map(|(_, value)| value).collect(),
+                }
+            })
+            .collect())
+    }
+
+    /// What one private change whose public part runs `cycles` cycles costs at the chain's fees
+    /// now (0 for a native transfer).
+    async fn private_fee(&self, cycles: u64) -> Result<fees::Estimate> {
+        let quote = self.wallet.client().get_fee_state().await?;
+        Ok(fees::private_running(&quote, self.wallet.config().private_fee_headroom_blocks, cycles))
+    }
+
+    /// Checks that the private changes of `job` can all be paid for, as the wallet will pay
+    /// them, before the first is proven (`plan`); refuses in words when they can't. A job of
+    /// several steps says what it takes in all.
+    async fn plan_private(&mut self, job: &str, steps: &[plan::Step<AccountId>]) -> Result<plan::Costed<AccountId>> {
+        let holdings = self.private_holdings().await?;
+        let costed = match plan::check(&holdings, steps) {
+            Ok(costed) => costed,
+            Err(short) => bail!(plan::refusal(job, &holdings, steps, &short, |id| format!("Private/{id}"))),
+        };
+        if steps.len() > 1 {
+            // Not a `fee:` line: each step prints its own, and the module adds those up.
+            println!(
+                "plan: {job} takes {} private steps, paid inside their proofs from {}: fees about {}, at most {} in all{}",
+                steps.len(),
+                costed.payers.iter().map(|id| format!("Private/{id}")).collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>().join(" and "),
+                costed.about,
+                costed.at_most,
+                if costed.moved > 0 { format!(", besides the {} they move", costed.moved) } else { String::new() }
+            );
+        }
+        Ok(costed)
+    }
+
+    /// What this wallet's private accounts hold together, the credits waiting for them included.
+    /// Measured before and after a private change, the difference is its fee, whichever account
+    /// the wallet had pay it and whatever refund it sent back (`private_fee_paid`).
+    async fn private_wealth(&mut self) -> Option<Wealth> {
+        self.wallet.sync_to_latest_block().await.ok()?;
+        let pending = self.wallet.owned_pending_messages().await.ok()?;
+        let key_chain = self.wallet.storage().key_chain();
+        let notes: u128 = key_chain
+            .private_account_ids()
+            .map(|(id, _)| self.wallet.get_account_private(id).and_then(|account| account.data.native_balance().ok()).unwrap_or(0))
+            .sum();
+        Some(Wealth {
+            total: notes.saturating_add(pending.iter().filter_map(wallet::PendingMessage::native_credit).sum()),
+            others: pending.iter().filter(|message| !is_fee_refund(message)).map(|message| u64::from(message.position)).collect(),
+        })
+    }
+
     /// The registry's state on `account`.
     async fn actor_state(&self, account: AccountId) -> Result<Vec<u8>> {
         self.actor_state_of(account, self.program).await
@@ -1236,16 +1319,6 @@ impl Client {
             );
             println!("(the deposit stops name squatting: holding many names ties up many deposits; nobody keeps it)");
         }
-        // The deposit or fee is only taken at the reveal, 15 minutes on: check
-        // now, so a short account doesn't commit and fail at the end.
-        if fee > 0 {
-            let have = self.spendable(owner).await;
-            if have < fee {
-                bail!(
-                    "{owner} holds {have}, less than the {fee} that registering {name}{NAME_SUFFIX} takes; add funds to it first"
-                );
-            }
-        }
         let holder = owner_tag(&id, &owner);
 
         // Step 1: commit. The commitment hides the identifier, so watching
@@ -1256,6 +1329,26 @@ impl Client {
             .get(name)
             .filter(|p| p.owner == owner.to_string() && local_now() < p.made.saturating_add(MAX_COMMIT_AGE_MS))
             .and_then(|p| Some((parse_hex32(&p.secret)?, p.made)));
+        // The deposit or fee is only taken at the reveal, 15 minutes on, and making the name
+        // public takes two more private steps after it: all are checked now, before the commit,
+        // so a short account doesn't commit and fail at the end
+        // (register-as-public-silently-stays-private). A resumed registration checks its reveal
+        // as it sends it.
+        if resumed.is_none() {
+            if self.is_private(owner) {
+                let public = defaults.then_public.iter().any(|queued| queued == name);
+                let steps = self.registration_steps(name, owner, fee, deposit, public).await?;
+                let job = if public { format!("registering {name}{NAME_SUFFIX} and making it public") } else { format!("registering {name}{NAME_SUFFIX}") };
+                self.plan_private(&job, &steps).await?;
+            } else if fee > 0 {
+                let have = self.spendable(owner).await;
+                if have < fee {
+                    bail!(
+                        "{owner} holds {have}, less than the {fee} that registering {name}{NAME_SUFFIX} takes; add funds to it first"
+                    );
+                }
+            }
+        }
         let (secret, made) = match resumed {
             Some(found) => {
                 println!("resuming the commitment to {name}{NAME_SUFFIX} made earlier");
@@ -1409,7 +1502,12 @@ impl Client {
             use std::os::unix::process::CommandExt as _;
             command.process_group(0);
         }
-        command.spawn().context("cannot start the background registration")?;
+        let child = command.spawn().context("cannot start the background registration")?;
+        // Kept until it ends (`Command::Register` clears it), so the Basecamp module knows the
+        // wallet is busy while it proves; a process that is gone no longer counts.
+        let mut defaults = load_defaults();
+        defaults.background.insert(name.to_owned(), child.id());
+        save_defaults(&defaults)?;
         Ok(log)
     }
     /// Adds `term` to the time `name` is held for, paid by `payer` or else its owner.
@@ -1611,7 +1709,7 @@ impl Client {
     async fn send(&mut self, mentions: Vec<AccountMention>, instruction: &Instruction, spent: u128) -> Result<()> {
         let program = self.program().await?;
         let message = borsh::to_vec(&RegistryMessage::Instruction(instruction.clone()))?;
-        self.transact(mentions, message, vec![(self.program, program)], spent).await
+        self.transact(mentions, message, vec![(self.program, program)], spent, call_cycles(instruction)).await
     }
 
     /// Sends `message` to the actor `mentions[0]` and confirms it applied. `mentions`
@@ -1625,14 +1723,31 @@ impl Client {
         message: Vec<u8>,
         programs: Vec<(AccountId, Program)>,
         spent: u128,
+        cycles: u64,
     ) -> Result<()> {
         let dry_run = std::env::var_os("LOGOS_NAMES_DRY_RUN").is_some();
+        let private = mentions.iter().any(|mention| mention.identity.is_private());
         let paying = mentions.clone();
-        let before = self.held_by(&paying).await;
-        let hash = if mentions.iter().any(|mention| mention.identity.is_private()) {
-            let quote = self.wallet.client().get_fee_state().await?;
-            let estimate = fees::private(&quote, self.wallet.config().private_fee_headroom_blocks);
-            println!("{}", fees::estimate_line(&estimate, "paid inside the proof, from a private account"));
+        let before = if private { None } else { Some(self.held_by(&paying).await) };
+        let wealth = if private { self.private_wealth().await } else { None };
+        let hash = if private {
+            // Checked as the wallet will pay it, before proving: by the account it acts for when
+            // that holds the reserve, else by another private account that does.
+            let acts_for = mentions
+                .iter()
+                .find(|mention| mention.authorizes && mention.identity.is_private())
+                .map(|mention| mention.identity.account_id())
+                .filter(|account| self.is_private(*account));
+            let estimate = self.private_fee(cycles).await?;
+            let mut from = "a private account".to_owned();
+            if let Some(acts_for) = acts_for {
+                let step = plan::Step { what: "this change".to_owned(), acts_for, moves_out: spent, credits: 0, payer: None, fee: estimate };
+                let costed = self.plan_private("this change", &[step]).await?;
+                if let Some(payer) = costed.payers.first() {
+                    from = format!("Private/{payer}");
+                }
+            }
+            println!("{}", fees::estimate_line(&estimate, &format!("paid inside the proof, from {from}")));
             if dry_run {
                 bail!("LOGOS_NAMES_DRY_RUN is set, so nothing was sent (a private change is not tried first)");
             }
@@ -1641,7 +1756,7 @@ impl Client {
             self.wallet
                 .send_privacy_preserving_tx(mentions, 0, message, &catalog)
                 .await
-                .context("the sequencer did not accept the transaction")?
+                .map_err(|error| refused_or(error, "the sequencer did not accept the transaction"))?
                 .0
         } else {
             // A call that fails is billed what it ran and keeps nothing, so try it here
@@ -1662,10 +1777,18 @@ impl Client {
             sent.context("the sequencer did not accept the transaction")?
         };
         println!("submitted {hash}");
-        let block = self.finish(hash).await.context("the transaction was not applied")?;
+        let (block, block_fee) = self.finish_landed(hash).await.context("the transaction was not applied")?;
         println!("applied in block {block}");
-        if let Some(line) = fees::paid_line(before, self.held_by(&paying).await, spent) {
-            println!("{line}");
+        match before {
+            Some(before) => {
+                if let Some(line) = fees::paid_line(before, self.held_by(&paying).await, spent) {
+                    println!("{line}");
+                }
+            }
+            None => {
+                let after = self.private_wealth().await;
+                println!("{}", private_fee_line(block_fee, private_fee_paid(wealth.as_ref(), after.as_ref(), 0, spent)));
+            }
         }
         Ok(())
     }
@@ -2023,14 +2146,14 @@ impl Client {
             println!("nothing worth claiming");
             return Ok(());
         }
+        // The largest first: when the payer can't pay for every claim, the most arrives.
+        let mut pending = pending;
+        pending.sort_by_key(|message| std::cmp::Reverse(message.native_credit().unwrap_or(0)));
         let receivers: std::collections::BTreeSet<AccountId> =
             pending.iter().map(|message| message.body.to.account_id).collect();
-        let private_balance = |client: &Self, id: AccountId| {
-            client
-                .wallet
-                .get_account_private(id)
-                .and_then(|account| account.data.native_balance().ok())
-                .unwrap_or(0)
+        let holdings = self.private_holdings().await?;
+        let holds = |id: AccountId| {
+            holdings.iter().find(|holding| holding.id == id).map_or(0, |holding| holding.note.saturating_add(holding.credits.iter().sum()))
         };
         let payer = match fee_from {
             Some(account) => {
@@ -2039,71 +2162,90 @@ impl Client {
                 }
                 account
             }
-            None => {
-                let ids: Vec<AccountId> =
-                    self.wallet.storage().key_chain().private_account_ids().map(|(id, _)| id).collect();
-                ids.into_iter()
-                    .filter(|id| !receivers.contains(id))
-                    .max_by_key(|id| private_balance(self, *id))
-                    .ok_or_else(|| {
-                        anyhow!("no other private account of this wallet can pay the claim fee; move some funds into one with `names setup --shield=<amount>`")
-                    })?
-            }
+            None => holdings
+                .iter()
+                .map(|holding| holding.id)
+                .filter(|id| !receivers.contains(id))
+                .max_by_key(|id| holds(*id))
+                .ok_or_else(|| {
+                    anyhow!("no other private account of this wallet can pay the claim fee; move some funds into one with `names setup --shield=<amount>`")
+                })?,
         };
-        let can_pay = private_balance(self, payer);
-        if can_pay < fee.at_most {
-            bail!(
-                "a claim costs at most {} (about {}), paid from Private/{payer}, which holds {can_pay}; move more into a private account first (`names setup --shield=<amount>`)",
-                fee.at_most,
-                fee.about
-            );
+        // Every claim is checked before the first is proven, as the wallet will pay them all
+        // from the payer (multi-claim-precheck-checks-one-claim). What the payer can't pay for
+        // at the worst case is left waiting, said here, never tried and failed halfway.
+        let steps: Vec<plan::Step<AccountId>> = pending
+            .iter()
+            .map(|message| {
+                let credit = message.native_credit().unwrap_or(0);
+                let to = message.body.to.account_id;
+                plan::Step { what: format!("claiming {} into Private/{to}", plan::grouped(credit)), acts_for: to, moves_out: 0, credits: credit, payer: Some(payer), fee }
+            })
+            .collect();
+        let fits = plan::fitting(&holdings, &steps);
+        if fits == 0 {
+            let short = plan::check(&holdings, &steps[..1]).err().ok_or_else(|| anyhow!("the claim can't be checked"))?;
+            bail!(plan::refusal("claiming", &holdings, &steps[..1], &short, |id| format!("Private/{id}")));
         }
-        println!("{}", fees::estimate_line(&fee, &format!("each claim, paid from Private/{payer} inside the proof")));
+        let count = pending.len();
+        let later = pending.split_off(fits);
+        if !later.is_empty() {
+            println!(
+                "claiming {fits} of {count}: Private/{payer} holds {}, enough for {fits} claim(s) if fees climb to {} each; the rest wait for another `names receive`",
+                holds(payer),
+                fee.at_most
+            );
+            for message in &later {
+                println!(
+                    "left waiting: {} to Private/{}: Private/{payer} can't also pay for this claim; claim it once Private/{payer} holds more",
+                    message.native_credit().unwrap_or(0),
+                    message.body.to.account_id
+                );
+            }
+        }
+        // Said before any claim, so a job that stops partway still names its payer.
+        println!("fee paid from Private/{payer}");
         self.wallet.set_private_fee_payer(Some(payer));
-        // The fee is what leaves the payer less the refunds its claims send back: credits the
-        // fee inbox makes, to a fresh alias of this wallet, while they run.
-        let paid_before = private_balance(self, payer);
-        let waiting = self.wallet.owned_pending_messages().await.unwrap_or_default();
-        let known: std::collections::BTreeSet<_> = waiting.iter().map(|message| message.position).collect();
-        // The payer's own waiting credits (its fees' refunds) are swept into the first
-        // claim's reserve: part of what it had (fee-paid-ignores-swept-refund-credits).
-        let payer_waiting = credits_to(&waiting, payer);
-        let mut block_fees = Some(0_u128);
-        for message in pending {
-            let amount = message.native_credit().unwrap_or(0);
-            let to = message.body.to.account_id;
+        let total = pending.len();
+        let waiting: Vec<(u128, AccountId)> =
+            pending.iter().chain(&later).map(|message| (message.native_credit().unwrap_or(0), message.body.to.account_id)).collect();
+        let mut landed: Vec<String> = Vec::new();
+        for (index, message) in pending.into_iter().enumerate() {
+            let (amount, to) = waiting[index];
+            // Every claim prints its own estimate and fee paid; the module adds them up.
+            println!("{}", fees::estimate_line(&fee, &format!("claim {} of {total}, paid from Private/{payer} inside the proof", index + 1)));
             println!("receiving {amount} into Private/{to}; proving it on this computer (several minutes)");
-            let (hash, _) = self
-                .wallet
-                .receive_pending_message(message)
-                .await
-                .context("the sequencer did not accept the claim")?;
-            println!("submitted {hash}");
-            let (block, block_fee) = self.finish_landed(hash).await.context("the claim was not applied")?;
-            block_fees = block_fees.zip(block_fee).and_then(|(sum, fee)| sum.checked_add(fee));
+            let before = self.private_wealth().await;
+            let claimed = match self.wallet.receive_pending_message(message).await {
+                Ok((hash, _)) => {
+                    println!("submitted {hash}");
+                    self.finish_landed(hash).await.context("the claim was not applied")
+                }
+                Err(error) => Err(refused_or(error, "the sequencer did not accept the claim")),
+            };
+            let (block, block_fee) = match claimed {
+                Ok(landed) => landed,
+                Err(error) => {
+                    save_wallet(&mut self.wallet)?;
+                    // What stopped, what landed and what still waits, in the log the module reads
+                    // (partial-claim-job-and-pages-say-nothing-true).
+                    for (amount, to) in &waiting[index..total] {
+                        println!("left waiting: {amount} to Private/{to}: not claimed");
+                    }
+                    let done = if landed.is_empty() { "nothing was claimed".to_owned() } else { format!("claimed {} of {count} ({})", landed.len(), landed.join(", ")) };
+                    bail!(
+                        "{done}. The claim of {} into Private/{to} stopped: {error:#}. It and the rest still wait, nothing of them is lost: run `names receive` again once Private/{payer} holds enough",
+                        plan::grouped(amount)
+                    );
+                }
+            };
             // Read once the wallet has caught up: before that it said "now holds 0".
-            self.wallet.sync_to_latest_block().await.ok();
-            println!("received in block {block}; Private/{to} now holds {}", private_balance(self, to));
+            let after = self.private_wealth().await;
+            println!("received in block {block}; Private/{to} now holds {}", private_held(&self.wallet, to));
+            println!("{}", private_fee_line(block_fee, private_fee_paid(before.as_ref(), after.as_ref(), 0, 0)));
+            landed.push(format!("{} into Private/{to}", plan::grouped(amount)));
         }
         save_wallet(&mut self.wallet)?;
-        let after = self.wallet.owned_pending_messages().await;
-        let refunds = after.as_ref().ok().map(|after| {
-            after
-                .iter()
-                .filter(|message| !known.contains(&message.position) && is_fee_refund(message))
-                .filter_map(wallet::PendingMessage::native_credit)
-                .sum::<u128>()
-        });
-        let swept_in = after.as_ref().ok().map(|after| swept(&payer_waiting, &credits_to(after, payer)));
-        // Each claim's block tells its fee when it was the block's only charged transaction.
-        let paid = block_fees.or_else(|| {
-            refunds.zip(swept_in).and_then(|(refunds, swept_in)| claim_fee(paid_before.saturating_add(swept_in), private_balance(self, payer), refunds))
-        });
-        match paid {
-            Some(paid) => println!("fee paid: {paid}"),
-            None => println!("fee paid: unknown"),
-        }
-        println!("fee paid from Private/{payer}");
         Ok(())
     }
 
@@ -2680,6 +2822,65 @@ fn gas_limit_for(cycles: u64) -> u64 {
     cycles.saturating_add(cycles.div_ceil(2)).max(MIN_GAS_LIMIT)
 }
 
+/// About how many cycles a registry call's public part runs, as measured on the testnet
+/// (2026-10-19, see [`MIN_GAS_LIMIT`]): a private change's fee grows with them, so a reveal
+/// costs more than a commit (5,811,525 against 5,199,394 on a local chain).
+fn call_cycles(instruction: &Instruction) -> u64 {
+    match instruction {
+        Instruction::Commit { .. } => COMMIT_CYCLES,
+        Instruction::Register { .. } | Instruction::Claim { .. } => REVEAL_CYCLES,
+        Instruction::Release { .. } => 51_322,
+        _ => CHANGE_CYCLES,
+    }
+}
+
+/// A commitment's cycles (see [`call_cycles`]).
+const COMMIT_CYCLES: u64 = 23_214;
+/// A reveal's cycles, which registers the name (see [`call_cycles`]).
+const REVEAL_CYCLES: u64 = 165_000;
+/// A profile change's or a hand-over's cycles (see [`call_cycles`]).
+const CHANGE_CYCLES: u64 = 65_590;
+
+/// Who funds a name's gas when it is made public: its holder if it holds `PUBLIC_GAS_FUND`
+/// (`holds`), else the main private account (an anon's own account holds only its deposit).
+fn gas_payer(holder: AccountId, holds: u128, main: AccountId) -> AccountId {
+    if holds >= board::PUBLIC_GAS_FUND { holder } else { main }
+}
+
+impl Client {
+    /// The private steps of registering `name` for `owner` (a private account), and of making
+    /// it public after (`public`): each at the fee its calls' cycles allow at worst.
+    async fn registration_steps(&mut self, name: &str, owner: AccountId, amount: u128, deposit: bool, public: bool) -> Result<Vec<plan::Step<AccountId>>> {
+        let kind = if deposit { "deposit" } else { "fee" };
+        let mut steps = vec![
+            plan::Step {
+                what: format!("committing to {name}{NAME_SUFFIX}"),
+                acts_for: owner,
+                moves_out: 0,
+                credits: 0,
+                payer: None,
+                fee: self.private_fee(gas_limit_for(COMMIT_CYCLES)).await?,
+            },
+            plan::Step {
+                what: format!("registering {name}{NAME_SUFFIX} for a {kind} of {}", plan::grouped(amount)),
+                acts_for: owner,
+                moves_out: amount,
+                credits: 0,
+                payer: None,
+                fee: self.private_fee(gas_limit_for(REVEAL_CYCLES)).await?,
+            },
+        ];
+        if public {
+            let holdings = self.private_holdings().await?;
+            let holds = holdings.iter().find(|holding| holding.id == owner).map_or(0, |holding| holding.note.saturating_add(holding.credits.iter().sum()));
+            let after: u128 = steps.iter().map(|step| step.fee.at_most.saturating_add(step.moves_out)).sum();
+            let main = default_private().unwrap_or(owner);
+            steps.extend(self.public_steps(name, owner, gas_payer(owner, holds.saturating_sub(after), main)).await?);
+        }
+        Ok(steps)
+    }
+}
+
 /// Execution gas for a public native-token transfer: the native token is a built-in
 /// that meters no cycles (only the transaction's bytes are billed, outside this), and
 /// the whole limit is reserved from the sender while the transfer runs.
@@ -2714,27 +2915,24 @@ async fn setup(client: &mut Client, shield: u128) -> Result<()> {
         return Ok(());
     }
     if shield > 0 {
-        // The fee is paid inside the proof, from what moves: what the private account gains
-        // less than `shield` is it. A private account's balance changes only by this wallet's
-        // own changes (a payment to it waits as a credit), so the figure is exact.
-        client.wallet.sync_to_latest_block().await.ok();
-        let held_before = private_held(&client.wallet, private);
-        // The wallet sweeps the account's own waiting credits (its fees' refunds) into the
-        // proof's fee reserve: they are part of what it had.
-        let pending_before = client.wallet.owned_pending_messages().await.unwrap_or_default();
-        let waiting_before = credits_to(&pending_before, private);
-        let known: std::collections::BTreeSet<_> = pending_before.iter().map(|message| message.position).collect();
-        // The private account pays the fee inside the proof, from what it holds and its
-        // waiting refunds: one that can't is told so before any proving, as `receive` does
-        // (unaffordable-shield-refusal-wording).
-        if let Ok(quote) = client.wallet.client().get_fee_state().await {
-            let fee = fees::private(&quote, client.wallet.config().private_fee_headroom_blocks);
-            let has = held_before.saturating_add(waiting_before.iter().map(|(_, value)| value).sum::<u128>());
-            if let Some(short) = shield_shortfall(private, has, fee.about) {
-                bail!(short);
-            }
-        }
+        // Checked as the wallet will pay it, before any proving: the fee comes from what moves
+        // when the private account is empty, or from another private account that holds the
+        // reserve (shield-refused-before-proving-though-wallet-would-pay).
+        let fee = client.private_fee(0).await?;
+        let steps = [plan::Step {
+            what: format!("moving {} to Private/{private}", plan::grouped(shield)),
+            acts_for: private,
+            moves_out: 0,
+            credits: shield,
+            payer: None,
+            fee,
+        }];
+        let costed = client.plan_private("moving to private", &steps).await?;
+        let payer = costed.payers.first().copied().unwrap_or(private);
+        // The same line every private change prints, so the job carries its fee (shield-job-fee-about-null).
+        println!("{}", fees::estimate_line(&fee, &format!("a move to private, paid inside the proof from Private/{payer}")));
         println!("moving {shield} to the private account; generating the proof (a few minutes)");
+        let before = client.private_wealth().await;
         let (hash, _) = NativeTokenTransfer(&client.wallet)
             .transfer(
                 AccountIdentity::Public(public),
@@ -2743,35 +2941,11 @@ async fn setup(client: &mut Client, shield: u128) -> Result<()> {
                 CreditDelivery::Automatic,
             )
             .await
-            .map_err(|error| match shield_build_refusal(&format!("{error:#}"), private) {
-                Some(plain) => anyhow!(plain),
-                None => anyhow::Error::from(error).context("the sequencer did not accept the transfer"),
-            })?;
+            .map_err(|error| refused_or(error, "the sequencer did not accept the transfer"))?;
         let (_, block_fee) = client.finish_landed(hash).await.context("the transfer was not applied")?;
-        client.wallet.sync_to_latest_block().await?;
         save_wallet(&mut client.wallet)?;
-        // Its block's fee summary when it was the block's only charged transaction; else
-        // what the account had, swept credits included, against what it holds now
-        // (fee-paid-ignores-swept-refund-credits).
-        let line = match block_fee {
-            Some(fee) => format!("fee paid: {fee}"),
-            None => {
-                // The reserve's surplus comes back as a refund to a fresh alias of this wallet.
-                match client.wallet.owned_pending_messages().await {
-                    Ok(after) => {
-                        let refunds: u128 = after
-                            .iter()
-                            .filter(|message| !known.contains(&message.position) && is_fee_refund(message))
-                            .filter_map(wallet::PendingMessage::native_credit)
-                            .sum();
-                        let had = held_before.saturating_add(swept(&waiting_before, &credits_to(&after, private)));
-                        shield_fee_line(shield, had, private_held(&client.wallet, private).saturating_add(refunds))
-                    }
-                    Err(_) => "fee paid: unknown".to_owned(),
-                }
-            }
-        };
-        println!("{line}");
+        let after = client.private_wealth().await;
+        println!("{}", private_fee_line(block_fee, private_fee_paid(before.as_ref(), after.as_ref(), shield, 0)));
     }
     println!("ready: `names register <name>` holds a name privately, `names pay <name> <amount>` pays one");
     Ok(())
@@ -2802,50 +2976,55 @@ fn credits_to(pending: &[wallet::PendingMessage], account: AccountId) -> Vec<(u6
         .collect()
 }
 
-/// What of `before` (credits waiting, by position) is no longer waiting in `after`: what
-/// a private change swept into its fee reserve.
-fn swept(before: &[(u64, u128)], after: &[(u64, u128)]) -> u128 {
-    before.iter().filter(|(position, _)| !after.iter().any(|(still, _)| still == position)).map(|(_, value)| value).sum()
-}
-
-/// What claims paid from their payer: what left it (`before` - `after`) less the refunds
-/// they sent back to it; `None` when that doesn't add up (jobs-report-no-fee-paid).
-fn claim_fee(before: u128, after: u128, refunds: u128) -> Option<u128> {
-    before.checked_sub(after)?.checked_sub(refunds)
-}
-
 /// What the private account `id` holds, as the wallet last saw it.
 fn private_held<C: wallet::WalletSequencerClient>(wallet: &WalletCore<C>, id: AccountId) -> u128 {
     wallet.get_account_private(id).and_then(|account| account.data.native_balance().ok()).unwrap_or(0)
 }
 
-/// Why a move to private is refused before proving: the private account `private`, which
-/// pays the fee inside the proof, has `has` (with its waiting refunds), less than `about`.
-fn shield_shortfall(private: AccountId, has: u128, about: u128) -> Option<String> {
-    (has < about).then(|| {
-        format!(
-            "Private/{private} pays the fee inside the proof and holds {has}; a move to private needs about {about} there. Fund it first (a payment to its name, or `names receive`). Nothing was sent."
-        )
-    })
+/// Whether the process `pid` still runs.
+fn still_running(pid: u32) -> bool {
+    // SAFETY: signal 0 only asks whether the process exists; nothing is sent.
+    i32::try_from(pid).is_ok_and(|pid| unsafe { libc::kill(pid, 0) } == 0)
 }
 
-/// A wallet build error that says the fee payer can't hold the reserve, in plain words: the
-/// transaction never reached the sequencer.
-fn shield_build_refusal(error: &str, private: AccountId) -> Option<String> {
-    error.contains("Fee reserve of").then(|| {
-        format!("Private/{private} pays the fee inside the proof and can't hold its reserve; fund it first (a payment to its name, or `names receive`). Nothing was sent.")
-    })
+/// What this wallet's private accounts hold together, waiting credits included, and the
+/// positions of the waiting credits that are not a fee's refund (`Client::private_wealth`).
+struct Wealth {
+    total: u128,
+    others: std::collections::BTreeSet<u64>,
 }
 
-/// The fee line of a move to private of `moved`: the fee is paid from the private account
-/// inside the proof, so `after = before + moved - fee` (jobs-report-no-fee-paid: a shield
-/// printed no fee, so its job and history showed none though 5,070,616 of 6,000,000 went
-/// to it). A move smaller than the fee leaves the account lower than before. Unknown when
-/// the account holds more than it was given.
-fn shield_fee_line(moved: u128, before: u128, after: u128) -> String {
-    match before.checked_add(moved).and_then(|given| given.checked_sub(after)) {
+/// The fee a private change paid, from what the wallet's private accounts held before and after
+/// it, with what it moved into them (`moved_in`: a move to private) and out of them
+/// (`moved_out`: a deposit, a payment). Its payer's swept credits and the refund it sent back
+/// stay inside the total, so they need no counting (fee-paid-ignores-swept-refund-credits), nor
+/// does it matter which account paid. Unknown when a payment arrived meanwhile, or it doesn't
+/// add up (jobs-report-no-fee-paid).
+fn private_fee_paid(before: Option<&Wealth>, after: Option<&Wealth>, moved_in: u128, moved_out: u128) -> Option<u128> {
+    let (before, after) = (before?, after?);
+    if after.others.iter().any(|position| !before.others.contains(position)) {
+        return None;
+    }
+    before.total.checked_add(moved_in)?.checked_sub(moved_out)?.checked_sub(after.total)
+}
+
+/// The `fee paid:` line of a private change: its block's fee when it was the block's only
+/// charged transaction, else what left the private accounts (`private_fee_paid`).
+fn private_fee_line(block_fee: Option<u128>, measured: Option<u128>) -> String {
+    match block_fee.or(measured) {
         Some(fee) => format!("fee paid: {fee}"),
         None => "fee paid: unknown".to_owned(),
+    }
+}
+
+/// A private change's failure, with the wallet's refusal to build one whose payer can't hold
+/// the fee reserve said plainly (`plan::build_refusal`): that one never reached the sequencer,
+/// so `context` ("the sequencer did not accept …") would be untrue for it.
+fn refused_or(error: impl Into<anyhow::Error>, context: &'static str) -> anyhow::Error {
+    let error: anyhow::Error = error.into();
+    match plan::build_refusal(&format!("{error:#}")) {
+        Some(plain) => anyhow!(plain),
+        None => error.context(context),
     }
 }
 
@@ -3429,19 +3608,28 @@ async fn main() -> Result<()> {
                 println!("no names yet; register one with `names register <name>`");
                 println!("(a name someone transferred to you shows here once you run `names mine --add <name>`)");
             }
-            for name in defaults.names {
-                match client.lookup(&name).await {
-                    Ok((Derived { id, .. }, record, _)) if client.holder(&name, &id, &record).is_ok() => {
+            for name in &defaults.names {
+                match client.lookup(name).await {
+                    Ok((Derived { id, .. }, record, _)) if client.holder(name, &id, &record).is_ok() => {
                         // Apps read this suffix to tell a private holder from a public one.
-                        let by = match client.holder(&name, &id, &record) {
-                            Ok(account) if client.is_private(account) => "; held privately",
-                            _ => "; held by a public account",
-                        };
+                        let private = matches!(client.holder(name, &id, &record), Ok(account) if client.is_private(account));
+                        let by = if private { "; held privately" } else { "; held by a public account" };
                         if record.expires == u64::MAX {
                             println!("{name}{NAME_SUFFIX}  held by a deposit (no expiry){by}");
                         } else {
                             let state = if local_now() >= record.expires { "lapsed" } else { "held" };
                             println!("{name}{NAME_SUFFIX}  {state} until {}{by}", readable(record.expires));
+                        }
+                        // Asked to be public and still private: said on a line of its own, which
+                        // the app reads (register-as-public-silently-stays-private).
+                        if private && defaults.then_public.contains(name) && !defaults.pending.contains_key(name) {
+                            match defaults.public_failed.get(name) {
+                                Some(why) => println!("{name}{NAME_SUFFIX}  not public yet: making it public stopped: {why}; `names make-public {name}` tries again"),
+                                None if defaults.background.get(name).is_some_and(|pid| still_running(*pid)) => {
+                                    println!("{name}{NAME_SUFFIX}  not public yet: it is being made public");
+                                }
+                                None => println!("{name}{NAME_SUFFIX}  not public yet: `names make-public {name}` makes it public"),
+                            }
                         }
                     }
                     _ => println!("{name}{NAME_SUFFIX}  no longer held by this wallet"),
@@ -3468,22 +3656,41 @@ async fn main() -> Result<()> {
                     save_defaults(&defaults)?;
                 }
             }
-            if !client.register(&name, owner, term, now, wait, cli.rpc.as_deref()).await? {
-                return Ok(());
+            let finished = async {
+                if !client.register(&name, owner, term, now, wait, cli.rpc.as_deref()).await? {
+                    return Ok(());
+                }
+                let mut defaults = load_defaults();
+                if !defaults.names.contains(&name) {
+                    defaults.names.push(name.clone());
+                }
+                save_defaults(&defaults)?;
+                // Registered privately first, so nothing showed who registered it; now moved to a
+                // public account that a private transfer funds. The request stays queued until it
+                // is done, and a stop is kept for `names mine` (register-as-public-silently-stays-private).
+                if defaults.then_public.contains(&name) {
+                    if let Err(error) = client.make_public(&name).await {
+                        let why = format!("{error:#}").trim_end_matches('.').to_owned();
+                        let mut defaults = load_defaults();
+                        defaults.public_failed.insert(name.clone(), why.clone());
+                        save_defaults(&defaults)?;
+                        bail!(
+                            "{name}{NAME_SUFFIX} is registered, and held privately: making it public stopped. {why}. `names make-public {name}` tries again"
+                        );
+                    }
+                }
+                Ok::<(), anyhow::Error>(())
             }
-            let mut defaults = load_defaults();
-            if !defaults.names.contains(&name) {
-                defaults.names.push(name.clone());
+            .await;
+            // A registration finishing in the background is no longer running.
+            if wait {
+                let mut defaults = load_defaults();
+                if defaults.background.get(&name) == Some(&std::process::id()) {
+                    defaults.background.remove(&name);
+                    save_defaults(&defaults)?;
+                }
             }
-            let convert = defaults.then_public.contains(&name);
-            defaults.then_public.retain(|queued| *queued != name);
-            save_defaults(&defaults)?;
-            // Registered privately first, so nothing showed who registered it; now
-            // moved to a public account that a private transfer funds.
-            if convert {
-                client.make_public(&name).await?;
-            }
-            Ok(())
+            finished
         }
         Command::Renew { name, term, payer } => client.renew(&name, term, payer).await,
         Command::Claim { name, snapshot } => client.claim(&name, &snapshot).await,
@@ -3944,53 +4151,71 @@ mod pay_tests {
 
 #[cfg(test)]
 mod fee_line_tests {
-    use super::shield_fee_line;
+    use super::{Wealth, private_fee_line, private_fee_paid, refused_or};
+
+    /// What the private accounts hold together, and the waiting payments that aren't refunds.
+    fn wealth(total: u128, others: &[u64]) -> Option<Wealth> {
+        Some(Wealth { total, others: others.iter().copied().collect() })
+    }
+
+    fn paid(before: Option<Wealth>, after: Option<Wealth>, moved_in: u128, moved_out: u128) -> String {
+        private_fee_line(None, private_fee_paid(before.as_ref(), after.as_ref(), moved_in, moved_out))
+    }
 
     /// jobs-report-no-fee-paid: shield 6,000,000, the private account 24,619,017 ->
     /// 25,548,401 (+929,384): 5,070,616 went as the fee, and no fee line was printed.
     #[test]
     fn a_move_to_private_says_what_it_paid() {
-        assert_eq!(shield_fee_line(6_000_000, 24_619_017, 25_548_401), "fee paid: 5070616");
-        assert_eq!(shield_fee_line(6_000_000, 0, 7_000_000), "fee paid: unknown");
-        // A move of 1,000 costing 5,070,616: the account ends lower than it started.
-        assert_eq!(shield_fee_line(1_000, 25_548_401, 20_478_785), "fee paid: 5070616");
+        assert_eq!(paid(wealth(24_619_017, &[]), wealth(25_548_401, &[]), 6_000_000, 0), "fee paid: 5070616");
+        assert_eq!(paid(wealth(0, &[]), wealth(7_000_000, &[]), 6_000_000, 0), "fee paid: unknown");
+        // A move of 1,000 costing 5,070,616: the accounts end lower than they started.
+        assert_eq!(paid(wealth(25_548_401, &[]), wealth(20_478_785, &[]), 1_000, 0), "fee paid: 5070616");
+        // Its block's fee, when the block tells it, is taken first.
+        assert_eq!(private_fee_line(Some(4_000), Some(5_000)), "fee paid: 4000");
     }
 
-    /// unaffordable-shield-refusal-wording: a payer holding 5,105 was refused only at build,
-    /// after "generating the proof", as "the sequencer did not accept the transfer".
+    /// fee-paid-ignores-swept-refund-credits: a shield's payer I7 held 3,260,249 and a waiting
+    /// refund of 3,169,135, which the move swept into its reserve; the surplus 1,358,768 came
+    /// back as a new refund. Counted together, the swept and the new refund need no tracking.
     #[test]
-    fn a_move_the_private_account_cant_pay_for_is_refused_in_plain_words() {
-        let private = super::AccountId::new([5; 32]);
-        let short = super::shield_shortfall(private, 5_105, 5_070_616).expect("refused");
-        assert!(short.contains("holds 5105; a move to private needs about 5070616 there"), "{short}");
-        assert!(short.ends_with("Nothing was sent."));
-        assert_eq!(super::shield_shortfall(private, 6_000_000, 5_070_616), None);
-        let raw = "Failed to build transaction: Invalid input: Fee reserve of 5070616 from payer APRe fails, though the transaction runs without it";
-        assert!(super::shield_build_refusal(raw, private).is_some_and(|plain| !plain.contains("sequencer")));
-        assert_eq!(super::shield_build_refusal("connection refused", private), None);
+    fn swept_credits_and_new_refunds_stay_inside_the_total() {
+        let before = wealth(3_260_249 + 3_169_135 + 2_000_000, &[230]);
+        let after = wealth(1_000_000 + 2_000_000 + 1_358_768, &[230]);
+        assert_eq!(paid(before, after, 1_000_000, 0), "fee paid: 5070616");
+        // The 2-claim receive: E3 9,619,017 and its refund 3,169,135 paid two claims of
+        // 1,000,000 each, which became notes, and 2,646,920 came back.
+        let before = wealth(9_619_017 + 3_169_135 + 2_000_000, &[300, 301]);
+        assert_eq!(paid(before, wealth(2_000_000 + 2_646_920, &[]), 0, 0), "fee paid: 10141232");
     }
 
-    /// fee-paid-ignores-swept-refund-credits: a shield's payer I7 held 3,260,249 and a
-    /// waiting refund of 3,169,135 (position 226), which the move swept into its fee
-    /// reserve; it reported 3,260,249 for a 5,070,616 fee.
+    /// shield-refused-before-proving-though-wallet-would-pay (b): Q paid the fee of a move into
+    /// E; measured on E alone it read as no fee at all. The total doesn't care who paid.
     #[test]
-    fn swept_credits_count_as_what_the_payer_had() {
-        let before = [(226, 3_169_135), (230, 2_000_000)];
-        let after = [(230, 2_000_000), (250, 1_358_768)];
-        assert_eq!(super::swept(&before, &after), 3_169_135);
-        // I7 3,260,249 -> 1,000,000 and the surplus 1,358,768 refunded to a new alias.
-        assert_eq!(super::shield_fee_line(1_000_000, 3_260_249 + super::swept(&before, &after), 1_000_000 + 1_358_768), "fee paid: 5070616");
-        // The 2-claim receive: E3 9,619,017 -> 0, its refund 3,169,135 swept, new refunds 2,646,920.
-        assert_eq!(super::claim_fee(9_619_017 + 3_169_135, 0, 2_646_920), Some(10_141_232));
+    fn the_fee_is_told_whichever_account_paid_it() {
+        let before = wealth(8_929_384, &[]);
+        let after = wealth(689_633 + 3_169_135 + 14_000_000, &[]);
+        assert_eq!(paid(before, after, 14_000_000, 0), "fee paid: 5070616");
+        // A deposit leaves the private accounts besides the fee.
+        assert_eq!(paid(wealth(29_289_152, &[]), wealth(29_289_152 - 1_000_000 - 5_811_525, &[]), 0, 1_000_000), "fee paid: 5811525");
     }
 
-    /// jobs-report-no-fee-paid (receive half) and receive-entry-has-no-account-amount: the
-    /// payer BF went 36,929,384 -> 23,619,017 over two claims and 3,169,135 came back to it
-    /// as a refund: 2 x 5,070,616 paid.
+    /// A payment that arrived meanwhile would read as a smaller fee: unknown instead.
     #[test]
-    fn claims_say_what_they_paid_less_the_refund_they_sent_back() {
-        assert_eq!(super::claim_fee(36_929_384, 23_619_017, 3_169_135), Some(10_141_232));
-        assert_eq!(super::claim_fee(10, 20, 0), None);
+    fn a_payment_arriving_meanwhile_makes_the_fee_unknown() {
+        assert_eq!(paid(wealth(10_000_000, &[7]), wealth(10_000_000 - 5_070_616 + 3_000, &[7, 9]), 0, 0), "fee paid: unknown");
+        assert_eq!(paid(None, wealth(1, &[]), 0, 0), "fee paid: unknown");
+    }
+
+    /// unaffordable-shield-refusal-wording and partial-claim-job-and-pages-say-nothing-true: the
+    /// wallet's refusal at build was told as "the sequencer did not accept …", which never saw it.
+    #[test]
+    fn a_change_the_wallet_refused_to_build_is_not_blamed_on_the_sequencer() {
+        let raw = anyhow::anyhow!("Failed to build transaction: Invalid input: Fee reserve of 5070616 from payer APRe fails, though the transaction runs without it: Invalid native transfer: sender APRe holds less than the transferred amount");
+        let said = format!("{:#}", refused_or(raw, "the sequencer did not accept the claim"));
+        assert!(!said.contains("sequencer"), "{said}");
+        assert!(said.contains("Private/APRe pays its fee and can't hold the fee reserve of 5,070,616"), "{said}");
+        let other = format!("{:#}", refused_or(anyhow::anyhow!("connection refused"), "the sequencer did not accept the claim"));
+        assert_eq!(other, "the sequencer did not accept the claim: connection refused");
     }
 }
 

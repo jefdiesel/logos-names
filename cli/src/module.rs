@@ -307,7 +307,15 @@ impl Client {
         let message = hex::decode(&change.message).context("the message is not hex")?;
         let spent = change.spent.parse().context("the amount spent is not a number")?;
         let program = self.program().await?;
-        self.transact(mentions, message, vec![(self.program, program)], spent).await
+        // The module's change is any registry call: priced as a profile change's cycles.
+        let cycles = borsh::from_slice::<names_core::Message>(&message)
+            .ok()
+            .and_then(|message| match message {
+                names_core::Message::Instruction(instruction) => Some(crate::call_cycles(&instruction)),
+                _ => None,
+            })
+            .unwrap_or(65_590);
+        self.transact(mentions, message, vec![(self.program, program)], spent, cycles).await
     }
 
     fn mention(&self, mention: &Mention) -> Result<AccountMention> {
