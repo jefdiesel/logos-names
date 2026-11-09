@@ -3718,6 +3718,15 @@ impl NamesModule for Names {
                     .and_then(|setup| cli::balances_now(&setup).ok())
                     .and_then(|rows| rows.into_iter().find(|(account, _)| *account == format!("Public/{to}")).map(|(_, balance)| balance))
                     .or_else(|| registry::public_balance(&self.sequencer, &account).ok());
+                // Without it the deposit's arrival can't be followed, and a later bridge to the
+                // account would be taken as arrived on this one's credit: a deposit can't be
+                // undone, so it isn't sent (bridge-with-unread-to_before-never-arrives).
+                let Some(to_before) = to_before else {
+                    return Err(format!(
+                        "LEZ didn't say what Public/{to} holds now, so this bridge's arrival couldn't be followed. Try again when LEZ answers. Nothing was sent."
+                    ));
+                };
+                let to_before = Some(to_before);
                 // Recorded before the node is asked: a call cut off (the module unloaded while the
                 // node proved) still leaves the deposit in the history and its note held, to be
                 // settled by the note (deposit-lost-from-activity-on-unload).
@@ -5299,6 +5308,11 @@ mod tests {
         assert!(unknown["error"].as_str().unwrap().contains("deposit channel"), "{unknown}");
         assert!(!node_asked().contains(&"channel_deposit_with_notes".to_owned()), "nothing deposited into an unknown channel");
         node_answers("get_channel_state", json!({ "accredited_keys": [], "configuration_threshold": 3 }));
+        // bridge-with-unread-to_before-never-arrives: LEZ doesn't answer for the account, so
+        // its arrival couldn't be followed: nothing is deposited.
+        let unread = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), true));
+        assert!(unread["error"].as_str().unwrap().contains("couldn't be followed") && unread["error"].as_str().unwrap().ends_with("Nothing was sent."), "{unread}");
+        assert!(!node_asked().contains(&"channel_deposit_with_notes".to_owned()), "nothing deposited without the account's balance");
         registry::BALANCES.with(|held| held.borrow_mut().push((registry::parse_account(to).unwrap(), 250)));
         // The deposit as the node stores it: the exact note, and a note for its fee.
         node_answers("get_transaction", json!({ "mantle_tx": { "ops": [
@@ -5737,6 +5751,7 @@ mod tests {
         // No answer, as when names is unloaded while the node proves (the real run's error
         // was the node "didn't answer", and the deposit had been made).
         node::ANSWERS.with(|answers| answers.borrow_mut().remove("channel_deposit_with_notes"));
+        registry::BALANCES.with(|held| held.borrow_mut().push((registry::parse_account(to).unwrap(), 0)));
         let cut = parsed(&names.chain_bridge(key.clone(), format!("Public/{to}"), "640,080".into(), true));
         assert_eq!(cut["success"], false, "{cut}");
         let mine = |names: &mut Names| parsed(&names.activity(key.clone()))["value"].as_array().unwrap().iter().find(|e| e["amount"] == "640080").cloned();
