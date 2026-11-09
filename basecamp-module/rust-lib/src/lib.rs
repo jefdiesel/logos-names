@@ -883,6 +883,9 @@ struct Names {
     token_info: HashMap<(AccountId, AccountId), (Value, std::time::Instant)>,
     /// What the Program Registry said about each asking app's publisher, and when (seconds).
     publishers: HashMap<String, (Value, u64)>,
+    /// When LEZ last answered about each followed bridge's receipt (seconds), so each is
+    /// asked on its schedule (`activity::receipt_due`), not on every balance read.
+    receipt_asks: std::sync::Mutex<std::collections::BTreeMap<AccountId, u64>>,
 }
 
 /// How long a cached read about a name is used before it is read again.
@@ -968,6 +971,7 @@ impl Default for Names {
             token_program: None,
             token_info: HashMap::new(),
             publishers: HashMap::new(),
+            receipt_asks: Default::default(),
         };
         // Files saved by versions before 0.10 were readable by every account on the
         // machine; this closes them up once.
@@ -2229,15 +2233,39 @@ impl Names {
         // (not minted at the second); a mint between them, or an ask LEZ doesn't answer,
         // leaves the account unread this time, so its credit is never also taken for money
         // that arrived (activity::note_balances).
+        //
+        // Bridges are followed for 30 days, and asking every one on every balance read cost
+        // reads without end (and a share of the call's deadline). The bridges to one account
+        // are asked together, and only when one is due by its age (`activity::receipt_due`:
+        // every minute, every hour once overdue) or when the account's balance rose in a way
+        // nothing explains (`activity::would_arrive`): no bridge's credit can be in the read
+        // unseen otherwise, so the wallet's read is noted as it is.
         let at = now();
         let entries = activity::all(dir);
         let followed = activity::bridges_followed(&entries, at);
+        let mut asks = self.receipt_asks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        asks.retain(|receipt, _| followed.iter().any(|(_, _, followed)| followed == receipt));
+        let sent_at = |id: &str| entries.iter().find(|entry| entry["id"] == id).and_then(|entry| entry["at"].as_u64()).unwrap_or(0);
+        let mut accounts: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for (id, to, receipt) in &followed {
+            if activity::receipt_due(at.saturating_sub(sent_at(id)), asks.get(receipt).copied(), at) {
+                accounts.insert(to.as_str());
+            }
+        }
+        for (to, balance) in rows {
+            if followed.iter().any(|(_, bridge_to, _)| bridge_to == to) && activity::would_arrive(dir, at, "lez", sequencer, to, *balance) {
+                accounts.insert(to.as_str());
+            }
+        }
         // Every read here shares the call's deadline, so the call answers inside the host's time
         // however many bridges wait; one past it is unread, and the bridge waits a round.
         let ask = |receipt: &registry::AccountId| registry::deposit_minted(sequencer, receipt, deadline).ok();
-        let mut minted: std::collections::HashMap<registry::AccountId, Option<bool>> = followed.iter().map(|(_, _, receipt)| (*receipt, ask(receipt))).collect();
+        let mut minted: std::collections::HashMap<registry::AccountId, Option<bool>> = followed
+            .iter()
+            .filter(|(_, to, _)| accounts.contains(to.as_str()))
+            .map(|(_, _, receipt)| (*receipt, ask(receipt)))
+            .collect();
         let mut rows = rows.to_vec();
-        let accounts: std::collections::BTreeSet<&str> = followed.iter().map(|(_, to, _)| to.as_str()).collect();
         for to in accounts {
             let Some(at_row) = rows.iter().position(|(account, _)| account == to) else { continue };
             let receipts: Vec<registry::AccountId> = followed.iter().filter(|(_, bridge_to, _)| bridge_to == to).map(|(_, _, receipt)| *receipt).collect();
@@ -2267,6 +2295,13 @@ impl Names {
                 }
             }
         }
+        // An ask LEZ answered waits its schedule; one it didn't is tried again next time.
+        for (receipt, answer) in &minted {
+            if answer.is_some() {
+                asks.insert(*receipt, at);
+            }
+        }
+        drop(asks);
         for (id, mut fields) in activity::bridge_updates(&entries, at, &|receipt| minted.get(receipt).copied().flatten()) {
             if fields["state"] == "arrived" {
                 fields["arrived_at"] = json!(at);
@@ -4996,6 +5031,7 @@ mod tests {
             token_program: None,
             token_info: HashMap::new(),
             publishers: HashMap::new(),
+            receipt_asks: Default::default(),
         }
     }
 
@@ -6331,21 +6367,76 @@ mod tests {
         let receipt = activity::bridge_receipt(&activity::all(&dir)[0]).unwrap();
         let state = || activity::all(&dir).into_iter().find(|e| e["id"] == id.as_str()).unwrap()["state"].as_str().unwrap().to_owned();
         let stale = [(to.clone(), 20_000_u128), ("Public/other".to_owned(), 7)];
+        // Each step below is a later round, when the receipt is due again.
+        let due_again = || names.receipt_asks.lock().unwrap().clear();
         // Not minted: the account is read afresh (the wallet's read may be older).
         assert_eq!(names.settle_activity(&dir, "seq", &stale, std::time::Instant::now() + cli::CALL_BUDGET), [(to.clone(), 23_000), ("Public/other".to_owned(), 7)]);
         assert_eq!(state(), "in_block");
         // LEZ doesn't answer for the receipt: the account isn't read this time.
+        due_again();
         registry::MINTED_UNREAD.with(|unread| unread.set(true));
         assert_eq!(names.settle_activity(&dir, "seq", &stale, std::time::Instant::now() + cli::CALL_BUDGET), [("Public/other".to_owned(), 7)]);
         registry::MINTED_UNREAD.with(|unread| unread.set(false));
         assert_eq!(state(), "in_block");
         // Minted between the first ask and the second: arrived, and the account isn't read this time.
+        due_again();
         let next = registry::MINTED_ASKED.with(std::cell::Cell::get);
         registry::MINTED.with(|minted| minted.borrow_mut().push((receipt, next + 1)));
         assert_eq!(names.settle_activity(&dir, "seq", &stale, std::time::Instant::now() + cli::CALL_BUDGET), [("Public/other".to_owned(), 7)]);
         assert_eq!(state(), "arrived");
         // Arrived, it isn't asked again; the account is the wallet's read.
+        due_again();
         assert_eq!(names.settle_activity(&dir, "seq", &stale, std::time::Instant::now() + cli::CALL_BUDGET), stale);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// bridges-followed-30-days-cost-receipt-reads: every balance read asked every followed
+    /// bridge's receipt twice, for 30 days. Now an overdue bridge is asked hourly, unless its
+    /// account's balance rose in a way nothing explains; then at once, so a mint in between
+    /// is still told once, as the bridge arriving late, never also as money that arrived.
+    #[test]
+    fn an_overdue_bridge_is_asked_on_its_schedule_or_when_its_account_rises() {
+        let names = fresh();
+        let dir = config_dir().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let account = [6_u8; 32];
+        let to = format!("Public/{}", registry::account_text(&account));
+        registry::BALANCES.with(|held| held.borrow_mut().push((account, 10_000)));
+        let three_days = 3 * 24 * 3600;
+        let id = activity::add(&dir, now() - three_days, json!({ "kind": "bridge", "chain": "logos", "to": to, "amount": "3000",
+            "note": "12".repeat(32), "channel": "00".repeat(32), "state": "in_block" }));
+        let receipt = activity::bridge_receipt(&activity::all(&dir)[0]).unwrap();
+        let asked = || registry::MINTED_ASKED.with(std::cell::Cell::get);
+        let settle = |balance: u128| {
+            let rows = names.settle_activity(&dir, "seq", &[(to.clone(), balance)], std::time::Instant::now() + cli::CALL_BUDGET);
+            activity::note_balances(&dir, now(), "lez", "seq", &rows);
+            rows
+        };
+        // First round: asked (never asked before), around a fresh read; the mark is set.
+        let first = asked();
+        assert_eq!(settle(10_000), [(to.clone(), 10_000)]);
+        assert_eq!(asked() - first, 2, "before and after the fresh read");
+        // Rounds with nothing new: not asked, the wallet's read noted as it is.
+        let quiet = asked();
+        for _ in 0..5 {
+            assert_eq!(settle(10_000), [(to.clone(), 10_000)]);
+        }
+        assert_eq!(asked(), quiet, "an overdue bridge isn't asked on every balance read");
+        // Minted meanwhile: the account rose, so the receipt is asked now, whatever the hour.
+        registry::MINTED.with(|minted| minted.borrow_mut().push((receipt, 0)));
+        registry::BALANCES.with(|held| held.borrow_mut().iter_mut().for_each(|(id, held)| if *id == account { *held = 13_000 }));
+        assert_eq!(settle(13_000), [(to.clone(), 13_000)]);
+        let all = activity::all(&dir);
+        let bridge = all.iter().find(|e| e["id"] == id.as_str()).unwrap();
+        assert_eq!((bridge["state"].as_str(), bridge["late"].as_bool()), (Some("arrived"), Some(true)), "{bridge}");
+        assert!(!all.iter().any(|e| e["kind"] == "arrived"), "the credit is the bridge's, told once: {all:?}");
+        // The schedule itself: every minute while it waits, hourly once overdue.
+        assert!(activity::receipt_due(60, None, 1_000));
+        assert!(!activity::receipt_due(60, Some(990), 1_000));
+        assert!(activity::receipt_due(60, Some(940), 1_000));
+        assert!(!activity::receipt_due(three_days, Some(10_000 - 600), 10_000));
+        assert!(activity::receipt_due(three_days, Some(10_000 - 3_600), 10_000));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
