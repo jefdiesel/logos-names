@@ -5204,6 +5204,26 @@ mod tests {
         assert_eq!(after["value"]["account"], other, "cli_balance still reports the OLD default after cli_account_use: {after}");
     }
 
+    /// october-cli-balance-zero-when-sequencer-down: the October CLI printed every public
+    /// account as 0 with the sequencer down (exit 0), and cli_balance answered success
+    /// with each public balance "0".
+    #[test]
+    fn a_public_zero_is_not_believed_from_a_sequencer_that_doesnt_answer() {
+        let tail = format!(
+            "case \"$*\" in\n*balance*) echo '  Public/{PUBLIC}  0  (default)'; echo '  Public/{OTHER}  0'; echo '  Private/{PRIVATE}  250  (default)' ;;\nesac"
+        );
+        let (mut names, dir) = with_wallet("balance-down", &tail);
+        registry::SEQUENCER_DOWN.with(|down| down.set(true));
+        let down = parsed(&names.cli_balance());
+        registry::SEQUENCER_DOWN.with(|down| down.set(false));
+        assert_eq!(down["success"], false, "{down}");
+        assert!(down["error"].as_str().unwrap().contains("could not reach the sequencer"), "{down}");
+        // Answering, a 0 is a 0.
+        let up = parsed(&names.cli_balance());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(up["value"]["public"]["balance"], "0", "{up}");
+    }
+
     /// RV2: after set_sequencer the balance is read from the new network, not the last one's output.
     #[test]
     fn review_balance_is_read_again_after_the_sequencer_changes() {

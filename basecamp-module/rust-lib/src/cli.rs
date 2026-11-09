@@ -1502,6 +1502,12 @@ fn balance_output(setup: &Setup) -> Result<String, String> {
         }
     }
     let output = run_text(setup, vec!["balance".to_owned()], BALANCE_PATIENCE)?;
+    // The October CLI prints 0 for every public account when the sequencer doesn't
+    // answer, and exits 0: a 0 is believed only from a sequencer that answers
+    // (october-cli-balance-zero-when-sequencer-down).
+    if parse_all_balances(&output).iter().any(|row| row["kind"] == "public" && row["balance"] == "0") {
+        registry::sequencer_reachable(&setup.sequencer)?;
+    }
     *seen = Some((key, Instant::now(), output.clone()));
     Ok(output)
 }
