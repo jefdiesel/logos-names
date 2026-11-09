@@ -216,6 +216,21 @@ const LOGOS_ACCOUNT_KEY: &str = "logos.account";
 /// The registry on the public LEZ testnet (v4, deployed 2026-10-16). Used unless
 /// `--program` or `LOGOS_NAMES_PROGRAM` names another.
 const DEFAULT_PROGRAM: &str = "38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq";
+/// The earlier registries on the public testnet (v2, v3, v4.0, v4.1), as the Basecamp module
+/// lists them (`RETIRED_REGISTRIES`): their accounts are programs' too, and a bridge to one
+/// lands where nobody can use it (cli-bridge-retired-registry-account-accepted).
+const RETIRED_PROGRAMS: [&str; 4] = [
+    "DugXYzVqYsXJumqsjaGtoZeJ742WmdRHGpByi8pNJm2z",
+    "66nUvzJtTxA729aUpTcAWDrb7cV9Heb2bDzceHQhLYad",
+    "E6oXebf6sicLtYBpEMijFdB8mqbXg3HRsWfYoJBgjvdj",
+    "2PXg3SSmh5hvECTz4xcfV2d5YvxwyF6yVhpnjTokzCkX",
+];
+
+/// The programs' accounts `names bridge` refuses: every registry it knows, current and
+/// retired, and the ones named by `--program` and `--token-program`.
+fn bridge_sinks(program: Option<AccountId>, token_program: Option<AccountId>) -> Vec<AccountId> {
+    std::iter::once(DEFAULT_PROGRAM).chain(RETIRED_PROGRAMS).filter_map(|program| program.parse().ok()).chain(program).chain(token_program).collect()
+}
 /// The public LEZ testnet's sequencer, reached directly: no server of ours sits between a
 /// user and the chain.
 const DEFAULT_RPC: &str = "https://testnet.lez.logos.co";
@@ -3250,8 +3265,7 @@ async fn main() -> Result<()> {
         }
         Command::Bridge { amount, to, from_key, node, max_fee, yes } => {
             let rpc = cli.rpc.as_deref().unwrap_or(DEFAULT_RPC);
-            let programs: Vec<AccountId> = DEFAULT_PROGRAM.parse().ok().into_iter().chain(cli.program).chain(cli.token_program).collect();
-            return bridge(rpc, &node, amount, &to, &programs, &from_key, max_fee, yes);
+            return bridge(rpc, &node, amount, &to, &bridge_sinks(cli.program, cli.token_program), &from_key, max_fee, yes);
         }
         // Only a name target needs the registry; everything else is between you and your node.
         Command::Chain(command) if command.name().is_none() => return chain::run(command.clone(), None),
@@ -4040,6 +4054,12 @@ mod input_tests {
         assert_eq!(bridge_destination("Public/11111111111111111111111111111111", &[registry]).unwrap_err(), "that is the empty account (all 1s), which no one holds");
         assert_eq!(bridge_destination(&format!("Public/{DEFAULT_PROGRAM}"), &[registry]).unwrap_err(), "that is a program's account, which can't take a bridge");
         assert_eq!(bridge_destination(&format!("Public/{someone}"), &[registry]).unwrap().to_string(), someone);
+        // cli-bridge-retired-registry-account-accepted: v2 and v4.1 took a deposit.
+        let sinks = bridge_sinks(None, Some(someone.parse().unwrap()));
+        for program in std::iter::once(DEFAULT_PROGRAM).chain(RETIRED_PROGRAMS).chain([someone]) {
+            assert_eq!(bridge_destination(&format!("Public/{program}"), &sinks).unwrap_err(), "that is a program's account, which can't take a bridge", "{program}");
+        }
+        assert_eq!(sinks.len(), 6);
         // Nothing reached the network: the unreachable node and sequencer were never asked.
         let zero = bridge("http://127.0.0.1:9", "http://127.0.0.1:9", 0, &format!("Public/{someone}"), &[registry], &"66".repeat(32), 100_000, true);
         assert_eq!(zero.unwrap_err().to_string(), "the amount must be more than 0");

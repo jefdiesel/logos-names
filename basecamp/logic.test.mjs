@@ -167,6 +167,13 @@ check("subDigits", [subDigits("1000", "1"), subDigits("210939029", "210939029"),
   // single-bridge-false-arrival-on-foreign-credit-at-least-amount: bridges matched together
   // by one credit are hedged, one matched by its own credit is not.
   check("activityLine bridge arrived hedged", [activityLine(Object.assign({}, bridge, { state: "arrived" }), now).state, activityLine(Object.assign({}, bridge, { state: "arrived", maybe: true }), now).state], ["Arrived on LEZ", "A credit of the same total as your bridges reached LEZ"]);
+  // late-or-expired-bridge-arrival-logged-twice / expired-bridge-takes-later-bridges-credit:
+  // a bridge not credited within 2 days is overdue (still followed by its receipt), and one
+  // credited after that arrives late, as one row.
+  const overdue = activityLine(Object.assign({}, bridge, { state: "expired", followed: true }), now);
+  check("activityLine bridge expired", [overdue.state, overdue.tone, activityLine(Object.assign({}, bridge, { state: "expired", followed: false }), now).state],
+    ["Not credited on LEZ after 2 days · still followed; check the balance", "warn", "Not seen on LEZ after 2 days · check the balance"]);
+  check("activityLine bridge arrived late", activityLine(Object.assign({}, bridge, { state: "arrived", late: true }), now).state, "Arrived on LEZ, late");
   // claim-entry-not-on-credited-accounts-page-and-shown-as-credit-on-payer: the module's
   // reply for a live 2-account claim (payer E3, two accounts credited 2,000,000 each).
   const claim = { all: true, amount: "4000000", at: 1794204085, chain: "lez", fee: { about: "5070616", at_most: "8239751", paid: "6972097" }, from: "Private/E3j7HPx3ZhoqRnB9BtMsGjWixbms3n9kamGKXKkjiuy5", id: "1794204085-receive", kind: "receive", received: { "Private/6MJ8W5vH7vTLPpCcnuA87YU3foxrx676CkzvtGHfBJXC": "2000000", "Private/9drrc1ARLeTXhHrgV8r54iNiWDD6Rj3yUMxQJTditnaK": "2000000" }, seq: 10, state: "done" };

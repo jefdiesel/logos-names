@@ -424,7 +424,11 @@ export function activityLine(entry, now, account) {
         tone = kind === "bridge" ? "warn" : "good"; break
     // Several bridges matched by one credit can't be told from one payment of their total
     // (single-bridge-false-arrival-on-foreign-credit-at-least-amount): said so.
-    case "arrived": stateText = kind !== "bridge" ? "" : e.maybe === true ? "A credit of the same total as your bridges reached LEZ" : "Arrived on LEZ"; tone = "good"; break
+    // A bridge arrives when LEZ mints its own deposit; `maybe` is kept by entries an older
+    // version matched by amount.
+    case "arrived": stateText = kind !== "bridge" ? "" : e.maybe === true ? "A credit of the same total as your bridges reached LEZ" : e.late === true ? "Arrived on LEZ, late" : "Arrived on LEZ"; tone = "good"; break
+    // A bridge LEZ hasn't credited within 2 days; it is still followed, and arrives if LEZ credits it.
+    case "expired": stateText = e.followed === false ? "Not seen on LEZ after 2 days · check the balance" : "Not credited on LEZ after 2 days · still followed; check the balance"; tone = "warn"; break
     case "done": stateText = "Done"; tone = "good"; break
     case "failed": stateText = "Didn't go through"; tone = "bad"; break
     // The module restarted while it ran, or its record is gone: it may have gone through.

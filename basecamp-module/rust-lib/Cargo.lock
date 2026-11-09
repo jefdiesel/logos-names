@@ -429,6 +429,7 @@ version = "0.5.0"
 dependencies = [
  "aes-gcm",
  "argon2",
+ "blake2",
  "bs58",
  "getrandom",
  "logos-rust-sdk",
