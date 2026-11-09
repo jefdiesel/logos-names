@@ -1998,6 +1998,19 @@ impl Names {
             .find(|account| registry::parse_account(account).is_ok_and(|id| registry::owner_tag(&derived.id, &id) == record.owner))
     }
 
+    /// Refuses when `to` (`Public/…` or `Private/…`) already holds `name`, by the tag its
+    /// record holds. A record that can't be read leaves it to the CLI.
+    fn not_held_by(&mut self, name: &str, to: &str) -> Result<(), String> {
+        let (Ok(registry), Ok(account)) = (self.registry(), registry::parse_account(to)) else { return Ok(()) };
+        let derived = self.derived(name);
+        match registry.record(name, &derived) {
+            Ok(Some(record)) if record.owner == registry::owner_tag(&derived.id, &account) => {
+                Err(format!("{} already holds {name}, so nothing was sent", registry::account_text(&account)))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Refuses an account nobody can use what is sent to it: the empty account (all 1s)
     /// and a program's own (the registry's, the token program's). `what` is what it
     /// would be given, in words ("hold a name", "take a bridge").
@@ -2579,6 +2592,11 @@ impl NamesModule for Names {
         };
         let to = command[3].clone();
         if let Err(refused) = self.may_hold(&to) {
+            return reply(Err(refused));
+        }
+        // Handing a name to the account that holds it is refused here, before any job, as
+        // the CLI would refuse it (module-self-transfer-starts-job-logs-failed).
+        if let Err(refused) = self.not_held_by(&command[2], &to) {
             return reply(Err(refused));
         }
         let out = self.cli_job(&name, "transfer", |_, _, _| Ok((command, None, Value::Null)));
@@ -5400,6 +5418,24 @@ mod tests {
         assert_eq!(shown["value"][0]["amount"], "12345", "{shown}");
         assert!(shown["warning"].as_str().unwrap().contains("activity-balances.json.corrupt-"), "{shown}");
         assert!(parsed(&names.activity(String::new()))["warning"].is_null(), "told once");
+    }
+
+    /// module-self-transfer-starts-job-logs-failed: cli_transfer to the account that
+    /// already held the name started a job, the CLI refused it ("... already holds ovone,
+    /// so nothing was sent"), and a failed transfer row was left in the history.
+    #[test]
+    fn handing_a_name_to_its_holder_is_refused_before_any_job() {
+        let (mut names, dir) = with_wallet("self-transfer", "exit 0");
+        let derived = registry::derive("ovone");
+        let holder = registry::parse_account(PRIVATE).unwrap();
+        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner: registry::owner_tag(&derived.id, &holder), expires: registry::NEVER, profile: registry::Profile::default(), claimed: false })));
+        let refused = parsed(&names.cli_transfer("ovone".into(), format!("Private/{PRIVATE}")));
+        assert_eq!(refused["error"], format!("{PRIVATE} already holds ovone, so nothing was sent"), "{refused}");
+        assert!(std::fs::read_dir(dir.join("jobs")).map_or(true, |entries| entries.count() == 0), "no job");
+        assert!(!activity::all(&config_dir().unwrap()).iter().any(|e| e["kind"] == "transfer"), "no history row");
+        // To another account it goes ahead.
+        assert_eq!(parsed(&names.cli_transfer("ovone".into(), format!("Public/{PUBLIC}")))["success"], true);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// receive-privately-entry-no-paying-account: the receive_privately entry had no
