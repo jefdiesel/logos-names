@@ -2935,6 +2935,28 @@ fn landing(position: usize, charged: &[bool], reverted: &[u64], paid: Option<u12
     }
 }
 
+/// Why a public send of `amount` from `from` (holding `balance`) is refused before it is
+/// sent: the fee reserve, up to `reserve`, leaves the payer before the transfer runs.
+fn send_shortfall(from: &str, balance: u128, amount: u128, reserve: u128) -> Option<String> {
+    (balance < amount.saturating_add(reserve)).then(|| {
+        format!(
+            "Public/{from} holds {balance}; sending {amount} also needs up to {reserve} held for the fee while it runs. Nothing was sent."
+        )
+    })
+}
+
+/// The failure of a public send that was included but reverted.
+fn reverted_send(amount: u128, fee: Option<u128>) -> String {
+    let fee = fee.map_or_else(|| "its fee".to_owned(), |fee| format!("its fee of {fee}"));
+    format!("nothing was sent: the transfer of {amount} was included in a block but did not run, since the payer could not hold it and the fee together; {fee} was still taken")
+}
+
+/// The chain's fee market, or `None` when it can't be read.
+async fn fee_quote_at(rpc: &str) -> Option<sequencer_service_rpc::FeeStateQuote> {
+    let client = sequencer_service_rpc::SequencerClientBuilder::default().build(rpc).ok()?;
+    sequencer_service_rpc::RpcClient::get_fee_state(&client).await.ok()
+}
+
 /// Whether `tx` touches the public account `account`.
 fn touches(tx: &LeeTransaction, account: &AccountId) -> bool {
     match tx {
@@ -3002,6 +3024,17 @@ async fn main() -> Result<()> {
                 None => None,
             };
             let before = paying.as_ref().and_then(|(rpc, (from, _))| public_balance_at(rpc, from));
+            // The fee reserve leaves the payer before the transfer runs: a payer that can't
+            // hold both has its transfer revert and still pays the fee, so it is refused here
+            // (full-balance-public-send-done-nothing-moved).
+            if let (Some((rpc, (from, amount))), Some(before)) = (&paying, before) {
+                let limit = overrides.gas_limit.unwrap_or(NATIVE_TRANSFER_GAS_LIMIT);
+                if let Some(quote) = fee_quote_at(rpc).await {
+                    if let Some(short) = send_shortfall(from, before, *amount, fees::native_public(&quote, limit).at_most) {
+                        bail!(short);
+                    }
+                }
+            }
             let sent = run_wallet(args, Some(overrides)).await;
             if let (Ok(hash), Some((rpc, (from, amount))), Some(before)) = (&sent, &paying, before) {
                 let after = public_balance_at(rpc, from);
@@ -3017,6 +3050,9 @@ async fn main() -> Result<()> {
                 match landed.as_ref().and_then(|landed| landed.fee) {
                     Some(fee) => println!("fee paid: {fee}"),
                     None => println!("{}", send_fee_line(before, after, *amount, others)),
+                }
+                if let Some(landed) = landed.filter(|landed| landed.reverted) {
+                    bail!(reverted_send(*amount, landed.fee));
                 }
             }
             return sent.map(|_| ());
@@ -3774,6 +3810,19 @@ mod send_fee_tests {
         assert_eq!(landing(0, &[true], &[], None), Landed { reverted: false, fee: None });
     }
 
+    /// full-balance-public-send-done-nothing-moved: H held 100,000 and sent 100,000; the
+    /// transfer was included in block 5, reverted, took a 12,088 fee and the CLI exited 0.
+    #[test]
+    fn a_send_the_payer_cant_hold_with_its_fee_is_refused_and_a_revert_fails() {
+        use super::{landing, reverted_send, send_shortfall};
+        let short = send_shortfall("H", 100_000, 100_000, 13_000).expect("refused");
+        assert!(short.contains("holds 100000") && short.ends_with("Nothing was sent."), "{short}");
+        assert_eq!(send_shortfall("H", 113_000, 100_000, 13_000), None);
+        assert!(landing(0, &[true], &[0], Some(12_088)).reverted);
+        assert!(!landing(1, &[true, true], &[0], None).reverted, "another transaction reverted");
+        assert!(reverted_send(100_000, Some(12_088)).starts_with("nothing was sent"));
+        assert!(reverted_send(100_000, Some(12_088)).contains("its fee of 12088 was still taken"));
+    }
 }
 
 #[cfg(test)]
