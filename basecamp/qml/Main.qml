@@ -4130,13 +4130,17 @@ Item {
             Layout.fillWidth: true
             spacing: 1
             Text { Layout.fillWidth: true; text: act.line.title; elide: Text.ElideRight; color: root.ink; font.family: root.sans; font.pixelSize: root.px(act.small ? 14 : 15) }
-            // The age always shows: a long account is shortened in its middle instead.
-            Item {
-                id: subRow
+            // The line wraps rather than being cut: its accounts are already shortened, and
+            // cutting its middle took "into Public" out of it (activity-bridge-subtitle-elided-mid-text).
+            Text {
                 Layout.fillWidth: true
-                implicitHeight: subText.implicitHeight
-                Text { id: subText; width: Math.max(0, Math.min(implicitWidth, subRow.width - agoText.implicitWidth)); text: act.line.sub; elide: Text.ElideMiddle; color: root.dim; font.family: root.sans; font.pixelSize: root.px(12) }
-                Text { id: agoText; x: subText.width; text: " · " + act.line.ago; color: root.dim; font.family: root.sans; font.pixelSize: root.px(12) }
+                text: act.line.sub + " · " + act.line.ago
+                wrapMode: Text.Wrap
+                maximumLineCount: 3
+                elide: Text.ElideRight
+                color: root.dim
+                font.family: root.sans
+                font.pixelSize: root.px(12)
             }
         }
         ColumnLayout {
