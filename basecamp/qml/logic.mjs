@@ -21,21 +21,49 @@ export function someAmount(digits) {
     return digits !== null && digits !== undefined && !/^0*$/.test(String(digits))
 }
 
-/// The largest token amount: token balances are 128-bit numbers.
-const TOKEN_MAX = "340282366920938463463374607431768211455"
+/// The largest amount: LEZ and token balances are 128-bit numbers.
+export const AMOUNT_MAX = "340282366920938463463374607431768211455"
+/// The largest Logos Blockchain amount: its notes hold 64-bit numbers.
+export const CHAIN_AMOUNT_MAX = "18446744073709551615"
 
-/// Why `text` isn't a token amount (whole base units, 1 to 2^128 - 1, `,` and
-/// `_` may group digits), or "" if it is one.
-export function tokenAmountProblem(text) {
-    var digits = String(text === null || text === undefined ? "" : text).trim().replace(/[,_]/g, "")
-    if (!/^[0-9]+$/.test(digits))
-        return "Enter a whole amount of the token's base units, such as 1000."
-    digits = digits.replace(/^0+/, "")
+/// Every amount a person types, in every field: `{digits, problem}`. `digits` is the
+/// amount written plainly ("1000"), or "" when `problem` says why it isn't one. The
+/// rules and the words are the names CLI's (`tokens::parse_amount`) and the module's
+/// (`cli::amount`), checked against the same table (basecamp-module/rust-lib/src/
+/// amounts.json): whole numbers above 0, `,` or `_` only between groups of three
+/// digits, so "1,5" is refused and never read as 15. `max` (decimal text) defaults to
+/// AMOUNT_MAX.
+export function amountRead(text, max) {
+    var typed = String(text === null || text === undefined ? "" : text).trim()
+    var refuse = function(problem) { return { digits: "", problem: problem } }
+    if (typed === "")
+        return refuse("Enter an amount, such as 1,000.")
+    if (/^-[0-9]/.test(typed))
+        return refuse(typed + " is negative. Enter an amount above 0.")
+    if (!/^[0-9,_]*[0-9][0-9,_]*$/.test(typed))
+        return refuse(typed + " isn't a whole number. Enter digits only, such as 1000 or 1,000.")
+    var groups = typed.split(/[,_]/)
+    // A first group starting with 0 (0,001) is no thousands grouping either.
+    if (groups.length > 1 && !(groups[0].length >= 1 && groups[0].length <= 3 && groups[0].charAt(0) !== "0"
+                               && groups.slice(1).every(function(group) { return group.length === 3 })))
+        return refuse(typed + " isn't a whole number: commas go only between groups of three digits, such as 1,000.")
+    var digits = groups.join("").replace(/^0+/, "")
     if (digits === "")
-        return "Enter an amount above zero."
-    if (digits.length > TOKEN_MAX.length || (digits.length === TOKEN_MAX.length && digits > TOKEN_MAX))
-        return "That is more than a token amount can be."
-    return ""
+        return refuse("Enter an amount above 0.")
+    var most = String(max || AMOUNT_MAX)
+    if (digits.length > most.length || (digits.length === most.length && digits > most))
+        return refuse(typed + " is more than an amount can be.")
+    return { digits: digits, problem: "" }
+}
+
+/// Why `text` isn't an amount, or "" when it is one (amountRead).
+export function amountProblem(text, max) {
+    return amountRead(text, max).problem
+}
+
+/// `text` as the amount it is, written plainly, or "" when it isn't one (amountRead).
+export function amountDigits(text, max) {
+    return amountRead(text, max).digits
 }
 
 /// Why `text` can't be where a token goes (a name, `Public/<id>` or one of

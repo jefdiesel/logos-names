@@ -273,7 +273,7 @@ enum Command {
         /// The default covers a few names' deposits and private changes: on LEZ 0.4 each
         /// private transaction reserves its fee in the proof, about 5,400,000 at the
         /// lowest base fees.
-        #[arg(long, default_value_t = 50_000_000, value_parser = parse_shield)]
+        #[arg(long, default_value_t = 50_000_000, value_parser = parse_shield, allow_hyphen_values = true)]
         shield: u128,
     },
     /// Show this wallet's accounts and balances.
@@ -542,7 +542,7 @@ enum Command {
         #[arg(value_parser = parse_payee_name)]
         name: String,
         /// Amount in base units, above zero; `1,000` may group it.
-        #[arg(value_parser = tokens::parse_amount, allow_negative_numbers = true)]
+        #[arg(value_parser = tokens::parse_amount, allow_hyphen_values = true)]
         amount: u128,
         /// Account to pay from; the wallet must hold its key. Defaults to the private
         /// account from `names setup`, which hides the payer too; a public one is seen
@@ -573,7 +573,7 @@ enum Command {
     Bridge {
         /// How much to move, in base units, above zero (`1,000` may group it); whole notes
         /// are used, so it may be a little more.
-        #[arg(value_parser = tokens::parse_amount, allow_negative_numbers = true)]
+        #[arg(value_parser = tokens::parse_amount, allow_hyphen_values = true)]
         amount: u128,
         /// The LEZ public account to credit, such as `Public/<id>`.
         #[arg(long)]
@@ -754,9 +754,10 @@ fn parse_account(input: &str) -> Result<AccountId, String> {
 }
 
 /// `names setup --shield`: an amount as every other amount is written (`5,000,000`), or 0
-/// to only make the accounts.
+/// (`00` too) to only make the accounts.
 fn parse_shield(input: &str) -> Result<u128, String> {
-    if input.trim() == "0" {
+    let typed = input.trim();
+    if !typed.is_empty() && typed.bytes().all(|b| b == b'0') {
         return Ok(0);
     }
     tokens::parse_amount(input)
@@ -2868,7 +2869,7 @@ fn bridge(
 ) -> Result<()> {
     let node = node.trim_end_matches('/');
     if amount == 0 {
-        bail!("the amount must be more than 0");
+        bail!("Enter an amount above 0.");
     }
     let to = bridge_destination(to, programs).map_err(|error| anyhow!(error))?;
     let from_key = from_key.trim().to_lowercase();
@@ -2957,6 +2958,29 @@ fn not_included(hash: HashType, waited: Option<u64>) -> String {
     format!(
         "{hash} was not applied: {when}. Most often another change from the same account was sent at the same time and took its place (then it was dropped and charged nothing). Check with `names resolve` before trying again: a slow chain may still apply it."
     )
+}
+
+/// `names wallet` arguments with every `--amount` read as every other amount is
+/// (`tokens::parse_amount`) and written plainly: `1,000` is sent as 1000; 0, `-5` and
+/// `1,5` are refused before anything is sent (wallet-auth-transfer-send-amount-not-unified:
+/// `--amount 0` posted a transfer that moved nothing and still paid its fee).
+fn wallet_amounts(mut args: Vec<String>) -> Result<Vec<String>, String> {
+    let mut at = 0;
+    while at < args.len() {
+        if args[at] == "--" {
+            break;
+        }
+        if let Some(value) = args[at].strip_prefix("--amount=") {
+            args[at] = format!("--amount={}", tokens::parse_amount(value)?);
+        } else if args[at] == "--amount" {
+            if let Some(value) = args.get(at + 1) {
+                args[at + 1] = tokens::parse_amount(value)?.to_string();
+                at += 1;
+            }
+        }
+        at += 1;
+    }
+    Ok(args)
 }
 
 /// The public payer and the amount of `wallet auth-transfer send --from=Public/<id>
@@ -3189,6 +3213,8 @@ async fn main() -> Result<()> {
     let overrides = sequencer_overrides(&cli)?;
     match cli.command {
         Command::Wallet { args } => {
+            // Every --amount is read as every other amount, before anything is sent.
+            let args = wallet_amounts(args).map_err(|problem| anyhow!(problem))?;
             // Native-token transfers meter no execution gas, and the whole limit is
             // reserved while one runs, so keep the limit tiny for them.
             let mut overrides = overrides.unwrap_or_default();
@@ -3870,7 +3896,27 @@ mod inclusion_tests {
 
 #[cfg(test)]
 mod paid_tests {
-    use super::{native_balance_of, native_send_parts};
+    use super::{native_balance_of, native_send_parts, wallet_amounts};
+
+    /// wallet-auth-transfer-send-amount-not-unified: `--amount 0` posted a transfer and
+    /// paid its fee; `1,000` and `-5` got clap's raw errors.
+    #[test]
+    fn a_wallet_amount_is_read_as_every_amount() {
+        let args = |list: &[&str]| list.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>();
+        let send = |amount: &str| wallet_amounts(args(&["auth-transfer", "send", "--from", "Public/F", "--to", "Public/G", "--amount", amount]));
+        assert_eq!(send("1,000").unwrap()[7], "1000");
+        assert_eq!(send("0"), Err("Enter an amount above 0.".to_owned()));
+        assert_eq!(send("-5"), Err("-5 is negative. Enter an amount above 0.".to_owned()));
+        assert!(send("1,5").unwrap_err().contains("groups of three"));
+        assert_eq!(wallet_amounts(args(&["auth-transfer", "send", "--amount=1_000"])).unwrap()[2], "--amount=1000");
+        assert_eq!(wallet_amounts(args(&["auth-transfer", "send", "--amount=0"])), Err("Enter an amount above 0.".to_owned()));
+        assert_eq!(wallet_amounts(args(&["account", "list"])).unwrap(), args(&["account", "list"]));
+        // What follows a bare `--` is left to the wallet.
+        assert_eq!(wallet_amounts(args(&["x", "--", "--amount", "0"])).unwrap()[3], "0");
+        // The parsed form is what the fee and shortfall checks read.
+        let read = send("20,000").unwrap();
+        assert_eq!(native_send_parts(&read), Some(("F".to_owned(), 20_000)));
+    }
 
     /// jobs-report-no-fee-paid: the module's pay_account (`wallet auth-transfer send`)
     /// printed no fee, so its entries said fee None while the chain took 4088.
@@ -4011,10 +4057,10 @@ mod input_tests {
         assert_eq!(bridge_destination(&format!("Public/{someone}"), &[registry]).unwrap().to_string(), someone);
         // Nothing reached the network: the unreachable node and sequencer were never asked.
         let zero = bridge("http://127.0.0.1:9", "http://127.0.0.1:9", 0, &format!("Public/{someone}"), &[registry], &"66".repeat(32), 100_000, true);
-        assert_eq!(zero.unwrap_err().to_string(), "the amount must be more than 0");
+        assert_eq!(zero.unwrap_err().to_string(), "Enter an amount above 0.");
         let private = bridge("http://127.0.0.1:9", "http://127.0.0.1:9", 1_000, &format!("Private/{someone}"), &[registry], &"66".repeat(32), 100_000, true);
         assert_eq!(private.unwrap_err().to_string(), "the bridge credits a public account: give --to as Public/<id>");
-        assert_eq!(Cli::try_parse_from(["names", "bridge", "0", "--to", someone, "--from-key", "k"]).err().map(|e| e.to_string().contains("the amount must be more than 0")), Some(true));
+        assert_eq!(Cli::try_parse_from(["names", "bridge", "0", "--to", someone, "--from-key", "k"]).err().map(|e| e.to_string().contains("Enter an amount above 0.")), Some(true));
     }
 
     /// cli-message-wording-bundle: clap's raw errors for `pay hopper -5`, `pay Public/<id>`,
@@ -4022,7 +4068,12 @@ mod input_tests {
     #[test]
     fn every_amount_reads_the_same_way_and_an_account_is_not_a_name() {
         let refused = |args: &[&str]| Cli::try_parse_from(args).err().map(|e| e.to_string()).unwrap_or_default();
-        assert!(refused(&["names", "pay", "hopper", "-5"]).contains("-5 is negative; the amount must be more than 0"), "{}", refused(&["names", "pay", "hopper", "-5"]));
+        assert!(refused(&["names", "pay", "hopper", "-5"]).contains("-5 is negative. Enter an amount above 0."), "{}", refused(&["names", "pay", "hopper", "-5"]));
+        // cli-wording-leftovers: `-1,000` and `setup --shield -5` were clap's "unexpected argument".
+        for args in [&["names", "pay", "hopper", "-1,000"][..], &["names", "setup", "--shield", "-5"], &["names", "bridge", "-1,000", "--to", "x", "--from-key", "k"]] {
+            let said = refused(args);
+            assert!(said.contains("is negative. Enter an amount above 0."), "{args:?}: {said}");
+        }
         let id = "Public/FNZ3fvu5mRwYEtr3Rf7fSbFJUKXKPFnAT1rSQkkDHyBE";
         assert!(refused(&["names", "pay", id, "100"]).contains("is an account, not a name; pay a public account with `names wallet auth-transfer send"), "{}", refused(&["names", "pay", id, "100"]));
         assert!(matches!(Cli::try_parse_from(["names", "bridge", "1,000", "--to", "x", "--from-key", "k"]).map(|cli| cli.command), Ok(Command::Bridge { amount: 1_000, .. })));

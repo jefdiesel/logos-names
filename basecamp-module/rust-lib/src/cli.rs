@@ -289,10 +289,7 @@ pub fn like_args(name: &str, post: &str, undo: bool) -> Result<Vec<String>, Stri
 /// `names pay`, privately from the CLI's private account.
 pub fn pay_args(name: &str, amount: &str) -> Result<Vec<String>, String> {
     let name = registry::parse_name(name)?;
-    let amount = ungrouped(amount).unwrap_or_default();
-    if !is_amount(&amount) {
-        return Err("enter a whole amount, such as 1000".to_owned());
-    }
+    let amount = amount_text(amount)?;
     Ok(vec!["pay".to_owned(), "--".to_owned(), name, amount])
 }
 
@@ -304,37 +301,53 @@ pub fn pay_from_public_args(setup: &Setup, name: &str, amount: &str) -> Result<V
     Ok(args)
 }
 
-/// A whole amount above zero, in decimal digits and nothing else.
-/// `text` without its digit grouping, if it is a whole number grouped the usual way:
-/// `1000`, `1,000` or `1_000`, never `1,5` (a decimal comma, which would pay ten times
-/// as much) or `,7`. Anything else is `None` (SC-2, A-2).
-pub fn ungrouped(text: &str) -> Option<String> {
-    let text = text.trim();
-    let groups: Vec<&str> = text.split([',', '_']).collect();
-    if groups.iter().any(|group| group.is_empty() || !group.bytes().all(|b| b.is_ascii_digit())) {
-        return None;
+/// Every amount a person types, read one way: a whole number above 0 that fits in 128
+/// bits, `,` or `_` only between groups of three digits (`1,000`), so `1,5` is refused,
+/// never read as 15 (SC-2). The words are the app's (logic.mjs `amountRead`) and the
+/// names CLI's (`tokens::parse_amount`); all three are tested against amounts.json.
+pub fn amount(text: &str) -> Result<u128, String> {
+    let typed = text.trim();
+    if typed.is_empty() {
+        return Err("Enter an amount, such as 1,000.".to_owned());
     }
-    // A first group starting with 0 (`0,001`, `00,001`) is no grouping either: refused like `1,5`.
-    let grouped = groups.len() == 1
-        || ((1..=3).contains(&groups[0].len()) && !groups[0].starts_with('0') && groups[1..].iter().all(|group| group.len() == 3));
-    grouped.then(|| groups.concat())
+    if typed.strip_prefix('-').is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit())) {
+        return Err(format!("{typed} is negative. Enter an amount above 0."));
+    }
+    if !typed.bytes().all(|b| b.is_ascii_digit() || b == b',' || b == b'_') || !typed.bytes().any(|b| b.is_ascii_digit()) {
+        return Err(format!("{typed} isn't a whole number. Enter digits only, such as 1000 or 1,000."));
+    }
+    let groups: Vec<&str> = typed.split([',', '_']).collect();
+    // A first group starting with 0 (`0,001`) is no thousands grouping either.
+    if groups.len() > 1 && !((1..=3).contains(&groups[0].len()) && !groups[0].starts_with('0') && groups[1..].iter().all(|group| group.len() == 3)) {
+        return Err(format!("{typed} isn't a whole number: commas go only between groups of three digits, such as 1,000."));
+    }
+    let digits = groups.concat();
+    let digits = digits.trim_start_matches('0');
+    if digits.is_empty() {
+        return Err("Enter an amount above 0.".to_owned());
+    }
+    digits.parse().map_err(|_| format!("{typed} is more than an amount can be."))
+}
+
+/// [`amount`] written plainly, as the CLI is given it: `1,000` is `1000`.
+pub fn amount_text(text: &str) -> Result<String, String> {
+    amount(text).map(|amount| amount.to_string())
 }
 
 #[cfg(test)]
 #[test]
-fn a_bridge_takes_amounts_grouped_as_every_other_amount_is() {
-    assert_eq!(bridge_amount("5,000").as_deref(), Ok("5000"));
-    assert_eq!(bridge_amount(" 5_000 ").as_deref(), Ok("5000"));
-    assert_eq!(bridge_amount("5000").as_deref(), Ok("5000"));
-    for refused in ["5,00", "0,001", "1,5", "0", ""] {
-        assert!(bridge_amount(refused).is_err(), "{refused}");
+fn every_amount_is_read_as_the_app_and_the_cli_read_it() {
+    let table: Value = serde_json::from_str(include_str!("amounts.json")).unwrap();
+    for case in table["accept"].as_array().unwrap() {
+        let (typed, want) = (case[0].as_str().unwrap(), case[1].as_str().unwrap());
+        assert_eq!(amount_text(typed).as_deref(), Ok(want), "{typed:?}");
+    }
+    for case in table["refuse"].as_array().unwrap() {
+        let (typed, want) = (case[0].as_str().unwrap(), case[1].as_str().unwrap());
+        assert_eq!(amount(typed), Err(want.to_owned()), "{typed:?}");
     }
     let args = bridge_args("5,000", "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", &"39".repeat(32), "", true).unwrap();
     assert_eq!(args.last().map(String::as_str), Some("5000"));
-}
-
-pub fn is_amount(amount: &str) -> bool {
-    !amount.is_empty() && amount.len() <= 30 && amount.bytes().all(|b| b.is_ascii_digit()) && !amount.bytes().all(|b| b == b'0')
 }
 
 // ── Bridging from the Logos Blockchain ──────────────────────────────────
@@ -380,7 +393,7 @@ pub fn bridge_node(node: &str) -> Result<String, String> {
 /// credited to the public account `to`. Without `send` the CLI only shows the
 /// plan; with it, `--yes`, and the deposit is made and cannot be undone.
 pub fn bridge_args(amount: &str, to: &str, from_key: &str, node: &str, send: bool) -> Result<Vec<String>, String> {
-    let amount = bridge_amount(amount)?;
+    let amount = amount_text(amount)?;
     let to = registry::account_text(&registry::parse_account(to)?);
     let mut args = vec![
         "bridge".to_owned(),
@@ -393,16 +406,6 @@ pub fn bridge_args(amount: &str, to: &str, from_key: &str, node: &str, send: boo
     }
     args.extend(["--".to_owned(), amount]);
     Ok(args)
-}
-
-/// An amount to bridge, above zero, in the one grammar every amount takes (`ungrouped`):
-/// `5000` or `5,000`, never `5,00` (cli-bridge-refuses-grouped-amount).
-pub fn bridge_amount(amount: &str) -> Result<String, String> {
-    let amount = ungrouped(amount).unwrap_or_default();
-    if !is_amount(&amount) {
-        return Err("enter a whole amount, such as 1000".to_owned());
-    }
-    Ok(amount)
 }
 
 /// The CLI wallet's default public account, as `names setup` saved it in the
@@ -534,7 +537,7 @@ pub fn run_bridge_to(setup: &Setup, amount: &str, from_key: &str, to: &str, node
     setup.wallet_ready()?;
     // Checked before the wallet is read, so bad input fails the same way every time.
     let node = bridge_node(node)?;
-    bridge_amount(amount)?;
+    self::amount(amount)?;
     bridge_key(from_key)?;
     let to = match bridge_to(to)? {
         Some(to) => to,
@@ -566,10 +569,15 @@ pub const DEFAULT_SHIELD: &str = "50000000";
 /// amount above zero and that much in the public account, that much moved to
 /// the private account. Empty is the CLI's default, 50,000,000.
 pub fn setup_args(shield: &str) -> Result<Vec<String>, String> {
-    let shield = if shield.trim().is_empty() { DEFAULT_SHIELD.to_owned() } else { ungrouped(shield).unwrap_or_default() };
-    if shield != "0" && !is_amount(&shield) {
-        return Err("enter a whole amount, such as 50000000".to_owned());
-    }
+    let typed = shield.trim();
+    // 0 (or 00) only makes the accounts; anything else is an amount like every other.
+    let shield = if typed.is_empty() {
+        DEFAULT_SHIELD.to_owned()
+    } else if typed.bytes().all(|b| b == b'0') {
+        "0".to_owned()
+    } else {
+        amount_text(typed)?
+    };
     Ok(vec!["setup".to_owned(), format!("--shield={shield}")])
 }
 
@@ -772,10 +780,7 @@ pub fn pay_account_args(setup: &Setup, to: &str, amount: &str, from_private: boo
     let PayTo::Account(to) = pay_to(to)? else {
         return Err("that is a name; pay it as a name".to_owned());
     };
-    let amount = ungrouped(amount).unwrap_or_default();
-    if !is_amount(&amount) {
-        return Err("enter a whole amount, such as 1000".to_owned());
-    }
+    let amount = amount_text(amount)?;
     let from = if from_private {
         format!("Private/{}", default_private(setup)?)
     } else {
@@ -812,19 +817,6 @@ const MAX_TOKEN_ROWS: usize = 256;
 /// with another.
 fn token_program_arg(program: &registry::AccountId) -> String {
     format!("--token-program={}", registry::account_text(program))
-}
-
-/// A token amount in base units: a whole number above zero that fits in 128
-/// bits (`,` and `_` may group digits), written plainly.
-pub fn token_amount(amount: &str) -> Result<String, String> {
-    let Some(digits) = ungrouped(amount) else {
-        return Err("enter a whole amount of the token's base units, such as 1000 (commas only between groups of three digits)".to_owned());
-    };
-    match digits.parse::<u128>() {
-        Ok(0) => Err("enter an amount above zero".to_owned()),
-        Ok(amount) => Ok(amount.to_string()),
-        Err(_) => Err("that is more than a token amount can be (2^128 - 1)".to_owned()),
-    }
 }
 
 /// A token's definition, written as its account ID.
@@ -868,7 +860,7 @@ pub fn token_send_args(
     to_public: bool,
 ) -> Result<Vec<String>, String> {
     let definition = token_definition(definition)?;
-    let amount = token_amount(amount)?;
+    let amount = amount_text(amount)?;
     let to = token_to(to)?;
     let mut args = vec![
         token_program_arg(program),
@@ -2407,10 +2399,10 @@ mod tests {
         // A decimal comma or a stray one is refused, not read as more (SC-2, A-2).
         for bad in ["1,5", ",7", "1,,000", "1000,", "12,34", "1,0000", "0,001", "0,100", "00,001", "0_001"] {
             assert!(pay_args("ada", bad).is_err(), "{bad}");
-            assert!(token_amount(bad).is_err(), "{bad}");
+            assert!(amount_text(bad).is_err(), "{bad}");
         }
         assert_eq!(pay_args("ada", "12,345,678").unwrap()[3], "12345678");
-        assert_eq!(token_amount("1_000").unwrap(), "1000");
+        assert_eq!(amount_text("1_000").unwrap(), "1000");
     }
 
     /// transfer-case-mangled-id-loses-name: a lower-cased ID that still decoded to 32
@@ -2520,7 +2512,7 @@ mod tests {
         );
         // Grouped like every other amount (cli-bridge-refuses-grouped-amount): 1,000 is 1000, 1,5 is refused.
         assert_eq!(bridge_args("1,000", PUBLIC, KEY, "", false).unwrap().last().map(String::as_str), Some("1000"));
-        for amount in ["", "0", "000", "-5", "1e9", "1,5", "1.5", "5 5", "--yes", &"9".repeat(31)] {
+        for amount in ["", "0", "000", "-5", "1e9", "1,5", "1.5", "5 5", "--yes", &"9".repeat(40)] {
             assert!(bridge_args(amount, PUBLIC, KEY, "", false).is_err(), "{amount:?}");
         }
         for key in ["", &KEY[1..], &format!("{KEY}0"), &KEY.replace('a', "g"), &format!("{} ", &KEY[..63]), "--yes", &format!("../{}", &KEY[3..])] {
@@ -2819,7 +2811,9 @@ mod tests {
         assert_eq!(setup_args("0").unwrap(), strings(&["setup", "--shield=0"]));
         assert_eq!(setup_args("").unwrap(), strings(&["setup", "--shield=50000000"]));
         assert_eq!(setup_args(" 7,000,000 ").unwrap(), strings(&["setup", "--shield=7000000"]));
-        for bad in ["-1", "1.5", "5 5", "--yes", "1e6", "00"] {
+        // cli-wording-leftovers: `00` is 0, as `0` is.
+        assert_eq!(setup_args("00").unwrap(), strings(&["setup", "--shield=0"]));
+        for bad in ["-1", "1.5", "5 5", "--yes", "1e6", "0,5"] {
             assert!(setup_args(bad).is_err(), "{bad}");
         }
     }
@@ -3022,11 +3016,11 @@ mod tests {
 
     #[test]
     fn token_amounts_reach_128_bits_and_no_further() {
-        assert_eq!(token_amount(" 1,000_000 "), Ok("1000000".to_owned()));
-        assert_eq!(token_amount(&u128::MAX.to_string()), Ok(u128::MAX.to_string()));
-        assert_eq!(token_amount("007"), Ok("7".to_owned()));
+        assert_eq!(amount_text(" 1,000_000 "), Ok("1000000".to_owned()));
+        assert_eq!(amount_text(&u128::MAX.to_string()), Ok(u128::MAX.to_string()));
+        assert_eq!(amount_text("007"), Ok("7".to_owned()));
         for bad in ["", "0", "000", "-1", "1.5", "1e3", "340282366920938463463374607431768211456", "--5", "five"] {
-            assert!(token_amount(bad).is_err(), "{bad}");
+            assert!(amount_text(bad).is_err(), "{bad}");
         }
     }
 

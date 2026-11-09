@@ -309,29 +309,33 @@ pub fn parse_from(input: &str) -> Result<Origin, String> {
     }
 }
 
-/// An amount in base units: a positive whole number that fits in 128 bits. `_` and `,`
-/// may group digits in threes (`1,000`); `1,5` is refused, not read as 15 (SC-2).
+/// Every amount a person types, read one way: a whole number above 0 that fits in 128
+/// bits, `,` or `_` only between groups of three digits (`1,000`), so `1,5` is refused,
+/// never read as 15 (SC-2). The words are the Basecamp app's (logic.mjs `amountRead`)
+/// and the module's (`cli::amount`); all three are tested against the same table
+/// (basecamp-module/rust-lib/src/amounts.json).
 pub fn parse_amount(input: &str) -> Result<u128, String> {
-    let text = input.trim();
-    if text.starts_with('-') && text.len() > 1 {
-        return Err(format!("{text} is negative; the amount must be more than 0"));
+    let typed = input.trim();
+    if typed.is_empty() {
+        return Err("Enter an amount, such as 1,000.".to_owned());
     }
-    let groups: Vec<&str> = text.split([',', '_']).collect();
-    if groups.iter().any(|group| group.is_empty() || !group.chars().all(|c| c.is_ascii_digit())) {
-        return Err(format!("{input} is not a whole number of base units"));
+    if typed.strip_prefix('-').is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit())) {
+        return Err(format!("{typed} is negative. Enter an amount above 0."));
     }
+    if !typed.bytes().all(|b| b.is_ascii_digit() || b == b',' || b == b'_') || !typed.bytes().any(|b| b.is_ascii_digit()) {
+        return Err(format!("{typed} isn't a whole number. Enter digits only, such as 1000 or 1,000."));
+    }
+    let groups: Vec<&str> = typed.split([',', '_']).collect();
     // A first group starting with 0 (`0,001`) is no thousands grouping either.
     if groups.len() > 1 && !((1..=3).contains(&groups[0].len()) && !groups[0].starts_with('0') && groups[1..].iter().all(|group| group.len() == 3)) {
-        return Err(format!("{input} isn't a whole number: commas go only between groups of three digits, such as 1,000"));
+        return Err(format!("{typed} isn't a whole number: commas go only between groups of three digits, such as 1,000."));
     }
     let digits = groups.concat();
-    match digits.parse::<u128>() {
-        Ok(0) => Err("the amount must be more than 0".to_owned()),
-        Ok(amount) => Ok(amount),
-        Err(_) => Err(format!(
-            "{input} is more than a token amount can be (2^128 - 1)"
-        )),
+    let digits = digits.trim_start_matches('0');
+    if digits.is_empty() {
+        return Err("Enter an amount above 0.".to_owned());
     }
+    digits.parse().map_err(|_| format!("{typed} is more than an amount can be."))
 }
 
 /// A sender holding `balance` can send `amount`.
@@ -1460,6 +1464,23 @@ mod tests {
             parse_amount("340282366920938463463374607431768211456").is_err(),
             "2^128 overflows"
         );
+    }
+
+    /// The app and the Basecamp module read every amount from this same table, so the
+    /// CLI, the module and every field in the app accept and refuse the same text with
+    /// the same words (amount-comma-stripped-in-bridge-token-send).
+    #[test]
+    fn every_amount_is_read_as_the_app_and_the_module_read_it() {
+        let table: serde_json::Value =
+            serde_json::from_str(include_str!("../../basecamp-module/rust-lib/src/amounts.json")).unwrap();
+        for case in table["accept"].as_array().unwrap() {
+            let (typed, want) = (case[0].as_str().unwrap(), case[1].as_str().unwrap());
+            assert_eq!(parse_amount(typed).map(|amount| amount.to_string()).as_deref(), Ok(want), "{typed:?}");
+        }
+        for case in table["refuse"].as_array().unwrap() {
+            let (typed, want) = (case[0].as_str().unwrap(), case[1].as_str().unwrap());
+            assert_eq!(parse_amount(typed), Err(want.to_owned()), "{typed:?}");
+        }
     }
 
     #[test]

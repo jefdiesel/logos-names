@@ -2690,7 +2690,7 @@ impl NamesModule for Names {
         }
         reply((|| {
             // Everything is checked before anything is remembered or run.
-            cli::bridge_amount(&amount)?;
+            cli::amount(&amount)?;
             let key = cli::bridge_key(&from_key)?;
             let node = cli::bridge_node(&node)?;
             let setup = self.cli_setup()?;
@@ -2708,7 +2708,7 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         reply((|| {
-            cli::bridge_amount(&amount)?;
+            cli::amount(&amount)?;
             let key = cli::bridge_key(&from_key)?;
             let node = cli::bridge_node(&node)?;
             // The destination too, before anything is remembered: a refused call leaves
@@ -2820,10 +2820,11 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         let out = reply((|| {
-            let command = cli::setup_args(&amount)?;
-            if command[1] == "--shield=0" {
-                return Err("enter an amount above zero".to_owned());
+            // An amount like every other, never 0; empty is setup's default.
+            if !amount.trim().is_empty() {
+                cli::amount(&amount)?;
             }
+            let command = cli::setup_args(&amount)?;
             self.wallet_job("shield", |setup| {
                 cli::default_public(setup)?;
                 Ok(command)
@@ -2903,9 +2904,7 @@ impl NamesModule for Names {
             let cli::PayTo::Account(to) = cli::pay_to(&account)? else {
                 return Err("that is a name; pay it as a name".to_owned());
             };
-            if !cli::is_amount(&cli::ungrouped(&amount).unwrap_or_default()) {
-                return Err("enter a whole amount, such as 1000".to_owned());
-            }
+            cli::amount(&amount)?;
             // A program's account and the empty one are refused as cli_bridge_to and
             // cli_transfer refuse them (pay-account-accepts-program-account).
             self.not_a_sink(&registry::parse_account(&to)?, "take a payment")?;
@@ -2917,7 +2916,7 @@ impl NamesModule for Names {
         let from = self.cli_setup().ok().and_then(|setup| {
             if from_private { cli::default_private(&setup).ok().map(|id| format!("Private/{id}")) } else { cli::default_public(&setup).ok().map(|id| format!("Public/{id}")) }
         });
-        log_started(&out, json!({ "kind": "pay_account", "chain": "lez", "from": from, "to": account.trim(), "amount": cli::ungrouped(&amount), "private": from_private }));
+        log_started(&out, json!({ "kind": "pay_account", "chain": "lez", "from": from, "to": account.trim(), "amount": cli::amount_text(&amount).ok(), "private": from_private }));
         out
     }
 
@@ -3160,7 +3159,7 @@ impl NamesModule for Names {
         };
         let out = self.cli_job(&name, "pay", |_, _, _| Ok((command, None, Value::Null)));
         let from = self.cli_setup().ok().and_then(|setup| cli::default_private(&setup).ok()).map(|id| format!("Private/{id}"));
-        log_started(&out, json!({ "kind": "pay", "chain": "lez", "from": from, "name": registry::normalize_name(&name), "amount": cli::ungrouped(&amount) }));
+        log_started(&out, json!({ "kind": "pay", "chain": "lez", "from": from, "name": registry::normalize_name(&name), "amount": cli::amount_text(&amount).ok() }));
         out
     }
 
@@ -3414,7 +3413,7 @@ impl NamesModule for Names {
         let from = self.cli_setup().ok().and_then(|setup| {
             if from_private { cli::default_private(&setup).ok().map(|id| format!("Private/{id}")) } else { cli::default_public(&setup).ok().map(|id| format!("Public/{id}")) }
         });
-        log_started(&out, json!({ "kind": "token_send", "chain": "lez", "from": from, "to": to.trim(), "amount": cli::ungrouped(&amount), "token": definition.trim() }));
+        log_started(&out, json!({ "kind": "token_send", "chain": "lez", "from": from, "to": to.trim(), "amount": cli::amount_text(&amount).ok(), "token": definition.trim() }));
         out
     }
 
@@ -6119,7 +6118,7 @@ mod tests {
         // No accounts yet: refused before anything runs.
         assert!(parsed(&names.cli_shield(String::new()))["error"].as_str().unwrap().contains("create your wallet"));
         std::fs::write(wallet.join("names.json"), format!("{{\"public\":\"{public}\",\"private\":\"yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z\"}}")).unwrap();
-        assert!(parsed(&names.cli_shield("0".into()))["error"].as_str().unwrap().contains("above zero"));
+        assert_eq!(parsed(&names.cli_shield("0".into()))["error"], "Enter an amount above 0.");
         let started = parsed(&names.cli_shield(String::new()));
         assert_eq!(started["value"]["kind"], "shield", "{started}");
         let id = started["value"]["id"].as_str().unwrap().to_owned();
