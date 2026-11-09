@@ -37,10 +37,12 @@ mod avatar;
 mod chain;
 mod chain_keys;
 mod chain_fee;
+mod chain_inscribe;
 mod changes;
 mod cli;
 mod page_view;
 mod provider;
+mod provider_inscribe;
 mod spell;
 mod registry;
 mod shortlist;
@@ -845,6 +847,48 @@ pub trait NamesModule: Send + 'static {
 
     /// Takes back all access `app` was given. Names app only.
     fn revoke_app(&mut self, app: String) -> String;
+
+    /// Inscribes a testimonial (`{"submission": "lp-0022:names-wallet", "text"}`, text
+    /// 1-1024 bytes) on the Logos Blockchain from the node key `from_key`, which pays the
+    /// fee. Each key has its own Ed25519 inscription key, made here once and kept 0600,
+    /// and its own channel (`sha256("lp-0022:testimonial:" || signer)`), which the first
+    /// inscription creates and later ones extend. Without `send` the plan `{from, balance,
+    /// signer, channel, parent, first, submission, text, bytes, msg_id, fee_estimate}`
+    /// (the fee the node's funding asks now). A plan moves nothing, but it does hold
+    /// notes: the node keeps the notes that funding uses for it until they are spent or
+    /// 10 more blocks are final (31.6 s measured on a solo node). The send of the same
+    /// inscription uses that funding; any other send, split or inscription from the key
+    /// meanwhile is refused as held (not short), and a plan for another key holds that
+    /// key's notes too, so price only the key the person picks. With `send` the
+    /// inscription is signed and sent (it cannot be undone) and `hash` and `fee` (what
+    /// it pays) are set; `chain_tx` follows it. Names app only. Through logosctl, write
+    /// a text or key that is only digits, or `true`/`false`, as `str:2026`:
+    /// logosctl 0.3.2 sends it as a number or boolean otherwise, and the host refuses the
+    /// call ("dispatch_failed: expected string") before names runs.
+    fn chain_inscribe(&mut self, from_key: String, text: String, send: bool) -> String;
+
+    /// Any app: asks for `text` (a testimonial, 1-1024 bytes) to be inscribed on the
+    /// Logos Blockchain. The person picks which of the node's chain accounts inscribes
+    /// it and pays its fee, and approves it in the Names app. No LEZ access is needed
+    /// first: the request names no account. Answers as `request_status` does, kind
+    /// `inscribe`; once done, `tx` is the transaction's hash and `account` the chain key.
+    /// Through logosctl, a text of only digits or `true`/`false` is written
+    /// `str:<text>` (see `chain_inscribe`).
+    fn propose_inscription(&mut self, text: String) -> String;
+
+    /// The inscription requests waiting for the person, oldest first: `[{id, app, text,
+    /// says, submission, publisher, choices: [{key, balance}]}]`, the choices the keys
+    /// the node's wallet holds. When the node can't list them (stopped, say), each request
+    /// is still listed, with `choices` empty and `node` saying why, so it can be rejected. The fee for a choice is `chain_inscribe(key, text,
+    /// false)`'s `fee_estimate`, which holds that key's notes for a while (see
+    /// `chain_inscribe`): ask it for the chosen key, not every choice. Names app only.
+    fn pending_inscriptions(&mut self) -> String;
+
+    /// Approves inscription request `request_id` with the node key `from_key`: it is
+    /// inscribed (`chain_inscribe`) and the request is `done` with `tx`. Refused before
+    /// anything is sent (a key the node doesn't hold, too little for the fee), the
+    /// request stays pending. Names app only.
+    fn approve_inscription(&mut self, request_id: String, from_key: String) -> String;
 
     /// Called once the module is wired to the host.
     fn on_context_ready(&mut self, _ctx: &RustModuleContext) {}
@@ -4143,6 +4187,31 @@ impl NamesModule for Names {
         store.save();
         reply(Ok(json!({ "revoked": revoked })))
     }
+
+    fn chain_inscribe(&mut self, from_key: String, text: String, send: bool) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(chain_inscribe::run(&from_key, &text, send))
+    }
+
+    fn propose_inscription(&mut self, text: String) -> String {
+        reply(self.inscription_proposed(&text))
+    }
+
+    fn pending_inscriptions(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(self.inscriptions_pending())
+    }
+
+    fn approve_inscription(&mut self, request_id: String, from_key: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(self.inscription_approved(request_id.trim(), &from_key))
+    }
 }
 
 // ── Wallet Provider SDK: the parts behind the methods ───────────────────
@@ -4737,6 +4806,10 @@ fn in_flight_refusal(error: String, from: &str, notes: &Map<String, Value>) -> S
     let short = error == chain::problem("wallet_transfer_funds", "not enough");
     if short && chain_notes_in_use(from).iter().any(|note| notes.contains_key(note)) {
         return IN_FLIGHT.to_owned();
+    }
+    // Held by the node for an inscription priced here (chain_inscribe.rs), not short.
+    if short && chain_inscribe::plan_holds_notes_of(from, notes) {
+        return chain_inscribe::HELD.to_owned();
     }
     error
 }

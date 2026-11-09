@@ -56,6 +56,8 @@ pub const SIGNER: &str = "signer";
 pub const CONNECT: &str = "connect";
 pub const TRANSFER: &str = "transfer";
 pub const CALL: &str = "call";
+/// A testimonial inscribed on the Logos Blockchain (LP-0022, provider_inscribe.rs).
+pub const INSCRIBE: &str = "inscribe";
 
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -474,7 +476,7 @@ impl Store {
             .filter(|request| {
                 ok_text(&request["id"], 64)
                     && request["app"].as_str().is_some_and(|app| app_name(app).is_ok())
-                    && matches!(request["kind"].as_str(), Some(CONNECT | TRANSFER | CALL))
+                    && matches!(request["kind"].as_str(), Some(CONNECT | TRANSFER | CALL | INSCRIBE))
                     && ok_text(&request["state"], 16)
                     && request["created"].is_u64()
                     && request["expires"].is_u64()
@@ -638,6 +640,11 @@ pub fn app_view(request: &Value) -> Value {
             }
         }
         Some(CALL) => view["program"] = request["program"].clone(),
+        Some(INSCRIBE) => {
+            for key in ["chain", "says", "submission", "text", "fee", "channel", "msg_id"] {
+                view[key] = request[key].clone();
+            }
+        }
         _ => {}
     }
     view
