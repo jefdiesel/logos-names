@@ -261,12 +261,21 @@ pub fn bridges_arrived(entries: &[Value], lez_now: &std::collections::HashMap<St
     bridge_updates(entries, lez_now).into_iter().filter(|(_, fields)| fields["state"] == "arrived").map(|(id, _)| id).collect()
 }
 
-/// What settling the bridges in a block among `entries` changes, `(id, fields)`: each that
-/// arrived becomes `arrived`, and the next one still waiting for that account gets the
-/// mark it is followed from moved up past the credits just used (`to_before`). Its own
-/// mark was read when it was sent, before those earlier bridges were credited; judged
-/// against it alone, the earlier bridge's credit was taken for its own
-/// (false-arrival-second-bridge-regressed).
+/// What settling the bridges in a block among `entries` changes, `(id, fields)`. LEZ credits
+/// a deposit whole, so a bridge arrives only on a credit of exactly its amount: the account
+/// holds exactly what it did before the first followed bridge was sent (`to_before`), plus
+/// what the logged entries settled since moved in or out, plus the amounts of the bridges
+/// up to this one (the bridges arrive in the order they were sent).
+///
+/// A credit larger than the amounts is never taken for them: a 700,000 payment from
+/// elsewhere marked a 500,001 bridge arrived (single-bridge-false-arrival-on-foreign-credit-at-least-amount).
+/// This reverses the whole-sum rule aa94d3b kept ("all of them once the account holds at
+/// least what they bring"): a bridge whose credit is hidden by other unlogged money now
+/// waits rather than claim arrival. Several bridges matched by one rise can't be told from
+/// one payment of their total, so they arrive with `maybe` (the History hedges them).
+/// Once some arrive, the next one waiting is followed from what the account holds now
+/// less what the logged entries moved since it was sent (`to_before`), if that is more
+/// than its own mark (false-arrival-second-bridge-regressed).
 pub fn bridge_updates(entries: &[Value], lez_now: &std::collections::HashMap<String, u128>) -> Vec<(String, Value)> {
     let mut pending: std::collections::BTreeMap<&str, Vec<&Value>> = std::collections::BTreeMap::new();
     for entry in entries {
@@ -276,15 +285,13 @@ pub fn bridge_updates(entries: &[Value], lez_now: &std::collections::HashMap<Str
             }
         }
     }
+    let amount = |bridge: &Value| i128::try_from(number(&bridge["amount"]).unwrap_or(0)).unwrap_or(i128::MAX);
     let mut updates = Vec::new();
     for (to, mut list) in pending {
         let Some(now) = lez_now.get(to).and_then(|now| i128::try_from(*now).ok()) else { continue };
         list.sort_by_key(|entry| (entry["at"].as_u64().unwrap_or(0), entry["id"].as_str().unwrap_or_default().to_owned()));
-        // Followed from the first that says what the account held; one that doesn't can't be.
-        let Some(start) = list.iter().position(|entry| number(&entry["to_before"]).is_some()) else { continue };
-        let since = list[start]["at"].as_u64().unwrap_or(0);
         // What the logged entries settled from `since` (and before `until`) moved in or out of `to`.
-        let moved_between = |until: u64| -> i128 {
+        let moved_between = |since: u64, until: u64| -> i128 {
             entries
                 .iter()
                 .filter(|entry| entry["kind"] != "bridge" && (since..until).contains(&entry["at"].as_u64().unwrap_or(0)))
@@ -292,35 +299,51 @@ pub fn bridge_updates(entries: &[Value], lez_now: &std::collections::HashMap<Str
                 .map(|entry| effect(entry, to).0)
                 .sum()
         };
-        let moved = moved_between(u64::MAX);
-        let base = i128::try_from(number(&list[start]["to_before"]).unwrap_or(0)).unwrap_or(i128::MAX);
-        let mut needed = base.saturating_add(moved);
-        let thresholds: Vec<i128> = list[start..]
-            .iter()
-            .map(|bridge| {
-                needed = needed.saturating_add(i128::try_from(number(&bridge["amount"]).unwrap_or(0)).unwrap_or(i128::MAX));
-                needed
-            })
-            .collect();
-        // All of them, once the account holds at least what they all bring; short of
-        // that only the first few whose credits it holds exactly (LEZ credits a deposit
-        // whole), so a credit from elsewhere is never taken for a bridge's.
-        let count = if thresholds.last().is_some_and(|last| now >= *last) {
-            thresholds.len()
-        } else {
-            thresholds.iter().rposition(|needed| now == *needed).map_or(0, |at| at + 1)
-        };
-        updates.extend(list[start..start + count].iter().filter_map(|bridge| Some((bridge["id"].as_str()?.to_owned(), json!({ "state": "arrived" })))));
-        // The next one waiting is followed from the mark the arrived ones reached: what the
-        // account held when the first was sent, what moved before the next was sent, and the
-        // credits just used. Its own mark may already hold some of them (an earlier credit
-        // that landed before it was sent but was seen only now), so the larger of the two.
-        if let (true, Some(next)) = (count > 0, list.get(start + count)) {
-            let used: i128 = list[start..start + count].iter().map(|bridge| i128::try_from(number(&bridge["amount"]).unwrap_or(0)).unwrap_or(i128::MAX)).sum();
-            let reached = base.saturating_add(moved_between(next["at"].as_u64().unwrap_or(0))).saturating_add(used);
+        let mut arrived: Vec<usize> = Vec::new();
+        let mut maybe = false;
+        // By the mark: the first few whose credits the account holds exactly.
+        if let Some(start) = list.iter().position(|entry| number(&entry["to_before"]).is_some()) {
+            let since = list[start]["at"].as_u64().unwrap_or(0);
+            let base = i128::try_from(number(&list[start]["to_before"]).unwrap_or(0)).unwrap_or(i128::MAX);
+            let mut needed = base.saturating_add(moved_between(since, u64::MAX));
+            let thresholds: Vec<i128> = list[start..]
+                .iter()
+                .map(|bridge| {
+                    needed = needed.saturating_add(amount(bridge));
+                    needed
+                })
+                .collect();
+            if let Some(at) = thresholds.iter().rposition(|needed| now == *needed) {
+                arrived.extend(start..=start + at);
+                maybe |= at > 0;
+            }
+        }
+        for at in &arrived {
+            if let Some(id) = list[*at]["id"].as_str() {
+                let fields = if maybe { json!({ "state": "arrived", "maybe": true }) } else { json!({ "state": "arrived" }) };
+                updates.push((id.to_owned(), fields));
+            }
+        }
+        let waiting: Vec<&Value> = list.iter().enumerate().filter(|(at, _)| !arrived.contains(at)).map(|(_, bridge)| *bridge).collect();
+        // The next one waiting, after some arrived: followed from what the account holds now.
+        let mut next_mark = None;
+        if let (false, Some(next)) = (arrived.is_empty(), waiting.first()) {
+            let reached = now - moved_between(next["at"].as_u64().unwrap_or(0), u64::MAX);
             let own = number(&next["to_before"]).and_then(|own| i128::try_from(own).ok());
-            if let (Some(id), true) = (next["id"].as_str(), own.is_none_or(|own| own < reached)) {
-                updates.push((id.to_owned(), json!({ "to_before": reached.max(0).to_string(), "followed": true })));
+            if own.is_none_or(|own| own < reached) {
+                next_mark = Some(reached.max(0).to_string());
+            }
+        }
+        // The next one waiting gets its new mark.
+        for (index, bridge) in waiting.iter().enumerate() {
+            let Some(id) = bridge["id"].as_str() else { continue };
+            let mut fields = serde_json::Map::new();
+            if let (0, Some(mark)) = (index, &next_mark) {
+                fields.insert("to_before".to_owned(), json!(mark));
+                fields.insert("followed".to_owned(), json!(true));
+            }
+            if !fields.is_empty() {
+                updates.push((id.to_owned(), Value::Object(fields)));
             }
         }
     }
@@ -551,7 +574,9 @@ mod tests {
         assert_eq!(bridges_arrived(&entries, &now(3_000_000)), ["1-bridge"]);
         assert_eq!(bridges_arrived(&entries, &now(5_000_000)), ["1-bridge", "2-bridge"]);
         assert_eq!(bridges_arrived(&entries, &now(5_700_000)).len(), 3);
-        assert_eq!(bridges_arrived(&entries, &now(9_000_000)).len(), 3, "all of them once it holds at least what they bring");
+        // More than they all bring is not their credits (single-bridge-false-arrival-on-foreign-credit-at-least-amount;
+        // this reverses aa94d3b's "all of them once it holds at least what they bring").
+        assert!(bridges_arrived(&entries, &now(9_000_000)).is_empty(), "more than all of them bring");
         // br/f2: bridges of 700,000, 3,000,000 and 2,000,000 and one credit of 3,000,000 from elsewhere: none.
         let f2 = vec![bridge(1, "700000"), bridge(2, "3000000"), bridge(3, "2000000")];
         assert!(bridges_arrived(&f2, &now(3_000_000)).is_empty());
@@ -630,8 +655,49 @@ mod tests {
             json!({ "id": "2-bridge", "at": 2, "kind": "bridge", "to": "Public/U", "amount": "2000000", "to_before": "3000000", "state": "in_block" }),
         ];
         let held = std::collections::HashMap::from([("Public/U".to_owned(), 3_000_000_u128)]);
-        assert_eq!(bridge_updates(&entries, &held), [("1-bridge".to_owned(), json!({ "state": "arrived" }))]);
+        let updates = bridge_updates(&entries, &held);
+        assert_eq!(updates[0], ("1-bridge".to_owned(), json!({ "state": "arrived" })));
+        assert!(updates[1..].iter().all(|(id, fields)| id == "2-bridge" && fields.get("to_before").is_none() && fields.get("state").is_none()), "{updates:?}");
         let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// Settles `entries` the way the module does on each balance read: every update applied.
+    fn poll(entries: &mut [Value], to: &str, held: u128) {
+        let now = std::collections::HashMap::from([(to.to_owned(), held)]);
+        for (id, fields) in bridge_updates(entries, &now) {
+            let entry = entries.iter_mut().find(|entry| entry["id"] == id.as_str()).expect("an entry");
+            for (key, value) in fields.as_object().unwrap() {
+                entry[key] = value.clone();
+            }
+        }
+    }
+
+    fn states(entries: &[Value]) -> Vec<(String, bool)> {
+        entries.iter().filter(|e| e["kind"] == "bridge").map(|e| (e["state"].as_str().unwrap().to_owned(), e["maybe"] == true)).collect()
+    }
+
+    fn bridge_to(at: u64, to: &str, amount: &str, to_before: Option<&str>) -> Value {
+        json!({ "id": format!("{at}-bridge"), "at": at, "kind": "bridge", "chain": "logos", "to": to, "amount": amount, "to_before": to_before, "state": "in_block" })
+    }
+
+    /// single-bridge-false-arrival-on-foreign-credit-at-least-amount (S8, S7): one payment
+    /// of 700,000 from elsewhere marked a 500,001 bridge arrived; one of 1,200,006 marked three.
+    #[test]
+    fn a_credit_from_elsewhere_is_not_a_bridges_arrival() {
+        let arrived = |held: &[u128], bridges: Vec<Value>| {
+            let mut entries = bridges;
+            for held in held {
+                poll(&mut entries, "Public/T", *held);
+            }
+            states(&entries)
+        };
+        // S8: 0, then a payment of 700,000 from elsewhere.
+        assert_eq!(arrived(&[0, 700_000], vec![bridge_to(1, "Public/T", "500001", Some("0"))]), [("in_block".to_owned(), false)]);
+        // S7: three bridges and one payment of exactly their total: it can't be told from
+        // their credits, so they arrive hedged.
+        let three = vec![bridge_to(1, "Public/T", "300003", Some("0")), bridge_to(2, "Public/T", "400002", Some("0")), bridge_to(3, "Public/T", "500001", Some("0"))];
+        assert_eq!(arrived(&[0, 1_200_006], three.clone()), vec![("arrived".to_owned(), true); 3]);
+        assert_eq!(arrived(&[0, 1_300_006], three), vec![("in_block".to_owned(), false); 3], "more than their total");
     }
 
     /// corrupt-activity-file-silently-erases-history: a truncated activity.json read as

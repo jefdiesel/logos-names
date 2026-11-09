@@ -411,7 +411,9 @@ export function activityLine(entry, now, account) {
             : Number(now) - sent > BRIDGE_ARRIVES_MS ? "In a block · should have arrived by now; check the balance"
             : "In a block · arrives in about 12 h"
         tone = kind === "bridge" ? "warn" : "good"; break
-    case "arrived": stateText = kind === "bridge" ? "Arrived on LEZ" : ""; tone = "good"; break
+    // Several bridges matched by one credit can't be told from one payment of their total
+    // (single-bridge-false-arrival-on-foreign-credit-at-least-amount): said so.
+    case "arrived": stateText = kind !== "bridge" ? "" : e.maybe === true ? "A credit of the same total as your bridges reached LEZ" : "Arrived on LEZ"; tone = "good"; break
     case "done": stateText = "Done"; tone = "good"; break
     case "failed": stateText = "Didn't go through"; tone = "bad"; break
     // The module restarted while it ran, or its record is gone: it may have gone through.
