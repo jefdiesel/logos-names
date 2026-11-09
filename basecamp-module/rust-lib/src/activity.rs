@@ -199,7 +199,13 @@ fn in_flight(entry: &Value, account: &str, now: u64) -> bool {
 /// Whether `entry` is a bridge into `account` that hasn't arrived and still may: it moves
 /// nothing into it yet, and is counted for it only once it arrives (or fails).
 fn bridge_waits_for(entry: &Value, account: &str) -> bool {
-    entry["kind"] == "bridge" && entry["to"].as_str() == Some(account) && matches!(entry["state"].as_str(), Some("sending" | "in_block" | "expired"))
+    entry["kind"] == "bridge" && entry["to"].as_str() == Some(account) && on_its_way(entry)
+}
+
+/// Whether a bridge may still arrive: anything but `arrived` and `failed`. One whose send
+/// was taken as `unknown` (not seen in a block in time) still arrives by its receipt.
+fn on_its_way(entry: &Value) -> bool {
+    !matches!(entry["state"].as_str(), Some("arrived" | "failed"))
 }
 
 /// What a settled `entry` did to `account`'s balance, and whether that is known: what
@@ -211,16 +217,17 @@ fn effect(entry: &Value, account: &str) -> (i128, bool) {
     if state == "failed" {
         return (0, true);
     }
+    // A bridge that hasn't arrived moved nothing into its LEZ account, whatever is known of
+    // its send: it arrives only by its receipt.
+    if to && !from && entry["kind"] == "bridge" && state != "arrived" {
+        return (0, true);
+    }
     // Whether it landed isn't known (its job record was pruned): it moves no expected
     // balance, and what it did shows only as a balance not being certain. Counted as
     // landed, a failed send of 99,999,999,999,999,999 became an arrival of at least
     // that much (failed-send-becomes-done-after-job-prune-regressed).
     if state == "unknown" {
         return (0, false);
-    }
-    // A bridge that never arrived moved nothing into its LEZ account.
-    if to && !from && entry["kind"] == "bridge" && state != "arrived" {
-        return (0, true);
     }
     let kind = entry["kind"].as_str().unwrap_or_default();
     // A split pays itself; a token send moves a token, not the native one; a transfer moves a name.
@@ -292,7 +299,7 @@ pub const BRIDGE_FOLLOW_S: u64 = 30 * 24 * 3600;
 pub fn bridges_followed(entries: &[Value], now: u64) -> Vec<(String, String, crate::registry::AccountId)> {
     entries
         .iter()
-        .filter(|entry| entry["kind"] == "bridge" && matches!(entry["state"].as_str(), Some("sending" | "in_block" | "expired")))
+        .filter(|entry| entry["kind"] == "bridge" && on_its_way(entry))
         .filter(|entry| now.saturating_sub(entry["at"].as_u64().unwrap_or(0)) < BRIDGE_FOLLOW_S)
         .filter_map(|entry| Some((entry["id"].as_str()?.to_owned(), entry["to"].as_str()?.to_owned(), bridge_receipt(entry)?)))
         .collect()
@@ -318,7 +325,7 @@ pub fn bridge_updates(entries: &[Value], now: u64, minted: &dyn Fn(&crate::regis
     for entry in entries.iter().filter(|entry| entry["kind"] == "bridge") {
         let Some(id) = entry["id"].as_str() else { continue };
         let state = entry["state"].as_str().unwrap_or_default();
-        if !matches!(state, "sending" | "in_block" | "expired") {
+        if !on_its_way(entry) {
             continue;
         }
         let age = now.saturating_sub(entry["at"].as_u64().unwrap_or(0));
@@ -627,6 +634,7 @@ mod tests {
         assert!(read(&d, 6, &minted, 1_700_002).is_empty());
         assert_eq!(rows(&d), [row("bridge", "500001", "arrived"), row("arrived", "700000", "arrived"), row("arrived", "500001", "arrived")]);
         // X3: one that never arrives; each payment is told as it comes.
+        let _ = std::fs::remove_dir_all(d);
         let d = dir("foreign-x3");
         read(&d, 1, &[], 0);
         bridge(&d, 2, 500_001, 1);
@@ -652,6 +660,7 @@ mod tests {
         assert_eq!(rows(&d), [row("bridge", "500001", "arrived")]);
         assert_eq!(all(&d)[0]["late"], true);
         // W1: one an older version counted (as 0) once it was past the wait.
+        let _ = std::fs::remove_dir_all(d);
         let d = dir("late-counted");
         read(&d, 1, &[], 20_000);
         let b = bridge(&d, 2, 3000, 1);
@@ -701,6 +710,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(d);
     }
 
+    /// A bridge whose send was taken as `unknown` (not seen in a block in time) still
+    /// arrives by its receipt, and its credit is not money that arrived besides.
+    #[test]
+    fn a_bridge_whose_send_was_unknown_still_arrives_by_its_receipt() {
+        let d = dir("unknown-bridge");
+        read(&d, 1, &[], 0);
+        let b = bridge(&d, 2, 3000, 1);
+        update(&d, &b, &json!({ "state": "unknown" }));
+        read(&d, 3, &[], 0);
+        let minted = [receipt_of(&d, &b)];
+        assert!(read(&d, 4, &minted, 3000).is_empty(), "{:?}", rows(&d));
+        assert_eq!(rows(&d), [row("bridge", "3000", "arrived")]);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
     /// A bridge with no channel or note recorded can't be followed: it never arrives, its
     /// credit is told as money that arrived, and it is overdue past the wait.
     #[test]
@@ -715,6 +739,7 @@ mod tests {
         read(&d, 2 + BRIDGE_WAIT_S, &[], 3000);
         assert_eq!(rows(&d)[0], row("bridge", "3000", "expired"));
         // No answer from LEZ about a receipt is not an arrival.
+        let _ = std::fs::remove_dir_all(d);
         let d = dir("unread");
         let b = bridge(&d, 2, 3000, 1);
         assert!(bridge_updates(&all(&d), 3, &|_| None).iter().all(|(_, fields)| fields.get("state").is_none()));
