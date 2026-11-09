@@ -571,7 +571,9 @@ enum Command {
     /// notes of `--from-key`, so slightly more than `amount` may move. LEZ credits it
     /// once the Logos Blockchain block is final. Without `--yes` it only shows the plan.
     Bridge {
-        /// How much to move, in base units; whole notes are used, so it may be a little more.
+        /// How much to move, in base units, above zero (`1,000` may group it); whole notes
+        /// are used, so it may be a little more.
+        #[arg(value_parser = tokens::parse_amount, allow_negative_numbers = true)]
         amount: u128,
         /// The LEZ public account to credit, such as `Public/<id>`.
         #[arg(long)]
@@ -749,6 +751,24 @@ fn parse_account(input: &str) -> Result<AccountId, String> {
         .unwrap_or(input);
     bare.parse()
         .map_err(|_| format!("not an account ID: {input}"))
+}
+
+/// The LEZ account `names bridge` credits: a public one (`Public/<id>` or bare) that
+/// someone can use, never the empty account or a program's (`programs`), as the
+/// Basecamp module refuses them (cli-bridge-direct-amount-zero-and-private-prefix).
+fn bridge_destination(to: &str, programs: &[AccountId]) -> Result<AccountId, String> {
+    let to = to.trim();
+    if to.starts_with("Private/") {
+        return Err("the bridge credits a public account: give --to as Public/<id>".to_owned());
+    }
+    let id = parse_account(to)?;
+    if id.value().iter().all(|byte| *byte == 0) {
+        return Err("that is the empty account (all 1s), which no one holds".to_owned());
+    }
+    if programs.contains(&id) {
+        return Err("that is a program's account, which can't take a bridge".to_owned());
+    }
+    Ok(id)
 }
 
 /// How `names balance` ends: an error when it could not catch up with the chain or read
@@ -2799,17 +2819,22 @@ const MAX_DEPOSIT_NOTES: usize = 30;
 /// Deposits whole notes of `from_key` into the LEZ channel through the user's own node,
 /// with the LEZ account as the deposit's metadata: the sequencer reads it as
 /// `borsh(AccountId)` and credits that account once the deposit is final.
+#[allow(clippy::too_many_arguments)]
 fn bridge(
     rpc: &str,
     node: &str,
     amount: u128,
     to: &str,
+    programs: &[AccountId],
     from_key: &str,
     max_fee: u64,
     yes: bool,
 ) -> Result<()> {
     let node = node.trim_end_matches('/');
-    let to = parse_account(to).map_err(|error| anyhow!(error))?;
+    if amount == 0 {
+        bail!("the amount must be more than 0");
+    }
+    let to = bridge_destination(to, programs).map_err(|error| anyhow!(error))?;
     let from_key = from_key.trim().to_lowercase();
     if from_key.len() != 64 || hex::decode(&from_key).is_err() {
         bail!("--from-key must be a 64-character hex public key");
@@ -3147,7 +3172,8 @@ async fn main() -> Result<()> {
         }
         Command::Bridge { amount, to, from_key, node, max_fee, yes } => {
             let rpc = cli.rpc.as_deref().unwrap_or(DEFAULT_RPC);
-            return bridge(rpc, &node, amount, &to, &from_key, max_fee, yes);
+            let programs: Vec<AccountId> = DEFAULT_PROGRAM.parse().ok().into_iter().chain(cli.program).chain(cli.token_program).collect();
+            return bridge(rpc, &node, amount, &to, &programs, &from_key, max_fee, yes);
         }
         // Only a name target needs the registry; everything else is between you and your node.
         Command::Chain(command) if command.name().is_none() => return chain::run(command.clone(), None),
@@ -3897,6 +3923,31 @@ mod fee_line_tests {
         assert_eq!(super::claim_fee(36_929_384, 23_619_017, 3_169_135), Some(10_141_232));
         assert_eq!(super::claim_fee(10, 20, 0), None);
     }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+
+    /// cli-bridge-direct-amount-zero-and-private-prefix: `names bridge 0 --yes` posted a
+    /// deposit with no inputs, `--to Private/<id>` was credited to Public/<id>, and the
+    /// empty account was accepted.
+    #[test]
+    fn a_bridge_is_refused_before_anything_is_asked() {
+        let registry: AccountId = DEFAULT_PROGRAM.parse().unwrap();
+        let someone = "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk";
+        assert_eq!(bridge_destination(&format!("Private/{someone}"), &[registry]).unwrap_err(), "the bridge credits a public account: give --to as Public/<id>");
+        assert_eq!(bridge_destination("Public/11111111111111111111111111111111", &[registry]).unwrap_err(), "that is the empty account (all 1s), which no one holds");
+        assert_eq!(bridge_destination(&format!("Public/{DEFAULT_PROGRAM}"), &[registry]).unwrap_err(), "that is a program's account, which can't take a bridge");
+        assert_eq!(bridge_destination(&format!("Public/{someone}"), &[registry]).unwrap().to_string(), someone);
+        // Nothing reached the network: the unreachable node and sequencer were never asked.
+        let zero = bridge("http://127.0.0.1:9", "http://127.0.0.1:9", 0, &format!("Public/{someone}"), &[registry], &"66".repeat(32), 100_000, true);
+        assert_eq!(zero.unwrap_err().to_string(), "the amount must be more than 0");
+        let private = bridge("http://127.0.0.1:9", "http://127.0.0.1:9", 1_000, &format!("Private/{someone}"), &[registry], &"66".repeat(32), 100_000, true);
+        assert_eq!(private.unwrap_err().to_string(), "the bridge credits a public account: give --to as Public/<id>");
+        assert_eq!(Cli::try_parse_from(["names", "bridge", "0", "--to", someone, "--from-key", "k"]).err().map(|e| e.to_string().contains("the amount must be more than 0")), Some(true));
+    }
+
 }
 
 #[cfg(test)]
