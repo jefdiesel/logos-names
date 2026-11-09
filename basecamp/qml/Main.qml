@@ -961,9 +961,23 @@ Item {
             return "A private account can't be paid by its address: nobody but its holder knows its keys. Pay its name, or ask for a public account."
         if (sendKind === "token")
             return tokenSendProblem()
-        if (payIsAccount(to))
-            return payAccountProblem(to)
-        return /^[0-9]+$/.test(amount) ? "" : "Enter a whole amount, such as 1000."
+        var bad = payIsAccount(to) ? payAccountProblem(to) : /^[0-9]+$/.test(amount) ? "" : "Enter a whole amount, such as 1000."
+        return bad !== "" ? bad : sendBalanceProblem(amount)
+    }
+
+    /// Why the account Send pays from can't pay `amount` (digits) and its fee, or "" when it
+    /// can or its balance isn't known yet (send-failure-text-raw-and-no-balance-check).
+    function sendBalanceProblem(amount) {
+        var digits = String(amount).replace(/,/g, "")
+        var from = payFromPublic ? cliPublic : cliBalance
+        if (!/^[0-9]+$/.test(digits) || !from || from.balance === undefined || from.balance === null)
+            return ""
+        var which = payFromPublic ? "public" : "private"
+        if (!Logic.atLeast(String(from.balance), digits))
+            return "Your " + which + " account holds " + grouped(from.balance) + ", less than " + grouped(digits) + "."
+        if (Logic.atLeast(digits, String(from.balance)))
+            return "Your " + which + " account holds exactly " + grouped(digits) + ", and the fee comes on top: send a little less."
+        return ""
     }
 
     /// Shows the summary to confirm; a chain send is checked by the node first.
@@ -2902,7 +2916,10 @@ Item {
                     job.after()
                 boardLoad()
             } else {
-                say("It didn't go through: " + lastLogLine(value.log_tail), true)
+                // The module's own words when it has them, never the CLI's "Error:" prefix
+                // (send-failure-text-raw-and-no-balance-check).
+                var why = value.problem ? String(value.problem) : "It didn't go through: " + lastLogLine(value.log_tail)
+                say(sentence(why.replace(/(^|: )Error: /, "$1")), true)
             }
         }, function() { job.asking = false })
     }
