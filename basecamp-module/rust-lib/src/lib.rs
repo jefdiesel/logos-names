@@ -2774,7 +2774,12 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        let out = reply(self.wallet_job("receive", |_| Ok(vec!["receive".to_owned()])));
+        let out = reply(self.wallet_job("receive", |setup| {
+            if !cli::has_command(&setup.program, "receive") {
+                return Err(cli::OLDER_CLI.to_owned());
+            }
+            Ok(vec!["receive".to_owned()])
+        }));
         log_started(&out, json!({ "kind": "receive", "chain": "lez" }));
         out
     }
@@ -2783,7 +2788,12 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        let out = reply(self.wallet_job("receive", |_| Ok(vec!["receive".to_owned(), "--all".to_owned()])));
+        let out = reply(self.wallet_job("receive", |setup| {
+            if !cli::has_command(&setup.program, "receive") {
+                return Err(cli::OLDER_CLI.to_owned());
+            }
+            Ok(vec!["receive".to_owned(), "--all".to_owned()])
+        }));
         log_started(&out, json!({ "kind": "receive", "chain": "lez", "all": true }));
         out
     }
@@ -5373,6 +5383,21 @@ mod tests {
         assert_eq!(shown["value"][0]["amount"], "12345", "{shown}");
         assert!(shown["warning"].as_str().unwrap().contains("activity-balances.json.corrupt-"), "{shown}");
         assert!(parsed(&names.activity(String::new()))["warning"].is_null(), "told once");
+    }
+
+    /// receive-on-october-cli-starts-failing-job: the October CLI has no `receive`, and
+    /// cli_receive started a job that failed with clap's "For more information, try
+    /// '--help'." and left a failed receive row in the history.
+    #[test]
+    fn receiving_with_a_cli_too_old_for_it_is_refused_up_front() {
+        let (mut names, dir) = with_fake_cli("old-receive", "case \"$*\" in *receive*) echo \"error: unrecognized subcommand 'receive'\" >&2; echo \"For more information, try '--help'.\" >&2; exit 2 ;; esac");
+        for answer in [names.cli_receive(), names.cli_receive_all()] {
+            let refused = parsed(&answer);
+            assert_eq!(refused["error"], cli::OLDER_CLI, "{refused}");
+        }
+        assert!(std::fs::read_dir(dir.join("jobs")).map_or(true, |entries| entries.count() == 0), "no job");
+        assert!(!activity::all(&config_dir().unwrap()).iter().any(|e| e["kind"] == "receive"), "no history row");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// chain-sent-corrupt-file-silently-overwritten (L5): a damaged chain-sent.json was read

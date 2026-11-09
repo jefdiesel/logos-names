@@ -1718,6 +1718,15 @@ pub fn has_prover(program: &Path) -> bool {
 
 /// Whether this CLI can sign for the module: one from before LEZ 0.4 can't, and
 /// can't talk to the chain either.
+/// Whether the CLI at `program` has the command `command` (`<program> <command> --help`
+/// answers). The October testnet build has no `receive`: run anyway, it failed as a job
+/// with clap's "For more information, try '--help'." (receive-on-october-cli-starts-failing-job).
+pub fn has_command(program: &Path, command: &str) -> bool {
+    let mut process = Command::new(program);
+    process.args([command, "--help"]).stdin(Stdio::null());
+    capture(process, program, VERSION_PATIENCE).is_ok_and(|(code, _, _)| code == Some(0))
+}
+
 pub fn speaks_module(program: &Path) -> bool {
     let mut process = Command::new(program);
     process.args(["module", "--help"]).stdin(Stdio::null());
