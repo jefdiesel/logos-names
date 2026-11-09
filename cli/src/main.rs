@@ -1938,10 +1938,11 @@ impl Client {
         println!("{} payment(s) waiting, {total} in all:", pending.len());
         for message in &pending {
             println!(
-                "  {} to Private/{} (position {})",
+                "  {} to Private/{} (position {}){}",
                 message.native_credit().unwrap_or(0),
                 message.body.to.account_id,
-                message.position
+                message.position,
+                if is_fee_refund(message) { ", a fee's refund" } else { "" }
             );
         }
         if list {
@@ -1951,15 +1952,25 @@ impl Client {
         let fee = fees::private(&quote, self.wallet.config().private_fee_headroom_blocks);
         // A credit worth less than claiming it costs (a private fee's refund, most often) is
         // left: claiming it would lose money. `--all` claims it anyway.
-        let (pending, left): (Vec<_>, Vec<_>) =
-            pending.into_iter().partition(|message| all || message.native_credit().unwrap_or(0) > fee.about);
+        // A fee's refund is left even with `--all`: claiming it pays a claim's fee and makes
+        // a new refund of about the same.
+        let (pending, left): (Vec<_>, Vec<_>) = pending
+            .into_iter()
+            .partition(|message| worth_claiming(message.native_credit().unwrap_or(0), is_fee_refund(message), all, fee.about));
         for message in &left {
-            println!(
-                "left waiting: {} to Private/{}: claiming it costs about {}, more than it holds (`names receive --all` claims it anyway)",
-                message.native_credit().unwrap_or(0),
-                message.body.to.account_id,
-                fee.about
-            );
+            let credit = message.native_credit().unwrap_or(0);
+            let to = message.body.to.account_id;
+            if is_fee_refund(message) && credit <= fee.about {
+                println!(
+                    "left waiting: {credit} to Private/{to}, a fee's refund: claiming it costs about {}, and makes a new refund of about the same",
+                    fee.about
+                );
+            } else {
+                println!(
+                    "left waiting: {credit} to Private/{to}: claiming it costs about {}, more than it holds (`names receive --all` claims it anyway)",
+                    fee.about
+                );
+            }
         }
         if pending.is_empty() {
             println!("nothing worth claiming");
@@ -2017,6 +2028,8 @@ impl Client {
                 .context("the sequencer did not accept the claim")?;
             println!("submitted {hash}");
             let block = self.finish(hash).await.context("the claim was not applied")?;
+            // Read once the wallet has caught up: before that it said "now holds 0".
+            self.wallet.sync_to_latest_block().await.ok();
             println!("received in block {block}; Private/{to} now holds {}", private_balance(self, to));
         }
         save_wallet(&mut self.wallet)?;
@@ -2660,6 +2673,12 @@ fn is_fee_refund(message: &wallet::PendingMessage) -> bool {
     message.body.from.account_id == system_accounts::fee_inbox_account_id()
 }
 
+/// Whether `receive` claims a credit of `credit`: one worth more than a claim costs
+/// (`about`), or any with `all`, but never a fee's refund worth less than a claim.
+fn worth_claiming(credit: u128, refund: bool, all: bool, about: u128) -> bool {
+    credit > about || (all && !refund)
+}
+
 /// What claims paid from their payer: what left it (`before` - `after`) less the refunds
 /// they sent back to it; `None` when that doesn't add up (jobs-report-no-fee-paid).
 fn claim_fee(before: u128, after: u128, refunds: u128) -> Option<u128> {
@@ -3010,7 +3029,9 @@ async fn main() -> Result<()> {
             // Payments to your name's private keys wait until you claim them (SC-1); those
             // worth less than a claim costs (a fee's refund) are told apart.
             if let Ok(pending) = client.wallet.owned_pending_messages().await {
-                let credits: Vec<u128> = pending.iter().filter_map(|message| message.native_credit()).collect();
+                // A fee's refund comes back after every private change: not counted as waiting.
+                let refunds: Vec<u128> = pending.iter().filter(|message| is_fee_refund(message)).filter_map(|message| message.native_credit()).collect();
+                let credits: Vec<u128> = pending.iter().filter(|message| !is_fee_refund(message)).filter_map(|message| message.native_credit()).collect();
                 let claim = match client.wallet.client().get_fee_state().await {
                     Ok(quote) => fees::private(&quote, client.wallet.config().private_fee_headroom_blocks).about,
                     Err(_) => 0,
@@ -3028,6 +3049,13 @@ async fn main() -> Result<()> {
                         "also waiting, worth less than claiming costs (about {claim}): {} credit(s), {} in all",
                         small.len(),
                         small.iter().sum::<u128>()
+                    );
+                }
+                if !refunds.is_empty() {
+                    println!(
+                        "fees' refunds waiting: {} credit(s), {} in all; claiming one costs about {claim} and makes a new refund, so they are left",
+                        refunds.len(),
+                        refunds.iter().sum::<u128>()
                     );
                 }
             }
@@ -3598,6 +3626,21 @@ mod fee_line_tests {
     fn claims_say_what_they_paid_less_the_refund_they_sent_back() {
         assert_eq!(super::claim_fee(36_929_384, 23_619_017, 3_169_135), Some(10_141_232));
         assert_eq!(super::claim_fee(10, 20, 0), None);
+    }
+}
+
+#[cfg(test)]
+mod receive_tests {
+    use super::worth_claiming;
+
+    /// receive-all-refund-credit-pure-loss: `receive --all` claimed a fee's refund of
+    /// 3,169,135 for a claim costing 5,070,616, and the claim made a new refund of 3,169,135.
+    #[test]
+    fn all_leaves_a_fees_refund_worth_less_than_a_claim() {
+        assert!(!worth_claiming(3_169_135, true, true, 5_070_616), "a refund, even with --all");
+        assert!(worth_claiming(1_000, false, true, 5_070_616), "a small payment with --all");
+        assert!(!worth_claiming(1_000, false, false, 5_070_616));
+        assert!(worth_claiming(9_000_000, true, false, 5_070_616), "a refund worth more than a claim is claimed");
     }
 }
 
