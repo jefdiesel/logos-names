@@ -36,6 +36,7 @@ mod activity;
 mod avatar;
 mod chain;
 mod chain_keys;
+mod chain_fee;
 mod changes;
 mod cli;
 mod page_view;
@@ -3589,6 +3590,9 @@ impl NamesModule for Names {
                 "amount": amount.to_string(),
                 "balance": balance.to_string(),
             });
+            if !send {
+                chain_fee_about(&mut plan, "fee_about", &chain_fee::Shape::Transfer { to: to_key.clone(), amount }, &from, None)?;
+            }
             if send {
                 let before = chain::notes_of(&node::call("wallet_get_notes", json!([from, ""]), node::QUICK)?);
                 let sent = node::call("wallet_transfer_funds", json!([from, [from], to_key, amount.to_string(), ""]), node::PROVING)
@@ -3634,6 +3638,13 @@ impl NamesModule for Names {
                 return Err(IN_FLIGHT.to_owned());
             }
             let mut plan = json!({ "from": from, "amount": amount.to_string(), "balance": balance.to_string(), "exact": exact });
+            if !send {
+                if exact {
+                    plan["fee_about"] = json!("0");
+                } else {
+                    chain_fee_about(&mut plan, "fee_about", &chain_fee::Shape::Transfer { to: from.clone(), amount }, &from, None)?;
+                }
+            }
             // A note of exactly the amount is already there: a split would only cost a fee
             // and take notes out of the stake (CR-9).
             if send && exact {
@@ -3714,6 +3725,16 @@ impl NamesModule for Names {
             });
             if needs_split {
                 plan["split_fee_allowance"] = json!(SPLIT_FEE_ALLOWANCE.to_string());
+            }
+            if !send {
+                let deposit = chain_fee::Shape::Deposit { channel: channel.clone(), metadata: registry::hex(&account).len() / 2 };
+                match &note {
+                    Some(note) => chain_fee_about(&mut plan, "fee_about", &deposit, &from, Some(note))?,
+                    None => plan["fee_about"] = Value::Null,
+                }
+                if needs_split {
+                    chain_fee_about(&mut plan, "split_fee_about", &chain_fee::Shape::Transfer { to: from.clone(), amount }, &from, None)?;
+                }
             }
             if exact_busy {
                 plan["needs_split"] = json!(false);
@@ -3857,11 +3878,18 @@ impl NamesModule for Names {
             let vouchers = node::call("wallet_get_claimable_vouchers", json!([]), node::QUICK)?;
             let count = vouchers["vouchers"].as_array().map_or(0, Vec::len);
             if !send {
-                return Ok(json!({
+                let fee_about = chain_claim_fee_about();
+                let reward = chain::amount(&vouchers["reward_amount"]);
+                let mut plan = json!({
                     "claimable": chain::amount(&vouchers["total_claimable"]).to_string(),
                     "vouchers": count,
-                    "reward_per_voucher": chain::amount(&vouchers["reward_amount"]).to_string(),
-                }));
+                    "reward_per_voucher": reward.to_string(),
+                    "fee_about": fee_about,
+                });
+                if let Some(warning) = chain_fee::claim_warning(plan["fee_about"].as_str().and_then(|fee| fee.parse().ok()).filter(|_| count > 0), reward) {
+                    plan["warning"] = Value::from(warning);
+                }
+                return Ok(plan);
             }
             if count == 0 {
                 return Err("There is nothing to claim: your node has no leader rewards waiting.".to_owned());
@@ -4734,6 +4762,46 @@ fn chain_sent_add(hash: &str, sent: Value) {
     save_object(&dir.join("chain-sent.json"), &all);
 }
 
+/// About what `shape` will cost paid from `from`, set in `plan` as `field` (decimal text, or
+/// null when the node can't say), with `cannot_pay_fee: true` when the key's notes can't
+/// pay it and its fee, and `in_flight: true` when they could but some are a send's from
+/// here still on its way: asked of the node with stand-ins of the key's notes, less `skip`
+/// and those a send from here still spends, so no real note is reserved (chain_fee.rs).
+/// `Err` when the node refuses it as it would refuse the send (a recipient that isn't a key).
+fn chain_fee_about(plan: &mut Value, field: &str, shape: &chain_fee::Shape, from: &str, skip: Option<&str>) -> Result<(), String> {
+    plan[field] = Value::Null;
+    let Ok(notes) = node::call("wallet_get_notes", json!([from, ""]), node::QUICK).map(|reply| chain::notes_of(&reply)) else { return Ok(()) };
+    let busy = chain_notes_in_use(from);
+    let (held_busy, free): (Vec<_>, Vec<_>) = notes.iter().filter(|(id, _)| skip != Some(id.as_str())).partition(|(id, _)| busy.contains(*id));
+    let values = |notes: Vec<(&String, &Value)>| notes.into_iter().map(|(_, value)| chain::amount(value)).collect::<Vec<u128>>();
+    match chain_fee::with_busy(shape, from, &values(free), &values(held_busy), |request| node::call("wallet_fund_tx", json!([request]), node::QUICK))? {
+        chain_fee::Estimate::Fee(fee) => plan[field] = Value::from(fee.to_string()),
+        chain_fee::Estimate::Short => plan["cannot_pay_fee"] = Value::Bool(true),
+        chain_fee::Estimate::InFlight => plan["in_flight"] = Value::Bool(true),
+        chain_fee::Estimate::Unknown => {}
+    }
+    Ok(())
+}
+
+/// About what one `leader_claim` will cost: its LeaderClaim op and a transfer from the
+/// node's leader funding key, which names can't tell from the others, so the most any
+/// key would pay with its own notes (chain_fee::claim_estimate).
+fn chain_claim_fee_about() -> Value {
+    let keys = node::call("wallet_get_known_addresses", json!([]), node::QUICK).unwrap_or_default();
+    let held: Vec<(String, Vec<u128>)> = keys
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .take(MAX_WALLET_ACCOUNTS)
+        .filter_map(|key| {
+            let notes = node::call("wallet_get_notes", json!([key, ""]), node::QUICK).map(|reply| chain::notes_of(&reply)).ok()?;
+            Some((key.to_owned(), notes.values().map(chain::amount).collect()))
+        })
+        .collect();
+    chain_fee::claim_estimate(&held, |request| node::call("wallet_fund_tx", json!([request]), node::QUICK)).map_or(Value::Null, |fee| Value::from(fee.to_string()))
+}
+
 /// Basecamp's Logos Blockchain node (`blockchain_module`), for the chain methods.
 #[cfg(not(test))]
 mod node {
@@ -5332,7 +5400,7 @@ mod tests {
         // One big note: a split is needed, and the bridge says so instead of moving it all.
         node_answers("wallet_get_notes", json!({ "notes": [{ "id": "b271", "value": "131296018" }] }));
         let split = parsed(&names.chain_split(NODE_KEY.into(), "1,000,000".into(), false));
-        assert_eq!(split["value"], json!({ "from": NODE_KEY, "amount": "1000000", "balance": "131296018", "exact": false }), "{split}");
+        assert_eq!(split["value"], json!({ "from": NODE_KEY, "amount": "1000000", "balance": "131296018", "exact": false, "fee_about": null }), "{split}");
         let to = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
         let plan = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), false));
         assert_eq!((plan["value"]["needs_split"].as_bool(), plan["value"]["note"].clone()), (Some(true), Value::Null), "{plan}");
@@ -5873,7 +5941,7 @@ mod tests {
         let mut names = fresh();
         node_answers("wallet_get_claimable_vouchers", json!({ "reward_amount": "13140", "total_claimable": "0", "vouchers": [] }));
         let plan = parsed(&names.chain_claim(false));
-        assert_eq!(plan["value"], json!({ "claimable": "0", "vouchers": 0, "reward_per_voucher": "13140" }), "{plan}");
+        assert_eq!(plan["value"], json!({ "claimable": "0", "vouchers": 0, "reward_per_voucher": "13140", "fee_about": null }), "{plan}");
         let claimed = parsed(&names.chain_claim(true));
         assert_eq!(claimed["success"], false, "{claimed}");
         assert_eq!(claimed["error"], "There is nothing to claim: your node has no leader rewards waiting.");
@@ -6873,5 +6941,142 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(chain_keys::records_path(&dir)).unwrap().permissions().mode() & 0o777, 0o600);
         let _ = std::fs::remove_file(chain_keys::records_path(&dir));
+    }
+
+    /// LP-0022 gas: each chain plan carries the node's own fee for it (`fee_about`), asked
+    /// with stand-ins of the key's notes and no funding key, so no real note is reserved.
+    /// The replies are a solo 0.3.4 node's (exp2: 100,000 in, 3,000 + 96,166 out = 834).
+    #[test]
+    fn chain_plans_carry_the_nodes_fee_estimate_without_naming_a_real_note() {
+        let mut names = fresh();
+        let to = "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225";
+        let fund_asked = || {
+            node::ASKED.with(|asked| asked.borrow().iter().rev().find(|(m, _)| m == "wallet_fund_tx").map(|(_, a)| serde_json::from_str::<Value>(a[0].as_str().unwrap()).unwrap()))
+        };
+        node_answers("wallet_get_balance", json!("100000"));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "f08a", "value": "100000" }] }));
+        node_answers("wallet_fund_tx", json!({ "funded_tx": { "ops": [{ "opcode": 0, "payload": { "inputs": ["01"], "outputs": [{ "pk": to, "value": 3000 }, { "pk": NODE_KEY, "value": 96166 }] } }] }, "tip": "b3" }));
+        let plan = parsed(&names.chain_send(NODE_KEY.into(), to.into(), "3,000".into(), false));
+        assert_eq!(plan["value"]["fee_about"], "834", "{plan}");
+        let request = fund_asked().expect("the node is asked for the fee");
+        assert_eq!(request["funding_public_keys"], json!([]), "no key the node could take a real note from");
+        assert_eq!(request["tx_builder"]["ledger_inputs"][0]["note"], json!({ "value": 100000, "pk": NODE_KEY }));
+        assert!(!request.to_string().contains("f08a"), "the real note's id is never named: {request}");
+        assert!(!node_asked().contains(&"wallet_transfer_funds".to_owned()), "a plan sends nothing");
+        // A split is the same transfer, to the key itself; nothing to split, nothing to pay.
+        let split = parsed(&names.chain_split(NODE_KEY.into(), "3,000".into(), false));
+        assert_eq!(split["value"]["fee_about"], "834", "{split}");
+        assert_eq!(fund_asked().unwrap()["tx_builder"]["pending_transfer"]["outputs"], json!([{ "value": 3000, "pk": NODE_KEY }]));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "f08a", "value": "100000" }, { "id": "e300", "value": "3000" }] }));
+        assert_eq!(parsed(&names.chain_split(NODE_KEY.into(), "3,000".into(), false))["value"]["fee_about"], "0", "an exact note is already there");
+        // When the node can't say, the plan still stands, without an estimate.
+        node_refuses("wallet_fund_tx", "Failed to parse fund request: missing field `tx_builder`");
+        let plan = parsed(&names.chain_send(NODE_KEY.into(), to.into(), "3,000".into(), false));
+        assert_eq!((plan["success"].clone(), plan["value"]["fee_about"].clone()), (json!(true), Value::Null), "{plan}");
+        assert_eq!(plan["value"]["cannot_pay_fee"], Value::Null, "a node that didn't say is not a short key");
+        // The node says no set of the key's notes can pay it with its fee (the proof run:
+        // 1,268 in two notes, a plan for 1,000): the plan says so instead of a figure.
+        node_answers("wallet_get_balance", json!("1268"));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "a1", "value": "1000" }, { "id": "a2", "value": "268" }] }));
+        node_refuses("wallet_fund_tx", "Failed to fund tx: Wallet does not have enough funds, available=0");
+        let plan = parsed(&names.chain_send(NODE_KEY.into(), to.into(), "1,000".into(), false));
+        assert_eq!((plan["value"]["fee_about"].clone(), plan["value"]["cannot_pay_fee"].clone()), (Value::Null, json!(true)), "{plan}");
+        // A note a send from here still spends is left out, as the node's wallet leaves it out.
+        node_answers("wallet_get_balance", json!("1000000"));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "busy", "value": "900000" }, { "id": "free", "value": "100000" }] }));
+        chain_sent_add(&"ee".repeat(32), json!({ "from": NODE_KEY, "inputs": ["busy"], "fee": null, "at": now() }));
+        node_answers("wallet_fund_tx", json!({ "funded_tx": { "ops": [{ "opcode": 0, "payload": { "inputs": ["01"], "outputs": [{ "value": 3000 }, { "value": 96166 }] } }] } }));
+        assert_eq!(parsed(&names.chain_send(NODE_KEY.into(), to.into(), "3,000".into(), false))["value"]["fee_about"], "834");
+        assert_eq!(fund_asked().unwrap()["tx_builder"]["ledger_inputs"].as_array().unwrap().len(), 1);
+        assert_eq!(fund_asked().unwrap()["tx_builder"]["ledger_inputs"][0]["note"]["value"], 100000);
+        chain_sent_remove(&"ee".repeat(32));
+    }
+
+    /// A claim's plan shows what one claim costs and warns when that is more than the
+    /// one reward it cashes (the node's leader_claim has no fee cap names can set).
+    #[test]
+    fn a_claim_plan_shows_its_fee_and_warns_when_it_is_more_than_the_reward() {
+        let mut names = fresh();
+        node_answers("wallet_get_claimable_vouchers", json!({ "reward_amount": "38", "total_claimable": "76", "vouchers": [{ "nullifier": "n1" }, { "nullifier": "n2" }] }));
+        node::ANSWERS.with(|answers| answers.borrow_mut().insert("wallet_get_known_addresses".into(), json!({ "success": true, "value": [NODE_KEY] })));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "af49", "value": "50000" }] }));
+        // As the solo node funded a stand-in claim (exp2 claim-a): 50,000 in, 48,401 back.
+        node_answers("wallet_fund_tx", json!({ "funded_tx": { "ops": [
+            { "opcode": 48, "payload": { "pk": NODE_KEY } },
+            { "opcode": 0, "payload": { "inputs": ["01"], "outputs": [{ "pk": NODE_KEY, "value": 48401 }] } }] } }));
+        let plan = parsed(&names.chain_claim(false));
+        assert_eq!(plan["value"]["fee_about"], "1599", "{plan}");
+        assert!(plan["value"]["warning"].as_str().unwrap().contains("reward of 38 and pays a fee of about 1599"), "{plan}");
+        assert!(!node_asked().contains(&"leader_claim".to_owned()), "a plan claims nothing");
+        let asked = node::ASKED.with(|asked| asked.borrow().iter().rev().find(|(m, _)| m == "wallet_fund_tx").map(|(_, a)| a.clone())).unwrap();
+        let request: Value = serde_json::from_str(asked[0].as_str().unwrap()).unwrap();
+        assert_eq!(request["tx_builder"]["mantle_tx"]["ops"][0]["opcode"], 0x30);
+        assert_eq!(request["funding_public_keys"], json!([]));
+    }
+
+    /// A bridge plan: the deposit's own fee, from the key's other notes (the exact note goes
+    /// whole into the deposit and is never named); with no exact note, the split's.
+    #[test]
+    fn a_bridge_plan_estimates_the_deposit_or_the_split_before_it() {
+        let mut names = fresh();
+        let to = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
+        node_answers("get_channel_state", json!({}));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "e8ac", "value": "1000000" }, { "id": "fee1", "value": "5000000" }] }));
+        node_answers("wallet_fund_tx", json!({ "funded_tx": { "ops": [
+            { "opcode": 18, "payload": { "inputs": ["03e8"] } },
+            { "opcode": 0, "payload": { "inputs": ["01"], "outputs": [{ "value": 4998386 }] } }] } }));
+        let plan = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1,000,000".into(), false));
+        assert_eq!(plan["value"]["fee_about"], "1614", "{plan}");
+        let asked = node::ASKED.with(|asked| asked.borrow().iter().rev().find(|(m, _)| m == "wallet_fund_tx").map(|(_, a)| a.clone())).unwrap();
+        let request: Value = serde_json::from_str(asked[0].as_str().unwrap()).unwrap();
+        assert_eq!(request["tx_builder"]["ledger_inputs"].as_array().unwrap().len(), 1);
+        assert_eq!(request["tx_builder"]["ledger_inputs"][0]["note"]["value"], 5000000, "the fee note, not the deposit's");
+        assert!(!request.to_string().contains("e8ac"));
+        // No exact note: the split comes first, so that is what the plan prices.
+        node_answers("wallet_fund_tx", json!({ "funded_tx": { "ops": [{ "opcode": 0, "payload": { "inputs": ["01"], "outputs": [{ "value": 700000 }, { "value": 4299134 }] } }] } }));
+        let plan = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "700,000".into(), false));
+        assert_eq!((plan["value"]["needs_split"].clone(), plan["value"]["fee_about"].clone(), plan["value"]["split_fee_about"].clone()), (json!(true), Value::Null, json!("866")), "{plan}");
+    }
+
+    /// adv.py H4: the key's only note (100,000) is the input of a send made here that isn't in
+    /// a block yet. A plan then is short only because of it: it says the note is in flight,
+    /// not that the key can't pay ("send a little less"); once the send lands, the fee.
+    #[test]
+    fn a_plan_while_the_keys_notes_are_in_flight_says_so_not_send_less() {
+        let mut names = fresh();
+        let to = "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225";
+        node_answers("wallet_get_balance", json!("100000"));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "f08a", "value": "100000" }] }));
+        node_answers("wallet_fund_tx", json!({ "funded_tx": { "ops": [{ "opcode": 0, "payload": { "inputs": ["01"], "outputs": [{ "value": 1000 }, { "value": 98166 }] } }] } }));
+        let hash = "d6".repeat(32);
+        chain_sent_add(&hash, json!({ "from": NODE_KEY, "inputs": ["f08a"], "fee": "834", "at": now() }));
+        for plan in [names.chain_send(NODE_KEY.into(), to.into(), "1,000".into(), false), names.chain_split(NODE_KEY.into(), "1,000".into(), false)] {
+            let plan = parsed(&plan);
+            let shown = &plan["value"];
+            assert_eq!((shown["in_flight"].clone(), shown["cannot_pay_fee"].clone(), shown["fee_about"].clone()), (json!(true), Value::Null, Value::Null), "{plan}");
+        }
+        // Short with the busy note counted too: that is "send less", as before.
+        node_refuses("wallet_fund_tx", "Failed to fund tx: Wallet does not have enough funds, available=0");
+        let plan = parsed(&names.chain_send(NODE_KEY.into(), to.into(), "1,000".into(), false));
+        assert_eq!((plan["value"]["in_flight"].clone(), plan["value"]["cannot_pay_fee"].clone()), (Value::Null, json!(true)), "{plan}");
+        // Landed: its input is gone from the wallet, the record lapses, the plan has a fee.
+        chain_sent_remove(&hash);
+        node_answers("wallet_fund_tx", json!({ "funded_tx": { "ops": [{ "opcode": 0, "payload": { "inputs": ["01"], "outputs": [{ "value": 1000 }, { "value": 98166 }] } }] } }));
+        let plan = parsed(&names.chain_send(NODE_KEY.into(), to.into(), "1,000".into(), false));
+        assert_eq!((plan["value"]["in_flight"].clone(), plan["value"]["fee_about"].clone()), (Value::Null, json!("834")), "{plan}");
+    }
+
+    /// adv.py H2 and the fixer's probe: a plan to 64 hex characters that aren't a key. The
+    /// node refused the stand-in with "Parsed bytes are bigger than the modulus" and the send
+    /// with "That isn't a Logos Blockchain public key"; the plan now says what the send says.
+    #[test]
+    fn a_plan_to_a_recipient_that_isnt_a_key_is_refused_as_the_send_is() {
+        let mut names = fresh();
+        node_answers("wallet_get_balance", json!("100000"));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "f08a", "value": "100000" }] }));
+        node_refuses("wallet_fund_tx", "Failed to parse fund request: Parsed bytes are bigger than the modulus, got 77648812782670860460512307594061302913369283834606025297048026922953510464427, expected 21888242871839275222246405745257275088548364400416034343698204186575808495617 at line 1 column 553");
+        let plan = parsed(&names.chain_send(NODE_KEY.into(), "ab".repeat(32), "1,000".into(), false));
+        assert_eq!((plan["success"].clone(), plan["error"].clone()), (json!(false), json!("That isn't a Logos Blockchain public key: check it and try again.")), "{plan}");
+        assert!(!node_asked().contains(&"wallet_transfer_funds".to_owned()), "a plan sends nothing");
     }
 }

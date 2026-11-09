@@ -1,0 +1,357 @@
+//! What a chain transaction will cost, before it is sent (LP-0022: "display estimated gas
+//! usage"), asked of the node itself.
+//!
+//! The node's `wallet_fund_tx` funds a transaction builder and returns it with its fee:
+//! the same funding a send, split, deposit or claim goes through, against the gas prices
+//! at the node's tip. Asked with the key's REAL notes, it RESERVES them (blockchain_module
+//! 0.3.4 on a solo node: a second plan answered "available=0" and the send after it was
+//! refused; the reservation is lifted only once the notes are spent or 10 blocks later
+//! become final). So it is never asked with a real note. Instead the builder carries
+//! stand-ins: notes of the same values and owner as the ones the node would spend (largest
+//! first, as its wallet picks them), under ids no wallet holds, and no funding key, so the
+//! node can't pull in a real note. The transaction is then the same shape (op, inputs,
+//! outputs, sizes), so its fee is the same, at the prices of the moment: measured on a solo
+//! node, 834 for one input and 866 for two, as the sends after them paid. Only the stand-in
+//! ids are reserved, and they are the same ids every time.
+
+use serde_json::{json, Value};
+
+/// No cap on the stand-in transaction: the estimate is to be read, not refused.
+const NO_CAP: u64 = 1_000_000_000_000_000;
+
+/// A transfer op carries at most this many inputs (the node's bound).
+const MAX_INPUTS: usize = 32;
+
+/// The ids under which a stand-in deposit names its note and a stand-in claim its voucher
+/// nullifier, after the transfer stand-ins' 1..=32. The node reads these 32 bytes as a
+/// little-endian field element, so the last byte must stay small: `..0063` (99) was refused
+/// ("did not match any variant of untagged enum OpDe"), `..0007` was read.
+const DEPOSIT_NOTE: u64 = 33;
+const CLAIM_NULLIFIER: u64 = 34;
+
+/// What is estimated: the ops the transaction has besides its fee-paying transfer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Shape {
+    /// `wallet_transfer_funds`: `amount` to `to`, change back (a split is a send to oneself).
+    Transfer { to: String, amount: u64 },
+    /// `channel_deposit_with_notes`: one whole note into `channel`, `metadata` bytes long.
+    Deposit { channel: String, metadata: usize },
+    /// `leader_claim`: one LeaderClaim op, its fee paid from the funding key.
+    Claim,
+}
+
+/// The stand-in note `i`: an op id no transaction has, so no wallet holds it.
+fn stand_in_op(i: usize) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(format!("names-fee-estimate-{i}").as_bytes()).to_vec()
+}
+
+fn note_id(n: u64) -> String {
+    format!("{n:064x}")
+}
+
+/// The `wallet_fund_tx` request for `shape` paid by stand-ins of `values` owned by `from`.
+pub fn request(shape: &Shape, from: &str, values: &[u128]) -> Value {
+    let inputs: Vec<Value> = values
+        .iter()
+        .enumerate()
+        .map(|(i, value)| json!({ "op_id": stand_in_op(i), "output_index": 0, "note": { "value": u64::try_from(*value).unwrap_or(u64::MAX), "pk": from } }))
+        .collect();
+    let ids: Vec<String> = (1..=values.len() as u64).map(note_id).collect();
+    let (ops, outputs) = match shape {
+        Shape::Transfer { to, amount } => (json!([]), json!([{ "value": amount, "pk": to }])),
+        Shape::Deposit { channel, metadata } => (
+            json!([{ "opcode": 0x12, "payload": { "channel_id": channel, "inputs": [note_id(DEPOSIT_NOTE)], "metadata": vec![0u8; *metadata] } }]),
+            json!([]),
+        ),
+        Shape::Claim => (
+            json!([{ "opcode": 0x30, "payload": { "pk": from, "rewards_root": "00".repeat(32), "voucher_nullifier": note_id(CLAIM_NULLIFIER) } }]),
+            json!([]),
+        ),
+    };
+    json!({
+        "tip": null,
+        "tx_builder": {
+            "mantle_tx": { "ops": ops },
+            "ledger_inputs": inputs,
+            "pending_transfer": { "inputs": ids, "outputs": outputs },
+            "channel_multi_sig_proofs": {},
+        },
+        "change_public_key": from,
+        "funding_public_keys": [],
+        "max_tx_fee": NO_CAP,
+        "priority_fee_percent": 0,
+    })
+}
+
+/// The fee of a funded stand-in transaction: what its stand-ins hold less what its
+/// transfer pays out (the amount and the change).
+pub fn fee_of(funded: &Value, held: u128) -> Option<u128> {
+    let ops = funded["funded_tx"]["ops"].as_array().or(funded["funded_tx"]["mantle_tx"]["ops"].as_array())?;
+    let paid: u128 = ops
+        .iter()
+        .filter(|op| op["opcode"] == 0)
+        .flat_map(|op| op["payload"]["outputs"].as_array().into_iter().flatten())
+        .map(|output| super::chain::amount(&output["value"]))
+        .sum();
+    held.checked_sub(paid)
+}
+
+/// What the node said a transaction would cost.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Estimate {
+    /// Its fee, at the node's gas prices now.
+    Fee(u128),
+    /// The key's notes can't pay it and its fee: they hold no more than the amount, or the
+    /// node said "not enough" for every set of the largest of them it was asked with.
+    Short,
+    /// The key's free notes can't pay it, but with the notes a send from here still spends
+    /// they could: it can be planned again once that send lands (see `with_busy`).
+    InFlight,
+    /// The node didn't say (not running, or refused the request for a reason a send
+    /// wouldn't meet).
+    Unknown,
+}
+
+impl Estimate {
+    pub fn fee(&self) -> Option<u128> {
+        match self {
+            Self::Fee(fee) => Some(*fee),
+            _ => None,
+        }
+    }
+}
+
+/// The node's fee for `shape` paid from `from`, whose spendable notes hold `notes`: the
+/// fewest largest notes that cover it, as the node's wallet picks them. `ask` sends one
+/// `wallet_fund_tx` request (its JSON text) and gives the node's reply. `Err` is a
+/// refusal the transaction itself would meet (`refusal`), for the plan to show.
+pub fn estimate(shape: &Shape, from: &str, notes: &[u128], mut ask: impl FnMut(String) -> Result<Value, String>) -> Result<Estimate, String> {
+    let mut values = notes.to_vec();
+    values.sort_unstable_by(|a, b| b.cmp(a));
+    let floor = match shape {
+        Shape::Transfer { amount, .. } => u128::from(*amount),
+        _ => 0,
+    };
+    let short = super::chain::problem("wallet_fund_tx", "not enough");
+    for count in 1..=values.len().min(MAX_INPUTS) {
+        let held: u128 = values[..count].iter().sum();
+        if held <= floor {
+            continue;
+        }
+        match ask(request(shape, from, &values[..count]).to_string()) {
+            Ok(funded) => return Ok(fee_of(&funded, held).map_or(Estimate::Unknown, Estimate::Fee)),
+            // These notes can't pay it with its fee: one more, as the wallet would.
+            Err(error) if error == short => continue,
+            Err(error) => return refusal(shape, &error).map_or(Ok(Estimate::Unknown), Err),
+        }
+    }
+    Ok(Estimate::Short)
+}
+
+/// A refusal of the stand-in that the transaction itself would meet, in the words a send
+/// gets. A transfer's stand-in names only the sender (already read from the node) and the
+/// recipient as keys, so the node's "Parsed bytes are bigger than the modulus" (0.3.4, on
+/// 64 hex characters that aren't a key) is about the recipient: the send to it is refused
+/// with "That isn't a Logos Blockchain public key" (fees-invalid-recipient-swallowed).
+fn refusal(shape: &Shape, error: &str) -> Option<String> {
+    let not_a_key = super::chain::problem("wallet_fund_tx", "invalid public key");
+    let modulus = error.to_ascii_lowercase().contains("bigger than the modulus");
+    (error == not_a_key || (modulus && matches!(shape, Shape::Transfer { .. }))).then_some(not_a_key)
+}
+
+/// `estimate` over the key's `free` notes; when they are short but the key also holds
+/// `busy` notes (inputs of a send from here not yet in a block, which the node's wallet
+/// won't spend twice), asked again with all of them: if those could pay it, the answer is
+/// to wait for that send to land, not to send less (fees-inflight-says-send-less: a plan
+/// said "send a little less" while the key's only note, 100,000, was a send's input).
+/// Stand-ins again, so no real note is reserved.
+pub fn with_busy(shape: &Shape, from: &str, free: &[u128], busy: &[u128], mut ask: impl FnMut(String) -> Result<Value, String>) -> Result<Estimate, String> {
+    let first = estimate(shape, from, free, &mut ask)?;
+    if first != Estimate::Short || busy.is_empty() {
+        return Ok(first);
+    }
+    let all: Vec<u128> = free.iter().chain(busy).copied().collect();
+    Ok(match estimate(shape, from, &all, &mut ask)? {
+        Estimate::Short => Estimate::Short,
+        _ => Estimate::InFlight,
+    })
+}
+
+/// About what one claim costs. Its fee is paid from the node's leader funding key, which
+/// names can't tell from the others, with that key's notes, largest first, as many as it
+/// takes; each input adds its bytes to the fee. So every key's own notes are priced (a
+/// claim's stand-in from them, as `estimate` picks them) and the most any key would pay
+/// is the figure: whichever key funds it, the claim costs no more at these gas prices.
+/// The largest single note of any key was used before, so a funding key holding small
+/// notes paid more than the plan said: 3 x 1,100 on a solo node, 2,028 planned, 2,092
+/// paid for two inputs (fees-claim-estimate-single-input). A key that can't pay one, or
+/// that the node won't price, is left out; `None` when no key can be priced.
+pub fn claim_estimate(held: &[(String, Vec<u128>)], mut ask: impl FnMut(String) -> Result<Value, String>) -> Option<u128> {
+    held.iter()
+        .filter_map(|(key, notes)| estimate(&Shape::Claim, key, notes, &mut ask).ok()?.fee())
+        .max()
+}
+
+/// A claim's estimate beside the reward it cashes: a warning when it costs more.
+pub fn claim_warning(fee: Option<u128>, reward: u128) -> Option<String> {
+    let fee = fee?;
+    (fee > reward).then(|| {
+        format!("A claim cashes one reward of {reward} and pays a fee of about {fee}: it costs more than it brings. The node's claim has no fee cap you can set.")
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const A: &str = "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07";
+    const B: &str = "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225";
+
+    /// The node's reply to a stand-in plan on a solo 0.3.4 node (exp2 si1): 100,000 in,
+    /// 3,000 + 96,166 out, so 834, what the send after it paid.
+    fn funded(outputs: &[u64]) -> Value {
+        let outs: Vec<Value> = outputs.iter().map(|v| json!({ "pk": A, "value": v })).collect();
+        json!({ "funded_tx": { "ops": [{ "opcode": 0, "payload": { "inputs": [note_id(1)], "outputs": outs } }] }, "tip": "b3", "transfer_proof": {} })
+    }
+
+    #[test]
+    fn the_fee_is_what_the_stand_ins_hold_less_what_is_paid_out() {
+        assert_eq!(fee_of(&funded(&[3000, 96166]), 100_000), Some(834));
+        assert_eq!(fee_of(&json!({ "funded_tx": { "mantle_tx": { "ops": [] } } }), 5), Some(5));
+        assert_eq!(fee_of(&json!({ "error": "x" }), 5), None);
+        assert_eq!(fee_of(&funded(&[10]), 5), None, "paid out more than held is no fee");
+    }
+
+    /// No real note and no funding key: the node can only spend the stand-ins.
+    #[test]
+    fn a_request_names_no_real_note_and_no_funding_key() {
+        let shown = request(&Shape::Transfer { to: B.into(), amount: 3000 }, A, &[100_000, 1234]);
+        assert_eq!(shown["funding_public_keys"], json!([]));
+        assert_eq!(shown["change_public_key"], A);
+        assert_eq!(shown["priority_fee_percent"], 0, "the node's own sends fund with 0");
+        assert_eq!(shown["tx_builder"]["pending_transfer"]["outputs"], json!([{ "value": 3000, "pk": B }]));
+        assert_eq!(shown["tx_builder"]["pending_transfer"]["inputs"], json!([note_id(1), note_id(2)]));
+        let inputs = shown["tx_builder"]["ledger_inputs"].as_array().unwrap();
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0]["note"], json!({ "value": 100_000, "pk": A }));
+        assert_eq!(inputs[0]["op_id"].as_array().unwrap().len(), 32, "the node reads an op id as 32 bytes");
+        // The same ids every time, so the node's reservations don't grow with each plan.
+        assert_eq!(request(&Shape::Claim, A, &[5]), request(&Shape::Claim, A, &[5]));
+        let deposit = request(&Shape::Deposit { channel: "01".repeat(32), metadata: 32 }, A, &[5]);
+        assert_eq!(deposit["tx_builder"]["mantle_tx"]["ops"][0]["opcode"], 0x12);
+        // As the node stored a real deposit (spike 5): metadata a list of bytes.
+        assert_eq!(deposit["tx_builder"]["mantle_tx"]["ops"][0]["payload"]["metadata"], json!(vec![0; 32]));
+        assert_eq!(request(&Shape::Claim, A, &[5])["tx_builder"]["mantle_tx"]["ops"][0]["opcode"], 0x30);
+    }
+
+    /// Largest notes first, one more each time the node says they can't pay it.
+    #[test]
+    fn the_estimate_takes_the_fewest_largest_notes_as_the_wallet_does() {
+        let short = crate::chain::problem("wallet_fund_tx", "Failed to fund tx: Wallet does not have enough funds, available=0");
+        let mut asked = Vec::new();
+        let fee = estimate(&Shape::Transfer { to: B.into(), amount: 94_198 }, A, &[1234, 94_098], |request| {
+            let request: Value = serde_json::from_str(&request).unwrap();
+            let count = request["tx_builder"]["ledger_inputs"].as_array().unwrap().len();
+            asked.push(count);
+            // As the solo node answered (exp2 si-2in): two inputs, 94,198 + 268 out.
+            if count < 2 { Err(short.clone()) } else { Ok(funded(&[94_198, 268])) }
+        });
+        assert_eq!(fee, Ok(Estimate::Fee(866)));
+        assert_eq!(asked, [2], "one note of 94,098 can't pay 94,198, so it isn't asked");
+        let mut asked = 0;
+        let fee = estimate(&Shape::Transfer { to: B.into(), amount: 3000 }, A, &[3500, 100], |_| {
+            asked += 1;
+            Err(short.clone())
+        });
+        assert_eq!((fee, asked), (Ok(Estimate::Short), 2), "nothing covers it with its fee");
+        // The proof run's case: 1,268 in two notes can't send 1,000 and a fee of 866.
+        assert_eq!(estimate(&Shape::Transfer { to: B.into(), amount: 1000 }, A, &[1000, 268], |_| Err(short.clone())), Ok(Estimate::Short));
+        assert_eq!(estimate(&Shape::Transfer { to: B.into(), amount: 1000 }, A, &[900], |_| unreachable!()), Ok(Estimate::Short), "less than the amount");
+        let down = estimate(&Shape::Claim, A, &[50_000], |_| Err("Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.".into()));
+        assert_eq!(down, Ok(Estimate::Unknown), "a node that didn't say is not a short key");
+        assert_eq!(estimate(&Shape::Claim, A, &[], |_| unreachable!()), Ok(Estimate::Short), "no notes, nothing asked");
+    }
+
+    /// The solo node's own words for a stand-in to 64 hex characters that aren't a key
+    /// (fixer probe, 2026-11-09): the send to it is refused, so the plan is too.
+    #[test]
+    fn a_recipient_that_isnt_a_key_refuses_the_plan_as_the_send_is_refused() {
+        let modulus = || Err(crate::chain::problem("wallet_fund_tx", "Failed to parse fund request: Parsed bytes are bigger than the modulus, got 77648812782670860460512307594061302913369283834606025297048026922953510464427, expected 21888242871839275222246405745257275088548364400416034343698204186575808495617 at line 1 column 553"));
+        let to = "ab".repeat(32);
+        let refused = estimate(&Shape::Transfer { to: to.clone(), amount: 1000 }, A, &[100_000], |_| modulus());
+        assert_eq!(refused, Err("That isn't a Logos Blockchain public key: check it and try again.".to_owned()));
+        // A claim's or a deposit's stand-in names no recipient: the same words are not about one.
+        assert_eq!(estimate(&Shape::Claim, A, &[100_000], |_| modulus()), Ok(Estimate::Unknown));
+        // Anything else the node won't parse is still "couldn't say", not a refusal.
+        let other = estimate(&Shape::Transfer { to, amount: 1000 }, A, &[100_000], |_| Err(crate::chain::problem("wallet_fund_tx", "Failed to parse fund request: missing field `tx_builder`")));
+        assert_eq!(other, Ok(Estimate::Unknown));
+    }
+
+    /// The key's only note is a send's input, not yet in a block (adv.py H4): its free notes
+    /// are short, all of them would pay, so the plan says to wait, not to send less.
+    #[test]
+    fn short_only_because_of_notes_in_flight_is_in_flight() {
+        let short = crate::chain::problem("wallet_fund_tx", "Failed to fund tx: Wallet does not have enough funds, available=0");
+        let transfer = Shape::Transfer { to: B.into(), amount: 1000 };
+        let funded_if = |enough: u128| {
+            let short = short.clone();
+            move |request: String| {
+                let request: Value = serde_json::from_str(&request).unwrap();
+                let held: u128 = request["tx_builder"]["ledger_inputs"].as_array().unwrap().iter().map(|i| u128::from(i["note"]["value"].as_u64().unwrap())).sum();
+                if held >= enough { Ok(funded(&[1000, (held - 1000 - 834) as u64])) } else { Err(short.clone()) }
+            }
+        };
+        assert_eq!(with_busy(&transfer, A, &[], &[100_000], funded_if(1834)), Ok(Estimate::InFlight));
+        assert_eq!(with_busy(&transfer, A, &[500], &[1500], funded_if(1834)), Ok(Estimate::InFlight), "free notes too small, all of them enough");
+        // Short with every note counted: send less, as before.
+        assert_eq!(with_busy(&transfer, A, &[500], &[1200], funded_if(1834)), Ok(Estimate::Short));
+        // Nothing busy: short is short; free notes enough: their fee.
+        assert_eq!(with_busy(&transfer, A, &[1200], &[], funded_if(1834)), Ok(Estimate::Short));
+        assert_eq!(with_busy(&transfer, A, &[100_000], &[50_000], funded_if(1834)), Ok(Estimate::Fee(834)));
+    }
+
+    /// Every stand-in id read as a little-endian field element stays below the BN254
+    /// modulus (its top byte, the last one written, at most 48).
+    #[test]
+    fn stand_in_ids_are_field_elements_the_node_can_read() {
+        let mut ids: Vec<String> = (1..=MAX_INPUTS as u64).map(note_id).collect();
+        ids.extend([note_id(DEPOSIT_NOTE), note_id(CLAIM_NULLIFIER)]);
+        for id in &ids {
+            assert!(u8::from_str_radix(&id[62..], 16).unwrap() <= 48 && id[..62].bytes().all(|b| b == b'0'), "{id}");
+        }
+        let mut unique = ids.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), ids.len(), "the deposit's and the claim's stand-ins are not a transfer's");
+    }
+
+    /// The verifier's claim run (claimv.log): A 94,198, the leader funding key 3 x 1,100, B
+    /// 100. The claim spent two of the funding key's notes and paid 2,092; one input of A's
+    /// priced it at 2,028. Each key is priced with its own notes, and the most is the figure.
+    #[test]
+    fn a_claim_is_priced_with_each_keys_own_notes_and_the_most_is_the_figure() {
+        let lf = "2d8fc4d28283ff0ddf9ad3166394da0bcab2d7df099d77ed18414f51c4e5e41a".to_owned();
+        let held = vec![(A.to_owned(), vec![94_198]), (lf, vec![1100, 1100, 1100]), (B.to_owned(), vec![100]), ("0d".repeat(32), vec![])];
+        let short = crate::chain::problem("wallet_fund_tx", "Failed to fund tx: Wallet does not have enough funds, available=0");
+        let node = |request: String| {
+            let request: Value = serde_json::from_str(&request).unwrap();
+            let values: Vec<u128> = request["tx_builder"]["ledger_inputs"].as_array().unwrap().iter().map(|i| u128::from(i["note"]["value"].as_u64().unwrap())).collect();
+            // At storage price 2: 2,028 for one input, 2,092 for two (32 bytes x 2 more).
+            let fee = 2028 + 64 * (values.len() as u128 - 1);
+            let held: u128 = values.iter().sum();
+            if held > fee { Ok(funded(&[(held - fee) as u64])) } else { Err(short.clone()) }
+        };
+        assert_eq!(claim_estimate(&held, node), Some(2092), "the funding key's two inputs, not A's one");
+        assert_eq!(claim_estimate(&held[..1], node), Some(2028));
+        assert_eq!(claim_estimate(&held[2..], node), None, "no key can pay a claim");
+        assert_eq!(claim_estimate(&held, |_| Err("Basecamp's Logos Blockchain node didn't answer.".into())), None);
+    }
+
+    #[test]
+    fn a_claim_warns_when_its_fee_is_more_than_its_reward() {
+        assert!(claim_warning(Some(1599), 38).unwrap().contains("reward of 38 and pays a fee of about 1599"));
+        assert_eq!(claim_warning(Some(10), 38), None);
+        assert_eq!(claim_warning(None, 38), None);
+    }
+}

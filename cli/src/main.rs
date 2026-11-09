@@ -719,6 +719,7 @@ fn write_man_pages(dir: &std::path::Path) -> Result<()> {
 mod board;
 mod claims;
 mod chain;
+mod chain_fee;
 mod fees;
 mod module;
 mod tokens;

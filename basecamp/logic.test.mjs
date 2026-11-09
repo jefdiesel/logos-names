@@ -195,5 +195,17 @@ check("subDigits", [subDigits("1000", "1"), subDigits("210939029", "210939029"),
   check("bridge on the key's page", onPage(Object.assign({}, bridge, { to: A }), bridge.from)[0][1], "-1,000,000");
 }
 
+// LP-0022 gas: the node's own estimate in a chain plan's confirm step (chain_fee.rs).
+// Imported here, not on the import line above, which other branches also extend (imports are hoisted).
+import { chainFeeLine, claimFeeLine } from "./qml/logic.mjs";
+check("chainFeeLine estimate", chainFeeLine({ amount: "3000", fee_about: "834" }), "About 834, paid from the key's notes: your node's figure at its gas prices now. The fee paid is shown once it's sent.");
+check("chainFeeLine no estimate", chainFeeLine({ amount: "3000", fee_about: null }), "Your node couldn't say in advance. The fee paid is shown once it's sent.");
+check("chainFeeLine no plan", chainFeeLine(null), "");
+check("chainFeeLine short", chainFeeLine({ amount: "1000", fee_about: null, cannot_pay_fee: true }), "That key's notes can't pay this amount and its fee: send a little less.");
+// adv.py H4: the key's only note is a send's input still on its way; not "send less".
+check("chainFeeLine in flight", chainFeeLine({ amount: "1000", fee_about: null, in_flight: true }), "Another transfer from this key is still waiting to land, and its notes can't be spent twice. Wait a minute for it to land, then try again.");
+check("claimFeeLine warns", claimFeeLine({ reward_per_voucher: "38", fee_about: "1599", warning: "It costs more than it brings." }), "Each claim costs about 1,599 in fees and cashes one reward of 38. It costs more than it brings.");
+check("claimFeeLine none", [claimFeeLine({ fee_about: null }), claimFeeLine(null)], ["", ""]);
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);
