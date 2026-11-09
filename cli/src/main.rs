@@ -272,9 +272,9 @@ enum Command {
         /// How much of the public account's tokens to move to the private account.
         /// The default covers a few names' deposits and private changes: on LEZ 0.4 each
         /// private transaction reserves its fee in the proof, about 5,400,000 at the
-        /// lowest base fees.
-        #[arg(long, default_value_t = 50_000_000, value_parser = parse_shield, allow_hyphen_values = true)]
-        shield: u128,
+        /// lowest base fees. Default 50,000,000; asked for and not made, it is an error.
+        #[arg(long, value_parser = parse_shield, allow_hyphen_values = true)]
+        shield: Option<u128>,
     },
     /// Show this wallet's accounts and balances.
     Balance,
@@ -767,7 +767,11 @@ fn parse_shield(input: &str) -> Result<u128, String> {
 /// (cli-message-wording-bundle).
 fn parse_payee_name(input: &str) -> Result<String, String> {
     let text = input.trim();
-    if text.starts_with("Public/") || text.starts_with("Private/") {
+    if text.starts_with("Private/") {
+        // Nobody but its holder knows a private account's keys, so it can't be paid by its ID.
+        return Err(format!("{text} is a private account, which can't be paid by its ID. Pay its name, or ask for a public account."));
+    }
+    if text.starts_with("Public/") {
         return Err(format!(
             "{text} is an account, not a name; pay a public account with `names wallet auth-transfer send --from <your account> --to {text} --amount <amount>`"
         ));
@@ -2661,6 +2665,16 @@ fn sequencer_overrides(cli: &Cli) -> Result<Option<WalletConfigOverrides>> {
     Ok(Some(overrides))
 }
 
+/// What `names setup` says when the public account `public` holds `balance`, less than
+/// the `shield` to move (the Basecamp module reads its "holds" and "at least" figures).
+fn unfunded_setup(public: AccountId, balance: u128, shield: u128) -> String {
+    format!(
+        "Public/{public} holds {}; send it at least {} testnet tokens from your LEZ wallet (or with `names bridge`), then run `names setup` again. A name is held by a refundable deposit (`names settings` shows it), so the private account needs at least that. Nothing was moved.",
+        chain::grouped(balance),
+        chain::grouped(shield)
+    )
+}
+
 /// How many times `register` sends its reveal before giving up.
 const REVEAL_ATTEMPTS: u32 = 4;
 
@@ -2686,9 +2700,15 @@ fn gas_limit_for(cycles: u64) -> u64 {
 /// the whole limit is reserved from the sender while the transfer runs.
 const NATIVE_TRANSFER_GAS_LIMIT: u64 = 1_000;
 
+/// The move to private `names setup` makes when `--shield` isn't given.
+const DEFAULT_SHIELD: u128 = 50_000_000;
+
 /// `names setup`: a public and a private account, and, once the public one is funded,
-/// some of its tokens moved to the private account so names can be held and paid privately.
-async fn setup(client: &mut Client, shield: u128) -> Result<()> {
+/// some of its tokens moved to the private account so names can be held and paid
+/// privately. A `--shield` asked for (`asked`) that
+/// the public account can't cover is an error; the default one only says what to do.
+async fn setup(client: &mut Client, asked: Option<u128>) -> Result<()> {
+    let shield = asked.unwrap_or(DEFAULT_SHIELD);
     let mut defaults = load_defaults();
     let public: AccountId = match defaults.public.as_deref().and_then(|id| id.parse().ok()) {
         Some(id) => id,
@@ -2707,11 +2727,12 @@ async fn setup(client: &mut Client, shield: u128) -> Result<()> {
 
     let balance = client.wallet.get_account_balance(public).await.unwrap_or(0);
     if balance < shield {
-        println!(
-            "Public/{public} holds {balance}; send it at least {shield} testnet tokens from your LEZ \
-             wallet (or with `names bridge`), then run `names setup` again. A name is held by a \
-             refundable deposit (`names settings` shows it), so the private account needs at least that"
-        );
+        let short = unfunded_setup(public, balance, shield);
+        // Asked for and not made, it is an error, so a script never takes it for done.
+        if asked.is_some() {
+            bail!(short);
+        }
+        println!("{short}");
         return Ok(());
     }
     if shield > 0 {
@@ -3142,11 +3163,19 @@ fn landing(position: usize, charged: &[bool], reverted: &[u64], summary: Option<
 }
 
 /// Why a public send of `amount` from `from` (holding `balance`) is refused before it is
-/// sent: the fee reserve, up to `reserve`, leaves the payer before the transfer runs.
+/// sent: more than it holds, or too little left beside it for the fee reserve (up to
+/// `reserve`), which leaves the payer before the transfer runs.
 fn send_shortfall(from: &str, balance: u128, amount: u128, reserve: u128) -> Option<String> {
+    let shown = chain::grouped;
+    if balance < amount {
+        return Some(format!("Public/{from} holds {}, less than {}. Nothing was sent.", shown(balance), shown(amount)));
+    }
     (balance < amount.saturating_add(reserve)).then(|| {
         format!(
-            "Public/{from} holds {balance}; sending {amount} also needs up to {reserve} held for the fee while it runs. Nothing was sent."
+            "Public/{from} holds {}; sending {} also needs up to {} held for the fee while it runs. Send a little less. Nothing was sent.",
+            shown(balance),
+            shown(amount),
+            shown(reserve)
         )
     })
 }
@@ -4074,11 +4103,16 @@ mod input_tests {
             let said = refused(args);
             assert!(said.contains("is negative. Enter an amount above 0."), "{args:?}: {said}");
         }
+        assert!(matches!(Cli::try_parse_from(["names", "setup", "--shield", "00"]).map(|cli| cli.command), Ok(Command::Setup { shield: Some(0) })));
+        assert!(matches!(Cli::try_parse_from(["names", "setup"]).map(|cli| cli.command), Ok(Command::Setup { shield: None })));
+        assert!(matches!(Cli::try_parse_from(["names", "pay", "hopper", "100", "--public"]).map(|cli| cli.command), Ok(Command::Pay { amount: 100, public: true, .. })));
+        let private = refused(&["names", "pay", "Private/FNZ3fvu5mRwYEtr3Rf7fSbFJUKXKPFnAT1rSQkkDHyBE", "100"]);
+        assert!(private.contains("is a private account, which can't be paid by its ID. Pay its name") && !private.contains("auth-transfer"), "{private}");
         let id = "Public/FNZ3fvu5mRwYEtr3Rf7fSbFJUKXKPFnAT1rSQkkDHyBE";
         assert!(refused(&["names", "pay", id, "100"]).contains("is an account, not a name; pay a public account with `names wallet auth-transfer send"), "{}", refused(&["names", "pay", id, "100"]));
         assert!(matches!(Cli::try_parse_from(["names", "bridge", "1,000", "--to", "x", "--from-key", "k"]).map(|cli| cli.command), Ok(Command::Bridge { amount: 1_000, .. })));
-        assert!(matches!(Cli::try_parse_from(["names", "setup", "--shield", "5,000,000"]).map(|cli| cli.command), Ok(Command::Setup { shield: 5_000_000 })));
-        assert!(matches!(Cli::try_parse_from(["names", "setup", "--shield", "0"]).map(|cli| cli.command), Ok(Command::Setup { shield: 0 })));
+        assert!(matches!(Cli::try_parse_from(["names", "setup", "--shield", "5,000,000"]).map(|cli| cli.command), Ok(Command::Setup { shield: Some(5_000_000) })));
+        assert!(matches!(Cli::try_parse_from(["names", "setup", "--shield", "0"]).map(|cli| cli.command), Ok(Command::Setup { shield: Some(0) })));
         assert!(matches!(Cli::try_parse_from(["names", "pay", "hopper", "1,000"]).map(|cli| cli.command), Ok(Command::Pay { amount: 1_000, .. })));
         assert!(matches!(Cli::try_parse_from(["names", "pay", "hopper", "--public", "100"]).map(|cli| cli.command), Ok(Command::Pay { amount: 100, public: true, .. })), "a flag is still a flag");
     }
@@ -4132,8 +4166,10 @@ mod send_fee_tests {
     fn a_send_the_payer_cant_hold_with_its_fee_is_refused_and_a_revert_fails() {
         use super::{landing, reverted_send, send_shortfall};
         let short = send_shortfall("H", 100_000, 100_000, 13_000).expect("refused");
-        assert!(short.contains("holds 100000") && short.ends_with("Nothing was sent."), "{short}");
+        assert_eq!(short, "Public/H holds 100,000; sending 100,000 also needs up to 13,000 held for the fee while it runs. Send a little less. Nothing was sent.");
         assert_eq!(send_shortfall("H", 113_000, 100_000, 13_000), None);
+        // cli-wording-leftovers: an amount above the balance is said as that, not as the fee.
+        assert_eq!(send_shortfall("H", 100_000, 99_999_999, 18_000).as_deref(), Some("Public/H holds 100,000, less than 99,999,999. Nothing was sent."));
         let block = Some(super::BlockFees { gas_used_exec: 1_000, gas_used_stor: 511, revenue_base: 12_088, revenue_tip: 0 });
         assert_eq!(landing(0, &[true], &[0], block, Some((511, 0))), super::Landed { reverted: true, fee: Some(12_088) });
         assert!(!landing(1, &[true, true], &[0], None, None).reverted, "another transaction reverted");

@@ -690,8 +690,11 @@ pub fn run_create_wallet(setup: &Setup) -> Result<Value, String> {
 /// public account holds too little, and says so.
 pub fn shield_outcome(log: &str, done: bool) -> Value {
     if let Some(line) = log.lines().find(|line| line.contains("send it at least")) {
+        // The CLI groups these figures (5,000,000) since 0.15.x; older ones wrote 5000000.
         let word_after = |key: &str| {
-            line.split_once(key).and_then(|(_, rest)| rest.split(|c: char| !c.is_ascii_digit()).find(|w| !w.is_empty())).map(str::to_owned)
+            let (_, rest) = line.split_once(key)?;
+            let figure: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == ',').filter(char::is_ascii_digit).collect();
+            (!figure.is_empty()).then_some(figure)
         };
         let (holds, needs) = (word_after(" holds "), word_after("at least "));
         let problem = match (holds, needs) {
@@ -2850,6 +2853,9 @@ mod tests {
         let read = shield_outcome(poor, true);
         assert_eq!(read["moved"], false);
         assert_eq!(read["problem"], "Your public account holds 1,200, and moving to private needs at least 5,000,000. Get more tokens, then try again.");
+        // cli-wording-leftovers: the CLI now groups the figures and fails a shield it couldn't make.
+        let grouped = "public account   Public/x\nError: Public/x holds 1,200; send it at least 5,000,000 testnet tokens from your LEZ wallet (or with `names bridge`), then run `names setup` again. Nothing was moved.\n";
+        assert_eq!(shield_outcome(grouped, false), read);
         let moved = shield_outcome("moving 5000000 to the private account; generating the proof (a few minutes)\nready: ...\n", true);
         assert_eq!(moved, json!({ "moved": true, "problem": null }));
         let scrolled = "Stored persistent accounts at /w/storage.json\n".repeat(40) + "Synced to block 36710\nready: `names register <name>` holds a name privately\n";
