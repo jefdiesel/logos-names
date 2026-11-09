@@ -2903,6 +2903,9 @@ impl NamesModule for Names {
             if !cli::is_amount(&cli::ungrouped(&amount).unwrap_or_default()) {
                 return Err("enter a whole amount, such as 1000".to_owned());
             }
+            // A program's account and the empty one are refused as cli_bridge_to and
+            // cli_transfer refuse them (pay-account-accepts-program-account).
+            self.not_a_sink(&registry::parse_account(&to)?, "take a payment")?;
             if let Ok(setup) = self.cli_setup() {
                 payable_account(&setup, &to)?;
             }
@@ -5503,6 +5506,23 @@ mod tests {
         assert!(names.not_a_sink(&[4; 32], "take a bridge").is_ok(), "anyone else's");
         let bridged = parsed(&names.chain_bridge("66".repeat(32), format!("Public/{DEFAULT_REGISTRY}"), "5000000".into(), false));
         assert_eq!(bridged["error"], "that is a program's account, which can't take a bridge", "{bridged}");
+    }
+
+    /// pay-account-accepts-program-account: cli_pay_account paid the registry's account
+    /// (5,000 -> 6,000) while cli_bridge_to and cli_transfer refused it.
+    #[test]
+    fn a_payment_to_a_programs_account_or_the_empty_one_is_refused() {
+        let (mut names, dir) = with_wallet("pay-program", "exit 0");
+        names.token_program = Some([5; 32]);
+        for to in [registry::account_text(&[7; 32]), registry::account_text(&[5; 32]), DEFAULT_REGISTRY.to_owned(), RETIRED_REGISTRIES[1].to_owned()] {
+            let refused = parsed(&names.cli_pay_account(format!("Public/{to}"), "1000".into(), false));
+            assert_eq!(refused["error"], "that is a program's account, which can't take a payment", "{to}: {refused}");
+        }
+        let empty = parsed(&names.cli_pay_account(format!("Public/{}", registry::account_text(&[0; 32])), "1000".into(), false));
+        assert_eq!(empty["error"], "that is the empty account (all 1s), which no one holds", "{empty}");
+        assert!(std::fs::read_dir(dir.join("jobs")).map_or(true, |entries| entries.count() == 0), "nothing ran");
+        assert!(!activity::all(&config_dir().unwrap()).iter().any(|e| e["kind"] == "pay_account" && e["to"].as_str().is_some_and(|to| to.contains(DEFAULT_REGISTRY))), "no history row");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// receive-privately-entry-no-paying-account: the receive_privately entry had no
