@@ -372,7 +372,8 @@ var BRIDGE_ARRIVES_MS = 12 * 3600 * 1000
 /// what left, "+" for what came in, "" for a move between your own accounts; `tone` is
 /// "good", "warn", "bad" or "plain" for the state. `account`, when given, is the account
 /// whose page shows the entry: the direction and amount are then that account's own
-/// (claim-entry-not-on-credited-accounts-page-and-shown-as-credit-on-payer).
+/// (incoming-payment-shown-as-outgoing-on-receiving-accounts-page,
+/// claim-entry-not-on-credited-accounts-page-and-shown-as-credit-on-payer).
 export function activityLine(entry, now, account) {
     var e = entry || {}
     var page = String(account || "")
@@ -450,6 +451,23 @@ function accountSide(e, kind, page) {
             }
         return null
     }
+    var incoming = kind === "pay_account" || kind === "token_send" || kind === "bridge" || kind === "send"
+    if (incoming && e.to === page && e.from !== page)
+        // Money into this account: received, and its fee was the payer's.
+        return function(line) {
+            if (kind === "pay_account" || kind === "token_send")
+                line.title = (kind === "token_send" ? "Received a token" : "Received") + (e.from ? " from " + whoShown(e.from) : "")
+            else if (kind === "send")
+                line.title = "Received on the Logos Blockchain"
+            if (kind === "pay_account")
+                line.sub = "on LEZ"
+            else if (kind === "token_send")
+                line.sub = "on LEZ"
+            else if (fee)
+                line.sub = line.sub.replace(" · fee " + grouped(fee), "")
+            line.sign = line.amount === "" ? "" : "+"
+            return line
+        }
     return null
 }
 

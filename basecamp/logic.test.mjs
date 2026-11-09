@@ -168,6 +168,15 @@ check("subDigits", [subDigits("1000", "1"), subDigits("210939029", "210939029"),
   // A payer credited too: its own credit, with the fee it paid beside it.
   const both = Object.assign({}, claim, { received: { [claim.from]: "3000000" } });
   check("claim payer also credited", onPage(both, claim.from), [["Claimed waiting payments", "+3,000,000", "on LEZ, into your private accounts · fee 6,972,097"]]);
+  // incoming-payment-shown-as-outgoing-on-receiving-accounts-page: a payment into A showed
+  // "Paid Public A ... -1,000" on A's own page.
+  const A = "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", P = "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z";
+  const paid = { kind: "pay_account", chain: "lez", from: P, to: A, amount: "1000", private: true, fee: { about: null, at_most: null, paid: "70000" }, state: "done", at: 1794200000 };
+  check("payment on the payee's page", onPage(paid, A), [["Received from Private yGrPEbP3…fe4Z", "+1,000", "on LEZ"]]);
+  check("payment on the payer's page", onPage(paid, P), [["Paid Public CCVd76Tk…pKnk", "-1,000", "on LEZ, from your private account · fee 70,000"]]);
+  check("token on the payee's page", onPage({ kind: "token_send", chain: "lez", from: P, to: A, amount: "50", state: "done", at: 1794200000 }, A)[0].slice(0, 2), ["Received a token from Private yGrPEbP3…fe4Z", "+50"]);
+  check("bridge on the LEZ account's page", onPage(Object.assign({}, bridge, { to: A, fee: "100000" }), A)[0].slice(1), ["+1,000,000", "from key 7a6223ab…2a2a into Public CCVd76Tk…pKnk"]);
+  check("bridge on the key's page", onPage(Object.assign({}, bridge, { to: A }), bridge.from)[0][1], "-1,000,000");
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
