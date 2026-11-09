@@ -149,6 +149,9 @@ check("subDigits", [subDigits("1000", "1"), subDigits("210939029", "210939029"),
   check("activityFor", activityFor([bridge, { kind: "pay", name: "ada" }], KEY).length, 1);
   check("agoShown", [agoShown(now - 5000, now), agoShown(now - 3 * 86400000, now)], ["just now", "3 d ago"]);
   check("agoShown in seconds", agoShown(Math.floor(now / 1000) - 7200, now), "2 h ago");
+  // activity-public-send-says-proving: a public send in flight said "Proving…".
+  const flying = (fields) => activityLine(Object.assign({ chain: "lez", state: "sending", to: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", amount: "1000", at: Math.floor(now / 1000) }, fields), now).state;
+  check("activityLine public sends are sending", [flying({ kind: "pay_account", private: false }), flying({ kind: "token_send", from: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk" }), flying({ kind: "pay_account", private: true }), flying({ kind: "shield" }), flying({ kind: "receive" }), flying({ kind: "pay", from: "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z" }), activityLine({ kind: "send", chain: "logos", state: "sending", at: now }, now).state], ["Sending…", "Sending…", "Proving…", "Proving…", "Proving…", "Proving…", "Sending…"]);
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");

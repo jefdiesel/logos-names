@@ -357,6 +357,14 @@ export function agoShown(at, now) {
     return Math.round(s / 86400) + " d ago"
 }
 
+/// Whether a LEZ entry is proven on this computer: a move to private and a claim always
+/// are; anything else when it is marked private or paid from a private account.
+function proven(e) {
+    if (e.chain !== "lez") return false
+    if (e.kind === "shield" || e.kind === "receive") return true
+    return e["private"] === true || /^Private\//.test(String(e.from || ""))
+}
+
 /// One history entry in words: {title, sub, amount, sign, state, tone}. `sign` is "-" for
 /// what left, "+" for what came in, "" for a move between your own accounts; `tone` is
 /// "good", "warn", "bad" or "plain" for the state.
@@ -381,7 +389,8 @@ export function activityLine(entry, now) {
     }
     var stateText = "", tone = "plain"
     switch (String(e.state || "")) {
-    case "sending": stateText = e.chain === "lez" ? "Proving…" : "Sending…"; tone = "warn"; break
+    // Only a private change is proven; a public one on LEZ is only sent (activity-public-send-says-proving).
+    case "sending": stateText = proven(e) ? "Proving…" : "Sending…"; tone = "warn"; break
     case "in_block":
         stateText = kind !== "bridge" ? "In a block" : e.followed === false ? "In a block · its arrival on LEZ can't be followed here" : "In a block · arrives in about 12 h"
         tone = kind === "bridge" ? "warn" : "good"; break
