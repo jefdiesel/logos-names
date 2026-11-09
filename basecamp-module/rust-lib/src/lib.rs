@@ -3564,7 +3564,7 @@ impl NamesModule for Names {
                 "balance": balance.to_string(),
             });
             if !send {
-                chain_fee_about(&mut plan, "fee_about", &chain_fee::Shape::Transfer { to: to_key.clone(), amount }, &from, None);
+                chain_fee_about(&mut plan, "fee_about", &chain_fee::Shape::Transfer { to: to_key.clone(), amount }, &from, None)?;
             }
             if send {
                 let before = chain::notes_of(&node::call("wallet_get_notes", json!([from, ""]), node::QUICK)?);
@@ -3615,7 +3615,7 @@ impl NamesModule for Names {
                 if exact {
                     plan["fee_about"] = json!("0");
                 } else {
-                    chain_fee_about(&mut plan, "fee_about", &chain_fee::Shape::Transfer { to: from.clone(), amount }, &from, None);
+                    chain_fee_about(&mut plan, "fee_about", &chain_fee::Shape::Transfer { to: from.clone(), amount }, &from, None)?;
                 }
             }
             // A note of exactly the amount is already there: a split would only cost a fee
@@ -3702,11 +3702,11 @@ impl NamesModule for Names {
             if !send {
                 let deposit = chain_fee::Shape::Deposit { channel: channel.clone(), metadata: registry::hex(&account).len() / 2 };
                 match &note {
-                    Some(note) => chain_fee_about(&mut plan, "fee_about", &deposit, &from, Some(note)),
+                    Some(note) => chain_fee_about(&mut plan, "fee_about", &deposit, &from, Some(note))?,
                     None => plan["fee_about"] = Value::Null,
                 }
                 if needs_split {
-                    chain_fee_about(&mut plan, "split_fee_about", &chain_fee::Shape::Transfer { to: from.clone(), amount }, &from, None);
+                    chain_fee_about(&mut plan, "split_fee_about", &chain_fee::Shape::Transfer { to: from.clone(), amount }, &from, None)?;
                 }
             }
             if exact_busy {
@@ -4718,16 +4718,18 @@ fn chain_sent_add(hash: &str, sent: Value) {
 /// null when the node can't say), with `cannot_pay_fee: true` when the key's notes can't
 /// pay it and its fee: asked of the node with stand-ins of the key's notes, less `skip` and
 /// those a send from here still spends, so no real note is reserved (chain_fee.rs).
-fn chain_fee_about(plan: &mut Value, field: &str, shape: &chain_fee::Shape, from: &str, skip: Option<&str>) {
+/// `Err` when the node refuses it as it would refuse the send (a recipient that isn't a key).
+fn chain_fee_about(plan: &mut Value, field: &str, shape: &chain_fee::Shape, from: &str, skip: Option<&str>) -> Result<(), String> {
     plan[field] = Value::Null;
-    let Ok(notes) = node::call("wallet_get_notes", json!([from, ""]), node::QUICK).map(|reply| chain::notes_of(&reply)) else { return };
+    let Ok(notes) = node::call("wallet_get_notes", json!([from, ""]), node::QUICK).map(|reply| chain::notes_of(&reply)) else { return Ok(()) };
     let busy = chain_notes_in_use(from);
     let values: Vec<u128> = notes.iter().filter(|(id, _)| !busy.contains(*id) && skip != Some(id.as_str())).map(|(_, value)| chain::amount(value)).collect();
-    match chain_fee::estimate(shape, from, &values, |request| node::call("wallet_fund_tx", json!([request]), node::QUICK)) {
+    match chain_fee::estimate(shape, from, &values, |request| node::call("wallet_fund_tx", json!([request]), node::QUICK))? {
         chain_fee::Estimate::Fee(fee) => plan[field] = Value::from(fee.to_string()),
         chain_fee::Estimate::Short => plan["cannot_pay_fee"] = Value::Bool(true),
         chain_fee::Estimate::Unknown => {}
     }
+    Ok(())
 }
 
 /// About what one `leader_claim` will cost: its LeaderClaim op and a transfer of one input
@@ -4748,7 +4750,8 @@ fn chain_claim_fee_about() -> Value {
         .collect();
     let Some((key, largest)) = chain_fee::claim_stand_in(&held) else { return Value::Null };
     chain_fee::estimate(&chain_fee::Shape::Claim, &key, &[largest], |request| node::call("wallet_fund_tx", json!([request]), node::QUICK))
-        .fee()
+        .ok()
+        .and_then(|estimate| estimate.fee())
         .map_or(Value::Null, |fee| Value::from(fee.to_string()))
 }
 
@@ -6952,5 +6955,19 @@ mod tests {
         node_answers("wallet_fund_tx", json!({ "funded_tx": { "ops": [{ "opcode": 0, "payload": { "inputs": ["01"], "outputs": [{ "value": 700000 }, { "value": 4299134 }] } }] } }));
         let plan = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "700,000".into(), false));
         assert_eq!((plan["value"]["needs_split"].clone(), plan["value"]["fee_about"].clone(), plan["value"]["split_fee_about"].clone()), (json!(true), Value::Null, json!("866")), "{plan}");
+    }
+
+    /// adv.py H2 and the fixer's probe: a plan to 64 hex characters that aren't a key. The
+    /// node refused the stand-in with "Parsed bytes are bigger than the modulus" and the send
+    /// with "That isn't a Logos Blockchain public key"; the plan now says what the send says.
+    #[test]
+    fn a_plan_to_a_recipient_that_isnt_a_key_is_refused_as_the_send_is() {
+        let mut names = fresh();
+        node_answers("wallet_get_balance", json!("100000"));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "f08a", "value": "100000" }] }));
+        node_refuses("wallet_fund_tx", "Failed to parse fund request: Parsed bytes are bigger than the modulus, got 77648812782670860460512307594061302913369283834606025297048026922953510464427, expected 21888242871839275222246405745257275088548364400416034343698204186575808495617 at line 1 column 553");
+        let plan = parsed(&names.chain_send(NODE_KEY.into(), "ab".repeat(32), "1,000".into(), false));
+        assert_eq!((plan["success"].clone(), plan["error"].clone()), (json!(false), json!("That isn't a Logos Blockchain public key: check it and try again.")), "{plan}");
+        assert!(!node_asked().contains(&"wallet_transfer_funds".to_owned()), "a plan sends nothing");
     }
 }

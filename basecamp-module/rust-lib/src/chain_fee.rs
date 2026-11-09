@@ -119,8 +119,9 @@ impl Estimate {
 
 /// The node's fee for `shape` paid from `from`, whose spendable notes hold `notes`: the
 /// fewest largest notes that cover it, as the node's wallet picks them. `ask` sends one
-/// `wallet_fund_tx` request (its JSON text) and gives the node's reply.
-pub fn estimate(shape: &Shape, from: &str, notes: &[u128], mut ask: impl FnMut(String) -> Result<Value, String>) -> Estimate {
+/// `wallet_fund_tx` request (its JSON text) and gives the node's reply. `Err` is a
+/// refusal the transaction itself would meet (`refusal`), for the plan to show.
+pub fn estimate(shape: &Shape, from: &str, notes: &[u128], mut ask: impl FnMut(String) -> Result<Value, String>) -> Result<Estimate, String> {
     let mut values = notes.to_vec();
     values.sort_unstable_by(|a, b| b.cmp(a));
     let floor = match shape {
@@ -134,13 +135,24 @@ pub fn estimate(shape: &Shape, from: &str, notes: &[u128], mut ask: impl FnMut(S
             continue;
         }
         match ask(request(shape, from, &values[..count]).to_string()) {
-            Ok(funded) => return fee_of(&funded, held).map_or(Estimate::Unknown, Estimate::Fee),
+            Ok(funded) => return Ok(fee_of(&funded, held).map_or(Estimate::Unknown, Estimate::Fee)),
             // These notes can't pay it with its fee: one more, as the wallet would.
             Err(error) if error == short => continue,
-            Err(_) => return Estimate::Unknown,
+            Err(error) => return refusal(shape, &error).map_or(Ok(Estimate::Unknown), Err),
         }
     }
-    Estimate::Short
+    Ok(Estimate::Short)
+}
+
+/// A refusal of the stand-in that the transaction itself would meet, in the words a send
+/// gets. A transfer's stand-in names only the sender (already read from the node) and the
+/// recipient as keys, so the node's "Parsed bytes are bigger than the modulus" (0.3.4, on
+/// 64 hex characters that aren't a key) is about the recipient: the send to it is refused
+/// with "That isn't a Logos Blockchain public key" (fees-invalid-recipient-swallowed).
+fn refusal(shape: &Shape, error: &str) -> Option<String> {
+    let not_a_key = super::chain::problem("wallet_fund_tx", "invalid public key");
+    let modulus = error.to_ascii_lowercase().contains("bigger than the modulus");
+    (error == not_a_key || (modulus && matches!(shape, Shape::Transfer { .. }))).then_some(not_a_key)
 }
 
 /// The key and note a claim's stand-in is made of: the largest note any key holds, so it
@@ -218,20 +230,35 @@ mod tests {
             // As the solo node answered (exp2 si-2in): two inputs, 94,198 + 268 out.
             if count < 2 { Err(short.clone()) } else { Ok(funded(&[94_198, 268])) }
         });
-        assert_eq!(fee, Estimate::Fee(866));
+        assert_eq!(fee, Ok(Estimate::Fee(866)));
         assert_eq!(asked, [2], "one note of 94,098 can't pay 94,198, so it isn't asked");
         let mut asked = 0;
         let fee = estimate(&Shape::Transfer { to: B.into(), amount: 3000 }, A, &[3500, 100], |_| {
             asked += 1;
             Err(short.clone())
         });
-        assert_eq!((fee, asked), (Estimate::Short, 2), "nothing covers it with its fee");
+        assert_eq!((fee, asked), (Ok(Estimate::Short), 2), "nothing covers it with its fee");
         // The proof run's case: 1,268 in two notes can't send 1,000 and a fee of 866.
-        assert_eq!(estimate(&Shape::Transfer { to: B.into(), amount: 1000 }, A, &[1000, 268], |_| Err(short.clone())), Estimate::Short);
-        assert_eq!(estimate(&Shape::Transfer { to: B.into(), amount: 1000 }, A, &[900], |_| unreachable!()), Estimate::Short, "less than the amount");
+        assert_eq!(estimate(&Shape::Transfer { to: B.into(), amount: 1000 }, A, &[1000, 268], |_| Err(short.clone())), Ok(Estimate::Short));
+        assert_eq!(estimate(&Shape::Transfer { to: B.into(), amount: 1000 }, A, &[900], |_| unreachable!()), Ok(Estimate::Short), "less than the amount");
         let down = estimate(&Shape::Claim, A, &[50_000], |_| Err("Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.".into()));
-        assert_eq!(down, Estimate::Unknown, "a node that didn't say is not a short key");
-        assert_eq!(estimate(&Shape::Claim, A, &[], |_| unreachable!()), Estimate::Short, "no notes, nothing asked");
+        assert_eq!(down, Ok(Estimate::Unknown), "a node that didn't say is not a short key");
+        assert_eq!(estimate(&Shape::Claim, A, &[], |_| unreachable!()), Ok(Estimate::Short), "no notes, nothing asked");
+    }
+
+    /// The solo node's own words for a stand-in to 64 hex characters that aren't a key
+    /// (fixer probe, 2026-11-09): the send to it is refused, so the plan is too.
+    #[test]
+    fn a_recipient_that_isnt_a_key_refuses_the_plan_as_the_send_is_refused() {
+        let modulus = || Err(crate::chain::problem("wallet_fund_tx", "Failed to parse fund request: Parsed bytes are bigger than the modulus, got 77648812782670860460512307594061302913369283834606025297048026922953510464427, expected 21888242871839275222246405745257275088548364400416034343698204186575808495617 at line 1 column 553"));
+        let to = "ab".repeat(32);
+        let refused = estimate(&Shape::Transfer { to: to.clone(), amount: 1000 }, A, &[100_000], |_| modulus());
+        assert_eq!(refused, Err("That isn't a Logos Blockchain public key: check it and try again.".to_owned()));
+        // A claim's or a deposit's stand-in names no recipient: the same words are not about one.
+        assert_eq!(estimate(&Shape::Claim, A, &[100_000], |_| modulus()), Ok(Estimate::Unknown));
+        // Anything else the node won't parse is still "couldn't say", not a refusal.
+        let other = estimate(&Shape::Transfer { to, amount: 1000 }, A, &[100_000], |_| Err(crate::chain::problem("wallet_fund_tx", "Failed to parse fund request: missing field `tx_builder`")));
+        assert_eq!(other, Ok(Estimate::Unknown));
     }
 
     /// Every stand-in id read as a little-endian field element stays below the BN254
