@@ -3047,7 +3047,7 @@ struct Landed {
 }
 
 /// The transaction `sent` in `block`, if the block holds it. A block ends with its fee
-/// transaction (whose summary is what every charged transaction in it paid, together)
+/// transaction (whose summary is what its charged transactions used and paid, together)
 /// and its clock transaction.
 fn landed_in(block: &common::block::Block, sent: &HashType) -> Option<Landed> {
     let transactions = &block.body.transactions;
@@ -3060,26 +3060,59 @@ fn landed_in(block: &common::block::Block, sent: &HashType) -> Option<Landed> {
             LeeTransaction::Public(tx) => tx.message().execution.fee.is_some(),
         })
         .collect();
-    let paid = match transactions.get(users) {
+    let summary = match transactions.get(users) {
         Some(LeeTransaction::Public(fee_tx)) => match borsh::from_slice::<fee_core::Message>(&fee_tx.message().execution.root.message) {
-            Ok(fee_core::Message::Distribute { summary, .. }) => summary.revenue_base.checked_add(summary.revenue_tip),
+            Ok(fee_core::Message::Distribute { summary, .. }) => Some(BlockFees {
+                gas_used_exec: summary.gas_used_exec,
+                gas_used_stor: summary.gas_used_stor,
+                revenue_base: summary.revenue_base,
+                revenue_tip: summary.revenue_tip,
+            }),
             _ => None,
         },
         _ => None,
     };
-    Some(landing(position, &charged, &block.body.reverted, paid))
+    // A public transaction's storage gas is its serialized size, as the chain prices it.
+    let own = match &transactions[position] {
+        LeeTransaction::Public(tx) => tx
+            .message()
+            .execution
+            .fee
+            .and_then(|fee| Some((u64::try_from(borsh::to_vec(&transactions[position]).ok()?.len()).ok()?, u128::from(fee.tip)))),
+        LeeTransaction::PrivacyPreserving(_) => None,
+    };
+    Some(landing(position, &charged, &block.body.reverted, summary, own))
+}
+
+/// A block's fee summary: the gas its charged transactions used and what they paid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BlockFees {
+    gas_used_exec: u64,
+    gas_used_stor: u64,
+    revenue_base: u128,
+    revenue_tip: u128,
 }
 
 /// `landed_in` on what it read: the transaction at `position` among a block's user
-/// transactions (`charged`, whether each pays a fee), the block's reverted positions and
-/// what its charged transactions paid together. That sum is this one's fee only when it is
-/// the block's sole charged transaction.
-fn landing(position: usize, charged: &[bool], reverted: &[u64], paid: Option<u128>) -> Landed {
+/// transactions (`charged`, whether each pays a fee), the block's reverted positions, its
+/// fee summary and, for a public transaction, its own storage gas and tip. Its fee is the
+/// summary's whole revenue when it is the block's sole charged transaction; beside others,
+/// when no transaction in the block used execution gas (native transfers), the block's
+/// storage base fee is the revenue over the storage gas, and its fee is its own share.
+fn landing(position: usize, charged: &[bool], reverted: &[u64], summary: Option<BlockFees>, own: Option<(u64, u128)>) -> Landed {
     let alone = charged.get(position) == Some(&true) && charged.iter().filter(|charged| **charged).count() == 1;
-    Landed {
-        reverted: u64::try_from(position).is_ok_and(|position| reverted.contains(&position)),
-        fee: paid.filter(|_| alone),
-    }
+    let fee = summary.and_then(|summary| {
+        if alone {
+            return summary.revenue_base.checked_add(summary.revenue_tip);
+        }
+        let (bytes, tip) = own.filter(|_| charged.get(position) == Some(&true))?;
+        let stor = u128::from(summary.gas_used_stor);
+        if summary.gas_used_exec != 0 || stor == 0 || summary.revenue_base % stor != 0 {
+            return None;
+        }
+        (summary.revenue_base / stor).checked_mul(u128::from(bytes))?.checked_add(tip)
+    });
+    Landed { reverted: u64::try_from(position).is_ok_and(|position| reverted.contains(&position)), fee }
 }
 
 /// Why a public send of `amount` from `from` (holding `balance`) is refused before it is
@@ -4029,11 +4062,15 @@ mod send_fee_tests {
     /// transaction the sum isn't its alone.
     #[test]
     fn a_send_alone_in_its_block_has_the_blocks_fee() {
-        use super::{Landed, landing};
-        assert_eq!(landing(0, &[true], &[], Some(4_352)), Landed { reverted: false, fee: Some(4_352) });
-        assert_eq!(landing(1, &[false, true], &[], Some(4_352)), Landed { reverted: false, fee: Some(4_352) }, "beside a fee-exempt deposit");
-        assert_eq!(landing(0, &[true, true], &[], Some(9_000)), Landed { reverted: false, fee: None });
-        assert_eq!(landing(0, &[true], &[], None), Landed { reverted: false, fee: None });
+        use super::{BlockFees, Landed, landing};
+        let block = |exec: u64, stor: u64, base: u128| Some(BlockFees { gas_used_exec: exec, gas_used_stor: stor, revenue_base: base, revenue_tip: 0 });
+        assert_eq!(landing(0, &[true], &[], block(0, 544, 4_352), Some((544, 0))), Landed { reverted: false, fee: Some(4_352) });
+        assert_eq!(landing(1, &[false, true], &[], block(0, 544, 4_352), Some((544, 0))), Landed { reverted: false, fee: Some(4_352) }, "beside a fee-exempt deposit");
+        // Beside B's send of 3,000 to F in the same block: both native transfers, no execution
+        // gas, so the storage base fee is 8,704 / 1,088 = 8 and F's send paid 544 x 8.
+        assert_eq!(landing(0, &[true, true], &[], block(0, 1_088, 8_704), Some((544, 0))), Landed { reverted: false, fee: Some(4_352) });
+        assert_eq!(landing(0, &[true, true], &[], block(1_000, 1_088, 16_704), Some((544, 0))), Landed { reverted: false, fee: None }, "another used execution gas");
+        assert_eq!(landing(0, &[true], &[], None, Some((544, 0))), Landed { reverted: false, fee: None });
     }
 
     /// full-balance-public-send-done-nothing-moved: H held 100,000 and sent 100,000; the
@@ -4044,8 +4081,9 @@ mod send_fee_tests {
         let short = send_shortfall("H", 100_000, 100_000, 13_000).expect("refused");
         assert!(short.contains("holds 100000") && short.ends_with("Nothing was sent."), "{short}");
         assert_eq!(send_shortfall("H", 113_000, 100_000, 13_000), None);
-        assert!(landing(0, &[true], &[0], Some(12_088)).reverted);
-        assert!(!landing(1, &[true, true], &[0], None).reverted, "another transaction reverted");
+        let block = Some(super::BlockFees { gas_used_exec: 1_000, gas_used_stor: 511, revenue_base: 12_088, revenue_tip: 0 });
+        assert_eq!(landing(0, &[true], &[0], block, Some((511, 0))), super::Landed { reverted: true, fee: Some(12_088) });
+        assert!(!landing(1, &[true, true], &[0], None, None).reverted, "another transaction reverted");
         assert!(reverted_send(100_000, Some(12_088)).starts_with("nothing was sent"));
         assert!(reverted_send(100_000, Some(12_088)).contains("its fee of 12088 was still taken"));
     }
