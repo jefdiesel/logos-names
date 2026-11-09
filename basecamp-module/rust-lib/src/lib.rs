@@ -3599,6 +3599,13 @@ impl NamesModule for Names {
             if balance <= u128::from(amount) {
                 return Err(format!("that key holds {balance}; splitting off {amount} needs a little more, for the fee"));
             }
+            // Enough, but only with notes a send from here still spends: said as chain_send
+            // says it (chain-split-concurrent-says-not-enough-not-in-flight).
+            let busy = chain_notes_in_use(&from);
+            let free = notes.iter().filter(|(id, _)| !busy.contains(*id)).map(|(_, value)| chain::amount(value)).sum::<u128>();
+            if send && free <= u128::from(amount) {
+                return Err(IN_FLIGHT.to_owned());
+            }
             let mut plan = json!({ "from": from, "amount": amount.to_string(), "balance": balance.to_string(), "exact": exact });
             // A note of exactly the amount is already there: a split would only cost a fee
             // and take notes out of the stake (CR-9).
@@ -3608,7 +3615,8 @@ impl NamesModule for Names {
                 return Ok(plan);
             }
             if send {
-                let sent = node::call("wallet_transfer_funds", json!([from, [from], from, amount.to_string(), ""]), node::PROVING)?;
+                let sent = node::call("wallet_transfer_funds", json!([from, [from], from, amount.to_string(), ""]), node::PROVING)
+                    .map_err(|error| in_flight_refusal(error, &from, &notes))?;
                 let hash = chain::hash_of(&sent);
                 let stored = hash.as_ref().and_then(|hash| node::call("get_transaction", json!([hash]), node::QUICK).ok());
                 let fee = stored.as_ref().and_then(|tx| chain::transfer_fee(tx, &notes));
@@ -4634,13 +4642,16 @@ fn chain_notes_in_use(from: &str) -> std::collections::HashSet<String> {
         .collect()
 }
 
+/// The refusal while a send made here still spends the notes a new one needs.
+const IN_FLIGHT: &str = "Another transfer from this key is still waiting to land, and its notes can't be spent twice. Try again in a minute. Nothing was sent.";
+
 /// A node's "not enough" for `from` while a send made here still spends some of its notes
 /// (`notes`, the key's now): the key holds enough, its notes are in flight
 /// (send-refusal-wording-concurrent: "doesn't hold enough" though it held 100,000).
 fn in_flight_refusal(error: String, from: &str, notes: &Map<String, Value>) -> String {
     let short = error == chain::problem("wallet_transfer_funds", "not enough");
     if short && chain_notes_in_use(from).iter().any(|note| notes.contains_key(note)) {
-        return "Another transfer from this key is still waiting to land, and its notes can't be spent twice. Try again in a minute. Nothing was sent.".to_owned();
+        return IN_FLIGHT.to_owned();
     }
     error
 }
@@ -5495,6 +5506,28 @@ mod tests {
         // To another account it goes ahead.
         assert_eq!(parsed(&names.cli_transfer("ovone".into(), format!("Public/{PUBLIC}")))["success"], true);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// chain-split-concurrent-says-not-enough-not-in-flight: chain_split while the key's notes
+    /// were in flight said "That key doesn't hold enough for this and its fee."
+    #[test]
+    fn a_split_refused_while_a_send_still_spends_the_keys_notes_says_so() {
+        let mut names = fresh();
+        let key = "e4".repeat(32);
+        node_answers("wallet_get_balance", json!("400000"));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "a1", "value": "100000" }, { "id": "a2", "value": "300000" }] }));
+        node_answers("wallet_transfer_funds", json!("d2".repeat(32)));
+        node_answers("get_transaction", json!({ "mantle_tx": { "ops": [{ "opcode": 0, "payload": { "inputs": ["a2"], "outputs": [{ "value": 250000 }, { "value": 48000 }] } }] } }));
+        assert_eq!(parsed(&names.chain_send(key.clone(), "39".repeat(32), "250000".into(), true))["success"], true);
+        // a2 is in flight: the key holds 400,000, but only a1 (100,000) is free.
+        let split = parsed(&names.chain_split(key.clone(), "150000".into(), true));
+        assert_eq!(split["error"], IN_FLIGHT, "{split}");
+        // The node says it hasn't enough while one of the notes is in flight: the same words.
+        node_refuses("wallet_transfer_funds", "Wallet does not have enough funds, available=0");
+        let split = parsed(&names.chain_split(key.clone(), "50000".into(), true));
+        assert_eq!(split["error"], IN_FLIGHT, "{split}");
+        // A plan (no send) still answers with what the key holds.
+        assert_eq!(parsed(&names.chain_split(key, "150000".into(), false))["success"], true);
     }
 
     /// cli-transfer-unregistered-name-starts-failing-job: a name nobody registered started
