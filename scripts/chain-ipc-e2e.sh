@@ -672,7 +672,7 @@ ha, hb = balance(A), balance(B)
 r = names("chain_send", A, B, "1,5", "false")
 show("names chain_send A -> B 1,5 (a decimal comma)", r)
 step("refusal: a comma that doesn't group thousands is refused, not read as 15", not r["ok"]
-     and r["error"] == "1,5 isn't a whole amount: commas go only between groups of three digits, such as 1,000"
+     and r["error"] == "1,5 isn't a whole number: commas go only between groups of three digits, such as 1,000."
      and (balance(A), balance(B)) == (ha, hb))
 r = names("chain_send", A, B, "100", "false")
 q = names("chain_send", A, B, '"100"', "false")
