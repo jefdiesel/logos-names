@@ -565,6 +565,28 @@ Item {
     property var chainSent: null         // the last send: {hash, amount, to, name, state, fee}
     property double chainSentAt: 0
     property string chainClaimed: ""     // the last claim's transaction, "" if none
+    property string chainAccountNote: "" // what the last New account did, or why it couldn't
+    property bool chainAccountNoteIsError: false
+
+    /// Makes a new account on the node (chain_account_new), labelled `label`, and reads the keys again.
+    function chainAccountNew(label) {
+        if (chainBusy)
+            return
+        chainBusy = true
+        chainAccountNote = ""
+        askLater("chain_account_new", [String(label || "").trim()], function(value) {
+            chainBusy = false
+            chainAccountNoteIsError = false
+            chainAccountNote = "Made " + (value.label ? value.label + " (" + Logic.keyShown(value.key) + ")" : "account " + Logic.keyShown(value.key)) + "."
+                + (value.note ? " " + value.note : "")
+            // Read the keys again now, even while a fuller read (loadChain) is on its way.
+            askLater("chain_accounts", [], function(keys) { chainAccounts = keys }, function(message) { console.log("names_ui: accounts:", message) }, 30000)
+        }, function(message) {
+            chainBusy = false
+            chainAccountNoteIsError = true
+            chainAccountNote = sentence(message)
+        }, 30000)
+    }
 
     /// Opens Blockchain and reads the node.
     function openChain() {
@@ -5370,6 +5392,27 @@ Item {
                                         }
                                         }
                                     }
+                                }
+                                // The Logos Blockchain: a new account (a key on the node), with a label.
+                                ColumnLayout {
+                                    visible: groupCard.open && groupCard.modelData.id === "chain" && groupCard.modelData.tone !== "alarm"
+                                    Layout.fillWidth: true
+                                    Layout.leftMargin: root.px(30)
+                                    Layout.rightMargin: root.px(18)
+                                    Layout.topMargin: root.px(8)
+                                    Layout.bottomMargin: root.px(14)
+                                    spacing: 8
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 10
+                                        Field { id: chainNewLabel; Layout.fillWidth: true; size: 15; hint: "Label (optional), such as Savings"; onAccepted: root.chainAccountNew(chainNewLabel.text) }
+                                        Action {
+                                            label: root.chainBusy ? "Making…" : "New account"
+                                            enabledNow: !root.chainBusy
+                                            onPressed: root.chainAccountNew(chainNewLabel.text)
+                                        }
+                                    }
+                                    Hint { visible: root.chainAccountNote !== ""; font.pixelSize: root.px(15); color: root.chainAccountNoteIsError ? root.alarm : root.dim; textFormat: Text.PlainText; text: root.chainAccountNote }
                                 }
                             }
                         }
