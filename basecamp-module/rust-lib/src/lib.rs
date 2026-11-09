@@ -4731,18 +4731,25 @@ fn chain_fee_about(plan: &mut Value, field: &str, shape: &chain_fee::Shape, from
 }
 
 /// About what one `leader_claim` will cost: its LeaderClaim op and a transfer of one input
-/// (the node's leader funding key, which names can't read, so the first key holding notes
-/// stands in for it; the fee depends on the shape, not the key).
+/// (the node's leader funding key, which names can't read, pays it; the fee depends on the
+/// shape, not the key, so the largest note any key holds stands in for its note).
 fn chain_claim_fee_about() -> Value {
     let keys = node::call("wallet_get_known_addresses", json!([]), node::QUICK).unwrap_or_default();
-    for key in keys.as_array().into_iter().flatten().filter_map(Value::as_str).take(MAX_WALLET_ACCOUNTS) {
-        let Ok(notes) = node::call("wallet_get_notes", json!([key, ""]), node::QUICK).map(|reply| chain::notes_of(&reply)) else { continue };
-        let Some(largest) = notes.values().map(chain::amount).max() else { continue };
-        return chain_fee::estimate(&chain_fee::Shape::Claim, key, &[largest], |request| node::call("wallet_fund_tx", json!([request]), node::QUICK))
-            .fee()
-            .map_or(Value::Null, |fee| Value::from(fee.to_string()));
-    }
-    Value::Null
+    let held: Vec<(String, Vec<u128>)> = keys
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .take(MAX_WALLET_ACCOUNTS)
+        .filter_map(|key| {
+            let notes = node::call("wallet_get_notes", json!([key, ""]), node::QUICK).map(|reply| chain::notes_of(&reply)).ok()?;
+            Some((key.to_owned(), notes.values().map(chain::amount).collect()))
+        })
+        .collect();
+    let Some((key, largest)) = chain_fee::claim_stand_in(&held) else { return Value::Null };
+    chain_fee::estimate(&chain_fee::Shape::Claim, &key, &[largest], |request| node::call("wallet_fund_tx", json!([request]), node::QUICK))
+        .fee()
+        .map_or(Value::Null, |fee| Value::from(fee.to_string()))
 }
 
 /// Basecamp's Logos Blockchain node (`blockchain_module`), for the chain methods.

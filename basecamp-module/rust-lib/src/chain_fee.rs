@@ -143,6 +143,17 @@ pub fn estimate(shape: &Shape, from: &str, notes: &[u128], mut ask: impl FnMut(S
     Estimate::Short
 }
 
+/// The key and note a claim's stand-in is made of: the largest note any key holds, so it
+/// pays the claim's fee in one input as the leader funding key's note does. The first key
+/// with notes was used before: a key whose largest note can't pay a claim's fee (the
+/// fixture's B holds 100) leaves the plan with no estimate, as a solo node's did while
+/// 1,161 vouchers waited.
+pub fn claim_stand_in(held: &[(String, Vec<u128>)]) -> Option<(String, u128)> {
+    held.iter()
+        .filter_map(|(key, notes)| notes.iter().max().map(|largest| (key.clone(), *largest)))
+        .max_by_key(|(_, largest)| *largest)
+}
+
 /// A claim's estimate beside the reward it cashes: a warning when it costs more.
 pub fn claim_warning(fee: Option<u128>, reward: u128) -> Option<String> {
     let fee = fee?;
@@ -236,6 +247,15 @@ mod tests {
         unique.sort();
         unique.dedup();
         assert_eq!(unique.len(), ids.len(), "the deposit's and the claim's stand-ins are not a transfer's");
+    }
+
+    /// The solo node's keys at the claim run: B with 100, the leader funding key with
+    /// 5,000, A with 94,166, in any order. The stand-in is A's note.
+    #[test]
+    fn a_claim_stand_in_is_the_largest_note_any_key_holds() {
+        let held = vec![(B.to_owned(), vec![100]), ("63f1".repeat(16), vec![5000]), (A.to_owned(), vec![94_166]), ("0d".repeat(32), vec![])];
+        assert_eq!(claim_stand_in(&held), Some((A.to_owned(), 94_166)));
+        assert_eq!(claim_stand_in(&[(B.to_owned(), vec![])]), None);
     }
 
     #[test]
