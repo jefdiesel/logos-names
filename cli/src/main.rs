@@ -2690,11 +2690,13 @@ fn private_held<C: wallet::WalletSequencerClient>(wallet: &WalletCore<C>, id: Ac
     wallet.get_account_private(id).and_then(|account| account.data.native_balance().ok()).unwrap_or(0)
 }
 
-/// The fee line of a move to private of `moved`: what the private account gained short of
-/// it (jobs-report-no-fee-paid: a shield printed no fee, so its job and history showed
-/// none though 5,070,616 of 6,000,000 went to it). Unknown when the account gained more.
+/// The fee line of a move to private of `moved`: the fee is paid from the private account
+/// inside the proof, so `after = before + moved - fee` (jobs-report-no-fee-paid: a shield
+/// printed no fee, so its job and history showed none though 5,070,616 of 6,000,000 went
+/// to it). A move smaller than the fee leaves the account lower than before. Unknown when
+/// the account holds more than it was given.
 fn shield_fee_line(moved: u128, before: u128, after: u128) -> String {
-    match after.checked_sub(before).and_then(|gained| moved.checked_sub(gained)) {
+    match before.checked_add(moved).and_then(|given| given.checked_sub(after)) {
         Some(fee) => format!("fee paid: {fee}"),
         None => "fee paid: unknown".to_owned(),
     }
@@ -3670,7 +3672,8 @@ mod fee_line_tests {
     fn a_move_to_private_says_what_it_paid() {
         assert_eq!(shield_fee_line(6_000_000, 24_619_017, 25_548_401), "fee paid: 5070616");
         assert_eq!(shield_fee_line(6_000_000, 0, 7_000_000), "fee paid: unknown");
-        assert_eq!(shield_fee_line(6_000_000, 10, 5), "fee paid: unknown");
+        // A move of 1,000 costing 5,070,616: the account ends lower than it started.
+        assert_eq!(shield_fee_line(1_000, 25_548_401, 20_478_785), "fee paid: 5070616");
     }
 
     /// jobs-report-no-fee-paid (receive half) and receive-entry-has-no-account-amount: the
