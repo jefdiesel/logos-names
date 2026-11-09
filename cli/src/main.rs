@@ -90,6 +90,19 @@ struct Defaults {
     labels: std::collections::BTreeMap<String, String>,
 }
 
+/// Whether `name` is queued to be made public (`then_public`), as its registration goes on. A
+/// new commitment says it afresh from `public` (`--public`), so a `--public` that was refused
+/// before its commitment leaves nothing behind for a later plain registration to act on. A
+/// resumed one keeps what was asked when it was made, and `--public` can still ask it now.
+fn queue_public(then_public: &mut Vec<String>, name: &str, public: bool, fresh: bool) {
+    let queued = then_public.iter().any(|queued| queued == name);
+    if public && !queued {
+        then_public.push(name.to_owned());
+    } else if !public && fresh && queued {
+        then_public.retain(|queued| queued != name);
+    }
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Pending {
     owner: String,
@@ -1308,6 +1321,7 @@ impl Client {
         now: Option<u64>,
         wait: bool,
         rpc: Option<&str>,
+        public: bool,
     ) -> Result<bool> {
         let Derived { id, key } = derive(name);
         // Check first, so a taken name isn't given a receiving account it won't use.
@@ -1367,7 +1381,6 @@ impl Client {
         // as it sends it.
         if resumed.is_none() {
             if self.is_private(owner) {
-                let public = defaults.then_public.iter().any(|queued| queued == name);
                 let steps = self.registration_steps(name, owner, fee, deposit, public).await?;
                 let job = if public { format!("registering {name}{NAME_SUFFIX} and making it public") } else { format!("registering {name}{NAME_SUFFIX}") };
                 self.plan_private(&job, &steps).await?;
@@ -1386,6 +1399,7 @@ impl Client {
                 if let Some(pending) = defaults.pending.get_mut(name) {
                     pending.failed = None;
                 }
+                queue_public(&mut defaults.then_public, name, public, false);
                 save_defaults(&defaults)?;
                 found
             }
@@ -1405,6 +1419,7 @@ impl Client {
                     name.to_owned(),
                     Pending { owner: owner.to_string(), secret: hex::encode(secret), made, failed: None },
                 );
+                queue_public(&mut defaults.then_public, name, public, true);
                 save_defaults(&defaults)?;
                 (secret, made)
             }
@@ -3747,15 +3762,10 @@ async fn main() -> Result<()> {
                 Some(owner) => owner,
                 None => default_private()?,
             };
-            if public {
-                let mut defaults = load_defaults();
-                if !defaults.then_public.contains(&name) {
-                    defaults.then_public.push(name.clone());
-                    save_defaults(&defaults)?;
-                }
-            }
+            // `--public` is queued by `register` with the commitment, never before it: a refused
+            // `--public` leaves nothing that a later plain registration would act on.
             let finished = async {
-                if !client.register(&name, owner, term, now, wait, cli.rpc.as_deref()).await? {
+                if !client.register(&name, owner, term, now, wait, cli.rpc.as_deref(), public).await? {
                     return Ok(());
                 }
                 let mut defaults = load_defaults();
@@ -4537,5 +4547,41 @@ mod wallet_storage_tests {
         assert!(made.iter().all(|id| saved.contains(id)), "every account made is still in the wallet: {made:?} vs {saved:?}");
         assert_eq!(saved.len(), before + 4);
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod register_public_tests {
+    use super::queue_public;
+
+    /// then-public-stays-queued-after-a-refused-register-public (2026-11-09 verifier, defect 2):
+    /// `register vpubname --public` was refused before its commitment and left vpubname
+    /// queued, so the next plain `register vpubname` was planned, and would have finished, as
+    /// a public one. Now only a commitment queues it, and a new plain one clears it.
+    #[test]
+    fn a_new_plain_commitment_clears_a_queue_left_by_a_refused_public_one() {
+        // What an older names left behind after the refused --public.
+        let mut queued = vec!["vpubname".to_owned(), "other".to_owned()];
+        queue_public(&mut queued, "vpubname", false, true);
+        assert_eq!(queued, ["other"]);
+        // A fresh --public commitment queues it, once.
+        queue_public(&mut queued, "vpubname", true, true);
+        queue_public(&mut queued, "vpubname", true, true);
+        assert_eq!(queued, ["other", "vpubname"]);
+    }
+
+    #[test]
+    fn a_resumed_registration_keeps_what_its_commitment_asked() {
+        // The background `names register <name> --wait` that finishes a --public registration
+        // passes no --public: it must still make the name public after the reveal.
+        let mut queued = vec!["pubname".to_owned()];
+        queue_public(&mut queued, "pubname", false, false);
+        assert_eq!(queued, ["pubname"]);
+        // A plain one resumed stays plain; --public on resuming asks for it now.
+        let mut queued = Vec::new();
+        queue_public(&mut queued, "plain", false, false);
+        assert!(queued.is_empty());
+        queue_public(&mut queued, "plain", true, false);
+        assert_eq!(queued, ["plain"]);
     }
 }
