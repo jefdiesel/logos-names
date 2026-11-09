@@ -2007,6 +2007,9 @@ impl Names {
             Ok(Some(record)) if record.owner == registry::owner_tag(&derived.id, &account) => {
                 Err(format!("{} already holds {name}, so nothing was sent", registry::account_text(&account)))
             }
+            // A name nobody registered has nothing to hand over: refused before any job
+            // and any history entry (cli-transfer-unregistered-name-starts-failing-job).
+            Ok(None) => Err(format!("{name} is not registered, so nothing was sent")),
             _ => Ok(()),
         }
     }
@@ -4975,6 +4978,8 @@ mod tests {
         assert!(lower["error"].as_str().unwrap().contains("all one case"), "{lower}");
         assert!(!dir.join("jobs").exists() || std::fs::read_dir(dir.join("jobs")).unwrap().count() == 0, "nothing ran");
         // A private account is never on the chain to be seen: it goes.
+        let derived = registry::derive("xferalpha");
+        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner: [3; 32], expires: registry::NEVER, profile: registry::Profile::default(), claimed: false })));
         let started = parsed(&names.cli_transfer("xferalpha".into(), format!("Private/{unseen}")));
         let id = started["value"]["id"].as_str().expect("a job").to_owned();
         assert_eq!(job_end(&mut names, &id)["state"], "done");
@@ -5492,20 +5497,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// not-a-sink-forgets-default-registry-after-set-registry: after set_registry(other),
-    /// a 5,000,000 bridge to the default registry's account went out.
+    /// cli-transfer-unregistered-name-starts-failing-job: a name nobody registered started
+    /// a transfer job (which failed "not registered") and left a transfer row in the history.
     #[test]
-    fn every_known_registry_is_refused_as_a_destination_whichever_is_configured() {
-        let mut names = fresh();
-        names.program = Some([9; 32]);
-        for program in std::iter::once(DEFAULT_REGISTRY).chain(RETIRED_REGISTRIES) {
-            let id = registry::parse_account(program).unwrap();
-            assert_eq!(names.not_a_sink(&id, "take a bridge"), Err("that is a program's account, which can't take a bridge".to_owned()), "{program}");
-        }
-        assert!(names.not_a_sink(&[9; 32], "take a bridge").is_err(), "the configured one");
-        assert!(names.not_a_sink(&[4; 32], "take a bridge").is_ok(), "anyone else's");
-        let bridged = parsed(&names.chain_bridge("66".repeat(32), format!("Public/{DEFAULT_REGISTRY}"), "5000000".into(), false));
-        assert_eq!(bridged["error"], "that is a program's account, which can't take a bridge", "{bridged}");
+    fn handing_over_a_name_nobody_registered_is_refused_before_any_job() {
+        let (mut names, dir) = with_wallet("unregistered-transfer", "exit 0");
+        // The registry holds no record for it: the sequencer has no state on its account.
+        names.sequencer = registry::stub_http(registry::json_reply(r#"{"jsonrpc":"2.0","id":1,"result":null}"#), 8);
+        let refused = parsed(&names.cli_transfer("nobodyhere".into(), format!("Private/{PRIVATE}")));
+        assert_eq!(refused["error"], "nobodyhere is not registered, so nothing was sent", "{refused}");
+        assert!(std::fs::read_dir(dir.join("jobs")).map_or(true, |entries| entries.count() == 0), "no job");
+        assert!(!activity::all(&config_dir().unwrap()).iter().any(|e| e["kind"] == "transfer" && e["name"] == "nobodyhere"), "no history row");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// pay-account-accepts-program-account: cli_pay_account paid the registry's account
@@ -5523,6 +5526,22 @@ mod tests {
         assert!(std::fs::read_dir(dir.join("jobs")).map_or(true, |entries| entries.count() == 0), "nothing ran");
         assert!(!activity::all(&config_dir().unwrap()).iter().any(|e| e["kind"] == "pay_account" && e["to"].as_str().is_some_and(|to| to.contains(DEFAULT_REGISTRY))), "no history row");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// not-a-sink-forgets-default-registry-after-set-registry: after set_registry(other),
+    /// a 5,000,000 bridge to the default registry's account went out.
+    #[test]
+    fn every_known_registry_is_refused_as_a_destination_whichever_is_configured() {
+        let mut names = fresh();
+        names.program = Some([9; 32]);
+        for program in std::iter::once(DEFAULT_REGISTRY).chain(RETIRED_REGISTRIES) {
+            let id = registry::parse_account(program).unwrap();
+            assert_eq!(names.not_a_sink(&id, "take a bridge"), Err("that is a program's account, which can't take a bridge".to_owned()), "{program}");
+        }
+        assert!(names.not_a_sink(&[9; 32], "take a bridge").is_err(), "the configured one");
+        assert!(names.not_a_sink(&[4; 32], "take a bridge").is_ok(), "anyone else's");
+        let bridged = parsed(&names.chain_bridge("66".repeat(32), format!("Public/{DEFAULT_REGISTRY}"), "5000000".into(), false));
+        assert_eq!(bridged["error"], "that is a program's account, which can't take a bridge", "{bridged}");
     }
 
     /// receive-privately-entry-no-paying-account: the receive_privately entry had no
