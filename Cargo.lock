@@ -5362,6 +5362,7 @@ dependencies = [
  "sequencer_service_rpc",
  "serde",
  "serde_json",
+ "system_accounts",
  "tokio",
  "ureq",
  "wallet",

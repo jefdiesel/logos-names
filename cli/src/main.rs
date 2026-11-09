@@ -2002,6 +2002,10 @@ impl Client {
         }
         println!("{}", fees::estimate_line(&fee, &format!("each claim, paid from Private/{payer} inside the proof")));
         self.wallet.set_private_fee_payer(Some(payer));
+        // The fee is what leaves the payer less the refunds its claims send back: credits the
+        // fee inbox makes, to a fresh alias of this wallet, while they run.
+        let paid_before = private_balance(self, payer);
+        let known: std::collections::BTreeSet<_> = self.wallet.owned_pending_messages().await.unwrap_or_default().iter().map(|message| message.position).collect();
         for message in pending {
             let amount = message.native_credit().unwrap_or(0);
             let to = message.body.to.account_id;
@@ -2016,6 +2020,20 @@ impl Client {
             println!("received in block {block}; Private/{to} now holds {}", private_balance(self, to));
         }
         save_wallet(&mut self.wallet)?;
+        let after = self.wallet.owned_pending_messages().await;
+        let refunds = after.as_ref().ok().map(|after| {
+            after
+                .iter()
+                .filter(|message| !known.contains(&message.position) && is_fee_refund(message))
+                .filter_map(wallet::PendingMessage::native_credit)
+                .sum::<u128>()
+        });
+        let paid = refunds.and_then(|refunds| claim_fee(paid_before, private_balance(self, payer), refunds));
+        match paid {
+            Some(paid) => println!("fee paid: {paid}"),
+            None => println!("fee paid: unknown"),
+        }
+        println!("fee paid from Private/{payer}");
         Ok(())
     }
 
@@ -2610,6 +2628,11 @@ async fn setup(client: &mut Client, shield: u128) -> Result<()> {
         return Ok(());
     }
     if shield > 0 {
+        // The fee is paid inside the proof, from what moves: what the private account gains
+        // less than `shield` is it. A private account's balance changes only by this wallet's
+        // own changes (a payment to it waits as a credit), so the figure is exact.
+        client.wallet.sync_to_latest_block().await.ok();
+        let held_before = private_held(&client.wallet, private);
         println!("moving {shield} to the private account; generating the proof (a few minutes)");
         let (hash, _) = NativeTokenTransfer(&client.wallet)
             .transfer(
@@ -2623,9 +2646,39 @@ async fn setup(client: &mut Client, shield: u128) -> Result<()> {
         client.finish(hash).await.context("the transfer was not applied")?;
         client.wallet.sync_to_latest_block().await?;
         save_wallet(&mut client.wallet)?;
+        println!("{}", shield_fee_line(shield, held_before, private_held(&client.wallet, private)));
     }
     println!("ready: `names register <name>` holds a name privately, `names pay <name> <amount>` pays one");
     Ok(())
+}
+
+/// Whether `message` is a private fee's refund: the surplus of a proof's fee reserve,
+/// which the fee inbox sends back as a credit. Every private change makes a new one, so
+/// claiming one only pays a claim's fee to get it back as another
+/// (receive-all-refund-credit-pure-loss).
+fn is_fee_refund(message: &wallet::PendingMessage) -> bool {
+    message.body.from.account_id == system_accounts::fee_inbox_account_id()
+}
+
+/// What claims paid from their payer: what left it (`before` - `after`) less the refunds
+/// they sent back to it; `None` when that doesn't add up (jobs-report-no-fee-paid).
+fn claim_fee(before: u128, after: u128, refunds: u128) -> Option<u128> {
+    before.checked_sub(after)?.checked_sub(refunds)
+}
+
+/// What the private account `id` holds, as the wallet last saw it.
+fn private_held<C: wallet::WalletSequencerClient>(wallet: &WalletCore<C>, id: AccountId) -> u128 {
+    wallet.get_account_private(id).and_then(|account| account.data.native_balance().ok()).unwrap_or(0)
+}
+
+/// The fee line of a move to private of `moved`: what the private account gained short of
+/// it (jobs-report-no-fee-paid: a shield printed no fee, so its job and history showed
+/// none though 5,070,616 of 6,000,000 went to it). Unknown when the account gained more.
+fn shield_fee_line(moved: u128, before: u128, after: u128) -> String {
+    match after.checked_sub(before).and_then(|gained| moved.checked_sub(gained)) {
+        Some(fee) => format!("fee paid: {fee}"),
+        None => "fee paid: unknown".to_owned(),
+    }
 }
 
 /// Most notes one deposit may spend: the node signs at most 32 items per transaction.
@@ -3522,6 +3575,29 @@ mod pay_tests {
         assert!(private_keys_of("alice", &public_only).is_err(), "and there are none");
         let keys_only = Profile { npk: Some([1; 32]), vpk: vec![2; 33], ..Profile::default() };
         assert!(!pays_publicly(&keys_only, false, false));
+    }
+}
+
+#[cfg(test)]
+mod fee_line_tests {
+    use super::shield_fee_line;
+
+    /// jobs-report-no-fee-paid: shield 6,000,000, the private account 24,619,017 ->
+    /// 25,548,401 (+929,384): 5,070,616 went as the fee, and no fee line was printed.
+    #[test]
+    fn a_move_to_private_says_what_it_paid() {
+        assert_eq!(shield_fee_line(6_000_000, 24_619_017, 25_548_401), "fee paid: 5070616");
+        assert_eq!(shield_fee_line(6_000_000, 0, 7_000_000), "fee paid: unknown");
+        assert_eq!(shield_fee_line(6_000_000, 10, 5), "fee paid: unknown");
+    }
+
+    /// jobs-report-no-fee-paid (receive half) and receive-entry-has-no-account-amount: the
+    /// payer BF went 36,929,384 -> 23,619,017 over two claims and 3,169,135 came back to it
+    /// as a refund: 2 x 5,070,616 paid.
+    #[test]
+    fn claims_say_what_they_paid_less_the_refund_they_sent_back() {
+        assert_eq!(super::claim_fee(36_929_384, 23_619_017, 3_169_135), Some(10_141_232));
+        assert_eq!(super::claim_fee(10, 20, 0), None);
     }
 }
 
