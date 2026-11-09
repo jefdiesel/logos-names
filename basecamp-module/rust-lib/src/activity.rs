@@ -131,6 +131,10 @@ pub fn involves(entry: &Value, account: &str) -> bool {
 /// (it takes about 12 hours); past this it is taken as never arriving.
 pub const BRIDGE_WAIT_S: u64 = 2 * 24 * 3600;
 
+/// How long a send on the Logos Blockchain may stay `sending` (not yet seen in a block)
+/// before its outcome is taken as unknown: they land in a minute or two.
+pub const SENDING_WAIT_S: u64 = 30 * 60;
+
 /// A number an entry carries as decimal text.
 fn number(value: &Value) -> Option<u128> {
     value.as_str().and_then(|text| text.parse().ok())
@@ -144,8 +148,11 @@ fn fee_paid(entry: &Value) -> Option<u128> {
 /// Whether `entry`'s effect on `account` may or may not be in a balance read yet: it is
 /// still being sent, or it is a bridge in a block that hasn't reached its LEZ account.
 fn in_flight(entry: &Value, account: &str, now: u64) -> bool {
+    let age = now.saturating_sub(entry["at"].as_u64().unwrap_or(0));
     match entry["state"].as_str() {
-        Some("sending") => true,
+        // A Logos Blockchain send lands in minutes; one still "sending" past the bound
+        // (nothing could settle it) no longer holds the marks of its keys.
+        Some("sending") => entry["chain"] != "logos" || age < SENDING_WAIT_S,
         Some("in_block") => {
             entry["kind"] == "bridge" && entry["to"].as_str() == Some(account) && now.saturating_sub(entry["at"].as_u64().unwrap_or(0)) < BRIDGE_WAIT_S
         }

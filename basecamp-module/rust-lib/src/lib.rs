@@ -2006,10 +2006,18 @@ impl Names {
                 // On the Logos Blockchain: in a block once its input notes are spent.
                 (Some("logos"), Some("sending")) => {
                     if let Some(hash) = entry["hash"].as_str() {
-                        if let Ok(state) = chain_landed(hash) {
-                            if state {
-                                settled = json!({ "state": "in_block" });
-                            }
+                        // Without its record here (chain-sent.json lost or pruned), the node
+                        // is asked what it spends; a send that lands is never left sending
+                        // (logos-send-stuck-sending-without-chain-sent-record).
+                        let landed = match chain_landed(hash) {
+                            Err(error) if error == NOT_SENT_HERE => entry["from"].as_str().map_or(Err(error), |from| chain_landed_asked(hash, from)),
+                            other => other,
+                        };
+                        if landed == Ok(true) {
+                            settled = json!({ "state": "in_block" });
+                        } else if now().saturating_sub(entry["at"].as_u64().unwrap_or(0)) >= activity::SENDING_WAIT_S {
+                            // Not seen in a block for this long: whether it ever will be is unknown.
+                            settled = json!({ "state": "unknown" });
                         }
                     } else if let (Some(note), Some(from)) = (entry["note"].as_str(), entry["from"].as_str()) {
                         // A deposit whose call was cut off: made once its note is spent, not
@@ -4487,7 +4495,7 @@ fn chain_sent() -> Map<String, Value> {
 /// Whether a send made here (`chain_sent`) is in a block: its inputs are spent, or for a
 /// split whose inputs weren't known, its exact note is there.
 fn chain_landed(hash: &str) -> Result<bool, String> {
-    let Some(known) = chain_sent().remove(hash) else { return Err("not sent from here".to_owned()) };
+    let Some(known) = chain_sent().remove(hash) else { return Err(NOT_SENT_HERE.to_owned()) };
     let inputs: Vec<String> = known["inputs"].as_array().into_iter().flatten().filter_map(|i| i.as_str().map(str::to_owned)).collect();
     let notes = chain::notes_of(&node::call("wallet_get_notes", json!([known["from"], ""]), node::QUICK)?);
     Ok(if inputs.is_empty() {
@@ -4496,6 +4504,21 @@ fn chain_landed(hash: &str) -> Result<bool, String> {
     } else {
         chain::spent(&inputs, &notes)
     })
+}
+
+/// What `chain_landed` says of a hash with no record here.
+const NOT_SENT_HERE: &str = "not sent from here";
+
+/// Whether the transaction `hash`, spending from `from`, is in a block, asked of the node
+/// when no record of it is kept here: the inputs it stores for it are all spent.
+fn chain_landed_asked(hash: &str, from: &str) -> Result<bool, String> {
+    let stored = node::call("get_transaction", json!([hash]), node::QUICK)?;
+    let inputs = chain::all_inputs(&stored);
+    if inputs.is_empty() {
+        return Err("the node doesn't show what that transaction spends".to_owned());
+    }
+    let notes = chain::notes_of(&node::call("wallet_get_notes", json!([from, ""]), node::QUICK)?);
+    Ok(chain::spent(&inputs, &notes))
 }
 
 /// How long a send made here holds the notes it spends for itself: once in a block they
@@ -5317,6 +5340,26 @@ mod tests {
         node_answers("wallet_get_notes", json!({ "notes": [{ "id": "a1", "value": "410000" }, { "id": "a2", "value": "300000" }] }));
         let plan = parsed(&names.chain_bridge("39".repeat(32), format!("Public/{to}"), "599600".into(), false));
         assert_eq!((plan["value"]["fee_short"].as_bool(), plan["value"]["others"].as_str()), (Some(false), Some("100400")), "{plan}");
+    }
+
+    /// logos-send-stuck-sending-without-chain-sent-record (L4): a send of 700 that landed
+    /// stayed `sending` for good once its hash was missing from chain-sent.json, and held
+    /// both keys' balance marks.
+    #[test]
+    fn a_logos_send_without_its_record_is_settled_by_the_node_or_becomes_unknown() {
+        let mut names = fresh();
+        let dir = config_dir().unwrap();
+        let landed = activity::add(&dir, now(), json!({ "kind": "send", "chain": "logos", "from": NODE_KEY, "to": "39".repeat(32), "amount": "700", "hash": "aa".repeat(32) }));
+        node_answers("get_transaction", json!({ "mantle_tx": { "ops": [{ "opcode": 0, "payload": { "inputs": ["n700"], "outputs": [{ "value": 700 }] } }] } }));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "n9", "value": "93798" }] }));
+        let state = |id: &str| activity::all(&dir).into_iter().find(|e| e["id"] == id).unwrap()["state"].clone();
+        assert_eq!(parsed(&names.activity(String::new()))["success"], true);
+        assert_eq!(state(&landed), "in_block", "the node shows its input spent");
+        // Nothing can tell, for longer than any send takes: unknown, not sending for good.
+        let old = activity::add(&dir, now() - activity::SENDING_WAIT_S - 1, json!({ "kind": "send", "chain": "logos", "from": NODE_KEY, "to": "39".repeat(32), "amount": "5", "hash": "bb".repeat(32) }));
+        node_answers("get_transaction", json!(null));
+        names.activity(String::new());
+        assert_eq!(state(&old), "unknown");
     }
 
     /// bridge-destination-empty-or-program-account-accepted: chain_bridge and cli_bridge_to
