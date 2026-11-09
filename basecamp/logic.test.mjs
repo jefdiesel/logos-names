@@ -199,7 +199,7 @@ check("subDigits", [subDigits("1000", "1"), subDigits("210939029", "210939029"),
     ["Payment from Private yGrPEbP3…fe4Z", "1,000", "Proving…"],
     ["Payment from Private yGrPEbP3…fe4Z", "1,000", "Didn't go through"],
     ["Payment from Private yGrPEbP3…fe4Z", "1,000", "Outcome unknown · check the balance"]]);
-  check("payee page: a token that failed", onPage({ kind: "token_send", chain: "lez", from: P, to: A, amount: "50", state: "failed", at: 1794200000 }, A)[0].slice(0, 2), ["Token from Private yGrPEbP3…fe4Z", "50"]);
+  check("payee page: a token that failed", onPage({ kind: "token_send", chain: "lez", from: P, to: A, amount: "50", state: "failed", at: 1794200000 }, A)[0].slice(0, 2), ["Token payment from Private yGrPEbP3…fe4Z", "50"]);
   check("payee page: a failed bridge", onPage(Object.assign({}, bridge, { to: A, state: "failed" }), A)[0][1], "1,000,000");
   const failedClaim = Object.assign({}, claim, { state: "failed" });
   check("credited page: a failed claim", onPage(failedClaim, "Private/9drrc1ARLeTXhHrgV8r54iNiWDD6Rj3yUMxQJTditnaK"), [["Claim of waiting payments", "2,000,000", "on LEZ, into your private accounts"]]);

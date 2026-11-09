@@ -6228,7 +6228,8 @@ Item {
                         }
                         // Why Review stays off: "1,5" is no amount, never 15.
                         Hint {
-                            visible: bridgeAmountField.text.trim() !== "" && root.bridgeAsked()[0] === ""
+                            // Once Review said it below, it isn't said twice.
+                            visible: bridgeAmountField.text.trim() !== "" && root.bridgeAsked()[0] === "" && root.bridgeError !== text
                             color: root.alarm
                             font.pixelSize: root.px(14)
                             text: Logic.amountProblem(bridgeAmountField.text, Logic.CHAIN_AMOUNT_MAX)

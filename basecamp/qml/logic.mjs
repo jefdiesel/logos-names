@@ -527,7 +527,7 @@ function accountSide(e, kind, page) {
             if (kind === "pay_account")
                 line.title = (landed ? "Received" : "Payment") + from
             else if (kind === "token_send")
-                line.title = (landed ? "Received a token" : "Token") + from
+                line.title = (landed ? "Received a token" : "Token payment") + from
             else if (kind === "send")
                 line.title = landed ? "Received on the Logos Blockchain" : "Payment on the Logos Blockchain"
             if (kind === "pay_account" || kind === "token_send")
