@@ -1755,7 +1755,7 @@ pub fn run_mine(setup: &Setup) -> Result<Vec<Value>, String> {
     }
     if !unknown.is_empty() {
         return Err(format!(
-            "The sequencer didn't give the record of {} ({}), so your names can't be listed now. Try again shortly",
+            "The sequencer didn't give the record of {} ({}), so your names couldn't be read now. Try again shortly",
             listed(&unknown),
             clause(why.as_deref().unwrap_or("it didn't answer"))
         ));
