@@ -2032,9 +2032,11 @@ impl Names {
         Ok(())
     }
 
-    /// Settles the history's entries still on their way, from the chain and the jobs:
-    /// `lez_now` is what the wallet's LEZ accounts hold now (empty when unread).
-    fn settle_activity(&self, dir: &std::path::Path, lez_now: &std::collections::HashMap<String, u128>) {
+    /// Settles the history's entries still on their way, from the chain and the jobs, and
+    /// returns the balances to note (`rows`, what the wallet's LEZ accounts hold as read
+    /// from `sequencer`): an account a bridge goes to is read afresh, or left out when its
+    /// read can't be told apart from that bridge's arrival.
+    fn settle_activity(&self, dir: &std::path::Path, sequencer: &str, rows: &[(String, u128)]) -> Vec<(String, u128)> {
         for entry in activity::all(dir).into_iter().filter(|entry| entry["state"] == "sending" || entry["state"] == "in_block") {
             let id = entry["id"].as_str().unwrap_or_default().to_owned();
             let mut settled = Value::Null;
@@ -2061,6 +2063,13 @@ impl Names {
                         if let Ok(notes) = node::call("wallet_get_notes", json!([from, ""]), node::QUICK).map(|reply| chain::notes_of(&reply)) {
                             if !notes.contains_key(note) {
                                 settled = json!({ "state": "in_block" });
+                                // Its transaction, found by the deposit's op id in the recent
+                                // blocks' events: its hash and the fee it paid
+                                // (bridge-settled-after-unload-has-no-hash-or-fee).
+                                if let Some((hash, fee)) = activity::bridge_op_id(&entry).and_then(|op| deposit_made(&op, from, note, &entry)) {
+                                    settled["hash"] = json!(hash);
+                                    settled["fee"] = fee.map_or(Value::Null, |fee| json!(fee.to_string()));
+                                }
                             } else if now().saturating_sub(entry["at"].as_u64().unwrap_or(0)) >= NOTES_HELD_S {
                                 settled = json!({ "state": "failed" });
                             }
@@ -2115,26 +2124,49 @@ impl Names {
                 activity::update(dir, &id, &settled);
             }
         }
-        // Bridges in a block arrive in the order they were sent, each once its LEZ account
-        // holds what it did before the first of them, plus those before it and itself, and
-        // what logged payments moved since: one credit never marks several (false-arrival).
+        // A bridge arrives once LEZ has minted its own deposit (its receipt), never on a
+        // balance that matches. Its account's balance is then read between two asks of the
+        // receipts, so the read either holds the credit (minted at the first ask) or doesn't
+        // (not minted at the second); a mint between them, or an ask LEZ doesn't answer,
+        // leaves the account unread this time, so its credit is never also taken for money
+        // that arrived (activity::note_balances).
         let at = now();
         let entries = activity::all(dir);
-        // A bridge to an account the wallet doesn't hold is followed from the sequencer.
-        let mut held = lez_now.clone();
-        for entry in entries.iter().filter(|entry| entry["kind"] == "bridge" && entry["state"] == "in_block") {
-            if let Some(to) = entry["to"].as_str().filter(|to| !held.contains_key(*to)) {
-                if let Some(balance) = registry::parse_account(to).ok().and_then(|id| registry::public_balance(&self.sequencer, &id).ok()) {
-                    held.insert(to.to_owned(), balance);
+        let followed = activity::bridges_followed(&entries, at);
+        let ask = |receipt: &registry::AccountId| registry::deposit_minted(sequencer, receipt).ok();
+        let mut minted: std::collections::HashMap<registry::AccountId, Option<bool>> = followed.iter().map(|(_, _, receipt)| (*receipt, ask(receipt))).collect();
+        let mut rows = rows.to_vec();
+        let accounts: std::collections::BTreeSet<&str> = followed.iter().map(|(_, to, _)| to.as_str()).collect();
+        for to in accounts {
+            let Some(at_row) = rows.iter().position(|(account, _)| account == to) else { continue };
+            let receipts: Vec<registry::AccountId> = followed.iter().filter(|(_, bridge_to, _)| bridge_to == to).map(|(_, _, receipt)| *receipt).collect();
+            let fresh = registry::parse_account(to).ok().and_then(|id| registry::public_balance(sequencer, &id).ok());
+            let mut certain = fresh.is_some();
+            for receipt in &receipts {
+                match minted.get(receipt).copied().flatten() {
+                    Some(true) => {}
+                    Some(false) => {
+                        let again = ask(receipt);
+                        certain &= again == Some(false);
+                        minted.insert(*receipt, again);
+                    }
+                    None => certain = false,
+                }
+            }
+            match fresh.filter(|_| certain) {
+                Some(balance) => rows[at_row].1 = balance,
+                None => {
+                    rows.remove(at_row);
                 }
             }
         }
-        for (id, mut fields) in activity::bridge_updates(&entries, &held) {
+        for (id, mut fields) in activity::bridge_updates(&entries, at, &|receipt| minted.get(receipt).copied().flatten()) {
             if fields["state"] == "arrived" {
                 fields["arrived_at"] = json!(at);
             }
             activity::update(dir, &id, &fields);
         }
+        rows
     }
 }
 
@@ -2675,9 +2707,10 @@ impl NamesModule for Names {
             if let Ok(rows) = cli::balances_now(&setup) {
                 // What settled first, so a send between the wallet's own accounts is not
                 // also taken for money that arrived.
-                if let Some(dir) = config_dir() {
-                    self.settle_activity(&dir, &rows.iter().cloned().collect());
-                }
+                let rows = match config_dir() {
+                    Some(dir) => self.settle_activity(&dir, &setup.sequencer, &rows),
+                    None => rows,
+                };
                 note_balances("lez", &setup.sequencer, &rows);
             }
             Ok(balance)
@@ -2873,10 +2906,10 @@ impl NamesModule for Names {
             let dir = config_dir().ok_or("no folder for the Wallet's history")?;
             let setup = self.cli_setup().ok();
             let read = setup.as_ref().and_then(|setup| cli::balances_now(setup).ok());
-            let lez_now: std::collections::HashMap<String, u128> = read.clone().unwrap_or_default().into_iter().collect();
-            self.settle_activity(&dir, &lez_now);
-            if let (Some(setup), Some(rows)) = (&setup, &read) {
-                note_balances("lez", &setup.sequencer, rows);
+            let sequencer = setup.as_ref().map_or_else(|| self.sequencer.clone(), |setup| setup.sequencer.clone());
+            let rows = self.settle_activity(&dir, &sequencer, read.as_deref().unwrap_or_default());
+            if let (Some(setup), Some(_)) = (&setup, &read) {
+                note_balances("lez", &setup.sequencer, &rows);
             }
             // A history file that couldn't be read was kept aside, never written over: say so
             // once. Only a lost history fails the call; a lost file of marks is a warning
@@ -3709,33 +3742,26 @@ impl NamesModule for Names {
                         "The deposit fee (at most {BRIDGE_MAX_FEE}) comes from this key's other notes, which hold {others}. Mine or receive a little more first. Nothing was sent."
                     ));
                 }
-                // What the LEZ account holds before the deposit, so its arrival can be told
-                // (activity): the wallet's own read, or the sequencer's for an account the
-                // wallet doesn't hold (bridge-to-foreign-account-to-before-null).
-                let to_before = self
-                    .cli_setup()
-                    .ok()
-                    .and_then(|setup| cli::balances_now(&setup).ok())
-                    .and_then(|rows| rows.into_iter().find(|(account, _)| *account == format!("Public/{to}")).map(|(_, balance)| balance))
-                    .or_else(|| registry::public_balance(&self.sequencer, &account).ok());
-                // Without it the deposit's arrival can't be followed, and a later bridge to the
-                // account would be taken as arrived on this one's credit: a deposit can't be
-                // undone, so it isn't sent (bridge-with-unread-to_before-never-arrives).
-                let Some(to_before) = to_before else {
-                    return Err(format!(
-                        "LEZ didn't say what Public/{to} holds now, so this bridge's arrival couldn't be followed. Try again when LEZ answers. Nothing was sent."
-                    ));
-                };
-                let to_before = Some(to_before);
+                // Its arrival on LEZ is told by the receipt LEZ writes when it mints this very
+                // deposit, named by the deposit's op id: the channel, the one note and the
+                // account, all known now (activity::bridge_updates). No balance of the account
+                // is needed, so none is read: a destination LEZ has never seen (`null`) is
+                // fine (chain-bridge-null-destination-read-taken-as-zero-strands-bridge).
+                let channel_bytes = <[u8; 32]>::try_from(registry::unhex(&channel)?).map_err(|_| "LEZ named a channel that isn't 32 bytes".to_owned())?;
+                let op_id = chain::deposit_op_id(&channel_bytes, std::slice::from_ref(&note), &account).ok_or("the note to deposit isn't 32 bytes of hex")?;
+                let receipt = registry::account_text(&registry::deposit_receipt(&op_id));
+                plan["op_id"] = json!(registry::hex(&op_id));
+                plan["receipt"] = json!(receipt);
                 // Recorded before the node is asked: a call cut off (the module unloaded while the
                 // node proved) still leaves the deposit in the history and its note held, to be
-                // settled by the note (deposit-lost-from-activity-on-unload).
+                // settled by the note (deposit-lost-from-activity-on-unload). What the key's notes
+                // held is kept with it, so the fee can be told once the deposit is found.
                 let pending = format!("pending-{}-{note}", now());
-                chain_sent_add(&pending, json!({ "from": from, "inputs": [note], "fee": null, "at": now(), "pending": true }));
+                chain_sent_add(&pending, json!({ "from": from, "inputs": [note], "fee": null, "at": now(), "pending": true, "notes": notes }));
                 let entry = config_dir().map(|dir| {
                     let id = activity::add(&dir, now(), json!({ "kind": "bridge", "chain": "logos", "from": from, "to": format!("Public/{to}"),
-                        "amount": amount.to_string(), "hash": null, "note": note, "channel": channel, "to_before": to_before.map(|b| b.to_string()),
-                        "followed": to_before.is_some() }));
+                        "amount": amount.to_string(), "hash": null, "note": note, "channel": channel, "op_id": registry::hex(&op_id),
+                        "receipt": receipt, "followed": true }));
                     (dir, id)
                 });
                 // The deposit's metadata is the LEZ account's 32 bytes, as `names bridge` sends it.
@@ -4665,6 +4691,43 @@ fn in_flight_refusal(error: String, from: &str, notes: &Map<String, Value>) -> S
     error
 }
 
+/// Most blocks walked back from the node's tip to find a deposit whose call was cut off.
+const DEPOSIT_SEARCH_BLOCKS: usize = 600;
+
+/// The deposit `op_id` of `note` from `from` (the history's `entry`), made though its call
+/// was cut off: its transaction's hash, found in the recent blocks' events, and the fee it
+/// paid, from what the key's notes held when it was sent (kept with its pending record).
+/// The hash is then kept like any send made here, so `chain_tx` can be asked of it.
+fn deposit_made(op_id: &[u8; 32], from: &str, note: &str, entry: &Value) -> Option<(String, Option<u128>)> {
+    let mut block = node::call("get_cryptarchia_info", json!([]), node::QUICK).ok()?["tip"].as_str()?.to_owned();
+    let mut found = None;
+    for _ in 0..DEPOSIT_SEARCH_BLOCKS {
+        let events = node::call("get_block_events", json!([block]), node::QUICK).ok()?;
+        if let Some(hash) = chain::deposit_in_events(&events, op_id) {
+            found = Some(hash);
+            break;
+        }
+        block = node::call("get_block", json!([block]), node::QUICK).ok()?["header"]["parent_block"].as_str()?.to_owned();
+    }
+    let hash = found?;
+    let pending = chain_sent().into_iter().find(|(key, sent)| key.starts_with("pending-") && sent["inputs"] == json!([note]) && sent["from"] == from);
+    let stored = node::call("get_transaction", json!([hash]), node::QUICK).ok();
+    let amount = entry["amount"].as_str().and_then(|amount| amount.parse::<u128>().ok());
+    let fee = match (&stored, &pending, amount) {
+        (Some(tx), Some((_, sent)), Some(amount)) => sent["notes"].as_object().and_then(|notes| chain::deposit_fee(tx, notes, amount)),
+        _ => None,
+    };
+    let mut inputs = stored.as_ref().map(chain::all_inputs).unwrap_or_default();
+    if inputs.is_empty() {
+        inputs.push(note.to_owned());
+    }
+    chain_sent_add(&hash, json!({ "from": from, "inputs": inputs, "fee": fee.map(|f| f.to_string()), "at": entry["at"] }));
+    if let Some((key, _)) = pending {
+        chain_sent_remove(&key);
+    }
+    Some((hash, fee))
+}
+
 /// Forgets a record `chain_sent_add` made (a deposit's pending one, once it has its hash).
 fn chain_sent_remove(key: &str) {
     let Some(dir) = config_dir() else { return };
@@ -5280,6 +5343,7 @@ mod tests {
     #[test]
     fn a_split_is_a_send_to_the_same_key_and_a_bridge_deposits_one_exact_note() {
         let mut names = fresh();
+        const E8: &str = "e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8";
         let asked_args = |method: &str| node::ASKED.with(|asked| asked.borrow().iter().rev().find(|(m, _)| m == method).map(|(_, a)| a.clone()));
         // One big note: a split is needed, and the bridge says so instead of moving it all.
         node_answers("wallet_get_notes", json!({ "notes": [{ "id": "b271", "value": "131296018" }] }));
@@ -5299,24 +5363,21 @@ mod tests {
         assert_eq!(made["value"]["fee"], "2018");
         assert_eq!(asked_args("wallet_transfer_funds"), Some(json!([NODE_KEY, [NODE_KEY], NODE_KEY, "1000000", ""])));
         // Now a note of exactly the amount: the bridge deposits just it, to the picked account.
-        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "c0de", "value": "130294000" }, { "id": "e8ac", "value": "1000000" }] }));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "c0de", "value": "130294000" }, { "id": "e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8", "value": "1000000" }] }));
         let ready = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), false));
-        assert_eq!((ready["value"]["note"].as_str(), ready["value"]["needs_split"].as_bool(), ready["value"]["total"].as_str()), (Some("e8ac"), Some(false), Some("1000000")), "{ready}");
+        assert_eq!((ready["value"]["note"].as_str(), ready["value"]["needs_split"].as_bool(), ready["value"]["total"].as_str()), (Some("e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8"), Some(false), Some("1000000")), "{ready}");
         node_answers("channel_deposit_with_notes", json!("ab".repeat(32)));
         // The node doesn't know the channel: nothing is deposited.
         let unknown = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), true));
         assert!(unknown["error"].as_str().unwrap().contains("deposit channel"), "{unknown}");
         assert!(!node_asked().contains(&"channel_deposit_with_notes".to_owned()), "nothing deposited into an unknown channel");
         node_answers("get_channel_state", json!({ "accredited_keys": [], "configuration_threshold": 3 }));
-        // bridge-with-unread-to_before-never-arrives: LEZ doesn't answer for the account, so
-        // its arrival couldn't be followed: nothing is deposited.
-        let unread = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), true));
-        assert!(unread["error"].as_str().unwrap().contains("couldn't be followed") && unread["error"].as_str().unwrap().ends_with("Nothing was sent."), "{unread}");
-        assert!(!node_asked().contains(&"channel_deposit_with_notes".to_owned()), "nothing deposited without the account's balance");
-        registry::BALANCES.with(|held| held.borrow_mut().push((registry::parse_account(to).unwrap(), 250)));
+        // chain-bridge-null-destination-read-taken-as-zero-strands-bridge: what the account
+        // holds isn't asked (LEZ hasn't seen it here: no balance known); its arrival is told
+        // by the deposit's receipt.
         // The deposit as the node stores it: the exact note, and a note for its fee.
         node_answers("get_transaction", json!({ "mantle_tx": { "ops": [
-            { "opcode": 5, "payload": { "inputs": ["e8ac"] } },
+            { "opcode": 5, "payload": { "inputs": ["e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8"] } },
             { "opcode": 0, "payload": { "inputs": ["c0de"], "outputs": [{ "value": 130292386 }] } }] } }));
         let sent = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), true));
         assert_eq!((sent["value"]["sent"].as_bool(), sent["value"]["hash"].as_str()), (Some(true), Some("ab".repeat(32).as_str())), "{sent}");
@@ -5338,15 +5399,19 @@ mod tests {
         // The split and the bridge are in the Wallet's history, the bridge with where it lands.
         let history = activity::all(&config_dir().unwrap());
         let bridge = history.iter().find(|e| e["kind"] == "bridge" && e["hash"] == "ab".repeat(32)).expect("the bridge is in the history");
-        // Not the wallet's account: what it held is asked of the sequencer, so its arrival can be followed.
-        assert_eq!((bridge["to_before"].as_str(), bridge["followed"].as_bool()), (Some("250"), Some(true)), "{bridge}");
+        // Followed by the receipt LEZ writes when it mints this deposit (op id of channel, note, account).
+        let op = chain::deposit_op_id(&[2; 32], &[E8.to_owned()], &registry::parse_account(to).unwrap()).unwrap();
+        assert_eq!((bridge["op_id"].as_str(), bridge["receipt"].as_str(), bridge["followed"].as_bool()),
+            (Some(registry::hex(&op).as_str()), Some(registry::account_text(&registry::deposit_receipt(&op)).as_str()), Some(true)), "{bridge}");
+        assert_eq!(sent["value"]["receipt"], bridge["receipt"], "the reply names it too");
+        assert!(bridge.get("to_before").is_none(), "no balance read: {bridge}");
         assert_eq!(bridge["fee"], "1614", "the paid fee is in the history");
         assert_eq!((bridge["amount"].as_str(), bridge["to"].as_str(), bridge["state"].as_str()), (Some("1000000"), Some(format!("Public/{to}").as_str()), Some("sending")));
         assert!(history.iter().any(|e| e["kind"] == "split" && e["hash"] == "cd".repeat(32)), "the split is in the history");
         let account = registry::parse_account(to).unwrap();
         assert_eq!(
             asked_args("channel_deposit_with_notes"),
-            Some(json!(["02".repeat(32), ["e8ac"], registry::hex(&account), NODE_KEY, [NODE_KEY], "100000", ""])),
+            Some(json!(["02".repeat(32), ["e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8"], registry::hex(&account), NODE_KEY, [NODE_KEY], "100000", ""])),
             "one exact note, the account's 32 bytes as metadata, the fee from the key's other notes"
         );
         // A private account is never a bridge's destination.
@@ -5757,37 +5822,84 @@ mod tests {
         assert_eq!(short["error"], "That key doesn't hold enough for this and its fee.", "{short}");
     }
 
+    /// A bridge's account is read afresh between two asks of its receipt: the balance then
+    /// holds its credit exactly when it arrives. A mint between the asks, or an ask LEZ
+    /// doesn't answer, leaves the account unread this time (its credit would otherwise be
+    /// told twice, as the bridge and as money that arrived).
+    #[test]
+    fn a_bridges_account_is_read_between_two_asks_of_its_receipt() {
+        let names = fresh();
+        let dir = config_dir().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let account = [5_u8; 32];
+        let to = format!("Public/{}", registry::account_text(&account));
+        registry::BALANCES.with(|held| held.borrow_mut().push((account, 23_000)));
+        let id = activity::add(&dir, now(), json!({ "kind": "bridge", "chain": "logos", "to": to, "amount": "3000",
+            "note": "11".repeat(32), "channel": "00".repeat(32), "state": "in_block" }));
+        let receipt = activity::bridge_receipt(&activity::all(&dir)[0]).unwrap();
+        let state = || activity::all(&dir).into_iter().find(|e| e["id"] == id.as_str()).unwrap()["state"].as_str().unwrap().to_owned();
+        let stale = [(to.clone(), 20_000_u128), ("Public/other".to_owned(), 7)];
+        // Not minted: the account is read afresh (the wallet's read may be older).
+        assert_eq!(names.settle_activity(&dir, "seq", &stale), [(to.clone(), 23_000), ("Public/other".to_owned(), 7)]);
+        assert_eq!(state(), "in_block");
+        // LEZ doesn't answer for the receipt: the account isn't read this time.
+        registry::MINTED_UNREAD.with(|unread| unread.set(true));
+        assert_eq!(names.settle_activity(&dir, "seq", &stale), [("Public/other".to_owned(), 7)]);
+        registry::MINTED_UNREAD.with(|unread| unread.set(false));
+        assert_eq!(state(), "in_block");
+        // Minted between the first ask and the second: arrived, and the account isn't read this time.
+        let next = registry::MINTED_ASKED.with(std::cell::Cell::get);
+        registry::MINTED.with(|minted| minted.borrow_mut().push((receipt, next + 1)));
+        assert_eq!(names.settle_activity(&dir, "seq", &stale), [("Public/other".to_owned(), 7)]);
+        assert_eq!(state(), "arrived");
+        // Arrived, it isn't asked again; the account is the wallet's read.
+        assert_eq!(names.settle_activity(&dir, "seq", &stale), stale);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// deposit-lost-from-activity-on-unload: names unloaded while chain_bridge waited on
     /// the node: the exact note was spent, and neither chain-sent nor the history had it.
     #[test]
     fn a_deposit_cut_off_mid_call_is_kept_and_settled_by_its_note() {
+        const A640: &str = "a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6";
         let mut names = fresh();
         let key = "4d".repeat(32);
         let to = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
-        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "a640", "value": "640080" }, { "id": "fee1", "value": "5000000" }] }));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6", "value": "640080" }, { "id": "fee1", "value": "5000000" }] }));
         node_answers("get_channel_state", json!({ "configuration_threshold": 3 }));
         // No answer, as when names is unloaded while the node proves (the real run's error
         // was the node "didn't answer", and the deposit had been made).
         node::ANSWERS.with(|answers| answers.borrow_mut().remove("channel_deposit_with_notes"));
-        registry::BALANCES.with(|held| held.borrow_mut().push((registry::parse_account(to).unwrap(), 0)));
         let cut = parsed(&names.chain_bridge(key.clone(), format!("Public/{to}"), "640,080".into(), true));
         assert_eq!(cut["success"], false, "{cut}");
         let mine = |names: &mut Names| parsed(&names.activity(key.clone()))["value"].as_array().unwrap().iter().find(|e| e["amount"] == "640080").cloned();
         let kept = mine(&mut names).expect("the deposit is in the history");
-        assert_eq!((kept["state"].as_str(), kept["note"].as_str(), kept["hash"].clone()), (Some("sending"), Some("a640"), Value::Null), "{kept}");
+        assert_eq!((kept["state"].as_str(), kept["note"].as_str(), kept["hash"].clone()), (Some("sending"), Some("a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6"), Value::Null), "{kept}");
         // Its note stays held: it isn't deposited twice.
         let again = parsed(&names.chain_bridge(key.clone(), format!("Public/{to}"), "640,080".into(), true));
         assert!(again["error"].as_str().unwrap().contains("still using its note"), "{again}");
-        // The node spent the note: the deposit was made.
+        // The node spent the note: the deposit was made. bridge-settled-after-unload-has-no-hash-or-fee:
+        // its transaction is found in a block's events by the deposit's op id, with its fee.
+        let op: Vec<u8> = registry::unhex(kept["op_id"].as_str().unwrap()).unwrap();
+        let hash = "7a".repeat(32);
+        node_answers("get_cryptarchia_info", json!({ "tip": "b2", "height": 2 }));
+        node_answers("get_block", json!({ "header": { "parent_block": "b1" } }));
+        node_answers("get_block_events", json!([{ "Tx": { "tx_hash": hash, "op_id": op, "payload": { "Deposit": { "amount": 640080 } } } }]));
+        node_answers("get_transaction", json!({ "mantle_tx": { "ops": [
+            { "opcode": 18, "payload": { "inputs": [A640] } },
+            { "opcode": 0, "payload": { "inputs": ["fee1"], "outputs": [{ "value": 4998386 }] } }] } }));
         node_answers("wallet_get_notes", json!({ "notes": [{ "id": "fee2", "value": "4998386" }] }));
-        assert_eq!(mine(&mut names).unwrap()["state"], "in_block");
+        let settled = mine(&mut names).unwrap();
+        assert_eq!((settled["state"].as_str(), settled["hash"].as_str(), settled["fee"].as_str()), (Some("in_block"), Some(hash.as_str()), Some("1614")), "{settled}");
+        assert_eq!(parsed(&names.chain_tx(hash.clone()))["value"], json!({ "hash": hash, "state": "in_block", "fee": "1614" }));
         // A refusal, by contrast, leaves no record and holds nothing.
-        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "b700", "value": "700000" }, { "id": "fee3", "value": "5000000" }] }));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7", "value": "700000" }, { "id": "fee3", "value": "5000000" }] }));
         node_refuses("channel_deposit_with_notes", "invalid public key");
         assert_eq!(parsed(&names.chain_bridge(key.clone(), format!("Public/{to}"), "700,000".into(), true))["success"], false);
         let refused = parsed(&names.activity(key.clone()))["value"].as_array().unwrap().iter().find(|e| e["amount"] == "700000").cloned().unwrap();
         assert_eq!(refused["state"], "failed", "{refused}");
-        assert!(!chain_notes_in_use(&key).contains("b700"));
+        assert!(!chain_notes_in_use(&key).contains("b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7"));
     }
 
     #[test]
