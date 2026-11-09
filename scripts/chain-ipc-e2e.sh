@@ -16,7 +16,8 @@
 # Funding: the standalone deployment's genesis gives 100000 to zk key e3635f…ce07 and 100
 # to 39e16b…3225; their secret keys are in the same repo's standalone-node-config.yaml.
 # Both files are pinned by sha256 below. They are a PUBLIC test fixture: never use these
-# keys on a real chain. Nothing is mined, and the run stays inside one epoch, so the node
+# keys on a real chain. Nothing is mined until the last section (a bridge sent, which mines
+# the node's own key for its notes), and the run stays inside one epoch, so the node
 # has no leader vouchers and the claim checked is the one with nothing to claim. (A claim
 # with vouchers needs an epoch boundary, every 6000 slots = 100 min here; it was checked
 # by hand on a solo node: one voucher per claim, see docs/wallet/PLAN.md.)
@@ -680,6 +681,112 @@ show("names chain_send A -> B '\"100\"'", q)
 say("FLAG upstream (logosctl 0.3.2): bare digits become a JSON number and the host refuses the call before names "
     f"runs ({str(r['error'])[:90]}); nothing moved: A {balance(A)} (was {ha}), B {balance(B)} (was {hb}). "
     "The Names app passes text, so only logosctl users meet it.")
+
+# ── A bridge sent: mined notes, the solo chain's genesis channel ───────────
+# e2e-never-reaches-bridge-send: every check above stops at the plan (fee_short, channel
+# unknown), so the deposit itself, its fee and its landing went untested. The node's own
+# key is mined, an exact note split off, and the deposit made into the genesis channel
+# 00..00, which a stand-in for the sequencer names (only getChannelId is answered).
+say("\n== bridge: a deposit sent, its fee read back, in a block")
+import http.server, threading
+CHANNEL = "00" * 32
+TO = "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk"
+
+
+class Channel(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+        if body.get("method") == "getChannelId":
+            out = {"jsonrpc": "2.0", "id": body.get("id"), "result": CHANNEL}
+        else:
+            out = {"jsonrpc": "2.0", "id": body.get("id"), "error": {"code": -32601, "message": "not here"}}
+        data = json.dumps(out).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+
+def wait_for(check, seconds, every=5):
+    end = time.time() + seconds
+    while time.time() < end:
+        if check():
+            return True
+        time.sleep(every)
+    return check()
+
+
+def landed(hash_):
+    r = names("chain_tx", hash_)
+    return r["ok"] and r["value"].get("state") == "in_block"
+
+
+try:
+    stand_in = http.server.ThreadingHTTPServer(("127.0.0.1", HTTP + 3), Channel)
+except OSError as error:
+    stand_in = None
+    step(f"bridge: the sequencer stand-in listens on 127.0.0.1:{HTTP + 3}", False, str(error))
+if stand_in:
+    threading.Thread(target=stand_in.serve_forever, daemon=True).start()
+    config_path = os.path.join(os.environ["HOME"], ".config", "logos-names", "config.json")
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    try:
+        config = json.load(open(config_path))
+    except (OSError, ValueError):
+        config = {}
+    config["sequencer"] = f"http://127.0.0.1:{HTTP + 3}"
+    json.dump(config, open(config_path, "w"))
+    ctl("module", "unload", "names")
+    rc, out = ctl("module", "load", "names")
+    say(f"    names reloaded with sequencer {config['sequencer']}: {out}")
+    pow_ = node("pow_status")
+    km = (((pow_["value"] or {}).get("auto_claim") or {}).get("targets") or [{}])[0].get("public_key") if pow_["ok"] and isinstance(pow_["value"], dict) else None
+    say(f"    mining key {km}")
+    node("pow_start_mining")
+    mined = bool(km) and wait_for(lambda: (balance(km) or 0) >= 3_000_000, 300)
+    node("pow_stop_mining")
+    step("bridge: the node's key mined at least 3,000,000", mined, f"balance {balance(km) if km else None}")
+    if mined:
+        split = names("chain_split", km, "1,000,000", "true")
+        show("names chain_split KM 1,000,000", split)
+        split_in = split["ok"] and bool(split["value"].get("hash")) and wait_for(lambda: landed(split["value"]["hash"]), 240)
+        step("bridge: the split of exactly 1,000,000 is in a block", split_in)
+        before = node("wallet_get_notes", km, "")
+        notes = {n["id"]: num(n["value"]) for n in ((before["value"] or {}).get("notes") or [])} if before["ok"] else {}
+        plan = names("chain_bridge", km, TO, "1,000,000", "false")
+        show("names chain_bridge KM 1,000,000 (plan)", plan)
+        step("bridge: the plan knows the channel, needs no split and isn't short of the fee",
+             plan["ok"] and plan["value"]["channel_known"] is True and plan["value"]["needs_split"] is False and plan["value"]["fee_short"] is False)
+        sent = names("chain_bridge", km, TO, "1,000,000", "true")
+        show("names chain_bridge KM 1,000,000 (send)", sent)
+        h = sent["value"].get("hash") if sent["ok"] else None
+        step("bridge: the deposit is sent and has a hash", bool(h))
+        again = names("chain_bridge", km, TO, "1,000,000", "true")
+        show("names chain_bridge KM 1,000,000 again, before the first is in a block", again)
+        step("bridge: a second deposit of the same note is refused (double-bridge)",
+             not again["ok"] and "still using its note" in str(again["error"]))
+        if h:
+            tx = node("get_transaction", h)
+            ops = (tx["value"] or {}).get("mantle_tx", {}).get("ops", []) if tx["ok"] and isinstance(tx["value"], dict) else []
+            inputs = [i for op in ops for i in op.get("payload", {}).get("inputs", [])]
+            change = sum(num(o.get("value")) or 0 for op in ops if op.get("opcode") == 0 for o in op.get("payload", {}).get("outputs", []))
+            known = all(i in notes for i in inputs) and inputs
+            fee = sum(notes[i] for i in inputs) - change - 1_000_000 if known else None
+            step("bridge: the fee it reports is what the node took (inputs - change - deposit), under the 100,000 cap",
+                 fee is not None and sent["value"].get("fee") == str(fee) and 0 < fee < 100_000,
+                 f"reported {sent['value'].get('fee')}, node {fee}")
+            step("bridge: the deposit is in a block", wait_for(lambda: landed(h), 240))
+            after = node("wallet_get_notes", km, "")
+            left = {n["id"] for n in ((after["value"] or {}).get("notes") or [])} if after["ok"] else set(inputs)
+            step("bridge: every note it spent (the deposit's and the fee's) is gone from the key", bool(inputs) and not (set(inputs) & left))
+            history = names("activity", TO)
+            entry = next((e for e in (history["value"] or []) if e.get("hash") == h), None) if history["ok"] else None
+            step("bridge: the history has the deposit with its fee", bool(entry) and entry.get("fee") == str(fee), json.dumps(entry)[:200])
+    stand_in.shutdown()
 
 # ── Node stopped ───────────────────────────────────────────────────────────
 say("\n== refusal: node stopped")
