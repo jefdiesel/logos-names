@@ -2018,7 +2018,12 @@ impl Names {
         if id.iter().all(|byte| *byte == 0) {
             return Err("that is the empty account (all 1s), which no one holds".to_owned());
         }
-        if Some(*id) == self.program || Some(*id) == self.token_program {
+        // Every registry this module knows, whichever is configured now
+        // (not-a-sink-forgets-default-registry-after-set-registry).
+        let known_registry = std::iter::once(DEFAULT_REGISTRY)
+            .chain(RETIRED_REGISTRIES)
+            .any(|program| registry::parse_account(program).is_ok_and(|program| program == *id));
+        if known_registry || Some(*id) == self.program || Some(*id) == self.token_program {
             return Err(format!("that is a program's account, which can't {what}"));
         }
         Ok(())
@@ -5482,6 +5487,22 @@ mod tests {
         // To another account it goes ahead.
         assert_eq!(parsed(&names.cli_transfer("ovone".into(), format!("Public/{PUBLIC}")))["success"], true);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// not-a-sink-forgets-default-registry-after-set-registry: after set_registry(other),
+    /// a 5,000,000 bridge to the default registry's account went out.
+    #[test]
+    fn every_known_registry_is_refused_as_a_destination_whichever_is_configured() {
+        let mut names = fresh();
+        names.program = Some([9; 32]);
+        for program in std::iter::once(DEFAULT_REGISTRY).chain(RETIRED_REGISTRIES) {
+            let id = registry::parse_account(program).unwrap();
+            assert_eq!(names.not_a_sink(&id, "take a bridge"), Err("that is a program's account, which can't take a bridge".to_owned()), "{program}");
+        }
+        assert!(names.not_a_sink(&[9; 32], "take a bridge").is_err(), "the configured one");
+        assert!(names.not_a_sink(&[4; 32], "take a bridge").is_ok(), "anyone else's");
+        let bridged = parsed(&names.chain_bridge("66".repeat(32), format!("Public/{DEFAULT_REGISTRY}"), "5000000".into(), false));
+        assert_eq!(bridged["error"], "that is a program's account, which can't take a bridge", "{bridged}");
     }
 
     /// receive-privately-entry-no-paying-account: the receive_privately entry had no
