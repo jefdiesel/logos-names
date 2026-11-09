@@ -98,20 +98,25 @@ pub fn fee_of(funded: &Value, held: u128) -> Option<u128> {
 }
 
 /// What the node said a transaction would cost.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Estimate {
     /// Its fee, at the node's gas prices now.
     Fee(u128),
-    /// The key's notes can't pay it and its fee (the node said so for every set of them).
+    /// The key's notes can't pay it and its fee: they hold no more than the amount, or the
+    /// node said "not enough" for every set of the largest of them it was asked with.
     Short,
-    /// The node didn't say (not running, or refused the request).
+    /// The key's free notes can't pay it, but with the notes a send from here still spends
+    /// they could: it can be planned again once that send lands (see `with_busy`).
+    InFlight,
+    /// The node didn't say (not running, or refused the request for a reason a send
+    /// wouldn't meet).
     Unknown,
 }
 
 impl Estimate {
-    pub fn fee(self) -> Option<u128> {
+    pub fn fee(&self) -> Option<u128> {
         match self {
-            Self::Fee(fee) => Some(fee),
+            Self::Fee(fee) => Some(*fee),
             _ => None,
         }
     }
@@ -153,6 +158,24 @@ fn refusal(shape: &Shape, error: &str) -> Option<String> {
     let not_a_key = super::chain::problem("wallet_fund_tx", "invalid public key");
     let modulus = error.to_ascii_lowercase().contains("bigger than the modulus");
     (error == not_a_key || (modulus && matches!(shape, Shape::Transfer { .. }))).then_some(not_a_key)
+}
+
+/// `estimate` over the key's `free` notes; when they are short but the key also holds
+/// `busy` notes (inputs of a send from here not yet in a block, which the node's wallet
+/// won't spend twice), asked again with all of them: if those could pay it, the answer is
+/// to wait for that send to land, not to send less (fees-inflight-says-send-less: a plan
+/// said "send a little less" while the key's only note, 100,000, was a send's input).
+/// Stand-ins again, so no real note is reserved.
+pub fn with_busy(shape: &Shape, from: &str, free: &[u128], busy: &[u128], mut ask: impl FnMut(String) -> Result<Value, String>) -> Result<Estimate, String> {
+    let first = estimate(shape, from, free, &mut ask)?;
+    if first != Estimate::Short || busy.is_empty() {
+        return Ok(first);
+    }
+    let all: Vec<u128> = free.iter().chain(busy).copied().collect();
+    Ok(match estimate(shape, from, &all, &mut ask)? {
+        Estimate::Short => Estimate::Short,
+        _ => Estimate::InFlight,
+    })
 }
 
 /// The key and note a claim's stand-in is made of: the largest note any key holds, so it
@@ -259,6 +282,29 @@ mod tests {
         // Anything else the node won't parse is still "couldn't say", not a refusal.
         let other = estimate(&Shape::Transfer { to, amount: 1000 }, A, &[100_000], |_| Err(crate::chain::problem("wallet_fund_tx", "Failed to parse fund request: missing field `tx_builder`")));
         assert_eq!(other, Ok(Estimate::Unknown));
+    }
+
+    /// The key's only note is a send's input, not yet in a block (adv.py H4): its free notes
+    /// are short, all of them would pay, so the plan says to wait, not to send less.
+    #[test]
+    fn short_only_because_of_notes_in_flight_is_in_flight() {
+        let short = crate::chain::problem("wallet_fund_tx", "Failed to fund tx: Wallet does not have enough funds, available=0");
+        let transfer = Shape::Transfer { to: B.into(), amount: 1000 };
+        let funded_if = |enough: u128| {
+            let short = short.clone();
+            move |request: String| {
+                let request: Value = serde_json::from_str(&request).unwrap();
+                let held: u128 = request["tx_builder"]["ledger_inputs"].as_array().unwrap().iter().map(|i| u128::from(i["note"]["value"].as_u64().unwrap())).sum();
+                if held >= enough { Ok(funded(&[1000, (held - 1000 - 834) as u64])) } else { Err(short.clone()) }
+            }
+        };
+        assert_eq!(with_busy(&transfer, A, &[], &[100_000], funded_if(1834)), Ok(Estimate::InFlight));
+        assert_eq!(with_busy(&transfer, A, &[500], &[1500], funded_if(1834)), Ok(Estimate::InFlight), "free notes too small, all of them enough");
+        // Short with every note counted: send less, as before.
+        assert_eq!(with_busy(&transfer, A, &[500], &[1200], funded_if(1834)), Ok(Estimate::Short));
+        // Nothing busy: short is short; free notes enough: their fee.
+        assert_eq!(with_busy(&transfer, A, &[1200], &[], funded_if(1834)), Ok(Estimate::Short));
+        assert_eq!(with_busy(&transfer, A, &[100_000], &[50_000], funded_if(1834)), Ok(Estimate::Fee(834)));
     }
 
     /// Every stand-in id read as a little-endian field element stays below the BN254

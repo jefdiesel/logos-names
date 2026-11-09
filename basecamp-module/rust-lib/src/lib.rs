@@ -4716,17 +4716,20 @@ fn chain_sent_add(hash: &str, sent: Value) {
 
 /// About what `shape` will cost paid from `from`, set in `plan` as `field` (decimal text, or
 /// null when the node can't say), with `cannot_pay_fee: true` when the key's notes can't
-/// pay it and its fee: asked of the node with stand-ins of the key's notes, less `skip` and
-/// those a send from here still spends, so no real note is reserved (chain_fee.rs).
+/// pay it and its fee, and `in_flight: true` when they could but some are a send's from
+/// here still on its way: asked of the node with stand-ins of the key's notes, less `skip`
+/// and those a send from here still spends, so no real note is reserved (chain_fee.rs).
 /// `Err` when the node refuses it as it would refuse the send (a recipient that isn't a key).
 fn chain_fee_about(plan: &mut Value, field: &str, shape: &chain_fee::Shape, from: &str, skip: Option<&str>) -> Result<(), String> {
     plan[field] = Value::Null;
     let Ok(notes) = node::call("wallet_get_notes", json!([from, ""]), node::QUICK).map(|reply| chain::notes_of(&reply)) else { return Ok(()) };
     let busy = chain_notes_in_use(from);
-    let values: Vec<u128> = notes.iter().filter(|(id, _)| !busy.contains(*id) && skip != Some(id.as_str())).map(|(_, value)| chain::amount(value)).collect();
-    match chain_fee::estimate(shape, from, &values, |request| node::call("wallet_fund_tx", json!([request]), node::QUICK))? {
+    let (held_busy, free): (Vec<_>, Vec<_>) = notes.iter().filter(|(id, _)| skip != Some(id.as_str())).partition(|(id, _)| busy.contains(*id));
+    let values = |notes: Vec<(&String, &Value)>| notes.into_iter().map(|(_, value)| chain::amount(value)).collect::<Vec<u128>>();
+    match chain_fee::with_busy(shape, from, &values(free), &values(held_busy), |request| node::call("wallet_fund_tx", json!([request]), node::QUICK))? {
         chain_fee::Estimate::Fee(fee) => plan[field] = Value::from(fee.to_string()),
         chain_fee::Estimate::Short => plan["cannot_pay_fee"] = Value::Bool(true),
+        chain_fee::Estimate::InFlight => plan["in_flight"] = Value::Bool(true),
         chain_fee::Estimate::Unknown => {}
     }
     Ok(())
@@ -6955,6 +6958,34 @@ mod tests {
         node_answers("wallet_fund_tx", json!({ "funded_tx": { "ops": [{ "opcode": 0, "payload": { "inputs": ["01"], "outputs": [{ "value": 700000 }, { "value": 4299134 }] } }] } }));
         let plan = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "700,000".into(), false));
         assert_eq!((plan["value"]["needs_split"].clone(), plan["value"]["fee_about"].clone(), plan["value"]["split_fee_about"].clone()), (json!(true), Value::Null, json!("866")), "{plan}");
+    }
+
+    /// adv.py H4: the key's only note (100,000) is the input of a send made here that isn't in
+    /// a block yet. A plan then is short only because of it: it says the note is in flight,
+    /// not that the key can't pay ("send a little less"); once the send lands, the fee.
+    #[test]
+    fn a_plan_while_the_keys_notes_are_in_flight_says_so_not_send_less() {
+        let mut names = fresh();
+        let to = "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225";
+        node_answers("wallet_get_balance", json!("100000"));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "f08a", "value": "100000" }] }));
+        node_answers("wallet_fund_tx", json!({ "funded_tx": { "ops": [{ "opcode": 0, "payload": { "inputs": ["01"], "outputs": [{ "value": 1000 }, { "value": 98166 }] } }] } }));
+        let hash = "d6".repeat(32);
+        chain_sent_add(&hash, json!({ "from": NODE_KEY, "inputs": ["f08a"], "fee": "834", "at": now() }));
+        for plan in [names.chain_send(NODE_KEY.into(), to.into(), "1,000".into(), false), names.chain_split(NODE_KEY.into(), "1,000".into(), false)] {
+            let plan = parsed(&plan);
+            let shown = &plan["value"];
+            assert_eq!((shown["in_flight"].clone(), shown["cannot_pay_fee"].clone(), shown["fee_about"].clone()), (json!(true), Value::Null, Value::Null), "{plan}");
+        }
+        // Short with the busy note counted too: that is "send less", as before.
+        node_refuses("wallet_fund_tx", "Failed to fund tx: Wallet does not have enough funds, available=0");
+        let plan = parsed(&names.chain_send(NODE_KEY.into(), to.into(), "1,000".into(), false));
+        assert_eq!((plan["value"]["in_flight"].clone(), plan["value"]["cannot_pay_fee"].clone()), (Value::Null, json!(true)), "{plan}");
+        // Landed: its input is gone from the wallet, the record lapses, the plan has a fee.
+        chain_sent_remove(&hash);
+        node_answers("wallet_fund_tx", json!({ "funded_tx": { "ops": [{ "opcode": 0, "payload": { "inputs": ["01"], "outputs": [{ "value": 1000 }, { "value": 98166 }] } }] } }));
+        let plan = parsed(&names.chain_send(NODE_KEY.into(), to.into(), "1,000".into(), false));
+        assert_eq!((plan["value"]["in_flight"].clone(), plan["value"]["fee_about"].clone()), (Value::Null, json!("834")), "{plan}");
     }
 
     /// adv.py H2 and the fixer's probe: a plan to 64 hex characters that aren't a key. The

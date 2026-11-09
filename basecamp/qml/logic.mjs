@@ -490,6 +490,8 @@ export function activityFor(rows, who) {
 export function chainFeeLine(plan) {
     if (!plan)
         return ""
+    if (plan.in_flight === true)
+        return "Another transfer from this key is still waiting to land, and its notes can't be spent twice. Wait a minute for it to land, then try again."
     if (plan.cannot_pay_fee === true)
         return "That key's notes can't pay this amount and its fee: send a little less."
     if (/^\d+$/.test(String(plan.fee_about)))

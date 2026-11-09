@@ -187,6 +187,8 @@ check("chainFeeLine estimate", chainFeeLine({ amount: "3000", fee_about: "834" }
 check("chainFeeLine no estimate", chainFeeLine({ amount: "3000", fee_about: null }), "Your node couldn't say in advance. The fee paid is shown once it's sent.");
 check("chainFeeLine no plan", chainFeeLine(null), "");
 check("chainFeeLine short", chainFeeLine({ amount: "1000", fee_about: null, cannot_pay_fee: true }), "That key's notes can't pay this amount and its fee: send a little less.");
+// adv.py H4: the key's only note is a send's input still on its way; not "send less".
+check("chainFeeLine in flight", chainFeeLine({ amount: "1000", fee_about: null, in_flight: true }), "Another transfer from this key is still waiting to land, and its notes can't be spent twice. Wait a minute for it to land, then try again.");
 check("claimFeeLine warns", claimFeeLine({ reward_per_voucher: "38", fee_about: "1599", warning: "It costs more than it brings." }), "Each claim costs about 1,599 in fees and cashes one reward of 38. It costs more than it brings.");
 check("claimFeeLine none", [claimFeeLine({ fee_about: null }), claimFeeLine(null)], ["", ""]);
 
