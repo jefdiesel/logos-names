@@ -1653,7 +1653,6 @@ pub fn parse_mine(output: &str) -> Vec<Value> {
     names
 }
 
-/// The last line of `text` that says something.
 /// Why a CLI run that failed failed, in one line built from its error: the `Error:` line
 /// (the CLI's own words), never the last line of its cause chain ("2: Connection refused
 /// (os error 61)"). When the causes show the sequencer couldn't be reached at all, that is
@@ -1697,6 +1696,7 @@ pub fn job_problem(kind: &str, log: &str) -> String {
     format!("{what}: {}", failure_cause(log))
 }
 
+/// The last line of `text` that says something.
 pub fn last_line(text: &str) -> &str {
     text.lines().rev().map(str::trim).find(|line| !line.is_empty()).unwrap_or("")
 }

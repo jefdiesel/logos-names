@@ -1016,23 +1016,13 @@ pub fn deposit_receipt(op_id: &[u8; 32]) -> AccountId {
 
 /// Whether LEZ has minted the deposit whose receipt is `receipt`: the bridge's state on it
 /// is written. `null` for an account nothing wrote is a real "not yet"; a reply that says
-/// neither (an error, a page of HTML, no `result`) is no answer.
+/// neither (an error, a page of HTML, no `result`) is no answer. Read as every read is
+/// (`rpc`), by `deadline`: the call that asks shares one deadline among all its reads.
 #[cfg(not(test))]
-pub fn deposit_minted(sequencer: &str, receipt: &AccountId) -> Result<bool, String> {
-    let response = ureq::post(sequencer)
-        .timeout(std::time::Duration::from_secs(15))
-        .send_json(json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getAccountView",
-            "params": [{ "account_id": account_text(receipt), "program_account_id": account_text(&bridge_program()) }],
-        }))
-        .map_err(|error| format!("could not reach the sequencer: {error}"))?;
-    let mut body = Vec::new();
-    std::io::Read::read_to_end(&mut std::io::Read::take(response.into_reader(), MAX_REPLY_LEN as u64 + 1), &mut body)
-        .map_err(|error| format!("the sequencer's reply broke off: {error}"))?;
-    let reply: Value = serde_json::from_slice(&body).map_err(|_| "the sequencer sent an unreadable reply".to_owned())?;
-    minted_in(&reply)
+pub fn deposit_minted(sequencer: &str, receipt: &AccountId, deadline: Instant) -> Result<bool, String> {
+    let params = json!([{ "account_id": account_text(receipt), "program_account_id": account_text(&bridge_program()) }]);
+    let result = rpc(sequencer, "getAccountView", params, deadline, READ_BUDGET)?;
+    minted_in(&json!({ "result": result }))
 }
 
 /// What a `getAccountView` reply for a receipt says (`deposit_minted`).
@@ -1049,7 +1039,7 @@ pub fn minted_in(reply: &Value) -> Result<bool, String> {
 
 /// Tests say which deposits LEZ minted (`MINTED`), and that it didn't answer (`MINTED_UNREAD`).
 #[cfg(test)]
-pub fn deposit_minted(_sequencer: &str, receipt: &AccountId) -> Result<bool, String> {
+pub fn deposit_minted(_sequencer: &str, receipt: &AccountId, _deadline: Instant) -> Result<bool, String> {
     if MINTED_UNREAD.with(std::cell::Cell::get) {
         return Err("could not reach the sequencer".to_owned());
     }
@@ -1067,16 +1057,16 @@ thread_local! {
     pub static MINTED_UNREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// What the public account `account` holds, read from the sequencer at `sequencer`:
-/// any account, not only the wallet's.
+/// What the public account `account` holds, read from the sequencer at `sequencer` by
+/// `deadline` (the asking call's): any account, not only the wallet's.
 #[cfg(not(test))]
-pub fn public_balance(sequencer: &str, account: &AccountId) -> Result<u128, String> {
-    Registry::new(sequencer, NATIVE_TOKEN).balance(account)
+pub fn public_balance(sequencer: &str, account: &AccountId, deadline: Instant) -> Result<u128, String> {
+    Registry { sequencer: sequencer.to_owned(), program: NATIVE_TOKEN, deadline }.balance(account)
 }
 
 /// Tests say what an account holds: never the network.
 #[cfg(test)]
-pub fn public_balance(_sequencer: &str, account: &AccountId) -> Result<u128, String> {
+pub fn public_balance(_sequencer: &str, account: &AccountId, _deadline: Instant) -> Result<u128, String> {
     BALANCES.with(|held| held.borrow().iter().find(|(id, _)| id == account).map(|(_, balance)| *balance)).ok_or_else(|| "not reached".to_owned())
 }
 

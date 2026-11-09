@@ -2119,7 +2119,7 @@ impl Names {
     /// returns the balances to note (`rows`, what the wallet's LEZ accounts hold as read
     /// from `sequencer`): an account a bridge goes to is read afresh, or left out when its
     /// read can't be told apart from that bridge's arrival.
-    fn settle_activity(&self, dir: &std::path::Path, sequencer: &str, rows: &[(String, u128)]) -> Vec<(String, u128)> {
+    fn settle_activity(&self, dir: &std::path::Path, sequencer: &str, rows: &[(String, u128)], deadline: std::time::Instant) -> Vec<(String, u128)> {
         for entry in activity::all(dir).into_iter().filter(|entry| entry["state"] == "sending" || entry["state"] == "in_block") {
             let id = entry["id"].as_str().unwrap_or_default().to_owned();
             let mut settled = Value::Null;
@@ -2231,14 +2231,16 @@ impl Names {
         let at = now();
         let entries = activity::all(dir);
         let followed = activity::bridges_followed(&entries, at);
-        let ask = |receipt: &registry::AccountId| registry::deposit_minted(sequencer, receipt).ok();
+        // Every read here shares the call's deadline, so the call answers inside the host's time
+        // however many bridges wait; one past it is unread, and the bridge waits a round.
+        let ask = |receipt: &registry::AccountId| registry::deposit_minted(sequencer, receipt, deadline).ok();
         let mut minted: std::collections::HashMap<registry::AccountId, Option<bool>> = followed.iter().map(|(_, _, receipt)| (*receipt, ask(receipt))).collect();
         let mut rows = rows.to_vec();
         let accounts: std::collections::BTreeSet<&str> = followed.iter().map(|(_, to, _)| to.as_str()).collect();
         for to in accounts {
             let Some(at_row) = rows.iter().position(|(account, _)| account == to) else { continue };
             let receipts: Vec<registry::AccountId> = followed.iter().filter(|(_, bridge_to, _)| bridge_to == to).map(|(_, _, receipt)| *receipt).collect();
-            let fresh = registry::parse_account(to).ok().and_then(|id| registry::public_balance(sequencer, &id).ok());
+            let fresh = registry::parse_account(to).ok().and_then(|id| registry::public_balance(sequencer, &id, deadline).ok());
             let mut certain = fresh.is_some();
             for receipt in &receipts {
                 match minted.get(receipt).copied().flatten() {
@@ -2810,7 +2812,8 @@ impl NamesModule for Names {
         reply_marked((|| {
             let setup = self.cli_setup()?;
             setup.wallet_ready()?;
-            let read = cli::balance_read(&setup, std::time::Instant::now() + cli::CALL_BUDGET)?;
+            let deadline = std::time::Instant::now() + cli::CALL_BUDGET;
+            let read = cli::balance_read(&setup, deadline)?;
             // Only a read in which the sequencer gave every balance moves the History: an
             // unread balance is never a 0 (selective-degradation-cold-read-false-arrivals).
             if read.complete() {
@@ -2818,7 +2821,7 @@ impl NamesModule for Names {
                 // What settled first, so a send between the wallet's own accounts is not
                 // also taken for money that arrived.
                 let rows = match config_dir() {
-                    Some(dir) => self.settle_activity(&dir, &setup.sequencer, &rows),
+                    Some(dir) => self.settle_activity(&dir, &setup.sequencer, &rows, deadline),
                     None => rows,
                 };
                 note_balances("lez", &setup.sequencer, &rows);
@@ -3018,10 +3021,11 @@ impl NamesModule for Names {
         }
         let listed = (|| -> Result<(Value, Option<String>), String> {
             let dir = config_dir().ok_or("no folder for the Wallet's history")?;
+            let deadline = std::time::Instant::now() + cli::CALL_BUDGET;
             let setup = self.cli_setup().ok();
             let read = setup.as_ref().and_then(|setup| cli::balances_now(setup).ok());
             let sequencer = setup.as_ref().map_or_else(|| self.sequencer.clone(), |setup| setup.sequencer.clone());
-            let rows = self.settle_activity(&dir, &sequencer, read.as_deref().unwrap_or_default());
+            let rows = self.settle_activity(&dir, &sequencer, read.as_deref().unwrap_or_default(), deadline);
             if let (Some(setup), Some(_)) = (&setup, &read) {
                 note_balances("lez", &setup.sequencer, &rows);
             }
@@ -6255,20 +6259,20 @@ mod tests {
         let state = || activity::all(&dir).into_iter().find(|e| e["id"] == id.as_str()).unwrap()["state"].as_str().unwrap().to_owned();
         let stale = [(to.clone(), 20_000_u128), ("Public/other".to_owned(), 7)];
         // Not minted: the account is read afresh (the wallet's read may be older).
-        assert_eq!(names.settle_activity(&dir, "seq", &stale), [(to.clone(), 23_000), ("Public/other".to_owned(), 7)]);
+        assert_eq!(names.settle_activity(&dir, "seq", &stale, std::time::Instant::now() + cli::CALL_BUDGET), [(to.clone(), 23_000), ("Public/other".to_owned(), 7)]);
         assert_eq!(state(), "in_block");
         // LEZ doesn't answer for the receipt: the account isn't read this time.
         registry::MINTED_UNREAD.with(|unread| unread.set(true));
-        assert_eq!(names.settle_activity(&dir, "seq", &stale), [("Public/other".to_owned(), 7)]);
+        assert_eq!(names.settle_activity(&dir, "seq", &stale, std::time::Instant::now() + cli::CALL_BUDGET), [("Public/other".to_owned(), 7)]);
         registry::MINTED_UNREAD.with(|unread| unread.set(false));
         assert_eq!(state(), "in_block");
         // Minted between the first ask and the second: arrived, and the account isn't read this time.
         let next = registry::MINTED_ASKED.with(std::cell::Cell::get);
         registry::MINTED.with(|minted| minted.borrow_mut().push((receipt, next + 1)));
-        assert_eq!(names.settle_activity(&dir, "seq", &stale), [("Public/other".to_owned(), 7)]);
+        assert_eq!(names.settle_activity(&dir, "seq", &stale, std::time::Instant::now() + cli::CALL_BUDGET), [("Public/other".to_owned(), 7)]);
         assert_eq!(state(), "arrived");
         // Arrived, it isn't asked again; the account is the wallet's read.
-        assert_eq!(names.settle_activity(&dir, "seq", &stale), stale);
+        assert_eq!(names.settle_activity(&dir, "seq", &stale, std::time::Instant::now() + cli::CALL_BUDGET), stale);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
