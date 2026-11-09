@@ -248,7 +248,7 @@ Item {
             else if (!reply.success)
                 failed(reply.error)
             else
-                done(reply.value)
+                done(reply.value, reply)
         }
         if (bridgeReady && logos.callModuleAsync)
             logos.callModuleAsync("names", method, args, settle, patience || 30000)
@@ -446,8 +446,10 @@ Item {
             cliPending = []
             return
         }
-        askLater("cli_mine", [], function(value) {
+        askLater("cli_mine", [], function(value, reply) {
             value = value || []
+            // The last list kept while reading it again fails says so (cli-mine-stale-list-unmarked-during-outage).
+            namesNote = Logic.readNote(reply)
             cliNames = value.filter(function(entry) { return !entry.registering && !entry.failed })
             cliPending = value.filter(function(entry) { return entry.registering || entry.failed })
             cliKnown = true
@@ -468,14 +470,21 @@ Item {
         if (cliPath === "")
             return
         cliBalance = undefined
-        askLater("cli_balance", [], function(value) {
+        askLater("cli_balance", [], function(value, reply) {
             cliBalance = value
+            // Balances the sequencer didn't give show as unknown, and this says which.
+            balanceNote = Logic.readNote(reply)
             loadActivity()
         }, function(message) {
             cliBalance = null
+            balanceNote = sentence(message)
             console.log("names_ui: CLI balance:", message)
         }, 120000)
     }
+
+    property string balanceNote: ""   // what the last balance read said about itself: partial, or why it failed
+    property string namesNote: ""     // the same for the names list: kept from before, and why
+    property string accountsNote: ""  // the same for the accounts list
 
     // ── Accounts and fees ───────────────────────────────────────────────
 
@@ -493,8 +502,9 @@ Item {
     function loadAccounts() {
         if (cliPath === "")
             return
-        askLater("cli_accounts", [], function(value) {
+        askLater("cli_accounts", [], function(value, reply) {
             cliAccounts = Logic.accountsShown(value)
+            accountsNote = Logic.readNote(reply)
             accountsError = ""
         }, function(message) {
             accountsError = sentence(message)
@@ -5166,8 +5176,10 @@ Item {
                         Hint { visible: root.receiveJob !== null; color: root.brass; font.pixelSize: root.px(15); text: "Proving the claim on this computer. Several minutes for each payment." }
                         Hint { visible: root.receiveProblem !== "" && root.receiveJob === null; color: root.alarm; font.pixelSize: root.px(15); text: root.receiveProblem }
                     }
+                    // A read the sequencer only partly answered, or why it failed: never "no balances".
+                    Hint { visible: root.balanceNote !== "" && root.cliBalance !== undefined; color: root.brass; font.pixelSize: root.px(15); text: root.balanceNote }
                     Hint {
-                        visible: root.walletGroups.length === 0
+                        visible: root.walletGroups.length === 0 && (root.balanceNote === "" || root.cliBalance === undefined)
                         text: root.cliBalance === undefined ? "Reading your balances…" : "No balances yet. Make a wallet in Settings, or start your node in Basecamp's Blockchain app."
                     }
 
@@ -5803,6 +5815,7 @@ Item {
                     Card {
                         Layout.fillWidth: true
                         Part { Layout.topMargin: 0; text: "My names" }
+                        Hint { visible: root.namesNote !== ""; color: root.brass; text: root.namesNote }
                         Hint { visible: root.cliNames.length === 0 && root.cliPending.length === 0; text: root.cliKnown ? "None yet." : "Reading your names…" }
                         Repeater {
                             model: root.cliNames
@@ -6957,6 +6970,7 @@ Item {
                         onPressed: root.walletShowEmpty = !root.walletShowEmpty
                     }
                     Hint { visible: root.accountsError !== "" && !root.cliOld; color: root.alarm; text: root.accountsError }
+                    Hint { visible: root.accountsNote !== "" && root.accountsError === ""; color: root.brass; text: root.accountsNote }
                     // An older names program: the two accounts it pays from, and why there's no more.
                     Fact {
                         visible: root.cliOld && root.cliAccounts === null && root.cliBalance !== undefined && root.cliBalance !== null
