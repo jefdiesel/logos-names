@@ -136,7 +136,7 @@ BRIDGE = r"""
                 { key: "e613268c7dd432c972e872d03fff5f79d6a3cbcc8103f34afc2b33fef998bf1d", balance: null, title: "names-1", label: "Savings", ready: false }] : []))
             if (method === "chain_account_new") {
                 return ok({ key: "e613268c7dd432c972e872d03fff5f79d6a3cbcc8103f34afc2b33fef998bf1d", title: "names-1", label: args[0], ready: false,
-                    note: "Your node uses this account from its next start: stop and start it in Basecamp's Blockchain app. Until then it can't send, and what it receives shows after the restart." }) }
+                    note: "Your node uses this account from its next start: stop and start it in Basecamp's Blockchain app. Until then it can't send, and don't have anything sent to it: what reaches it before your node uses it isn't seen." }) }
             if (method === "chain_stake") return ok({ staked: "34002373886", notes: 4538, keys: ["66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b"], epoch: 7,
                 next_epoch_in_s: 113623, claimable: "26280", vouchers: 2, reward_per_voucher: "13140" })
             if (method === "chain_bridge") { var asked = String(args[2]).replace(/,/g, "")

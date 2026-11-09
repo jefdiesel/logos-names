@@ -554,6 +554,9 @@ Item {
 
     property var chainStatus: null       // chain_status, or null
     property var chainAccounts: null     // chain_accounts: [{key, balance}]; null until read
+    // The keys the node uses now: an account made since it started can't send, and what
+    // reaches it before the node uses it isn't seen, so it isn't offered to pay or receive.
+    readonly property var chainUsable: Logic.chainUsable(chainAccounts)
     property var chainStake: null        // chain_stake, or null
     property string chainError: ""       // why the node couldn't be read
     property bool chainReading: false
@@ -611,8 +614,9 @@ Item {
             chainError = ""
             askLater("chain_accounts", [], function(keys) {
                 chainAccounts = keys
-                if (chainFrom === "" && keys.length > 0)
-                    chainFrom = keys[0].key
+                var usable = Logic.chainUsable(keys)
+                if (chainFrom === "" && usable.length > 0)
+                    chainFrom = usable[0].key
                 askLater("chain_stake", [], function(stake) {
                     chainStake = stake
                     chainReading = false
@@ -1150,7 +1154,7 @@ Item {
         bridgeSent = false
         bridgeHash = ""
         // The key it was opened from, else the one used last, else the node's first.
-        bridgeFromKey = fromKey ? fromKey : bridgeKey !== "" ? bridgeKey : chainAccounts !== null && chainAccounts.length > 0 ? chainAccounts[0].key : ""
+        bridgeFromKey = fromKey ? fromKey : bridgeKey !== "" ? bridgeKey : chainUsable !== null && chainUsable.length > 0 ? chainUsable[0].key : ""
         bridgeFromLez = ""
         bridgeTo = ""
         bridgeToPrivate = false
@@ -1246,7 +1250,7 @@ Item {
 
     /// The node key the bridge sends from: the one picked, if the node holds it, else its first.
     readonly property string bridgeFrom: {
-        var keys = (chainAccounts || []).map(function(entry) { return entry.key })
+        var keys = (chainUsable || []).map(function(entry) { return entry.key })
         return keys.indexOf(bridgeFromKey) >= 0 ? bridgeFromKey : keys.length > 0 ? keys[0] : ""
     }
 
@@ -5618,7 +5622,7 @@ Item {
                     }
 
                     Repeater {
-                        model: root.receiveKind === "chain" && root.chainAccounts !== null ? root.chainAccounts : []
+                        model: root.receiveKind === "chain" && root.chainUsable !== null ? root.chainUsable : []
                         Card {
                             id: keyCard
                             required property var modelData
@@ -6166,7 +6170,7 @@ Item {
                         Layout.leftMargin: root.px(14)
                         spacing: 4
                         Repeater {
-                            model: root.chainAccounts || []
+                            model: root.chainUsable || []
                             PickRow {
                                 required property var modelData
                                 title: "Logos Blockchain"

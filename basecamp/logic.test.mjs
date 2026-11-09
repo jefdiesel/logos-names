@@ -1,6 +1,6 @@
 // Checks the view's own logic (qml/logic.mjs, which qml/Main.qml imports), since the QML
 // engine cannot run in CI. Run with: node basecamp/logic.test.mjs
-import { atLeast, someAmount, entryShown, tokenAmountProblem, tokenToProblem, tokenSendProves, tokenShown, feeEstimate, feePaid, accountTitle, accountsShown, publisherLine, durationWords, keyShown, chainToProblem, stakeLines, rewardsLine, grouped, addDigits, walletAssets, subDigits, walletGroups, chainKeyTitle, chainKeySub, stakeTable, activityLine, activityFor, agoShown } from "./qml/logic.mjs";
+import { atLeast, someAmount, entryShown, tokenAmountProblem, tokenToProblem, tokenSendProves, tokenShown, feeEstimate, feePaid, accountTitle, accountsShown, publisherLine, durationWords, keyShown, chainToProblem, stakeLines, rewardsLine, grouped, addDigits, walletAssets, subDigits, walletGroups, chainKeyTitle, chainKeySub, chainUsable, stakeTable, activityLine, activityFor, agoShown } from "./qml/logic.mjs";
 import { readFileSync } from "node:fs";
 
 let failures = 0;
@@ -122,6 +122,7 @@ check("subDigits", [subDigits("1000", "1"), subDigits("210939029", "210939029"),
     [["Main", "Public · " + keyShown(KEY), true, "5"], ["Account", "Public · abababab…abab · your node uses it from its next start", false, null]]);
   check("walletGroups chain later", [labelled[0].note, labelled[0].total], ["2 keys on your node · 1 from its next start", "5"]);
   check("chainKeyTitle", [chainKeyTitle({ key: KEY }), chainKeyTitle({ key: KEY, label: "  " }), chainKeyTitle({ key: KEY, label: "Savings", title: "names-2" })], ["Node key", "Node key", "Savings"]);
+  check("chainUsable", [chainUsable(null), chainUsable([{ key: KEY, balance: "5" }, { key: NEW, balance: null, ready: false }, { key: "cd", balance: "0", ready: true }]).map(a => a.key)], [null, [KEY, "cd"]]);
   check("chainKeySub ready", chainKeySub({ key: KEY, ready: true }), "Public · " + keyShown(KEY));
   check("walletGroups node down", walletGroups(null, null, null, [], {}, null, true, null).map(x => [x.id, x.total, x.note]), [["chain", null, "Node not running"]]);
   // A name is matched to the account its profile's npk points at.

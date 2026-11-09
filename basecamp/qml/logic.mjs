@@ -341,6 +341,12 @@ export function chainKeySub(a) {
     return "Public · " + keyShown(a.key) + (a.ready === false ? " · your node uses it from its next start" : "")
 }
 
+/// The chain_accounts rows the node uses now (not one it takes at its next start), or
+/// null while they haven't been read.
+export function chainUsable(chainAccounts) {
+    return chainAccounts ? chainAccounts.filter(function(a) { return a.ready !== false }) : null
+}
+
 /// The Staking table: what the node holds, what is staked, what isn't counted yet.
 export function stakeTable(stake, chainAccounts) {
     if (!stake) return null
