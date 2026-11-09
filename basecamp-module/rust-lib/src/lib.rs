@@ -661,8 +661,12 @@ pub trait NamesModule: Send + 'static {
     /// last final block's slot, `mode` the node's (`Online` once synced).
     fn chain_status(&mut self) -> String;
 
-    /// The keys the node's wallet holds: `[{key, balance}]`, `balance`
-    /// decimal text or null if it couldn't be read.
+    /// The keys the node's wallet holds: `[{key, balance, label?, title?,
+    /// ready?}]`, `balance` decimal text or null if it couldn't be read.
+    /// `label` is the one given with `chain_account_label`/`_new`; an account
+    /// made with `chain_account_new` also has its keystore `title` and `ready`
+    /// (false, balance null, until the node uses it from its next start). A
+    /// hidden account (`chain_account_remove`) is left out while it holds nothing.
     fn chain_accounts(&mut self) -> String;
 
     /// Stake: `{staked, notes, keys, epoch, next_epoch_in_s, claimable,

@@ -727,6 +727,18 @@ mod tests {
         assert!(records.contains_key(NEW));
     }
 
+    /// The module's contract (the trait, from which the lidl is derived) still said
+    /// chain_accounts answers `[{key, balance}]`. Its doc names every field annotate adds.
+    #[test]
+    fn the_contract_names_what_chain_accounts_answers() {
+        let lib = include_str!("lib.rs");
+        let end = lib.find("fn chain_accounts(&mut self) -> String;").expect("chain_accounts in the trait");
+        let doc = &lib[lib[..end].rfind("fn ").unwrap()..end];
+        for field in ["label", "title", "ready", "hidden"] {
+            assert!(doc.contains(field), "chain_accounts' doc doesn't say `{field}`: {doc}");
+        }
+    }
+
     #[test]
     fn rows_show_labels_and_the_accounts_made_here() {
         let rows = json!([{ "key": A, "balance": "100000" }, { "key": B, "balance": "100" }]);
