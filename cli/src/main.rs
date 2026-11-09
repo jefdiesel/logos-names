@@ -2844,6 +2844,50 @@ fn public_balance_at(rpc: &str, id: &str) -> Option<u128> {
     native_balance_of(&rpc_call(rpc, "getAccountView", params).ok()?)
 }
 
+/// A public send's fee line: what left the payer besides `amount`, only when no other
+/// transaction (`others`) touched the payer between the reads; else unknown, never a
+/// smaller figure.
+fn send_fee_line(before: u128, after: Option<u128>, amount: u128, others: Option<usize>) -> String {
+    match (others, after) {
+        (Some(0), Some(after)) => fees::paid_line(before, after, amount),
+        _ => None,
+    }
+    .unwrap_or_else(|| "fee paid: unknown".to_owned())
+}
+
+/// The sequencer's last block, or `None` when it can't be read.
+async fn last_block_at(rpc: &str) -> Option<u64> {
+    let client = sequencer_service_rpc::SequencerClientBuilder::default().build(rpc).ok()?;
+    sequencer_service_rpc::RpcClient::get_last_block_id(&client).await.ok()
+}
+
+/// Most blocks `transactions_touching` reads; past this the count is not known.
+const MAX_BLOCKS_SCANNED: u64 = 300;
+
+/// How many transactions in blocks `after + 1 ..= last` touch the public account `id`
+/// (base58): sign for it, credit it or name it. `None` when a block can't be read.
+async fn transactions_touching(rpc: &str, id: &str, after: u64, last: u64) -> Option<usize> {
+    let account: AccountId = id.parse().ok()?;
+    if last.saturating_sub(after) > MAX_BLOCKS_SCANNED {
+        return None;
+    }
+    let client = sequencer_service_rpc::SequencerClientBuilder::default().build(rpc).ok()?;
+    let mut count = 0;
+    for block_id in after.saturating_add(1)..=last {
+        let block = sequencer_service_rpc::RpcClient::get_block(&client, block_id).await.ok()??;
+        count += block.body.transactions.iter().filter(|tx| touches(tx, &account)).count();
+    }
+    Some(count)
+}
+
+/// Whether `tx` touches the public account `account`.
+fn touches(tx: &LeeTransaction, account: &AccountId) -> bool {
+    match tx {
+        LeeTransaction::Public(tx) => tx.affected_public_account_ids().contains(account),
+        LeeTransaction::PrivacyPreserving(tx) => tx.affected_public_account_ids().contains(account),
+    }
+}
+
 fn rpc_call(rpc: &str, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
     let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
     let reply: serde_json::Value = serde_json::from_str(
@@ -2895,12 +2939,22 @@ async fn main() -> Result<()> {
             // A public send says what it paid, as the names commands do: the wallet prints
             // no fee, and LEZ 0.4 keeps no receipt of one (jobs-report-no-fee-paid).
             let paying = cli.rpc.clone().zip(native_send_parts(&args));
+            // The blocks the send can land in, read around the balance reads: any other
+            // transaction there that touches the payer (money coming in) makes the balance
+            // difference no measure of the fee (send-fee-measured-from-balance-absorbs-concurrent-credit).
+            let first_block = match &paying {
+                Some((rpc, _)) => last_block_at(rpc).await,
+                None => None,
+            };
             let before = paying.as_ref().and_then(|(rpc, (from, _))| public_balance_at(rpc, from));
             let sent = run_wallet(args, Some(overrides)).await;
             if let (Ok(()), Some((rpc, (from, amount))), Some(before)) = (&sent, &paying, before) {
-                if let Some(line) = public_balance_at(rpc, from).and_then(|after| fees::paid_line(before, after, *amount)) {
-                    println!("{line}");
-                }
+                let after = public_balance_at(rpc, from);
+                let others = match (first_block, last_block_at(rpc).await) {
+                    (Some(first), Some(last)) => transactions_touching(rpc, from, first, last).await.map(|count| count.saturating_sub(1)),
+                    _ => None,
+                };
+                println!("{}", send_fee_line(before, after, *amount, others));
             }
             return sent;
         }
@@ -3626,6 +3680,22 @@ mod fee_line_tests {
     fn claims_say_what_they_paid_less_the_refund_they_sent_back() {
         assert_eq!(super::claim_fee(36_929_384, 23_619_017, 3_169_135), Some(10_141_232));
         assert_eq!(super::claim_fee(10, 20, 0), None);
+    }
+}
+
+#[cfg(test)]
+mod send_fee_tests {
+    use super::send_fee_line;
+
+    /// send-fee-measured-from-balance-absorbs-concurrent-credit (G1): F 9,999,998,691,296 ->
+    /// 9,999,998,669,944 for a send of 20,000 while 3,000 came in: "fee paid: 1352", the
+    /// real fee being 4,352.
+    #[test]
+    fn a_send_whose_payer_was_also_paid_meanwhile_has_an_unknown_fee() {
+        assert_eq!(send_fee_line(9_999_998_691_296, Some(9_999_998_669_944), 20_000, Some(1)), "fee paid: unknown");
+        assert_eq!(send_fee_line(9_999_998_691_296, Some(9_999_998_669_944), 20_000, None), "fee paid: unknown", "blocks not read");
+        assert_eq!(send_fee_line(1_000, Some(400), 500, Some(0)), "fee paid: 100");
+        assert_eq!(send_fee_line(1_000, None, 500, Some(0)), "fee paid: unknown");
     }
 }
 
