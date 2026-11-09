@@ -162,6 +162,13 @@ fn effect(entry: &Value, account: &str) -> (i128, bool) {
     if state == "failed" {
         return (0, true);
     }
+    // Whether it landed isn't known (its job record was pruned): it moves no expected
+    // balance, and what it did shows only as a balance not being certain. Counted as
+    // landed, a failed send of 99,999,999,999,999,999 became an arrival of at least
+    // that much (failed-send-becomes-done-after-job-prune-regressed).
+    if state == "unknown" {
+        return (0, false);
+    }
     // A bridge that never arrived moved nothing into its LEZ account.
     if to && !from && entry["kind"] == "bridge" && state != "arrived" {
         return (0, true);
@@ -505,6 +512,23 @@ mod tests {
         entries[1]["to_before"] = json!("3000000");
         assert!(bridges_arrived(&entries, &now(3_000_000)).is_empty(), "{:?}", bridges_arrived(&entries, &now(3_000_000)));
         assert_eq!(bridges_arrived(&entries, &now(4_496_000)), ["2-bridge"]);
+    }
+
+    /// failed-send-becomes-done-after-job-prune-regressed (G2): a send of
+    /// 99,999,999,999,999,999 that failed, its job record then pruned, was settled
+    /// `unknown`, still counted as spent, and the next read logged an arrival of at least
+    /// the whole amount.
+    #[test]
+    fn a_send_whose_outcome_is_unknown_moves_no_expected_balance() {
+        let d = dir("unknown");
+        note(&d, 1, &[("Public/A", 1_000_000)]);
+        add(&d, 2, json!({ "kind": "pay_account", "chain": "lez", "from": "Public/A", "to": "Public/B", "amount": "99999999999999999", "fee": null, "state": "unknown" }));
+        assert!(note(&d, 3, &[("Public/A", 1_000_000)]).is_empty(), "{:?}", arrivals(&d));
+        assert!(note(&d, 4, &[("Public/A", 1_000_000)]).is_empty(), "{:?}", arrivals(&d));
+        // Money that does come in later is told, from the mark the reads reset.
+        assert_eq!(note(&d, 5, &[("Public/A", 1_000_500)]).len(), 1);
+        assert_eq!(arrivals(&d)[0]["amount"], "500");
+        let _ = std::fs::remove_dir_all(d);
     }
 
     /// false-arrival-second-bridge-regressed (f2b): bridges of 3,000,000 then 2,000,000 to
