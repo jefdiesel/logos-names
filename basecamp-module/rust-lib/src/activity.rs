@@ -153,7 +153,11 @@ pub fn all(dir: &Path) -> Vec<Value> {
 /// key, or a name).
 pub fn involves(entry: &Value, account: &str) -> bool {
     let account = account.trim();
-    account.is_empty() || ["from", "to", "name"].iter().any(|field| entry[*field].as_str() == Some(account)) || received(entry, account).is_some()
+    account.is_empty()
+        || ["from", "to", "name"].iter().any(|field| entry[*field].as_str() == Some(account))
+        || received(entry, account).is_some()
+        // A claim that left a credit to `account` waiting shows on its page too; it moved nothing.
+        || number(&entry["left"][account]).is_some()
 }
 
 /// What a claim (`receive`) credited `account` with, from its `received` map.
@@ -761,6 +765,22 @@ mod tests {
         assert!(involves(&entry, "Private/BF") && involves(&entry, "Private/9Dk3") && !involves(&entry, "Private/X"));
         // The credit is the claim's, not money that arrived; the payer's fall is no arrival either.
         assert!(note(&d, 3, &[("Private/BF", 23_619_017), ("Private/9Dk3", 4_123_256)]).is_empty(), "{:?}", arrivals(&d));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// partial-claim-job-and-pages-say-nothing-true: one of two claims landed (R1 credited
+    /// 1,000,000, payer P paid 5,070,616) and R2's credit still waits. The entry is partly
+    /// done, on all three pages, and explains P's and R1's balances.
+    #[test]
+    fn a_claim_that_stopped_partway_is_on_every_page_and_counts_what_landed() {
+        let d = dir("partial");
+        note(&d, 1, &[("Private/P", 8_929_384), ("Private/R1", 0), ("Private/R2", 0)]);
+        add(&d, 2, json!({ "kind": "receive", "chain": "lez", "from": "Private/P", "amount": "1000000", "to": "Private/R1",
+            "received": { "Private/R1": "1000000" }, "left": { "Private/R2": "1000000" }, "fee": { "about": "10141232", "paid": "5070616" }, "state": "partial" }));
+        let entry = all(&d).remove(0);
+        assert!(["Private/P", "Private/R1", "Private/R2"].iter().all(|page| involves(&entry, page)), "{entry}");
+        // P lost the fee (its refund waits as a credit), R1 got its claim, R2 is unchanged.
+        assert!(note(&d, 3, &[("Private/P", 8_929_384 - 5_070_616), ("Private/R1", 1_000_000), ("Private/R2", 0)]).is_empty(), "{:?}", arrivals(&d));
         let _ = std::fs::remove_dir_all(d);
     }
 

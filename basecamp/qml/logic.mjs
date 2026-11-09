@@ -403,7 +403,10 @@ export function activityLine(entry, now, account) {
     case "pay": title = "Paid " + (e.name || "a name"); sub = "on LEZ"; break
     case "pay_account": title = "Paid " + whoShown(e.to); sub = e["private"] ? "on LEZ, from your private account" : "on LEZ, from your public account"; break
     case "shield": title = "Moved to private"; sub = "on LEZ, from your public account"; sign = ""; break
-    case "receive": title = e.claimed === false ? "Nothing claimed" : "Claimed waiting payments"; sub = e.claimed === false ? "on LEZ, what waits is worth less than claiming it costs" : "on LEZ, into your private accounts"; sign = "+"; break
+    case "receive": title = e.claimed === false ? "Nothing claimed" : "Claimed waiting payments"; sub = e.claimed === false ? "on LEZ, what waits is worth less than claiming it costs" : "on LEZ, into your private accounts"; sign = "+"
+        if (e.claimed !== false && e.left && typeof e.left === "object" && Object.keys(e.left).length > 0)
+            sub += " · some still wait"
+        break
     case "token_send": title = "Sent a token"; sub = "to " + whoShown(e.to); break
     case "transfer": title = "Gave " + (e.name || "a name") + " away"; sub = "to " + whoShown(e.to); sign = ""; break
     case "receive_privately": title = "Private payments to " + (e.name || "a name"); sub = "on LEZ, new receiving keys"; sign = ""; break
@@ -431,6 +434,8 @@ export function activityLine(entry, now, account) {
     case "expired": stateText = e.followed === false ? "Not seen on LEZ after 2 days · check the balance" : "Not credited on LEZ after 2 days · still followed; check the balance"; tone = "warn"; break
     case "done": stateText = "Done"; tone = "good"; break
     case "failed": stateText = "Didn't go through"; tone = "bad"; break
+    // Some of its steps landed and the rest stopped (partial-claim-job-and-pages-say-nothing-true).
+    case "partial": stateText = "Partly done · see what's left"; tone = "warn"; break
     // The module restarted while it ran, or its record is gone: it may have gone through.
     case "unknown": stateText = "Outcome unknown · check the balance"; tone = "warn"; break
     }
@@ -446,6 +451,16 @@ export function activityLine(entry, now, account) {
 function accountSide(e, kind, page) {
     var received = e.received && typeof e.received === "object" ? e.received : {}
     var fee = e.fee && typeof e.fee === "object" ? e.fee.paid : e.fee
+    var left = e.left && typeof e.left === "object" ? e.left : {}
+    if (kind === "receive" && left[page] && !received[page])
+        // A credit to this account the claim left for later: it still waits, nothing moved.
+        return function(line) {
+            line.title = "Still waiting to be claimed"
+            line.sub = "on LEZ, claim it with Receive once your paying account holds enough"
+            line.amount = grouped(left[page])
+            line.sign = ""
+            return line
+        }
     if (kind === "receive" && e.claimed !== false) {
         var credit = received[page]
         if (credit)
@@ -494,7 +509,8 @@ export function activityFor(rows, who) {
     var list = Array.isArray(rows) ? rows : []
     return list.filter(function(e) {
         var credited = e.received && typeof e.received === "object" && Object.prototype.hasOwnProperty.call(e.received, who)
-        return e.from === who || e.to === who || e.name === who || credited
+        var waiting = e.left && typeof e.left === "object" && Object.prototype.hasOwnProperty.call(e.left, who)
+        return e.from === who || e.to === who || e.name === who || credited || waiting
     })
 }
 

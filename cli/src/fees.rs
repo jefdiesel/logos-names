@@ -33,6 +33,13 @@ pub fn public(quote: &FeeStateQuote, cycles: u64, limit: u64, message_bytes: usi
 /// A private transaction, its fee paid inside the proof. `headroom_blocks` is the wallet's
 /// `private_fee_headroom_blocks`: how many full blocks the reserve allows the fees to climb.
 pub fn private(quote: &FeeStateQuote, headroom_blocks: u64) -> Estimate {
+    private_running(quote, headroom_blocks, 0)
+}
+
+/// A private transaction whose public part runs `cycles` cycles (a registry call's does; a
+/// native transfer's runs none), its fee paid inside the proof: the wallet prices its reserve
+/// so (`reserve_pricing` in the LEZ wallet).
+pub fn private_running(quote: &FeeStateQuote, headroom_blocks: u64, cycles: u64) -> Estimate {
     let climb = |base, max_gas, target, damping, lo, hi| {
         (0..headroom_blocks).fold(base, |fee, _| market::next_base_fee(fee, max_gas, target, damping, lo, hi))
     };
@@ -53,8 +60,8 @@ pub fn private(quote: &FeeStateQuote, headroom_blocks: u64) -> Estimate {
         market::BASE_FEE_STOR_MAX,
     );
     Estimate {
-        about: private_fee_required(0, quote.base_fee_exec, quote.base_fee_stor),
-        at_most: private_fee_required(0, exec, stor),
+        about: private_fee_required(cycles, quote.base_fee_exec, quote.base_fee_stor),
+        at_most: private_fee_required(cycles, exec, stor),
     }
 }
 
@@ -131,6 +138,10 @@ mod tests {
         assert_eq!(five.about, none.about);
         assert!(five.at_most > five.about);
         assert_eq!(five.about, private_fee_required(0, 8, 8));
+        // A registry call's public part makes it dearer (a reveal paid 5,811,525 where a
+        // transfer paid 5,070,616).
+        let running = private_running(&quote(), 5, 165_000);
+        assert!(running.about > five.about && running.at_most > five.at_most);
     }
 
     #[test]

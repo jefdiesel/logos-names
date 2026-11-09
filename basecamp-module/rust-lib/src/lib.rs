@@ -1682,11 +1682,32 @@ impl Names {
             .unwrap_or(Value::Null)
     }
 
+    /// A registration the CLI is finishing in the background for this wallet, as a running job
+    /// (`cli::background_registrations`), or None. It proves and saves the wallet like a job.
+    fn background_job(&self) -> Option<Value> {
+        let setup = self.cli_setup().ok()?;
+        cli::background_registrations(&setup.wallet).into_iter().next()
+    }
+
+    /// What holds the wallet now: a running CLI job other than an install, or a registration
+    /// finishing in the background; None when nothing does (`cli_status.busy`).
+    fn wallet_busy(&self) -> Option<Value> {
+        let running = self.jobs().ok().and_then(|jobs| jobs.running().into_iter().find(|job| job["name"] != cli::INSTALL_JOB));
+        running.or_else(|| self.background_job())
+    }
+
+    /// Refuses while a registration finishes in the background (the module's own jobs are
+    /// refused by `Jobs::prepare`): it saves the wallet when it ends, from the copy it read.
+    fn no_background_job(&self) -> Result<(), String> {
+        self.background_job().map_or(Ok(()), |job| Err(cli::busy_with(&job)))
+    }
+
     /// Starts a wallet job (`cli_shield`, `cli_pay_account`).
     fn wallet_job(&self, kind: &str, build: impl FnOnce(&cli::Setup) -> Result<Vec<String>, String>) -> Result<Value, String> {
         let setup = self.cli_setup()?;
         setup.wallet_ready()?;
         let command = build(&setup)?;
+        self.no_background_job()?;
         chain_answers(&setup, None)?;
         let jobs = self.jobs()?;
         let id = jobs.prepare(cli::WALLET_JOB)?;
@@ -1703,7 +1724,7 @@ impl Names {
                 job["kind"].as_str().unwrap_or("a change"),
                 job["id"].as_str().unwrap_or_default()
             )),
-            None => Ok(()),
+            None => self.no_background_job(),
         }
     }
 
@@ -1752,7 +1773,11 @@ impl Names {
             }
             Some("receive") if !running && !done => {
                 let first = log.lines().map(str::trim).find(|line| line.starts_with("Error:")).unwrap_or_else(|| cli::last_line(&log));
-                state["problem"] = Value::from(format!("Claiming didn't finish: {}", first.trim_start_matches("Error:").trim()));
+                // The CLI says what landed and what stopped; a run that claimed some is partly done.
+                let whole = state["id"].as_str().and_then(|id| self.jobs().ok().map(|jobs| jobs.whole_log(id))).unwrap_or_else(|| log.clone());
+                let (_, claims) = cli::parse_claims(&whole);
+                let what = if claims.is_empty() { "Claiming didn't finish" } else { "Claiming finished only in part" };
+                state["problem"] = Value::from(format!("{what}: {}", first.trim_start_matches("Error:").trim()));
             }
             Some("pay_account") if !running && !done => {
                 let first = log.lines().map(str::trim).find(|line| line.starts_with("Error:")).unwrap_or_else(|| cli::last_line(&log));
@@ -1788,6 +1813,7 @@ impl Names {
             let name = registry::parse_name(typed)?;
             let setup = self.cli_setup()?;
             setup.wallet_ready()?;
+            self.no_background_job()?;
             chain_answers(&setup, self.program.as_ref().map(|program| (program, name.as_str())))?;
             let jobs = self.jobs()?;
             let id = jobs.prepare(&name)?;
@@ -2155,6 +2181,21 @@ impl Names {
                                 let (payer, claims) = cli::parse_claims(&log);
                                 if let Some(payer) = payer {
                                     settled["from"] = json!(payer);
+                                }
+                                // A claim job that stopped after some claims landed is partly done,
+                                // not failed: those accounts were credited and its payer paid
+                                // (partial-claim-job-and-pages-say-nothing-true).
+                                if settled["state"] == "failed" && !claims.is_empty() {
+                                    settled["state"] = json!("partial");
+                                }
+                                // What still waits, by account, so the waiting account's page shows it.
+                                let mut left = Map::new();
+                                for (to, amount) in cli::parse_left(&log) {
+                                    let had = left.get(&to).and_then(Value::as_str).and_then(|text| text.parse::<u128>().ok()).unwrap_or(0);
+                                    left.insert(to, json!((had + amount).to_string()));
+                                }
+                                if !left.is_empty() {
+                                    settled["left"] = Value::Object(left);
                                 }
                                 if !claims.is_empty() {
                                     let mut received = Map::new();
@@ -2862,7 +2903,9 @@ impl NamesModule for Names {
                 "wallet": has_wallet,
                 "public": account("public"),
                 "private": account("private"),
-                "busy": self.running_job(cli::WALLET_JOB),
+                // Whatever holds the wallet: a wallet job, a change to a name, or a registration
+                // finishing in the background (wallet-job-allowed-while-detached-registration-pending).
+                "busy": self.wallet_busy().unwrap_or(Value::Null),
             }))
         })())
     }
@@ -2906,6 +2949,7 @@ impl NamesModule for Names {
             if let Some(id) = self.jobs().ok().and_then(|jobs| jobs.running_for(cli::WALLET_JOB)) {
                 return Err(format!("your wallet is busy with something else (job {id}); wait for it to finish"));
             }
+            self.no_background_job()?;
             let made = cli::run_create_wallet(&setup)?;
             // The folder it was made in is the one used from now on.
             if self.cli_wallet.is_none() {
@@ -5211,6 +5255,79 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// partial-claim-job-and-pages-say-nothing-true: the second of two claims was refused by the
+    /// wallet; the job blamed the sequencer, reported no fee, showed the credited account as
+    /// failed and left the payer's and the waiting account's pages empty.
+    #[test]
+    fn a_claim_job_that_stopped_partway_is_partly_done_on_every_page() {
+        let (p, r1, r2) = (
+            "Private/DetM9mjtAHfGp4rqpRNVWBkMjUr2rtEdCUGq3T8rNCdQ",
+            "Private/9Dk3Yx4ZQnHxAZ2c4pkuDZ7cHKu8M1NC2vWqzTzS2r8q",
+            "Private/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk",
+        );
+        let log = [
+            format!("fee paid from {p}"),
+            format!("fee: about 5070616, at most 8239751 (claim 1 of 2, paid from {p} inside the proof)"),
+            format!("receiving 1000000 into {r1}; proving it on this computer (several minutes)"),
+            format!("received in block 469; {r1} now holds 1000000"),
+            "fee paid: 5070616".to_owned(),
+            format!("fee: about 5070616, at most 8239751 (claim 2 of 2, paid from {p} inside the proof)"),
+            format!("receiving 1000000 into {r2}; proving it on this computer (several minutes)"),
+            format!("left waiting: 1000000 to {r2}: not claimed"),
+            format!("Error: claimed 1 of 2 (1,000,000 into {r1}). The claim of 1,000,000 into {r2} stopped: the wallet refused this change before sending it: {p} pays its fee and can't hold the fee reserve of 5,070,616 on top of what the change moves. Nothing was sent for it."),
+        ];
+        let script = format!("case \"$*\" in *--help*) exit 0;; esac\n{}\nexit 1", log.iter().map(|line| format!("echo '{}'", line.replace('\'', "'\\''"))).collect::<Vec<_>>().join("\n"));
+        let (mut names, dir) = with_fake_cli("partialclaim", &script);
+        let started = parsed(&names.cli_receive_all());
+        let job = started["value"]["id"].as_str().expect("a job").to_owned();
+        let ended = job_end(&mut names, &job);
+        assert_eq!(ended["state"], "failed", "{ended}");
+        let problem = ended["problem"].as_str().unwrap();
+        assert!(problem.starts_with("Claiming finished only in part: claimed 1 of 2"), "{problem}");
+        assert!(!problem.contains("sequencer"), "{problem}");
+        assert_eq!(ended["fee"], json!({ "about": "10141232", "at_most": "16479502", "paid": "5070616" }));
+        for page in [p, r1, r2] {
+            let rows = parsed(&names.activity(page.into()));
+            let row = rows["value"].as_array().unwrap().iter().find(|e| e["job"] == job.as_str()).cloned().unwrap_or_else(|| panic!("not on {page}'s page: {rows}"));
+            assert_eq!(row["state"], "partial", "{row}");
+            assert_eq!((row["from"].as_str(), row["received"][r1].as_str(), row["left"][r2].as_str()), (Some(p), Some("1000000"), Some("1000000")), "{row}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// wallet-job-allowed-while-detached-registration-pending: while `names register --wait`
+    /// finished a registration in the background, `cli_status.busy` was null and a wallet job
+    /// that also saves the wallet was accepted.
+    #[test]
+    fn a_registration_finishing_in_the_background_keeps_the_wallet_busy() {
+        use std::os::unix::fs::PermissionsExt;
+        let (mut names, dir) = with_fake_cli("background", "case \"$*\" in *--help*) exit 0;; esac\nexit 0");
+        // A process run as `names register racea --wait`, as the CLI starts one.
+        let script = dir.join("bg").join("names");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut finishing = std::process::Command::new(&script).args(["register", "racea", "--wait"]).spawn().unwrap();
+        let saved = json!({ "pending": { "racea": { "made": 7 } }, "background": { "racea": finishing.id() } });
+        std::fs::write(dir.join("wallet").join("names.json"), saved.to_string()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let status = parsed(&names.cli_status());
+        let receive = parsed(&names.cli_receive());
+        let register = parsed(&names.cli_register("raceb".into(), false));
+        let _ = finishing.kill();
+        let _ = finishing.wait();
+        // Where ps shows the script by its own name, the registration holds the wallet.
+        if status["value"]["busy"]["background"] == true {
+            assert_eq!(status["value"]["busy"]["name"], "racea", "{status}");
+            for refused in [&receive, &register] {
+                assert!(refused["error"].as_str().unwrap().contains("finishing the registration of racea"), "{refused}");
+            }
+        }
+        // Once it has ended, the wallet is free.
+        assert_eq!(parsed(&names.cli_status())["value"]["busy"], Value::Null);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     fn job_end(names: &mut Names, id: &str) -> Value {
         for _ in 0..200 {
             let state = parsed(&names.job(id.to_owned()));
@@ -5294,7 +5411,7 @@ mod tests {
     #[test]
     fn an_empty_cli_wallet_holds_nothing_and_takes_no_changes() {
         let (mut names, dir) = with_fake_cli("empty", "echo 'jef.lez  held by a deposit (no expiry)'");
-        assert_eq!(parsed(&names.cli_mine())["value"], json!([{ "name": "jef", "display": "jef", "signer": "cli", "state": "held by a deposit (no expiry)", "lapsed": false, "registering": false, "failed": false, "private": null }]));
+        assert_eq!(parsed(&names.cli_mine())["value"], json!([{ "name": "jef", "display": "jef", "signer": "cli", "state": "held by a deposit (no expiry)", "lapsed": false, "registering": false, "failed": false, "private": null, "not_public": null }]));
         let empty = dir.join("empty-wallet");
         std::fs::create_dir_all(&empty).expect("a dir");
         names.cli_wallet = Some(empty.to_string_lossy().into_owned());
