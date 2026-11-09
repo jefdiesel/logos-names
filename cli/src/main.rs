@@ -2320,13 +2320,15 @@ fn quietly<T>(run: impl FnOnce() -> T) -> T {
     result
 }
 
-/// Runs the LEZ wallet's command line with `args`, as its own `wallet` binary would.
-async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>) -> Result<()> {
+/// Runs the LEZ wallet's command line with `args`, as its own `wallet` binary would: the
+/// hash of the transaction it sent, if it sent one.
+async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>) -> Result<Option<HashType>> {
     use clap::{CommandFactory as _, Parser as _};
     use wallet::{
         ExecutionFailureKind,
-        cli::{Args, execute_continuous_run, execute_subcommand},
+        cli::{Args, SubcommandReturnValue, execute_continuous_run, execute_subcommand},
     };
+    let mut sent = None;
 
     let Args { continuous_run, dry_run, fee_headroom, fee_payer, refund_to, command } =
         Args::parse_from(std::iter::once("names wallet".to_owned()).chain(args));
@@ -2362,6 +2364,7 @@ async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>)
         match execute_subcommand(&mut wallet, command).await {
             // A dry run ends the command on the error channel once it has reported.
             Err(error) if matches!(error.root_cause().downcast_ref(), Some(ExecutionFailureKind::DryRun)) => {}
+            Ok(SubcommandReturnValue::TransactionExecuted { tx_hash }) => sent = Some(tx_hash),
             result => {
                 result?;
             }
@@ -2374,7 +2377,7 @@ async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>)
         let mut help = Args::command().name("names wallet");
         println!("{}", help.render_long_help());
     }
-    Ok(())
+    Ok(sent)
 }
 
 /// Why an existing wallet may not open: LEZ 0.4 cannot read a 0.3 wallet's file.
@@ -2866,20 +2869,70 @@ async fn last_block_at(rpc: &str) -> Option<u64> {
 /// Most blocks `transactions_touching` reads; past this the count is not known.
 const MAX_BLOCKS_SCANNED: u64 = 300;
 
-/// How many transactions in blocks `after + 1 ..= last` touch the public account `id`
-/// (base58): sign for it, credit it or name it. `None` when a block can't be read.
-async fn transactions_touching(rpc: &str, id: &str, after: u64, last: u64) -> Option<usize> {
+/// Reads blocks `after + 1 ..= last`: how many of their transactions touch the public
+/// account `id` (base58), signing for it, crediting it or naming it, and how the
+/// transaction `sent` fared in the block that holds it. `None` when a block can't be read.
+async fn scan_blocks(rpc: &str, id: &str, sent: Option<&HashType>, after: u64, last: u64) -> Option<(usize, Option<Landed>)> {
     let account: AccountId = id.parse().ok()?;
     if last.saturating_sub(after) > MAX_BLOCKS_SCANNED {
         return None;
     }
     let client = sequencer_service_rpc::SequencerClientBuilder::default().build(rpc).ok()?;
     let mut count = 0;
+    let mut landed = None;
     for block_id in after.saturating_add(1)..=last {
         let block = sequencer_service_rpc::RpcClient::get_block(&client, block_id).await.ok()??;
         count += block.body.transactions.iter().filter(|tx| touches(tx, &account)).count();
+        if let (None, Some(sent)) = (&landed, sent) {
+            landed = landed_in(&block, sent);
+        }
     }
-    Some(count)
+    Some((count, landed))
+}
+
+/// How a sent transaction fared in its block.
+#[derive(Debug, PartialEq, Eq)]
+struct Landed {
+    /// Its action reverted: it moved nothing and still paid its fee.
+    reverted: bool,
+    /// What it paid, when it can be told from the block alone.
+    fee: Option<u128>,
+}
+
+/// The transaction `sent` in `block`, if the block holds it. A block ends with its fee
+/// transaction (whose summary is what every charged transaction in it paid, together)
+/// and its clock transaction.
+fn landed_in(block: &common::block::Block, sent: &HashType) -> Option<Landed> {
+    let transactions = &block.body.transactions;
+    let position = transactions.iter().position(|tx| tx.hash() == *sent)?;
+    let users = transactions.len().checked_sub(2)?;
+    let charged: Vec<bool> = transactions[..users]
+        .iter()
+        .map(|tx| match tx {
+            LeeTransaction::PrivacyPreserving(_) => true,
+            LeeTransaction::Public(tx) => tx.message().execution.fee.is_some(),
+        })
+        .collect();
+    let paid = match transactions.get(users) {
+        Some(LeeTransaction::Public(fee_tx)) => match borsh::from_slice::<fee_core::Message>(&fee_tx.message().execution.root.message) {
+            Ok(fee_core::Message::Distribute { summary, .. }) => summary.revenue_base.checked_add(summary.revenue_tip),
+            _ => None,
+        },
+        _ => None,
+    };
+    Some(landing(position, &charged, &block.body.reverted, paid))
+}
+
+/// `landed_in` on what it read: the transaction at `position` among a block's user
+/// transactions (`charged`, whether each pays a fee), the block's reverted positions and
+/// what its charged transactions paid together. That sum is this one's fee only when it is
+/// the block's sole charged transaction.
+fn landing(position: usize, charged: &[bool], reverted: &[u64], paid: Option<u128>) -> Landed {
+    let alone = charged.get(position) == Some(&true) && charged.iter().filter(|charged| **charged).count() == 1;
+    Landed {
+        reverted: u64::try_from(position).is_ok_and(|position| reverted.contains(&position)),
+        fee: paid.filter(|_| alone),
+    }
 }
 
 /// Whether `tx` touches the public account `account`.
@@ -2950,15 +3003,23 @@ async fn main() -> Result<()> {
             };
             let before = paying.as_ref().and_then(|(rpc, (from, _))| public_balance_at(rpc, from));
             let sent = run_wallet(args, Some(overrides)).await;
-            if let (Ok(()), Some((rpc, (from, amount))), Some(before)) = (&sent, &paying, before) {
+            if let (Ok(hash), Some((rpc, (from, amount))), Some(before)) = (&sent, &paying, before) {
                 let after = public_balance_at(rpc, from);
-                let others = match (first_block, last_block_at(rpc).await) {
-                    (Some(first), Some(last)) => transactions_touching(rpc, from, first, last).await.map(|count| count.saturating_sub(1)),
+                let scan = match (first_block, last_block_at(rpc).await) {
+                    (Some(first), Some(last)) => scan_blocks(rpc, from, hash.as_ref(), first, last).await,
                     _ => None,
                 };
-                println!("{}", send_fee_line(before, after, *amount, others));
+                let others = scan.as_ref().map(|(count, _)| count.saturating_sub(1));
+                let landed = scan.and_then(|(_, landed)| landed);
+                // The block's own fee summary is the fee when the send is the block's only
+                // charged transaction: money arriving meanwhile doesn't change it
+                // (send-fee-measured-from-balance-absorbs-concurrent-credit).
+                match landed.as_ref().and_then(|landed| landed.fee) {
+                    Some(fee) => println!("fee paid: {fee}"),
+                    None => println!("{}", send_fee_line(before, after, *amount, others)),
+                }
             }
-            return sent;
+            return sent.map(|_| ());
         }
         Command::Bridge { amount, to, from_key, node, max_fee, yes } => {
             let rpc = cli.rpc.as_deref().unwrap_or(DEFAULT_RPC);
@@ -3700,6 +3761,19 @@ mod send_fee_tests {
         assert_eq!(send_fee_line(1_000, Some(400), 500, Some(0)), "fee paid: 100");
         assert_eq!(send_fee_line(1_000, None, 500, Some(0)), "fee paid: unknown");
     }
+
+    /// G1 again: the send was its block's only charged transaction, so the block's fee
+    /// summary (4,352) is its fee, whatever arrived meanwhile; beside another charged
+    /// transaction the sum isn't its alone.
+    #[test]
+    fn a_send_alone_in_its_block_has_the_blocks_fee() {
+        use super::{Landed, landing};
+        assert_eq!(landing(0, &[true], &[], Some(4_352)), Landed { reverted: false, fee: Some(4_352) });
+        assert_eq!(landing(1, &[false, true], &[], Some(4_352)), Landed { reverted: false, fee: Some(4_352) }, "beside a fee-exempt deposit");
+        assert_eq!(landing(0, &[true, true], &[], Some(9_000)), Landed { reverted: false, fee: None });
+        assert_eq!(landing(0, &[true], &[], None), Landed { reverted: false, fee: None });
+    }
+
 }
 
 #[cfg(test)]
