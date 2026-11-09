@@ -40,6 +40,7 @@ mod changes;
 mod cli;
 mod page_view;
 mod provider;
+mod provider_inscribe;
 mod spell;
 mod registry;
 mod shortlist;
@@ -832,6 +833,25 @@ pub trait NamesModule: Send + 'static {
     /// inscription is signed and sent (it cannot be undone) and `hash` and `fee` (what
     /// it pays) are set; `chain_tx` follows it. Names app only.
     fn chain_inscribe(&mut self, from_key: String, text: String, send: bool) -> String;
+
+    /// Any app: asks for `text` (a testimonial, 1-1024 bytes) to be inscribed on the
+    /// Logos Blockchain. The person picks which of the node's chain accounts inscribes
+    /// it and pays its fee, and approves it in the Names app. No LEZ access is needed
+    /// first: the request names no account. Answers as `request_status` does, kind
+    /// `inscribe`; once done, `tx` is the transaction's hash and `account` the chain key.
+    fn propose_inscription(&mut self, text: String) -> String;
+
+    /// The inscription requests waiting for the person, oldest first: `[{id, app, text,
+    /// says, submission, publisher, choices: [{key, balance}]}]`, the choices the keys
+    /// the node's wallet holds. The fee for a choice is `chain_inscribe(key, text,
+    /// false)`'s `fee_estimate`. Names app only.
+    fn pending_inscriptions(&mut self) -> String;
+
+    /// Approves inscription request `request_id` with the node key `from_key`: it is
+    /// inscribed (`chain_inscribe`) and the request is `done` with `tx`. Refused before
+    /// anything is sent (a key the node doesn't hold, too little for the fee), the
+    /// request stays pending. Names app only.
+    fn approve_inscription(&mut self, request_id: String, from_key: String) -> String;
 
     /// Called once the module is wired to the host.
     fn on_context_ready(&mut self, _ctx: &RustModuleContext) {}
@@ -4085,6 +4105,24 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         reply(chain_inscribe::run(&from_key, &text, send))
+    }
+
+    fn propose_inscription(&mut self, text: String) -> String {
+        reply(self.inscription_proposed(&text))
+    }
+
+    fn pending_inscriptions(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(self.inscriptions_pending())
+    }
+
+    fn approve_inscription(&mut self, request_id: String, from_key: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(self.inscription_approved(request_id.trim(), &from_key))
     }
 }
 
