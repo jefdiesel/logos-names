@@ -1659,6 +1659,12 @@ impl Client {
     /// spent and a new one made: it is recorded here, or the next private change would
     /// spend the old note and be refused.
     async fn finish(&mut self, hash: HashType) -> Result<u64> {
+        self.finish_landed(hash).await.map(|(block_id, _)| block_id)
+    }
+
+    /// `finish`, and the fee the transaction paid when its block tells it (it is the
+    /// block's only charged transaction).
+    async fn finish_landed(&mut self, hash: HashType) -> Result<(u64, Option<u128>)> {
         // Bounded here: the wallet's own poll waited 11m48s for a change the sequencer had
         // dropped (another from the same account took its nonce) and then said only "not
         // found in preconfigured amount of blocks" (second-concurrent-transfer-hangs).
@@ -1688,7 +1694,7 @@ impl Client {
         if reverted {
             bail!("{hash} was included in block {block_id} but reverted: it failed on chain or raced with another change; its fee was charged and nothing else applied");
         }
-        Ok(block_id)
+        Ok((block_id, landed_in(&block, &hash).and_then(|landed| landed.fee)))
     }
 
     /// Runs the call against current chain state with the deployed bytecode, without
@@ -2016,7 +2022,12 @@ impl Client {
         // The fee is what leaves the payer less the refunds its claims send back: credits the
         // fee inbox makes, to a fresh alias of this wallet, while they run.
         let paid_before = private_balance(self, payer);
-        let known: std::collections::BTreeSet<_> = self.wallet.owned_pending_messages().await.unwrap_or_default().iter().map(|message| message.position).collect();
+        let waiting = self.wallet.owned_pending_messages().await.unwrap_or_default();
+        let known: std::collections::BTreeSet<_> = waiting.iter().map(|message| message.position).collect();
+        // The payer's own waiting credits (its fees' refunds) are swept into the first
+        // claim's reserve: part of what it had (fee-paid-ignores-swept-refund-credits).
+        let payer_waiting = credits_to(&waiting, payer);
+        let mut block_fees = Some(0_u128);
         for message in pending {
             let amount = message.native_credit().unwrap_or(0);
             let to = message.body.to.account_id;
@@ -2027,7 +2038,8 @@ impl Client {
                 .await
                 .context("the sequencer did not accept the claim")?;
             println!("submitted {hash}");
-            let block = self.finish(hash).await.context("the claim was not applied")?;
+            let (block, block_fee) = self.finish_landed(hash).await.context("the claim was not applied")?;
+            block_fees = block_fees.zip(block_fee).and_then(|(sum, fee)| sum.checked_add(fee));
             // Read once the wallet has caught up: before that it said "now holds 0".
             self.wallet.sync_to_latest_block().await.ok();
             println!("received in block {block}; Private/{to} now holds {}", private_balance(self, to));
@@ -2041,7 +2053,11 @@ impl Client {
                 .filter_map(wallet::PendingMessage::native_credit)
                 .sum::<u128>()
         });
-        let paid = refunds.and_then(|refunds| claim_fee(paid_before, private_balance(self, payer), refunds));
+        let swept_in = after.as_ref().ok().map(|after| swept(&payer_waiting, &credits_to(after, payer)));
+        // Each claim's block tells its fee when it was the block's only charged transaction.
+        let paid = block_fees.or_else(|| {
+            refunds.zip(swept_in).and_then(|(refunds, swept_in)| claim_fee(paid_before.saturating_add(swept_in), private_balance(self, payer), refunds))
+        });
         match paid {
             Some(paid) => println!("fee paid: {paid}"),
             None => println!("fee paid: unknown"),
@@ -2649,6 +2665,11 @@ async fn setup(client: &mut Client, shield: u128) -> Result<()> {
         // own changes (a payment to it waits as a credit), so the figure is exact.
         client.wallet.sync_to_latest_block().await.ok();
         let held_before = private_held(&client.wallet, private);
+        // The wallet sweeps the account's own waiting credits (its fees' refunds) into the
+        // proof's fee reserve: they are part of what it had.
+        let pending_before = client.wallet.owned_pending_messages().await.unwrap_or_default();
+        let waiting_before = credits_to(&pending_before, private);
+        let known: std::collections::BTreeSet<_> = pending_before.iter().map(|message| message.position).collect();
         println!("moving {shield} to the private account; generating the proof (a few minutes)");
         let (hash, _) = NativeTokenTransfer(&client.wallet)
             .transfer(
@@ -2659,10 +2680,31 @@ async fn setup(client: &mut Client, shield: u128) -> Result<()> {
             )
             .await
             .context("the sequencer did not accept the transfer")?;
-        client.finish(hash).await.context("the transfer was not applied")?;
+        let (_, block_fee) = client.finish_landed(hash).await.context("the transfer was not applied")?;
         client.wallet.sync_to_latest_block().await?;
         save_wallet(&mut client.wallet)?;
-        println!("{}", shield_fee_line(shield, held_before, private_held(&client.wallet, private)));
+        // Its block's fee summary when it was the block's only charged transaction; else
+        // what the account had, swept credits included, against what it holds now
+        // (fee-paid-ignores-swept-refund-credits).
+        let line = match block_fee {
+            Some(fee) => format!("fee paid: {fee}"),
+            None => {
+                // The reserve's surplus comes back as a refund to a fresh alias of this wallet.
+                match client.wallet.owned_pending_messages().await {
+                    Ok(after) => {
+                        let refunds: u128 = after
+                            .iter()
+                            .filter(|message| !known.contains(&message.position) && is_fee_refund(message))
+                            .filter_map(wallet::PendingMessage::native_credit)
+                            .sum();
+                        let had = held_before.saturating_add(swept(&waiting_before, &credits_to(&after, private)));
+                        shield_fee_line(shield, had, private_held(&client.wallet, private).saturating_add(refunds))
+                    }
+                    Err(_) => "fee paid: unknown".to_owned(),
+                }
+            }
+        };
+        println!("{line}");
     }
     println!("ready: `names register <name>` holds a name privately, `names pay <name> <amount>` pays one");
     Ok(())
@@ -2680,6 +2722,21 @@ fn is_fee_refund(message: &wallet::PendingMessage) -> bool {
 /// (`about`), or any with `all`, but never a fee's refund worth less than a claim.
 fn worth_claiming(credit: u128, refund: bool, all: bool, about: u128) -> bool {
     credit > about || (all && !refund)
+}
+
+/// The credits waiting for `account`, by position: `(position, value)`.
+fn credits_to(pending: &[wallet::PendingMessage], account: AccountId) -> Vec<(u64, u128)> {
+    pending
+        .iter()
+        .filter(|message| message.body.to.account_id == account)
+        .map(|message| (u64::from(message.position), message.native_credit().unwrap_or(0)))
+        .collect()
+}
+
+/// What of `before` (credits waiting, by position) is no longer waiting in `after`: what
+/// a private change swept into its fee reserve.
+fn swept(before: &[(u64, u128)], after: &[(u64, u128)]) -> u128 {
+    before.iter().filter(|(position, _)| !after.iter().any(|(still, _)| still == position)).map(|(_, value)| value).sum()
 }
 
 /// What claims paid from their payer: what left it (`before` - `after`) less the refunds
@@ -3771,6 +3828,20 @@ mod fee_line_tests {
         assert_eq!(shield_fee_line(6_000_000, 0, 7_000_000), "fee paid: unknown");
         // A move of 1,000 costing 5,070,616: the account ends lower than it started.
         assert_eq!(shield_fee_line(1_000, 25_548_401, 20_478_785), "fee paid: 5070616");
+    }
+
+    /// fee-paid-ignores-swept-refund-credits: a shield's payer I7 held 3,260,249 and a
+    /// waiting refund of 3,169,135 (position 226), which the move swept into its fee
+    /// reserve; it reported 3,260,249 for a 5,070,616 fee.
+    #[test]
+    fn swept_credits_count_as_what_the_payer_had() {
+        let before = [(226, 3_169_135), (230, 2_000_000)];
+        let after = [(230, 2_000_000), (250, 1_358_768)];
+        assert_eq!(super::swept(&before, &after), 3_169_135);
+        // I7 3,260,249 -> 1,000,000 and the surplus 1,358,768 refunded to a new alias.
+        assert_eq!(super::shield_fee_line(1_000_000, 3_260_249 + super::swept(&before, &after), 1_000_000 + 1_358_768), "fee paid: 5070616");
+        // The 2-claim receive: E3 9,619,017 -> 0, its refund 3,169,135 swept, new refunds 2,646,920.
+        assert_eq!(super::claim_fee(9_619_017 + 3_169_135, 0, 2_646_920), Some(10_141_232));
     }
 
     /// jobs-report-no-fee-paid (receive half) and receive-entry-has-no-account-amount: the
