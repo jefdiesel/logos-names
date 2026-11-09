@@ -9,8 +9,9 @@
 //!   is only ever one the keystore doesn't hold yet, and the keystore is read again after.
 //! - The running wallet doesn't follow a key made after it started: the node lists it
 //!   in `wallet_get_known_addresses` from its next start, and only then can it spend
-//!   from it or see what it receives. What was sent to it before that start stays
-//!   unseen after it (the wallet starts from its last final block, not genesis).
+//!   from it or see what it receives. What was sent to it in a block already final
+//!   at that start stays unseen after it: the wallet starts from its last final block,
+//!   not genesis (a send whose block wasn't final yet was seen).
 //! - A key with no notes answers `wallet_get_balance` "Unknown wallet address."; its
 //!   balance is then 0.
 //! - `remove_key(keystore, title)` deletes the key, secret and all.
@@ -172,9 +173,10 @@ fn kept(before: &Keystore, after: &Keystore) -> bool {
 }
 
 /// What a new account needs the person to know: the node takes it at its next start.
-/// A key sent to before the node used it stays unseen after the restart (spike: 2,000 sent
-/// to 8bbf9fbd… while the node didn't list it; after a restart the node listed the key and
-/// answered "Unknown wallet address."), so the note says not to receive before then.
+/// A key sent to before the node used it, in a block final before the restart, stays
+/// unseen after it (spike: 2,000 sent to 8bbf9fbd… while the node didn't list it; after a
+/// restart the node listed the key and answered "Unknown wallet address."), so the note
+/// says not to receive before then.
 pub const RESTART: &str = "Your node uses this account from its next start: stop and start it in Basecamp's Blockchain app. Until then it can't send, and don't have anything sent to it: what reaches it before your node uses it isn't seen.";
 
 /// Makes a new account (a zk key in the node's keystore) labelled `label`:
