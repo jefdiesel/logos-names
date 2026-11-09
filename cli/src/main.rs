@@ -2858,7 +2858,7 @@ fn setup_short<E: std::fmt::Display>(public: AccountId, read: Option<Result<u128
         None => Ok(None),
         Some(Err(error)) => bail!(
             "the accounts are made, but what Public/{public} holds could not be read ({}), so nothing was moved. Run `names setup` again when the sequencer answers.",
-            error.to_string().trim().trim_end_matches('.')
+            format!("{error:#}").trim().trim_end_matches('.')
         ),
         Some(Ok(balance)) if balance < shield => Ok(Some(unfunded_setup(public, balance, shield))),
         Some(Ok(_)) => Ok(None),
