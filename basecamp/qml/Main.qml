@@ -565,6 +565,7 @@ Item {
     property var chainSent: null         // the last send: {hash, amount, to, name, state, fee}
     property double chainSentAt: 0
     property string chainClaimed: ""     // the last claim's transaction, "" if none
+    property var chainClaimPlan: null    // chain_claim(false): what one claim costs (fee_about, warning)
 
     /// Opens Blockchain and reads the node.
     function openChain() {
@@ -594,6 +595,9 @@ Item {
                 askLater("chain_stake", [], function(stake) {
                     chainStake = stake
                     chainReading = false
+                    // What one claim would cost, asked of the node before Claim is pressed.
+                    if (stake && stake.vouchers > 0)
+                        askLater("chain_claim", [false], function(plan) { chainClaimPlan = plan }, function(message) { chainClaimPlan = null }, 30000)
                 }, function(message) {
                     chainReading = false
                     console.log("names_ui: stake:", message)
@@ -1031,7 +1035,7 @@ Item {
     /// The fee, in one line ("" while unknown).
     function sendFee() {
         if (sendKind === "chain")
-            return "Paid from the key's notes; shown once it's sent (about 2,000 on the testnet)."
+            return Logic.chainFeeLine(chainPlan)
         var estimate = Logic.feeEstimate(feeQuote, sendFromPrivate || sendToName())
         return estimate === "" ? "" : estimate
     }
@@ -1347,13 +1351,13 @@ Item {
             return "Your node doesn't know LEZ's deposit channel (" + Logic.keyShown(bridgePlan.channel || "") + "). It may still be syncing, or your sequencer is on another network. Nothing can be bridged until it does."
         if (bridgePlan.needs_split)
             return "No note on that key holds exactly " + grouped(asked) + ", and a bridge deposits whole notes. First split "
-                + grouped(asked) + " off into a note of its own: a send from the key to itself (a fee of about 2,000, in a block within a minute). "
+                + grouped(asked) + " off into a note of its own: a send from the key to itself (" + (/^\d+$/.test(String(bridgePlan.split_fee_about)) ? "a fee of about " + grouped(bridgePlan.split_fee_about) + ", your node's figure" : "a fee of about 2,000") + ", in a block within a minute). "
                 + "The rest comes back as change. The notes it spends leave the stake, and the new ones join it within two epochs."
         if (bridgePlan.fee_short === true)
             return "That key holds a note of exactly " + grouped(asked) + ", but the deposit fee (at most " + grouped(bridgePlan.fee || "100000")
                 + ") comes from its other notes, which hold " + grouped(bridgePlan.others || "0") + ". Mine or receive a little more first."
         return "Ready: exactly " + grouped(asked) + " from one note of that key, into " + (bridgeTo !== "" ? Logic.keyShown(bridgeTo.substr(7)) : "your LEZ public account")
-            + ". Network fee at most " + grouped(bridgePlan.fee || "100000") + ", paid from the key's other notes. Nothing has been sent yet."
+            + ". Network fee " + (/^\d+$/.test(String(bridgePlan.fee_about)) ? "about " + grouped(bridgePlan.fee_about) + " (your node's figure; at most " + grouped(bridgePlan.fee || "100000") + ")" : "at most " + grouped(bridgePlan.fee || "100000")) + ", paid from the key's other notes. Nothing has been sent yet."
     }
 
     /// Whether the plan deposits more than twice what was asked (whole notes): worth a warning.
@@ -5704,6 +5708,12 @@ Item {
                                 }
                             }
                         }
+                    }
+                    Hint {
+                        visible: text !== "" && stakePage.table !== null && stakePage.table.vouchers > 0
+                        color: root.chainClaimPlan !== null && root.chainClaimPlan.warning ? root.alarm : root.dim
+                        font.pixelSize: root.px(14)
+                        text: Logic.claimFeeLine(root.chainClaimPlan)
                     }
                     Hint {
                         visible: root.chainStake !== null

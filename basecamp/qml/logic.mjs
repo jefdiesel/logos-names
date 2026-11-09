@@ -483,3 +483,23 @@ export function activityFor(rows, who) {
     })
 }
 
+
+/// A Logos Blockchain plan's fee for its confirm step: the node's own figure for this
+/// very transaction (`fee_about`, decimal text, from chain_send / chain_split / chain_bridge
+/// plans) or, without one, when the fee will be known.
+export function chainFeeLine(plan) {
+    if (!plan)
+        return ""
+    if (/^\d+$/.test(String(plan.fee_about)))
+        return "About " + groupDigits(plan.fee_about) + ", paid from the key's notes: your node's figure at its gas prices now. The fee paid is shown once it's sent."
+    return "Your node couldn't say in advance. The fee paid is shown once it's sent."
+}
+
+/// What one leader-reward claim costs, from chain_claim's plan: its `fee_about` beside the
+/// one reward it cashes, with the module's `warning` when the fee is more.
+export function claimFeeLine(plan) {
+    if (!plan || !/^\d+$/.test(String(plan.fee_about)))
+        return ""
+    var line = "Each claim costs about " + groupDigits(plan.fee_about) + " in fees and cashes one reward of " + groupDigits(plan.reward_per_voucher || "0") + "."
+    return plan.warning ? line + " " + plan.warning : line
+}
