@@ -385,6 +385,18 @@ mod tests {
         assert_eq!(short.missing(), ('S', 6_000_000));
     }
 
+    /// A change sweeps at most four waiting credits, once, when it acts for its own payer.
+    #[test]
+    fn a_change_sweeps_at_most_four_credits_once() {
+        let credits = [1_000_000, 2_000_000, 3_000_000, 2_500_000, 1_500_000];
+        // 4 largest = 9,000,000; with all five (or swept twice) the payer would hold 10,000,000.
+        let fee = Estimate { about: 9_000_000, at_most: 9_000_000 };
+        let steps = [Step { fee, ..step('P', 0, 0, None) }];
+        assert!(check(&[holding('P', 0, &credits)], &steps).is_ok());
+        let dearer = [Step { fee: Estimate { about: 9_000_001, at_most: 9_000_001 }, ..step('P', 0, 0, None) }];
+        assert_eq!(check(&[holding('P', 0, &credits)], &dearer).unwrap_err().holds, 9_000_000);
+    }
+
     /// A dearer step (a registry call's public part) is checked at its own fee.
     #[test]
     fn each_step_is_checked_at_its_own_fee() {
