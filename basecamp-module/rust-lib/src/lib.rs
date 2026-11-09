@@ -3549,7 +3549,12 @@ impl NamesModule for Names {
                 .sum();
             // Without an exact note, a split makes it from these same notes first: the fee is
             // then paid from what is left of them, less the split's own fee (needs-split-plan).
-            let others = if note.is_none() && !exact_busy { others.saturating_sub(u128::from(amount)) } else { others };
+            // The split's fee isn't known until it is made (866 and 2,018 seen), so what it
+            // may cost is set aside too: a plan said fee_short false with 100,400 left, the
+            // split took 866, and the deposit was then refused at 99,534
+            // (needs-split-plan-ignores-fee-after-split-regressed).
+            let needs_split = note.is_none() && !exact_busy;
+            let others = if needs_split { others.saturating_sub(u128::from(amount)).saturating_sub(u128::from(SPLIT_FEE_ALLOWANCE)) } else { others };
             let fee_short = others < u128::from(BRIDGE_MAX_FEE);
             let channel = registry::channel_id(&self.sequencer)?;
             // A deposit can't be undone: the channel the sequencer names has to be on the
@@ -3561,6 +3566,9 @@ impl NamesModule for Names {
                 "fee": BRIDGE_MAX_FEE.to_string(), "fee_reserve": BRIDGE_MAX_FEE.to_string(), "note": note, "needs_split": note.is_none(), "channel": channel,
                 "channel_known": channel_known, "fee_short": fee_short, "others": others.to_string(), "lines": [],
             });
+            if needs_split {
+                plan["split_fee_allowance"] = json!(SPLIT_FEE_ALLOWANCE.to_string());
+            }
             if exact_busy {
                 plan["needs_split"] = json!(false);
                 plan["busy"] = json!(true);
@@ -4423,6 +4431,9 @@ mod program_registry {
 
 /// The most a bridge deposit's fee may be, as `names bridge` caps it by default.
 const BRIDGE_MAX_FEE: u64 = 100_000;
+/// What a bridge plan that needs a split sets aside for the split's own fee, which the
+/// node tells only once the split is made (866, 2,018 and 2,054 seen for one-input transfers).
+const SPLIT_FEE_ALLOWANCE: u64 = 10_000;
 
 /// The board answers kept at once (feeds, authors' pages, threads).
 const MAX_BOARD_READS: usize = 48;
@@ -5270,10 +5281,27 @@ mod tests {
         node_answers("wallet_get_notes", json!({ "notes": [{ "id": "k150", "value": "150100" }] }));
         let to = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
         let plan = parsed(&names.chain_bridge("39".repeat(32), format!("Public/{to}"), "100,000".into(), false));
-        assert_eq!((plan["value"]["needs_split"].as_bool(), plan["value"]["fee_short"].as_bool(), plan["value"]["others"].as_str()), (Some(true), Some(true), Some("50100")), "{plan}");
+        assert_eq!((plan["value"]["needs_split"].as_bool(), plan["value"]["fee_short"].as_bool(), plan["value"]["others"].as_str()), (Some(true), Some(true), Some("40100")), "{plan}");
         node_answers("wallet_get_notes", json!({ "notes": [{ "id": "k250", "value": "250100" }] }));
         let plan = parsed(&names.chain_bridge("39".repeat(32), format!("Public/{to}"), "100,000".into(), false));
         assert_eq!((plan["value"]["needs_split"].as_bool(), plan["value"]["fee_short"].as_bool()), (Some(true), Some(false)), "{plan}");
+    }
+
+    /// needs-split-plan-ignores-fee-after-split-regressed (e1): KA held 700,000 in two notes;
+    /// the plan for 599,600 said needs_split, fee_short false, others 100,400; the split took
+    /// 866 and the bridge was then refused, the other notes holding 99,534.
+    #[test]
+    fn a_plan_that_needs_a_split_sets_aside_the_splits_own_fee() {
+        let mut names = fresh();
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "a1", "value": "400000" }, { "id": "a2", "value": "300000" }] }));
+        let to = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
+        let plan = parsed(&names.chain_bridge("39".repeat(32), format!("Public/{to}"), "599600".into(), false));
+        assert_eq!((plan["value"]["needs_split"].as_bool(), plan["value"]["fee_short"].as_bool()), (Some(true), Some(true)), "{plan}");
+        assert_eq!((plan["value"]["others"].as_str(), plan["value"]["split_fee_allowance"].as_str()), (Some("90400"), Some("10000")), "{plan}");
+        // Past the reserve and the split's fee: ready.
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "a1", "value": "410000" }, { "id": "a2", "value": "300000" }] }));
+        let plan = parsed(&names.chain_bridge("39".repeat(32), format!("Public/{to}"), "599600".into(), false));
+        assert_eq!((plan["value"]["fee_short"].as_bool(), plan["value"]["others"].as_str()), (Some(false), Some("100400")), "{plan}");
     }
 
     /// RV5: a bridge plan isn't "ready" when the exact note is the key's only one (nothing pays the fee).
