@@ -2792,7 +2792,7 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| {
+        let listed = (|| -> Result<(Value, Option<String>), String> {
             let dir = config_dir().ok_or("no folder for the Wallet's history")?;
             let setup = self.cli_setup().ok();
             let read = setup.as_ref().and_then(|setup| cli::balances_now(setup).ok());
@@ -2801,12 +2801,20 @@ impl NamesModule for Names {
             if let (Some(setup), Some(rows)) = (&setup, &read) {
                 note_balances("lez", &setup.sequencer, rows);
             }
-            // A history file that couldn't be read was kept aside, never written over: say so once.
-            if let Some(why) = activity::damaged(&dir) {
+            // A history file that couldn't be read was kept aside, never written over: say so
+            // once. Only a lost history fails the call; a lost file of marks is a warning
+            // beside the list.
+            let damage = activity::damage(&dir);
+            if let Some((true, why)) = damage {
                 return Err(why);
             }
-            Ok(Value::from(activity::all(&dir).into_iter().filter(|entry| activity::involves(entry, &account)).take(100).collect::<Vec<_>>()))
-        })())
+            let list = Value::from(activity::all(&dir).into_iter().filter(|entry| activity::involves(entry, &account)).take(100).collect::<Vec<_>>());
+            Ok((list, damage.map(|(_, why)| why)))
+        })();
+        match listed {
+            Ok((list, Some(warning))) => json!({ "success": true, "value": list, "error": null, "warning": warning }).to_string(),
+            other => reply(other.map(|(list, _)| list)),
+        }
     }
 
     fn cli_pay_account(&mut self, account: String, amount: String, from_private: bool) -> String {
@@ -5340,6 +5348,22 @@ mod tests {
         node_answers("wallet_get_notes", json!({ "notes": [{ "id": "a1", "value": "410000" }, { "id": "a2", "value": "300000" }] }));
         let plan = parsed(&names.chain_bridge("39".repeat(32), format!("Public/{to}"), "599600".into(), false));
         assert_eq!((plan["value"]["fee_short"].as_bool(), plan["value"]["others"].as_str()), (Some(false), Some("100400")), "{plan}");
+    }
+
+    /// corrupt-balances-file-fails-whole-activity-call (G4): only the marks file damaged,
+    /// and activity() answered success:false "a new history started".
+    #[test]
+    fn activity_lists_the_history_with_a_warning_when_only_the_marks_are_damaged() {
+        let mut names = fresh();
+        let dir = config_dir().unwrap();
+        activity::add(&dir, now(), json!({ "kind": "arrived", "chain": "lez", "to": "Public/F", "amount": "12345", "state": "arrived" }));
+        std::fs::write(dir.join("activity-balances.json"), "{\"lez@x:Public/F\":\"5").unwrap();
+        activity::note_balances(&dir, now(), "lez", "x", &[("Public/F".to_owned(), 9)]);
+        let shown = parsed(&names.activity(String::new()));
+        assert_eq!(shown["success"], true, "{shown}");
+        assert_eq!(shown["value"][0]["amount"], "12345", "{shown}");
+        assert!(shown["warning"].as_str().unwrap().contains("activity-balances.json.corrupt-"), "{shown}");
+        assert!(parsed(&names.activity(String::new()))["warning"].is_null(), "told once");
     }
 
     /// logos-send-stuck-sending-without-chain-sent-record (L4): a send of 700 that landed

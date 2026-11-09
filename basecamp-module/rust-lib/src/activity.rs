@@ -52,7 +52,14 @@ const CORRUPT: &str = ".corrupt-";
 /// The history files found damaged since this was last asked (each told once): why,
 /// in words, or `None`.
 pub fn damaged(dir: &Path) -> Option<String> {
-    let mut found = Vec::new();
+    damage(dir).map(|(_, why)| why)
+}
+
+/// What `damaged` tells, and whether the history itself (`activity.json`) was lost: only
+/// then is the list a new one. A damaged file of balance marks costs nothing listed
+/// (corrupt-balances-file-fails-whole-activity-call).
+pub fn damage(dir: &Path) -> Option<(bool, String)> {
+    let mut found: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with("activity") && name.contains(CORRUPT) && !name.ends_with(".told") {
@@ -60,13 +67,25 @@ pub fn damaged(dir: &Path) -> Option<String> {
             found.push(format!("{name}.told"));
         }
     }
-    (!found.is_empty()).then(|| {
-        format!(
+    found.sort();
+    let of = |prefix: &str| found.iter().filter(|name| name.starts_with(prefix)).cloned().collect::<Vec<_>>();
+    let (history, marks) = (of("activity.json"), of("activity-balances.json"));
+    let mut why = Vec::new();
+    if !history.is_empty() {
+        why.push(format!(
             "The Wallet's history file couldn't be read, so it was kept aside ({}, in {}) and a new history started.",
-            found.join(", "),
+            history.join(", "),
             dir.display()
-        )
-    })
+        ));
+    }
+    if !marks.is_empty() {
+        why.push(format!(
+            "The file of what each account held at the last read couldn't be read, so it was kept aside ({}, in {}); the history is intact, and money that arrived before this read may not be listed.",
+            marks.join(", "),
+            dir.display()
+        ));
+    }
+    (!why.is_empty()).then(|| (!history.is_empty(), why.join(" ")))
 }
 
 fn save(path: &Path, object: &Map<String, Value>) {
@@ -593,6 +612,23 @@ mod tests {
         assert!(damaged(&d).is_none(), "told once");
         let kept: Vec<String> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("activity.json.corrupt-")).collect();
         assert_eq!(std::fs::read_to_string(d.join(&kept[0])).unwrap(), whole[..whole.len() - 1], "the four entries are kept as they were");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// corrupt-balances-file-fails-whole-activity-call (G4): with only
+    /// activity-balances.json damaged, activity() failed saying the history was lost and a
+    /// new one started, though activity.json was intact.
+    #[test]
+    fn a_damaged_file_of_marks_is_a_warning_not_a_lost_history() {
+        let d = dir("marks");
+        add(&d, 1, json!({ "kind": "pay_account", "amount": "11" }));
+        std::fs::write(balances_file(&d), "{\"lez@x:Public/F\":\"5").unwrap();
+        note(&d, 2, &[("Public/F", 9)]);
+        let (history_lost, why) = damage(&d).expect("told");
+        assert!(!history_lost, "{why}");
+        assert!(why.contains("activity-balances.json.corrupt-") && why.contains("the history is intact") && !why.contains("new history"), "{why}");
+        assert_eq!(all(&d).len(), 1, "the history is all there");
+        assert!(damage(&d).is_none(), "told once");
         let _ = std::fs::remove_dir_all(d);
     }
 
