@@ -2566,6 +2566,10 @@ impl NamesModule for Names {
         if let Err(error) = cli::set_page_args(&name, &content_type, Some(std::path::Path::new("check"))) {
             return reply(Err(error));
         }
+        // A page of text is held to what set-text and posts are (cli-set-page-forwards-control-chars).
+        if let Err(error) = cli::page_text(&content_type, &body) {
+            return reply(Err(error));
+        }
         self.cli_job(&name, "set_page", |jobs, name, id| {
             if body.is_empty() {
                 return Ok((cli::set_page_args(name, &content_type, None)?, None, Value::Null));
@@ -5418,6 +5422,28 @@ mod tests {
         assert_eq!(shown["value"][0]["amount"], "12345", "{shown}");
         assert!(shown["warning"].as_str().unwrap().contains("activity-balances.json.corrupt-"), "{shown}");
         assert!(parsed(&names.activity(String::new()))["warning"].is_null(), "told once");
+    }
+
+    /// cli-set-page-forwards-control-chars: a text/html page with NUL, ESC and BEL in it
+    /// was passed to the CLI as a job, while cli_set_text refused control characters.
+    #[test]
+    fn a_text_page_with_control_characters_is_refused_before_any_job() {
+        let (mut names, dir) = with_fake_cli("page-control", "exit 0");
+        for body in ["<p>x\u{0}y\u{1b}[31mz\u{7}</p>", "a\u{85}b"] {
+            for content_type in ["text/html", "text/plain; charset=utf-8", ""] {
+                let refused = parsed(&names.cli_set_page("alice".into(), content_type.into(), body.into()));
+                assert!(refused["error"].as_str().unwrap_or_default().contains("control characters"), "{content_type}: {refused}");
+            }
+        }
+        assert!(std::fs::read_dir(dir.join("jobs")).map_or(true, |entries| entries.count() == 0), "no job");
+        // Line breaks of either kind and tabs are text; a binary type is left as it is.
+        let text = parsed(&names.cli_set_page("alice".into(), "text/html".into(), "<p>a</p>\r\n\t<p>b</p>\n".into()));
+        assert_eq!(text["success"], true, "{text}");
+        job_end(&mut names, text["value"]["id"].as_str().unwrap());
+        let png = parsed(&names.cli_set_page("alice".into(), "image/png".into(), "\u{0}\u{1}PNG".into()));
+        assert_eq!(png["success"], true, "{png}");
+        job_end(&mut names, png["value"]["id"].as_str().unwrap());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// module-self-transfer-starts-job-logs-failed: cli_transfer to the account that

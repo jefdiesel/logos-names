@@ -243,6 +243,17 @@ pub fn plain_text(text: &str, what: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Refuses a page body of text (a `text/…` content type, or none, the CLI's default
+/// being text) with a control character in it other than a line break (`\n`, `\r`) or a
+/// tab: a NUL, an escape sequence or a bell only hide what the page says.
+pub fn page_text(content_type: &str, body: &str) -> Result<(), String> {
+    let kind = content_type.trim().to_ascii_lowercase();
+    if (kind.is_empty() || kind.starts_with("text/")) && body.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')) {
+        return Err("a page of text can't hold control characters (such as a NUL); remove them and try again".to_owned());
+    }
+    Ok(())
+}
+
 /// `names post`.
 pub fn post_args(name: &str, text: &str, cids: &[String], reply: &str) -> Result<Vec<String>, String> {
     let name = registry::parse_name(name)?;
