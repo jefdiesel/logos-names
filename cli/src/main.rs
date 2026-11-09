@@ -2791,11 +2791,13 @@ fn worth_claiming(credit: u128, refund: bool, all: bool, about: u128) -> bool {
     credit > about || (all && !refund)
 }
 
-/// The credits waiting for `account`, by position: `(position, value)`.
+/// The credits waiting for `account`, by position: `(position, value)`. A fee's refund is
+/// addressed to one of the account's aliases; its recipient is the account itself, which is
+/// how the wallet picks the credits a private change sweeps into its payer's fee reserve.
 fn credits_to(pending: &[wallet::PendingMessage], account: AccountId) -> Vec<(u64, u128)> {
     pending
         .iter()
-        .filter(|message| message.body.to.account_id == account)
+        .filter(|message| message.recipient.account_id() == account)
         .map(|message| (u64::from(message.position), message.native_credit().unwrap_or(0)))
         .collect()
 }
