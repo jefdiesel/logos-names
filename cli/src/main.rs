@@ -2399,6 +2399,14 @@ async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>)
     let storage_path = fetch_persistent_storage_path()?;
 
     if let Some(command) = command {
+        // Making an account reads the key tree and saves it: under the wallet's lock, as
+        // `names receive-privately` and the module's account_new make theirs, so concurrent
+        // runs make different accounts (wallet-account-new-concurrent-same-account).
+        let _lock = if makes_account(&command) {
+            Some(wallet_lock(&storage_path)?)
+        } else {
+            None
+        };
         let mut wallet = if storage_path.exists() {
             let password = wallet_password(&storage_path)?;
             WalletCore::new_update_chain(config_path, storage_path, overrides, &password).context(OLD_WALLET)?
@@ -2435,6 +2443,11 @@ async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>)
         println!("{}", help.render_long_help());
     }
     Ok(sent)
+}
+
+/// Whether `names wallet <command>` makes an account (`account new public|private`).
+fn makes_account(command: &wallet::cli::Command) -> bool {
+    matches!(command, wallet::cli::Command::Account(wallet::cli::account::AccountSubcommand::New(_)))
 }
 
 /// Why an existing wallet may not open: LEZ 0.4 cannot read a 0.3 wallet's file.
@@ -3984,6 +3997,16 @@ mod input_tests {
         assert!(matches!(Cli::try_parse_from(["names", "pay", "hopper", "--public", "100"]).map(|cli| cli.command), Ok(Command::Pay { amount: 100, public: true, .. })), "a flag is still a flag");
     }
 
+    /// wallet-account-new-concurrent-same-account: four concurrent `names wallet account new
+    /// private` all made Private/BTTNMK… at /3. Making an account is done under the lock.
+    #[test]
+    fn making_an_account_takes_the_wallet_lock() {
+        use clap::Parser as _;
+        let parsed = |args: &[&str]| wallet::cli::Args::parse_from(std::iter::once("names wallet").chain(args.iter().copied())).command.expect("a command");
+        assert!(makes_account(&parsed(&["account", "new", "private"])));
+        assert!(makes_account(&parsed(&["account", "new", "public"])));
+        assert!(!makes_account(&parsed(&["account", "list"])));
+    }
 }
 
 #[cfg(test)]
