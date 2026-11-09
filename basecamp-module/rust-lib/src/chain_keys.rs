@@ -143,17 +143,26 @@ pub fn known(ask: &mut Ask) -> Result<Vec<String>, String> {
 }
 
 /// The keystore of the running node, among `candidates`: the first whose keys include
-/// every key the node lists. Refuses when none does, never guessing.
+/// every key the node lists. Refuses when none does, never guessing: `RESTART_FIRST` when
+/// one holds some of the listed keys but not all (a key taken out of the keystore since
+/// the node started: the node lists it until it restarts), else `NO_KEYSTORE`.
 pub fn the_nodes(ask: &mut Ask, candidates: &[NodeFiles], known: &[String]) -> Result<(NodeFiles, Keystore), String> {
+    let mut some_of_them = false;
     for files in candidates {
         let Ok(reply) = ask("read_accounts", json!([files.config.to_string_lossy()])) else { continue };
         let read = keystore(&reply);
         if read.is_the_nodes(known) {
             return Ok((files.clone(), read));
         }
+        some_of_them |= known.iter().any(|key| read.find(key).is_some());
     }
-    Err(NO_KEYSTORE.to_owned())
+    Err(if some_of_them { RESTART_FIRST } else { NO_KEYSTORE }.to_owned())
 }
+
+/// Why no account can be made when the keystore lacks a key the node lists: the
+/// running node keeps listing a key taken out of its keystore until it restarts.
+pub const RESTART_FIRST: &str = "Your node lists a key its keystore no longer holds (one taken out since the node started), so the Names app changes nothing in it. \
+     Stop and start your node in Basecamp's Blockchain app, then try again.";
 
 /// Why no account can be made or removed: the keystore isn't where the module looks.
 pub const NO_KEYSTORE: &str = "The Names app couldn't find your node's keystore beside its own data, so it can't add or remove keys. \
@@ -462,10 +471,15 @@ mod tests {
         let down = make(&mut |m, a| node.ask(m, a), &files(), &mut records, "", 1).unwrap_err();
         assert!(down.contains("isn't running"), "{down}");
         assert_eq!(node.methods(), ["wallet_get_known_addresses"]);
-        // A keystore that lacks a key the node lists is another node's: refused, nothing generated.
+        // A keystore that lacks a key the node lists: refused, nothing generated.
         let mut node = Node::new(&[("wallet_get_known_addresses", Ok(json!([A, NEW]))), ("read_accounts", Ok(read(&[])))]);
-        assert_eq!(make(&mut |m, a| node.ask(m, a), &files(), &mut records, "", 1).unwrap_err(), NO_KEYSTORE);
+        assert_eq!(make(&mut |m, a| node.ask(m, a), &files(), &mut records, "", 1).unwrap_err(), RESTART_FIRST);
         assert!(!node.methods().contains(&"generate_key"));
+        // A keystore the node can't read, or one holding none of the node's keys: not found.
+        let mut node = Node::new(&[("wallet_get_known_addresses", Ok(json!([A]))), ("read_accounts", Err("no such file".to_owned()))]);
+        assert_eq!(make(&mut |m, a| node.ask(m, a), &files(), &mut records, "", 1).unwrap_err(), NO_KEYSTORE);
+        let mut node = Node::new(&[("wallet_get_known_addresses", Ok(json!([NEW]))), ("read_accounts", Ok(read(&[])))]);
+        assert_eq!(make(&mut |m, a| node.ask(m, a), &files(), &mut records, "", 1).unwrap_err(), NO_KEYSTORE, "another node's keystore");
         // No folder found at all.
         let mut node = Node::new(&[("wallet_get_known_addresses", known_ab())]);
         assert_eq!(make(&mut |m, a| node.ask(m, a), &[], &mut records, "", 1).unwrap_err(), NO_KEYSTORE);
@@ -548,6 +562,20 @@ mod tests {
         ]);
         let made = make(&mut |m, a| node.ask(m, a), &files(), &mut records, "After", 2).unwrap();
         assert_eq!(made["title"], "names-2", "the hidden account's title stays taken: {made}");
+    }
+
+    /// adv2 D3/D4, adv V10: a key taken out of the keystore outside the Names app (the
+    /// node's remove_key) stays listed by the running node until it restarts. Then no
+    /// keystore holds every listed key, and the refusal said the keystore couldn't be found.
+    /// It now names the real cause: restart the node.
+    #[test]
+    fn a_key_taken_out_before_the_node_restarts_asks_for_a_restart() {
+        // The node lists NEW; its keystore no longer holds it.
+        let mut node = Node::new(&[("wallet_get_known_addresses", Ok(json!([A, B, LF, NEW]))), ("read_accounts", Ok(read(&[])))]);
+        let refused = make(&mut |m, a| node.ask(m, a), &files(), &mut Map::new(), "After", 1).unwrap_err();
+        assert!(refused.contains("Stop and start your node"), "{refused}");
+        assert!(!refused.contains("couldn't find"), "{refused}");
+        assert!(!node.methods().contains(&"generate_key"));
     }
 
     #[test]
