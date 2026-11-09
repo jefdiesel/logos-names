@@ -309,6 +309,19 @@ pub fn ungrouped(text: &str) -> Option<String> {
     grouped.then(|| groups.concat())
 }
 
+#[cfg(test)]
+#[test]
+fn a_bridge_takes_amounts_grouped_as_every_other_amount_is() {
+    assert_eq!(bridge_amount("5,000").as_deref(), Ok("5000"));
+    assert_eq!(bridge_amount(" 5_000 ").as_deref(), Ok("5000"));
+    assert_eq!(bridge_amount("5000").as_deref(), Ok("5000"));
+    for refused in ["5,00", "0,001", "1,5", "0", ""] {
+        assert!(bridge_amount(refused).is_err(), "{refused}");
+    }
+    let args = bridge_args("5,000", "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", &"39".repeat(32), "", true).unwrap();
+    assert_eq!(args.last().map(String::as_str), Some("5000"));
+}
+
 pub fn is_amount(amount: &str) -> bool {
     !amount.is_empty() && amount.len() <= 30 && amount.bytes().all(|b| b.is_ascii_digit()) && !amount.bytes().all(|b| b == b'0')
 }
@@ -371,13 +384,14 @@ pub fn bridge_args(amount: &str, to: &str, from_key: &str, node: &str, send: boo
     Ok(args)
 }
 
-/// An amount to bridge: decimal digits only, above zero.
+/// An amount to bridge, above zero, in the one grammar every amount takes (`ungrouped`):
+/// `5000` or `5,000`, never `5,00` (cli-bridge-refuses-grouped-amount).
 pub fn bridge_amount(amount: &str) -> Result<String, String> {
-    let amount = amount.trim();
-    if !is_amount(amount) {
+    let amount = ungrouped(amount).unwrap_or_default();
+    if !is_amount(&amount) {
         return Err("enter a whole amount, such as 1000".to_owned());
     }
-    Ok(amount.to_owned())
+    Ok(amount)
 }
 
 /// The CLI wallet's default public account, as `names setup` saved it in the
@@ -2394,7 +2408,9 @@ mod tests {
             sent,
             strings(&["bridge", &format!("--to=Public/{PUBLIC}"), &format!("--from-key={KEY}"), "--node=http://localhost:18080", "--yes", "--", "5"])
         );
-        for amount in ["", "0", "000", "-5", "1e9", "1,000", "1.5", "5 5", "--yes", &"9".repeat(31)] {
+        // Grouped like every other amount (cli-bridge-refuses-grouped-amount): 1,000 is 1000, 1,5 is refused.
+        assert_eq!(bridge_args("1,000", PUBLIC, KEY, "", false).unwrap().last().map(String::as_str), Some("1000"));
+        for amount in ["", "0", "000", "-5", "1e9", "1,5", "1.5", "5 5", "--yes", &"9".repeat(31)] {
             assert!(bridge_args(amount, PUBLIC, KEY, "", false).is_err(), "{amount:?}");
         }
         for key in ["", &KEY[1..], &format!("{KEY}0"), &KEY.replace('a', "g"), &format!("{} ", &KEY[..63]), "--yes", &format!("../{}", &KEY[3..])] {
