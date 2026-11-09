@@ -3790,7 +3790,6 @@ impl NamesModule for Names {
                         return Err(error);
                     }
                 };
-                chain_sent_remove(&pending);
                 let hash = chain::hash_of(&deposited);
                 if let Some(hash) = &hash {
                     // Every note it spends, the fee's too, so it counts as in a block only
@@ -3808,6 +3807,9 @@ impl NamesModule for Names {
                         activity::update(dir, id, &json!({ "hash": hash, "fee": plan["fee"] }));
                     }
                 }
+                // Only now: a call cut off before this still has what the key's notes held,
+                // to tell the fee by (deposit_made).
+                chain_sent_remove(&pending);
                 plan["sent"] = json!(true);
                 plan["hash"] = hash.map_or(Value::Null, Value::from);
             }
@@ -4716,7 +4718,12 @@ fn deposit_made(op_id: &[u8; 32], from: &str, note: &str, entry: &Value) -> Opti
         block = node::call("get_block", json!([block]), node::QUICK).ok()?["header"]["parent_block"].as_str()?.to_owned();
     }
     let hash = found?;
-    let pending = chain_sent().into_iter().find(|(key, sent)| key.starts_with("pending-") && sent["inputs"] == json!([note]) && sent["from"] == from);
+    let sent = chain_sent();
+    // Cut off after its record was kept: that has its fee already.
+    if let Some(known) = sent.get(&hash) {
+        return Some((hash.clone(), known["fee"].as_str().and_then(|fee| fee.parse().ok())));
+    }
+    let pending = sent.into_iter().find(|(key, sent)| key.starts_with("pending-") && sent["inputs"] == json!([note]) && sent["from"] == from);
     let stored = node::call("get_transaction", json!([hash]), node::QUICK).ok();
     let amount = entry["amount"].as_str().and_then(|amount| amount.parse::<u128>().ok());
     let fee = match (&stored, &pending, amount) {
