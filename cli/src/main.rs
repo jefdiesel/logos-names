@@ -2670,6 +2670,16 @@ async fn setup(client: &mut Client, shield: u128) -> Result<()> {
         let pending_before = client.wallet.owned_pending_messages().await.unwrap_or_default();
         let waiting_before = credits_to(&pending_before, private);
         let known: std::collections::BTreeSet<_> = pending_before.iter().map(|message| message.position).collect();
+        // The private account pays the fee inside the proof, from what it holds and its
+        // waiting refunds: one that can't is told so before any proving, as `receive` does
+        // (unaffordable-shield-refusal-wording).
+        if let Ok(quote) = client.wallet.client().get_fee_state().await {
+            let fee = fees::private(&quote, client.wallet.config().private_fee_headroom_blocks);
+            let has = held_before.saturating_add(waiting_before.iter().map(|(_, value)| value).sum::<u128>());
+            if let Some(short) = shield_shortfall(private, has, fee.about) {
+                bail!(short);
+            }
+        }
         println!("moving {shield} to the private account; generating the proof (a few minutes)");
         let (hash, _) = NativeTokenTransfer(&client.wallet)
             .transfer(
@@ -2679,7 +2689,10 @@ async fn setup(client: &mut Client, shield: u128) -> Result<()> {
                 CreditDelivery::Automatic,
             )
             .await
-            .context("the sequencer did not accept the transfer")?;
+            .map_err(|error| match shield_build_refusal(&format!("{error:#}"), private) {
+                Some(plain) => anyhow!(plain),
+                None => anyhow::Error::from(error).context("the sequencer did not accept the transfer"),
+            })?;
         let (_, block_fee) = client.finish_landed(hash).await.context("the transfer was not applied")?;
         client.wallet.sync_to_latest_block().await?;
         save_wallet(&mut client.wallet)?;
@@ -2748,6 +2761,24 @@ fn claim_fee(before: u128, after: u128, refunds: u128) -> Option<u128> {
 /// What the private account `id` holds, as the wallet last saw it.
 fn private_held<C: wallet::WalletSequencerClient>(wallet: &WalletCore<C>, id: AccountId) -> u128 {
     wallet.get_account_private(id).and_then(|account| account.data.native_balance().ok()).unwrap_or(0)
+}
+
+/// Why a move to private is refused before proving: the private account `private`, which
+/// pays the fee inside the proof, has `has` (with its waiting refunds), less than `about`.
+fn shield_shortfall(private: AccountId, has: u128, about: u128) -> Option<String> {
+    (has < about).then(|| {
+        format!(
+            "Private/{private} pays the fee inside the proof and holds {has}; a move to private needs about {about} there. Fund it first (a payment to its name, or `names receive`). Nothing was sent."
+        )
+    })
+}
+
+/// A wallet build error that says the fee payer can't hold the reserve, in plain words: the
+/// transaction never reached the sequencer.
+fn shield_build_refusal(error: &str, private: AccountId) -> Option<String> {
+    error.contains("Fee reserve of").then(|| {
+        format!("Private/{private} pays the fee inside the proof and can't hold its reserve; fund it first (a payment to its name, or `names receive`). Nothing was sent.")
+    })
 }
 
 /// The fee line of a move to private of `moved`: the fee is paid from the private account
@@ -3828,6 +3859,20 @@ mod fee_line_tests {
         assert_eq!(shield_fee_line(6_000_000, 0, 7_000_000), "fee paid: unknown");
         // A move of 1,000 costing 5,070,616: the account ends lower than it started.
         assert_eq!(shield_fee_line(1_000, 25_548_401, 20_478_785), "fee paid: 5070616");
+    }
+
+    /// unaffordable-shield-refusal-wording: a payer holding 5,105 was refused only at build,
+    /// after "generating the proof", as "the sequencer did not accept the transfer".
+    #[test]
+    fn a_move_the_private_account_cant_pay_for_is_refused_in_plain_words() {
+        let private = super::AccountId::new([5; 32]);
+        let short = super::shield_shortfall(private, 5_105, 5_070_616).expect("refused");
+        assert!(short.contains("holds 5105; a move to private needs about 5070616 there"), "{short}");
+        assert!(short.ends_with("Nothing was sent."));
+        assert_eq!(super::shield_shortfall(private, 6_000_000, 5_070_616), None);
+        let raw = "Failed to build transaction: Invalid input: Fee reserve of 5070616 from payer APRe fails, though the transaction runs without it";
+        assert!(super::shield_build_refusal(raw, private).is_some_and(|plain| !plain.contains("sequencer")));
+        assert_eq!(super::shield_build_refusal("connection refused", private), None);
     }
 
     /// fee-paid-ignores-swept-refund-credits: a shield's payer I7 held 3,260,249 and a
