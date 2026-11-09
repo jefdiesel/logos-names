@@ -748,6 +748,36 @@ pub fn channel_id(sequencer: &str) -> Result<String, String> {
         .ok_or_else(|| "LEZ didn't say where deposits go. Try again later.".to_owned())
 }
 
+/// Whether the sequencer at `sequencer` answers at all (any reply, even a refusal, is an
+/// answer). An older CLI (the October testnet build) prints a public balance of 0 and
+/// every name as "no longer held by this wallet" when it can't reach it, and exits 0.
+#[cfg(not(test))]
+pub fn sequencer_reachable(sequencer: &str) -> Result<(), String> {
+    match ureq::post(sequencer)
+        .timeout(std::time::Duration::from_secs(10))
+        .send_json(json!({ "jsonrpc": "2.0", "id": 1, "method": "getLastBlockId", "params": [] }))
+    {
+        Ok(_) | Err(ureq::Error::Status(..)) => Ok(()),
+        Err(error) => Err(format!("could not reach the sequencer: {error}")),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whether a test's sequencer is down.
+    pub static SEQUENCER_DOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Tests say whether the sequencer answers: never the network.
+#[cfg(test)]
+pub fn sequencer_reachable(sequencer: &str) -> Result<(), String> {
+    if SEQUENCER_DOWN.with(std::cell::Cell::get) {
+        Err(format!("could not reach the sequencer: {sequencer}: Connection Failed"))
+    } else {
+        Ok(())
+    }
+}
+
 /// Tests know the channel: a fixed one, never the network.
 #[cfg(test)]
 pub fn channel_id(_sequencer: &str) -> Result<String, String> {

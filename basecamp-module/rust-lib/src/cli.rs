@@ -1362,7 +1362,14 @@ pub fn run_mine(setup: &Setup) -> Result<Vec<Value>, String> {
     if setup.wallet_ready().is_err() {
         return Ok(Vec::new());
     }
-    Ok(parse_mine(&run_text(setup, mine_args(), MINE_PATIENCE)?))
+    let output = run_text(setup, mine_args(), MINE_PATIENCE)?;
+    // The October CLI says every name is "no longer held by this wallet" when the
+    // sequencer doesn't answer, and exits 0: that is no answer, not an empty list
+    // (mine-sequencer-down-empties-names).
+    if output.lines().any(|line| line.trim_end().ends_with("no longer held by this wallet")) {
+        registry::sequencer_reachable(&setup.sequencer)?;
+    }
+    Ok(parse_mine(&output))
 }
 
 /// Runs `names balance` and returns the default private account and its

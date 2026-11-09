@@ -4996,6 +4996,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// mine-sequencer-down-empties-names: the October CLI printed every name as "no
+    /// longer held by this wallet" with the sequencer down (exit 0), and cli_mine answered
+    /// success with [].
+    #[test]
+    fn names_are_not_taken_as_gone_when_the_sequencer_doesnt_answer() {
+        let (mut names, dir) = with_fake_cli("mine-down", "echo 'jefdiesel  no longer held by this wallet'; echo 'anon-frost-frog  no longer held by this wallet'");
+        registry::SEQUENCER_DOWN.with(|down| down.set(true));
+        let down = parsed(&names.cli_mine());
+        registry::SEQUENCER_DOWN.with(|down| down.set(false));
+        assert_eq!(down["success"], false, "{down}");
+        assert!(down["error"].as_str().unwrap().contains("could not reach the sequencer"), "{down}");
+        // With the sequencer answering, the names really are gone.
+        assert_eq!(parsed(&names.cli_mine())["value"], json!([]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn the_bridge_key_and_node_are_kept_only_when_valid() {
         let key = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
