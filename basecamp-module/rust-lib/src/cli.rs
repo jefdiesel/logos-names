@@ -627,9 +627,9 @@ pub fn claim_args(name: &str, snapshot: &Path) -> Result<Vec<String>, String> {
 }
 
 /// Fetches the snapshot at `url`, a static file, at most `MAX_SNAPSHOT` bytes.
-pub fn fetch_snapshot(url: &str) -> Result<Vec<u8>, String> {
+pub fn fetch_snapshot(url: &str, wait: Duration) -> Result<Vec<u8>, String> {
     let reply = ureq::get(url)
-        .timeout(Duration::from_secs(30))
+        .timeout(wait.clamp(Duration::from_secs(1), Duration::from_secs(30)))
         .call()
         .map_err(|error| format!("could not fetch the list of names from the earlier chain: {error}"))?;
     let mut body = Vec::new();
@@ -1168,7 +1168,7 @@ static SLOW_READS: Mutex<std::collections::BTreeMap<String, std::sync::Arc<SlowR
 /// kept for the next call; "could not reach the sequencer" when it doesn't, and the read
 /// is stopped. A read that ended in an error or a failed exit is never kept for a later
 /// call, which reads afresh (slow-read-error-survives-recovery).
-fn run_bounded(setup: &Setup, command: Vec<String>, patience: Duration, deadline: Instant, probe: &Probe) -> Result<CliOutput, String> {
+fn run_bounded(setup: &Setup, command: Vec<String>, patience: Duration, deadline: registry::Deadline, probe: &Probe) -> Result<CliOutput, String> {
     let key = format!("{}\u{0}{}\u{0}{}\u{0}{}", setup.program.display(), setup.wallet.display(), setup.sequencer, command.join("\u{0}"));
     let read = {
         let mut reads = SLOW_READS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1204,7 +1204,7 @@ fn run_bounded(setup: &Setup, command: Vec<String>, patience: Duration, deadline
             reads.remove(&key);
         }
     };
-    let wait = (Instant::now() + CALL_WAIT).min(deadline).saturating_duration_since(Instant::now());
+    let wait = (Instant::now() + CALL_WAIT).min(deadline.at).saturating_duration_since(Instant::now());
     let guard = read.result.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let (mut guard, _) = read.ended.wait_timeout_while(guard, wait, |result| result.is_none()).unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some((_, result)) = guard.take() {
@@ -1273,14 +1273,24 @@ fn unread_warning(unread: &[String], why: Option<&str>) -> Option<String> {
     ))
 }
 
-/// The public rows that read 0, read again from the sequencer by the module itself, a few
-/// at a time, before `deadline`. The October CLI prints 0 for a balance it could not read
-/// and exits 0, so its 0 is believed only when the sequencer says so too; a row the
-/// sequencer doesn't give becomes unknown (null), and why is returned
-/// (selective-degradation-cold-read-false-arrivals, balance-accounts-zeroed-with-success-on-partial-failure).
-fn recheck_zeros(rows: &mut [Value], sequencer: &str, deadline: Instant) -> Option<String> {
-    let zeros: Vec<usize> = (0..rows.len()).filter(|at| rows[*at]["kind"] == "public" && rows[*at]["balance"] == "0").collect();
-    let reader = registry::Registry { sequencer: sequencer.to_owned(), program: registry::NATIVE_TOKEN, deadline };
+/// The public rows that read 0 or unknown (null), read again from the sequencer by the
+/// module itself, a few at a time, before `deadline`. The October CLI prints 0 for a
+/// balance it could not read and exits 0, so its 0 is believed only when the sequencer says
+/// so too; a row the sequencer doesn't give becomes unknown (null), and the read's own
+/// reason is returned (selective-degradation-cold-read-false-arrivals,
+/// balance-accounts-zeroed-with-success-on-partial-failure). An unknown row is read too, so
+/// it says why in the sequencer's words, never a bare "it didn't answer", and holds what the
+/// sequencer gives once it answers (cli-balance-bare-it-didnt-answer).
+fn recheck_zeros(rows: &mut [Value], sequencer: &str, deadline: registry::Deadline) -> Option<String> {
+    recheck_public(rows, sequencer, deadline, true)
+}
+
+/// `recheck_zeros`, for the unknown rows only (`zeros` false: a CLI whose 0 is a reading).
+fn recheck_public(rows: &mut [Value], sequencer: &str, deadline: registry::Deadline, zeros: bool) -> Option<String> {
+    let zeros: Vec<usize> = (0..rows.len())
+        .filter(|at| rows[*at]["kind"] == "public" && (rows[*at]["balance"].is_null() || (zeros && rows[*at]["balance"] == "0")))
+        .collect();
+    let reader = registry::Registry::by(sequencer, registry::NATIVE_TOKEN, deadline);
     let mut why = None;
     for batch in zeros.chunks(8) {
         let answers: Vec<Result<u128, String>> = std::thread::scope(|scope| {
@@ -1331,17 +1341,26 @@ impl AccountsRead {
 /// the sequencer gave them (null where it didn't), and which those are.
 pub fn run_account_list(setup: &Setup) -> Result<AccountsRead, String> {
     setup.wallet_ready()?;
-    let deadline = Instant::now() + CALL_BUDGET;
+    let deadline = registry::Deadline::after(CALL_BUDGET);
     let probe = Probe::start(&setup.sequencer);
     let (code, out, err) = run_bounded(setup, vec!["module".to_owned(), "account-list".to_owned()], ACCOUNTS_PATIENCE, deadline, &probe)?;
     if code != Some(0) {
         let problem = failure(&err, &out);
-        return Err(if problem == OLDER_CLI { problem } else { probe.problem(deadline).unwrap_or(problem) });
+        return Err(if problem == OLDER_CLI { problem } else { probe.problem(deadline.at).unwrap_or(problem) });
     }
     let list = answer(&out, "account list")?;
-    let rows: Vec<Value> = list.as_array().ok_or("the names CLI's account list is not a list")?.iter().map(account_entry).collect::<Result<_, _>>()?;
+    let mut rows: Vec<Value> = list.as_array().ok_or("the names CLI's account list is not a list")?.iter().map(account_entry).collect::<Result<_, _>>()?;
+    // A balance the CLI couldn't read is read again here: the sequencer's own answer, or its
+    // own reason, never a bare "it didn't answer".
+    let mut why = None;
+    if !unread_public(&rows).is_empty() {
+        why = probe.problem(deadline.at);
+        if let Some(problem) = recheck_public(&mut rows, &setup.sequencer, deadline, false) {
+            why.get_or_insert(problem);
+        }
+    }
     let unread = unread_public(&rows);
-    let why = if unread.is_empty() { None } else { Some(probe.problem(deadline).unwrap_or_else(|| "it didn't answer".to_owned())) };
+    let why = if unread.is_empty() { None } else { why };
     Ok(AccountsRead { rows, unread, why })
 }
 
@@ -1750,83 +1769,150 @@ pub fn mine_doubts(output: &str) -> (Vec<String>, Vec<String>) {
     (unknown, gone)
 }
 
-/// The wallet's accounts, as `names wallet account list` names them (`Public/…`, `Private/…`).
-fn wallet_accounts(setup: &Setup, deadline: Instant) -> Result<Vec<registry::AccountId>, String> {
-    let patience = deadline.saturating_duration_since(Instant::now()).clamp(Duration::from_secs(1), QUICK_PATIENCE);
-    let listed = run_text(setup, vec!["wallet".to_owned(), "account".to_owned(), "list".to_owned()], patience)?;
-    Ok(listed
+/// The accounts `names wallet account list` names, as `Public/<id>` or `Private/<id>`, in order.
+pub fn listed_accounts(output: &str) -> Vec<String> {
+    output
         .split_whitespace()
-        .filter_map(|word| word.strip_prefix("Private/").or_else(|| word.strip_prefix("Public/")))
-        .filter_map(|id| registry::parse_account(id.trim_end_matches([',', ')'])).ok())
-        .collect())
+        .filter_map(|word| {
+            let word = word.trim_end_matches([',', ')']);
+            let (kind, id) = word.split_once('/')?;
+            (matches!(kind, "Public" | "Private") && registry::parse_account(id).is_ok()).then(|| word.to_owned())
+        })
+        .collect()
 }
 
-/// Of the names the CLI called gone, those the module can't confirm are: the sequencer
-/// doesn't give their record, or the record says one of the wallet's accounts holds it.
-/// The October CLI calls every name it could not read "no longer held by this wallet"
-/// and exits 0, so that word alone is never taken (cli-mine-empty-list-when-account-views-fail).
-fn not_surely_gone(setup: &Setup, gone: &[String], deadline: Instant) -> (Vec<String>, Option<String>) {
-    if gone.is_empty() {
-        return (Vec::new(), None);
+/// The wallet's accounts, as `names wallet account list` names them (`Public/…`, `Private/…`),
+/// asked by `deadline`. The list is the wallet's own: no read of the sequencer.
+pub fn wallet_accounts(setup: &Setup, deadline: registry::Deadline) -> Result<Vec<String>, String> {
+    let patience = deadline.left().clamp(Duration::from_secs(1), QUICK_PATIENCE);
+    let listed = run_text(setup, vec!["wallet".to_owned(), "account".to_owned(), "list".to_owned()], patience)?;
+    Ok(listed_accounts(&listed))
+}
+
+/// A time in milliseconds since the Unix epoch as the CLI writes it: `2026-11-09 17:05:00Z`.
+pub fn readable(time: u64) -> String {
+    let seconds = time / 1000;
+    // Days to a civil date, counting from 0000-03-01 so leap days fall at a year's end.
+    let days = seconds / 86_400 + 719_468;
+    let (era, day_of_era) = (days / 146_097, days % 146_097);
+    let year_of_era = (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 { shifted_month + 3 } else { shifted_month - 9 };
+    let year = year_of_era + era * 400 + u64::from(month <= 2);
+    let (hour, minute, second) = (seconds / 3600 % 24, seconds / 60 % 60, seconds % 60);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}Z")
+}
+
+/// A name the wallet holds as `names mine` lists it, made by the module from the record it
+/// read itself: `holder` is the account (`Public/…` or `Private/…`) whose tag the record holds.
+pub fn held_entry(name: &str, record: &registry::Resolved, holder: &str, now: u64) -> Value {
+    let lapsed = record.expires != registry::NEVER && now >= record.expires;
+    let state = if record.expires == registry::NEVER {
+        "held by a deposit (no expiry)".to_owned()
+    } else {
+        format!("{} until {}", if lapsed { "lapsed" } else { "held" }, readable(record.expires))
+    };
+    json!({
+        "name": name,
+        "display": format!("{name}{}", registry::NAME_SUFFIX),
+        "signer": "cli",
+        "state": state,
+        "lapsed": lapsed,
+        "registering": false,
+        "failed": false,
+        "private": holder.starts_with("Private/"),
+        "not_public": null,
+    })
+}
+
+/// What the module makes of the names the CLI couldn't vouch for (`unknown`, or "no longer
+/// held by this wallet"), from their records as the sequencer gives them to the module itself.
+#[derive(Debug, Default)]
+struct Confirmed {
+    /// The names the wallet does hold, as `names mine` lists them.
+    held: Vec<Value>,
+    /// The names whose record the sequencer didn't give, and why.
+    unread: Vec<String>,
+    why: Option<String>,
+}
+
+/// Reads the record of each of `doubts` by `deadline`. A name with no record, or held by
+/// another account, is gone; one held by an account of this wallet is listed from its record:
+/// the October CLI calls every name it couldn't read or decode "no longer held by this wallet"
+/// and exits 0, so that word alone is never taken (cli-mine-empty-list-when-account-views-fail),
+/// and a record the module reads is never blamed on the sequencer
+/// (october-cli-mine-blames-the-sequencer). Fails only when the wallet's accounts can't be listed.
+fn confirm_names(setup: &Setup, doubts: &[String], deadline: registry::Deadline) -> Result<Confirmed, String> {
+    let mut confirmed = Confirmed::default();
+    if doubts.is_empty() {
+        return Ok(confirmed);
     }
     let Some(program) = setup.registry.as_deref().and_then(|program| registry::parse_account(program).ok()) else {
-        return (gone.to_vec(), Some("no registry is set to read them from".to_owned()));
+        confirmed.unread = doubts.to_vec();
+        confirmed.why = Some("no registry is set to read them from".to_owned());
+        return Ok(confirmed);
     };
-    let reader = registry::Registry { sequencer: setup.sequencer.clone(), program, deadline };
-    let accounts = match wallet_accounts(setup, deadline) {
-        Ok(accounts) => accounts,
-        Err(problem) => return (gone.to_vec(), Some(problem)),
-    };
-    let mut doubtful = Vec::new();
-    let mut why = None;
-    for name in gone {
+    let reader = registry::Registry::by(&setup.sequencer, program, deadline);
+    let mut accounts: Option<Vec<String>> = None;
+    for name in doubts {
         let derived = registry::derive(name);
         match reader.record(name, &derived) {
             Ok(None) => {}
             Ok(Some(record)) if record.gone(registry::local_now()) => {}
             Ok(Some(record)) => {
-                if accounts.iter().any(|account| record.is_held_by(&derived.id, account)) {
-                    doubtful.push(name.clone());
-                    why.get_or_insert_with(|| "the names CLI could not read them".to_owned());
+                if accounts.is_none() {
+                    accounts = Some(wallet_accounts(setup, deadline).map_err(|problem| format!("the names CLI couldn't list this wallet's accounts: {}", clause(&problem)))?);
+                }
+                let holder = accounts.iter().flatten().find(|account| {
+                    account.split_once('/').and_then(|(_, id)| registry::parse_account(id).ok()).is_some_and(|id| record.is_held_by(&derived.id, &id))
+                });
+                if let Some(holder) = holder {
+                    confirmed.held.push(held_entry(name, &record, holder, registry::local_now()));
                 }
             }
             Err(problem) => {
-                doubtful.push(name.clone());
-                why.get_or_insert(problem);
+                confirmed.unread.push(name.clone());
+                confirmed.why.get_or_insert(problem);
             }
         }
     }
-    (doubtful, why)
+    Ok(confirmed)
 }
 
 /// Runs `names mine` and returns the names it holds. A wallet directory with no wallet in
-/// it holds none, and is left as it is. A name the sequencer didn't give is no answer, not
-/// a name gone: the read fails, naming them, and the last list stays.
+/// it holds none, and is left as it is. Each name the CLI couldn't vouch for is read by the
+/// module itself (`confirm_names`); one the sequencer doesn't give is no answer, not a name
+/// gone: the read fails, naming them, and the last list stays.
 pub fn run_mine(setup: &Setup) -> Result<Vec<Value>, String> {
     if setup.wallet_ready().is_err() {
         return Ok(Vec::new());
     }
-    let deadline = Instant::now() + CALL_BUDGET;
+    let deadline = registry::Deadline::after(CALL_BUDGET);
     let probe = Probe::start(&setup.sequencer);
     let (code, out, err) = run_bounded(setup, mine_args(), MINE_PATIENCE, deadline, &probe)?;
-    let (mut unknown, gone) = mine_doubts(&out);
+    let (unknown, gone) = mine_doubts(&out);
     if code != Some(0) && unknown.is_empty() {
-        return Err(probe.problem(deadline).unwrap_or_else(|| failure(&err, &out)));
+        return Err(probe.problem(deadline.at).unwrap_or_else(|| failure(&err, &out)));
     }
-    let mut why = (!unknown.is_empty()).then(|| probe.problem(deadline).unwrap_or_else(|| "it didn't answer".to_owned()));
-    let (doubtful, doubt) = not_surely_gone(setup, &gone, deadline);
-    unknown.extend(doubtful);
-    if why.is_none() {
-        why = doubt;
-    }
-    if !unknown.is_empty() {
+    let doubts: Vec<String> = unknown.into_iter().chain(gone).collect();
+    let confirmed = confirm_names(setup, &doubts, deadline).map_err(|why| format!("Your names couldn't be read now: {why}. Try again shortly"))?;
+    if !confirmed.unread.is_empty() {
+        let why = confirmed.why.or_else(|| probe.problem(deadline.at));
         return Err(format!(
             "The sequencer didn't give the record of {} ({}), so your names couldn't be read now. Try again shortly",
-            listed(&unknown),
+            listed(&confirmed.unread),
             clause(why.as_deref().unwrap_or("it didn't answer"))
         ));
     }
-    Ok(parse_mine(&out))
+    let mut names = parse_mine(&out);
+    for entry in confirmed.held {
+        if !names.iter().any(|known| known["name"] == entry["name"]) {
+            names.push(entry);
+        }
+    }
+    Ok(names)
 }
 
 /// Runs `names balance` and returns the default private account and its balance:
@@ -1834,7 +1920,7 @@ pub fn run_mine(setup: &Setup) -> Result<Vec<Value>, String> {
 /// default public account the same way, or null. A balance the sequencer didn't give is null.
 pub fn run_balance(setup: &Setup) -> Result<Value, String> {
     setup.wallet_ready()?;
-    Ok(balance_read(setup, Instant::now() + CALL_BUDGET)?.reply())
+    Ok(balance_read(setup, registry::Deadline::after(CALL_BUDGET))?.reply())
 }
 
 /// `run_balance`'s answer from `names balance` output: `{account, balance, public,
@@ -2007,9 +2093,10 @@ const BALANCE_FRESH: Duration = Duration::from_secs(15);
 /// `names balance`, read and checked (at most `BALANCE_FRESH` old), before `deadline`.
 /// The CLI runs while the sequencer's health is checked beside it; each public 0 it prints
 /// is read again from the sequencer (the October CLI prints 0 for a balance it could not
-/// read), and an `unknown` stays unknown. Fails when no public balance could be read, or
-/// the CLI failed for another reason.
-pub fn balance_read(setup: &Setup, deadline: Instant) -> Result<BalanceRead, String> {
+/// read), and so is each `unknown`: it stays unknown only when the module can't read it
+/// either, and then says why in the sequencer's words. Fails when no public balance could be
+/// read, or the CLI failed for another reason.
+pub fn balance_read(setup: &Setup, deadline: registry::Deadline) -> Result<BalanceRead, String> {
     let key = (setup.program.clone(), setup.wallet.clone(), setup.sequencer.clone());
     if let Some((seen_key, at, read)) = BALANCE_SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
         if *seen_key == key && at.elapsed() < BALANCE_FRESH {
@@ -2023,18 +2110,19 @@ pub fn balance_read(setup: &Setup, deadline: Instant) -> Result<BalanceRead, Str
     // rest; any other failure is the read's.
     let some_unknown = rows.iter().any(|row| row["kind"] == "public" && row["balance"].is_null());
     if code != Some(0) && !(some_unknown && err.contains("public balance(s) are unknown")) {
-        return Err(probe.problem(deadline).unwrap_or_else(|| failure(&err, &output)));
+        return Err(probe.problem(deadline.at).unwrap_or_else(|| failure(&err, &output)));
     }
-    let mut why = some_unknown.then(|| probe.problem(deadline).unwrap_or_else(|| "it didn't answer".to_owned()));
+    let mut why = if some_unknown { probe.problem(deadline.at) } else { None };
     if let Some(problem) = recheck_zeros(&mut rows, &setup.sequencer, deadline) {
         why.get_or_insert(problem);
     }
     let unread = unread_public(&rows);
+    let why = if unread.is_empty() { None } else { why };
     let public = rows.iter().filter(|row| row["kind"] == "public").count();
     if public > 0 && unread.len() == public {
         return Err(why.unwrap_or_else(|| "could not reach the sequencer".to_owned()));
     }
-    let healthy = matches!(probe.answer(deadline), Some(Ok(())));
+    let healthy = matches!(probe.answer(deadline.at), Some(Ok(())));
     let read = BalanceRead { output, rows, unread, why, healthy };
     *BALANCE_SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((key, Instant::now(), read.clone()));
     Ok(read)
@@ -2043,8 +2131,9 @@ pub fn balance_read(setup: &Setup, deadline: Instant) -> Result<BalanceRead, Str
 /// Every account `names balance` lists and what it holds, `(Public/… or Private/…, balance)`,
 /// from the shared read (at most `BALANCE_FRESH` old), and only from a complete one: a
 /// balance the sequencer didn't give is never taken for anything.
-pub fn balances_now(setup: &Setup) -> Result<Vec<(String, u128)>, String> {
-    let read = balance_read(setup, Instant::now() + CALL_BUDGET)?;
+/// Read by `deadline`: the asking call's, which all its reads share.
+pub fn balances_by(setup: &Setup, deadline: registry::Deadline) -> Result<Vec<(String, u128)>, String> {
+    let read = balance_read(setup, deadline)?;
     if !read.complete() {
         return Err(read.marks()["warning"].as_str().unwrap_or("the sequencer didn't answer").to_owned());
     }
@@ -2083,7 +2172,7 @@ pub fn parse_npk(output: &str) -> Option<String> {
 pub fn run_accounts_any(setup: &Setup) -> Result<AccountsRead, String> {
     match run_account_list(setup) {
         Err(problem) if problem == OLDER_CLI => {
-            let read = balance_read(setup, Instant::now() + CALL_BUDGET)?;
+            let read = balance_read(setup, registry::Deadline::after(CALL_BUDGET))?;
             let mut rows = read.rows.clone();
             // `names balance` leaves out private accounts that hold nothing, a name's new
             // receiving account among them; `wallet account list` has every one.
