@@ -326,6 +326,10 @@ Item {
             moduleOutdated = ""
             registry = config.registry ? config.registry : ""
             sequencer = config.sequencer ? config.sequencer : ""
+            zoneId = config.zone && config.zone.id ? config.zone.id : "home"
+            zoneName = config.zone && config.zone.name ? config.zone.name : ""
+            zoneHome = !config.zone || config.zone.home !== false
+            loadZones()
             walletConfig = config.wallet_config ? config.wallet_config : ""
             walletStorage = config.wallet_storage ? config.wallet_storage : ""
             cliPath = config.cli ? config.cli : ""
@@ -371,16 +375,144 @@ Item {
         onTriggered: root.loadConfig()
     }
 
-    function saveConfig(newSequencer, newRegistry) {
+    /// Saves the registry. Sequencers are set per zone (Settings, Zones).
+    function saveConfig(newRegistry) {
         try {
-            if (newSequencer !== sequencer && !call("names", "set_sequencer", [newSequencer]))
-                say("That is not an http or https address.", true)
             if (newRegistry !== registry && !call("names", "set_registry", [newRegistry]))
                 say("That is not a program ID.", true)
         } catch (error) {
             say(error.message, true)
         }
         loadConfig()
+    }
+
+    // ── Zones (LP-0022) ─────────────────────────────────────────────────
+    // A zone is one LEZ chain, known by its channel, with its own sequencer and its
+    // own wallet. Names are kept on the first, Home; one zone is in use at a time.
+
+    property var zones: []                // zone_list: Home first
+    property string zoneId: "home"        // the zone in use
+    property string zoneName: ""          // what the person calls it
+    property bool zoneHome: true
+    property int zoneMax: 16
+    property bool zoneBusy: false         // a zone change is with the module
+    property string zoneNote: ""          // what the last change said
+    property bool zoneNoteBad: false
+    property string zoneOpen: ""          // the zone whose row is open for changes
+    property bool zoneRemoving: false     // "Remove" was pressed on the open row and asks to confirm
+    property bool zoneAdding: false
+    property var zoneOtherChain: null     // Home's new sequencer serves another chain: {url, channel}
+    readonly property bool zonesMany: zones.length > 1
+    readonly property string homeName: zones.length > 0 ? zones[0].name : "Home"
+
+    function takeZones(view) {
+        if (!view || !Array.isArray(view.zones))
+            return
+        zones = view.zones
+        zoneMax = view.max || 16
+        var used = zones.filter(function(zone) { return zone.current })[0]
+        if (used) {
+            zoneId = used.id
+            zoneName = used.name
+            zoneHome = !!used.home
+        }
+    }
+
+    function loadZones() {
+        askLater("zone_list", [], takeZones, function(message) {
+            console.log("names_ui: zone_list:", message)
+        }, 20000)
+    }
+
+    /// One change to the zones: the list it answers with is shown, then `done(value)`.
+    function zoneAsk(method, args, done) {
+        if (zoneBusy)
+            return
+        zoneBusy = true
+        zoneNote = ""
+        zoneNoteBad = false
+        askLater(method, args, function(value) {
+            zoneBusy = false
+            takeZones(value)
+            done(value)
+        }, function(message) {
+            zoneBusy = false
+            zoneNote = sentence(message)
+            zoneNoteBad = true
+        }, 40000)
+    }
+
+    function zoneCalled(id) {
+        var found = zones.filter(function(zone) { return zone.id === id })[0]
+        return found ? found.name : "the zone"
+    }
+
+    function zoneAdd(name, url) {
+        zoneAsk("zone_add", [name.trim(), url.trim()], function(value) {
+            zoneAdding = false
+            zoneOtherChain = null
+            zoneNote = "Added " + zoneCalled(value.added) + ". It has a wallet folder of its own: use it to make its wallet."
+        })
+    }
+
+    /// Uses zone `id`: every balance, account and send is that zone's from here on.
+    function zoneUse(id) {
+        zoneAsk("zone_use", [id], function() {
+            zoneOpen = ""
+            zoneNote = "Using " + zoneName + "."
+            // Nothing read on the zone left is shown as this one's.
+            cliBalance = undefined
+            cliAccounts = null
+            cliStatus = null
+            tokenHoldings = null
+            walletAccount = null
+            if (walletView === "account")
+                walletView = "home"
+            loadConfig()
+            loadAppRequests()
+        })
+    }
+
+    function zoneRemove(id) {
+        zoneAsk("zone_remove", [id], function(value) {
+            zoneOpen = ""
+            zoneRemoving = false
+            var gone = value.removed || {}
+            zoneNote = "Removed " + (gone.name || "the zone") + ". Its wallet folder was kept" + (gone.wallet_dir ? " (" + gone.wallet_dir + ")" : "") + ": adding the zone again finds it."
+            loadActivity()
+        })
+    }
+
+    function zoneRename(id, name) {
+        zoneAsk("zone_rename", [id, name.trim()], function() {
+            zoneNote = "Renamed."
+            if (!zoneHome || id === "home")
+                loadConfig()
+        })
+    }
+
+    /// Points zone `id` at another sequencer of the same chain. Home may become another
+    /// chain, only once the person has said so (`otherChainOk`).
+    function zoneSequencer(id, url, otherChainOk) {
+        url = url.trim()
+        zoneAsk("zone_sequencer", [id, url, !!otherChainOk], function(value) {
+            if (value.changed === false && value.other_chain) {
+                zoneOtherChain = { url: url, channel: value.channel || "" }
+                return
+            }
+            zoneOtherChain = null
+            zoneNote = "Sequencer changed. The wallet, its accounts and its history are as they were."
+            loadConfig()
+        })
+    }
+
+    /// The zone a request or plan is for, as a sheet shows it.
+    function zoneFact(what) {
+        if (!what || what.zone === undefined || what.zone === null)
+            return ""
+        var name = what.zone_name ? what.zone_name : "A zone removed since"
+        var channel = what.zone_channel ? what.zone_channel : what.zone !== "home" ? what.zone : ""
+        return name + (channel ? " · channel " + Logic.keyShown(channel) : "")
     }
 
     /// Reads the deposit a name would lock. Until it is known, registering waits.
@@ -2621,6 +2753,8 @@ Item {
 
     /// The chain this app is on, from the sequencer's address.
     function networkName() {
+        if (zonesMany && zoneName !== "")
+            return zoneName
         return /testnet/.test(sequencer) ? "LEZ testnet" : /127\.0\.0\.1|localhost/.test(sequencer) ? "Local chain" : "LEZ"
     }
 
@@ -3583,6 +3717,9 @@ Item {
     function appCanApprove() {
         if (appRequest === null || appBusy || appChosen.length === 0)
             return false
+        // Asked for another zone than the one in use: the same account ID is another account there.
+        if (appRequest.zone_in_use === false)
+            return false
         if (appRequestRisky(appRequest) && !appUnderstood)
             return false
         return true
@@ -4324,6 +4461,7 @@ Item {
             Text {
                 Layout.fillWidth: true
                 text: act.line.sub + " · " + act.line.ago
+                textFormat: Text.PlainText
                 wrapMode: Text.Wrap
                 maximumLineCount: 3
                 elide: Text.ElideRight
@@ -4762,8 +4900,17 @@ Item {
                 RowLayout {
                     visible: root.sequencer !== ""
                     spacing: 8
-                    Rectangle { width: 8; height: 8; radius: 4; color: root.good }
-                    Text { text: root.networkName(); color: root.faint; font.family: root.sans; font.pixelSize: root.px(14) }
+                    Rectangle { width: 8; height: 8; radius: 4; color: root.zoneHome ? root.good : root.brass }
+                    Text {
+                        Layout.fillWidth: true
+                        text: root.networkName()
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        color: root.zoneHome ? root.faint : root.brass
+                        font.family: root.sans
+                        font.pixelSize: root.px(14)
+                        MouseArea { anchors.fill: parent; enabled: root.zonesMany; cursorShape: Qt.PointingHandCursor; onClicked: root.go("settings") }
+                    }
                 }
             }
         }
@@ -5333,6 +5480,26 @@ Item {
                             }
                         }
                     }
+                    // Which zone the LEZ balances below are on, once there is more than one.
+                    RowLayout {
+                        visible: root.zonesMany
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Hint {
+                            textFormat: Text.PlainText
+                            color: root.zoneHome ? root.dim : root.brass
+                            font.pixelSize: root.px(15)
+                            text: "Zone in use: " + root.zoneName + (root.zoneHome ? "" : ". LEZ balances and sends here are on it; your names stay on " + root.homeName + ".")
+                        }
+                        Link { text: "Zones"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.go("settings") }
+                    }
+                    Card {
+                        visible: !root.zoneHome && root.cliStatus !== null && !root.cliStatus.wallet
+                        Layout.fillWidth: true
+                        Hint { textFormat: Text.PlainText; color: root.ink; text: root.zoneName + " has no wallet yet. A zone's wallet is its own: new accounts, and a recovery phrase of its own to write down." }
+                        Action { label: root.walletBusy ? "Making it…" : "Make this zone's wallet"; strong: true; enabledNow: !root.walletBusy && root.cliPath !== ""; onPressed: root.createWallet() }
+                        Hint { visible: root.walletError !== ""; color: root.alarm; font.pixelSize: root.px(15); text: root.walletError }
+                    }
                     Hint { visible: root.sendingLine() !== ""; color: root.brass; font.pixelSize: root.px(16); text: root.sendingLine() }
                     Hint { visible: root.notice !== "" && root.sendingLine() === ""; color: root.noticeIsError ? root.alarm : root.dim; font.pixelSize: root.px(16); text: root.notice }
                     // Payments to your names' private keys wait until you claim them (SC-1).
@@ -5718,6 +5885,7 @@ Item {
                                 ? (root.chainPlan.name ? root.chainPlan.name + " · " : "") + Logic.keyShown(root.chainPlan.to)
                                 : sendToResolved()
                         }
+                        Fact { visible: root.zonesMany && root.sendKind !== "chain"; label: "Zone"; value: root.zoneName }
                         Fact { label: "Amount"; value: root.grouped(root.sendDigits()) + (root.sendKind === "chain" ? "" : " " + root.sendTitle) }
                         Fact {
                             label: "From"
@@ -6010,6 +6178,15 @@ Item {
                     Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
                     Text { text: "Names"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
                     Hint { text: "Your wallet can hold many names. Names held privately can't be linked to each other on chain; a name held publicly shows its holder. Each name is paid into its own private account unless it publishes a public one." }
+                    // On another zone the names are still listed, and changed only on Home.
+                    Card {
+                        visible: !root.zoneHome
+                        Layout.fillWidth: true
+                        border.color: root.brass
+                        Hint { textFormat: Text.PlainText; color: root.ink; text: "Names are kept on " + root.homeName + ", and the wallet is using " + root.zoneName + " now. They are listed here; to register, change or pay one, switch to " + root.homeName + "." }
+                        Action { label: root.zoneBusy ? "Switching…" : "Switch to " + root.homeName; strong: true; enabledNow: !root.zoneBusy; onPressed: root.zoneUse("home") }
+                        Hint { visible: root.zoneNoteBad; color: root.alarm; font.pixelSize: root.px(15); textFormat: Text.PlainText; text: root.zoneNote }
+                    }
 
                     Card {
                         Layout.fillWidth: true
@@ -6200,7 +6377,7 @@ Item {
                     visible: root.walletView === "account" && root.walletAccount !== null
                     readonly property var row: root.walletAccount
                     readonly property var send: root.sendState(row)
-                    readonly property var mine: Logic.activityFor(root.activityRows, root.rowAccount(row))
+                    readonly property var mine: Logic.activityFor(root.activityRows, root.rowAccount(row), root.zoneId)
                     Layout.fillWidth: true
                     Layout.maximumWidth: 680
                     spacing: 12
@@ -6499,9 +6676,9 @@ Item {
                             Layout.fillWidth: true
                             Hint {
                                 color: root.ink
-                                text: root.bridgePlan === null ? "" : "This moves exactly " + root.grouped(root.bridgeAsked()[0]) + " from your Logos Blockchain key into LEZ"
+                                text: root.bridgePlan === null ? "" : "This moves exactly " + root.grouped(root.bridgeAsked()[0]) + " from your Logos Blockchain key into " + (root.zonesMany && root.bridgePlan.zone_name ? "the zone " + root.bridgePlan.zone_name : "LEZ")
                                     + (root.bridgeToPrivate ? " (your main public account, then you move it to private)" : "")
-                                    + ", through LEZ's deposit channel " + Logic.keyShown(root.bridgePlan.channel || "") + " (your node knows it). It can't be undone. It arrives in about 12 hours."
+                                    + ", through its deposit channel " + Logic.keyShown(root.bridgePlan.channel || "") + " (your node knows it). It can't be undone. It arrives in about 12 hours."
                             }
                             RowLayout {
                                 spacing: 8
@@ -7238,6 +7415,129 @@ Item {
                             Action { label: "Cancel"; onPressed: root.accountNewKind = "" }
                         }
                     }
+                    Part { text: "Zones" }
+                    Hint { text: "A zone is a LEZ chain with its own sequencer. Each has its own wallet here, and one is in use at a time. Your names are kept on " + root.homeName + "." }
+                    Repeater {
+                        model: root.zones
+                        ColumnLayout {
+                            id: zoneRow
+                            required property var modelData
+                            readonly property bool open: root.zoneOpen === modelData.id
+                            Layout.fillWidth: true
+                            spacing: 8
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 12
+                                Rectangle { Layout.preferredWidth: 10; Layout.preferredHeight: 10; radius: 5; color: zoneRow.modelData.current ? root.good : "transparent"; border.width: 1; border.color: zoneRow.modelData.current ? root.good : root.line }
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 2
+                                    Text {
+                                        Layout.fillWidth: true
+                                        textFormat: Text.PlainText
+                                        text: zoneRow.modelData.name + (zoneRow.modelData.current ? "  ·  in use" : "") + (zoneRow.modelData.home ? "  ·  names are kept here" : "")
+                                        color: root.ink
+                                        font.family: root.sans
+                                        font.pixelSize: root.px(17)
+                                        font.weight: Font.DemiBold
+                                        elide: Text.ElideRight
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        textFormat: Text.PlainText
+                                        text: zoneRow.modelData.sequencer + (zoneRow.modelData.channel ? "  ·  channel " + Logic.keyShown(zoneRow.modelData.channel) : "")
+                                        color: root.dim
+                                        font.family: root.mono
+                                        font.pixelSize: root.px(13)
+                                        elide: Text.ElideMiddle
+                                    }
+                                }
+                                Action { visible: !zoneRow.modelData.current; label: "Use"; enabledNow: !root.zoneBusy; onPressed: root.zoneUse(zoneRow.modelData.id) }
+                                Link {
+                                    text: zoneRow.open ? "Close" : "Change"
+                                    color: root.dim
+                                    font.pixelSize: root.px(15)
+                                    onPressed: { root.zoneOpen = zoneRow.open ? "" : zoneRow.modelData.id; root.zoneRemoving = false; root.zoneOtherChain = null; root.zoneNote = "" }
+                                }
+                            }
+                            Card {
+                                visible: zoneRow.open
+                                Layout.fillWidth: true
+                                Hint { font.pixelSize: root.px(15); text: "Name" }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    Field { id: zoneNameField; Layout.fillWidth: true; size: 16; text: zoneRow.modelData.name; hint: "What you call this zone"; onAccepted: root.zoneRename(zoneRow.modelData.id, zoneNameField.text) }
+                                    Action { label: "Rename"; enabledNow: !root.zoneBusy && zoneNameField.text.trim() !== "" && zoneNameField.text.trim() !== zoneRow.modelData.name; onPressed: root.zoneRename(zoneRow.modelData.id, zoneNameField.text) }
+                                }
+                                Hint { font.pixelSize: root.px(15); text: "Sequencer. Another one serving the same chain can be used at any time: the wallet, its accounts and its history stay as they are." }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    Field { id: zoneSequencerField; Layout.fillWidth: true; size: 16; text: zoneRow.modelData.sequencer; hint: "https://…" }
+                                    Action {
+                                        label: root.zoneBusy ? "Asking it…" : "Change sequencer"
+                                        enabledNow: !root.zoneBusy && zoneSequencerField.text.trim() !== "" && zoneSequencerField.text.trim() !== zoneRow.modelData.sequencer
+                                        onPressed: root.zoneSequencer(zoneRow.modelData.id, zoneSequencerField.text, false)
+                                    }
+                                }
+                                // Home's sequencer names another chain: said first, done only on a yes.
+                                ColumnLayout {
+                                    visible: zoneRow.modelData.home && root.zoneOtherChain !== null
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    Hint {
+                                        textFormat: Text.PlainText
+                                        color: root.alarm
+                                        text: root.zoneOtherChain === null ? "" : "That sequencer serves another chain (channel " + Logic.keyShown(root.zoneOtherChain.channel) + "). "
+                                            + zoneRow.modelData.name + " would become that chain: your names and balances are read there from then on, and what you hold on the present chain stays behind on it. To keep both, add it as a zone instead."
+                                    }
+                                    RowLayout {
+                                        spacing: 8
+                                        Action { label: "Add it as a zone"; strong: true; enabledNow: !root.zoneBusy; onPressed: root.zoneAdd("", root.zoneOtherChain.url) }
+                                        Action { label: "Make " + zoneRow.modelData.name + " that chain"; grave: true; enabledNow: !root.zoneBusy; onPressed: root.zoneSequencer("home", root.zoneOtherChain.url, true) }
+                                        Action { label: "Cancel"; onPressed: { root.zoneOtherChain = null; zoneSequencerField.text = zoneRow.modelData.sequencer } }
+                                    }
+                                }
+                                Fact { label: "Wallet folder"; code: true; value: zoneRow.modelData.wallet_dir ? zoneRow.modelData.wallet_dir + (zoneRow.modelData.has_wallet ? "" : "  (no wallet in it yet)") : "The names program's own"; full: zoneRow.modelData.wallet_dir || "" }
+                                Fact { visible: !!zoneRow.modelData.channel; label: "Channel"; code: true; value: zoneRow.modelData.channel || ""; full: zoneRow.modelData.channel || "" }
+                                // Removing forgets the zone here; nothing on its chain changes and its wallet folder stays.
+                                Hint {
+                                    visible: !zoneRow.modelData.home
+                                    font.pixelSize: root.px(15)
+                                    text: zoneRow.modelData.current ? "This is the zone in use. To remove it, use another zone first."
+                                        : "Removing a zone forgets it here. Nothing changes on its chain, and its wallet folder is kept."
+                                }
+                                RowLayout {
+                                    visible: !zoneRow.modelData.home && !zoneRow.modelData.current
+                                    spacing: 8
+                                    Action { visible: !root.zoneRemoving; label: "Remove this zone"; grave: true; enabledNow: !root.zoneBusy; onPressed: root.zoneRemoving = true }
+                                    Action { visible: root.zoneRemoving; label: "Yes, remove " + zoneRow.modelData.name; grave: true; strong: true; enabledNow: !root.zoneBusy; onPressed: root.zoneRemove(zoneRow.modelData.id) }
+                                    Action { visible: root.zoneRemoving; label: "Cancel"; onPressed: root.zoneRemoving = false }
+                                }
+                            }
+                        }
+                    }
+                    Hint { visible: root.zoneNote !== ""; textFormat: Text.PlainText; color: root.zoneNoteBad ? root.alarm : root.good; font.pixelSize: root.px(15); text: root.zoneNote }
+                    Action {
+                        visible: !root.zoneAdding
+                        label: "+  Add a zone"
+                        enabledNow: !root.zoneBusy && root.zones.length > 0 && root.zones.length < root.zoneMax
+                        onPressed: { root.zoneAdding = true; root.zoneNote = ""; newZoneName.text = ""; newZoneSequencer.text = "" }
+                    }
+                    Hint { visible: root.zones.length >= root.zoneMax; font.pixelSize: root.px(15); text: "At most " + root.zoneMax + " zones are kept. Remove one to add another." }
+                    Card {
+                        visible: root.zoneAdding
+                        Layout.fillWidth: true
+                        Hint { color: root.ink; text: "Give the address of the zone's sequencer. It is asked which chain it serves, and that chain becomes a zone here with an empty wallet folder of its own. Nothing is sent." }
+                        Field { id: newZoneSequencer; Layout.fillWidth: true; size: 16; hint: "Sequencer: https://… (http:// only on this computer)" }
+                        Field { id: newZoneName; Layout.fillWidth: true; size: 16; hint: "Name (optional)"; onAccepted: root.zoneAdd(newZoneName.text, newZoneSequencer.text) }
+                        RowLayout {
+                            spacing: 8
+                            Action { label: root.zoneBusy ? "Asking it…" : "Add zone"; strong: true; enabledNow: !root.zoneBusy && newZoneSequencer.text.trim() !== ""; onPressed: root.zoneAdd(newZoneName.text, newZoneSequencer.text) }
+                            Action { label: "Cancel"; enabledNow: !root.zoneBusy; onPressed: root.zoneAdding = false }
+                        }
+                    }
                     Part { text: "Bridge" }
                     Hint { text: "Moving tokens from your Logos Blockchain node into LEZ is in the Wallet. One way for now; about 12 hours to arrive." }
                     Action {
@@ -7297,28 +7597,21 @@ Item {
                         text: root.registry
                         hint: "Program ID of the registry"
                     }
-                    Part { text: "Sequencer" }
-                    Field {
-                        id: sequencerField
-                        Layout.fillWidth: true
-                        size: 17
-                        text: root.sequencer
-                        hint: "https://testnet.lez.logos.co"
-                    }
+                    Hint { font.pixelSize: root.px(15); text: "Sequencers are set per zone: Settings, Zones." }
                     // Saved only on purpose: a slip here points every read and change elsewhere (M-7).
                     RowLayout {
                         visible: !root.networkConfirm
                         spacing: 8
                         Action {
                             label: "Save"
-                            enabledNow: sequencerField.text.trim() !== root.sequencer || registryField.text.trim() !== root.registry
+                            enabledNow: registryField.text.trim() !== root.registry
                             onPressed: root.networkConfirm = true
                         }
                         Link {
-                            visible: sequencerField.text.trim() !== root.sequencer || registryField.text.trim() !== root.registry
+                            visible: registryField.text.trim() !== root.registry
                             text: "Undo"
                             font.pixelSize: root.px(16)
-                            onPressed: { sequencerField.text = root.sequencer; registryField.text = root.registry }
+                            onPressed: registryField.text = root.registry
                         }
                     }
                     Card {
@@ -7326,21 +7619,18 @@ Item {
                         Layout.fillWidth: true
                         Hint {
                             color: root.ink
-                            text: "Switch to " + (sequencerField.text.trim() !== root.sequencer ? "the sequencer " + sequencerField.text.trim() : "")
-                                + (sequencerField.text.trim() !== root.sequencer && registryField.text.trim() !== root.registry ? " and " : "")
-                                + (registryField.text.trim() !== root.registry ? "the registry " + Logic.keyShown(registryField.text.trim()) : "")
-                                + "? Names, balances and every change you make then go there. Only switch to one you trust."
+                            text: "Switch to the registry " + Logic.keyShown(registryField.text.trim()) + "? Names and every change you make to them then go there. Only switch to one you trust."
                         }
                         RowLayout {
                             spacing: 8
                             Action {
                                 label: "Yes, switch"
                                 strong: true
-                                onPressed: { root.networkConfirm = false; root.saveConfig(sequencerField.text.trim(), registryField.text.trim()) }
+                                onPressed: { root.networkConfirm = false; root.saveConfig(registryField.text.trim()) }
                             }
                             Action {
                                 label: "Cancel"
-                                onPressed: { root.networkConfirm = false; sequencerField.text = root.sequencer; registryField.text = root.registry }
+                                onPressed: { root.networkConfirm = false; registryField.text = root.registry }
                             }
                         }
                     }
@@ -8742,6 +9032,7 @@ Item {
                     visible: appSheet.kind === "transfer"
                     Layout.fillWidth: true
                     spacing: 6
+                    Fact { visible: root.zoneFact(appSheet.request) !== ""; label: "Zone"; value: root.zoneFact(appSheet.request) }
                     Fact { visible: !root.appIsToken(appSheet.request); label: "Asset"; value: appSheet.kind === "transfer" ? appSheet.request.asset + " (the native token)" : "" }
                     Fact { label: "Amount"; value: appSheet.kind === "transfer" ? root.appSends(appSheet.request) : "" }
                     Fact {
@@ -8770,6 +9061,7 @@ Item {
                     visible: appSheet.kind === "call"
                     Layout.fillWidth: true
                     spacing: 6
+                    Fact { visible: root.zoneFact(appSheet.request) !== ""; label: "Zone"; value: root.zoneFact(appSheet.request) }
                     Fact {
                         label: "Program"
                         value: appSheet.kind !== "call" ? "" : appSheet.request.program_label && appSheet.request.program_label.text ? appSheet.request.program_label.text : root.shorten(appSheet.request.program)
@@ -8876,6 +9168,25 @@ Item {
                     }
                 }
 
+                ColumnLayout {
+                    visible: appSheet.request !== null && appSheet.request.zone_in_use === false
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Hint {
+                        textFormat: Text.PlainText
+                        color: root.alarm
+                        text: appSheet.request === null || appSheet.request.zone_in_use !== false ? ""
+                            : appSheet.request.zone_removed ? "This was asked for a zone that has been removed since. Reject it, and the app can ask again."
+                            : "This was asked for " + appSheet.request.zone_name + ", and the wallet is using " + root.zoneName + " now. Switch to " + appSheet.request.zone_name + " to approve it, or reject it."
+                    }
+                    Action {
+                        visible: appSheet.request !== null && !appSheet.request.zone_removed
+                        label: root.zoneBusy ? "Switching…" : "Switch to " + (appSheet.request !== null && appSheet.request.zone_name ? appSheet.request.zone_name : "it")
+                        enabledNow: !root.zoneBusy && !root.appBusy
+                        onPressed: root.zoneUse(appSheet.request.zone)
+                    }
+                    Hint { visible: root.zoneNoteBad; color: root.alarm; font.pixelSize: root.px(15); textFormat: Text.PlainText; text: root.zoneNote }
+                }
                 Hint { visible: root.appError !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.appError }
                 Hint { visible: root.appBusy; color: root.brass; text: appSheet.kind === "call" ? "Trying it, then signing and sending it. This waits for its block, up to two minutes…" : "One moment…" }
                 RowLayout {

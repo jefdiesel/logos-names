@@ -73,7 +73,7 @@ BRIDGE = r"""
                         private_accounts: [{ account: "%(carol)s", balance: "2999000", funded: true }] })
                 return JSON.stringify({ success: false, value: null, error: "the LEZ wallet is not running; install LEZ Wallet and open it" })
             }
-            if (method === "get_config") return JSON.stringify({ registry: %(registry)s, sequencer: "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json", cli: "/Users/you/.local/bin/names", cli_wallet: "/Users/you/.lee/wallet", bridge_key: "%(bridge_key)s", bridge_node: null, module_version: root.neededModule })
+            if (method === "get_config") return JSON.stringify({ zone: (%(mock)s).zone || { id: "home", name: "Home", channel: "%(home_channel)s", home: true }, names_sequencer: "http://127.0.0.1:3040", registry: %(registry)s, sequencer: (%(mock)s).zone ? "http://127.0.0.1:3041" : "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json", cli: "/Users/you/.local/bin/names", cli_wallet: "/Users/you/.lee/wallet", bridge_key: "%(bridge_key)s", bridge_node: null, module_version: root.neededModule })
             if (method === "normalize") return String(args[0]).toLowerCase().replace(/\.lez$/, "")
             if (method === "mine") return ok({ names: names.filter(function(entry) { return entry.owner === "%(alice)s" }).map(function(entry) {
                 return { name: entry.name, display: entry.name + ".lez", owner: entry.owner, expires: null, never: true, lapsed: false } }), pending: [] })
@@ -85,6 +85,14 @@ BRIDGE = r"""
             if (method === "cli_set_text" || method === "cli_profile" || method === "cli_set_page" || method === "cli_register")
                 return ok({ id: args[0] + "-1792000000000", name: args[0], kind: method.substr(4), state: "running", started: Date.now() - 125000 })
             var mock = %(mock)s
+            // Zones (LP-0022): stand-ins, nothing is asked of a sequencer.
+            if (/^zone_/.test(method)) {
+                if (!mock.zones) return ok(null)
+                var zonesView = { zones: mock.zones, current: mock.zone ? mock.zone.id : "home", max: 16 }
+                if (method === "zone_sequencer" && mock.otherChain)
+                    return ok(Object.assign({ changed: false, other_chain: true, channel: "0505050505050505050505050505050505050505050505050505050505050505", why: "that sequencer serves another chain" }, zonesView))
+                return ok(zonesView)
+            }
             if (method === "cli_balance") {
                 if (mock.balance === null) return JSON.stringify({ success: false, value: null, error: "there is no wallet in /Users/you/.lee/wallet yet" })
                 return ok({ account: "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", balance: mock.private !== undefined ? mock.private : root.missing === "pauper" ? "5000" : "250000000",
@@ -219,6 +227,23 @@ BRIDGE = r"""
     Timer { id: shot; interval: 500; onTriggered: root.grabToImage(function(result) { result.saveToFile("%(out)s"); Qt.quit() }) }
 """
 
+HOME_CHANNEL = "01" * 32
+ZONE_B = "03" * 32
+# Two zones as zone_list answers them: Home (the testnet) and a second chain with a wallet of its own.
+def zones(current, b_wallet=True):
+    return [{"id": "home", "name": "Home", "channel": HOME_CHANNEL, "sequencer": "http://127.0.0.1:3040", "home": True, "current": current == "home",
+             "wallet_dir": "/Users/you/.lee/wallet", "has_wallet": True, "token_program": "Tok3nProgram1111111111111111111111111111111"},
+            {"id": ZONE_B, "name": "Games zone", "channel": ZONE_B, "sequencer": "http://127.0.0.1:3041", "home": False, "current": current == ZONE_B,
+             "wallet_dir": "/Users/you/.config/logos-names/zones/" + ZONE_B + "/wallet", "has_wallet": b_wallet, "token_program": None}]
+ON_B = {"id": ZONE_B, "name": "Games zone", "channel": ZONE_B, "home": False}
+# Another app's payment as pending_requests answers it, asked for the second zone.
+def zone_request(in_use, removed=False):
+    return ('{ id: "r1", kind: "transfer", app: "forumer_ui", reason: "a tip for the author", created: Date.now(), expires: Date.now() + 600000, asset: "LEZ", asset_kind: "native", amount: "250000", '
+            'destination: "ada", destination_kind: "name", zone: "%s", zone_channel: "%s", zone_name: %s, zone_in_use: %s, zone_removed: %s, '
+            'choices: [{ account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", label: "Names wallet, main public account", granted: true }], '
+            'publisher: { status: "verified", publisher: "forumer", module: "forumer_ui", version: "1.2.0" } }'
+            % (ZONE_B, ZONE_B, "null" if removed else '"Games zone"', "true" if in_use else "false", "true" if removed else "false"))
+
 SCENARIOS = {
     "start": "",
     "wallet-names": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); root.walletView = "names"',
@@ -248,7 +273,21 @@ SCENARIOS = {
     "wallet-bridge-plain": 'root.openWallet("home"); Qt.callLater(function() { root.openGetTokens() })',
     "wallet-bridge-open": 'root.openWallet("home"); Qt.callLater(function() { root.openGetTokens(); root.bridgeFromOpen = true })',
     "wallet-bridge-open-to": 'root.openWallet("home"); Qt.callLater(function() { root.openGetTokens(); root.bridgeToOpen = true })',
-    "settings-network": 'root.section = "settings"; root.settingsOpen = true; sequencerField.text = "https://other.example"; root.networkConfirm = true',
+    "settings-network": 'root.section = "settings"; root.settingsOpen = true; registryField.text = "9W9huNeAds11pdGpMijrdhTkSQ8upNudRnrZJbNNWfoW"; root.networkConfirm = true',
+    # Zones (LP-0022): the list with one row open, a new zone, Home's sequencer naming another chain,
+    # the wallet and the names on a second zone, and another app's request asked for a zone.
+    "settings-zones": 'root.section = "settings"; root.zoneOpen = "%(zone_b)s"; root.zoneNote = "Sequencer changed. The wallet, its accounts and its history are as they were."',
+    "settings-zones-add": 'root.section = "settings"; root.zoneAdding = true',
+    "settings-zones-remove": 'root.section = "settings"; root.zoneOpen = "%(zone_b)s"; root.zoneRemoving = true',
+    "settings-zones-other-chain": 'root.section = "settings"; root.zoneOpen = "home"; root.zoneOtherChain = { url: "http://127.0.0.1:3042", channel: "0505050505050505050505050505050505050505050505050505050505050505" }',
+    "wallet-zone": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home")',
+    "wallet-zone-nowallet": 'root.openWallet("home")',
+    "wallet-zone-names": 'root.openWallet("home"); root.walletView = "names"',
+    "wallet-zone-activity": 'root.go("activity"); root.loadActivity()',
+    "wallet-zone-review": 'root.openWallet("home"); root.openSend({ id: "lez-public", kind: "lez", title: "LEZ", definition: "", fromPrivate: false }, "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR"); sendAmount.text = "1000"; root.sendReview()',
+    "approve-zone": 'root.appRequests = [%(zone_request)s]; root.appChosen = ["Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk"]; root.appChosenFor = "r1"',
+    "approve-other-zone": 'root.appRequests = [%(zone_request)s]; root.appChosen = ["Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk"]; root.appChosenFor = "r1"',
+    "approve-removed-zone": 'root.appRequests = [%(zone_request_gone)s]; root.appChosen = ["Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk"]; root.appChosenFor = "r1"',
     "wallet-send": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); root.openSend({ id: "lez-private", kind: "lez", title: "LEZ", definition: "", fromPrivate: true }, "ada"); sendAmount.text = "1000"',
     "wallet-review": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); root.openSend({ id: "lez-private", kind: "lez", title: "LEZ", definition: "", fromPrivate: true }, "ada"); sendAmount.text = "1000"; root.sendReview()',
     "wallet-review-public": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); root.openSend({ id: "lez-public", kind: "lez", title: "LEZ", definition: "", fromPrivate: false }, "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR"); sendAmount.text = "1000"; root.sendReview()',
@@ -350,7 +389,26 @@ SCENARIOS = {
 
 # What the module's stand-in says in each Welcome state (see `mock` in BRIDGE).
 NO_WALLET = {"status": {"wallet": False, "public": None, "private": None}, "balance": None}
+# Entries on both zones, as `activity` answers them once there are two.
+ZONE_ACTIVITY = [
+    {"id": "z1", "at": 1792000000, "kind": "pay_account", "chain": "lez", "zone": ZONE_B, "zone_name": "Games zone", "to": "Public/FaPur3GjBrXZoE5Yz6bNjLeqXJzEn6pzXEdE9MCJZsdg", "amount": "1000", "fee": "4088", "state": "done"},
+    {"id": "z2", "at": 1791990000, "kind": "pay", "chain": "lez", "zone_name": "Home", "name": "ada", "amount": "250000", "fee": "4088", "state": "done"},
+    {"id": "z3", "at": 1791980000, "kind": "pay_account", "chain": "lez", "zone": "07" * 32, "zone_name": None, "to": "Public/FaPur3GjBrXZoE5Yz6bNjLeqXJzEn6pzXEdE9MCJZsdg", "amount": "77", "state": "done"},
+    {"id": "z4", "at": 1791970000, "kind": "send", "chain": "logos", "from": "66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b", "to": "73058ad5edb0e72b66c3e05ae90471382c3bb4d61314db995ef40e674dbf591e", "amount": "5000", "fee": "2018", "state": "in_block"},
+]
 MOCKS = {
+    "settings-zones": {"zones": zones("home")},
+    "settings-zones-add": {"zones": zones("home")},
+    "settings-zones-remove": {"zones": zones("home")},
+    "settings-zones-other-chain": {"zones": zones("home"), "otherChain": True},
+    "wallet-zone": {"zones": zones(ZONE_B), "zone": ON_B},
+    "wallet-zone-nowallet": {"zones": zones(ZONE_B, False), "zone": ON_B, "balance": None, "status": {"wallet": False, "public": None, "private": None}},
+    "wallet-zone-names": {"zones": zones(ZONE_B), "zone": ON_B},
+    "wallet-zone-activity": {"zones": zones(ZONE_B), "zone": ON_B, "activity": ZONE_ACTIVITY},
+    "wallet-zone-review": {"zones": zones(ZONE_B), "zone": ON_B},
+    "approve-zone": {"zones": zones(ZONE_B), "zone": ON_B},
+    "approve-other-zone": {"zones": zones("home")},
+    "approve-removed-zone": {"zones": zones("home")},
     "welcome-install": {"status": {"cli": None, "wallet": False, "public": None, "private": None}, "balance": None},
     "welcome-terminal": {"status": {"cli": None, "wallet": False, "public": None, "private": None}, "balance": None},
     "welcome-installing": {"status": {"cli": None, "wallet": False, "public": None, "private": None}, "balance": None},
@@ -397,6 +455,7 @@ MOCKS = {
 def main():
     qml, out_dir = sys.argv[1], sys.argv[2]
     wanted = sys.argv[3:] or list(SCENARIOS)
+    filled = {"zone_b": ZONE_B, "zone_request": zone_request(True), "zone_request_gone": zone_request(False, True)}
     source = open(os.path.join(HERE, "..", "qml", "Main.qml")).read()
     marker = "Item {\n    id: root\n"
     assert marker in source, "Main.qml no longer starts the way the harness expects"
@@ -413,7 +472,8 @@ def main():
             "registry": "null" if scenario == "unset" else json.dumps("DbYLkKwd2b13bQhceVj351mpPw7QmRzEjRT2EfU56CKH"),
             "mock": json.dumps(MOCKS.get(scenario, {})),
             "bridge_key": "" if scenario == "get-tokens" else "8e3b0f4a2c71d95e6a0b4c8d2f1e7a3954c6b0d8e2f4a6c8b0d2e4f6a8c0b2d4",
-            "scenario": SCENARIOS[scenario], "out": out, "height": 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "name", "settings-accounts", "settings-oldcli", "settings-account-new", "settings-network") else 1500 if scenario.startswith("get-tokens") or scenario.startswith("wallet") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1100 if scenario.startswith("inscribe") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
+            "home_channel": HOME_CHANNEL,
+            "scenario": (SCENARIOS[scenario] % dict(filled, zone_request=zone_request(scenario == "approve-zone"))) if "%(zone" in SCENARIOS[scenario] else SCENARIOS[scenario], "out": out, "height": 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "name", "settings-accounts", "settings-oldcli", "settings-account-new", "settings-network") or scenario.startswith("settings-zones") else 1100 if scenario.startswith("approve-") and "zone" in scenario else 1500 if scenario.startswith("get-tokens") or scenario.startswith("wallet") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1100 if scenario.startswith("inscribe") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
         }
         # Beside Main.qml, so its relative imports (logic.mjs) resolve.
         with tempfile.NamedTemporaryFile("w", suffix=".qml", delete=False, dir=os.path.join(HERE, "..", "qml")) as handle:

@@ -521,6 +521,12 @@ export function activityLine(entry, now, account) {
     // Money came in only once it landed; a failed or unknown change moved nothing known.
     if ((sign === "+" && !landedIn(e)) || e.state === "failed" || e.state === "unknown")
         sign = ""
+    // Which zone, once there is more than one to tell apart (the module gives `zone_name`
+    // then; null for a zone removed since).
+    if (typeof e.zone_name === "string" && e.zone_name !== "")
+        sub += (sub ? " · " : "") + "zone " + e.zone_name
+    else if (e.zone_name === null && e.zone)
+        sub += (sub ? " · " : "") + "a zone removed since"
     return { title: title, sub: sub, amount: amount, sign: amount === "" ? "" : sign, state: stateText, tone: tone, ago: agoShown(e.at, now) }
 }
 
@@ -603,9 +609,14 @@ function accountSide(e, kind, page) {
 
 /// The entries that involve `who` (a LEZ account, a node key or a name): as payer, payee,
 /// name, or an account a claim credited.
-export function activityFor(rows, who) {
+export function activityFor(rows, who, zone) {
     var list = Array.isArray(rows) ? rows : []
+    // The same keys make the same LEZ account ID on every zone, and what it holds there
+    // is other money: a LEZ account's page lists the zone in use (`zone`) only.
+    var lezPage = zone !== undefined && /^(Public|Private)\//.test(String(who))
     return list.filter(function(e) {
+        if (lezPage && (e.chain === "lez" || e.kind === "bridge") && (e.zone || "home") !== zone)
+            return false
         var credited = e.received && typeof e.received === "object" && Object.prototype.hasOwnProperty.call(e.received, who)
         var waiting = e.left && typeof e.left === "object" && Object.prototype.hasOwnProperty.call(e.left, who)
         return e.from === who || e.to === who || e.name === who || credited || waiting

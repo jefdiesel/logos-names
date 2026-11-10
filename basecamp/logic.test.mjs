@@ -181,6 +181,26 @@ check("subDigits", [subDigits("1000", "1"), subDigits("210939029", "210939029"),
   const least = activityLine({ kind: "arrived", chain: "lez", to: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", amount: null, at_least: "95648", state: "arrived", at: now }, now);
   check("activityLine arrived at least", [least.amount, least.sign, least.sub], ["", "", "in Public CCVd76Tk…pKnk on LEZ · at least 95,648"]);
   check("activityFor", activityFor([bridge, { kind: "pay", name: "ada" }], KEY).length, 1);
+  // Zones (LP-0022): the same keys are the same LEZ account ID on every zone, so an account's
+  // page lists the zone in use only; a Logos Blockchain key's page and a name's are not narrowed.
+  {
+    const ACC = "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk";
+    const B = "0303030303030303030303030303030303030303030303030303030303030303";
+    const rows = [
+      { id: "h", kind: "pay_account", chain: "lez", from: ACC, amount: "1" },
+      { id: "b", kind: "pay_account", chain: "lez", zone: B, from: ACC, amount: "2" },
+      { id: "bh", kind: "bridge", chain: "logos", from: KEY, to: ACC, amount: "3" },
+      { id: "bb", kind: "bridge", chain: "logos", zone: B, from: KEY, to: ACC, amount: "4" },
+    ];
+    const ids = (who, zone) => activityFor(rows, who, zone).map((e) => e.id);
+    check("activityFor on home", ids(ACC, "home"), ["h", "bh"]);
+    check("activityFor on a zone", ids(ACC, B), ["b", "bb"]);
+    check("activityFor with no zone given", ids(ACC), ["h", "b", "bh", "bb"]);
+    check("activityFor a chain key is every zone's", ids(KEY, B), ["bh", "bb"]);
+    const line = (fields) => activityLine(Object.assign({ kind: "pay", chain: "lez", name: "ada", amount: "7", state: "done", at: now }, fields), now).sub;
+    check("activityLine names the zone", [line({ zone: B, zone_name: "Games zone" }).endsWith(" · zone Games zone"), line({ zone_name: "Home" }).endsWith(" · zone Home"),
+      line({ zone: B, zone_name: null }).endsWith(" · a zone removed since"), / zone /.test(line({}))], [true, true, true, false]);
+  }
   check("agoShown", [agoShown(now - 5000, now), agoShown(now - 3 * 86400000, now)], ["just now", "3 d ago"]);
   check("agoShown in seconds", agoShown(Math.floor(now / 1000) - 7200, now), "2 h ago");
   // activity-public-send-says-proving: a public send in flight said "Proving…".
