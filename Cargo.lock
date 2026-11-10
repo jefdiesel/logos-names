@@ -953,8 +953,10 @@ version = "0.1.0"
 source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.4.0-rc1#1806e873ea2ac0e1b608aa7cf2f9b6e1fb12db21"
 dependencies = [
  "borsh",
+ "lee",
  "lee_core",
  "risc0-zkvm",
+ "serde",
 ]
 
 [[package]]
@@ -5694,8 +5696,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "blake2 0.10.6",
  "board_core",
  "borsh",
+ "bridge_core",
  "clap",
  "clap_mangen",
  "clock_core",
@@ -5713,6 +5717,7 @@ dependencies = [
  "sequencer_service_rpc",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "system_accounts",
  "tokio",
  "ureq",

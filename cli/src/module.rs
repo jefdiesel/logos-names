@@ -260,6 +260,14 @@ impl Client {
     fn module_accounts(&self) -> Result<()> {
         let key_chain = self.wallet.storage().key_chain();
         let public: Vec<String> = key_chain.public_account_ids().map(|(id, _)| id.to_string()).collect();
+        // Each public account's public key, which LEZ 0.4 needs to credit a bridge to it.
+        let keys: serde_json::Map<String, serde_json::Value> = key_chain
+            .public_account_ids()
+            .filter_map(|(id, _)| {
+                let key = self.wallet.get_account_public_signing_key(id)?;
+                Some((id.to_string(), serde_json::Value::from(hex::encode(lee::PublicKey::new_from_private_key(key).value()))))
+            })
+            .collect();
         let private: Vec<serde_json::Value> = key_chain
             .private_account_ids()
             .map(|(id, _)| {
@@ -267,7 +275,7 @@ impl Client {
                 serde_json::json!({ "account": id.to_string(), "balance": balance.unwrap_or(0).to_string() })
             })
             .collect();
-        println!("{}", serde_json::json!({ "public": public, "private": private }));
+        println!("{}", serde_json::json!({ "public": public, "private": private, "keys": keys }));
         Ok(())
     }
 

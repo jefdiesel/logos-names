@@ -603,7 +603,9 @@ enum Command {
         /// are used, so it may be a little more.
         #[arg(value_parser = tokens::parse_amount, allow_hyphen_values = true)]
         amount: u128,
-        /// The LEZ public account to credit, such as `Public/<id>`.
+        /// The LEZ public account to credit: `Public/<id>`, or its public key (64 hex
+        /// characters). LEZ 0.4 credits a bridge only to an account named by its key, so for
+        /// an account this wallet doesn't hold, give its key (its owner can tell it).
         #[arg(long)]
         to: String,
         /// The Logos Blockchain public key (64 hex characters) whose notes pay, as the
@@ -747,6 +749,10 @@ fn write_man_pages(dir: &std::path::Path) -> Result<()> {
 mod board;
 mod claims;
 mod chain;
+/// The deposit encoding, one file shared with the Basecamp module so both send the same bytes.
+#[path = "../../basecamp-module/rust-lib/src/deposit.rs"]
+#[allow(dead_code)] // the receipt and op id parts are the module's (the CLI's tests check them)
+mod deposit;
 mod fees;
 mod plan;
 mod module;
@@ -808,22 +814,63 @@ fn parse_payee_name(input: &str) -> Result<String, String> {
     parse_name(input)
 }
 
-/// The LEZ account `names bridge` credits: a public one (`Public/<id>` or bare) that
-/// someone can use, never the empty account or a program's (`programs`), as the
-/// Basecamp module refuses them (cli-bridge-direct-amount-zero-and-private-prefix).
-fn bridge_destination(to: &str, programs: &[AccountId]) -> Result<AccountId, String> {
+/// The LEZ account `names bridge` credits: a public one (`Public/<id>` or bare, or its
+/// public key as 64 hex, which names the account and is what LEZ 0.4 needs for one this
+/// wallet doesn't hold) that someone can use, never the empty account or a program's
+/// (`programs`), as the Basecamp module refuses them
+/// (cli-bridge-direct-amount-zero-and-private-prefix). With the key when one was given.
+fn bridge_destination(to: &str, programs: &[AccountId]) -> Result<(AccountId, Option<[u8; 32]>), String> {
     let to = to.trim();
     if to.starts_with("Private/") {
         return Err("the bridge credits a public account: give --to as Public/<id>".to_owned());
     }
-    let id = parse_account(to)?;
+    let key = deposit::public_key_text(to);
+    let id = match key {
+        Some(key) => AccountId::new(deposit::key_account(&key)),
+        None => parse_account(to)?,
+    };
     if id.value().iter().all(|byte| *byte == 0) {
         return Err("that is the empty account (all 1s), which no one holds".to_owned());
     }
     if programs.contains(&id) {
         return Err("that is a program's account, which can't take a bridge".to_owned());
     }
-    Ok(id)
+    Ok((id, key))
+}
+
+/// Which LEZ the sequencer at `rpc` runs (`deposit::lez_of`), so a deposit carries the
+/// metadata it decodes; refused when it can't be told.
+fn lez_version(rpc: &str) -> Result<deposit::Lez> {
+    let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": deposit::PROBE_METHOD, "params": [deposit::PROBE_ACCOUNT] });
+    let mut response = ureq::post(rpc)
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .header("Content-Type", "application/json")
+        .send(body.to_string())
+        .with_context(|| format!("cannot reach the sequencer at {rpc}"))?;
+    let reply: serde_json::Value = serde_json::from_str(&response.body_mut().read_to_string().unwrap_or_default()).unwrap_or_default();
+    deposit::lez_of(&reply).ok_or_else(|| anyhow!(deposit::UNKNOWN_LEZ))
+}
+
+/// The public key of `account` when this wallet holds it: what LEZ 0.4 needs to credit a
+/// bridge to it. Opening the wallet reads its file and signs nothing.
+async fn held_public_key(overrides: Option<WalletConfigOverrides>, account: AccountId) -> Option<[u8; 32]> {
+    let wallet = open_wallet(overrides, false, false).await.ok()?;
+    wallet.get_account_public_signing_key(account).map(|key| *lee::PublicKey::new_from_private_key(key).value())
+}
+
+/// The metadata of a deposit crediting `to` (`deposit::metadata`), for the LEZ at `rpc`:
+/// on 0.4 with `key` (given as `--to`) or the wallet's own key for `to`, and refused in
+/// plain words, before anything is sent, when neither is there.
+async fn bridge_metadata(rpc: &str, overrides: Option<WalletConfigOverrides>, to: AccountId, key: Option<[u8; 32]>) -> Result<Vec<u8>> {
+    let lez = lez_version(rpc)?;
+    let key = match (lez, key) {
+        (deposit::Lez::V04, None) => held_public_key(overrides, to).await,
+        (_, key) => key,
+    };
+    deposit::metadata(lez, to.value(), key.map(deposit::Evidence::Key).as_ref())
+        .map_err(|refusal| anyhow!(refusal.words(&|account: &[u8; 32]| AccountId::new(*account).to_string())))
 }
 
 /// How `names balance` ends: an error when it could not catch up with the chain or read
@@ -3098,11 +3145,13 @@ fn pick_notes(mut notes: Vec<(String, u128)>, amount: u128, most: usize) -> (Vec
 }
 
 /// Deposits whole notes of `from_key` into the LEZ channel through the user's own node,
-/// with the LEZ account as the deposit's metadata: the sequencer reads it as
-/// `borsh(AccountId)` and credits that account once the deposit is final.
+/// crediting `to` (`bridge_destination`): the deposit's metadata is what the sequencer's
+/// LEZ decodes (`bridge_metadata`), and it credits the account once the deposit is final.
+/// Everything that can be refused is checked before the node is asked for anything.
 #[allow(clippy::too_many_arguments)]
-fn bridge(
+async fn bridge(
     rpc: &str,
+    overrides: Option<WalletConfigOverrides>,
     node: &str,
     amount: u128,
     to: &str,
@@ -3115,11 +3164,12 @@ fn bridge(
     if amount == 0 {
         bail!("Enter an amount above 0.");
     }
-    let to = bridge_destination(to, programs).map_err(|error| anyhow!(error))?;
+    let (to, key) = bridge_destination(to, programs).map_err(|error| anyhow!(error))?;
     let from_key = from_key.trim().to_lowercase();
     if from_key.len() != 64 || hex::decode(&from_key).is_err() {
         bail!("--from-key must be a 64-character hex public key");
     }
+    let metadata = bridge_metadata(rpc, overrides, to, key).await?;
     let channel = rpc_call(rpc, "getChannelId", serde_json::json!({}))?;
     let channel = channel
         .as_str()
@@ -3157,7 +3207,7 @@ fn bridge(
     }
     let body = serde_json::json!({
         "tip": null,
-        "deposit": { "channel_id": channel, "inputs": picked, "metadata": borsh::to_vec(&to)? },
+        "deposit": { "channel_id": channel, "inputs": picked, "metadata": metadata },
         "change_public_key": from_key,
         "funding_public_keys": [from_key],
         "max_tx_fee": max_fee,
@@ -3510,7 +3560,7 @@ async fn main() -> Result<()> {
         }
         Command::Bridge { amount, to, from_key, node, max_fee, yes } => {
             let rpc = cli.rpc.as_deref().unwrap_or(DEFAULT_RPC);
-            return bridge(rpc, &node, amount, &to, &bridge_sinks(cli.program, cli.token_program), &from_key, max_fee, yes);
+            return bridge(rpc, overrides, &node, amount, &to, &bridge_sinks(cli.program, cli.token_program), &from_key, max_fee, yes).await;
         }
         // Only a name target needs the registry; everything else is between you and your node.
         Command::Chain(command) if command.name().is_none() => return chain::run(command.clone(), None),
@@ -4114,18 +4164,104 @@ mod shortlist_tests {
     }
 }
 
-/// What a bridge deposit's metadata is: the Names module builds it from the account's 32
-/// bytes, so they must be exactly what `names bridge` sends (`borsh::to_vec(&to)`).
+/// The deposit encoding the module and `names bridge` share (`deposit.rs`), fed to LEZ
+/// 0.4's own decoder (`bridge_core`, v0.4.0-rc1): real-bridges-to-lez-0.4-never-mint. The
+/// sequencer runs `DepositMetadata::try_from_slice` on a final deposit's metadata and
+/// credits `recipient.account_id()`; a decode failure leaves the deposit in custody.
 #[cfg(test)]
 mod bridge_metadata_tests {
-    use super::{AccountId, parse_account};
+    use super::deposit::{self, Evidence, Lez};
+    use borsh::BorshDeserialize as _;
+    use bridge_core::DepositMetadata;
+    use lee::{AccountId, PrivateKey, PublicKey};
+    use lee_core::program::PdaSeed;
+    use sha2::Digest as _;
 
+    /// 32 bytes that look random, the same every run.
+    fn bytes(seed: u64) -> [u8; 32] {
+        sha2::Sha256::digest(seed.to_le_bytes()).into()
+    }
+
+    /// The wallet's own accounts: the key the CLI reads from its signing key makes metadata
+    /// that LEZ 0.4 decodes to that very account.
     #[test]
-    fn a_deposits_metadata_is_the_accounts_32_bytes_raw() {
-        let bytes: [u8; 32] = std::array::from_fn(|i| u8::try_from(i * 7 + 1).unwrap_or(0));
-        assert_eq!(borsh::to_vec(&AccountId::new(bytes)).expect("borsh"), bytes.to_vec(), "no length prefix, no tag");
-        let to = parse_account("Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk").expect("an account");
-        assert_eq!(borsh::to_vec(&to).expect("borsh").len(), 32);
+    fn a_wallet_accounts_key_decodes_to_that_account() {
+        for seed in 0..64 {
+            let Ok(private) = PrivateKey::try_new(bytes(seed)) else { continue };
+            let public = PublicKey::new_from_private_key(&private);
+            let account = AccountId::from(&public);
+            assert_eq!(deposit::key_account(public.value()), *account.value(), "the account of a key");
+            let metadata = deposit::metadata(Lez::V04, account.value(), Some(&Evidence::Key(*public.value()))).expect("metadata");
+            let decoded = DepositMetadata::try_from_slice(&metadata).expect("LEZ 0.4 decodes it");
+            assert_eq!(decoded.recipient.account_id(), account, "credits the account");
+            assert_eq!(deposit::credited(Lez::V04, &metadata), Some(*account.value()));
+        }
+    }
+
+    /// The bytes the module and the CLI sent until now (the account's 32 bytes) are what
+    /// LEZ 0.4 can't decode: every such bridge stayed in custody. LEZ 0.3 reads them.
+    #[test]
+    fn the_bare_account_is_lez_0_3_metadata_and_lez_0_4_refuses_it() {
+        let account = AccountId::new(bytes(7));
+        let metadata = deposit::metadata(Lez::V03, account.value(), None).expect("metadata");
+        assert_eq!(metadata, borsh::to_vec(&account).expect("borsh"), "0.3's DepositMetadata {{ recipient_id }}");
+        assert_eq!(AccountId::try_from_slice(&metadata).expect("0.3 decodes it"), account);
+        assert!(DepositMetadata::try_from_slice(&metadata).is_err(), "0.4 can't");
+    }
+
+    /// The curve check in `deposit.rs` (the module has no curve library) agrees with LEZ's
+    /// own `PublicKey::try_new`, which the decoder runs, for thousands of 32-byte values;
+    /// metadata is made only from a key LEZ accepts.
+    #[test]
+    fn the_curve_check_agrees_with_lez() {
+        let (mut valid, mut invalid) = (0, 0);
+        for seed in 0..4000 {
+            let candidate = bytes(seed);
+            let lez = PublicKey::try_new(candidate).is_ok();
+            assert_eq!(deposit::valid_public_key(&candidate), lez, "{}", hex::encode(candidate));
+            let decodes = DepositMetadata::try_from_slice(&[&[1, 0][..], &candidate[..]].concat()).is_ok();
+            assert_eq!(decodes, lez, "the decoder accepts exactly the keys LEZ does");
+            let made = deposit::metadata(Lez::V04, &deposit::key_account(&candidate), Some(&Evidence::Key(candidate)));
+            assert_eq!(made.is_ok(), lez);
+            if lez { valid += 1 } else { invalid += 1 }
+        }
+        assert!(valid > 1000 && invalid > 1000, "both kinds seen: {valid} valid, {invalid} not");
+        for edge in [[0_u8; 32], [0xff; 32]] {
+            assert_eq!(deposit::valid_public_key(&edge), PublicKey::try_new(edge).is_ok(), "{}", hex::encode(edge));
+        }
+    }
+
+    /// A program's account (PDA evidence) decodes to it too.
+    #[test]
+    fn pda_evidence_decodes_to_the_programs_account() {
+        let (program, seed) = (bytes(1), bytes(2));
+        let account = AccountId::for_public_pda(&AccountId::new(program), &PdaSeed::new(seed));
+        assert_eq!(deposit::pda_account(&program, &seed), *account.value());
+        let metadata = deposit::metadata(Lez::V04, account.value(), Some(&Evidence::Pda { program, seed })).expect("metadata");
+        assert_eq!(DepositMetadata::try_from_slice(&metadata).expect("decodes").recipient.account_id(), account);
+    }
+
+    /// The receipt LEZ writes when it mints a deposit, and the bridge program, as LEZ 0.4's
+    /// bridge derives them: the module follows a bridge by this account.
+    #[test]
+    fn the_receipt_is_lez_0_4s_own() {
+        assert_eq!(deposit::bridge_program(), *bridge_core::bridge_account_id().value());
+        for seed in 0..16 {
+            let op = bytes(seed);
+            assert_eq!(deposit::receipt(&op), *bridge_core::deposit_receipt_account_id(bridge_core::bridge_account_id(), op).value());
+        }
+    }
+
+    /// For an account the wallet doesn't hold, LEZ 0.4 needs the key; the refusal says how
+    /// to give it, and that nothing was sent.
+    #[test]
+    fn a_foreign_account_without_its_key_is_refused_in_plain_words() {
+        let account = AccountId::new(bytes(9));
+        let refusal = deposit::metadata(Lez::V04, account.value(), None).unwrap_err();
+        let said = refusal.words(&|id: &[u8; 32]| AccountId::new(*id).to_string());
+        assert!(said.contains(&format!("doesn't hold Public/{account}")), "{said}");
+        assert!(said.contains("public key (64 hex characters"), "{said}");
+        assert!(said.ends_with("Nothing was sent."), "{said}");
     }
 }
 
@@ -4364,7 +4500,13 @@ mod input_tests {
         assert_eq!(bridge_destination(&format!("Private/{someone}"), &[registry]).unwrap_err(), "the bridge credits a public account: give --to as Public/<id>");
         assert_eq!(bridge_destination("Public/11111111111111111111111111111111", &[registry]).unwrap_err(), "that is the empty account (all 1s), which no one holds");
         assert_eq!(bridge_destination(&format!("Public/{DEFAULT_PROGRAM}"), &[registry]).unwrap_err(), "that is a program's account, which can't take a bridge");
-        assert_eq!(bridge_destination(&format!("Public/{someone}"), &[registry]).unwrap().to_string(), someone);
+        let (id, key) = bridge_destination(&format!("Public/{someone}"), &[registry]).unwrap();
+        assert_eq!((id.to_string().as_str(), key), (someone, None));
+        // Its public key names the account too, and is kept for the deposit's metadata.
+        let key = "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
+        let (id, given) = bridge_destination(key, &[registry]).unwrap();
+        assert_eq!(id, AccountId::from(&key.parse::<lee::PublicKey>().unwrap()));
+        assert_eq!(given.map(hex::encode).as_deref(), Some(key));
         // cli-bridge-retired-registry-account-accepted: v2 and v4.1 took a deposit.
         let sinks = bridge_sinks(None, Some(someone.parse().unwrap()));
         for program in std::iter::once(DEFAULT_PROGRAM).chain(RETIRED_PROGRAMS).chain([someone]) {
@@ -4372,9 +4514,12 @@ mod input_tests {
         }
         assert_eq!(sinks.len(), 6);
         // Nothing reached the network: the unreachable node and sequencer were never asked.
-        let zero = bridge("http://127.0.0.1:9", "http://127.0.0.1:9", 0, &format!("Public/{someone}"), &[registry], &"66".repeat(32), 100_000, true);
+        let refused = |amount, to: String| {
+            futures::executor::block_on(bridge("http://127.0.0.1:9", None, "http://127.0.0.1:9", amount, &to, &[registry], &"66".repeat(32), 100_000, true))
+        };
+        let zero = refused(0, format!("Public/{someone}"));
         assert_eq!(zero.unwrap_err().to_string(), "Enter an amount above 0.");
-        let private = bridge("http://127.0.0.1:9", "http://127.0.0.1:9", 1_000, &format!("Private/{someone}"), &[registry], &"66".repeat(32), 100_000, true);
+        let private = refused(1_000, format!("Private/{someone}"));
         assert_eq!(private.unwrap_err().to_string(), "the bridge credits a public account: give --to as Public/<id>");
         assert_eq!(Cli::try_parse_from(["names", "bridge", "0", "--to", someone, "--from-key", "k"]).err().map(|e| e.to_string().contains("Enter an amount above 0.")), Some(true));
     }

@@ -46,3 +46,11 @@ ureq = "3"
 futures = "0.3"
 base64 = "0.22"
 tokio = { version = "1.50", features = ["macros", "rt-multi-thread", "time"] }
+# The deposit encoding shared with the Basecamp module (basecamp-module/rust-lib/src/deposit.rs)
+# hashes with these; both are already in the lock through LEZ.
+sha2 = "0.10"
+blake2 = "0.10"
+
+[dev-dependencies]
+# LEZ 0.4's own bridge types: the tests feed the shared deposit encoding to its real decoder.
+bridge_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc1", features = ["host"] }
