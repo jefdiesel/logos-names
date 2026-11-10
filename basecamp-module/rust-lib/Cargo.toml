@@ -20,9 +20,12 @@ crate-type = ["staticlib"]
 aes-gcm = "0.10"
 # Argon2id derives a name's identifier and key (registry v5, SPEC.md section 3).
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
-# Blake2b-256 names a Logos Blockchain deposit (its op id), which LEZ mints it under.
+# Blake2b-256 names a Logos Blockchain deposit (its op id), which LEZ mints it under,
+# and is the Mantle transaction hash of an inscription (chain_inscribe.rs).
 blake2 = "0.10"
 bs58 = "0.5"
+# A testimonial inscribed on the Logos Blockchain is signed with Ed25519 (chain_inscribe.rs).
+ed25519-dalek = "=2.2.0"
 getrandom = "0.2"
 # Decodes a name's avatar for apps that may not load `data:` URLs (avatar.rs).
 png = "0.18"

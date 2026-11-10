@@ -70,6 +70,10 @@ check("submission refused", ["", "LP-0021", "-lp", "lp 0021", "lp#1", "a".repeat
 check("username ok", ["", "alice", "Ünïcode name", "x".repeat(32)].map(L.usernameProblem), ["", "", "", ""]);
 check("username refused", [" alice", "alice ", "a\u0007b", "x".repeat(33), "é".repeat(17), "a\u00a0"].map((s) => L.usernameProblem(s) !== ""), [true, true, true, true, true, true]);
 check("text ok", ["line one\nline two\ttabbed", "x".repeat(1024), "  padded  "].map(L.textProblem), ["", "", ""]);
+check("inscription text: the program's rules, and nothing that turns the text around or shows nothing",
+    ["fine\nline", "", "bell\u0007", "good\u202Edab", "a\u2066b", "a\u200Fb", "a\u061Cb", "a\u200Bb", "\uFEFFa", "a\u2028b", "a\uDB40\uDC41b",
+     "\uD83D\uDC68\u200D\uD83D\uDC69 \u0645\u06CC\u200C\u062E \u2764\uFE0F"].map((s) => L.inscriptionProblem(s) !== ""),
+    [false, true, true, true, true, true, true, true, true, true, true, false]);
 check("text refused", ["", "   \n", "bell\u0007", "cr\r", "x".repeat(1025), "\u0085"].map((s) => L.textProblem(s) !== ""), [true, true, true, true, true, true]);
 
 // ── Reading a list back ─────────────────────────────────────────────────────────────
@@ -132,6 +136,24 @@ check("accountViewRequest", JSON.parse(L.accountViewRequest("A", "B")).params, [
 check("months", [L.monthOf(0), L.monthOf(1798761599999), L.monthOf(1798761600000), L.formatTime(1800000000000)], ["1970-01", "2026-12", "2027-01", "2027-01-15 08:00 UTC"]);
 check("postingAccounts keeps public ones", L.postingAccounts([{ account: "Public/abc", account_kind: "public" }, { account: "Private/def", account_kind: "private" }]), ["Public/abc"]);
 check("postSummary fits 280", L.postSummary(SUB, "Public/" + people[0], "x".repeat(2000)).length <= 280, true);
+
+// ── Where it's written, and what a request says ────────────────────────────────────
+check("targets", L.TARGETS.map((t) => t.key), ["lez", "chain"]);
+const KEY = "66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b";
+check("requestStatus: nothing yet", L.requestStatus("inscribe", null), { text: "", tone: "plain" });
+check("requestStatus: pending", ["connect", "call", "inscribe"].map((k) => L.requestStatus(k, { state: "pending" }).text),
+  ["Waiting for you to choose accounts in the Names app…", "Waiting for your approval…", "Waiting for you to choose an account and approve it in the Names app…"]);
+check("requestStatus: done", [L.requestStatus("call", { state: "done", account: "Public/abc" }), L.requestStatus("inscribe", { state: "done", account: KEY }), L.requestStatus("connect", { state: "approved" })],
+  [{ text: "Posted from Public/abc.", tone: "good" }, { text: "Inscribed on the Logos Blockchain from 66ecf4…a81b. It's final in a few minutes.", tone: "good" }, { text: "Connected.", tone: "good" }]);
+check("requestStatus: failed", [L.requestStatus("call", { state: "failed", error: "out of gas" }), L.requestStatus("call", { state: "failed" }), L.requestStatus("inscribe", { state: "failed", error: "the inscription may not have been sent" })],
+  [{ text: "Not posted: Out of gas.", tone: "bad" }, { text: "Not posted: The call failed.", tone: "bad" },
+   { text: "The wallet couldn't confirm it was sent. Look at the Names app's history before asking again: it may still land.", tone: "bad" }]);
+check("requestStatus: turned down", ["rejected", "expired", "cancelled"].map((state) => [L.requestStatus("call", { state }).text, L.requestStatus("inscribe", { state }).text]),
+  [["You declined it in the Names app. Nothing was signed or sent.", "You declined it in the Names app. Nothing was inscribed or paid."],
+   ["Nobody answered within 10 minutes. Nothing was signed or sent.", "Nobody answered within 10 minutes. Nothing was inscribed or paid."],
+   ["Withdrawn. Nothing was signed or sent.", "Withdrawn. Nothing was inscribed or paid."]]);
+check("requestStatus: a state it doesn't know", L.requestStatus("call", { state: "odd" }), { text: "odd", tone: "plain" });
+check("grouped", [L.grouped("1086"), L.grouped("999"), L.grouped("1234567")], ["1,086", "999", "1,234,567"]);
 
 // ── QML hygiene ────────────────────────────────────────────────────────────────────
 // Qt's QML parser on Linux refuses `x.public` ("Expected token 'identifier'") and the whole

@@ -276,6 +276,38 @@ export function textProblem(text) {
     return ""
 }
 
+/// Rust `chain_keys::unseen`: characters that show nothing, break the line or turn the
+/// text around, except the emoji and script joiners. Pairs are first and last code point.
+const UNSEEN = [[0xad, 0xad], [0x34f, 0x34f], [0x61c, 0x61c], [0x600, 0x605], [0x6dd, 0x6dd], [0x70f, 0x70f], [0x8e2, 0x8e2],
+    [0x115f, 0x1160], [0x17b4, 0x17b5], [0x180e, 0x180e], [0x200b, 0x200b], [0x200e, 0x200f], [0x2028, 0x202e], [0x2060, 0x206f],
+    [0x3164, 0x3164], [0xfeff, 0xfeff], [0xffa0, 0xffa0], [0xfff9, 0xfffb], [0x110bd, 0x110bd], [0x110cd, 0x110cd],
+    [0x13430, 0x1343f], [0x1bca0, 0x1bca3], [0x1d173, 0x1d17a], [0xe0001, 0xe0001], [0xe0020, 0xe007f]]
+
+function unseen(code) {
+    for (var i = 0; i < UNSEEN.length; i++)
+        if (code >= UNSEEN[i][0] && code <= UNSEEN[i][1]) return true
+    return false
+}
+
+/// Why the Names Wallet would refuse to inscribe this text, or "": the program's rules,
+/// and no character that turns the text around or shows nothing (the wallet shows the
+/// text for approval, and what is shown must read as what is inscribed).
+export function inscriptionProblem(text) {
+    var p = textProblem(text)
+    if (p) return p
+    var t = String(text)
+    for (var i = 0; i < t.length; i++) {
+        var c = t.charCodeAt(i)
+        // A surrogate pair is one character above U+FFFF.
+        if (c >= 0xd800 && c <= 0xdbff && i + 1 < t.length) {
+            var low = t.charCodeAt(i + 1)
+            if (low >= 0xdc00 && low <= 0xdfff) { c = 0x10000 + ((c - 0xd800) << 10) + (low - 0xdc00); i++ }
+        }
+        if (unseen(c)) return "An inscribed testimonial can't hold characters that turn the text around or show nothing."
+    }
+    return ""
+}
+
 // ── Borsh ────────────────────────────────────────────────────────────────────────────
 
 function u32(out, n) { out.push(n & 255, (n >>> 8) & 255, (n >>> 16) & 255, (n >>> 24) & 255) }
@@ -519,4 +551,59 @@ export function postSummary(submission, author, text) {
     var quoted = rustTrim(text).replace(/\s+/g, " ")
     if (quoted.length > 120) quoted = quoted.substr(0, 119) + "…"
     return ("Post a testimonial for " + submission + " from " + author + ": “" + quoted + "”").substr(0, 280)
+}
+
+// ── Where a testimonial is written ─────────────────────────────────────────────────
+
+/// The two places this app writes to. On the LEZ zone a testimonial is a call to the
+/// testimonial program from a public account the person gave this app. On the Logos
+/// Blockchain it is an inscription: the Names Wallet asks the person which of their
+/// node's accounts inscribes it and pays the fee, so this app needs no access first.
+export const TARGETS = [
+    { key: "lez", label: "LEZ zone", sub: "Stored by the testimonial program, signed by one of your public LEZ accounts" },
+    { key: "chain", label: "Logos Blockchain", sub: "Inscribed on the chain itself, paid from one of your node's accounts" },
+]
+
+/// A wallet request's state in words: {text, tone} with tone good, bad or plain.
+/// `kind` is connect, call (a post on the LEZ zone) or inscribe; `r` is request_status's
+/// answer (null before the first one).
+export function requestStatus(kind, r) {
+    if (!r) return { text: "", tone: "plain" }
+    var nothing = kind === "inscribe" ? "Nothing was inscribed or paid." : "Nothing was signed or sent."
+    switch (r.state) {
+    case "pending":
+        return { text: kind === "connect" ? "Waiting for you to choose accounts in the Names app…"
+                     : kind === "inscribe" ? "Waiting for you to choose an account and approve it in the Names app…"
+                     : "Waiting for your approval…", tone: "plain" }
+    case "running":
+        return { text: "Approved: the wallet is trying the call, then sending it and waiting for its block…", tone: "plain" }
+    case "approved":
+        return { text: "Connected.", tone: "good" }
+    case "done":
+        return { text: kind === "inscribe" ? "Inscribed on the Logos Blockchain from " + short(r.account) + ". It's final in a few minutes."
+                     : "Posted from " + r.account + ".", tone: "good" }
+    case "failed":
+        return { text: kind === "inscribe" ? "The wallet couldn't confirm it was sent. Look at the Names app's history before asking again: it may still land."
+                     : "Not posted: " + sentenceOf(r.error || "the call failed"), tone: "bad" }
+    case "rejected":
+        return { text: "You declined it in the Names app. " + nothing, tone: "bad" }
+    case "expired":
+        return { text: "Nobody answered within 10 minutes. " + nothing, tone: "bad" }
+    case "cancelled":
+        return { text: "Withdrawn. " + nothing, tone: "plain" }
+    }
+    return { text: String(r.state), tone: "plain" }
+}
+
+/// A message as a sentence: a capital first, a full stop last.
+export function sentenceOf(message) {
+    var t = String(message).trim()
+    if (t === "") return ""
+    t = t.charAt(0).toUpperCase() + t.substr(1)
+    return /[.?!]$/.test(t) ? t : t + "."
+}
+
+/// Digits in threes: 1086 as "1,086".
+export function grouped(digits) {
+    return String(digits).replace(/\B(?=(\d{3})+(?!\d))/g, ",")
 }

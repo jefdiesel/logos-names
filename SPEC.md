@@ -854,10 +854,18 @@ module names {
   method set_wallet_files(config_path: tstr, storage_path: tstr) -> bool
   method set_cli(path: tstr) -> bool
   method set_cli_wallet(dir: tstr) -> bool
+
+  method zone_list() -> tstr
+  method zone_add(name: tstr, sequencer: tstr) -> tstr
+  method zone_use(zone: tstr) -> tstr
+  method zone_remove(zone: tstr) -> tstr
+  method zone_rename(zone: tstr, name: tstr) -> tstr
+  method zone_sequencer(zone: tstr, url: tstr, other_chain_ok: bool) -> tstr
 }
 ```
 
-Every method except `normalize` and the six configuration methods answers
+Every method except `normalize` and the six configuration methods (`get_config`
+and the `set_*` ones) answers
 with JSON text in the envelope Logos modules use:
 
 ```json
@@ -913,6 +921,37 @@ return false and change nothing for a value that is not an account ID or an
 http(s) URL. `get_config` returns the sequencer URL, registry program ID and
 wallet files in use, and `cli` and `cli_wallet` (below) as they will be used,
 defaults filled in (`cli` is `null` if no CLI is found).
+
+**Zones (module 0.15.3 on, Names app only).** The wallet can hold up to 16 LEZ
+zones. A zone is one chain, known by its channel (`getChannelId`, 64 hex), with
+one sequencer URL in use. The first zone is `home`: the registry is read there
+whichever zone is in use, and a method that registers or changes a name answers
+`success: false` while another zone is in use. An added zone's id is its
+channel, and it has a CLI wallet folder of its own
+(`<config dir>/zones/<channel>/wallet`, made with `cli_create_wallet` while
+that zone is in use, with its own recovery phrase). One zone is in use at a
+time, and `sequencer`, `cli_wallet` and `token_program` in `get_config` are
+that zone's. `get_config` also has `names_sequencer` (home's, where names are
+read) and `zone`: `{"id", "name", "channel", "home"}` (`name` only for the
+Names app).
+
+| Method | `value` |
+|---|---|
+| `zone_list()` | `{"zones": [{"id", "name", "channel", "sequencer", "home", "current", "wallet_dir", "has_wallet", "token_program"}], "current", "max"}` |
+| `zone_add(name, sequencer)` | as `zone_list`, with `added`, the new zone's id. The sequencer is asked its channel. Refused if it doesn't answer, serves a zone already here, or home's own channel isn't known yet. Not in use until `zone_use` |
+| `zone_use(zone)` | as `zone_list`. Remembered across restarts. Refused while a wallet job runs |
+| `zone_remove(zone)` | as `zone_list`, with `removed`: `{"name", "channel", "wallet_dir"}`. Refused for home and for the zone in use. The wallet folder stays on disk, and adding the zone again uses it |
+| `zone_rename(zone, name)` | as `zone_list` |
+| `zone_sequencer(zone, url, other_chain_ok)` | as `zone_list`, with `changed: true` and `channel`, when the sequencer at `url` names the zone's own channel: the wallet, accounts and history stay as they are. One that names another chain, or doesn't answer while the zone's channel is known, is refused and nothing changes. Home with no wallet yet takes whatever chain the sequencer serves. For home with a wallet and a chain no zone here has, the value is `{"changed": false, "other_chain": true, "channel", "why"}`, and the same call with `other_chain_ok` true makes that chain home |
+
+`set_sequencer(url)` changes the sequencer of the zone in use by the same
+rules, and returns false where `zone_sequencer` would refuse. History entries
+made on an added zone carry `zone` (its channel); `activity` lists an account's
+LEZ entries for the zone in use only, and adds `zone_name` when more than one
+zone is set up (`null` for a zone since removed). The zones are saved in
+`config.json` (`zones`, `zone`); the flat `sequencer`, `registry` and
+`cli_wallet` fields stay home's, so an earlier version reads the file as
+before.
 
 **Changing.** The module holds no keys. It builds the instruction with the actors
 and seeds of section 8.3, checks it against the chain, and hands it to the `names`

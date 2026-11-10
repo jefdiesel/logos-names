@@ -1,0 +1,129 @@
+lp22-inscribe-e2e  2026-11-09T14:30:45Z  host minim4-5
+  work dir  /Volumes/exos162/logos/dev/lp22/inscribe/e2e
+  ports     net 3940 (udp), blend 3941, http 127.0.0.1:3942
+  logosctl  /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/bin/logosctl (logosctl version 0.3.2)
+  module    /Volumes/exos162/logos/dev/chain-ipc/real-module/blockchain_module (blockchain_module 0.3.4)
+  names     /nix/store/lr4qacv59bvlp3mcjsg0k6n2rfdlyraj-logos-names-module-lib-lgx-0.15.3
+            lgx sha256 6a3b44560b64b26f9635184e8bfe67858030ff9e0d15665a3af4eb7f4d460a08
+deployment.yaml: OK
+standalone-node-config.yaml: OK
+Daemon started (pid 25273)
+Logs: /Volumes/exos162/logos/dev/lp22/inscribe/e2e/session/logs/daemon.log
+
+== session
+    install names: exit 0
+    module load blockchain_module: {"dependencies_loaded":[],"module":"blockchain_module","status":"ok","version":"0.3.4"}
+    module load names: {"dependencies_loaded":[],"module":"names","status":"ok","version":"0.15.3"}
+PASS session loads blockchain_module 0.3.4 and names — names 0.15.3
+
+== refusal: node not started
+    names chain_inscribe plan: ERR Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.
+PASS refusal: node not started
+
+== solo node
+    gen-args.json: {"skip_ibd": true, "net_port": 3940, "blend_port": 3941, "http_addr": "127.0.0.1:3942", "output": "user_config.yaml", "use_persistence_paths": true}
+
+== ISOLATION (before anything moves)
+    /Volumes/exos162/logos/dev/lp22/inscribe/e2e/session/data/blockchain_module/351f0b5a9f4c/user_config.yaml, in full:
+      | network:
+      |   backend:
+      |     swarm:
+      |       port: 3940
+      | blend:
+      |   core:
+      |     backend:
+      |       listening_address: /ip4/0.0.0.0/udp/3941/quic-v1
+      | api:
+      |   backend:
+      |     listen_address: 127.0.0.1:3942
+      | tracing:
+      |   logger:
+      |     file:
+      |       directory: /Volumes/exos162/logos/dev/lp22/inscribe/e2e/session/data/blockchain_module/351f0b5a9f4c/logs
+      |       prefix: node.log
+      |       appender_type: Simple
+      | state:
+      |   base_folder: /Volumes/exos162/logos/dev/lp22/inscribe/e2e/session/data/blockchain_module/351f0b5a9f4c/state
+      | cryptarchia:
+      |   service:
+      |     bootstrap:
+      |       prolonged_bootstrap_period: 5s
+    grep -i -E 'peer|ibd' user_config.yaml: (no match)
+    start: null
+    get_cryptarchia_info: {"height": 1, "lib": "6c0cba559465e59ef5a7a9cf75fc6fdc6bd3b46d233d588c3442dcf74efd470b", "lib_slot": 0, "mode": "Online", "slot": 15953807, "tip": "db332927e2aa6d7db81b9a561f2d08b0e2c1668d11daeb0c8b03e611bc992581"}
+    get_network_info: {"n_connections": 0, "n_discovered_peers": 0, "n_peers": 0, "n_pending_connections": 0}
+    node log: WARN logos_blockchain::chain::network::bootstrap::ibd: Skipping IBD as no peers are configured
+PASS ISOLATION: no peers configured, IBD skipped, zero peers and connections
+
+== chain_inscribe plan (send=false), twice
+    names chain_inscribe A plan: {"balance": "100000", "bytes": 114, "channel": "5805fce0b88c6811860828956eeab57bc2bc07e54e1dd0ba95e95dd72dfe6d85", "fee": null, "fee_estimate": "1129", "first": true, "from": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07", "hash": null, "msg_id": "326a33b8937551dab1b733c283217b2eb77fefbecde8e2b17b4ee7e1cdcb3e00", "parent": "0000000000000000000000000000000000000000000000000000000000000000", "signer": "03778ed50665faf5fe11ff929eb5d0d3466475fc4294092c545fc411abe76c47", "submission": "lp-0022:names-wallet", "text": "Names puts my Logos Blockchain keys and my LEZ names in one wallet."}
+    node get_channel_state of the plan's channel: ERR No channel found for id ChannelId([88, 5, 252, 224, 184, 140, 104, 17, 134, 8, 40, 149, 110, 234, 181, 123, 194, 188, 7, 229, 78, 29, 208, 186, 149, 233, 93, 215, 45, 254, 109, 133])
+PASS plan: a first inscription into the key's own channel, which the node doesn't have yet — channel 5805fce0b88c6811…, signer 03778ed50665faf5…
+PASS plan: the inscription is the testimonial's JSON, its fee from the node's funding — fee_estimate 1129, balance 100000 = node 100000
+PASS plan moves nothing: a second plan of it gives the same fee, the node's balance and notes unchanged — A 100000 -> 100000, notes 1 -> 1
+    names chain_inscribe A plan of another text, at once: ERR Your node is holding this key's notes for the inscription it priced a moment ago, and lets them go once 10 more blocks are final (under a minute on a test node, a few minutes on the testnet). Try again then. Nothing was sent.
+    node wallet_fund_tx from A, asked directly: ERR Failed to fund tx: Wallet does not have enough funds, available=0
+PASS the node holds the plan's notes: a funding from A is refused by the node itself, and names says it is held, not short — Failed to fund tx: Wallet does not have enough funds, available=0
+
+== chain_inscribe (send=true): the first inscription
+    names chain_inscribe A send: {"balance": "100000", "bytes": 114, "channel": "5805fce0b88c6811860828956eeab57bc2bc07e54e1dd0ba95e95dd72dfe6d85", "fee": "1129", "fee_estimate": "1129", "first": true, "from": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07", "hash": "dbf399f20c65310178fcbc5f308da54f385fa96a262e0a4709e83a8fb5ce21f5", "msg_id": "326a33b8937551dab1b733c283217b2eb77fefbecde8e2b17b4ee7e1cdcb3e00", "parent": "0000000000000000000000000000000000000000000000000000000000000000", "signer": "03778ed50665faf5fe11ff929eb5d0d3466475fc4294092c545fc411abe76c47", "submission": "lp-0022:names-wallet", "text": "Names puts my Logos Blockchain keys and my LEZ names in one wallet."}
+PASS send: a hash, the fee it pays — hash dbf399f20c65310178fcbc5f308da54f385fa96a262e0a4709e83a8fb5ce21f5, fee 1129 (plan said about 1129)
+    node get_channel_state after: {"accredited_keys": ["03778ed50665faf5fe11ff929eb5d0d3466475fc4294092c545fc411abe76c47"], "config_tip_hash": "0000000000000000000000000000000000000000000000000000000000000000", "configuration_threshold": 1, "posting_timeframe": 0, "posting_timeout": 0, "tip_message": "326a33b8937551dab1b733c283217b2eb77fefbecde8e2b17b4ee7e1cdcb3e00", "tip_sequencer": 0, "tip_sequencer_starting_slot": 15953808, "tip_slot": 15953808, "transfer_threshold": 1}
+PASS node: the channel now exists, written only by the account's inscription key, its tip this inscription — accredited ['03778ed50665faf5fe11ff929eb5d0d3466475fc4294092c545fc411abe76c47'], tip 326a33b8937551da…
+    node get_transaction: {"mantle_tx": {"ops": [{"opcode": 17, "payload": {"channel_id": "5805fce0b88c6811860828956eeab57bc2bc07e54e1dd0ba95e95dd72dfe6d85", "inscription": "7b227375626d697373696f6e223a226c702d303032323a6e616d65732d77616c6c6574222c2274657874223a224e616d65732070757473206d79204c6f676f7320426c6f636b636861696e206b65797320616e64206d79204c455a206e616d657320696e206f6e652077616c6c65742e227d", "parent": "0000000000000000000000000000000000000000000000000000000000000000", "signer": "03778ed50665faf5fe11ff929eb5d0d3466475fc4294092c545fc411abe76c47"}}, {"opcode": 0, "payload": {"inputs": ["f08aaa6388c8aa77e71fbc3a2a2b3edea5684e3b80bd7e778b8755bc893c0b0f"], "outputs": [{"pk": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07", "value": 98871}]}}]}, "ops_proofs": [{"Ed25519Sig": "6e42e99884a46593db79c74acd49c70b796bc6ef9bd56f46146d0f9d9e35e6d930093b694dde831de8f6feee7f47e904d36341b677df1806bfb8dd08edbb170e"}, {"ZkSig": {"pi_a": "1f7d457b503f5204d38a81c16e7f657687fef6a59be0a20e76c5bedbbac0f586", "pi_b": "5fb1dedfbf07b7a67a35ac2a192751188ab8bbf4e401b674a8b0c1e6b59bee2c095c2ccbfcef23dd46a027f69ccdac0728a8089dbdb9c95c51af6fd22267e7a3", "pi_c": "baef0bc4424ca013158cc9f39554965620ea3cc8af57e0fca726797d32303118"}}]}
+PASS node: the transaction holds the inscription, the testimonial's JSON, signed by that key
+PASS node: the fee came from the chosen key, as names reported: inputs less change, gone from its wallet — names fee 1129, node 1129; A 100000 -> 98871; estimate 1129
+    node get_blocks(15953808, 15953808): a block with a transaction hashing to dbf399f20c653101…
+PASS node: read back from the block it stored, the inscription says what was written — slot 15953808: {"submission":"lp-0022:names-wallet","text":"Names puts my Logos Blockchain keys and my LEZ names in one wallet."}
+    names chain_tx: {"fee": "1129", "hash": "dbf399f20c65310178fcbc5f308da54f385fa96a262e0a4709e83a8fb5ce21f5", "state": "in_block"}
+PASS chain_tx follows it: in_block with the fee paid
+
+== a second inscription chains on the channel's tip
+    names chain_inscribe A plan: {"balance": "98871", "bytes": 82, "channel": "5805fce0b88c6811860828956eeab57bc2bc07e54e1dd0ba95e95dd72dfe6d85", "fee": null, "fee_estimate": "1097", "first": false, "from": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07", "hash": null, "msg_id": "8b624827d08947780df94f80703a2813e4a3ece60661dc342fea05bed3c9552c", "parent": "326a33b8937551dab1b733c283217b2eb77fefbecde8e2b17b4ee7e1cdcb3e00", "signer": "03778ed50665faf5fe11ff929eb5d0d3466475fc4294092c545fc411abe76c47", "submission": "lp-0022:names-wallet", "text": "Second one: it chains on the first."}
+PASS plan: not first, its parent the channel's tip as the node has it
+    names chain_inscribe A send: {"balance": "98871", "bytes": 82, "channel": "5805fce0b88c6811860828956eeab57bc2bc07e54e1dd0ba95e95dd72dfe6d85", "fee": "1097", "fee_estimate": "1097", "first": false, "from": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07", "hash": "c43beab13c38e0c88e3d3176194e0e61e98f60e811402c5cab83cebad2ff0913", "msg_id": "8b624827d08947780df94f80703a2813e4a3ece60661dc342fea05bed3c9552c", "parent": "326a33b8937551dab1b733c283217b2eb77fefbecde8e2b17b4ee7e1cdcb3e00", "signer": "03778ed50665faf5fe11ff929eb5d0d3466475fc4294092c545fc411abe76c47", "submission": "lp-0022:names-wallet", "text": "Second one: it chains on the first."}
+PASS node: the second is the channel's tip, its parent the first, in a block — tip 8b624827d0894778…
+
+== another chain account inscribes into its own channel
+    names chain_inscribe B send: {"balance": "5100", "bytes": 66, "channel": "76d3bb4b36dabaaf4bf00d4854abdd208dc1deb40446d9376c54505403dea374", "fee": "1081", "fee_estimate": "1081", "first": true, "from": "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225", "hash": "4a37f812a75e1cbc02e91ee5a7773eb171913f613233dbe2fcac1499daf3defd", "msg_id": "9ea15171406285fcafe37029b5e3a99b39d5e60b3747ef8a2e328b1a69023a59", "parent": "0000000000000000000000000000000000000000000000000000000000000000", "signer": "2e62926fb296d535088ae4660860f92929aa21844c5d86d0f7359ea122eaf225", "submission": "lp-0022:names-wallet", "text": "From the other key."}
+PASS node: B's inscription is in B's own channel under B's own key, its fee from B — B 5100 -> 4019, fee 1081
+
+== provider: propose_inscription -> pending_inscriptions -> approve_inscription
+    names propose_inscription: {"account": null, "chain": "logos", "channel": null, "created": 1794234724772, "decided": null, "error": null, "expires": 1794235324772, "fee": null, "kind": "inscribe", "msg_id": null, "request": "0cc22843f6915171d02764ce3e793746", "says": "inscribes on the Logos blockchain", "state": "pending", "submission": "lp-0022:names-wallet", "text": "Asked for by an app, approved in the Names app.", "tx": null}
+PASS propose_inscription: a pending request of kind inscribe
+    names pending_inscriptions: [{"app": "host", "chain": "logos", "choices": [{"balance": "4019", "key": "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225"}, {"balance": "91940", "key": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07"}], "created": 1794234724772, "expires": 1794235324772, "id": "0cc22843f6915171d02764ce3e793746", "kind": "inscribe", "publisher": null, "says": "inscribes on the Logos blockchain", "state": "pending", "submission": "lp-0022:names-wallet", "text": "Asked for by an app, approved in the Names app."}]
+PASS pending_inscriptions: the sheet's facts (app, text, what it does) and the node's own keys as choices, with their balances — 2 keys held by the node
+    names approve_inscription (account A): {"account": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07", "chain": "logos", "channel": "5805fce0b88c6811860828956eeab57bc2bc07e54e1dd0ba95e95dd72dfe6d85", "created": 1794234724772, "decided": 1794234725442, "error": null, "expires": 1794235324772, "fee": "1109", "kind": "inscribe", "msg_id": "8d2b797b05b71c6cb18bf4604e569cc7b825499c98bb14d5a098682ef4a07cba", "request": "0cc22843f6915171d02764ce3e793746", "says": "inscribes on the Logos blockchain", "state": "done", "submission": "lp-0022:names-wallet", "text": "Asked for by an app, approved in the Names app.", "tx": "744bfc3cf7267414e392640f4814965c60c6c7ca26204ad89e45886e0783aeb4"}
+PASS approve_inscription: inscribed from the chosen account, in a block, the channel's tip, fee as estimated — tx 744bfc3cf7267414…, fee 1109 (estimate 1109)
+    names request_status: {"account": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07", "app": "host", "chain": "logos", "channel": "5805fce0b88c6811860828956eeab57bc2bc07e54e1dd0ba95e95dd72dfe6d85", "created": 1794234724772, "decided": 1794234725442, "error": null, "expires": 1794235324772, "fee": "1109", "job": null, "kind": "inscribe", "msg_id": "8d2b797b05b71c6cb18bf4604e569cc7b825499c98bb14d5a098682ef4a07cba", "problem": null, "request": "0cc22843f6915171d02764ce3e793746", "says": "inscribes on the Logos blockchain", "state": "done", "submission": "lp-0022:names-wallet", "text": "Asked for by an app, approved in the Names app.", "tx": "744bfc3cf7267414e392640f4814965c60c6c7ca26204ad89e45886e0783aeb4"}
+PASS request_status: done, with the transaction's hash
+PASS approve_inscription twice is refused — that request is done already
+PASS approve_inscription with a key the node doesn't hold is refused and stays pending — ababab…abab isn't an account your node's wallet holds
+
+== after the names module reloads
+    names chain_inscribe A plan: {"balance": "90831", "bytes": 61, "channel": "5805fce0b88c6811860828956eeab57bc2bc07e54e1dd0ba95e95dd72dfe6d85", "fee": null, "fee_estimate": "1076", "first": false, "from": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07", "hash": null, "msg_id": "dea15e4f70c89dff0d3f7bdc56e737839e11a33d8120893287eb6fd7c47af455", "parent": "8d2b797b05b71c6cb18bf4604e569cc7b825499c98bb14d5a098682ef4a07cba", "signer": "03778ed50665faf5fe11ff929eb5d0d3466475fc4294092c545fc411abe76c47", "submission": "lp-0022:names-wallet", "text": "after a reload"}
+    names chain_tx H1: {"fee": "1129", "hash": "dbf399f20c65310178fcbc5f308da54f385fa96a262e0a4709e83a8fb5ce21f5", "state": "in_block"}
+PASS reload: the approved request is still done with its hash
+PASS reload: the same key and channel, the parent the node's tip; chain_tx still knows the first
+
+== the inscription keys stay private
+PASS keys file is 0600, holds one key per account used, and no secret is in any reply or the daemon log — mode 0o600, 2 keys, 0 leaked
+
+== refusals
+    names chain_inscribe a key the node can't read: ERR That isn't a Logos Blockchain public key: check it and try again.
+PASS refusal: a key the node can't read
+    names chain_inscribe no text: ERR a testimonial needs some text
+PASS refusal: no text
+    names chain_inscribe text over 1,024 bytes: ERR a testimonial holds at most 1024 bytes of text
+PASS refusal: text over 1,024 bytes
+PASS refusal: no inscription key is made for a key the node can't read
+
+== refusal: node stopped
+    names chain_inscribe plan: ERR Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.
+PASS refusal: node stopped, chain_inscribe says so as the node does
+
+== stopping the session
+{"message":"Daemon shutting down.","status":"ok"}
+PASS session stopped — pgrep -fl /Volumes/exos162/logos/dev/lp22/inscribe/e2e prints nothing
+RESULT 30 PASS, 0 FAIL (+ session stop above)
+exit 0

@@ -6,6 +6,10 @@
 // (granted_accounts), approval and the transaction (propose_call, request_status). This
 // app never sees a key. The person approves the call in the Names app.
 //
+// A testimonial can also be inscribed on the Logos Blockchain itself
+// (propose_inscription): the Names app then asks which of the node's chain accounts
+// inscribes it and pays the fee, so that path needs no connection first.
+//
 // Reads are plain sequencer reads (`getAccountView`), as the `testimonial` client makes
 // them. Basecamp gives a QML view no network, so this app's small backend
 // (src/testimonial_ui_backend.cpp) makes each read; it holds no key.
@@ -30,15 +34,22 @@ Item {
     property string submission: Logic.DEFAULT_SUBMISSION
     property bool settingsOpen: false
 
+    // Where the testimonial is written: "lez" (the testimonial program on the LEZ zone)
+    // or "chain" (an inscription on the Logos Blockchain).
+    property string target: "lez"
+
     // ── Wallet state (Provider SDK) ─────────────────────────────────────────
     property var granted: []            // [{account, account_kind}] this app was given
     property bool connected: false
     property string author: ""          // the account picked in this app: Public/<id>
     property string requestId: ""       // the request being waited on
-    property string requestKind: ""     // connect or call
+    property string requestKind: ""     // connect, call or inscribe
     property var request: null          // its last status
     property double postDeadline: 0     // when the post's time window closes (ms)
     property var lastPost: null         // {account, tx, node} of the post this app last sent
+    property string askedBody: ""       // the text of the request being waited on, as sent
+    property bool statusAsked: false    // a status read is out: the next waits for its answer
+    property int statusMisses: 0        // status reads in a row that got no answer
 
     // ── Compose ─────────────────────────────────────────────────────────────
     property string username: ""
@@ -59,7 +70,7 @@ Item {
     readonly property var postable: Logic.postingAccounts(granted)
     readonly property bool waiting: requestId !== "" && (request === null || request.state === "pending" || request.state === "running")
     readonly property string usernameProblem: Logic.usernameProblem(username)
-    readonly property string textProblem: body === "" ? "" : Logic.textProblem(body)
+    readonly property string textProblem: body === "" ? "" : target === "chain" ? Logic.inscriptionProblem(body) : Logic.textProblem(body)
     readonly property string submissionProblem: Logic.submissionProblem(submission)
     readonly property bool programOk: Logic.isAccount(program)
     readonly property int textBytes: Logic.utf8(body).length
@@ -93,7 +104,11 @@ Item {
             var r = null
             try { r = JSON.parse(reply) } catch (error) {}
             if (r && typeof r === "string") { try { r = JSON.parse(r) } catch (error) {} }
-            if (!r || r.success === undefined)
+            // No reply at all is a call that waited past its time: the module answers one
+            // call at a time. `true` tells the caller so.
+            if (reply === undefined || reply === null || String(reply) === "")
+                (failed || fail)("The names module is busy and didn't answer in time.", true)
+            else if (!r || r.success === undefined)
                 (failed || fail)("The names module is missing or too old: install Names 0.11.0 or later.")
             else if (!r.success)
                 (failed || fail)(r.error)
@@ -146,6 +161,8 @@ Item {
         requestId = v.request
         requestKind = kind
         request = v
+        statusAsked = false
+        statusMisses = 0
         poll.start()
     }
 
@@ -153,18 +170,42 @@ Item {
         id: poll
         interval: 2000
         repeat: true
-        onTriggered: root.names("request_status", [root.requestId], function(v) {
-            root.request = v
-            if (v.state === "pending" || v.state === "running") return
-            poll.stop()
-            if (root.requestKind === "connect" && v.state === "approved")
-                root.readGranted()
-            if (root.requestKind === "call" && v.state === "done") {
-                root.lastPost = { account: v.account, tx: v.tx, node: root.lastPost ? root.lastPost.node : "" }
-                textArea.text = ""
-                root.refresh()
-            }
-        }, function(message) { poll.stop(); root.fail(message) })
+        onTriggered: {
+            if (root.statusAsked) return
+            root.statusAsked = true
+            var asked = root.requestId
+            root.names("request_status", [asked], function(v) {
+                // An answer about a request this app has since replaced says nothing now.
+                if (asked !== root.requestId) return
+                root.statusAsked = false
+                root.statusMisses = 0
+                root.request = v
+                if (v.state === "pending" || v.state === "running") return
+                poll.stop()
+                if (root.requestKind === "connect" && v.state === "approved")
+                    root.readGranted()
+                if (root.requestKind === "call" && v.state === "done") {
+                    root.lastPost = { account: v.account, tx: v.tx, node: root.lastPost ? root.lastPost.node : "" }
+                    root.clearSent()
+                    root.refresh()
+                }
+                if (root.requestKind === "inscribe" && v.state === "done")
+                    root.clearSent()
+            }, function(message, unanswered) {
+                if (asked !== root.requestId) return
+                root.statusAsked = false
+                // While the wallet sends an approved request (minutes, for an inscription)
+                // the module answers nothing else: that is not a failure, so keep asking.
+                if (unanswered && ++root.statusMisses <= 20) return
+                poll.stop()
+                root.fail(message)
+            })
+        }
+    }
+
+    /// Empties the text box once its text was sent, unless something else was typed since.
+    function clearSent() {
+        if (textArea.text === askedBody) textArea.text = ""
     }
 
     function cancel() {
@@ -228,6 +269,7 @@ Item {
                 try { if (!clockError && clock.length === 16) chainTime = Logic.clockTime(clock) } catch (e) {}
                 var now = Logic.postTime(chainTime, Date.now())
                 var made = Logic.postCall(program, submission, username, body, now, author)
+                askedBody = body
                 names("propose_call", [made.program, made.accounts_json, made.instruction_hex,
                                        Logic.postSummary(submission, author, body)], function(v) {
                     checking = false
@@ -236,6 +278,22 @@ Item {
                     follow(v, "call")
                 })
             })
+        })
+    }
+
+    /// Asks the Names Wallet to inscribe the testimonial on the Logos Blockchain. The
+    /// person picks the chain account that pays and approves it in the Names app; this
+    /// app names no account and needs no access for it.
+    function inscribe() {
+        problem = ""
+        var p = Logic.inscriptionProblem(body)
+        if (p) { problem = p; return }
+        checking = true
+        askedBody = body
+        names("propose_inscription", [body], function(v) {
+            checking = false
+            postDeadline = 0
+            follow(v, "inscribe")
         })
     }
 
@@ -317,9 +375,31 @@ Item {
                 Action { label: "Use these"; strong: true; onPressed: { root.listing = null; root.refresh(); root.settingsOpen = false } }
             }
 
+            // Where it's written.
+            Panel {
+                title: "Where to write it"
+                Repeater {
+                    model: Logic.TARGETS
+                    delegate: Choice {
+                        required property var modelData
+                        Layout.fillWidth: true
+                        label: modelData.label
+                        sub: modelData.sub
+                        plain: true
+                        chosen: root.target === modelData.key
+                        onPressed: if (!root.waiting && !root.checking) { root.target = modelData.key; root.problem = "" }
+                    }
+                }
+                Hint {
+                    visible: root.target === "chain"
+                    text: "No connection is needed for this: when you ask, the Names app shows the words, lets you choose which of your node's Logos Blockchain accounts pays the fee, and inscribes it only once you approve. An inscription is public and can't be changed or removed."
+                }
+            }
+
             // 1. Connect.
             Panel {
                 title: "1. Connect your Names Wallet"
+                visible: root.target === "lez"
                 Hint {
                     text: root.connected
                         ? "Connected. This app may see: " + root.granted.map(function(a) { return Logic.short(a.account) }).join(", ") + "."
@@ -340,7 +420,7 @@ Item {
             // 2. Account selection.
             Panel {
                 title: "2. Choose the account that posts"
-                visible: root.connected
+                visible: root.target === "lez" && root.connected
                 Hint {
                     text: root.postable.length === 0
                         ? "Give this app a public account (Add an account). A testimonial comes from a public account: one per account, and the program refuses a private sender's one-time alias."
@@ -360,21 +440,32 @@ Item {
 
             // 3. Write it.
             Panel {
-                title: "3. Write your testimonial"
-                visible: root.connected && root.postable.length > 0
-                Hint { text: "Name to show (optional, up to 32 bytes; anyone can type any name, so it isn't proof of who you are)" }
-                Field { Layout.fillWidth: true; text: root.username; onEdited: root.username = text; onTextChanged: root.username = text }
-                Bad { text: root.usernameProblem }
-                Hint { text: "Testimonial for " + root.submission + " (" + root.textBytes + " / " + Logic.MAX_TEXT + " bytes)" }
+                title: root.target === "chain" ? "Write your testimonial" : "3. Write your testimonial"
+                visible: root.target === "chain" || (root.connected && root.postable.length > 0)
+                Hint { visible: root.target === "lez"; text: "Name to show (optional, up to 32 bytes; anyone can type any name, so it isn't proof of who you are)" }
+                Field { visible: root.target === "lez"; Layout.fillWidth: true; text: root.username; onEdited: root.username = text; onTextChanged: root.username = text }
+                Bad { text: root.target === "lez" ? root.usernameProblem : "" }
+                Hint {
+                    text: (root.target === "chain" ? "Testimonial for the Names Wallet" : "Testimonial for " + root.submission)
+                        + " (" + root.textBytes + " / " + Logic.MAX_TEXT + " bytes)"
+                }
                 Area { id: textArea; Layout.fillWidth: true; onTextChanged: root.body = text }
                 Bad { text: root.textProblem }
                 RowLayout {
                     spacing: 12
                     Action {
+                        visible: root.target === "lez"
                         label: root.checking ? "Checking…" : "Post with " + Logic.short(root.author)
                         strong: true
                         enabledNow: !root.checking && !root.waiting && root.author !== ""
                         onPressed: root.post()
+                    }
+                    Action {
+                        visible: root.target === "chain"
+                        label: root.checking ? "Asking…" : "Ask the Names app to inscribe it"
+                        strong: true
+                        enabledNow: !root.checking && !root.waiting && root.body !== "" && root.textProblem === ""
+                        onPressed: root.inscribe()
                     }
                 }
                 Bad { text: root.problem }
@@ -382,7 +473,7 @@ Item {
 
             // 4. Approval and the transaction.
             Panel {
-                title: root.requestKind === "connect" ? "Waiting for the Names app" : "4. Approve in the Names app"
+                title: root.requestKind === "connect" ? "Waiting for the Names app" : root.requestKind === "inscribe" ? (root.waiting ? "Approve in the Names app" : "Your inscription") : "4. Approve in the Names app"
                 visible: root.requestId !== ""
                 Hint {
                     visible: root.requestKind === "call" && root.request !== null && root.request.state === "pending"
@@ -390,35 +481,39 @@ Item {
                         + " to sign: the testimonial's address is that account's, so another account is refused before anything is sent."
                         + (root.postDeadline > 0 ? " The post's time window closes in " + Math.max(0, Math.round((root.postDeadline - root.tick) / 60000)) + " min." : "")
                 }
+                Hint {
+                    visible: root.requestKind === "inscribe" && root.request !== null && root.request.state === "pending"
+                    text: "Open the Names app. It shows these words, your node's Logos Blockchain accounts and the fee your node asks; choose the account that pays and approve. Nothing is inscribed before that."
+                }
                 Status {
-                    text: {
-                        var r = root.request
-                        if (!r) return ""
-                        if (r.state === "pending") return root.requestKind === "connect" ? "Waiting for you to choose accounts in the Names app…" : "Waiting for your approval…"
-                        if (r.state === "running") return "Approved: the wallet is trying the call, then sending it and waiting for its block…"
-                        if (r.state === "approved") return "Connected."
-                        if (r.state === "done") return "Posted from " + r.account + "."
-                        if (r.state === "failed") return "Not posted: " + root.sentence(r.error || "the call failed")
-                        if (r.state === "rejected") return "You declined it in the Names app. Nothing was signed or sent."
-                        if (r.state === "expired") return "Nobody answered within 10 minutes. Nothing was signed or sent."
-                        if (r.state === "cancelled") return "Withdrawn. Nothing was signed or sent."
-                        return r.state
-                    }
-                    tone: root.request && root.request.state === "done" ? root.good
-                        : root.request && /failed|rejected|expired/.test(root.request.state) ? root.alarm : root.ink
+                    readonly property var said: Logic.requestStatus(root.requestKind, root.request)
+                    text: said.text
+                    tone: said.tone === "good" ? root.good : said.tone === "bad" ? root.alarm : root.ink
                 }
                 Hint {
-                    visible: root.request !== null && root.request.state === "failed"
+                    visible: root.requestKind !== "inscribe" && root.request !== null && root.request.state === "failed"
                     text: "If you chose a different account in Names than " + (root.lastPost ? root.lastPost.account : "the one picked here")
                         + ", or the approval came after the time window closed, the wallet refused it before sending: post again. On LEZ a sent call that fails still pays its fee, which is why nothing is retried for you."
                 }
                 Fact { visible: !!(root.request && root.request.tx); label: "Transaction"; value: root.request && root.request.tx ? root.request.tx : "" }
-                Fact { visible: !!(root.request && root.request.state === "done" && root.lastPost && root.lastPost.node); label: "Stored at"; value: root.lastPost ? root.lastPost.node : "" }
+                Fact { visible: root.requestKind === "call" && !!(root.request && root.request.state === "done" && root.lastPost && root.lastPost.node); label: "Stored at"; value: root.lastPost ? root.lastPost.node : "" }
+                Fact { visible: root.requestKind === "inscribe" && !!(root.request && root.request.account); label: root.request && root.request.state === "done" ? "Paid from" : "Account chosen"; value: root.request && root.request.account ? root.request.account : "" }
+                Fact { visible: root.requestKind === "inscribe" && !!(root.request && root.request.fee); label: "Fee paid"; value: root.request && root.request.fee ? Logic.grouped(root.request.fee) : "" }
+                Fact { visible: root.requestKind === "inscribe" && !!(root.request && root.request.channel); label: "Channel"; value: root.request && root.request.channel ? root.request.channel : "" }
+                Fact { visible: root.requestKind === "inscribe" && !!(root.request && root.request.submission); label: "Filed under"; value: root.request && root.request.submission ? root.request.submission : "" }
                 Link { visible: root.waiting && root.request && root.request.state === "pending"; label: "Withdraw the request"; onPressed: root.cancel() }
             }
 
             // The submission's testimonials, read from the chain.
             Panel {
+                visible: root.target === "chain"
+                title: "Reading inscriptions"
+                Hint {
+                    text: "An inscription is read from the Logos Blockchain itself: every account has its own channel, shown here once yours is inscribed, and its transaction shows in the Names app's history. The list of testimonials on the LEZ zone is under “LEZ zone” above."
+                }
+            }
+            Panel {
+                visible: root.target === "lez"
                 title: "Testimonials for " + root.submission
                 Hint {
                     visible: !root.programOk
@@ -632,9 +727,11 @@ Item {
     component Choice: Rectangle {
         id: choice
         property string label: ""
+        property string sub: ""
+        property bool plain: false       // words, not an account ID
         property bool chosen: false
         signal pressed()
-        implicitHeight: 40
+        implicitHeight: sub !== "" ? 58 : 40
         radius: 6
         color: choiceArea.containsMouse ? root.raised : "transparent"
         border.width: 1
@@ -652,13 +749,27 @@ Item {
                 border.width: 1
                 border.color: choice.chosen ? root.brass : root.dim
             }
-            Text {
+            ColumnLayout {
                 Layout.fillWidth: true
-                text: choice.label
-                color: root.ink
-                font.family: root.mono
-                font.pixelSize: root.px(14)
-                elide: Text.ElideMiddle
+                spacing: 2
+                Text {
+                    Layout.fillWidth: true
+                    text: choice.label
+                    color: root.ink
+                    font.family: choice.plain ? root.sans : root.mono
+                    font.pixelSize: choice.plain ? root.px(16) : root.px(14)
+                    font.weight: choice.plain ? Font.DemiBold : Font.Normal
+                    elide: choice.plain ? Text.ElideRight : Text.ElideMiddle
+                }
+                Text {
+                    visible: choice.sub !== ""
+                    Layout.fillWidth: true
+                    text: choice.sub
+                    color: root.dim
+                    font.family: root.sans
+                    font.pixelSize: root.px(14)
+                    elide: Text.ElideRight
+                }
             }
         }
         MouseArea { id: choiceArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: choice.pressed() }

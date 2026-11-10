@@ -372,16 +372,44 @@ export function walletGroups(cliBalance, accounts, holdings, watched, tokenNames
 
     if (chainAccounts || chainDown) {
         var keys = (chainAccounts || []).map(function(a) {
-            return { id: "chain-" + a.key, kind: "chain", title: "Node key", sub: "Public · " + keyShown(a.key), address: a.key,
-                     balance: a.balance === null || a.balance === undefined ? null : String(a.balance), fromPrivate: false, definition: "", key: a.key, canSend: true, account: "" }
+            return { id: "chain-" + a.key, kind: "chain", title: chainKeyTitle(a), sub: chainKeySub(a), address: a.key,
+                     balance: a.balance === null || a.balance === undefined ? null : String(a.balance), fromPrivate: false, definition: "", key: a.key, canSend: a.ready !== false,
+                     later: a.ready === false, account: "" }
         })
+        var later = keys.filter(function(r) { return !r.canSend }).length
         var total = chainAccounts ? keys.reduce(function(sum, r) { return sum === null || r.balance === null ? sum : addDigits(sum, r.balance) }, "0") : null
         var waiting = stake && total !== null ? subDigits(total, stake.staked) : null
         var note = chainDown ? "Node not running" : (keys.length === 1 ? "1 key on your node" : keys.length + " keys on your node")
+            + (later === 0 ? "" : " · " + later + " from its next start")
             + (stake === null || stake === undefined || total === null ? "" : waiting === "0" ? " · all staked" : waiting !== null ? " · " + grouped(waiting) + " not counted yet" : " · " + grouped(stake.staked) + " staked")
         groups.push({ id: "chain", title: "Logos Blockchain", letter: "B", total: total, note: note, tone: chainDown ? "alarm" : stake ? "stake" : "plain", rows: keys })
     }
     return groups
+}
+
+/// A Logos Blockchain account's title: its label, else what it is.
+/// `a` is a chain_accounts row ({key, balance, label?, title?, ready?}).
+export function chainKeyTitle(a) {
+    var label = String(a && a.label ? a.label : "").trim()
+    return label !== "" ? label : a && a.title ? "Account" : "Node key"
+}
+
+/// A Logos Blockchain account's second line: the key, and when the node uses it.
+export function chainKeySub(a) {
+    return "Public · " + keyShown(a.key) + (a.ready === false ? " · your node uses it from its next start" : "")
+}
+
+/// Why an account the node takes at its next start offers no address, Receive or Bridge yet.
+export function chainLaterNote() {
+    return "Your node uses this account from its next start: stop and start it in Basecamp's Blockchain app. "
+        + "Until then it can't send, and don't have anything sent to it: what reaches it before your node uses it isn't seen. "
+        + "Its address, Receive and Bridge show here once your node uses it."
+}
+
+/// The chain_accounts rows the node uses now (not one it takes at its next start), or
+/// null while they haven't been read.
+export function chainUsable(chainAccounts) {
+    return chainAccounts ? chainAccounts.filter(function(a) { return a.ready !== false }) : null
 }
 
 /// The Staking table: what the node holds, what is staked, what isn't counted yet.
@@ -444,6 +472,7 @@ export function activityLine(entry, now, account) {
     var title = "", sub = "", sign = "-"
     switch (kind) {
     case "send": title = "Sent on the Logos Blockchain"; sub = "to " + (e.name ? e.name : whoShown(e.to)); break
+    case "inscribe": title = "Inscribed a testimonial"; sub = "on the Logos Blockchain, from " + whoShown(e.from); sign = ""; break
     case "split": title = "Made a note of exactly " + amount; sub = "on " + whoShown(e.from) + (e.fee ? " · fee " + grouped(e.fee) : ""); sign = ""; break
     case "bridge": title = "Bridge to LEZ"; sub = "from " + whoShown(e.from) + " into " + whoShown(e.to); break
     case "pay": title = "Paid " + (e.name || "a name"); sub = "on LEZ"; break
@@ -492,6 +521,12 @@ export function activityLine(entry, now, account) {
     // Money came in only once it landed; a failed or unknown change moved nothing known.
     if ((sign === "+" && !landedIn(e)) || e.state === "failed" || e.state === "unknown")
         sign = ""
+    // Which zone, once there is more than one to tell apart (the module gives `zone_name`
+    // then; null for a zone removed since).
+    if (typeof e.zone_name === "string" && e.zone_name !== "")
+        sub += (sub ? " · " : "") + "zone " + e.zone_name
+    else if (e.zone_name === null && e.zone)
+        sub += (sub ? " · " : "") + "a zone removed since"
     return { title: title, sub: sub, amount: amount, sign: amount === "" ? "" : sign, state: stateText, tone: tone, ago: agoShown(e.at, now) }
 }
 
@@ -574,12 +609,86 @@ function accountSide(e, kind, page) {
 
 /// The entries that involve `who` (a LEZ account, a node key or a name): as payer, payee,
 /// name, or an account a claim credited.
-export function activityFor(rows, who) {
+export function activityFor(rows, who, zone) {
     var list = Array.isArray(rows) ? rows : []
+    // The same keys make the same LEZ account ID on every zone, and what it holds there
+    // is other money: a LEZ account's page lists the zone in use (`zone`) only.
+    var lezPage = zone !== undefined && /^(Public|Private)\//.test(String(who))
     return list.filter(function(e) {
+        if (lezPage && (e.chain === "lez" || e.kind === "bridge") && (e.zone || "home") !== zone)
+            return false
         var credited = e.received && typeof e.received === "object" && Object.prototype.hasOwnProperty.call(e.received, who)
         var waiting = e.left && typeof e.left === "object" && Object.prototype.hasOwnProperty.call(e.left, who)
         return e.from === who || e.to === who || e.name === who || credited || waiting
     })
 }
 
+
+/// A Logos Blockchain plan's fee for its confirm step: the node's own figure for this
+/// very transaction (`fee_about`, decimal text, from chain_send / chain_split / chain_bridge
+/// plans) or, without one, when the fee will be known.
+export function chainFeeLine(plan) {
+    if (!plan)
+        return ""
+    if (plan.in_flight === true)
+        return "Another transfer from this key is still waiting to land, and its notes can't be spent twice. Wait a minute for it to land, then try again."
+    if (plan.cannot_pay_fee === true)
+        return "That key's notes can't pay this amount and its fee: send a little less."
+    if (/^\d+$/.test(String(plan.fee_about)))
+        return "About " + groupDigits(plan.fee_about) + ", paid from the key's notes: your node's figure at its gas prices now. The fee paid is shown once it's sent."
+    return "Your node couldn't say in advance. The fee paid is shown once it's sent."
+}
+
+/// What one leader-reward claim costs, from chain_claim's plan: its `fee_about` beside the
+/// one reward it cashes, with the module's `warning` when the fee is more.
+export function claimFeeLine(plan) {
+    if (!plan || !/^\d+$/.test(String(plan.fee_about)))
+        return ""
+    var line = "Each claim costs about " + groupDigits(plan.fee_about) + " in fees and cashes one reward of " + groupDigits(plan.reward_per_voucher || "0") + "."
+    return plan.warning ? line + " " + plan.warning : line
+}
+
+// ── An app's inscription request (Wallet Provider SDK, LP-0022) ───────
+
+/// The heading of an inscription request's sheet.
+export function inscribeTitle(request) {
+    return request ? String(request.app || "An app") + " asks you to inscribe a testimonial on the Logos Blockchain" : ""
+}
+
+/// One chain account offered for an inscription, in words: {title, sub}.
+export function inscribeChoice(choice) {
+    var c = choice || {}
+    return { title: chainKeyTitle(c), sub: keyShown(c.key) + " · holds " + grouped(c.balance || "0") }
+}
+
+/// The account ticked when an inscription request is first seen: the first that holds
+/// anything (an empty one can't pay the fee), or none.
+export function inscribeFirstChoice(choices) {
+    var holding = (choices || []).filter(function(c) { return /^\d+$/.test(String(c.balance)) && !/^0+$/.test(String(c.balance)) })
+    return holding.length > 0 ? holding[0].key : ""
+}
+
+/// The sheet's fee line for the chosen account: {text, tone}. `plan` is chain_inscribe's
+/// plan for it (null while it is read), `problem` why the node refused the plan.
+export function inscribeFee(chosen, plan, problem) {
+    if (!chosen)
+        return { text: "Choose the account that pays it", tone: "plain" }
+    if (problem)
+        return { text: String(problem), tone: "bad" }
+    if (!plan)
+        return { text: "Asking your node…", tone: "plain" }
+    if (/^\d+$/.test(String(plan.fee_estimate)))
+        return { text: "About " + groupDigits(plan.fee_estimate) + ", paid from this account: your node's figure at its gas prices now. The fee paid is shown once it's sent.", tone: "plain" }
+    return { text: "Your node couldn't say in advance. The fee paid is shown once it's sent.", tone: "plain" }
+}
+
+/// Whether the inscription on the sheet may be approved: an account is chosen, the node
+/// priced it for that account (or couldn't say), and nothing is on its way.
+export function inscribeCanApprove(state) {
+    var s = state || {}
+    if (!s.request || s.busy || !s.chosen || s.request.node)
+        return false
+    if (s.risky && !s.understood)
+        return false
+    return !!s.plan && !s.problem
+}

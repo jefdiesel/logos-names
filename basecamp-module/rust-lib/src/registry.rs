@@ -735,10 +735,16 @@ pub fn unhex(text: &str) -> Result<Vec<u8>, String> {
 
 /// The Logos Blockchain channel LEZ takes deposits on, as the sequencer names it
 /// (`getChannelId`): 64 hex characters.
-#[cfg(not(test))]
 pub fn channel_id(sequencer: &str) -> Result<String, String> {
+    channel_id_within(sequencer, Duration::from_secs(15))
+}
+
+/// `channel_id`, waiting at most `wait` for the answer. The channel is also what tells
+/// one LEZ zone from another (`zones`).
+#[cfg(not(test))]
+pub fn channel_id_within(sequencer: &str, wait: Duration) -> Result<String, String> {
     let response = ureq::post(sequencer)
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(wait)
         .send_json(json!({ "jsonrpc": "2.0", "id": 1, "method": "getChannelId", "params": {} }))
         .map_err(|error| format!("could not reach LEZ to ask where deposits go: {error}"))?;
     let reply: Value = response.into_json().map_err(|_| "LEZ's reply about deposits was unreadable".to_owned())?;
@@ -1078,10 +1084,22 @@ pub fn sequencer_reachable(sequencer: &str) -> Result<(), String> {
     }
 }
 
-/// Tests know the channel: a fixed one, never the network.
+/// Tests know the channel, never the network: the one a test gave that sequencer
+/// (`CHANNELS`), or a fixed one.
 #[cfg(test)]
-pub fn channel_id(_sequencer: &str) -> Result<String, String> {
-    Ok("02".repeat(32))
+pub fn channel_id_within(sequencer: &str, _wait: Duration) -> Result<String, String> {
+    CHANNELS_ASKED.with(|asked| asked.set(asked.get() + 1));
+    CHANNELS
+        .with(|known| known.borrow().iter().find(|(url, _)| url == sequencer).map(|(_, channel)| channel.clone()))
+        .unwrap_or_else(|| Ok("02".repeat(32)))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What a test's sequencers say their channel is, by address: a channel, or why not.
+    pub static CHANNELS: std::cell::RefCell<Vec<(String, Result<String, String>)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// How many times a channel was asked for.
+    pub static CHANNELS_ASKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Which LEZ the sequencer at `sequencer` runs (`deposit::lez_of`), so a deposit carries

@@ -35,15 +35,22 @@
 mod activity;
 mod avatar;
 mod chain;
+mod chain_keys;
+mod chain_fee;
+mod chain_inscribe;
 mod changes;
 mod cli;
 mod deposit;
 mod page_view;
 mod provider;
+mod provider_inscribe;
 mod spell;
+mod text;
 mod registry;
 mod shortlist;
 mod wallet;
+mod zones;
+use text::is_http_url;
 
 use changes::{Change, Mention};
 use registry::{AccountId, Derived, Registry, Settings};
@@ -251,9 +258,53 @@ pub trait NamesModule: Send + 'static {
     /// account ID.
     fn set_registry(&mut self, program_id: String) -> bool;
 
-    /// Read from the sequencer at this URL, and remember it across restarts.
-    /// Returns false and changes nothing unless it is an http or https URL.
+    /// Has the zone in use read from the sequencer at this URL, and remembers
+    /// it across restarts (`zone_sequencer` for that zone, without
+    /// `other_chain_ok`). Returns false and changes nothing unless it is an
+    /// https URL (http on this computer) of a sequencer that serves the same
+    /// chain; one that serves another chain is another zone (`zone_add`).
     fn set_sequencer(&mut self, url: String) -> bool;
+
+    // ── Zones (LP-0022) ─────────────────────────────────────────────────
+    //
+    // A zone is one LEZ chain, known by its channel on the Logos Blockchain,
+    // not by its sequencer's address. The first is home, where LNS names are
+    // kept; others are added by a sequencer's address and keep a wallet
+    // folder of their own. One zone is in use at a time: balances, payments,
+    // tokens, bridges and other apps' requests are that zone's, and names stay
+    // readable everywhere. Names app only.
+
+    /// The zones set up here: `{zones: [{id, name, channel, sequencer, home,
+    /// current, wallet_dir, has_wallet, token_program}], current, max}`. A
+    /// zone's `id` is `home`, or its channel.
+    fn zone_list(&mut self) -> String;
+
+    /// Adds the zone the sequencer at `sequencer` serves, called `name` (empty:
+    /// "Zone" and the start of its channel). Refused when the sequencer doesn't
+    /// say its channel, or serves a zone already here. Replies as `zone_list`,
+    /// with `added`, the new zone's id; it isn't in use until `zone_use`.
+    fn zone_add(&mut self, name: String, sequencer: String) -> String;
+
+    /// Uses zone `zone` (an id from `zone_list`) from now on, and remembers it
+    /// across restarts. Refused while a wallet job runs. Replies as `zone_list`.
+    fn zone_use(&mut self, zone: String) -> String;
+
+    /// Forgets zone `zone`: not home, and not the one in use. Its wallet folder
+    /// stays on disk. Replies as `zone_list`, with `removed`: `{name, channel,
+    /// wallet_dir}`.
+    fn zone_remove(&mut self, zone: String) -> String;
+
+    /// Calls zone `zone` `name` from now on. Replies as `zone_list`.
+    fn zone_rename(&mut self, zone: String, name: String) -> String;
+
+    /// Has zone `zone` use the sequencer at `url`. The zone's wallet, accounts
+    /// and history stay as they are, so the sequencer must name the zone's own
+    /// channel; one that names another chain, or doesn't say, is refused and
+    /// nothing changes. Replies as `zone_list`, with `changed: true` and
+    /// `channel`. For home and another chain the reply is `{changed: false,
+    /// other_chain: true, channel, why}`, and asking again with
+    /// `other_chain_ok` makes that chain home.
+    fn zone_sequencer(&mut self, zone: String, url: String, other_chain_ok: bool) -> String;
 
     /// Names the wallet to open when the LEZ wallet module is running with no
     /// wallet open: the paths of its configuration and storage files, as the
@@ -661,8 +712,13 @@ pub trait NamesModule: Send + 'static {
     /// last final block's slot, `mode` the node's (`Online` once synced).
     fn chain_status(&mut self) -> String;
 
-    /// The keys the node's wallet holds: `[{key, balance}]`, `balance`
-    /// decimal text or null if it couldn't be read.
+    /// The keys the node's wallet holds: `[{key, balance, label?, title?,
+    /// ready?}]`, `balance` decimal text or null if it couldn't be read.
+    /// `label` is the one given with `chain_account_label`/`_new`; an account
+    /// made with `chain_account_new` also has its keystore `title` and `ready`
+    /// (false, balance null, until the node uses it from its next start). A
+    /// hidden account (`chain_account_remove`) is left out while the node shows
+    /// it holding nothing.
     fn chain_accounts(&mut self) -> String;
 
     /// Stake: `{staked, notes, keys, epoch, next_epoch_in_s, claimable,
@@ -723,6 +779,24 @@ pub trait NamesModule: Send + 'static {
     /// undone) and `sent`, `hash` are set; `chain_tx` follows it. LEZ credits it
     /// once the block holding it is final.
     fn chain_bridge(&mut self, from_key: String, to: String, amount: String, send: bool) -> String;
+
+    /// Makes a new account on the node: a key in its keystore, labelled
+    /// `label` (at most 40 characters; empty for none): `{key, title, label,
+    /// ready, note}`. The node uses it from its next start (`ready` false
+    /// until then; `note` says so). Its secret stays in the node's keystore.
+    fn chain_account_new(&mut self, label: String) -> String;
+
+    /// Labels the node key `key` (empty takes the label off): `{key, label}`.
+    /// Labels are kept by this module, and shown by `chain_accounts`.
+    fn chain_account_label(&mut self, key: String, label: String) -> String;
+
+    /// Hides an account made with `chain_account_new` once the node uses it
+    /// and it holds nothing: `{key, title, hidden, note}`. Its key stays in the
+    /// node's keystore (the node can't say what is on its way to a key, so no
+    /// secret is deleted), and it is listed again once the node shows it
+    /// holding anything (what reached it before the node used it isn't seen).
+    /// Refused for any other key, and for one holding anything.
+    fn chain_account_remove(&mut self, key: String) -> String;
 
     // ── Wallet Provider SDK: for any app (docs/wallet/PROVIDER-SDK.md) ──
     //
@@ -822,6 +896,50 @@ pub trait NamesModule: Send + 'static {
     /// Takes back all access `app` was given. Names app only.
     fn revoke_app(&mut self, app: String) -> String;
 
+    /// Inscribes a testimonial (`{"submission": "lp-0022:names-wallet", "text"}`, text
+    /// 1-1024 bytes) on the Logos Blockchain from the node key `from_key`, which pays the
+    /// fee. Each key has its own Ed25519 inscription key, made here once and kept 0600,
+    /// and its own channel (`sha256("lp-0022:testimonial:" || signer)`), which the first
+    /// inscription creates and later ones extend. Without `send` the plan `{from, balance,
+    /// signer, channel, parent, first, submission, text, bytes, msg_id, fee_estimate}`
+    /// (the fee the node asks now, or absent when it couldn't say). A plan moves and
+    /// holds nothing: the node prices it on stand-ins for the key's notes (`chain_fee`),
+    /// so any number of plans, sends and splits can follow at once. With `send` the
+    /// inscription is funded, signed and sent (it cannot be undone) and `hash` and `fee`
+    /// (what it pays) are set; `chain_tx` follows it. A send the node refused after
+    /// funding it leaves that key's notes held for about 10 final blocks: the same
+    /// inscription sent again uses that funding, anything else from the key meanwhile is
+    /// refused as held (not short). Names app only. Through logosctl, write
+    /// a text or key that is only digits, or `true`/`false`, as `str:2026`:
+    /// logosctl 0.3.2 sends it as a number or boolean otherwise, and the host refuses the
+    /// call ("dispatch_failed: expected string") before names runs.
+    fn chain_inscribe(&mut self, from_key: String, text: String, send: bool) -> String;
+
+    /// Any app: asks for `text` (a testimonial, 1-1024 bytes) to be inscribed on the
+    /// Logos Blockchain. The person picks which of the node's chain accounts inscribes
+    /// it and pays its fee, and approves it in the Names app. No LEZ access is needed
+    /// first: the request names no account. Answers as `request_status` does, kind
+    /// `inscribe`; once done, `tx` is the transaction's hash and `account` the chain key.
+    /// Through logosctl, a text of only digits or `true`/`false` is written
+    /// `str:<text>` (see `chain_inscribe`).
+    fn propose_inscription(&mut self, text: String) -> String;
+
+    /// The inscription requests waiting for the person, oldest first: `[{id, app, text,
+    /// says, submission, publisher, choices: [{key, balance, label?, title?}]}]`, the choices the keys
+    /// the node's wallet holds. When the node can't list them (stopped, say), each request
+    /// is still listed, with `choices` empty and `node` saying why, so it can be rejected.
+    /// A choice carries the `label` the person gave the account (or its keystore `title`),
+    /// and an account hidden while it holds nothing is left out, as in `chain_accounts`.
+    /// The fee for a choice is `chain_inscribe(key, text, false)`'s `fee_estimate`, which
+    /// holds nothing. `pending_requests` doesn't list these. Names app only.
+    fn pending_inscriptions(&mut self) -> String;
+
+    /// Approves inscription request `request_id` with the node key `from_key`: it is
+    /// inscribed (`chain_inscribe`) and the request is `done` with `tx`. Refused before
+    /// anything is sent (a key the node doesn't hold, too little for the fee), the
+    /// request stays pending. Names app only.
+    fn approve_inscription(&mut self, request_id: String, from_key: String) -> String;
+
     /// Called once the module is wired to the host.
     fn on_context_ready(&mut self, _ctx: &RustModuleContext) {}
 }
@@ -883,6 +1001,12 @@ struct Names {
     token_info: HashMap<(AccountId, AccountId), (Value, std::time::Instant)>,
     /// What the Program Registry said about each asking app's publisher, and when (seconds).
     publishers: HashMap<String, (Value, u64)>,
+    /// The LEZ zones set up here and the one in use (`zones`). `sequencer`, `cli_wallet`
+    /// and `token_program` above are the zone in use's, and are what every method reads;
+    /// `program`, the registry, is always home's, where LNS names are kept.
+    zones: zones::Zones,
+    /// Whether home's sequencer was asked for its channel in this run (`home_channel`).
+    channel_asked: bool,
     /// When LEZ last answered about each followed bridge's receipt (seconds), so each is
     /// asked on its schedule (`activity::receipt_due`), not on every balance read.
     receipt_asks: std::sync::Mutex<std::collections::BTreeMap<AccountId, u64>>,
@@ -971,6 +1095,8 @@ impl Default for Names {
             token_program: None,
             token_info: HashMap::new(),
             publishers: HashMap::new(),
+            zones: zones::Zones::new(bare_home(DEFAULT_SEQUENCER)),
+            channel_asked: false,
             receipt_asks: Default::default(),
         };
         // Files saved by versions before 0.10 were readable by every account on the
@@ -987,30 +1113,6 @@ impl Default for Names {
         }
         names
     }
-}
-
-/// A sequencer URL the module will talk to: `https://`, or `http://` only to this
-/// machine (a local dev chain). Plain http elsewhere would let anyone on the network
-/// swap name records and payment keys.
-fn is_http_url(url: &str) -> bool {
-    // Plain URL characters only, and no `user@` part: a backslash, a space or an `@` is
-    // read one way here and another by the HTTP library, which let `http://` reach any
-    // host (SF-2). A sequencer address never needs them.
-    let plain = |c: char| c.is_ascii_alphanumeric() || "-._~:/?#[]!$&'()*+,;=%".contains(c);
-    if url.is_empty() || !url.chars().all(plain) {
-        return false;
-    }
-    if let Some(rest) = url.strip_prefix("https://") {
-        return rest.split(['/', '?', '#']).next().is_some_and(|host| !host.is_empty());
-    }
-    let Some(rest) = url.strip_prefix("http://") else { return false };
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let host = if let Some(bracketed) = host.strip_prefix('[') {
-        bracketed.split(']').next().unwrap_or("")
-    } else {
-        host.split(':').next().unwrap_or("")
-    };
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 /// The one app that may use the methods that spend, sign, change the module's
@@ -1059,14 +1161,31 @@ fn only_the_names_app() -> Result<(), String> {
 }
 
 /// The part of the configuration other apps may read: the network, not the person.
+/// `sequencer` and `token_program` are the zone in use's, and `zone` says which that is
+/// (never what the person calls it); `registry` is read through `names_sequencer`, home's.
 fn public_config(config: &Value) -> Value {
     json!({
         "sequencer": config["sequencer"],
+        "names_sequencer": config["names_sequencer"],
         "registry": config["registry"],
         "token_program": config["token_program"],
+        "zone": { "id": config["zone"]["id"], "channel": config["zone"]["channel"], "home": config["zone"]["home"] },
         "module_version": config["module_version"],
     })
 }
+
+/// The home zone as the configuration's own fields give it: `sequencer`, and nothing
+/// known or chosen yet.
+fn bare_home(sequencer: &str) -> zones::Zone {
+    zones::Zone { name: String::new(), channel: None, sequencer: sequencer.to_owned(), wallet: None, token_program: None }
+}
+
+/// How long a sequencer is given to say its channel when zones are set up or changed: a
+/// person is waiting, and the host gives a call a few seconds more than this.
+const CHANNEL_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What a sequencer's address must be (`is_http_url`).
+const NOT_A_SEQUENCER: &str = "a sequencer's address starts with https://, or with http:// when it is on this computer";
 
 /// Puts a LEZ job that started (its reply `out`) in the Wallet's history, as `entry` with
 /// the job's id; it settles when the job ends (`activity`).
@@ -1528,16 +1647,33 @@ impl Names {
             .as_str()
             .and_then(|program| registry::parse_account(program).ok())
             .filter(|program| *program != registry::NATIVE_TOKEN);
+        // The fields above are home's. The zone in use, if it is another, takes their place.
+        let home = zones::Zone {
+            wallet: self.cli_wallet.clone(),
+            token_program: self.token_program.as_ref().map(registry::account_text),
+            ..bare_home(&self.sequencer)
+        };
+        self.zones = zones::Zones::load(saved, home);
+        // A zone whose wallet folder can't be used now is not entered: home is, and the
+        // zone stays set up.
+        if !self.on_home() && self.enter_zone().is_err() {
+            self.zones.use_zone(0);
+        }
     }
 
+    /// What is saved. `sequencer`, `cli_wallet` and `token_program` are home's whichever
+    /// zone is in use, as they were before there were zones: a version without zones
+    /// reads them and finds home.
     fn config(&self) -> Value {
+        let zones = self.zones_now();
+        let home = zones.home();
         json!({
-            "sequencer": self.sequencer,
+            "sequencer": home.sequencer,
             "registry": self.program.as_ref().map(registry::account_text),
             "wallet_config": self.wallet_files.as_ref().map(|(config, _)| config),
             "wallet_storage": self.wallet_files.as_ref().map(|(_, storage)| storage),
             "cli": self.cli,
-            "cli_wallet": self.cli_wallet,
+            "cli_wallet": home.wallet,
             "follows": self.follows,
             "main_name": self.main_name,
             "bridge_key": self.bridge_key,
@@ -1545,7 +1681,9 @@ impl Names {
             "likes": self.likes,
             "dm_names": self.dm_names,
             "chat_names": self.chat_names,
-            "token_program": self.token_program.as_ref().map(registry::account_text),
+            "token_program": home.token_program,
+            "zones": zones.json(),
+            "zone": zones.current_id(),
         })
     }
 
@@ -1554,6 +1692,13 @@ impl Names {
     /// no CLI is found).
     fn shown_config(&self) -> Value {
         let mut config = self.config();
+        let zones = self.zones_now();
+        // What is in use now: the zone's own sequencer, wallet and token program, with
+        // home's sequencer (where names are read) beside them.
+        config["names_sequencer"] = config["sequencer"].take();
+        config["sequencer"] = json!(self.sequencer);
+        config["token_program"] = json!(self.token_program.as_ref().map(registry::account_text));
+        config["zone"] = json!({ "id": zones.current_id(), "name": zones.zone().name, "channel": zones.zone().channel, "home": zones.current() == 0 });
         config["cli"] = json!(cli::find_program(self.cli.as_deref()).map(|path| path.to_string_lossy().into_owned()));
         config["cli_wallet"] = json!(cli::find_wallet(self.cli_wallet.as_deref()).map(|dir| dir.to_string_lossy().into_owned()));
         config["module_version"] = json!(MODULE_VERSION);
@@ -1712,6 +1857,279 @@ impl Names {
             }
         }
         self.board_read_now(&key)
+    }
+
+    // ── Zones ────────────────────────────────────────────────────────────
+
+    /// Whether the zone in use is home, where LNS names are kept.
+    fn on_home(&self) -> bool {
+        self.zones.current() == 0
+    }
+
+    /// Home's sequencer: the one names are read from and changed through.
+    fn home_sequencer(&self) -> String {
+        if self.on_home() {
+            self.sequencer.clone()
+        } else {
+            self.zones.home().sequencer.clone()
+        }
+    }
+
+    /// Home's CLI wallet folder as it was set (None for the default one).
+    fn home_wallet(&self) -> Option<String> {
+        if self.on_home() {
+            self.cli_wallet.clone()
+        } else {
+            self.zones.home().wallet.clone()
+        }
+    }
+
+    /// Whether home has a wallet already: what it holds was read from home's chain.
+    fn home_has_wallet(&self) -> bool {
+        cli::find_wallet(self.home_wallet().as_deref()).is_some_and(|dir| dir.join(cli::STORAGE_FILE).is_file())
+    }
+
+    /// The zones, with the one in use as the module's own fields have it now. `sequencer`,
+    /// `cli_wallet` and `token_program` are what the methods read and the setters change,
+    /// so they are written back here before the zones are saved, shown or changed.
+    fn zones_now(&self) -> zones::Zones {
+        let mut zones = self.zones.clone();
+        let mut zone = zones.zone().clone();
+        let home = zones.current() == 0;
+        if zone.sequencer != self.sequencer {
+            zone.sequencer = self.sequencer.clone();
+            // Home's channel is known only for the sequencer that said it.
+            if home {
+                zone.channel = None;
+            }
+        }
+        zone.wallet = match (&self.cli_wallet, &zone.channel) {
+            // An added zone's own folder is its default, and isn't kept as a choice.
+            (Some(dir), Some(channel)) if !home && config_dir().is_some_and(|config| zones::wallet_dir(&config, channel) == std::path::Path::new(dir)) => None,
+            (dir, _) => dir.clone(),
+        };
+        zone.token_program = self.token_program.as_ref().map(registry::account_text);
+        zones.put_current(zone);
+        zones
+    }
+
+    /// The wallet folder an added zone uses: the one chosen for it, or its own under the
+    /// module's folder, made here if it is new. Never home's: a LEZ wallet's file holds
+    /// what it last read from one chain. A chosen folder that can't be used now (missing,
+    /// or not this user's alone) is an error, not a reason to open another wallet.
+    fn zone_wallet(zone: &zones::Zone) -> Result<String, String> {
+        if let Some(dir) = zone.wallet.as_deref() {
+            return if cli::is_owned_safely(std::path::Path::new(dir), true, false) {
+                Ok(dir.to_owned())
+            } else {
+                Err(format!("{}'s wallet folder {dir} can't be used now: it is missing, or isn't yours alone. Put it back to use this zone.", zone.name))
+            };
+        }
+        let channel = zone.channel.as_deref().ok_or("this zone has no channel")?;
+        let dir = zones::wallet_dir(&config_dir().ok_or("this device has nowhere to keep a zone's wallet")?, channel);
+        cli::private_dir(&dir).map_err(|error| format!("couldn't make {}'s wallet folder: {error}", zone.name))?;
+        Ok(dir.to_string_lossy().into_owned())
+    }
+
+    /// Points the module at the zone in use: its sequencer, its wallet folder and its
+    /// token program. Nothing changes when its wallet folder can't be used.
+    fn enter_zone(&mut self) -> Result<(), String> {
+        let zone = self.zones.zone().clone();
+        let wallet = if self.on_home() { zone.wallet.clone() } else { Some(Self::zone_wallet(&zone)?) };
+        self.sequencer = zone.sequencer;
+        self.cli_wallet = wallet;
+        self.token_program = zone
+            .token_program
+            .as_deref()
+            .and_then(|program| registry::parse_account(program).ok())
+            .filter(|program| *program != registry::NATIVE_TOKEN);
+        Ok(())
+    }
+
+    /// Where the wallet of zone `at` of `zones` is kept; it may not be made yet.
+    fn zone_dir(zones: &zones::Zones, at: usize) -> Option<std::path::PathBuf> {
+        let zone = zones.at(at)?;
+        if at == 0 {
+            return cli::find_wallet(zone.wallet.as_deref());
+        }
+        match (&zone.wallet, &zone.channel) {
+            (Some(dir), _) => Some(std::path::PathBuf::from(dir)),
+            (None, Some(channel)) => config_dir().map(|dir| zones::wallet_dir(&dir, channel)),
+            (None, None) => None,
+        }
+    }
+
+    /// The zone, other than the one in use, whose wallet is kept in `dir`: one folder
+    /// holds one chain's wallet.
+    fn wallet_taken(&self, dir: &std::path::Path) -> Option<String> {
+        let zones = self.zones_now();
+        let real = |path: &std::path::Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+        let wanted = real(dir);
+        (0..zones.len())
+            .filter(|at| *at != zones.current())
+            .find(|at| Self::zone_dir(&zones, *at).is_some_and(|other| real(&other) == wanted))
+            .and_then(|at| zones.at(at).map(|zone| zone.name.clone()))
+    }
+
+    /// The zones as the Names app lists them (`zone_list`).
+    fn zones_view(&self) -> Value {
+        let zones = self.zones_now();
+        let list: Vec<Value> = (0..zones.len())
+            .filter_map(|at| {
+                let zone = zones.at(at)?;
+                let dir = Self::zone_dir(&zones, at);
+                Some(json!({
+                    "id": zones.id(at),
+                    "name": zone.name,
+                    "channel": zone.channel,
+                    "sequencer": zone.sequencer,
+                    "home": at == 0,
+                    "current": at == zones.current(),
+                    "wallet_dir": dir.as_ref().map(|dir| dir.to_string_lossy().into_owned()),
+                    "has_wallet": dir.as_ref().is_some_and(|dir| dir.join(cli::STORAGE_FILE).is_file()),
+                    "token_program": zone.token_program,
+                }))
+            })
+            .collect();
+        json!({ "zones": list, "current": zones.current_id(), "max": zones::MAX_ZONES })
+    }
+
+    /// Home's channel. Until it is known, home's sequencer is asked for it once a run
+    /// (`again`: now, whatever was asked before), and the answer is saved: from then on
+    /// another sequencer is told to serve home or not, and home's balance marks are kept
+    /// under the channel, so they survive a change of sequencer. None while the sequencer
+    /// doesn't say, or names a channel an added zone already has.
+    fn home_channel(&mut self, again: bool) -> Option<String> {
+        let mut zones = self.zones_now();
+        if let Some(channel) = &zones.home().channel {
+            return Some(channel.clone());
+        }
+        if self.channel_asked && !again {
+            return None;
+        }
+        self.channel_asked = true;
+        let sequencer = zones.home().sequencer.clone();
+        let channel = registry::channel_id_within(&sequencer, CHANNEL_WAIT).ok().and_then(|read| zones::channel(&read))?;
+        if zones.holder(&channel, Some(0)).is_some() {
+            return None;
+        }
+        zones.at_mut(0)?.channel = Some(channel.clone());
+        self.zones = zones;
+        if let Some(dir) = config_dir() {
+            activity::move_marks(&dir, "lez", &sequencer, &channel);
+        }
+        self.save();
+        Some(channel)
+    }
+
+    /// Has zone `index` use the sequencer at `url`, and returns the zone's channel. The
+    /// zone stays the same zone: its wallet, accounts and history are untouched, so the new
+    /// sequencer must name the zone's own channel (`zones::sequencer_change`). Home may
+    /// take another chain when the person said so (`other_chain_ok`) or has no wallet yet.
+    fn change_sequencer(&mut self, index: usize, url: &str, other_chain_ok: bool) -> Result<Option<String>, zones::Refused> {
+        let refused = |why: &str| zones::Refused { why: why.to_owned(), other_chain: None };
+        let url = url.trim();
+        if !is_http_url(url) {
+            return Err(refused(NOT_A_SEQUENCER));
+        }
+        if index == 0 {
+            // What home is now, so the new address can be told to serve it or not.
+            self.home_channel(true);
+        }
+        let mut zones = self.zones_now();
+        let zone = zones.at(index).cloned().ok_or_else(|| refused("there is no such zone here"))?;
+        if zone.sequencer == url {
+            return Ok(zone.channel);
+        }
+        let read = registry::channel_id_within(url, CHANNEL_WAIT)
+            .and_then(|read| zones::channel(&read).ok_or_else(|| "its channel isn't 64 hex characters".to_owned()));
+        let holder = read.as_ref().ok().and_then(|channel| zones.holder(channel, Some(index))).and_then(|at| zones.at(at)).map(|zone| zone.name.clone());
+        let take_other = index == 0 && (other_chain_ok || !self.home_has_wallet());
+        let channel = zones::sequencer_change(&zone.name, zone.channel.as_deref(), read.as_deref().map_err(String::as_str), holder.as_deref(), take_other)?;
+        let in_use = index == zones.current();
+        if let Some(changed) = zones.at_mut(index) {
+            changed.sequencer = url.to_owned();
+            changed.channel = channel.clone();
+        }
+        self.zones = zones;
+        if in_use {
+            self.sequencer = url.to_owned();
+        }
+        if in_use || index == 0 {
+            // Names are read from home's sequencer, everything else from the zone in use's.
+            self.forget_all_reads();
+            self.token_info.clear();
+        }
+        self.save();
+        Ok(channel)
+    }
+
+    /// The CLI as names use it: home's sequencer and home's wallet, whichever zone is in use.
+    fn names_setup(&self) -> Result<cli::Setup, String> {
+        let mut setup = self.cli_setup()?;
+        if !self.on_home() {
+            setup.wallet = cli::find_wallet(self.home_wallet().as_deref()).ok_or("no wallet directory for the names CLI")?;
+            setup.sequencer = self.home_sequencer();
+        }
+        Ok(setup)
+    }
+
+    /// Home's wallet's accounts: the ones that hold names.
+    fn names_held(&self) -> Result<Held, String> {
+        wallet::accounts(&self.names_setup()?)
+    }
+
+    /// Refuses a change to a name, or a payment to one, while another zone is in use:
+    /// names are kept on home, and its wallet signs and pays for them.
+    fn names_here(&self) -> Result<(), String> {
+        if self.on_home() {
+            return Ok(());
+        }
+        let (home, zone) = (&self.zones.home().name, &self.zones.zone().name);
+        Err(format!("names are kept on {home}, and this wallet is using {zone} now. Switch to {home} to do this. Nothing was started."))
+    }
+
+    /// `log_started`, with the entry said to be on the zone in use.
+    fn log_started(&self, out: &str, entry: Value) {
+        log_started(out, activity::in_zone(entry, &self.zones.current_id()));
+    }
+
+    /// Notes what the zone in use's LEZ accounts hold now, in the Wallet's history (arrivals).
+    fn note_lez(&self, rows: &[(String, u128)]) {
+        if let Some(dir) = config_dir() {
+            let zones = self.zones_now();
+            activity::note_zone_balances(&dir, now(), zones.zone().scope(), &zones.current_id(), rows);
+        }
+    }
+
+    /// `key` for a read kept in the background, as the zone in use's own: a read that
+    /// ends after a switch is then never shown as another zone's.
+    fn zone_key(&self, key: &str) -> String {
+        format!("{key}@{}", self.zones.current_id())
+    }
+
+    /// Refuses a request another app made for another zone than the one in use, or for a
+    /// chain the zone no longer is: the same account ID is another account there.
+    fn asked_here(&self, request: &Value) -> Result<(), String> {
+        let asked = request["zone"].as_str().unwrap_or(zones::HOME);
+        let zones = self.zones_now();
+        if asked == zones.current_id() {
+            return match (request["zone_channel"].as_str(), zones.zone().channel.as_deref()) {
+                (Some(asked), Some(now)) if asked != now => {
+                    Err("the chain this was asked for has changed since. Reject it, and the app can ask again.".to_owned())
+                }
+                _ => Ok(()),
+            };
+        }
+        match zones.index(asked).and_then(|at| zones.at(at)) {
+            Some(zone) => Err(format!(
+                "this was asked for {}, and the wallet is using {} now. Switch to {} to approve it, or reject it.",
+                zone.name,
+                zones.zone().name,
+                zone.name
+            )),
+            None => Err("this was asked for a zone that has been removed since. Reject it, and the app can ask again.".to_owned()),
+        }
     }
 
     fn cli_setup(&self) -> Result<cli::Setup, String> {
@@ -1895,7 +2313,7 @@ impl Names {
         kind: &str,
         build: impl FnOnce(&cli::Jobs, &str, &str) -> Result<(Vec<String>, Option<std::path::PathBuf>, Value), String>,
     ) -> String {
-        self.cli_job_by(typed, kind, &mut Start::new(&self.sequencer), build)
+        self.cli_job_by(typed, kind, &mut Start::new(&self.home_sequencer()), build)
     }
 
     /// `cli_job`, as part of a job start (`start`) whose checks began before it.
@@ -1908,6 +2326,7 @@ impl Names {
     ) -> String {
         reply((|| {
             let name = registry::parse_name(typed)?;
+            self.names_here()?;
             let setup = self.cli_setup()?;
             setup.wallet_ready()?;
             self.no_background_job()?;
@@ -1945,7 +2364,8 @@ impl Names {
         let program = self
             .program
             .ok_or("no registry is configured; call set_registry with its program ID")?;
-        Ok(Registry::new(&self.sequencer, program))
+        // Names are kept on home, whichever zone is in use.
+        Ok(Registry::new(&self.home_sequencer(), program))
     }
 
     /// The identifier and key of `name`, derived the first time it is asked for.
@@ -2003,6 +2423,7 @@ impl Names {
     /// Checks that the open wallet can sign and pay for `change`, has it sign
     /// and send it, and returns `{name, signer, tx}` with the change's extras.
     fn send(&self, registry: &Registry, held: &Held, name: &str, change: &Change) -> Result<Value, String> {
+        self.names_here()?;
         if !held.public.contains(&change.signer) {
             return Err(format!(
                 "the open wallet does not hold {} as a public account, which must sign this",
@@ -2036,6 +2457,7 @@ impl Names {
     /// wallet's public accounts. The signer must be one of them; it also pays.
     fn change(&self, name: &str, build: impl FnOnce(&Registry, &[AccountId]) -> Result<Change, String>) -> String {
         reply((|| {
+            self.names_here()?;
             let registry = self.registry()?;
             let held = self.held()?;
             let change = build(&registry, &held.public)?;
@@ -2063,6 +2485,7 @@ impl Names {
     /// report that it is done. See [`NamesModule::register`].
     fn register_step(&mut self, typed: &str, owner: &str, private_account: &str) -> Result<Value, String> {
         let name = registry::parse_name(typed)?;
+        self.names_here()?;
         let registry = self.registry()?;
         let held = self.held()?;
         let owner = registry::parse_account(owner)?;
@@ -2161,7 +2584,7 @@ impl Names {
     fn may_hold(&self, to: &str, start: &mut Start) -> Result<(), String> {
         let id = registry::parse_account(to)?;
         self.not_a_sink(&id, "hold a name")?;
-        if let (Some(bare), Ok(setup)) = (to.strip_prefix("Public/"), self.cli_setup()) {
+        if let (Some(bare), Ok(setup)) = (to.strip_prefix("Public/"), self.names_setup()) {
             start.not_down()?;
             let seen = registry::account_seen(&setup.sequencer, &id, start.deadline).map_err(|why| start_refused(&why))?;
             start.account_read = true;
@@ -2184,11 +2607,11 @@ impl Names {
         let program = self.program?;
         let derived = self.derived(&name);
         start.not_down().ok()?;
-        let record = registry::Registry::by(&self.sequencer, program, start.deadline).record(&name, &derived).ok()?;
+        let record = registry::Registry::by(&self.home_sequencer(), program, start.deadline).record(&name, &derived).ok()?;
         // The record was read: the job's own check needn't read it again.
         start.record_read = Some(name.clone());
         let record = record?;
-        let accounts = cli::wallet_accounts(&self.cli_setup().ok()?, start.deadline).ok()?;
+        let accounts = cli::wallet_accounts(&self.names_setup().ok()?, start.deadline).ok()?;
         accounts.into_iter().find(|account| {
             account.split_once('/').and_then(|(_, id)| registry::parse_account(id).ok()).is_some_and(|id| registry::owner_tag(&derived.id, &id) == record.owner)
         })
@@ -2201,7 +2624,7 @@ impl Names {
         let (Some(program), Ok(account)) = (self.program, registry::parse_account(to)) else { return Ok(()) };
         let derived = self.derived(name);
         start.not_down()?;
-        let record = registry::Registry::by(&self.sequencer, program, start.deadline).record(name, &derived).map_err(|why| start_refused(&why))?;
+        let record = registry::Registry::by(&self.home_sequencer(), program, start.deadline).record(name, &derived).map_err(|why| start_refused(&why))?;
         start.record_read = Some(name.to_owned());
         match record {
             Some(record) if record.owner == registry::owner_tag(&derived.id, &account) => {
@@ -2354,9 +2777,17 @@ impl Names {
         // unseen otherwise, so the wallet's read is noted as it is.
         let at = now();
         let entries = activity::all(dir);
-        let followed = activity::bridges_followed(&entries, at);
+        // A bridge is followed on the zone it went to. One to the zone in use settles with
+        // that zone's balances, below; one to another zone is only asked after at that
+        // zone's own sequencer, and waits if the zone has been removed.
+        let zones = self.zones_now();
+        let here = zones.current_id();
+        let went_to: HashMap<&str, &str> = entries.iter().filter_map(|entry| Some((entry["id"].as_str()?, activity::zone_of(entry)))).collect();
+        let (followed, elsewhere): (Vec<_>, Vec<_>) = activity::bridges_followed(&entries, at)
+            .into_iter()
+            .partition(|(id, _, _)| went_to.get(id.as_str()).copied().unwrap_or(zones::HOME) == here);
         let mut asks = self.receipt_asks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        asks.retain(|receipt, _| followed.iter().any(|(_, _, followed)| followed == receipt));
+        asks.retain(|receipt, _| followed.iter().chain(&elsewhere).any(|(_, _, followed)| followed == receipt));
         let sent_at = |id: &str| entries.iter().find(|entry| entry["id"] == id).and_then(|entry| entry["at"].as_u64()).unwrap_or(0);
         let mut accounts: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
         for (id, to, receipt) in &followed {
@@ -2365,7 +2796,7 @@ impl Names {
             }
         }
         for (to, balance) in rows {
-            if followed.iter().any(|(_, bridge_to, _)| bridge_to == to) && activity::would_arrive(dir, at, "lez", sequencer, to, *balance) {
+            if followed.iter().any(|(_, bridge_to, _)| bridge_to == to) && activity::would_arrive(dir, at, "lez", zones.zone().scope(), Some(&here), to, *balance) {
                 accounts.insert(to.as_str());
             }
         }
@@ -2377,6 +2808,14 @@ impl Names {
             .filter(|(_, to, _)| accounts.contains(to.as_str()))
             .map(|(_, _, receipt)| (*receipt, ask(receipt)))
             .collect();
+        // One to another zone is asked at that zone's sequencer, on the same schedule.
+        for (id, _, receipt) in &elsewhere {
+            if !activity::receipt_due(at.saturating_sub(sent_at(id)), asks.get(receipt).copied(), at) {
+                continue;
+            }
+            let theirs = went_to.get(id.as_str()).and_then(|zone| zones.index(zone)).and_then(|at| zones.at(at)).map(|zone| zone.sequencer.clone());
+            minted.insert(*receipt, theirs.and_then(|sequencer| registry::deposit_minted(&sequencer, receipt, deadline).ok()));
+        }
         let mut rows = rows.to_vec();
         for to in accounts {
             let Some(at_row) = rows.iter().position(|(account, _)| account == to) else { continue };
@@ -2528,15 +2967,24 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         reply((|| {
-            let registry = self.registry()?;
+            // Names are kept on home: on another zone an account is only what it holds there.
+            let home = self.on_home();
+            let registry = if home { self.registry()? } else { Registry::new(&self.sequencer, self.program.unwrap_or([0; 32])) };
             let held = self.held()?;
+            let summary = |account: &AccountId| -> Result<Value, String> {
+                if home {
+                    return registry.account_summary(account);
+                }
+                let balance = registry.balance(account)?;
+                Ok(json!({ "account": registry::account_text(account), "balance": balance.to_string(), "funded": balance > 0, "name": null }))
+            };
             // Each summary is a read over the network; they are read together.
             let mut accounts = std::thread::scope(|scope| {
                 let readers: Vec<_> = held
                     .public
                     .iter()
                     .take(MAX_WALLET_ACCOUNTS)
-                    .map(|account| scope.spawn(|| registry.account_summary(account)))
+                    .map(|account| scope.spawn(|| summary(account)))
                     .collect();
                 readers
                     .into_iter()
@@ -2565,7 +3013,7 @@ impl NamesModule for Names {
         }
         reply((|| {
             let registry = self.registry()?;
-            let held = self.held()?.public;
+            let held = self.names_held()?.public;
             let mut memory = memory()?;
             let remembered = memory.names(&registry.program);
             // Deriving is done one name at a time (it is CPU work and cached);
@@ -2653,7 +3101,7 @@ impl NamesModule for Names {
             // Only names the open wallet holds are remembered, so the device
             // keeps no list of names merely looked up.
             let derived = self.derived(&name);
-            let held = self.held()?.public;
+            let held = self.names_held()?.public;
             let found = registry.resolve(&name, &derived)?;
             if !found.is_some_and(|resolved| held.iter().any(|account| resolved.is_held_by(&derived.id, account))) {
                 return Err(format!("{name}{} is not held by the open wallet", registry::NAME_SUFFIX));
@@ -2689,7 +3137,7 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         // The proof a registration carries comes from the names CLI, which holds the list.
-        shortlist::use_cli(self.cli_setup().ok());
+        shortlist::use_cli(self.names_setup().ok());
         reply(self.register_step(&name, &owner, &private_account))
     }
 
@@ -2812,7 +3260,7 @@ impl NamesModule for Names {
         }
         let snapshot = snapshot.trim().to_owned();
         // The list is fetched within the job start's deadline, like every check.
-        let mut start = Start::new(&self.sequencer);
+        let mut start = Start::new(&self.home_sequencer());
         let deadline = start.deadline;
         self.cli_job_by(&name, "claim", &mut start, |jobs, name, id| {
             if std::path::Path::new(&snapshot).is_absolute() {
@@ -2845,7 +3293,7 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         reply_marked((|| {
-            let setup = self.cli_setup()?;
+            let setup = self.names_setup()?;
             // The CLI reads every name it holds from the chain, which takes seconds:
             // answer with the last list and refresh it on its own thread.
             // Kept per wallet: another wallet holds other names.
@@ -2915,7 +3363,7 @@ impl NamesModule for Names {
         };
         let to = command[3].clone();
         // Every check shares one deadline, inside the host's 20 s.
-        let mut start = Start::new(&self.sequencer);
+        let mut start = Start::new(&self.home_sequencer());
         if let Err(refused) = self.may_hold(&to, &mut start) {
             return reply(Err(refused));
         }
@@ -2925,7 +3373,7 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         let out = self.cli_job_by(&name, "transfer", &mut start, |_, _, _| Ok((command, None, Value::Null)));
-        log_started(&out, json!({ "kind": "transfer", "chain": "lez", "name": registry::normalize_name(&name), "to": to }));
+        self.log_started(&out, json!({ "kind": "transfer", "chain": "lez", "name": registry::normalize_name(&name), "to": to }));
         // The names it holds change: read them afresh.
         self.forget_mine();
         out
@@ -2940,11 +3388,11 @@ impl NamesModule for Names {
             Err(error) => return reply(Err(error)),
         };
         // The holder pays the fee, so its page lists it (receive-privately-entry-no-paying-account).
-        let mut start = Start::new(&self.sequencer);
+        let mut start = Start::new(&self.home_sequencer());
         let from = self.holder_of(&name, &mut start);
         let out = self.cli_job_by(&name, "receive_privately", &mut start, |_, _, _| Ok((command, None, Value::Null)));
         // In the history like a transfer, with the fee it paid once it ends.
-        log_started(&out, json!({ "kind": "receive_privately", "chain": "lez", "name": registry::normalize_name(&name), "from": from }));
+        self.log_started(&out, json!({ "kind": "receive_privately", "chain": "lez", "name": registry::normalize_name(&name), "from": from }));
         out
     }
 
@@ -2978,7 +3426,9 @@ impl NamesModule for Names {
                     Some(dir) => self.settle_activity(&dir, &setup.sequencer, &rows, deadline),
                     None => rows,
                 };
-                note_balances("lez", &setup.sequencer, &rows);
+                // The sequencer answers now: home's channel is learnt here if it isn't known.
+                self.home_channel(false);
+                self.note_lez(&rows);
             }
             Ok((read.reply(), read.marks()))
         })())
@@ -3031,6 +3481,10 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         reply((|| {
+            if !self.on_home() {
+                let home = &self.zones.home().name;
+                return Err(format!("the faucet pays on {home} only. Switch to {home} to ask it."));
+            }
             let wallet = cli::find_wallet(self.cli_wallet.as_deref())
                 .ok_or_else(|| "create your wallet first (Welcome, Create my wallet)".to_owned())?;
             let account = cli::saved_account(&wallet, "public")
@@ -3137,7 +3591,7 @@ impl NamesModule for Names {
         let (from, to) = self.cli_setup().ok().map_or((None, None), |setup| {
             (cli::default_public(&setup).ok().map(|id| format!("Public/{id}")), cli::default_private(&setup).ok().map(|id| format!("Private/{id}")))
         });
-        log_started(&out, json!({ "kind": "shield", "chain": "lez", "from": from, "to": to, "amount": moved }));
+        self.log_started(&out, json!({ "kind": "shield", "chain": "lez", "from": from, "to": to, "amount": moved }));
         out
     }
 
@@ -3151,7 +3605,7 @@ impl NamesModule for Names {
             }
             Ok(vec!["receive".to_owned()])
         }));
-        log_started(&out, json!({ "kind": "receive", "chain": "lez" }));
+        self.log_started(&out, json!({ "kind": "receive", "chain": "lez" }));
         out
     }
 
@@ -3165,7 +3619,7 @@ impl NamesModule for Names {
             }
             Ok(vec!["receive".to_owned(), "--all".to_owned()])
         }));
-        log_started(&out, json!({ "kind": "receive", "chain": "lez", "all": true }));
+        self.log_started(&out, json!({ "kind": "receive", "chain": "lez", "all": true }));
         out
     }
 
@@ -3180,8 +3634,8 @@ impl NamesModule for Names {
             let read = setup.as_ref().and_then(|setup| cli::balances_by(setup, deadline).ok());
             let sequencer = setup.as_ref().map_or_else(|| self.sequencer.clone(), |setup| setup.sequencer.clone());
             let rows = self.settle_activity(&dir, &sequencer, read.as_deref().unwrap_or_default(), deadline);
-            if let (Some(setup), Some(_)) = (&setup, &read) {
-                note_balances("lez", &setup.sequencer, &rows);
+            if setup.is_some() && read.is_some() {
+                self.note_lez(&rows);
             }
             // A history file that couldn't be read was kept aside, never written over: say so
             // once. Only a lost history fails the call; a lost file of marks is a warning
@@ -3190,7 +3644,28 @@ impl NamesModule for Names {
             if let Some((true, why)) = damage {
                 return Err(why);
             }
-            let list = Value::from(activity::all(&dir).into_iter().filter(|entry| activity::involves(entry, &account)).take(100).collect::<Vec<_>>());
+            // A LEZ account's page lists the zone in use only: the same keys make the same
+            // account ID on every zone, and what one holds there is other money.
+            let zones = self.zones_now();
+            let here = zones.current_id();
+            let lez_page = account.trim().starts_with("Public/") || account.trim().starts_with("Private/");
+            let list = Value::from(
+                activity::all(&dir)
+                    .into_iter()
+                    .filter(|entry| activity::involves(entry, &account))
+                    .filter(|entry| !(lez_page && activity::on_lez(entry) && activity::zone_of(entry) != here))
+                    .take(100)
+                    .map(|mut entry| {
+                        // What the zone is called now, once there is more than one to tell
+                        // apart; null for a zone that has been removed.
+                        if activity::on_lez(&entry) && (zones.len() > 1 || activity::zone_of(&entry) != zones::HOME) {
+                            let name = zones.index(activity::zone_of(&entry)).and_then(|at| zones.at(at)).map(|zone| zone.name.clone());
+                            entry["zone_name"] = json!(name);
+                        }
+                        entry
+                    })
+                    .collect::<Vec<_>>(),
+            );
             Ok((list, damage.map(|(_, why)| why)))
         })();
         match listed {
@@ -3222,7 +3697,7 @@ impl NamesModule for Names {
         let from = self.cli_setup().ok().and_then(|setup| {
             if from_private { cli::default_private(&setup).ok().map(|id| format!("Private/{id}")) } else { cli::default_public(&setup).ok().map(|id| format!("Public/{id}")) }
         });
-        log_started(&out, json!({ "kind": "pay_account", "chain": "lez", "from": from, "to": account.trim(), "amount": cli::amount_text(&amount).ok(), "private": from_private }));
+        self.log_started(&out, json!({ "kind": "pay_account", "chain": "lez", "from": from, "to": account.trim(), "amount": cli::amount_text(&amount).ok(), "private": from_private }));
         out
     }
 
@@ -3244,7 +3719,7 @@ impl NamesModule for Names {
             }
         }
         reply((|| {
-            let setup = self.cli_setup()?;
+            let setup = self.names_setup()?;
             if following && self.follows.is_empty() {
                 return Ok(json!({ "posts": [], "updating": false, "error": null }));
             }
@@ -3257,7 +3732,7 @@ impl NamesModule for Names {
     fn board_posts_of(&mut self, name: String, before: i64) -> String {
         reply((|| {
             let name = registry::parse_name(&name)?;
-            let setup = self.cli_setup()?;
+            let setup = self.names_setup()?;
             let key = format!("author:{name}:{before}");
             Ok(self.board_read(key, move || cli::run_posts_of(&setup, &name, before)))
         })())
@@ -3267,7 +3742,7 @@ impl NamesModule for Names {
         reply((|| {
             // Checked before it becomes a key: junk is refused, not kept (SF-1).
             let post = cli::post_ref(&post)?;
-            let setup = self.cli_setup()?;
+            let setup = self.names_setup()?;
             Ok(self.board_read(format!("thread:{post}"), move || cli::run_thread(&setup, &post)))
         })())
     }
@@ -3333,7 +3808,7 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         reply((|| {
-            let setup = self.cli_setup()?;
+            let setup = self.names_setup()?;
             let saved: Value = std::fs::read_to_string(setup.wallet.join("names.json"))
                 .ok()
                 .and_then(|text| serde_json::from_str(&text).ok())
@@ -3465,7 +3940,7 @@ impl NamesModule for Names {
         };
         let out = self.cli_job(&name, "pay", |_, _, _| Ok((command, None, Value::Null)));
         let from = self.cli_setup().ok().and_then(|setup| cli::default_private(&setup).ok()).map(|id| format!("Private/{id}"));
-        log_started(&out, json!({ "kind": "pay", "chain": "lez", "from": from, "name": registry::normalize_name(&name), "amount": cli::amount_text(&amount).ok() }));
+        self.log_started(&out, json!({ "kind": "pay", "chain": "lez", "from": from, "name": registry::normalize_name(&name), "amount": cli::amount_text(&amount).ok() }));
         out
     }
 
@@ -3536,13 +4011,28 @@ impl NamesModule for Names {
             return false;
         }
         let dir = dir.trim();
-        if dir.is_empty() {
-            self.cli_wallet = None;
+        let chosen = if dir.is_empty() {
+            if self.on_home() {
+                None
+            } else {
+                // An added zone's default is its own folder, never home's.
+                let own = zones::Zone { wallet: None, ..self.zones.zone().clone() };
+                match Self::zone_wallet(&own) {
+                    Ok(dir) => Some(dir),
+                    Err(_) => return false,
+                }
+            }
         } else if cli::is_owned_safely(std::path::Path::new(dir), true, false) {
-            self.cli_wallet = Some(dir.to_owned());
+            Some(dir.to_owned())
         } else {
             return false;
+        };
+        // One folder holds one chain's wallet: another zone's is refused.
+        let used = chosen.as_deref().map(std::path::PathBuf::from).or_else(|| cli::find_wallet(None));
+        if used.is_some_and(|dir| self.wallet_taken(&dir).is_some()) {
+            return false;
         }
+        self.cli_wallet = chosen;
         self.save();
         true
     }
@@ -3582,16 +4072,122 @@ impl NamesModule for Names {
         if only_the_names_app().is_err() {
             return false;
         }
-        let url = url.trim();
-        if is_http_url(url) {
-            self.sequencer = url.to_owned();
-            self.forget_all_reads();
-            self.token_info.clear();
-            self.save();
-            true
-        } else {
-            false
+        self.change_sequencer(self.zones.current(), &url, false).is_ok()
+    }
+
+    // ── Zones ───────────────────────────────────────────────────────────
+
+    fn zone_list(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
         }
+        self.home_channel(false);
+        reply(Ok(self.zones_view()))
+    }
+
+    fn zone_add(&mut self, name: String, sequencer: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let url = sequencer.trim();
+            if !is_http_url(url) {
+                return Err(NOT_A_SEQUENCER.to_owned());
+            }
+            if !name.trim().is_empty() {
+                zones::name(&name)?;
+            }
+            // Home's channel first: a sequencer that serves home is not another zone.
+            if self.home_channel(true).is_none() {
+                return Err(format!(
+                    "{}'s own sequencer didn't say which chain it serves, so a new zone can't be told apart from it. Nothing was added; try again when it answers.",
+                    self.zones.home().name
+                ));
+            }
+            let read = registry::channel_id_within(url, CHANNEL_WAIT)
+                .map_err(|why| format!("that sequencer didn't say which chain it serves, so it can't be added. ({})", why.trim().trim_end_matches('.')))?;
+            let mut zones = self.zones_now();
+            let at = zones.add(&name, url, &read)?;
+            let added = zones.id(at);
+            self.zones = zones;
+            self.save();
+            Ok(merged(self.zones_view(), &json!({ "added": added })))
+        })())
+    }
+
+    fn zone_use(&mut self, zone: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let at = self.zones.find(&zone)?;
+            let was = self.zones.current();
+            if at != was {
+                // A job saves the wallet it started with when it ends, and is followed by
+                // the zone it runs on.
+                self.no_job_running()?;
+                self.zones = self.zones_now();
+                self.zones.use_zone(at);
+                if let Err(why) = self.enter_zone() {
+                    self.zones.use_zone(was);
+                    return Err(why);
+                }
+                // Everything read so far was the other zone's.
+                self.forget_all_reads();
+                self.token_info.clear();
+                self.forget_tokens();
+                self.forget_mine();
+                self.save();
+            }
+            Ok(self.zones_view())
+        })())
+    }
+
+    fn zone_remove(&mut self, zone: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let mut zones = self.zones_now();
+            let at = zones.find(&zone)?;
+            let dir = Self::zone_dir(&zones, at).map(|dir| dir.to_string_lossy().into_owned());
+            let removed = zones.remove(at)?;
+            self.zones = zones;
+            self.save();
+            // Its wallet folder stays where it is: adding the zone again finds it.
+            Ok(merged(self.zones_view(), &json!({ "removed": { "name": removed.name, "channel": removed.channel, "wallet_dir": dir } })))
+        })())
+    }
+
+    fn zone_rename(&mut self, zone: String, name: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let mut zones = self.zones_now();
+            let at = zones.find(&zone)?;
+            zones.rename(at, &name)?;
+            self.zones = zones;
+            self.save();
+            Ok(self.zones_view())
+        })())
+    }
+
+    fn zone_sequencer(&mut self, zone: String, url: String, other_chain_ok: bool) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let at = self.zones.find(&zone)?;
+            match self.change_sequencer(at, &url, other_chain_ok) {
+                Ok(channel) => Ok(merged(self.zones_view(), &json!({ "changed": true, "channel": channel }))),
+                // Home may take another chain, once the person has said so.
+                Err(zones::Refused { why, other_chain: Some(channel) }) if at == 0 => {
+                    Ok(json!({ "changed": false, "other_chain": true, "channel": channel, "why": why }))
+                }
+                Err(refused) => Err(refused.why),
+            }
+        })())
     }
 
     // ── Tokens ──────────────────────────────────────────────────────────
@@ -3719,7 +4315,7 @@ impl NamesModule for Names {
         let from = self.cli_setup().ok().and_then(|setup| {
             if from_private { cli::default_private(&setup).ok().map(|id| format!("Private/{id}")) } else { cli::default_public(&setup).ok().map(|id| format!("Public/{id}")) }
         });
-        log_started(&out, json!({ "kind": "token_send", "chain": "lez", "from": from, "to": to.trim(), "amount": cli::amount_text(&amount).ok(), "token": definition.trim() }));
+        self.log_started(&out, json!({ "kind": "token_send", "chain": "lez", "from": from, "to": to.trim(), "amount": cli::amount_text(&amount).ok(), "token": definition.trim() }));
         out
     }
 
@@ -3812,6 +4408,7 @@ impl NamesModule for Names {
         reply((|| {
             let keys = node::call("wallet_get_known_addresses", json!([]), node::QUICK)?;
             let keys: Vec<String> = keys.as_array().map(|k| k.iter().filter_map(|k| k.as_str().and_then(chain::parse_key)).collect()).unwrap_or_default();
+            let known = keys.clone();
             // The node lists some keys its wallet can't spend from; those are left out.
             Ok(Value::from(
                 keys.into_iter()
@@ -3823,6 +4420,8 @@ impl NamesModule for Names {
                     })
                     .collect::<Vec<_>>(),
             ))
+            // Labels, and the accounts made here (no notes yet, or not used before the node restarts).
+            .map(|rows| chain_keys::annotate(rows, &known, &chain_keys::records(&known)))
             .inspect(|rows| {
                 let held: Vec<(String, u128)> = rows
                     .as_array()
@@ -3873,6 +4472,9 @@ impl NamesModule for Names {
                 "amount": amount.to_string(),
                 "balance": balance.to_string(),
             });
+            if !send {
+                chain_fee_about(&mut plan, "fee_about", &chain_fee::Shape::Transfer { to: to_key.clone(), amount }, &from, None)?;
+            }
             if send {
                 let before = chain::notes_of(&node::call("wallet_get_notes", json!([from, ""]), node::QUICK)?);
                 let sent = node::call("wallet_transfer_funds", json!([from, [from], to_key, amount.to_string(), ""]), node::PROVING)
@@ -3918,6 +4520,13 @@ impl NamesModule for Names {
                 return Err(IN_FLIGHT.to_owned());
             }
             let mut plan = json!({ "from": from, "amount": amount.to_string(), "balance": balance.to_string(), "exact": exact });
+            if !send {
+                if exact {
+                    plan["fee_about"] = json!("0");
+                } else {
+                    chain_fee_about(&mut plan, "fee_about", &chain_fee::Shape::Transfer { to: from.clone(), amount }, &from, None)?;
+                }
+            }
             // A note of exactly the amount is already there: a split would only cost a fee
             // and take notes out of the stake (CR-9).
             if send && exact {
@@ -4001,6 +4610,19 @@ impl NamesModule for Names {
             let others = if needs_split { others.saturating_sub(u128::from(amount)).saturating_sub(u128::from(SPLIT_FEE_ALLOWANCE)) } else { others };
             let fee_short = others < u128::from(BRIDGE_MAX_FEE);
             let channel = registry::channel_id(&self.sequencer)?;
+            // The deposit is for the zone in use, and a zone is its channel: a sequencer
+            // that now names another one isn't that zone's, and a deposit can't be undone.
+            let zones = self.zones_now();
+            if let (Some(known), Some(read)) = (zones.zone().channel.as_deref(), zones::channel(&channel)) {
+                if known != read {
+                    return Err(format!(
+                        "{}'s sequencer now names another chain (channel {}, not {}). Nothing was sent; check the zone's sequencer.",
+                        zones.zone().name,
+                        zones::short(&read),
+                        zones::short(known)
+                    ));
+                }
+            }
             // A deposit can't be undone: the channel the sequencer names has to be on the
             // chain the node follows (CR-1).
             let channel_known = node::call("get_channel_state", json!([channel]), node::QUICK).is_ok();
@@ -4008,10 +4630,20 @@ impl NamesModule for Names {
                 "sent": false, "hash": null, "to": to, "amount": amount.to_string(),
                 "total": note.as_ref().map(|_| amount.to_string()), "notes": note.as_ref().map(|_| "1"),
                 "fee": BRIDGE_MAX_FEE.to_string(), "fee_reserve": BRIDGE_MAX_FEE.to_string(), "note": note, "needs_split": note.is_none(), "channel": channel,
-                "channel_known": channel_known, "fee_short": fee_short, "others": others.to_string(), "lines": [],
+                "channel_known": channel_known, "zone": zones.current_id(), "zone_name": zones.zone().name, "fee_short": fee_short, "others": others.to_string(), "lines": [],
             });
             if needs_split {
                 plan["split_fee_allowance"] = json!(SPLIT_FEE_ALLOWANCE.to_string());
+            }
+            if !send {
+                let deposit = chain_fee::Shape::Deposit { channel: channel.clone(), metadata: registry::hex(&account).len() / 2 };
+                match &note {
+                    Some(note) => chain_fee_about(&mut plan, "fee_about", &deposit, &from, Some(note))?,
+                    None => plan["fee_about"] = Value::Null,
+                }
+                if needs_split {
+                    chain_fee_about(&mut plan, "split_fee_about", &chain_fee::Shape::Transfer { to: from.clone(), amount }, &from, None)?;
+                }
             }
             if exact_busy {
                 plan["needs_split"] = json!(false);
@@ -4052,9 +4684,10 @@ impl NamesModule for Names {
                 let pending = format!("pending-{}-{note}", now());
                 chain_sent_add(&pending, json!({ "from": from, "inputs": [note], "fee": null, "at": now(), "pending": true, "notes": notes }));
                 let entry = config_dir().map(|dir| {
-                    let id = activity::add(&dir, now(), json!({ "kind": "bridge", "chain": "logos", "from": from, "to": format!("Public/{to}"),
+                    let entry = json!({ "kind": "bridge", "chain": "logos", "from": from, "to": format!("Public/{to}"),
                         "amount": amount.to_string(), "hash": null, "note": note, "channel": channel, "op_id": registry::hex(&op_id),
-                        "metadata": registry::hex(&metadata), "receipt": receipt, "followed": true }));
+                        "metadata": registry::hex(&metadata), "receipt": receipt, "followed": true });
+                    let id = activity::add(&dir, now(), activity::in_zone(entry, &zones.current_id()));
                     (dir, id)
                 });
                 // The metadata as `names bridge` sends it too (`deposit::metadata`).
@@ -4151,11 +4784,18 @@ impl NamesModule for Names {
             let vouchers = node::call("wallet_get_claimable_vouchers", json!([]), node::QUICK)?;
             let count = vouchers["vouchers"].as_array().map_or(0, Vec::len);
             if !send {
-                return Ok(json!({
+                let fee_about = chain_claim_fee_about();
+                let reward = chain::amount(&vouchers["reward_amount"]);
+                let mut plan = json!({
                     "claimable": chain::amount(&vouchers["total_claimable"]).to_string(),
                     "vouchers": count,
-                    "reward_per_voucher": chain::amount(&vouchers["reward_amount"]).to_string(),
-                }));
+                    "reward_per_voucher": reward.to_string(),
+                    "fee_about": fee_about,
+                });
+                if let Some(warning) = chain_fee::claim_warning(plan["fee_about"].as_str().and_then(|fee| fee.parse().ok()).filter(|_| count > 0), reward) {
+                    plan["warning"] = Value::from(warning);
+                }
+                return Ok(plan);
             }
             if count == 0 {
                 return Err("There is nothing to claim: your node has no leader rewards waiting.".to_owned());
@@ -4176,6 +4816,27 @@ impl NamesModule for Names {
             let fee = stored.as_ref().and_then(|tx| chain::transfer_fee(tx, &before));
             Ok(chain::claim_result(hash, &vouchers, fee))
         })())
+    }
+
+    fn chain_account_new(&mut self, label: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(chain_keys::with_node(|ask, files, records| chain_keys::make(ask, files, records, &label, now())))
+    }
+
+    fn chain_account_label(&mut self, key: String, label: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(chain_keys::with_node(|ask, _, records| chain_keys::relabel(ask, records, &key, &label)))
+    }
+
+    fn chain_account_remove(&mut self, key: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(chain_keys::with_node(|ask, _, records| chain_keys::remove(ask, records, &key)))
     }
 
     // ── Wallet Provider SDK ─────────────────────────────────────────────
@@ -4222,6 +4883,10 @@ impl NamesModule for Names {
             let app = asking_app()?;
             let now = provider::now_ms();
             let mut request = provider::transfer_request(&app, &asset, &amount, &destination, now)?;
+            // A name is paid on home, where names are kept.
+            if !self.on_home() && matches!(cli::pay_to(request["destination"].as_str().unwrap_or_default()), Ok(cli::PayTo::Name(_))) {
+                return Err("the wallet is using a zone where a name can't be paid; ask to pay an account ID".to_owned());
+            }
             if let Some(definition) = provider::token_of(&request) {
                 // Reading the token costs a run of the CLI, so only an app that
                 // may ask now gets one.
@@ -4305,7 +4970,10 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         self.provider_refresh();
-        let pending: Vec<Value> = self.store().requests.iter().filter(|request| request["state"] == "pending").cloned().collect();
+        // An inscription is paid from a chain account, not one of these: it has its own
+        // list and approval (`pending_inscriptions`, `approve_inscription`).
+        let pending: Vec<Value> =
+            self.store().requests.iter().filter(|request| request["state"] == "pending" && request["kind"] != provider::INSCRIBE).cloned().collect();
         // The wallet's other public accounts take the CLI a moment to list, so
         // they come from a read in the background and join the choices once known.
         let others = if pending.iter().any(|request| request["kind"] != provider::TRANSFER) { self.publics_read_lately() } else { Vec::new() };
@@ -4318,6 +4986,8 @@ impl NamesModule for Names {
                 publishers.insert(app, publisher);
             }
         }
+        let zones = self.zones_now();
+        let here = zones.current_id();
         let store = self.store();
         let views: Vec<Value> = pending
             .into_iter()
@@ -4325,6 +4995,16 @@ impl NamesModule for Names {
                 let app = request["app"].as_str().unwrap_or_default().to_owned();
                 let granted = store.granted(&app);
                 let kind = request["kind"].as_str().unwrap_or_default().to_owned();
+                if kind == provider::TRANSFER || kind == provider::CALL {
+                    // Which zone it was asked for, as it is called now, and whether that
+                    // is the one in use (it can only be approved there).
+                    let asked = request["zone"].as_str().unwrap_or(zones::HOME).to_owned();
+                    let name = zones.index(&asked).and_then(|at| zones.at(at)).map(|zone| zone.name.clone());
+                    request["zone_in_use"] = json!(asked == here);
+                    request["zone_removed"] = json!(name.is_none());
+                    request["zone_name"] = json!(name.or_else(|| request["zone_name"].as_str().map(str::to_owned)));
+                    request["zone"] = json!(asked);
+                }
                 request["choices"] = Value::from(
                     choices
                         .iter()
@@ -4387,6 +5067,31 @@ impl NamesModule for Names {
         let revoked = store.revoke(app.trim());
         store.save();
         reply(Ok(json!({ "revoked": revoked })))
+    }
+
+    fn chain_inscribe(&mut self, from_key: String, text: String, send: bool) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(chain_inscribe::run(&from_key, &text, send))
+    }
+
+    fn propose_inscription(&mut self, text: String) -> String {
+        reply(self.inscription_proposed(&text))
+    }
+
+    fn pending_inscriptions(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(self.inscriptions_pending())
+    }
+
+    fn approve_inscription(&mut self, request_id: String, from_key: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(self.inscription_approved(request_id.trim(), &from_key))
     }
 }
 
@@ -4466,7 +5171,15 @@ impl Names {
         answer
     }
 
-    fn queue(&mut self, app: &str, request: Value, now: u64) -> Result<Value, String> {
+    fn queue(&mut self, app: &str, mut request: Value, now: u64) -> Result<Value, String> {
+        // A transfer or a call is for the zone in use when it is asked, and is approved
+        // only there: the same account ID is another account on another zone.
+        if request["kind"] == provider::TRANSFER || request["kind"] == provider::CALL {
+            let zones = self.zones_now();
+            request["zone"] = json!(zones.current_id());
+            request["zone_name"] = json!(zones.zone().name);
+            request["zone_channel"] = json!(zones.zone().channel);
+        }
         let store = self.store();
         if store.granted(app).is_empty() {
             return Err(NOT_CONNECTED.to_owned());
@@ -4502,7 +5215,7 @@ impl Names {
     /// `pending_requests`); empty until the first read ends.
     fn publics_read_lately(&self) -> Vec<AccountId> {
         let Ok(setup) = self.cli_setup() else { return Vec::new() };
-        let read = self.read_in_background("provider:publics".to_owned(), std::time::Duration::from_secs(30), move || {
+        let read = self.read_in_background(self.zone_key("provider:publics"), std::time::Duration::from_secs(30), move || {
             wallet::accounts(&setup).map(|held| json!(held.public.iter().map(registry::account_text).collect::<Vec<_>>()))
         });
         read["value"]
@@ -4526,6 +5239,10 @@ impl Names {
         }
         let kind = request["kind"].as_str().unwrap_or_default().to_owned();
         let app = request["app"].as_str().unwrap_or_default().to_owned();
+        if kind == provider::TRANSFER || kind == provider::CALL {
+            // Stays pending: the person can switch zones and approve it, or reject it.
+            self.asked_here(&request)?;
+        }
         let chosen: Vec<String> = account
             .split(',')
             .map(str::trim)
@@ -4715,12 +5432,12 @@ impl Names {
                 Ok(setup) if cli::default_private(&setup).ok().as_deref() == Some(registry::account_text(&id).as_str()) => setup,
                 _ => return unreadable("this private account's balance can't be read on this computer"),
             };
-            let read = self.read_in_background("provider:cli_balance".to_owned(), BALANCE_EVERY, move || cli::run_balance(&setup));
+            let read = self.read_in_background(self.zone_key("provider:cli_balance"), BALANCE_EVERY, move || cli::run_balance(&setup));
             let balance = read["value"]["balance"].clone();
             merged(read, &json!({ "value": balance }))
         } else {
             let registry = Registry::new(&self.sequencer, self.program.unwrap_or([0; 32]));
-            self.read_in_background(format!("provider:balance:{}", registry::account_text(&id)), BALANCE_EVERY, move || {
+            self.read_in_background(self.zone_key(&format!("provider:balance:{}", registry::account_text(&id))), BALANCE_EVERY, move || {
                 registry.balance(&id).map(|balance| json!(balance.to_string()))
             })
         };
@@ -4982,6 +5699,10 @@ fn in_flight_refusal(error: String, from: &str, notes: &Map<String, Value>) -> S
     if short && chain_notes_in_use(from).iter().any(|note| notes.contains_key(note)) {
         return IN_FLIGHT.to_owned();
     }
+    // Held by the node for an inscription priced here (chain_inscribe.rs), not short.
+    if short && chain_inscribe::plan_holds_notes_of(from, notes) {
+        return chain_inscribe::HELD.to_owned();
+    }
     error
 }
 
@@ -5046,6 +5767,46 @@ fn chain_sent_add(hash: &str, sent: Value) {
     }
     all.insert(hash.to_owned(), sent);
     save_object(&dir.join("chain-sent.json"), &all);
+}
+
+/// About what `shape` will cost paid from `from`, set in `plan` as `field` (decimal text, or
+/// null when the node can't say), with `cannot_pay_fee: true` when the key's notes can't
+/// pay it and its fee, and `in_flight: true` when they could but some are a send's from
+/// here still on its way: asked of the node with stand-ins of the key's notes, less `skip`
+/// and those a send from here still spends, so no real note is reserved (chain_fee.rs).
+/// `Err` when the node refuses it as it would refuse the send (a recipient that isn't a key).
+fn chain_fee_about(plan: &mut Value, field: &str, shape: &chain_fee::Shape, from: &str, skip: Option<&str>) -> Result<(), String> {
+    plan[field] = Value::Null;
+    let Ok(notes) = node::call("wallet_get_notes", json!([from, ""]), node::QUICK).map(|reply| chain::notes_of(&reply)) else { return Ok(()) };
+    let busy = chain_notes_in_use(from);
+    let (held_busy, free): (Vec<_>, Vec<_>) = notes.iter().filter(|(id, _)| skip != Some(id.as_str())).partition(|(id, _)| busy.contains(*id));
+    let values = |notes: Vec<(&String, &Value)>| notes.into_iter().map(|(_, value)| chain::amount(value)).collect::<Vec<u128>>();
+    match chain_fee::with_busy(shape, from, &values(free), &values(held_busy), |request| node::call("wallet_fund_tx", json!([request]), node::QUICK))? {
+        chain_fee::Estimate::Fee(fee) => plan[field] = Value::from(fee.to_string()),
+        chain_fee::Estimate::Short => plan["cannot_pay_fee"] = Value::Bool(true),
+        chain_fee::Estimate::InFlight => plan["in_flight"] = Value::Bool(true),
+        chain_fee::Estimate::Unknown => {}
+    }
+    Ok(())
+}
+
+/// About what one `leader_claim` will cost: its LeaderClaim op and a transfer from the
+/// node's leader funding key, which names can't tell from the others, so the most any
+/// key would pay with its own notes (chain_fee::claim_estimate).
+fn chain_claim_fee_about() -> Value {
+    let keys = node::call("wallet_get_known_addresses", json!([]), node::QUICK).unwrap_or_default();
+    let held: Vec<(String, Vec<u128>)> = keys
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .take(MAX_WALLET_ACCOUNTS)
+        .filter_map(|key| {
+            let notes = node::call("wallet_get_notes", json!([key, ""]), node::QUICK).map(|reply| chain::notes_of(&reply)).ok()?;
+            Some((key.to_owned(), notes.values().map(chain::amount).collect()))
+        })
+        .collect();
+    chain_fee::claim_estimate(&held, |request| node::call("wallet_fund_tx", json!([request]), node::QUICK)).map_or(Value::Null, |fee| Value::from(fee.to_string()))
 }
 
 /// Basecamp's Logos Blockchain node (`blockchain_module`), for the chain methods.
@@ -5154,6 +5915,8 @@ mod tests {
             token_program: None,
             token_info: HashMap::new(),
             publishers: HashMap::new(),
+            zones: zones::Zones::new(bare_home(DEFAULT_SEQUENCER)),
+            channel_asked: false,
             receipt_asks: Default::default(),
         }
     }
@@ -5912,7 +6675,7 @@ mod tests {
         // One big note: a split is needed, and the bridge says so instead of moving it all.
         node_answers("wallet_get_notes", json!({ "notes": [{ "id": "b271", "value": "131296018" }] }));
         let split = parsed(&names.chain_split(NODE_KEY.into(), "1,000,000".into(), false));
-        assert_eq!(split["value"], json!({ "from": NODE_KEY, "amount": "1000000", "balance": "131296018", "exact": false }), "{split}");
+        assert_eq!(split["value"], json!({ "from": NODE_KEY, "amount": "1000000", "balance": "131296018", "exact": false, "fee_about": null }), "{split}");
         let to = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
         let plan = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), false));
         assert_eq!((plan["value"]["needs_split"].as_bool(), plan["value"]["note"].clone()), (Some(true), Value::Null), "{plan}");
@@ -6688,7 +7451,8 @@ mod tests {
         let asked = || registry::MINTED_ASKED.with(std::cell::Cell::get);
         let settle = |balance: u128| {
             let rows = names.settle_activity(&dir, "seq", &[(to.clone(), balance)], registry::Deadline::after(cli::CALL_BUDGET));
-            activity::note_balances(&dir, now(), "lez", "seq", &rows);
+            // Noted as the module notes it: under the zone in use's marks, with its entries.
+            names.note_lez(&rows);
             rows
         };
         // First round: asked (never asked before), around a fresh read; the mark is set.
@@ -6797,7 +7561,7 @@ mod tests {
         let mut names = fresh();
         node_answers("wallet_get_claimable_vouchers", json!({ "reward_amount": "13140", "total_claimable": "0", "vouchers": [] }));
         let plan = parsed(&names.chain_claim(false));
-        assert_eq!(plan["value"], json!({ "claimable": "0", "vouchers": 0, "reward_per_voucher": "13140" }), "{plan}");
+        assert_eq!(plan["value"], json!({ "claimable": "0", "vouchers": 0, "reward_per_voucher": "13140", "fee_about": null }), "{plan}");
         let claimed = parsed(&names.chain_claim(true));
         assert_eq!(claimed["success"], false, "{claimed}");
         assert_eq!(claimed["error"], "There is nothing to claim: your node has no leader rewards waiting.");
@@ -6899,7 +7663,9 @@ mod tests {
         let other = parsed(&names.get_config());
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
         let keys: Vec<&String> = other.as_object().unwrap().keys().collect();
-        assert_eq!(keys, ["module_version", "registry", "sequencer", "token_program"], "{other}");
+        assert_eq!(keys, ["module_version", "names_sequencer", "registry", "sequencer", "token_program", "zone"], "{other}");
+        let zone: Vec<&String> = other["zone"].as_object().unwrap().keys().collect();
+        assert_eq!(zone, ["channel", "home", "id"], "{other}");
     }
 
     #[test]
@@ -7764,5 +8530,653 @@ mod tests {
         assert_eq!(parsed(&bad.cli_fee())["success"], false);
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(other);
+    }
+
+    /// LP-0022 accounts: the new methods are the Names app's alone, a new account is
+    /// listed (with its label) before the node uses it, and without the node's keystore
+    /// beside the module's data nothing is made.
+    #[test]
+    fn chain_accounts_are_the_names_apps_and_list_the_ones_made_here() {
+        let mut names = fresh();
+        let dir = config_dir().unwrap();
+        let _ = std::fs::remove_file(chain_keys::records_path(&dir));
+        as_caller(logos_rust_sdk::LogosCaller::Module { name: "evil_ui".into(), instance: None });
+        for refused in [names.chain_account_new("x".into()), names.chain_account_label(NODE_KEY.into(), "x".into()), names.chain_account_remove(NODE_KEY.into())] {
+            assert!(parsed(&refused)["error"].as_str().unwrap().contains("only the Names app"), "{refused}");
+        }
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert!(node_asked().is_empty(), "nothing was asked for the other app");
+        node_answers("wallet_get_known_addresses", json!([NODE_KEY]));
+        node_answers("wallet_get_balance", json!("7"));
+        // The test process has no --instance-persistence-path: no keystore, nothing made.
+        assert_eq!(parsed(&names.chain_account_new("Savings".into()))["error"], chain_keys::NO_KEYSTORE);
+        assert!(!node_asked().contains(&"generate_key".to_owned()));
+        let made = "ab".repeat(32);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(chain_keys::records_path(&dir), json!({ made.clone(): { "title": "names-1", "label": "Savings", "at": 1 } }).to_string()).unwrap();
+        let labelled = parsed(&names.chain_account_label(NODE_KEY.into(), "Main".into()));
+        assert_eq!(labelled["value"], json!({ "key": NODE_KEY, "label": "Main" }), "{labelled}");
+        let shown = parsed(&names.chain_accounts());
+        assert_eq!(shown["value"], json!([
+            { "key": NODE_KEY, "balance": "7", "label": "Main", "ready": true },
+            { "key": made, "balance": null, "title": "names-1", "label": "Savings", "ready": false },
+        ]), "{shown}");
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(chain_keys::records_path(&dir)).unwrap().permissions().mode() & 0o777, 0o600);
+        let _ = std::fs::remove_file(chain_keys::records_path(&dir));
+    }
+
+    /// LP-0022 gas: each chain plan carries the node's own fee for it (`fee_about`), asked
+    /// with stand-ins of the key's notes and no funding key, so no real note is reserved.
+    /// The replies are a solo 0.3.4 node's (exp2: 100,000 in, 3,000 + 96,166 out = 834).
+    #[test]
+    fn chain_plans_carry_the_nodes_fee_estimate_without_naming_a_real_note() {
+        let mut names = fresh();
+        let to = "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225";
+        let fund_asked = || {
+            node::ASKED.with(|asked| asked.borrow().iter().rev().find(|(m, _)| m == "wallet_fund_tx").map(|(_, a)| serde_json::from_str::<Value>(a[0].as_str().unwrap()).unwrap()))
+        };
+        node_answers("wallet_get_balance", json!("100000"));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "f08a", "value": "100000" }] }));
+        node_answers("wallet_fund_tx", json!({ "funded_tx": { "ops": [{ "opcode": 0, "payload": { "inputs": ["01"], "outputs": [{ "pk": to, "value": 3000 }, { "pk": NODE_KEY, "value": 96166 }] } }] }, "tip": "b3" }));
+        let plan = parsed(&names.chain_send(NODE_KEY.into(), to.into(), "3,000".into(), false));
+        assert_eq!(plan["value"]["fee_about"], "834", "{plan}");
+        let request = fund_asked().expect("the node is asked for the fee");
+        assert_eq!(request["funding_public_keys"], json!([]), "no key the node could take a real note from");
+        assert_eq!(request["tx_builder"]["ledger_inputs"][0]["note"], json!({ "value": 100000, "pk": NODE_KEY }));
+        assert!(!request.to_string().contains("f08a"), "the real note's id is never named: {request}");
+        assert!(!node_asked().contains(&"wallet_transfer_funds".to_owned()), "a plan sends nothing");
+        // A split is the same transfer, to the key itself; nothing to split, nothing to pay.
+        let split = parsed(&names.chain_split(NODE_KEY.into(), "3,000".into(), false));
+        assert_eq!(split["value"]["fee_about"], "834", "{split}");
+        assert_eq!(fund_asked().unwrap()["tx_builder"]["pending_transfer"]["outputs"], json!([{ "value": 3000, "pk": NODE_KEY }]));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "f08a", "value": "100000" }, { "id": "e300", "value": "3000" }] }));
+        assert_eq!(parsed(&names.chain_split(NODE_KEY.into(), "3,000".into(), false))["value"]["fee_about"], "0", "an exact note is already there");
+        // When the node can't say, the plan still stands, without an estimate.
+        node_refuses("wallet_fund_tx", "Failed to parse fund request: missing field `tx_builder`");
+        let plan = parsed(&names.chain_send(NODE_KEY.into(), to.into(), "3,000".into(), false));
+        assert_eq!((plan["success"].clone(), plan["value"]["fee_about"].clone()), (json!(true), Value::Null), "{plan}");
+        assert_eq!(plan["value"]["cannot_pay_fee"], Value::Null, "a node that didn't say is not a short key");
+        // The node says no set of the key's notes can pay it with its fee (the proof run:
+        // 1,268 in two notes, a plan for 1,000): the plan says so instead of a figure.
+        node_answers("wallet_get_balance", json!("1268"));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "a1", "value": "1000" }, { "id": "a2", "value": "268" }] }));
+        node_refuses("wallet_fund_tx", "Failed to fund tx: Wallet does not have enough funds, available=0");
+        let plan = parsed(&names.chain_send(NODE_KEY.into(), to.into(), "1,000".into(), false));
+        assert_eq!((plan["value"]["fee_about"].clone(), plan["value"]["cannot_pay_fee"].clone()), (Value::Null, json!(true)), "{plan}");
+        // A note a send from here still spends is left out, as the node's wallet leaves it out.
+        node_answers("wallet_get_balance", json!("1000000"));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "busy", "value": "900000" }, { "id": "free", "value": "100000" }] }));
+        chain_sent_add(&"ee".repeat(32), json!({ "from": NODE_KEY, "inputs": ["busy"], "fee": null, "at": now() }));
+        node_answers("wallet_fund_tx", json!({ "funded_tx": { "ops": [{ "opcode": 0, "payload": { "inputs": ["01"], "outputs": [{ "value": 3000 }, { "value": 96166 }] } }] } }));
+        assert_eq!(parsed(&names.chain_send(NODE_KEY.into(), to.into(), "3,000".into(), false))["value"]["fee_about"], "834");
+        assert_eq!(fund_asked().unwrap()["tx_builder"]["ledger_inputs"].as_array().unwrap().len(), 1);
+        assert_eq!(fund_asked().unwrap()["tx_builder"]["ledger_inputs"][0]["note"]["value"], 100000);
+        chain_sent_remove(&"ee".repeat(32));
+    }
+
+    /// A claim's plan shows what one claim costs and warns when that is more than the
+    /// one reward it cashes (the node's leader_claim has no fee cap names can set).
+    #[test]
+    fn a_claim_plan_shows_its_fee_and_warns_when_it_is_more_than_the_reward() {
+        let mut names = fresh();
+        node_answers("wallet_get_claimable_vouchers", json!({ "reward_amount": "38", "total_claimable": "76", "vouchers": [{ "nullifier": "n1" }, { "nullifier": "n2" }] }));
+        node::ANSWERS.with(|answers| answers.borrow_mut().insert("wallet_get_known_addresses".into(), json!({ "success": true, "value": [NODE_KEY] })));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "af49", "value": "50000" }] }));
+        // As the solo node funded a stand-in claim (exp2 claim-a): 50,000 in, 48,401 back.
+        node_answers("wallet_fund_tx", json!({ "funded_tx": { "ops": [
+            { "opcode": 48, "payload": { "pk": NODE_KEY } },
+            { "opcode": 0, "payload": { "inputs": ["01"], "outputs": [{ "pk": NODE_KEY, "value": 48401 }] } }] } }));
+        let plan = parsed(&names.chain_claim(false));
+        assert_eq!(plan["value"]["fee_about"], "1599", "{plan}");
+        assert!(plan["value"]["warning"].as_str().unwrap().contains("reward of 38 and pays a fee of about 1599"), "{plan}");
+        assert!(!node_asked().contains(&"leader_claim".to_owned()), "a plan claims nothing");
+        let asked = node::ASKED.with(|asked| asked.borrow().iter().rev().find(|(m, _)| m == "wallet_fund_tx").map(|(_, a)| a.clone())).unwrap();
+        let request: Value = serde_json::from_str(asked[0].as_str().unwrap()).unwrap();
+        assert_eq!(request["tx_builder"]["mantle_tx"]["ops"][0]["opcode"], 0x30);
+        assert_eq!(request["funding_public_keys"], json!([]));
+    }
+
+    /// A bridge plan: the deposit's own fee, from the key's other notes (the exact note goes
+    /// whole into the deposit and is never named); with no exact note, the split's.
+    #[test]
+    fn a_bridge_plan_estimates_the_deposit_or_the_split_before_it() {
+        let mut names = fresh();
+        let to = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
+        node_answers("get_channel_state", json!({}));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "e8ac", "value": "1000000" }, { "id": "fee1", "value": "5000000" }] }));
+        node_answers("wallet_fund_tx", json!({ "funded_tx": { "ops": [
+            { "opcode": 18, "payload": { "inputs": ["03e8"] } },
+            { "opcode": 0, "payload": { "inputs": ["01"], "outputs": [{ "value": 4998386 }] } }] } }));
+        let plan = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1,000,000".into(), false));
+        assert_eq!(plan["value"]["fee_about"], "1614", "{plan}");
+        let asked = node::ASKED.with(|asked| asked.borrow().iter().rev().find(|(m, _)| m == "wallet_fund_tx").map(|(_, a)| a.clone())).unwrap();
+        let request: Value = serde_json::from_str(asked[0].as_str().unwrap()).unwrap();
+        assert_eq!(request["tx_builder"]["ledger_inputs"].as_array().unwrap().len(), 1);
+        assert_eq!(request["tx_builder"]["ledger_inputs"][0]["note"]["value"], 5000000, "the fee note, not the deposit's");
+        assert!(!request.to_string().contains("e8ac"));
+        // No exact note: the split comes first, so that is what the plan prices.
+        node_answers("wallet_fund_tx", json!({ "funded_tx": { "ops": [{ "opcode": 0, "payload": { "inputs": ["01"], "outputs": [{ "value": 700000 }, { "value": 4299134 }] } }] } }));
+        let plan = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "700,000".into(), false));
+        assert_eq!((plan["value"]["needs_split"].clone(), plan["value"]["fee_about"].clone(), plan["value"]["split_fee_about"].clone()), (json!(true), Value::Null, json!("866")), "{plan}");
+    }
+
+    /// adv.py H4: the key's only note (100,000) is the input of a send made here that isn't in
+    /// a block yet. A plan then is short only because of it: it says the note is in flight,
+    /// not that the key can't pay ("send a little less"); once the send lands, the fee.
+    #[test]
+    fn a_plan_while_the_keys_notes_are_in_flight_says_so_not_send_less() {
+        let mut names = fresh();
+        let to = "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225";
+        node_answers("wallet_get_balance", json!("100000"));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "f08a", "value": "100000" }] }));
+        node_answers("wallet_fund_tx", json!({ "funded_tx": { "ops": [{ "opcode": 0, "payload": { "inputs": ["01"], "outputs": [{ "value": 1000 }, { "value": 98166 }] } }] } }));
+        let hash = "d6".repeat(32);
+        chain_sent_add(&hash, json!({ "from": NODE_KEY, "inputs": ["f08a"], "fee": "834", "at": now() }));
+        for plan in [names.chain_send(NODE_KEY.into(), to.into(), "1,000".into(), false), names.chain_split(NODE_KEY.into(), "1,000".into(), false)] {
+            let plan = parsed(&plan);
+            let shown = &plan["value"];
+            assert_eq!((shown["in_flight"].clone(), shown["cannot_pay_fee"].clone(), shown["fee_about"].clone()), (json!(true), Value::Null, Value::Null), "{plan}");
+        }
+        // Short with the busy note counted too: that is "send less", as before.
+        node_refuses("wallet_fund_tx", "Failed to fund tx: Wallet does not have enough funds, available=0");
+        let plan = parsed(&names.chain_send(NODE_KEY.into(), to.into(), "1,000".into(), false));
+        assert_eq!((plan["value"]["in_flight"].clone(), plan["value"]["cannot_pay_fee"].clone()), (Value::Null, json!(true)), "{plan}");
+        // Landed: its input is gone from the wallet, the record lapses, the plan has a fee.
+        chain_sent_remove(&hash);
+        node_answers("wallet_fund_tx", json!({ "funded_tx": { "ops": [{ "opcode": 0, "payload": { "inputs": ["01"], "outputs": [{ "value": 1000 }, { "value": 98166 }] } }] } }));
+        let plan = parsed(&names.chain_send(NODE_KEY.into(), to.into(), "1,000".into(), false));
+        assert_eq!((plan["value"]["in_flight"].clone(), plan["value"]["fee_about"].clone()), (Value::Null, json!("834")), "{plan}");
+    }
+
+    /// adv.py H2 and the fixer's probe: a plan to 64 hex characters that aren't a key. The
+    /// node refused the stand-in with "Parsed bytes are bigger than the modulus" and the send
+    /// with "That isn't a Logos Blockchain public key"; the plan now says what the send says.
+    #[test]
+    fn a_plan_to_a_recipient_that_isnt_a_key_is_refused_as_the_send_is() {
+        let mut names = fresh();
+        node_answers("wallet_get_balance", json!("100000"));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "f08a", "value": "100000" }] }));
+        node_refuses("wallet_fund_tx", "Failed to parse fund request: Parsed bytes are bigger than the modulus, got 77648812782670860460512307594061302913369283834606025297048026922953510464427, expected 21888242871839275222246405745257275088548364400416034343698204186575808495617 at line 1 column 553");
+        let plan = parsed(&names.chain_send(NODE_KEY.into(), "ab".repeat(32), "1,000".into(), false));
+        assert_eq!((plan["success"].clone(), plan["error"].clone()), (json!(false), json!("That isn't a Logos Blockchain public key: check it and try again.")), "{plan}");
+        assert!(!node_asked().contains(&"wallet_transfer_funds".to_owned()), "a plan sends nothing");
+    }
+
+    // ── Zones (LP-0022) ─────────────────────────────────────────────────
+
+    /// Where the tests' second zone has its sequencer.
+    const ZONE_B: &str = "http://127.0.0.1:7";
+
+    /// Has the sequencer at `url` name `channel`, or not answer and say why.
+    fn sequencer_says(url: &str, channel: Result<&str, &str>) {
+        registry::CHANNELS.with(|known| {
+            let mut known = known.borrow_mut();
+            known.retain(|(known_url, _)| known_url != url);
+            known.push((url.to_owned(), channel.map(str::to_owned).map_err(str::to_owned)));
+        });
+    }
+
+    /// `with_wallet`, its sequencer serving channel 01…, with a second zone "Second"
+    /// (channel ab…, at `ZONE_B`) added and not in use. Returns the zone's id too.
+    fn with_two_zones(label: &str, tail: &str) -> (Names, std::path::PathBuf, String) {
+        let (mut names, dir) = with_wallet(label, tail);
+        let _ = std::fs::remove_dir_all(config_dir().unwrap());
+        sequencer_says("http://127.0.0.1:9", Ok(&"01".repeat(32)));
+        sequencer_says(ZONE_B, Ok(&"AB".repeat(32)));
+        let added = parsed(&names.zone_add("Second".into(), ZONE_B.into()));
+        assert_eq!(added["value"]["added"], "ab".repeat(32), "{added}");
+        (names, dir, "ab".repeat(32))
+    }
+
+    /// Uses zone `id`, and gives its wallet folder a wallet with home's accounts if it
+    /// has none (the same keys make the same account IDs on every zone).
+    fn use_zone(names: &mut Names, id: &str) {
+        let used = parsed(&names.zone_use(id.into()));
+        assert_eq!(used["value"]["current"], id, "{used}");
+        let wallet = std::path::PathBuf::from(names.cli_wallet.clone().expect("a wallet folder"));
+        if !wallet.join(cli::STORAGE_FILE).exists() {
+            std::fs::write(wallet.join(cli::STORAGE_FILE), "{}").unwrap();
+            std::fs::write(wallet.join("names.json"), format!("{{\"public\":\"{PUBLIC}\",\"private\":\"{PRIVATE}\"}}")).unwrap();
+        }
+    }
+
+    fn zone_test_end(dir: std::path::PathBuf) {
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(config_dir().unwrap());
+    }
+
+    #[test]
+    fn zones_are_added_listed_renamed_and_removed() {
+        let (mut names, dir, second) = with_two_zones("zones-list", "exit 0");
+        let home_wallet = names.cli_wallet.clone().unwrap();
+        let listed = parsed(&names.zone_list())["value"].clone();
+        assert_eq!((listed["current"].as_str(), listed["max"].as_u64(), listed["zones"].as_array().unwrap().len()), (Some("home"), Some(16), 2), "{listed}");
+        let (home, added) = (&listed["zones"][0], &listed["zones"][1]);
+        assert_eq!(
+            (home["id"].as_str(), home["name"].as_str(), home["channel"].as_str(), home["sequencer"].as_str(), home["home"].as_bool(), home["current"].as_bool()),
+            (Some("home"), Some("Home"), Some("01".repeat(32).as_str()), Some("http://127.0.0.1:9"), Some(true), Some(true)),
+            "{home}"
+        );
+        assert_eq!((home["wallet_dir"].as_str(), home["has_wallet"].as_bool()), (Some(home_wallet.as_str()), Some(true)), "{home}");
+        assert_eq!(
+            (added["id"].as_str(), added["name"].as_str(), added["sequencer"].as_str(), added["home"].as_bool(), added["current"].as_bool(), added["has_wallet"].as_bool()),
+            (Some(second.as_str()), Some("Second"), Some(ZONE_B), Some(false), Some(false), Some(false)),
+            "{added}"
+        );
+        // Its wallet is a folder of its own, never home's.
+        assert!(added["wallet_dir"].as_str().unwrap().ends_with(&format!("zones/{second}/wallet")), "{added}");
+
+        // A zone is its channel: the same chain at another address is not a second zone,
+        // and neither is home's.
+        sequencer_says("https://again.example", Ok(&"ab".repeat(32)));
+        let again = parsed(&names.zone_add("Again".into(), "https://again.example".into()));
+        assert!(again["error"].as_str().unwrap().contains("serves Second, a zone already set up here"), "{again}");
+        sequencer_says("https://home-too.example", Ok(&"01".repeat(32)));
+        let home_too = parsed(&names.zone_add(String::new(), "https://home-too.example".into()));
+        assert!(home_too["error"].as_str().unwrap().contains("serves Home"), "{home_too}");
+        // A sequencer that doesn't say which chain it serves can't be told apart.
+        sequencer_says("https://quiet.example", Err("it didn't answer in time."));
+        let quiet = parsed(&names.zone_add("Quiet".into(), "https://quiet.example".into()));
+        assert!(quiet["error"].as_str().unwrap().contains("didn't say which chain it serves, so it can't be added. (it didn't answer in time)"), "{quiet}");
+        // An address is checked as every sequencer's is; a name as a zone's is.
+        for url in ["ftp://x.example", "http://evil.example", ""] {
+            assert_eq!(parsed(&names.zone_add("X".into(), url.into()))["error"], NOT_A_SEQUENCER, "{url}");
+        }
+        sequencer_says("https://third.example", Ok(&"cd".repeat(32)));
+        assert_eq!(parsed(&names.zone_add("second".into(), "https://third.example".into()))["success"], false, "a name in use");
+        assert_eq!(parsed(&names.zone_add("x".repeat(zones::MAX_NAME + 1), "https://third.example".into()))["success"], false, "too long");
+        // With no name it is called by its channel.
+        let third = parsed(&names.zone_add(String::new(), "https://third.example".into()))["value"].clone();
+        assert_eq!(third["zones"][2]["name"], "Zone cdcdcdcd", "{third}");
+
+        let renamed = parsed(&names.zone_rename(second.clone(), "Shop zone".into()))["value"].clone();
+        assert_eq!(renamed["zones"][1]["name"], "Shop zone", "{renamed}");
+        assert_eq!(parsed(&names.zone_rename(second.clone(), "Zone cdcdcdcd".into()))["success"], false, "another zone's name");
+        assert_eq!(parsed(&names.zone_rename("nope".into(), "X".into()))["error"], "there is no such zone here");
+
+        // Home stays, and so does the zone in use; any other is forgotten, its folder kept.
+        assert!(parsed(&names.zone_remove("home".into()))["error"].as_str().unwrap().contains("home zone can't be removed"));
+        use_zone(&mut names, &second);
+        assert!(parsed(&names.zone_remove(second.clone()))["error"].as_str().unwrap().contains("is the zone in use"));
+        let zone_wallet = names.cli_wallet.clone().unwrap();
+        use_zone(&mut names, "home");
+        let removed = parsed(&names.zone_remove(second.clone()))["value"].clone();
+        assert_eq!((removed["removed"]["name"].as_str(), removed["removed"]["wallet_dir"].as_str()), (Some("Shop zone"), Some(zone_wallet.as_str())), "{removed}");
+        assert_eq!(removed["zones"].as_array().unwrap().len(), 2, "{removed}");
+        assert!(std::path::Path::new(&zone_wallet).join(cli::STORAGE_FILE).is_file(), "the wallet folder stays");
+        assert_eq!(parsed(&names.zone_use(second.clone()))["error"], "there is no such zone here");
+        // Added again, it finds its wallet.
+        let back = parsed(&names.zone_add("Second".into(), ZONE_B.into()))["value"].clone();
+        let back = back["zones"].as_array().unwrap().iter().find(|zone| zone["id"] == second.as_str()).cloned().unwrap();
+        assert_eq!((back["wallet_dir"].as_str(), back["has_wallet"].as_bool()), (Some(zone_wallet.as_str()), Some(true)), "{back}");
+
+        // Only the Names app sets zones up.
+        as_caller(app("evil_ui"));
+        for refused in [names.zone_list(), names.zone_add("E".into(), "https://e.example".into()), names.zone_use(second.clone()), names.zone_remove(second.clone()), names.zone_rename(second.clone(), "E".into()), names.zone_sequencer(second.clone(), "https://e.example".into(), true)] {
+            assert_eq!(parsed(&refused)["success"], false, "{refused}");
+        }
+        assert_eq!(names.sequencer, "http://127.0.0.1:9");
+        zone_test_end(dir);
+    }
+
+    #[test]
+    fn the_zone_in_use_has_its_own_sequencer_wallet_and_token_program_and_is_kept() {
+        use std::os::unix::fs::PermissionsExt;
+        let (mut names, dir, second) = with_two_zones("zones-kept", "exit 0");
+        let home_wallet = names.cli_wallet.clone().unwrap();
+        names.token_program = Some([5; 32]);
+        use_zone(&mut names, &second);
+        let zone_wallet = names.cli_wallet.clone().unwrap();
+        assert_eq!(names.sequencer, ZONE_B);
+        assert_eq!(std::path::PathBuf::from(&zone_wallet), zones::wallet_dir(&config_dir().unwrap(), &second));
+        assert_eq!(std::fs::metadata(&zone_wallet).unwrap().permissions().mode() & 0o777, 0o700, "the folder is this user's alone");
+        assert_eq!(names.token_program, None, "home's token program isn't this zone's");
+        names.token_program = Some([9; 32]);
+
+        // What is saved: home in the fields a version without zones reads, and the zones.
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(config_dir().unwrap().join("config.json")).unwrap()).unwrap();
+        assert_eq!(saved["zone"], second.as_str(), "{saved}");
+        let config = names.config();
+        assert_eq!(
+            (config["sequencer"].as_str(), config["cli_wallet"].as_str(), config["token_program"].as_str(), config["zone"].as_str()),
+            (Some("http://127.0.0.1:9"), Some(home_wallet.as_str()), Some(registry::account_text(&[5; 32]).as_str()), Some(second.as_str())),
+            "{config}"
+        );
+        assert_eq!(config["zones"][1]["token_program"], registry::account_text(&[9; 32]), "{config}");
+        assert_eq!(config["zones"][1]["wallet"], Value::Null, "a zone's own folder isn't kept as a choice: {config}");
+
+        // A restart reads it back and is on the same zone.
+        let mut again = fresh();
+        again.apply_saved(&config);
+        assert_eq!((again.sequencer.as_str(), again.cli_wallet.as_deref(), again.token_program), (ZONE_B, Some(zone_wallet.as_str()), Some([9; 32])));
+        assert_eq!(again.config(), config);
+        // What the app is shown is the zone in use, with home's sequencer beside it;
+        // another app is told which network, never what the person calls it.
+        let shown = parsed(&again.get_config());
+        assert_eq!((shown["sequencer"].as_str(), shown["names_sequencer"].as_str(), shown["cli_wallet"].as_str()), (Some(ZONE_B), Some("http://127.0.0.1:9"), Some(zone_wallet.as_str())), "{shown}");
+        assert_eq!(shown["zone"], json!({ "id": second, "name": "Second", "channel": second, "home": false }), "{shown}");
+        as_caller(app("evil_ui"));
+        let other = parsed(&again.get_config());
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert_eq!(other["zone"], json!({ "id": second, "channel": second, "home": false }), "{other}");
+        assert!(!other.to_string().contains("Second") && other.get("cli_wallet").is_none(), "{other}");
+
+        // Back on home everything is home's again.
+        use_zone(&mut again, "home");
+        assert_eq!((again.sequencer.as_str(), again.cli_wallet.as_deref(), again.token_program), ("http://127.0.0.1:9", Some(home_wallet.as_str()), Some([5; 32])));
+        assert_eq!(again.config()["zones"][1]["token_program"], registry::account_text(&[9; 32]));
+
+        // A version without zones reads home; one before zones wrote nothing else.
+        let mut old = config.clone();
+        old.as_object_mut().unwrap().remove("zones");
+        old.as_object_mut().unwrap().remove("zone");
+        let mut before = fresh();
+        before.apply_saved(&old);
+        assert_eq!((before.sequencer.as_str(), before.cli_wallet.as_deref(), before.zones.len()), ("http://127.0.0.1:9", Some(home_wallet.as_str()), 1));
+
+        // A zone whose chosen wallet folder is gone is not entered: home is, the zone stays.
+        let mut gone = config.clone();
+        gone["zones"][1]["wallet"] = json!(dir.join("unplugged").to_string_lossy());
+        let mut unplugged = fresh();
+        unplugged.apply_saved(&gone);
+        assert_eq!((unplugged.sequencer.as_str(), unplugged.zones.current(), unplugged.zones.len()), ("http://127.0.0.1:9", 0, 2));
+        let refused = parsed(&unplugged.zone_use(second.clone()));
+        assert!(refused["error"].as_str().unwrap().contains("wallet folder") && refused["error"].as_str().unwrap().contains("can't be used now"), "{refused}");
+        assert_eq!((unplugged.sequencer.as_str(), unplugged.cli_wallet.as_deref()), ("http://127.0.0.1:9", Some(home_wallet.as_str())), "nothing changed");
+        zone_test_end(dir);
+    }
+
+    #[test]
+    fn a_zones_wallet_folder_is_never_another_zones() {
+        let (mut names, dir, second) = with_two_zones("zones-folder", "exit 0");
+        let home_wallet = names.cli_wallet.clone().unwrap();
+        use_zone(&mut names, &second);
+        let own = names.cli_wallet.clone().unwrap();
+        // Home's folder holds home's wallet.
+        assert!(!names.set_cli_wallet(home_wallet.clone()));
+        assert_eq!(names.cli_wallet.as_deref(), Some(own.as_str()));
+        // Another folder of the person's is taken, and an empty choice goes back to its own.
+        let other = dir.join("other-wallet");
+        cli::private_dir(&other).unwrap();
+        assert!(names.set_cli_wallet(other.to_string_lossy().into_owned()));
+        assert_eq!(names.config()["zones"][1]["wallet"], json!(other.to_string_lossy()));
+        assert!(names.set_cli_wallet(String::new()));
+        assert_eq!(names.cli_wallet.as_deref(), Some(own.as_str()));
+        // And home can't take the zone's.
+        use_zone(&mut names, "home");
+        assert!(!names.set_cli_wallet(own.clone()));
+        assert_eq!(names.cli_wallet.as_deref(), Some(home_wallet.as_str()));
+        zone_test_end(dir);
+    }
+
+    #[test]
+    fn names_stay_on_home_while_another_zone_is_in_use() {
+        let (mut names, dir, second) = with_two_zones("zones-names", "exit 0");
+        let home_wallet = names.cli_wallet.clone().unwrap();
+        connect(&mut names, "tips_ui", &format!("Public/{PUBLIC}"));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        use_zone(&mut names, &second);
+        // Reads about names go to home's sequencer with home's wallet; the rest to the zone's.
+        let (for_names, for_money) = (names.names_setup().unwrap(), names.cli_setup().unwrap());
+        assert_eq!((for_names.sequencer.as_str(), for_names.wallet.to_string_lossy().as_ref()), ("http://127.0.0.1:9", home_wallet.as_str()));
+        assert_eq!((for_money.sequencer.as_str(), for_money.wallet.clone()), (ZONE_B, zones::wallet_dir(&config_dir().unwrap(), &second)));
+        assert_eq!(names.home_sequencer(), "http://127.0.0.1:9");
+        // A change to a name, or a payment to one, is refused before anything runs.
+        for refused in [
+            names.cli_set_text("jef".into(), "chat".into(), "hi".into()),
+            names.cli_pay("jef".into(), "5".into()),
+            names.cli_receive_privately("jef".into()),
+        ] {
+            let refused = parsed(&refused);
+            assert_eq!(refused["error"], "names are kept on Home, and this wallet is using Second now. Switch to Home to do this. Nothing was started.", "{refused}");
+        }
+        assert_eq!(parsed(&names.cli_faucet())["error"], "the faucet pays on Home only. Switch to Home to ask it.");
+        as_caller(app("tips_ui"));
+        let to_name = parsed(&names.propose_transfer("LEZ".into(), "5".into(), "jef".into()));
+        assert!(to_name["error"].as_str().unwrap().contains("a name can't be paid"), "{to_name}");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert!(std::fs::read_dir(dir.join("jobs")).map_or(true, |entries| entries.count() == 0), "no job ran");
+        assert!(activity::all(&config_dir().unwrap()).is_empty(), "nothing is in the history");
+        // On home they run as before.
+        use_zone(&mut names, "home");
+        let started = parsed(&names.cli_set_text("jef".into(), "chat".into(), "hi".into()));
+        let ended = job_end(&mut names, started["value"]["id"].as_str().expect("a job"));
+        assert!(ended["log_tail"].as_str().unwrap().contains("[--rpc=http://127.0.0.1:9]\n[set-text]"), "{ended}");
+        zone_test_end(dir);
+    }
+
+    #[test]
+    fn a_sequencer_is_changed_within_its_zone_and_no_further() {
+        let (mut names, dir, second) = with_two_zones("zones-sequencer", "exit 0");
+        sequencer_says("https://b2.example", Ok(&"ab".repeat(32)));
+        sequencer_says("https://c.example", Ok(&"cd".repeat(32)));
+        sequencer_says("https://quiet.example", Err("it didn't answer in time"));
+        // The same chain at another address: the zone moves there, and stays itself.
+        let moved = parsed(&names.zone_sequencer(second.clone(), "https://b2.example".into(), false))["value"].clone();
+        assert_eq!((moved["changed"].as_bool(), moved["channel"].as_str(), moved["zones"][1]["sequencer"].as_str(), moved["zones"][1]["id"].as_str()), (Some(true), Some(second.as_str()), Some("https://b2.example"), Some(second.as_str())), "{moved}");
+        assert_eq!(names.sequencer, "http://127.0.0.1:9", "home is still in use");
+        // Another chain, or one that doesn't say, is refused: also when the person insists,
+        // since only home may become another chain.
+        for insist in [false, true] {
+            let other = parsed(&names.zone_sequencer(second.clone(), "https://c.example".into(), insist));
+            assert!(other["error"].as_str().unwrap().contains("serves another chain (channel cdcdcdcd"), "{other}");
+        }
+        let quiet = parsed(&names.zone_sequencer(second.clone(), "https://quiet.example".into(), false));
+        assert!(quiet["error"].as_str().unwrap().contains("didn't say which chain it serves"), "{quiet}");
+        assert_eq!(parsed(&names.zone_sequencer(second.clone(), "ftp://x".into(), false))["error"], NOT_A_SEQUENCER);
+        assert_eq!(parsed(&names.zone_list())["value"]["zones"][1]["sequencer"], "https://b2.example");
+
+        // Home, with a wallet: another chain is told, and taken only when the person says so.
+        assert!(!names.set_sequencer("https://c.example".into()));
+        let asked = parsed(&names.zone_sequencer("home".into(), "https://c.example".into(), false));
+        assert_eq!((asked["success"].as_bool(), asked["value"]["changed"].as_bool(), asked["value"]["other_chain"].as_bool(), asked["value"]["channel"].as_str()), (Some(true), Some(false), Some(true), Some("cd".repeat(32).as_str())), "{asked}");
+        assert_eq!(names.sequencer, "http://127.0.0.1:9");
+        // A sequencer that serves a zone already here is never home's.
+        let taken = parsed(&names.zone_sequencer("home".into(), "https://b2.example".into(), true));
+        assert!(taken["error"].as_str().unwrap().contains("serves Second, a zone already set up here"), "{taken}");
+        assert!(!names.set_sequencer("https://quiet.example".into()), "home's chain is known, so a sequencer must say it");
+        let said = parsed(&names.zone_sequencer("home".into(), "https://c.example".into(), true))["value"].clone();
+        assert_eq!((said["changed"].as_bool(), said["zones"][0]["channel"].as_str(), said["zones"][0]["sequencer"].as_str()), (Some(true), Some("cd".repeat(32).as_str()), Some("https://c.example")), "{said}");
+        assert_eq!(names.sequencer, "https://c.example");
+
+        // The zone in use is the one `set_sequencer` changes, wallet and all untouched.
+        use_zone(&mut names, &second);
+        let wallet = names.cli_wallet.clone();
+        sequencer_says("https://b3.example", Ok(&"ab".repeat(32)));
+        assert!(names.set_sequencer("https://b3.example".into()));
+        assert!(!names.set_sequencer("https://c.example".into()), "home's chain is not this zone's");
+        assert_eq!((names.sequencer.as_str(), names.cli_wallet.clone()), ("https://b3.example", wallet));
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(config_dir().unwrap().join("config.json")).unwrap()).unwrap();
+        assert_eq!((saved["sequencer"].as_str(), saved["zones"][1]["sequencer"].as_str(), saved["zone"].as_str()), (Some("https://c.example"), Some("https://b3.example"), Some(second.as_str())), "{saved}");
+        zone_test_end(dir);
+    }
+
+    /// A home with no wallet yet has nothing read from a chain: its sequencer is set
+    /// freely, as it was before there were zones.
+    #[test]
+    fn a_home_without_a_wallet_takes_any_sequencer() {
+        let mut names = fresh();
+        let empty = std::env::temp_dir().join(format!("logos-names-module-zones-empty-{}-{}", std::process::id(), now()));
+        cli::private_dir(&empty).unwrap();
+        names.cli_wallet = Some(empty.to_string_lossy().into_owned());
+        sequencer_says(DEFAULT_SEQUENCER, Ok(&"01".repeat(32)));
+        sequencer_says("https://other.example", Ok(&"03".repeat(32)));
+        sequencer_says("https://quiet.example", Err("no answer"));
+        assert!(names.set_sequencer("https://other.example".into()));
+        assert_eq!(parsed(&names.zone_list())["value"]["zones"][0]["channel"], "03".repeat(32));
+        // One that doesn't say is still refused once home's chain is known.
+        assert!(!names.set_sequencer("https://quiet.example".into()));
+        zone_test_end(empty);
+    }
+
+    /// The same keys make the same account ID on every zone, and what it holds there is
+    /// other money: a balance read on one zone is never compared with another's.
+    #[test]
+    fn each_zone_has_its_own_balances_and_history() {
+        let tail = format!(
+            "case \"$*\" in\n*127.0.0.1:9*balance*) echo '  Private/{PRIVATE}  250  (default)' ;;\n*127.0.0.1:7*balance*) echo '  Private/{PRIVATE}  5  (default)' ;;\n*auth-transfer*) sleep 1 ;;\nesac"
+        );
+        let (mut names, dir, second) = with_two_zones("zones-history", &tail);
+        assert_eq!(parsed(&names.cli_balance())["value"]["balance"], "250");
+        use_zone(&mut names, &second);
+        assert_eq!(parsed(&names.cli_balance())["value"]["balance"], "5", "the zone's own balance, not home's kept");
+        use_zone(&mut names, "home");
+        assert_eq!(parsed(&names.cli_balance())["value"]["balance"], "250");
+        use_zone(&mut names, &second);
+        assert_eq!(parsed(&names.cli_balance())["value"]["balance"], "5");
+        let history = activity::all(&config_dir().unwrap());
+        assert!(history.is_empty(), "245 was told as money that arrived: {history:?}");
+
+        // What is sent on a zone says so, and a zone isn't left while a job runs on it.
+        let paid = parsed(&names.cli_pay_account(format!("Public/{OTHER}"), "1000".into(), false));
+        let job = paid["value"]["id"].as_str().expect("a job").to_owned();
+        let busy = parsed(&names.zone_use("home".into()));
+        assert!(busy["error"].as_str().unwrap().contains("to finish first"), "{busy}");
+        assert_eq!(names.sequencer, ZONE_B);
+        let ended = job_end(&mut names, &job);
+        assert!(ended["log_tail"].as_str().unwrap().contains("[--rpc=http://127.0.0.1:7]"), "{ended}");
+        let on_zone = parsed(&names.activity(format!("Public/{PUBLIC}")))["value"].clone();
+        assert_eq!((on_zone[0]["kind"].as_str(), on_zone[0]["zone"].as_str(), on_zone[0]["zone_name"].as_str()), (Some("pay_account"), Some(second.as_str()), Some("Second")), "{on_zone}");
+        // On home the account's page doesn't list it; the whole history does, by zone.
+        use_zone(&mut names, "home");
+        assert_eq!(parsed(&names.activity(format!("Public/{PUBLIC}")))["value"], json!([]));
+        let all = parsed(&names.activity(String::new()))["value"].clone();
+        assert_eq!((all.as_array().unwrap().len(), all[0]["zone_name"].as_str(), all[0]["state"].as_str()), (1, Some("Second"), Some("done")), "{all}");
+        // A home entry says home once there is more than one zone.
+        let dir_now = config_dir().unwrap();
+        activity::add(&dir_now, now(), json!({ "kind": "pay_account", "chain": "lez", "from": format!("Public/{PUBLIC}"), "to": format!("Public/{OTHER}"), "amount": "7", "state": "done" }));
+        let all = parsed(&names.activity(String::new()))["value"].clone();
+        assert_eq!((all[0]["amount"].as_str(), all[0]["zone_name"].as_str(), all[0].get("zone").is_none()), (Some("7"), Some("Home"), true), "{all}");
+        // A removed zone's entries stay, with no name to give.
+        parsed(&names.zone_remove(second.clone()));
+        let all = parsed(&names.activity(String::new()))["value"].clone();
+        assert_eq!((all[1]["zone"].as_str(), all[1]["zone_name"].clone()), (Some(second.as_str()), Value::Null), "{all}");
+        zone_test_end(dir);
+    }
+
+    /// Another app's transfer or call is for the zone in use when it asks, and is only
+    /// approved there: on another zone the same account ID is another account.
+    #[test]
+    fn another_apps_request_is_approved_only_on_the_zone_it_was_asked_for() {
+        let (mut names, dir, second) = with_two_zones("zones-provider", "exit 0");
+        connect(&mut names, "tips_ui", &format!("Public/{PUBLIC}"));
+        as_caller(app("tips_ui"));
+        let on_home = parsed(&names.propose_transfer(String::new(), "250".into(), format!("Public/{OTHER}")))["value"].clone();
+        // The app is told the network, never what the person calls it.
+        assert_eq!((on_home["zone"].as_str(), on_home["zone_channel"].as_str(), on_home.get("zone_name").is_none()), (Some("home"), Some("01".repeat(32).as_str()), true), "{on_home}");
+        let home_id = on_home["request"].as_str().unwrap().to_owned();
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        use_zone(&mut names, &second);
+        as_caller(app("tips_ui"));
+        let on_second = parsed(&names.propose_transfer(String::new(), "300".into(), format!("Public/{OTHER}")))["value"].clone();
+        assert_eq!((on_second["zone"].as_str(), on_second["zone_channel"].as_str()), (Some(second.as_str()), Some(second.as_str())), "{on_second}");
+        let second_id = on_second["request"].as_str().unwrap().to_owned();
+        assert_eq!(parsed(&names.request_status(home_id.clone()))["value"]["zone"], "home");
+
+        // The prompt says which zone each was asked for and whether it is the one in use.
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let pending = parsed(&names.pending_requests())["value"].clone();
+        let shown = |id: &str| pending.as_array().unwrap().iter().find(|request| request["id"] == id).cloned().unwrap();
+        assert_eq!((shown(&home_id)["zone_name"].as_str(), shown(&home_id)["zone_in_use"].as_bool()), (Some("Home"), Some(false)), "{pending}");
+        assert_eq!((shown(&second_id)["zone_name"].as_str(), shown(&second_id)["zone_in_use"].as_bool()), (Some("Second"), Some(true)), "{pending}");
+        // Approving home's on this zone is refused, and it stays to be approved there.
+        let wrong = approve(&mut names, &home_id, &format!("Public/{PUBLIC}"));
+        assert_eq!(wrong["error"], "this was asked for Home, and the wallet is using Second now. Switch to Home to approve it, or reject it.", "{wrong}");
+        assert!(std::fs::read_dir(dir.join("jobs")).map_or(true, |entries| entries.count() == 0), "nothing ran");
+        assert_eq!(parsed(&names.request_status(home_id.clone()))["value"]["state"], "pending");
+        // This zone's own runs on this zone's sequencer.
+        let started = approve(&mut names, &second_id, &format!("Public/{PUBLIC}"));
+        let ended = job_end(&mut names, started["value"]["job"].as_str().expect("a job"));
+        assert!(ended["log_tail"].as_str().unwrap().contains(&format!("[--rpc=http://127.0.0.1:7]")) && ended["log_tail"].as_str().unwrap().contains("[--amount=300]"), "{ended}");
+
+        // A request for a zone that was removed since can only be rejected.
+        as_caller(app("tips_ui"));
+        let orphan = parsed(&names.propose_transfer(String::new(), "400".into(), format!("Public/{OTHER}")))["value"]["request"].as_str().unwrap().to_owned();
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        use_zone(&mut names, "home");
+        let started = approve(&mut names, &home_id, &format!("Public/{PUBLIC}"));
+        let ended = job_end(&mut names, started["value"]["job"].as_str().expect("a job"));
+        assert!(ended["log_tail"].as_str().unwrap().contains("[--rpc=http://127.0.0.1:9]") && ended["log_tail"].as_str().unwrap().contains("[--amount=250]"), "{ended}");
+        let elsewhere = approve(&mut names, &orphan, &format!("Public/{PUBLIC}"));
+        assert!(elsewhere["error"].as_str().unwrap().contains("this was asked for Second"), "{elsewhere}");
+        parsed(&names.zone_remove(second.clone()));
+        let removed = approve(&mut names, &orphan, &format!("Public/{PUBLIC}"));
+        assert_eq!(removed["error"], "this was asked for a zone that has been removed since. Reject it, and the app can ask again.", "{removed}");
+        let pending = parsed(&names.pending_requests())["value"].clone();
+        let left = pending.as_array().unwrap().iter().find(|request| request["id"] == orphan.as_str()).cloned().unwrap();
+        assert_eq!((left["zone_removed"].as_bool(), left["zone_name"].as_str(), left["zone_in_use"].as_bool()), (Some(true), Some("Second"), Some(false)), "{left}");
+        assert_eq!(parsed(&names.reject_request(orphan))["success"], true);
+        zone_test_end(dir);
+    }
+
+    /// A request asked for home is not approved once home has become another chain.
+    #[test]
+    fn a_request_is_not_approved_on_a_chain_home_became_since() {
+        let (mut names, dir, _) = with_two_zones("zones-provider-chain", "exit 0");
+        connect(&mut names, "tips_ui", &format!("Public/{PUBLIC}"));
+        as_caller(app("tips_ui"));
+        let id = parsed(&names.propose_transfer(String::new(), "250".into(), format!("Public/{OTHER}")))["value"]["request"].as_str().unwrap().to_owned();
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        sequencer_says("https://c.example", Ok(&"cd".repeat(32)));
+        assert_eq!(parsed(&names.zone_sequencer("home".into(), "https://c.example".into(), true))["value"]["changed"], true);
+        let refused = approve(&mut names, &id, &format!("Public/{PUBLIC}"));
+        assert_eq!(refused["error"], "the chain this was asked for has changed since. Reject it, and the app can ask again.", "{refused}");
+        assert!(std::fs::read_dir(dir.join("jobs")).map_or(true, |entries| entries.count() == 0), "nothing ran");
+        zone_test_end(dir);
+    }
+
+    /// A deposit can't be undone: the plan names the zone it is for, and nothing is sent
+    /// when the zone's sequencer names another chain than the zone's.
+    #[test]
+    fn a_bridge_names_its_zone_and_stops_when_the_sequencer_names_another_chain() {
+        let mut names = fresh();
+        let _ = std::fs::remove_dir_all(config_dir().unwrap());
+        sequencer_says(DEFAULT_SEQUENCER, Ok(&"01".repeat(32)));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "e9ac", "value": "1000000" }, { "id": "c1de", "value": "5000000" }] }));
+        node_answers("channel_deposit_with_notes", json!("ac".repeat(32)));
+        node_answers("get_channel_state", json!({ "configuration_threshold": 3 }));
+        assert_eq!(parsed(&names.zone_list())["value"]["zones"][0]["channel"], "01".repeat(32));
+        let plan = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{OTHER}"), "1000000".into(), false));
+        assert_eq!((plan["value"]["zone"].as_str(), plan["value"]["zone_name"].as_str(), plan["value"]["channel"].as_str()), (Some("home"), Some("Home"), Some("01".repeat(32).as_str())), "{plan}");
+        sequencer_says(DEFAULT_SEQUENCER, Ok(&"03".repeat(32)));
+        for send in [false, true] {
+            let refused = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{OTHER}"), "1000000".into(), send));
+            assert_eq!(refused["error"], "Home's sequencer now names another chain (channel 03030303…0303, not 01010101…0101). Nothing was sent; check the zone's sequencer.", "{refused}");
+        }
+        assert!(!node_asked().contains(&"channel_deposit_with_notes".to_owned()), "nothing was deposited");
+        let _ = std::fs::remove_dir_all(config_dir().unwrap());
+    }
+
+    /// Home's channel is learnt from its sequencer once, saved, and its balance marks
+    /// are kept under it from then on: they survive a change of sequencer.
+    #[test]
+    fn homes_channel_is_learnt_once_and_its_marks_follow_it() {
+        let tail = format!("case \"$*\" in\n*balance*) echo '  Private/{PRIVATE}  250  (default)' ;;\nesac");
+        let (mut names, dir) = with_wallet("zones-home-channel", &tail);
+        let config = config_dir().unwrap();
+        let _ = std::fs::remove_dir_all(&config);
+        sequencer_says("http://127.0.0.1:9", Err("no answer"));
+        assert_eq!(parsed(&names.cli_balance())["value"]["balance"], "250");
+        let marks = || std::fs::read_to_string(config.join("activity-balances.json")).unwrap();
+        assert!(marks().contains("lez@http://127.0.0.1:9:"), "{}", marks());
+        // Not asked again on every read while it doesn't say.
+        let asked = registry::CHANNELS_ASKED.with(std::cell::Cell::get);
+        parsed(&names.cli_balance());
+        assert_eq!(registry::CHANNELS_ASKED.with(std::cell::Cell::get), asked);
+        // The zone list asks once more; then it is known, saved, and the marks are its.
+        sequencer_says("http://127.0.0.1:9", Ok(&"01".repeat(32)));
+        names.channel_asked = false;
+        assert_eq!(parsed(&names.zone_list())["value"]["zones"][0]["channel"], "01".repeat(32));
+        assert!(marks().contains(&format!("lez@{}:", "01".repeat(32))) && !marks().contains("127.0.0.1:9"), "{}", marks());
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(config.join("config.json")).unwrap()).unwrap();
+        assert_eq!(saved["zones"][0]["channel"], "01".repeat(32), "{saved}");
+        // The same chain at another address: nothing arrives by the move.
+        sequencer_says("http://127.0.0.1:5", Ok(&"01".repeat(32)));
+        assert!(names.set_sequencer("http://127.0.0.1:5".into()));
+        assert_eq!(parsed(&names.cli_balance())["value"]["balance"], "250");
+        assert!(activity::all(&config).is_empty(), "{:?}", activity::all(&config));
+        zone_test_end(dir);
     }
 }

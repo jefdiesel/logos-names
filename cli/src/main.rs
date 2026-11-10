@@ -296,6 +296,11 @@ struct Cli {
     #[arg(long, env = "NAMES_TOKEN_PROGRAM", global = true, value_parser = parse_account)]
     token_program: Option<AccountId>,
 
+    /// The LEZ zone this command runs on, instead of the one in use: `home`, a zone's
+    /// name, or its channel (`names zone list` shows them). Not together with `--rpc`.
+    #[arg(long, env = "LOGOS_NAMES_ZONE", global = true)]
+    zone: Option<String>,
+
     /// How to speak to the token program: `prototype` is the one in `wallet-tokens/`.
     #[arg(long, env = "NAMES_TOKEN_CODEC", global = true, default_value = "prototype", value_parser = tokens::CODECS)]
     token_codec: String,
@@ -639,6 +644,11 @@ enum Command {
     /// key or a name, stake and leader rewards. Run `names chain help`.
     #[command(subcommand)]
     Chain(chain::ChainCommand),
+    /// LEZ zones: add the zone a sequencer serves, switch between zones, change a zone's
+    /// sequencer. Each zone has its own wallet folder; LNS names are kept on home. Run
+    /// `names zone help`.
+    #[command(subcommand)]
+    Zone(zone::ZoneCommand),
     /// Fungible tokens: list what this wallet holds, send to a name or an account,
     /// receive private credits. Needs `--token-program` (or NAMES_TOKEN_PROGRAM).
     #[command(subcommand)]
@@ -762,6 +772,7 @@ fn write_man_pages(dir: &std::path::Path) -> Result<()> {
 mod board;
 mod claims;
 mod chain;
+mod chain_fee;
 /// The deposit encoding, one file shared with the Basecamp module so both send the same bytes.
 #[path = "../../basecamp-module/rust-lib/src/deposit.rs"]
 #[allow(dead_code)] // the receipt and op id parts are the module's (the CLI's tests check them)
@@ -770,7 +781,16 @@ mod fees;
 mod plan;
 mod module;
 mod prover;
+/// The text checks and the zones' rules, two files shared with the Basecamp module so the
+/// CLI's zones and the Names app's follow the same ones.
+#[path = "../../basecamp-module/rust-lib/src/text.rs"]
+#[allow(dead_code)] // the module's own parts
+mod text;
 mod tokens;
+mod zone;
+#[path = "../../basecamp-module/rust-lib/src/zones.rs"]
+#[allow(dead_code)] // the module's own parts
+mod zones;
 
 /// The text entry that points a name to another (SPEC.md §7, Forwarding).
 const FORWARD_KEY: &str = "forward";
@@ -3577,6 +3597,28 @@ fn touches(tx: &LeeTransaction, account: &AccountId) -> bool {
     }
 }
 
+/// Whether `command` can run on a zone other than home: the ones about the wallet, its
+/// tokens and the blockchain node can; the ones about names can't, since names are kept on
+/// home (`zone::Applied::names_elsewhere`).
+fn runs_off_home(command: &Command) -> bool {
+    match command {
+        Command::Setup { .. }
+        | Command::Balance
+        | Command::Receive { .. }
+        | Command::Wallet { .. }
+        | Command::Bridge { .. }
+        | Command::Token(_)
+        | Command::Module(_)
+        | Command::Zone(_)
+        | Command::Man { .. }
+        | Command::ClaimsRoot { .. }
+        | Command::AccountLogEntry { .. }
+        | Command::Address { .. } => true,
+        Command::Chain(command) => command.name().is_none(),
+        _ => false,
+    }
+}
+
 fn rpc_call(rpc: &str, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
     let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
     let reply: serde_json::Value = serde_json::from_str(
@@ -3598,9 +3640,37 @@ async fn main() -> Result<()> {
     // Where programs run and proofs are made: the r0vm the installer puts next to `names`
     // unless RISC0_SERVER_PATH names another, or in-process in a local-prove build (`prover`).
     prover::start();
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
     if let Command::Man { dir } = &cli.command {
         return write_man_pages(dir);
+    }
+    if let Command::Zone(command) = &cli.command {
+        let home_wallet = fetch_persistent_storage_path().ok().and_then(|storage| storage.parent().map(std::path::Path::to_owned));
+        return zone::run(command, DEFAULT_RPC, home_wallet.as_deref());
+    }
+    // The zone this command runs on (`names zone`): its sequencer, and for an added zone its
+    // own wallet folder. `--rpc` names a sequencer directly and sets the zones aside.
+    let on_zone = match zone::config_dir() {
+        Ok(dir) => zone::applied(&dir, DEFAULT_RPC, cli.rpc.is_some(), cli.zone.as_deref())?,
+        Err(nowhere) if cli.zone.is_some() => return Err(nowhere),
+        Err(_) => None,
+    };
+    if let Some(on_zone) = on_zone {
+        if !on_zone.home {
+            if !runs_off_home(&cli.command) {
+                bail!(on_zone.names_elsewhere());
+            }
+            if let Some(wallet) = on_zone.wallet_ready()? {
+                // SAFETY: set as `names` starts, before the wallet is opened or anything
+                // else reads the environment (as `prover::start` sets its own above).
+                unsafe { std::env::set_var("LEE_WALLET_HOME_DIR", wallet) };
+            }
+            // Said on every command that runs away from home, apart from its own output.
+            eprintln!("zone: {} ({})", on_zone.name, on_zone.sequencer.as_deref().unwrap_or_default());
+        }
+        if let Some(sequencer) = on_zone.sequencer {
+            cli.rpc = Some(sequencer);
+        }
     }
     let overrides = sequencer_overrides(&cli)?;
     match cli.command {
@@ -4231,6 +4301,7 @@ async fn main() -> Result<()> {
         | Command::AccountLogEntry { .. }
         | Command::Wallet { .. }
         | Command::Bridge { .. }
+        | Command::Zone(_)
         | Command::Man { .. } => {
             unreachable!("handled before the wallet is opened")
         }

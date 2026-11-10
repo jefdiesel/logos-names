@@ -56,6 +56,8 @@ pub const SIGNER: &str = "signer";
 pub const CONNECT: &str = "connect";
 pub const TRANSFER: &str = "transfer";
 pub const CALL: &str = "call";
+/// A testimonial inscribed on the Logos Blockchain (LP-0022, provider_inscribe.rs).
+pub const INSCRIBE: &str = "inscribe";
 
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -75,37 +77,7 @@ pub fn app_name(name: &str) -> Result<String, String> {
     Ok(name.to_owned())
 }
 
-/// Text an app wrote, made safe to put in front of the person: control
-/// characters and the Unicode marks that reorder or hide text (bidi
-/// overrides, zero-width characters) become spaces, runs of space collapse,
-/// and it is cut to `max` characters with an ellipsis.
-pub fn clean_text(text: &str, max: usize) -> String {
-    let hidden = |c: char| {
-        c.is_control()
-            || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}' | '\u{061C}')
-    };
-    let mut out = String::new();
-    let mut space = false;
-    for c in text.chars() {
-        let c = if hidden(c) || c.is_whitespace() { ' ' } else { c };
-        if c == ' ' {
-            if !space && !out.is_empty() {
-                out.push(' ');
-            }
-            space = true;
-        } else {
-            out.push(c);
-            space = false;
-        }
-    }
-    let out = out.trim_end().to_owned();
-    if out.chars().count() > max {
-        let cut: String = out.chars().take(max.saturating_sub(1)).collect();
-        format!("{}…", cut.trim_end())
-    } else {
-        out
-    }
-}
+pub use crate::text::clean_text;
 
 /// An account written `Public/<id>` or `Private/<id>`: whether it is private,
 /// and its ID. A bare ID is refused, so public and private are never confused.
@@ -465,7 +437,7 @@ impl Store {
             .filter(|request| {
                 ok_text(&request["id"], 64)
                     && request["app"].as_str().is_some_and(|app| app_name(app).is_ok())
-                    && matches!(request["kind"].as_str(), Some(CONNECT | TRANSFER | CALL))
+                    && matches!(request["kind"].as_str(), Some(CONNECT | TRANSFER | CALL | INSCRIBE))
                     && ok_text(&request["state"], 16)
                     && request["created"].is_u64()
                     && request["expires"].is_u64()
@@ -627,11 +599,28 @@ pub fn app_view(request: &Value) -> Value {
             for key in ["asset", "asset_kind", "token_name", "amount", "destination"] {
                 view[key] = request[key].clone();
             }
+            zone_view(&mut view, request);
         }
-        Some(CALL) => view["program"] = request["program"].clone(),
+        Some(CALL) => {
+            view["program"] = request["program"].clone();
+            zone_view(&mut view, request);
+        }
+        Some(INSCRIBE) => {
+            for key in ["chain", "says", "submission", "text", "fee", "channel", "msg_id"] {
+                view[key] = request[key].clone();
+            }
+        }
         _ => {}
     }
     view
+}
+
+/// Adds the zone a transfer or a call was asked for to the app's view of it: `zone`
+/// (`home`, or the zone's channel) and `zone_channel` when it is known. Never what the
+/// person calls the zone.
+fn zone_view(view: &mut Value, request: &Value) {
+    view["zone"] = json!(request["zone"].as_str().unwrap_or(crate::zones::HOME));
+    view["zone_channel"] = request["zone_channel"].clone();
 }
 
 #[cfg(test)]

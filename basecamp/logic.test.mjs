@@ -1,6 +1,6 @@
 // Checks the view's own logic (qml/logic.mjs, which qml/Main.qml imports), since the QML
 // engine cannot run in CI. Run with: node basecamp/logic.test.mjs
-import { atLeast, someAmount, entryShown, amountRead, amountProblem, amountDigits, AMOUNT_MAX, CHAIN_AMOUNT_MAX, jobProblem, tokenToProblem, tokenSendProves, tokenShown, feeEstimate, feePaid, accountTitle, accountsShown, publisherLine, durationWords, keyShown, chainToProblem, stakeLines, rewardsLine, grouped, addDigits, walletAssets, subDigits, walletGroups, stakeTable, activityLine, activityFor, agoShown, readNote } from "./qml/logic.mjs";
+import { atLeast, someAmount, entryShown, amountRead, amountProblem, amountDigits, AMOUNT_MAX, CHAIN_AMOUNT_MAX, jobProblem, tokenToProblem, tokenSendProves, tokenShown, feeEstimate, feePaid, accountTitle, accountsShown, publisherLine, durationWords, keyShown, chainToProblem, stakeLines, rewardsLine, grouped, addDigits, walletAssets, subDigits, walletGroups, stakeTable, activityLine, activityFor, agoShown, readNote, chainKeyTitle, chainKeySub, chainUsable, chainLaterNote } from "./qml/logic.mjs";
 import { readFileSync } from "node:fs";
 
 let failures = 0;
@@ -136,6 +136,19 @@ check("subDigits", [subDigits("1000", "1"), subDigits("210939029", "210939029"),
   check("walletGroups fallback", walletGroups({ balance: "5", account: "a", public: { account: "b", balance: "7" } }, null, null, [], {}, null, false, null).map(x => [x.id, x.total]), [["lez", "12"]]);
   // cli_balance with no default private account: account and balance null, the public one still shown.
   check("walletGroups fallback no private", walletGroups({ balance: null, account: null, public: { account: "b", balance: "7" }, waiting: null }, null, null, [], {}, null, false, null).map(x => [x.id, x.total, x.rows.map(r => r.id)]), [["lez", "7", ["lez-public"]]]);
+  // LP-0022 accounts: labels title the rows; one the node takes at its next start can't send yet.
+  const NEW = "ab".repeat(32);
+  const labelled = walletGroups(null, null, null, [], {}, [{ key: KEY, balance: "5", label: "Main", ready: true }, { key: NEW, balance: null, title: "names-1", label: "", ready: false }], false, null);
+  check("walletGroups chain labels", labelled[0].rows.map(r => [r.title, r.sub, r.canSend, r.balance]),
+    [["Main", "Public · " + keyShown(KEY), true, "5"], ["Account", "Public · abababab…abab · your node uses it from its next start", false, null]]);
+  check("walletGroups chain later", [labelled[0].note, labelled[0].total], ["2 keys on your node · 1 from its next start", "5"]);
+  check("chainKeyTitle", [chainKeyTitle({ key: KEY }), chainKeyTitle({ key: KEY, label: "  " }), chainKeyTitle({ key: KEY, label: "Savings", title: "names-2" })], ["Node key", "Node key", "Savings"]);
+  check("chainUsable", [chainUsable(null), chainUsable([{ key: KEY, balance: "5" }, { key: NEW, balance: null, ready: false }, { key: "cd", balance: "0", ready: true }]).map(a => a.key)], [null, [KEY, "cd"]]);
+  check("chainKeySub ready", chainKeySub({ key: KEY, ready: true }), "Public · " + keyShown(KEY));
+  // The account page offers no address, Receive or Bridge for an account the node takes at its
+  // next start (verify render wallet-chain-notready-page showed Address + Copy and Receive).
+  check("walletGroups chain later rows", labelled[0].rows.map(r => r.later), [false, true]);
+  check("chainLaterNote", [chainLaterNote().includes("next start"), chainLaterNote().includes("don't have anything sent to it")], [true, true]);
   check("walletGroups node down", walletGroups(null, null, null, [], {}, null, true, null).map(x => [x.id, x.total, x.note]), [["chain", null, "Node not running"]]);
   // A name is matched to the account its profile's npk points at.
   const npkAccounts = accounts.concat([{ account: "Private/Jef1", kind: "private", label: null, balance: "7", default: false, npk: "AB".repeat(32) }]);
@@ -168,6 +181,26 @@ check("subDigits", [subDigits("1000", "1"), subDigits("210939029", "210939029"),
   const least = activityLine({ kind: "arrived", chain: "lez", to: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", amount: null, at_least: "95648", state: "arrived", at: now }, now);
   check("activityLine arrived at least", [least.amount, least.sign, least.sub], ["", "", "in Public CCVd76Tk…pKnk on LEZ · at least 95,648"]);
   check("activityFor", activityFor([bridge, { kind: "pay", name: "ada" }], KEY).length, 1);
+  // Zones (LP-0022): the same keys are the same LEZ account ID on every zone, so an account's
+  // page lists the zone in use only; a Logos Blockchain key's page and a name's are not narrowed.
+  {
+    const ACC = "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk";
+    const B = "0303030303030303030303030303030303030303030303030303030303030303";
+    const rows = [
+      { id: "h", kind: "pay_account", chain: "lez", from: ACC, amount: "1" },
+      { id: "b", kind: "pay_account", chain: "lez", zone: B, from: ACC, amount: "2" },
+      { id: "bh", kind: "bridge", chain: "logos", from: KEY, to: ACC, amount: "3" },
+      { id: "bb", kind: "bridge", chain: "logos", zone: B, from: KEY, to: ACC, amount: "4" },
+    ];
+    const ids = (who, zone) => activityFor(rows, who, zone).map((e) => e.id);
+    check("activityFor on home", ids(ACC, "home"), ["h", "bh"]);
+    check("activityFor on a zone", ids(ACC, B), ["b", "bb"]);
+    check("activityFor with no zone given", ids(ACC), ["h", "b", "bh", "bb"]);
+    check("activityFor a chain key is every zone's", ids(KEY, B), ["bh", "bb"]);
+    const line = (fields) => activityLine(Object.assign({ kind: "pay", chain: "lez", name: "ada", amount: "7", state: "done", at: now }, fields), now).sub;
+    check("activityLine names the zone", [line({ zone: B, zone_name: "Games zone" }).endsWith(" · zone Games zone"), line({ zone_name: "Home" }).endsWith(" · zone Home"),
+      line({ zone: B, zone_name: null }).endsWith(" · a zone removed since"), / zone /.test(line({}))], [true, true, true, false]);
+  }
   check("agoShown", [agoShown(now - 5000, now), agoShown(now - 3 * 86400000, now)], ["just now", "3 d ago"]);
   check("agoShown in seconds", agoShown(Math.floor(now / 1000) - 7200, now), "2 h ago");
   // activity-public-send-says-proving: a public send in flight said "Proving…".
@@ -234,6 +267,42 @@ check("subDigits", [subDigits("1000", "1"), subDigits("210939029", "210939029"),
   // account-page-address-line-useless: the prefix ate the shown characters.
   check("keyShown account", [keyShown(A), keyShown(P), keyShown("Public/11111111111111111111111111111111")], ["Public/CCVd76Tk…pKnk", "Private/yGrPEbP3…fe4Z", "Public/11111111…1111"]);
   check("bridge on the key's page", onPage(Object.assign({}, bridge, { to: A }), bridge.from)[0][1], "-1,000,000");
+}
+
+// LP-0022 gas: the node's own estimate in a chain plan's confirm step (chain_fee.rs).
+// Imported here, not on the import line above, which other branches also extend (imports are hoisted).
+import { chainFeeLine, claimFeeLine } from "./qml/logic.mjs";
+check("chainFeeLine estimate", chainFeeLine({ amount: "3000", fee_about: "834" }), "About 834, paid from the key's notes: your node's figure at its gas prices now. The fee paid is shown once it's sent.");
+check("chainFeeLine no estimate", chainFeeLine({ amount: "3000", fee_about: null }), "Your node couldn't say in advance. The fee paid is shown once it's sent.");
+check("chainFeeLine no plan", chainFeeLine(null), "");
+check("chainFeeLine short", chainFeeLine({ amount: "1000", fee_about: null, cannot_pay_fee: true }), "That key's notes can't pay this amount and its fee: send a little less.");
+// adv.py H4: the key's only note is a send's input still on its way; not "send less".
+check("chainFeeLine in flight", chainFeeLine({ amount: "1000", fee_about: null, in_flight: true }), "Another transfer from this key is still waiting to land, and its notes can't be spent twice. Wait a minute for it to land, then try again.");
+check("claimFeeLine warns", claimFeeLine({ reward_per_voucher: "38", fee_about: "1599", warning: "It costs more than it brings." }), "Each claim costs about 1,599 in fees and cashes one reward of 38. It costs more than it brings.");
+check("claimFeeLine none", [claimFeeLine({ fee_about: null }), claimFeeLine(null)], ["", ""]);
+
+// LP-0022 inscription: an app's request, approved in the Names app with a chain account.
+import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscribeCanApprove } from "./qml/logic.mjs";
+{
+  const K1 = "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07", K2 = "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225";
+  const request = { id: "r1", app: "testimonial_ui", text: "good wallet", choices: [{ key: K2, balance: "0" }, { key: K1, balance: "100000", label: "Savings" }] };
+  check("inscribeTitle", [inscribeTitle(request), inscribeTitle(null)], ["testimonial_ui asks you to inscribe a testimonial on the Logos Blockchain", ""]);
+  check("inscribeChoice", request.choices.map(inscribeChoice).concat([inscribeChoice({ key: K2, balance: "5", title: "names-1", label: "" })]), [
+    { title: "Node key", sub: "39e16b43…3225 · holds 0" }, { title: "Savings", sub: "e3635f20…ce07 · holds 100,000" }, { title: "Account", sub: "39e16b43…3225 · holds 5" }]);
+  // An empty account can't pay the fee: it isn't the one ticked.
+  check("inscribeFirstChoice", [inscribeFirstChoice(request.choices), inscribeFirstChoice([{ key: K2, balance: "0" }]), inscribeFirstChoice([]), inscribeFirstChoice(undefined)], [K1, "", "", ""]);
+  check("inscribeFee", [inscribeFee("", null, ""), inscribeFee(K1, null, ""), inscribeFee(K1, { fee_estimate: "1086" }, ""), inscribeFee(K1, { fee_estimate: null }, ""),
+    inscribeFee(K1, null, "That key doesn't hold enough for this and its fee.")], [
+    { text: "Choose the account that pays it", tone: "plain" }, { text: "Asking your node…", tone: "plain" },
+    { text: "About 1,086, paid from this account: your node's figure at its gas prices now. The fee paid is shown once it's sent.", tone: "plain" },
+    { text: "Your node couldn't say in advance. The fee paid is shown once it's sent.", tone: "plain" },
+    { text: "That key doesn't hold enough for this and its fee.", tone: "bad" }]);
+  const can = (over) => inscribeCanApprove(Object.assign({ request, chosen: K1, plan: { fee_estimate: "1086" }, problem: "", busy: false, risky: false, understood: false }, over));
+  check("inscribeCanApprove", [can({}), can({ chosen: "" }), can({ plan: null }), can({ problem: "short" }), can({ busy: true }), can({ risky: true }), can({ risky: true, understood: true }),
+    can({ plan: { fee_estimate: null } }), can({ request: Object.assign({}, request, { node: "Your Logos Blockchain node isn't running." }) }), can({ request: null })],
+    [true, false, false, false, false, false, true, true, false, false]);
+  check("history: an inscription", [activityLine({ kind: "inscribe", chain: "logos", from: K1, hash: "ab".repeat(32), fee: "1086", state: "in_block", at: 1794200000 }, 1794205600000)].map(l => [l.title, l.sub, l.amount, l.sign, l.state]),
+    [["Inscribed a testimonial", "on the Logos Blockchain, from key e3635f20…ce07 · fee 1,086", "", "", "In a block"]]);
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");

@@ -159,6 +159,81 @@ the stake at an epoch boundary (up to two epochs after they arrive), and unstaki
 sending them to a key the node doesn't hold. Leader wins pay vouchers; `claim` turns
 them into tokens.
 
+## Zones and sequencers
+
+The wallet can hold more than one LEZ zone. A zone is one chain. It is known by its
+channel on the Logos Blockchain (64 hex), not by a sequencer's address: a zone has
+one sequencer address in use, and you can change it.
+
+In the Names app, under **Settings, Zones**:
+
+- **Add a zone.** Give the address of one of its sequencers, and a name if you like.
+  The sequencer is asked which chain it serves (`getChannelId`), and that chain
+  becomes a zone. Nothing is sent. A sequencer of a zone you already have is refused.
+- **Use.** Switches the wallet to that zone. One zone is in use at a time and every
+  screen says which. Balances, payments, tokens, the bridge and other apps' requests
+  are then that zone's.
+- **Change sequencer.** Another address for the same zone. The new sequencer must
+  name the zone's own channel, and it is asked before anything changes, so the
+  accounts, balances and history stay as they are. A sequencer of another chain is
+  refused; add it as a zone of its own.
+- **Rename**, and **Remove** for a zone that isn't Home and isn't in use. A removed
+  zone's wallet folder stays on disk, and adding the zone again finds it.
+
+What to know:
+
+- **Home** is the first zone, where your LNS names are. Names are read from Home
+  whichever zone is in use. Registering, changing or paying to a name needs Home in
+  use.
+- **Each added zone has a wallet of its own**, with its own accounts and its own
+  recovery phrase, in `~/.config/logos-names/zones/<channel>/wallet`. Write that
+  phrase down as well. Home's wallet stays where it was.
+- The zones, their sequencers and the one in use are kept in
+  `~/.config/logos-names/config.json` (readable by you only) and are there after a
+  restart. If a zone's sequencer is down, the wallet says so and sends nothing; the
+  other zones are not affected.
+- A request from another app is for the zone that was in use when it asked, and
+  can be approved only there. The approval sheet names the zone.
+- At most 16 zones.
+
+With the CLI, the same under `names zone`:
+
+```sh
+names zone list                               # the zones, their sequencers and wallet folders
+names zone add https://seq.example --name Second   # the zone that sequencer serves
+names zone use second                         # every command runs on it from now on
+names --zone second balance                   # or one command only
+names zone sequencer second https://other.example  # another sequencer of the same chain
+names zone rename second "Second zone"
+names zone remove second                      # its wallet folder stays
+```
+
+A zone is named by its name, by `home`, or by its channel (the first characters are
+enough). On an added zone `names` uses that zone's sequencer and its wallet folder,
+and says so on every command (`zone: Second (https://…)`). `names setup --shield=0`
+makes a wallet there, and `names wallet restore-keys` brings your recovery phrase's
+accounts. Commands about a name are refused away from Home; add `--zone home`.
+`names zone sequencer home <address>` sets the sequencer Home's commands use, in
+place of the public testnet; a sequencer of another chain needs `--other-chain` once
+Home has a wallet.
+
+The CLI keeps its own list, in `~/.config/logos-names/cli-zones.json`, and its own
+zone in use. The Names app's list is separate, so a command in a terminal never
+changes the zone the app's screens show. Both keep an added zone's wallet in the
+same folder, so a zone set up in both is one wallet. `--rpc` (or `LOGOS_NAMES_RPC`)
+still names a sequencer directly and sets the zones aside; it can't be combined with
+`--zone`.
+
+Limits: an added zone's history stays on this computer under the zone's channel,
+and is shown without a zone name once the zone is removed. Home's own channel is
+learned the first time its sequencer answers; until then a change of Home's
+sequencer can't be checked against it, and a zone can't be added. A zone added in
+the app isn't on the CLI's list until it is added there too, and the other way
+round. `names token send` to a name works on Home only, since names are read there.
+
+Test: `scripts/lp22-zones-e2e.sh` (two standalone sequencers, one wallet, the module
+over Logos Core IPC and then the CLI on its own).
+
 ## Logos accounts
 
 A name and a Logos account (an AccountLog key, from the identity LIP) can point at
