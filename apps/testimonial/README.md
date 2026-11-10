@@ -10,7 +10,7 @@ through the `names` module's SDK, and the app never sees a key.
 |---|---|
 | Basecamp name | `testimonial_ui` (what the person sees in every Names prompt) |
 | Needs | the `names` module `>=0.11.0` and the Names app open to approve |
-| Defaults | submission `lp-0021:names-wallet`; sequencer = the one the Names Wallet uses (`get_config`) |
+| Defaults | submission `lp-0021:names-wallet`; sequencer = the one the Names Wallet uses (`get_config`: the zone in use's) |
 | Settings | sequencer, testimonial program ID (deployed when testnet 0.4 launches), submission ID |
 
 ## Worked example: connect → account selection → approval → transaction

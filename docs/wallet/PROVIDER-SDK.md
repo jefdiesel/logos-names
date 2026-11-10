@@ -40,6 +40,20 @@ what the person sees in every prompt.
 The Names app must be installed and open to answer requests. A request that
 nobody answers expires after 10 minutes.
 
+**Zones.** The wallet can hold several LEZ zones (chains) and uses one at a
+time. Balances are those of the zone in use. A transfer or a call is asked for
+the zone in use at that moment and can be approved only there: the person sees
+the zone's name on the sheet, and if they have switched since, they are told to
+switch back or reject. Your view of the request carries `zone` (`home`, or the
+zone's channel) and `zone_channel` (64 hex, `null` if not known yet), never what
+the person calls the zone. `get_config` tells you where you are before you ask:
+`sequencer` and `token_program` are the zone in use's, `zone` is
+`{"id", "channel", "home"}`, and `names_sequencer` is where names are read
+(always home's). The same account ID is another account on another zone, so
+compare `zone_channel` with the chain your app is built for. A payment to a
+name needs the home zone in use; elsewhere, ask to pay an account ID. Access
+(`request_access`) is per app and account, not per zone.
+
 ## Setup
 
 Add the module as a dependency in your app's `metadata.json`:
@@ -94,6 +108,7 @@ of the person's, so it needs no access.
   "asset": "LEZ", "asset_kind": "native", "amount": "1000", "destination": "alice",   // transfer
   "token_name": null,             // transfer of a token: its definition's name
   "program": "<base58>",          // call
+  "zone": "home", "zone_channel": "<64 hex>",   // transfer, call: the zone it was asked for
   "tx": "<hash>",                 // call, inscribe: the transaction sent
   "chain": "logos", "submission": "lp-0022:names-wallet", "text": "…",   // inscribe
   "fee": "1086", "channel": "<64 hex>", "msg_id": "<64 hex>",            // inscribe, once done
@@ -254,7 +269,7 @@ gets `only the Names app can do this`.
 
 | Method | Value |
 |---|---|
-| `pending_requests()` | the waiting connect, transfer and call requests (not inscriptions), oldest first, with everything the prompt shows and `choices`: `[{account, account_kind, pays, label, granted}]`. A payment comes from the wallet's main public or private account (`pays`). A call can be signed by any of its public accounts; those beyond the main one are read in the background and can appear a few seconds later |
+| `pending_requests()` | the waiting connect, transfer and call requests (not inscriptions), oldest first, with everything the prompt shows and `choices`: `[{account, account_kind, pays, label, granted}]`. A transfer or a call also has `zone`, `zone_name`, `zone_in_use` (false: it can't be approved until the person switches to that zone) and `zone_removed`. A payment comes from the wallet's main public or private account (`pays`). A call can be signed by any of its public accounts; those beyond the main one are read in the background and can appear a few seconds later |
 | `approve_request(request_id, account)` | approves with one of the request's `choices` (for `connect`, one or more separated by commas). A transfer starts as a CLI job, and its `job` is in the value. If the wallet is busy, the request stays pending and the error says so |
 | `reject_request(request_id)` | the rejected request, of any kind |
 | `pending_inscriptions()` | the waiting inscription requests, oldest first: `{id, app, publisher, says, submission, text, created, expires, choices}`. `choices` is `[{key, balance, label?, title?}]`, the accounts the person's node holds, named as the Blockchain tab names them and without an empty account they hid. If the node can't be asked, `choices` is empty and `node` says why |
