@@ -762,30 +762,68 @@ const REQUEST_CAP: Duration = Duration::from_secs(10);
 /// its last block is not answering.
 pub const PROBE_WAIT: Duration = Duration::from_secs(5);
 
-/// What a call says when its time for the sequencer ran out.
+/// When a call that reads the sequencer started and when it must have its answer: every read
+/// it makes shares this one deadline, and a read that runs out says how long the call waited
+/// in all, not what was left for its last request (resolve-under-slow-says-6-s-after-15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Deadline {
+    pub start: Instant,
+    pub at: Instant,
+}
+
+impl Deadline {
+    /// `budget` from now.
+    pub fn after(budget: Duration) -> Self {
+        let start = Instant::now();
+        Deadline { start, at: start + budget }
+    }
+
+    /// The time left.
+    pub fn left(&self) -> Duration {
+        self.at.saturating_duration_since(Instant::now())
+    }
+
+    /// Whether the time is up.
+    pub fn passed(&self) -> bool {
+        Instant::now() >= self.at
+    }
+
+    /// How long the call has waited so far.
+    pub fn spent(&self) -> Duration {
+        self.start.elapsed()
+    }
+
+    /// What a read says when the time ran out: how long the call waited.
+    pub fn too_slow(&self) -> String {
+        too_slow(self.spent())
+    }
+}
+
+/// What a call says when its time for the sequencer ran out after `waited`.
 pub fn too_slow(waited: Duration) -> String {
-    // Rounded up: a wait of 4.98 s of the probe's 5 is said as 5.
-    format!("could not reach the sequencer: it didn't answer within {} s. Try again shortly", waited.as_millis().div_ceil(1000).max(1))
+    // To the nearest second: a wait of 4.98 s of the probe's 5 is said as 5, and a call
+    // that gave up a moment after its 15 s as 15.
+    format!("could not reach the sequencer: it didn't answer within {} s. Try again shortly", ((waited.as_millis() + 500) / 1000).max(1))
 }
 
 /// How long the next request may wait before `deadline`, or why there is no time left.
-pub fn request_wait(deadline: Instant, budget: Duration) -> Result<Duration, String> {
-    let left = deadline.saturating_duration_since(Instant::now());
+pub fn request_wait(deadline: Deadline) -> Result<Duration, String> {
+    let left = deadline.left();
     if left < Duration::from_millis(300) {
-        return Err(too_slow(budget));
+        return Err(deadline.too_slow());
     }
     Ok(left.min(REQUEST_CAP))
 }
 
 /// A request to the sequencer that failed, in words: no answer in time, no connection, or
 /// an HTTP error status (a proxy's 503) instead of a JSON-RPC reply.
-fn request_problem(error: ureq::Error, waited: Duration) -> String {
+fn request_problem(error: ureq::Error, deadline: Deadline) -> String {
     match error {
         ureq::Error::Status(code, _) => format!("could not reach the sequencer: it answered HTTP {code} instead of a reading"),
         ureq::Error::Transport(transport) => {
             let text = transport.to_string();
             if text.contains("timed out") || text.contains("deadline") || text.contains("WouldBlock") {
-                too_slow(waited)
+                deadline.too_slow()
             } else {
                 format!("could not reach the sequencer: {text}")
             }
@@ -808,16 +846,16 @@ pub fn rpc_result(body: &[u8]) -> Result<Value, String> {
 /// Sends `method` to `sequencer` and returns the reply's `result`, waiting until
 /// `deadline` at most (see `request_wait`); every failure is said in words, never read as
 /// an empty answer.
-pub fn rpc(sequencer: &str, method: &str, params: Value, deadline: Instant, budget: Duration) -> Result<Value, String> {
-    let wait = request_wait(deadline, budget)?;
+pub fn rpc(sequencer: &str, method: &str, params: Value, deadline: Deadline) -> Result<Value, String> {
+    let wait = request_wait(deadline)?;
     let response = ureq::post(sequencer)
         .timeout(wait)
         .send_json(json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }))
-        .map_err(|error| request_problem(error, wait))?;
+        .map_err(|error| request_problem(error, deadline))?;
     // Read at most MAX_REPLY_LEN: a sequencer that sends more is refused, not believed.
     let mut body = Vec::new();
     std::io::Read::read_to_end(&mut std::io::Read::take(response.into_reader(), MAX_REPLY_LEN as u64 + 1), &mut body)
-        .map_err(|error| if error.to_string().contains("timed out") { too_slow(wait) } else { format!("could not reach the sequencer: its reply broke off: {error}") })?;
+        .map_err(|error| if error.to_string().contains("timed out") { deadline.too_slow() } else { format!("could not reach the sequencer: its reply broke off: {error}") })?;
     if body.len() > MAX_REPLY_LEN {
         return Err("the sequencer sent a reply larger than any account".to_owned());
     }
@@ -833,23 +871,77 @@ pub fn sequencer_reachable(sequencer: &str) -> Result<(), String> {
 }
 
 /// Asks `sequencer` for its last block, and is Ok only for a JSON-RPC reply carrying one.
+/// Its own wait is said as the health check's: a call that read for longer before it gave up
+/// never says the sequencer had only 5 s (job-start-says-5-s-after-9).
 pub fn probe_sequencer(sequencer: &str) -> Result<(), String> {
-    let result = rpc(sequencer, "getLastBlockId", json!([]), Instant::now() + PROBE_WAIT, PROBE_WAIT)?;
+    let result = rpc(sequencer, "getLastBlockId", json!([]), Deadline::after(PROBE_WAIT)).map_err(|why| {
+        if why.starts_with("could not reach the sequencer: it didn't answer within") {
+            format!("could not reach the sequencer: it didn't answer a health check within {} s. Try again shortly", PROBE_WAIT.as_secs())
+        } else {
+            why
+        }
+    })?;
     result.as_u64().map(|_| ()).ok_or_else(|| "could not reach the sequencer: it sent no block number".to_owned())
 }
 
-/// Whether the sequencer reads the registry's record of `name` (`getAccountView`), as
-/// every job about a name does first: a sequencer that says its last block but fails
-/// account reads can't run the job either.
+/// Whether the sequencer reads the registry's record of `name` (`getAccountView`) by
+/// `deadline`, as every job about a name does first: a sequencer that says its last block
+/// but fails account reads can't run the job either.
 #[cfg(not(test))]
-pub fn name_readable(sequencer: &str, program: &AccountId, name: &str) -> Result<(), String> {
-    Registry::new(sequencer, *program).record(name, &derive(name)).map(|_| ())
+pub fn name_readable(sequencer: &str, program: &AccountId, name: &str, deadline: Deadline) -> Result<(), String> {
+    Registry::by(sequencer, *program, deadline).record(name, &derive(name)).map(|_| ())
 }
 
 /// Tests say whether the sequencer answers: never the network.
 #[cfg(test)]
-pub fn name_readable(sequencer: &str, _program: &AccountId, _name: &str) -> Result<(), String> {
+pub fn name_readable(sequencer: &str, _program: &AccountId, _name: &str, deadline: Deadline) -> Result<(), String> {
+    stub_wait(deadline)?;
     sequencer_reachable(sequencer)
+}
+
+/// Whether the sequencer reads accounts (`getAccountView` of `account`) by `deadline`: a
+/// sequencer can say its last block and fail every account read, and no wallet job runs
+/// then (cli-receive-all-starts-with-only-the-probe-answering).
+#[cfg(not(test))]
+pub fn account_readable(sequencer: &str, account: &AccountId, deadline: Deadline) -> Result<(), String> {
+    view_readable(sequencer, account, deadline)
+}
+
+/// `account_readable`, from the network: the account's view, any reading (null too).
+pub fn view_readable(sequencer: &str, account: &AccountId, deadline: Deadline) -> Result<(), String> {
+    let params = json!([{ "account_id": account_text(account), "program_account_id": account_text(&NATIVE_TOKEN) }]);
+    rpc(sequencer, "getAccountView", params, deadline).map(|_| ())
+}
+
+/// Tests say whether account reads answer (`ACCOUNTS_UNREADABLE`): never the network.
+#[cfg(test)]
+pub fn account_readable(_sequencer: &str, _account: &AccountId, deadline: Deadline) -> Result<(), String> {
+    stub_wait(deadline)?;
+    if ACCOUNTS_UNREADABLE.with(std::cell::Cell::get) {
+        return Err("could not reach the sequencer: it answered HTTP 503 instead of a reading".to_owned());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whether a test's sequencer fails every account read (and still says its last block).
+    pub static ACCOUNTS_UNREADABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// How long each of a test's stand-in reads takes: a slow sequencer.
+    pub static STUB_DELAY: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
+}
+
+/// A test's stand-in read: it takes `STUB_DELAY`, and fails as a real read does when
+/// `deadline` comes first.
+#[cfg(test)]
+pub fn stub_wait(deadline: Deadline) -> Result<(), String> {
+    let delay = STUB_DELAY.with(std::cell::Cell::get);
+    if delay >= deadline.left() {
+        std::thread::sleep(deadline.left());
+        return Err(deadline.too_slow());
+    }
+    std::thread::sleep(delay);
+    Ok(())
 }
 
 /// The block number in a `getLastBlockId` reply, or why the reply isn't one.
@@ -998,9 +1090,10 @@ pub fn channel_id(_sequencer: &str) -> Result<String, String> {
 #[cfg(not(test))]
 pub fn lez_version(sequencer: &str) -> Result<crate::deposit::Lez, String> {
     let request = json!({ "jsonrpc": "2.0", "id": 1, "method": crate::deposit::PROBE_METHOD, "params": [crate::deposit::PROBE_ACCOUNT] });
+    let deadline = Deadline::after(REQUEST_CAP);
     let response = match ureq::post(sequencer).timeout(REQUEST_CAP).send_json(request) {
         Ok(response) | Err(ureq::Error::Status(_, response)) => response,
-        Err(error) => return Err(request_problem(error, REQUEST_CAP)),
+        Err(error) => return Err(request_problem(error, deadline)),
     };
     let reply: Value = response.into_json().unwrap_or(Value::Null);
     crate::deposit::lez_of(&reply).ok_or_else(|| crate::deposit::UNKNOWN_LEZ.to_owned())
@@ -1023,10 +1116,11 @@ thread_local! {
 /// answers null for an account no transaction has touched. LEZ can't pay such an
 /// account of another wallet by its ID (the send lands, keeps its fee and credits
 /// nothing), and a hand-over to one is most likely to a mistyped ID.
+/// Read by `deadline` (the asking call's).
 #[cfg(not(test))]
-pub fn account_seen(sequencer: &str, account: &AccountId) -> Result<bool, String> {
+pub fn account_seen(sequencer: &str, account: &AccountId, deadline: Deadline) -> Result<bool, String> {
     let params = json!([{ "account_id": account_text(account), "program_account_id": account_text(&NATIVE_TOKEN) }]);
-    Ok(!rpc(sequencer, "getAccountView", params, Instant::now() + REQUEST_CAP, REQUEST_CAP)?.is_null())
+    Ok(!rpc(sequencer, "getAccountView", params, deadline)?.is_null())
 }
 
 /// LEZ's bridge program (`deposit::bridge_program`).
@@ -1046,9 +1140,9 @@ pub fn deposit_receipt(op_id: &[u8; 32]) -> AccountId {
 /// neither (an error, a page of HTML, no `result`) is no answer. Read as every read is
 /// (`rpc`), by `deadline`: the call that asks shares one deadline among all its reads.
 #[cfg(not(test))]
-pub fn deposit_minted(sequencer: &str, receipt: &AccountId, deadline: Instant) -> Result<bool, String> {
+pub fn deposit_minted(sequencer: &str, receipt: &AccountId, deadline: Deadline) -> Result<bool, String> {
     let params = json!([{ "account_id": account_text(receipt), "program_account_id": account_text(&bridge_program()) }]);
-    let result = rpc(sequencer, "getAccountView", params, deadline, READ_BUDGET)?;
+    let result = rpc(sequencer, "getAccountView", params, deadline)?;
     minted_in(&json!({ "result": result }))
 }
 
@@ -1066,7 +1160,7 @@ pub fn minted_in(reply: &Value) -> Result<bool, String> {
 
 /// Tests say which deposits LEZ minted (`MINTED`), and that it didn't answer (`MINTED_UNREAD`).
 #[cfg(test)]
-pub fn deposit_minted(_sequencer: &str, receipt: &AccountId, _deadline: Instant) -> Result<bool, String> {
+pub fn deposit_minted(_sequencer: &str, receipt: &AccountId, _deadline: Deadline) -> Result<bool, String> {
     if MINTED_UNREAD.with(std::cell::Cell::get) {
         return Err("could not reach the sequencer".to_owned());
     }
@@ -1087,13 +1181,13 @@ thread_local! {
 /// What the public account `account` holds, read from the sequencer at `sequencer` by
 /// `deadline` (the asking call's): any account, not only the wallet's.
 #[cfg(not(test))]
-pub fn public_balance(sequencer: &str, account: &AccountId, deadline: Instant) -> Result<u128, String> {
-    Registry { sequencer: sequencer.to_owned(), program: NATIVE_TOKEN, deadline }.balance(account)
+pub fn public_balance(sequencer: &str, account: &AccountId, deadline: Deadline) -> Result<u128, String> {
+    Registry::by(sequencer, NATIVE_TOKEN, deadline).balance(account)
 }
 
 /// Tests say what an account holds: never the network.
 #[cfg(test)]
-pub fn public_balance(_sequencer: &str, account: &AccountId, _deadline: Instant) -> Result<u128, String> {
+pub fn public_balance(_sequencer: &str, account: &AccountId, _deadline: Deadline) -> Result<u128, String> {
     BALANCES.with(|held| held.borrow().iter().find(|(id, _)| id == account).map(|(_, balance)| *balance)).ok_or_else(|| "not reached".to_owned())
 }
 
@@ -1111,7 +1205,11 @@ thread_local! {
 
 /// Tests say which accounts are unseen: never the network.
 #[cfg(test)]
-pub fn account_seen(_sequencer: &str, account: &AccountId) -> Result<bool, String> {
+pub fn account_seen(_sequencer: &str, account: &AccountId, deadline: Deadline) -> Result<bool, String> {
+    stub_wait(deadline)?;
+    if ACCOUNTS_UNREADABLE.with(std::cell::Cell::get) {
+        return Err("could not reach the sequencer: it answered HTTP 503 instead of a reading".to_owned());
+    }
     Ok(!UNSEEN.with(|unseen| unseen.borrow().contains(account)))
 }
 
@@ -1121,20 +1219,25 @@ pub fn account_seen(_sequencer: &str, account: &AccountId) -> Result<bool, Strin
 pub struct Registry {
     pub sequencer: String,
     pub program: AccountId,
-    pub deadline: Instant,
+    pub deadline: Deadline,
 }
 
 impl Registry {
     /// `program` on `sequencer`, its reads sharing `READ_BUDGET` from now.
     pub fn new(sequencer: &str, program: AccountId) -> Self {
-        Registry { sequencer: sequencer.to_owned(), program, deadline: Instant::now() + READ_BUDGET }
+        Registry::by(sequencer, program, Deadline::after(READ_BUDGET))
+    }
+
+    /// `program` on `sequencer`, its reads sharing the asking call's `deadline`.
+    pub fn by(sequencer: &str, program: AccountId, deadline: Deadline) -> Self {
+        Registry { sequencer: sequencer.to_owned(), program, deadline }
     }
 
     /// `program`'s state on `account`; empty when it has none. A reply that isn't a
     /// reading (an HTTP error, HTML, an error reply, no result) fails, never reads as empty.
     fn actor_state(&self, account: &AccountId, program: &AccountId) -> Result<Vec<u8>, String> {
         let params = json!([{ "account_id": account_text(account), "program_account_id": account_text(program) }]);
-        let result = rpc(&self.sequencer, "getAccountView", params, self.deadline, READ_BUDGET)?;
+        let result = rpc(&self.sequencer, "getAccountView", params, self.deadline)?;
         actor_bytes(&result, program)
     }
 
@@ -1179,6 +1282,7 @@ impl Registry {
     pub fn record(&self, name: &str, derived: &Derived) -> Result<Option<Resolved>, String> {
         #[cfg(test)]
         if let Some(found) = RECORDS.with(|records| records.borrow().iter().find(|(id, _)| *id == derived.id).map(|(_, record)| record.clone())) {
+            stub_wait(self.deadline)?;
             return Ok(Some(found));
         }
         let bytes = self.state(&record_address(&self.program, &derived.id))?;
@@ -1349,7 +1453,9 @@ mod tests {
         assert_eq!(registry.balance(&[2; 32]), Ok(5));
         let third = registry.balance(&[3; 32]).expect_err("past the deadline");
         assert!(started.elapsed() < READ_BUDGET + Duration::from_millis(700), "answered within the budget: {:?}", started.elapsed());
-        assert!(third.contains("didn't answer within"), "{third}");
+        // resolve-under-slow-says-6-s-after-15: the third read had 1 s left, and the call
+        // waited 4 s in all; it says the 4 s.
+        assert!(third.contains(&format!("didn't answer within {} s", READ_BUDGET.as_secs())), "{third}");
         // A hung sequencer is said so within the budget, not after the host gave up.
         let hung = stub_rpc(|_| {
             std::thread::sleep(Duration::from_secs(30));
@@ -1359,6 +1465,27 @@ mod tests {
         let problem = Registry::new(&hung, [7; 32]).balance(&[1; 32]).expect_err("hung");
         assert!(started.elapsed() < READ_BUDGET + Duration::from_millis(700), "{:?}", started.elapsed());
         assert!(problem.starts_with("could not reach the sequencer: it didn't answer within"), "{problem}");
+    }
+
+    /// cli-receive-all-starts-with-only-the-probe-answering: a sequencer that says its last
+    /// block and refuses account reads doesn't read accounts; a null view is a reading.
+    #[test]
+    fn an_account_read_tells_a_sequencer_that_only_says_its_last_block() {
+        let probe_only = stub_rpc(|request| if request["method"] == "getLastBlockId" { rpc_ok(json!(7)) } else { (503, "upstream 503".into()) });
+        assert_eq!(probe_sequencer(&probe_only), Ok(()));
+        // A health check that times out says it was the health check, and its own 5 s.
+        let hung = stub_rpc(|_| {
+            std::thread::sleep(Duration::from_secs(30));
+            rpc_ok(json!(7))
+        });
+        assert_eq!(probe_sequencer(&hung), Err("could not reach the sequencer: it didn't answer a health check within 5 s. Try again shortly".to_owned()));
+        let refused = view_readable(&probe_only, &[1; 32], Deadline::after(READ_BUDGET)).expect_err("503");
+        assert_eq!(refused, "could not reach the sequencer: it answered HTTP 503 instead of a reading");
+        let answers = stub_rpc(|_| rpc_ok(Value::Null));
+        assert_eq!(view_readable(&answers, &[1; 32], Deadline::after(READ_BUDGET)), Ok(()));
+        // A deadline already spent asks nothing, and says how long the call waited.
+        let spent = Deadline { start: Instant::now() - Duration::from_secs(12), at: Instant::now() };
+        assert_eq!(view_readable(&answers, &[1; 32], spent), Err("could not reach the sequencer: it didn't answer within 12 s. Try again shortly".to_owned()));
     }
 
     /// The LEZ 0.3 testnet: its sequencer answers with `shards`, its records are

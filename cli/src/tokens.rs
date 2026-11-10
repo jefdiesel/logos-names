@@ -1203,7 +1203,7 @@ impl Client {
             .context("the transaction was not applied")?;
         println!("applied in block {block}");
         // A token call moves no native tokens: all that left the payers is the fee.
-        if let Some(line) = crate::fees::paid_line(before, self.held_by(&paying).await, 0) {
+        if let Some(line) = crate::fees::paid_line_of(before, self.held_by(&paying).await, 0) {
             println!("{line}");
         }
         Ok((hash, block))
