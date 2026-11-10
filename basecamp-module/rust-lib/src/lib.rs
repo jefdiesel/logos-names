@@ -964,6 +964,8 @@ struct BoardRead {
     updating: bool,
     /// When the last read ended (only kept by `read_in_background`).
     fetched: Option<std::time::Instant>,
+    /// When `value` was read: how old a list kept through failed reads is.
+    read_at: Option<std::time::Instant>,
 }
 
 /// Where this module keeps what it remembers between runs.
@@ -1161,6 +1163,21 @@ fn payable_account(setup: &cli::Setup, to: &str) -> Result<(), String> {
     }
 }
 
+/// Refuses a job while the sequencer doesn't answer, before anything is made or started: a
+/// job that fails at its first read has already changed the wallet (`receive-privately`
+/// made a new private account each time:
+/// receive-privately-during-outage-leaves-orphan-private-accounts). The sequencer must say
+/// its last block and, for a job about a name, read the registry's record of it (a
+/// sequencer can do the first and fail account reads).
+fn chain_answers(setup: &cli::Setup, about: Option<(&registry::AccountId, &str)>) -> Result<(), String> {
+    let refused = |why: String| format!("{}. Nothing was started; try again when it answers.", why.trim().trim_end_matches(['.', ' ']));
+    registry::sequencer_reachable(&setup.sequencer).map_err(refused)?;
+    if let Some((program, name)) = about {
+        registry::name_readable(&setup.sequencer, program, name).map_err(refused)?;
+    }
+    Ok(())
+}
+
 /// Notes what `chain`'s accounts hold now, as read from `scope` (the sequencer, for LEZ),
 /// in the Wallet's history (arrivals).
 fn note_balances(chain: &str, scope: &str, balances: &[(String, u128)]) {
@@ -1175,6 +1192,38 @@ fn reply(outcome: Result<Value, String>) -> String {
         Err(error) => json!({ "success": false, "value": null, "error": error }),
     }
     .to_string()
+}
+
+/// `reply`, with `marks` (an object, or null for none) beside a success: what a read that
+/// is partial or stale says about itself, `{partial, unread, stale, as_of, warning}`, so it
+/// is never mistaken for a whole, fresh one.
+fn reply_marked(outcome: Result<(Value, Value), String>) -> String {
+    match outcome {
+        Ok((value, marks)) => merged(json!({ "success": true, "value": value, "error": null }), &marks).to_string(),
+        Err(error) => reply(Err(error)),
+    }
+}
+
+/// A span of time as a sentence says it: "40 s", "3 min", "2 h".
+fn age_text(ms: u64) -> String {
+    match ms / 1000 {
+        secs @ 0..=89 => format!("{} s", secs.max(1)),
+        secs @ 90..=5399 => format!("{} min", (secs + 30) / 60),
+        secs => format!("{} h", (secs + 1800) / 3600),
+    }
+}
+
+/// What a list kept from an earlier read says beside it while reading it again fails:
+/// `{stale, as_of, warning}` (cli-mine-stale-list-unmarked-during-outage).
+fn stale_marks(why: &str, age_ms: u64, what: &str) -> Value {
+    let why = why.trim().trim_end_matches(['.', ' ']);
+    let mut letters = why.chars();
+    let why = letters.next().map_or_else(String::new, |first| first.to_uppercase().chain(letters).collect());
+    json!({
+        "stale": true,
+        "as_of": now().saturating_sub(age_ms),
+        "warning": format!("{what} as read {} ago. {why}.", age_text(age_ms)),
+    })
 }
 
 /// Adds the fields of `extra`, when it is an object, to `value`.
@@ -1583,7 +1632,15 @@ impl Names {
 
     fn remember_mine(&self, key: &str, list: Value) {
         let mut reads = self.board_reads.lock().expect("the board reads lock");
-        reads.entry(key.to_owned()).or_default().value = Some(list);
+        let read = reads.entry(key.to_owned()).or_default();
+        read.value = Some(list);
+        read.read_at = Some(std::time::Instant::now());
+    }
+
+    /// How long ago the value kept under `key` was read, in ms (0 if never told).
+    fn read_age_ms(&self, key: &str) -> u64 {
+        let reads = self.board_reads.lock().expect("the board reads lock");
+        reads.get(key).and_then(|read| read.read_at).map_or(0, |at| u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX))
     }
 
     /// The CLI's names changed (a registration or transfer ended): the next
@@ -1635,6 +1692,7 @@ impl Names {
                         Ok(value) => {
                             read.value = Some(value);
                             read.error = None;
+                            read.read_at = Some(std::time::Instant::now());
                         }
                         Err(error) => read.error = Some(error),
                     }
@@ -1693,11 +1751,33 @@ impl Names {
             .unwrap_or(Value::Null)
     }
 
+    /// A registration the CLI is finishing in the background for this wallet, as a running job
+    /// (`cli::background_registrations`), or None. It proves and saves the wallet like a job.
+    fn background_job(&self) -> Option<Value> {
+        let setup = self.cli_setup().ok()?;
+        cli::background_registrations(&setup.wallet).into_iter().next()
+    }
+
+    /// What holds the wallet now: a running CLI job other than an install, or a registration
+    /// finishing in the background; None when nothing does (`cli_status.busy`).
+    fn wallet_busy(&self) -> Option<Value> {
+        let running = self.jobs().ok().and_then(|jobs| jobs.running().into_iter().find(|job| job["name"] != cli::INSTALL_JOB));
+        running.or_else(|| self.background_job())
+    }
+
+    /// Refuses while a registration finishes in the background (the module's own jobs are
+    /// refused by `Jobs::prepare`): it saves the wallet when it ends, from the copy it read.
+    fn no_background_job(&self) -> Result<(), String> {
+        self.background_job().map_or(Ok(()), |job| Err(cli::busy_with(&job)))
+    }
+
     /// Starts a wallet job (`cli_shield`, `cli_pay_account`).
     fn wallet_job(&self, kind: &str, build: impl FnOnce(&cli::Setup) -> Result<Vec<String>, String>) -> Result<Value, String> {
         let setup = self.cli_setup()?;
         setup.wallet_ready()?;
         let command = build(&setup)?;
+        self.no_background_job()?;
+        chain_answers(&setup, None)?;
         let jobs = self.jobs()?;
         let id = jobs.prepare(cli::WALLET_JOB)?;
         jobs.start(&setup, &id, cli::WALLET_JOB, kind, command, None)
@@ -1713,7 +1793,7 @@ impl Names {
                 job["kind"].as_str().unwrap_or("a change"),
                 job["id"].as_str().unwrap_or_default()
             )),
-            None => Ok(()),
+            None => self.no_background_job(),
         }
     }
 
@@ -1761,28 +1841,32 @@ impl Names {
                 }
             }
             Some("receive") if !running && !done => {
-                let first = log.lines().map(str::trim).find(|line| line.starts_with("Error:")).unwrap_or_else(|| cli::last_line(&log));
-                state["problem"] = Value::from(format!("Claiming didn't finish: {}", first.trim_start_matches("Error:").trim()));
-            }
-            Some("pay_account") if !running && !done => {
-                let first = log.lines().map(str::trim).find(|line| line.starts_with("Error:")).unwrap_or_else(|| cli::last_line(&log));
-                state["problem"] = Value::from(format!("The payment didn't go through: {}", first.trim_start_matches("Error:").trim()));
+                // The CLI says what landed and what stopped; a run that claimed some is partly
+                // done, and says so (partial-claim-job-and-pages-say-nothing-true). One that
+                // claimed nothing fails like every other job, below.
+                let whole = state["id"].as_str().and_then(|id| self.jobs().ok().map(|jobs| jobs.whole_log(id))).unwrap_or_else(|| log.clone());
+                let (_, claims) = cli::parse_claims(&whole);
+                if !claims.is_empty() {
+                    state["problem"] = Value::from(format!("Claiming finished only in part: {}", cli::failure_cause(&log)));
+                }
             }
             Some("token_send" | "token_receive") if !running => {
-                let what = if state["kind"] == "token_send" { "The token transfer didn't go through" } else { "Receiving didn't finish" };
                 if let Some(fields) = cli::token_outcome(&log).as_object() {
                     for (key, value) in fields {
                         state[key.as_str()] = value.clone();
                     }
                 }
-                if !done {
-                    let first = log.lines().map(str::trim).find(|line| line.starts_with("Error:")).unwrap_or_else(|| cli::last_line(&log));
-                    state["problem"] = Value::from(format!("{what}: {}", first.trim_start_matches("Error:").trim()));
-                }
                 // What the wallet holds has changed.
                 self.forget_tokens();
             }
             _ => {}
+        }
+        // Every job that failed says what didn't happen and why in one line, built from
+        // the CLI's error, never its last cause line (transfer-failure-text-is-last-cause-line).
+        let failed = !running && !done && state["state"] != "unknown";
+        if failed && !state["problem"].as_str().is_some_and(|problem| !problem.is_empty()) {
+            let kind = state["kind"].as_str().unwrap_or_default().to_owned();
+            state["problem"] = Value::from(cli::job_problem(&kind, &log));
         }
     }
 
@@ -1798,6 +1882,8 @@ impl Names {
             let name = registry::parse_name(typed)?;
             let setup = self.cli_setup()?;
             setup.wallet_ready()?;
+            self.no_background_job()?;
+            chain_answers(&setup, self.program.as_ref().map(|program| (program, name.as_str())))?;
             let jobs = self.jobs()?;
             let id = jobs.prepare(&name)?;
             let (command, scratch, extra) = build(&jobs, &name, &id)?;
@@ -1823,10 +1909,7 @@ impl Names {
         let program = self
             .program
             .ok_or("no registry is configured; call set_registry with its program ID")?;
-        Ok(Registry {
-            sequencer: self.sequencer.clone(),
-            program,
-        })
+        Ok(Registry::new(&self.sequencer, program))
     }
 
     /// The identifier and key of `name`, derived the first time it is asked for.
@@ -2101,9 +2184,11 @@ impl Names {
         Ok(())
     }
 
-    /// Settles the history's entries still on their way, from the chain and the jobs:
-    /// `lez_now` is what the wallet's LEZ accounts hold now (empty when unread).
-    fn settle_activity(&self, dir: &std::path::Path, lez_now: &std::collections::HashMap<String, u128>) {
+    /// Settles the history's entries still on their way, from the chain and the jobs, and
+    /// returns the balances to note (`rows`, what the wallet's LEZ accounts hold as read
+    /// from `sequencer`): an account a bridge goes to is read afresh, or left out when its
+    /// read can't be told apart from that bridge's arrival.
+    fn settle_activity(&self, dir: &std::path::Path, sequencer: &str, rows: &[(String, u128)], deadline: std::time::Instant) -> Vec<(String, u128)> {
         for entry in activity::all(dir).into_iter().filter(|entry| entry["state"] == "sending" || entry["state"] == "in_block") {
             let id = entry["id"].as_str().unwrap_or_default().to_owned();
             let mut settled = Value::Null;
@@ -2130,6 +2215,13 @@ impl Names {
                         if let Ok(notes) = node::call("wallet_get_notes", json!([from, ""]), node::QUICK).map(|reply| chain::notes_of(&reply)) {
                             if !notes.contains_key(note) {
                                 settled = json!({ "state": "in_block" });
+                                // Its transaction, found by the deposit's op id in the recent
+                                // blocks' events: its hash and the fee it paid
+                                // (bridge-settled-after-unload-has-no-hash-or-fee).
+                                if let Some((hash, fee)) = activity::bridge_op_id(&entry).and_then(|op| deposit_made(&op, from, note, &entry)) {
+                                    settled["hash"] = json!(hash);
+                                    settled["fee"] = fee.map_or(Value::Null, |fee| json!(fee.to_string()));
+                                }
                             } else if now().saturating_sub(entry["at"].as_u64().unwrap_or(0)) >= NOTES_HELD_S {
                                 settled = json!({ "state": "failed" });
                             }
@@ -2159,6 +2251,21 @@ impl Names {
                                 if let Some(payer) = payer {
                                     settled["from"] = json!(payer);
                                 }
+                                // A claim job that stopped after some claims landed is partly done,
+                                // not failed: those accounts were credited and its payer paid
+                                // (partial-claim-job-and-pages-say-nothing-true).
+                                if settled["state"] == "failed" && !claims.is_empty() {
+                                    settled["state"] = json!("partial");
+                                }
+                                // What still waits, by account, so the waiting account's page shows it.
+                                let mut left = Map::new();
+                                for (to, amount) in cli::parse_left(&log) {
+                                    let had = left.get(&to).and_then(Value::as_str).and_then(|text| text.parse::<u128>().ok()).unwrap_or(0);
+                                    left.insert(to, json!((had + amount).to_string()));
+                                }
+                                if !left.is_empty() {
+                                    settled["left"] = Value::Object(left);
+                                }
                                 if !claims.is_empty() {
                                     let mut received = Map::new();
                                     for (to, amount) in &claims {
@@ -2184,26 +2291,57 @@ impl Names {
                 activity::update(dir, &id, &settled);
             }
         }
-        // Bridges in a block arrive in the order they were sent, each once its LEZ account
-        // holds what it did before the first of them, plus those before it and itself, and
-        // what logged payments moved since: one credit never marks several (false-arrival).
+        // A bridge arrives once LEZ has minted its own deposit (its receipt), never on a
+        // balance that matches. Its account's balance is then read between two asks of the
+        // receipts, so the read either holds the credit (minted at the first ask) or doesn't
+        // (not minted at the second); a mint between them, or an ask LEZ doesn't answer,
+        // leaves the account unread this time, so its credit is never also taken for money
+        // that arrived (activity::note_balances).
         let at = now();
         let entries = activity::all(dir);
-        // A bridge to an account the wallet doesn't hold is followed from the sequencer.
-        let mut held = lez_now.clone();
-        for entry in entries.iter().filter(|entry| entry["kind"] == "bridge" && entry["state"] == "in_block") {
-            if let Some(to) = entry["to"].as_str().filter(|to| !held.contains_key(*to)) {
-                if let Some(balance) = registry::parse_account(to).ok().and_then(|id| registry::public_balance(&self.sequencer, &id).ok()) {
-                    held.insert(to.to_owned(), balance);
+        let followed = activity::bridges_followed(&entries, at);
+        // Every read here shares the call's deadline, so the call answers inside the host's time
+        // however many bridges wait; one past it is unread, and the bridge waits a round.
+        let ask = |receipt: &registry::AccountId| registry::deposit_minted(sequencer, receipt, deadline).ok();
+        let mut minted: std::collections::HashMap<registry::AccountId, Option<bool>> = followed.iter().map(|(_, _, receipt)| (*receipt, ask(receipt))).collect();
+        let mut rows = rows.to_vec();
+        let accounts: std::collections::BTreeSet<&str> = followed.iter().map(|(_, to, _)| to.as_str()).collect();
+        for to in accounts {
+            let Some(at_row) = rows.iter().position(|(account, _)| account == to) else { continue };
+            let receipts: Vec<registry::AccountId> = followed.iter().filter(|(_, bridge_to, _)| bridge_to == to).map(|(_, _, receipt)| *receipt).collect();
+            let fresh = registry::parse_account(to).ok().and_then(|id| registry::public_balance(sequencer, &id, deadline).ok());
+            let mut certain = fresh.is_some();
+            for receipt in &receipts {
+                match minted.get(receipt).copied().flatten() {
+                    Some(true) => {}
+                    Some(false) => {
+                        let again = ask(receipt);
+                        certain &= again == Some(false);
+                        minted.insert(*receipt, again);
+                    }
+                    None => certain = false,
+                }
+            }
+            match fresh.filter(|_| certain) {
+                Some(balance) => {
+                    rows[at_row].1 = balance;
+                    // The wallet's next read must be no older than this one, or the
+                    // account would seem to fall back and rise again, and the bridge's
+                    // credit be told a second time as money that arrived.
+                    cli::forget_balance();
+                }
+                None => {
+                    rows.remove(at_row);
                 }
             }
         }
-        for (id, mut fields) in activity::bridge_updates(&entries, &held) {
+        for (id, mut fields) in activity::bridge_updates(&entries, at, &|receipt| minted.get(receipt).copied().flatten()) {
             if fields["state"] == "arrived" {
                 fields["arrived_at"] = json!(at);
             }
             activity::update(dir, &id, &fields);
         }
+        rows
     }
 }
 
@@ -2624,19 +2762,21 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| {
+        reply_marked((|| {
             let setup = self.cli_setup()?;
             // The CLI reads every name it holds from the chain, which takes seconds:
             // answer with the last list and refresh it on its own thread.
             // Kept per wallet: another wallet holds other names.
             let key = format!("cli_mine:{}", setup.wallet.display());
             if self.mine_known(&key) {
-                let cached = self.board_read(key, move || cli::run_mine(&setup).map(Value::from));
-                return Ok(cached["posts"].clone());
+                let cached = self.board_read(key.clone(), move || cli::run_mine(&setup).map(Value::from));
+                // A refresh that failed leaves the last list, said to be from then.
+                let marks = cached["error"].as_str().map_or(Value::Null, |why| stale_marks(why, self.read_age_ms(&key), "Your names"));
+                return Ok((cached["posts"].clone(), marks));
             }
             let fresh = Value::from(cli::run_mine(&setup)?);
             self.remember_mine(&key, fresh.clone());
-            Ok(fresh)
+            Ok((fresh, Value::Null))
         })())
     }
 
@@ -2738,18 +2878,24 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| {
+        reply_marked((|| {
             let setup = self.cli_setup()?;
-            let balance = cli::run_balance(&setup)?;
-            if let Ok(rows) = cli::balances_now(&setup) {
+            setup.wallet_ready()?;
+            let deadline = std::time::Instant::now() + cli::CALL_BUDGET;
+            let read = cli::balance_read(&setup, deadline)?;
+            // Only a read in which the sequencer gave every balance moves the History: an
+            // unread balance is never a 0 (selective-degradation-cold-read-false-arrivals).
+            if read.complete() {
+                let rows = read.balances();
                 // What settled first, so a send between the wallet's own accounts is not
                 // also taken for money that arrived.
-                if let Some(dir) = config_dir() {
-                    self.settle_activity(&dir, &rows.iter().cloned().collect());
-                }
+                let rows = match config_dir() {
+                    Some(dir) => self.settle_activity(&dir, &setup.sequencer, &rows, deadline),
+                    None => rows,
+                };
                 note_balances("lez", &setup.sequencer, &rows);
             }
-            Ok(balance)
+            Ok((read.reply(), read.marks()))
         })())
     }
 
@@ -2759,7 +2905,7 @@ impl NamesModule for Names {
         }
         reply((|| {
             // Everything is checked before anything is remembered or run.
-            cli::bridge_amount(&amount)?;
+            cli::amount(&amount)?;
             let key = cli::bridge_key(&from_key)?;
             let node = cli::bridge_node(&node)?;
             let setup = self.cli_setup()?;
@@ -2777,7 +2923,7 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         reply((|| {
-            cli::bridge_amount(&amount)?;
+            cli::amount(&amount)?;
             let key = cli::bridge_key(&from_key)?;
             let node = cli::bridge_node(&node)?;
             // The destination too, before anything is remembered: a refused call leaves
@@ -2829,7 +2975,9 @@ impl NamesModule for Names {
                 "wallet": has_wallet,
                 "public": account("public"),
                 "private": account("private"),
-                "busy": self.running_job(cli::WALLET_JOB),
+                // Whatever holds the wallet: a wallet job, a change to a name, or a registration
+                // finishing in the background (wallet-job-allowed-while-detached-registration-pending).
+                "busy": self.wallet_busy().unwrap_or(Value::Null),
             }))
         })())
     }
@@ -2873,6 +3021,7 @@ impl NamesModule for Names {
             if let Some(id) = self.jobs().ok().and_then(|jobs| jobs.running_for(cli::WALLET_JOB)) {
                 return Err(format!("your wallet is busy with something else (job {id}); wait for it to finish"));
             }
+            self.no_background_job()?;
             let made = cli::run_create_wallet(&setup)?;
             // The folder it was made in is the one used from now on.
             if self.cli_wallet.is_none() {
@@ -2889,10 +3038,11 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         let out = reply((|| {
-            let command = cli::setup_args(&amount)?;
-            if command[1] == "--shield=0" {
-                return Err("enter an amount above zero".to_owned());
+            // An amount like every other, never 0; empty is setup's default.
+            if !amount.trim().is_empty() {
+                cli::amount(&amount)?;
             }
+            let command = cli::setup_args(&amount)?;
             self.wallet_job("shield", |setup| {
                 cli::default_public(setup)?;
                 Ok(command)
@@ -2940,12 +3090,13 @@ impl NamesModule for Names {
         }
         let listed = (|| -> Result<(Value, Option<String>), String> {
             let dir = config_dir().ok_or("no folder for the Wallet's history")?;
+            let deadline = std::time::Instant::now() + cli::CALL_BUDGET;
             let setup = self.cli_setup().ok();
             let read = setup.as_ref().and_then(|setup| cli::balances_now(setup).ok());
-            let lez_now: std::collections::HashMap<String, u128> = read.clone().unwrap_or_default().into_iter().collect();
-            self.settle_activity(&dir, &lez_now);
-            if let (Some(setup), Some(rows)) = (&setup, &read) {
-                note_balances("lez", &setup.sequencer, rows);
+            let sequencer = setup.as_ref().map_or_else(|| self.sequencer.clone(), |setup| setup.sequencer.clone());
+            let rows = self.settle_activity(&dir, &sequencer, read.as_deref().unwrap_or_default(), deadline);
+            if let (Some(setup), Some(_)) = (&setup, &read) {
+                note_balances("lez", &setup.sequencer, &rows);
             }
             // A history file that couldn't be read was kept aside, never written over: say so
             // once. Only a lost history fails the call; a lost file of marks is a warning
@@ -2972,9 +3123,7 @@ impl NamesModule for Names {
             let cli::PayTo::Account(to) = cli::pay_to(&account)? else {
                 return Err("that is a name; pay it as a name".to_owned());
             };
-            if !cli::is_amount(&cli::ungrouped(&amount).unwrap_or_default()) {
-                return Err("enter a whole amount, such as 1000".to_owned());
-            }
+            cli::amount(&amount)?;
             // A program's account and the empty one are refused as cli_bridge_to and
             // cli_transfer refuse them (pay-account-accepts-program-account).
             self.not_a_sink(&registry::parse_account(&to)?, "take a payment")?;
@@ -2986,7 +3135,7 @@ impl NamesModule for Names {
         let from = self.cli_setup().ok().and_then(|setup| {
             if from_private { cli::default_private(&setup).ok().map(|id| format!("Private/{id}")) } else { cli::default_public(&setup).ok().map(|id| format!("Public/{id}")) }
         });
-        log_started(&out, json!({ "kind": "pay_account", "chain": "lez", "from": from, "to": account.trim(), "amount": cli::ungrouped(&amount), "private": from_private }));
+        log_started(&out, json!({ "kind": "pay_account", "chain": "lez", "from": from, "to": account.trim(), "amount": cli::amount_text(&amount).ok(), "private": from_private }));
         out
     }
 
@@ -3229,7 +3378,7 @@ impl NamesModule for Names {
         };
         let out = self.cli_job(&name, "pay", |_, _, _| Ok((command, None, Value::Null)));
         let from = self.cli_setup().ok().and_then(|setup| cli::default_private(&setup).ok()).map(|id| format!("Private/{id}"));
-        log_started(&out, json!({ "kind": "pay", "chain": "lez", "from": from, "name": registry::normalize_name(&name), "amount": cli::ungrouped(&amount) }));
+        log_started(&out, json!({ "kind": "pay", "chain": "lez", "from": from, "name": registry::normalize_name(&name), "amount": cli::amount_text(&amount).ok() }));
         out
     }
 
@@ -3483,7 +3632,7 @@ impl NamesModule for Names {
         let from = self.cli_setup().ok().and_then(|setup| {
             if from_private { cli::default_private(&setup).ok().map(|id| format!("Private/{id}")) } else { cli::default_public(&setup).ok().map(|id| format!("Public/{id}")) }
         });
-        log_started(&out, json!({ "kind": "token_send", "chain": "lez", "from": from, "to": to.trim(), "amount": cli::ungrouped(&amount), "token": definition.trim() }));
+        log_started(&out, json!({ "kind": "token_send", "chain": "lez", "from": from, "to": to.trim(), "amount": cli::amount_text(&amount).ok(), "token": definition.trim() }));
         out
     }
 
@@ -3504,7 +3653,13 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| cli::run_accounts_any(&self.cli_setup()?))())
+        // Accounts whose balance the sequencer didn't give are listed with it null, and
+        // named beside the list (balance-accounts-zeroed-with-success-on-partial-failure).
+        reply_marked((|| {
+            let read = cli::run_accounts_any(&self.cli_setup()?)?;
+            let marks = read.marks();
+            Ok((Value::from(read.rows), marks))
+        })())
     }
 
     fn cli_account_new(&mut self, kind: String, label: String) -> String {
@@ -3801,33 +3956,26 @@ impl NamesModule for Names {
                         "The deposit fee (at most {BRIDGE_MAX_FEE}) comes from this key's other notes, which hold {others}. Mine or receive a little more first. Nothing was sent."
                     ));
                 }
-                // What the LEZ account holds before the deposit, so its arrival can be told
-                // (activity): the wallet's own read, or the sequencer's for an account the
-                // wallet doesn't hold (bridge-to-foreign-account-to-before-null).
-                let to_before = self
-                    .cli_setup()
-                    .ok()
-                    .and_then(|setup| cli::balances_now(&setup).ok())
-                    .and_then(|rows| rows.into_iter().find(|(account, _)| *account == format!("Public/{to}")).map(|(_, balance)| balance))
-                    .or_else(|| registry::public_balance(&self.sequencer, &account).ok());
-                // Without it the deposit's arrival can't be followed, and a later bridge to the
-                // account would be taken as arrived on this one's credit: a deposit can't be
-                // undone, so it isn't sent (bridge-with-unread-to_before-never-arrives).
-                let Some(to_before) = to_before else {
-                    return Err(format!(
-                        "LEZ didn't say what Public/{to} holds now, so this bridge's arrival couldn't be followed. Try again when LEZ answers. Nothing was sent."
-                    ));
-                };
-                let to_before = Some(to_before);
+                // Its arrival on LEZ is told by the receipt LEZ writes when it mints this very
+                // deposit, named by the deposit's op id: the channel, the one note and the
+                // account, all known now (activity::bridge_updates). No balance of the account
+                // is needed, so none is read: a destination LEZ has never seen (`null`) is
+                // fine (chain-bridge-null-destination-read-taken-as-zero-strands-bridge).
+                let channel_bytes = <[u8; 32]>::try_from(registry::unhex(&channel)?).map_err(|_| "LEZ named a channel that isn't 32 bytes".to_owned())?;
+                let op_id = chain::deposit_op_id(&channel_bytes, std::slice::from_ref(&note), &account).ok_or("the note to deposit isn't 32 bytes of hex")?;
+                let receipt = registry::account_text(&registry::deposit_receipt(&op_id));
+                plan["op_id"] = json!(registry::hex(&op_id));
+                plan["receipt"] = json!(receipt);
                 // Recorded before the node is asked: a call cut off (the module unloaded while the
                 // node proved) still leaves the deposit in the history and its note held, to be
-                // settled by the note (deposit-lost-from-activity-on-unload).
+                // settled by the note (deposit-lost-from-activity-on-unload). What the key's notes
+                // held is kept with it, so the fee can be told once the deposit is found.
                 let pending = format!("pending-{}-{note}", now());
-                chain_sent_add(&pending, json!({ "from": from, "inputs": [note], "fee": null, "at": now(), "pending": true }));
+                chain_sent_add(&pending, json!({ "from": from, "inputs": [note], "fee": null, "at": now(), "pending": true, "notes": notes }));
                 let entry = config_dir().map(|dir| {
                     let id = activity::add(&dir, now(), json!({ "kind": "bridge", "chain": "logos", "from": from, "to": format!("Public/{to}"),
-                        "amount": amount.to_string(), "hash": null, "note": note, "channel": channel, "to_before": to_before.map(|b| b.to_string()),
-                        "followed": to_before.is_some() }));
+                        "amount": amount.to_string(), "hash": null, "note": note, "channel": channel, "op_id": registry::hex(&op_id),
+                        "receipt": receipt, "followed": true }));
                     (dir, id)
                 });
                 // The deposit's metadata is the LEZ account's 32 bytes, as `names bridge` sends it.
@@ -3850,7 +3998,6 @@ impl NamesModule for Names {
                         return Err(error);
                     }
                 };
-                chain_sent_remove(&pending);
                 let hash = chain::hash_of(&deposited);
                 if let Some(hash) = &hash {
                     // Every note it spends, the fee's too, so it counts as in a block only
@@ -3868,6 +4015,9 @@ impl NamesModule for Names {
                         activity::update(dir, id, &json!({ "hash": hash, "fee": plan["fee"] }));
                     }
                 }
+                // Only now: a call cut off before this still has what the key's notes held,
+                // to tell the fee by (deposit_made).
+                chain_sent_remove(&pending);
                 plan["sent"] = json!(true);
                 plan["hash"] = hash.map_or(Value::Null, Value::from);
             }
@@ -4504,8 +4654,7 @@ impl Names {
                 Some(state) if state["state"] == "done" => Some((true, String::new())),
                 Some(state) if state["state"] == "failed" => {
                     let log = state["log_tail"].as_str().unwrap_or_default();
-                    let first = log.lines().map(str::trim).find(|line| line.starts_with("Error:")).unwrap_or_else(|| cli::last_line(log));
-                    Some((false, provider::clean_text(first.trim_start_matches("Error:").trim(), 300)))
+                    Some((false, provider::clean_text(&cli::failure_cause(log), 300)))
                 }
                 _ => None,
             };
@@ -4544,7 +4693,7 @@ impl Names {
             let balance = read["value"]["balance"].clone();
             merged(read, &json!({ "value": balance }))
         } else {
-            let registry = Registry { sequencer: self.sequencer.clone(), program: self.program.unwrap_or([0; 32]) };
+            let registry = Registry::new(&self.sequencer, self.program.unwrap_or([0; 32]));
             self.read_in_background(format!("provider:balance:{}", registry::account_text(&id)), BALANCE_EVERY, move || {
                 registry.balance(&id).map(|balance| json!(balance.to_string()))
             })
@@ -4812,6 +4961,48 @@ fn in_flight_refusal(error: String, from: &str, notes: &Map<String, Value>) -> S
         return chain_inscribe::HELD.to_owned();
     }
     error
+}
+
+/// Most blocks walked back from the node's tip to find a deposit whose call was cut off.
+const DEPOSIT_SEARCH_BLOCKS: usize = 600;
+
+/// The deposit `op_id` of `note` from `from` (the history's `entry`), made though its call
+/// was cut off: its transaction's hash, found in the recent blocks' events, and the fee it
+/// paid, from what the key's notes held when it was sent (kept with its pending record).
+/// The hash is then kept like any send made here, so `chain_tx` can be asked of it.
+fn deposit_made(op_id: &[u8; 32], from: &str, note: &str, entry: &Value) -> Option<(String, Option<u128>)> {
+    let mut block = node::call("get_cryptarchia_info", json!([]), node::QUICK).ok()?["tip"].as_str()?.to_owned();
+    let mut found = None;
+    for _ in 0..DEPOSIT_SEARCH_BLOCKS {
+        let events = node::call("get_block_events", json!([block]), node::QUICK).ok()?;
+        if let Some(hash) = chain::deposit_in_events(&events, op_id) {
+            found = Some(hash);
+            break;
+        }
+        block = node::call("get_block", json!([block]), node::QUICK).ok()?["header"]["parent_block"].as_str()?.to_owned();
+    }
+    let hash = found?;
+    let sent = chain_sent();
+    // Cut off after its record was kept: that has its fee already.
+    if let Some(known) = sent.get(&hash) {
+        return Some((hash.clone(), known["fee"].as_str().and_then(|fee| fee.parse().ok())));
+    }
+    let pending = sent.into_iter().find(|(key, sent)| key.starts_with("pending-") && sent["inputs"] == json!([note]) && sent["from"] == from);
+    let stored = node::call("get_transaction", json!([hash]), node::QUICK).ok();
+    let amount = entry["amount"].as_str().and_then(|amount| amount.parse::<u128>().ok());
+    let fee = match (&stored, &pending, amount) {
+        (Some(tx), Some((_, sent)), Some(amount)) => sent["notes"].as_object().and_then(|notes| chain::deposit_fee(tx, notes, amount)),
+        _ => None,
+    };
+    let mut inputs = stored.as_ref().map(chain::all_inputs).unwrap_or_default();
+    if inputs.is_empty() {
+        inputs.push(note.to_owned());
+    }
+    chain_sent_add(&hash, json!({ "from": from, "inputs": inputs, "fee": fee.map(|f| f.to_string()), "at": entry["at"] }));
+    if let Some((key, _)) = pending {
+        chain_sent_remove(&key);
+    }
+    Some((hash, fee))
 }
 
 /// Forgets a record `chain_sent_add` made (a deposit's pending one, once it has its hash).
@@ -5255,6 +5446,79 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// partial-claim-job-and-pages-say-nothing-true: the second of two claims was refused by the
+    /// wallet; the job blamed the sequencer, reported no fee, showed the credited account as
+    /// failed and left the payer's and the waiting account's pages empty.
+    #[test]
+    fn a_claim_job_that_stopped_partway_is_partly_done_on_every_page() {
+        let (p, r1, r2) = (
+            "Private/DetM9mjtAHfGp4rqpRNVWBkMjUr2rtEdCUGq3T8rNCdQ",
+            "Private/9Dk3Yx4ZQnHxAZ2c4pkuDZ7cHKu8M1NC2vWqzTzS2r8q",
+            "Private/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk",
+        );
+        let log = [
+            format!("fee paid from {p}"),
+            format!("fee: about 5070616, at most 8239751 (claim 1 of 2, paid from {p} inside the proof)"),
+            format!("receiving 1000000 into {r1}; proving it on this computer (several minutes)"),
+            format!("received in block 469; {r1} now holds 1000000"),
+            "fee paid: 5070616".to_owned(),
+            format!("fee: about 5070616, at most 8239751 (claim 2 of 2, paid from {p} inside the proof)"),
+            format!("receiving 1000000 into {r2}; proving it on this computer (several minutes)"),
+            format!("left waiting: 1000000 to {r2}: not claimed"),
+            format!("Error: claimed 1 of 2 (1,000,000 into {r1}). The claim of 1,000,000 into {r2} stopped: the wallet refused this change before sending it: {p} pays its fee and can't hold the fee reserve of 5,070,616 on top of what the change moves. Nothing was sent for it."),
+        ];
+        let script = format!("case \"$*\" in *--help*) exit 0;; esac\n{}\nexit 1", log.iter().map(|line| format!("echo '{}'", line.replace('\'', "'\\''"))).collect::<Vec<_>>().join("\n"));
+        let (mut names, dir) = with_fake_cli("partialclaim", &script);
+        let started = parsed(&names.cli_receive_all());
+        let job = started["value"]["id"].as_str().expect("a job").to_owned();
+        let ended = job_end(&mut names, &job);
+        assert_eq!(ended["state"], "failed", "{ended}");
+        let problem = ended["problem"].as_str().unwrap();
+        assert!(problem.starts_with("Claiming finished only in part: claimed 1 of 2"), "{problem}");
+        assert!(!problem.contains("sequencer"), "{problem}");
+        assert_eq!(ended["fee"], json!({ "about": "10141232", "at_most": "16479502", "paid": "5070616" }));
+        for page in [p, r1, r2] {
+            let rows = parsed(&names.activity(page.into()));
+            let row = rows["value"].as_array().unwrap().iter().find(|e| e["job"] == job.as_str()).cloned().unwrap_or_else(|| panic!("not on {page}'s page: {rows}"));
+            assert_eq!(row["state"], "partial", "{row}");
+            assert_eq!((row["from"].as_str(), row["received"][r1].as_str(), row["left"][r2].as_str()), (Some(p), Some("1000000"), Some("1000000")), "{row}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// wallet-job-allowed-while-detached-registration-pending: while `names register --wait`
+    /// finished a registration in the background, `cli_status.busy` was null and a wallet job
+    /// that also saves the wallet was accepted.
+    #[test]
+    fn a_registration_finishing_in_the_background_keeps_the_wallet_busy() {
+        use std::os::unix::fs::PermissionsExt;
+        let (mut names, dir) = with_fake_cli("background", "case \"$*\" in *--help*) exit 0;; esac\nexit 0");
+        // A process run as `names register racea --wait`, as the CLI starts one.
+        let script = dir.join("bg").join("names");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut finishing = std::process::Command::new(&script).args(["register", "racea", "--wait"]).spawn().unwrap();
+        let saved = json!({ "pending": { "racea": { "made": 7 } }, "background": { "racea": finishing.id() } });
+        std::fs::write(dir.join("wallet").join("names.json"), saved.to_string()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let status = parsed(&names.cli_status());
+        let receive = parsed(&names.cli_receive());
+        let register = parsed(&names.cli_register("raceb".into(), false));
+        let _ = finishing.kill();
+        let _ = finishing.wait();
+        // Where ps shows the script by its own name, the registration holds the wallet.
+        if status["value"]["busy"]["background"] == true {
+            assert_eq!(status["value"]["busy"]["name"], "racea", "{status}");
+            for refused in [&receive, &register] {
+                assert!(refused["error"].as_str().unwrap().contains("finishing the registration of racea"), "{refused}");
+            }
+        }
+        // Once it has ended, the wallet is free.
+        assert_eq!(parsed(&names.cli_status())["value"]["busy"], Value::Null);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     fn job_end(names: &mut Names, id: &str) -> Value {
         for _ in 0..200 {
             let state = parsed(&names.job(id.to_owned()));
@@ -5338,7 +5602,7 @@ mod tests {
     #[test]
     fn an_empty_cli_wallet_holds_nothing_and_takes_no_changes() {
         let (mut names, dir) = with_fake_cli("empty", "echo 'jef.lez  held by a deposit (no expiry)'");
-        assert_eq!(parsed(&names.cli_mine())["value"], json!([{ "name": "jef", "display": "jef", "signer": "cli", "state": "held by a deposit (no expiry)", "lapsed": false, "registering": false, "failed": false, "private": null }]));
+        assert_eq!(parsed(&names.cli_mine())["value"], json!([{ "name": "jef", "display": "jef", "signer": "cli", "state": "held by a deposit (no expiry)", "lapsed": false, "registering": false, "failed": false, "private": null, "not_public": null }]));
         let empty = dir.join("empty-wallet");
         std::fs::create_dir_all(&empty).expect("a dir");
         names.cli_wallet = Some(empty.to_string_lossy().into_owned());
@@ -5359,14 +5623,52 @@ mod tests {
     #[test]
     fn names_are_not_taken_as_gone_when_the_sequencer_doesnt_answer() {
         let (mut names, dir) = with_fake_cli("mine-down", "echo 'jefdiesel  no longer held by this wallet'; echo 'anon-frost-frog  no longer held by this wallet'");
-        registry::SEQUENCER_DOWN.with(|down| down.set(true));
+        // The sequencer says its last block (the old check passed) but fails account reads.
+        names.sequencer = registry::stub_rpc(|request| if request["method"] == "getLastBlockId" { registry::rpc_ok(json!(7)) } else { (503, "upstream 503".into()) });
         let down = parsed(&names.cli_mine());
-        registry::SEQUENCER_DOWN.with(|down| down.set(false));
         assert_eq!(down["success"], false, "{down}");
-        assert!(down["error"].as_str().unwrap().contains("could not reach the sequencer"), "{down}");
-        // With the sequencer answering, the names really are gone.
+        let error = down["error"].as_str().unwrap();
+        assert!(error.contains("didn't give the record of jefdiesel, anon-frost-frog") && error.contains("HTTP 503"), "{down}");
+        // With the sequencer answering that neither has a record, they really are gone.
+        names.sequencer = registry::stub_rpc(|_| registry::rpc_ok(Value::Null));
         assert_eq!(parsed(&names.cli_mine())["value"], json!([]));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// cli-mine-empty-list-when-account-views-fail / cli-mine-stale-list-unmarked-during-outage:
+    /// once a list was read, a refresh that couldn't read the names replaced it with []
+    /// (the October CLI calls each "no longer held"), and during an outage the last list
+    /// came back as a plain success. Now the last list stays, said to be stale and why.
+    #[test]
+    fn a_refresh_that_cant_read_the_names_keeps_the_list_and_says_its_stale() {
+        let (mut names, dir) = with_fake_cli("mine-stale", "cat \"$(dirname \"$0\")/mine.txt\"");
+        std::fs::write(dir.join("mine.txt"), "jefdiesel  held by a deposit (no expiry)\nanon-frost-frog  held by a deposit (no expiry)\n").unwrap();
+        let healthy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let answers = healthy.clone();
+        names.sequencer = registry::stub_rpc(move |_| {
+            if answers.load(std::sync::atomic::Ordering::SeqCst) { registry::rpc_ok(Value::Null) } else { (503, "upstream 503".into()) }
+        });
+        let first = parsed(&names.cli_mine());
+        assert_eq!(first["value"].as_array().map(Vec::len), Some(2), "{first}");
+        assert_eq!(first["stale"], Value::Null, "{first}");
+        // The outage: the CLI calls both gone, the sequencer gives neither record.
+        healthy.store(false, std::sync::atomic::Ordering::SeqCst);
+        std::fs::write(dir.join("mine.txt"), "jefdiesel  no longer held by this wallet\nanon-frost-frog  no longer held by this wallet\n").unwrap();
+        let mut seen = parsed(&names.cli_mine());
+        for _ in 0..40 {
+            if seen["stale"] == true {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            seen = parsed(&names.cli_mine());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(seen["success"], true, "{seen}");
+        assert_eq!(seen["value"].as_array().map(Vec::len), Some(2), "the last list stays: {seen}");
+        assert_eq!(seen["stale"], true, "{seen}");
+        let warning = seen["warning"].as_str().unwrap();
+        assert!(warning.starts_with("Your names as read ") && warning.contains("HTTP 503"), "{warning}");
+        assert!(seen["as_of"].as_u64().is_some(), "{seen}");
     }
 
     #[test]
@@ -5469,6 +5771,7 @@ mod tests {
     #[test]
     fn a_split_is_a_send_to_the_same_key_and_a_bridge_deposits_one_exact_note() {
         let mut names = fresh();
+        const E8: &str = "e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8";
         let asked_args = |method: &str| node::ASKED.with(|asked| asked.borrow().iter().rev().find(|(m, _)| m == method).map(|(_, a)| a.clone()));
         // One big note: a split is needed, and the bridge says so instead of moving it all.
         node_answers("wallet_get_notes", json!({ "notes": [{ "id": "b271", "value": "131296018" }] }));
@@ -5488,24 +5791,21 @@ mod tests {
         assert_eq!(made["value"]["fee"], "2018");
         assert_eq!(asked_args("wallet_transfer_funds"), Some(json!([NODE_KEY, [NODE_KEY], NODE_KEY, "1000000", ""])));
         // Now a note of exactly the amount: the bridge deposits just it, to the picked account.
-        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "c0de", "value": "130294000" }, { "id": "e8ac", "value": "1000000" }] }));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "c0de", "value": "130294000" }, { "id": "e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8", "value": "1000000" }] }));
         let ready = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), false));
-        assert_eq!((ready["value"]["note"].as_str(), ready["value"]["needs_split"].as_bool(), ready["value"]["total"].as_str()), (Some("e8ac"), Some(false), Some("1000000")), "{ready}");
+        assert_eq!((ready["value"]["note"].as_str(), ready["value"]["needs_split"].as_bool(), ready["value"]["total"].as_str()), (Some("e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8"), Some(false), Some("1000000")), "{ready}");
         node_answers("channel_deposit_with_notes", json!("ab".repeat(32)));
         // The node doesn't know the channel: nothing is deposited.
         let unknown = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), true));
         assert!(unknown["error"].as_str().unwrap().contains("deposit channel"), "{unknown}");
         assert!(!node_asked().contains(&"channel_deposit_with_notes".to_owned()), "nothing deposited into an unknown channel");
         node_answers("get_channel_state", json!({ "accredited_keys": [], "configuration_threshold": 3 }));
-        // bridge-with-unread-to_before-never-arrives: LEZ doesn't answer for the account, so
-        // its arrival couldn't be followed: nothing is deposited.
-        let unread = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), true));
-        assert!(unread["error"].as_str().unwrap().contains("couldn't be followed") && unread["error"].as_str().unwrap().ends_with("Nothing was sent."), "{unread}");
-        assert!(!node_asked().contains(&"channel_deposit_with_notes".to_owned()), "nothing deposited without the account's balance");
-        registry::BALANCES.with(|held| held.borrow_mut().push((registry::parse_account(to).unwrap(), 250)));
+        // chain-bridge-null-destination-read-taken-as-zero-strands-bridge: what the account
+        // holds isn't asked (LEZ hasn't seen it here: no balance known); its arrival is told
+        // by the deposit's receipt.
         // The deposit as the node stores it: the exact note, and a note for its fee.
         node_answers("get_transaction", json!({ "mantle_tx": { "ops": [
-            { "opcode": 5, "payload": { "inputs": ["e8ac"] } },
+            { "opcode": 5, "payload": { "inputs": ["e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8"] } },
             { "opcode": 0, "payload": { "inputs": ["c0de"], "outputs": [{ "value": 130292386 }] } }] } }));
         let sent = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{to}"), "1000000".into(), true));
         assert_eq!((sent["value"]["sent"].as_bool(), sent["value"]["hash"].as_str()), (Some(true), Some("ab".repeat(32).as_str())), "{sent}");
@@ -5527,15 +5827,19 @@ mod tests {
         // The split and the bridge are in the Wallet's history, the bridge with where it lands.
         let history = activity::all(&config_dir().unwrap());
         let bridge = history.iter().find(|e| e["kind"] == "bridge" && e["hash"] == "ab".repeat(32)).expect("the bridge is in the history");
-        // Not the wallet's account: what it held is asked of the sequencer, so its arrival can be followed.
-        assert_eq!((bridge["to_before"].as_str(), bridge["followed"].as_bool()), (Some("250"), Some(true)), "{bridge}");
+        // Followed by the receipt LEZ writes when it mints this deposit (op id of channel, note, account).
+        let op = chain::deposit_op_id(&[2; 32], &[E8.to_owned()], &registry::parse_account(to).unwrap()).unwrap();
+        assert_eq!((bridge["op_id"].as_str(), bridge["receipt"].as_str(), bridge["followed"].as_bool()),
+            (Some(registry::hex(&op).as_str()), Some(registry::account_text(&registry::deposit_receipt(&op)).as_str()), Some(true)), "{bridge}");
+        assert_eq!(sent["value"]["receipt"], bridge["receipt"], "the reply names it too");
+        assert!(bridge.get("to_before").is_none(), "no balance read: {bridge}");
         assert_eq!(bridge["fee"], "1614", "the paid fee is in the history");
         assert_eq!((bridge["amount"].as_str(), bridge["to"].as_str(), bridge["state"].as_str()), (Some("1000000"), Some(format!("Public/{to}").as_str()), Some("sending")));
         assert!(history.iter().any(|e| e["kind"] == "split" && e["hash"] == "cd".repeat(32)), "the split is in the history");
         let account = registry::parse_account(to).unwrap();
         assert_eq!(
             asked_args("channel_deposit_with_notes"),
-            Some(json!(["02".repeat(32), ["e8ac"], registry::hex(&account), NODE_KEY, [NODE_KEY], "100000", ""])),
+            Some(json!(["02".repeat(32), ["e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8"], registry::hex(&account), NODE_KEY, [NODE_KEY], "100000", ""])),
             "one exact note, the account's 32 bytes as metadata, the fee from the key's other notes"
         );
         // A private account is never a bridge's destination.
@@ -5575,15 +5879,194 @@ mod tests {
             "case \"$*\" in\n*balance*) echo '  Public/{PUBLIC}  0  (default)'; echo '  Public/{OTHER}  0'; echo '  Private/{PRIVATE}  250  (default)' ;;\nesac"
         );
         let (mut names, dir) = with_wallet("balance-down", &tail);
-        registry::SEQUENCER_DOWN.with(|down| down.set(true));
+        names.sequencer = "http://127.0.0.1:9/".into();
         let down = parsed(&names.cli_balance());
-        registry::SEQUENCER_DOWN.with(|down| down.set(false));
         assert_eq!(down["success"], false, "{down}");
         assert!(down["error"].as_str().unwrap().contains("could not reach the sequencer"), "{down}");
         // Answering, a 0 is a 0.
+        names.sequencer = registry::stub_rpc(|_| registry::rpc_ok(registry::view_holding(0)));
         let up = parsed(&names.cli_balance());
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(up["value"]["public"]["balance"], "0", "{up}");
+        assert_eq!(up["partial"], Value::Null, "{up}");
+    }
+
+    /// The October CLI's balance read with some account reads failing (a proxy answering
+    /// 503 to getAccountBalance, or one read in three), and getLastBlockId answering.
+    fn october_balance(label: &str, failing: &'static [&'static str]) -> (Names, std::path::PathBuf) {
+        let tail = format!(
+            "case \"$*\" in\n*balance*) echo 'public accounts (seen on chain):'; echo '  Public/{PUBLIC}  0  (default)'; echo '  Public/{OTHER}  0'; echo '  Private/{PRIVATE}  250  (default)'; echo 'private total: 250' ;;\nesac"
+        );
+        let (mut names, dir) = with_wallet(label, &tail);
+        names.sequencer = registry::stub_rpc(move |request| {
+            let account = registry::asked_account(request);
+            if failing.contains(&account.as_str()) {
+                (503, "upstream 503".into())
+            } else if account == PUBLIC {
+                registry::rpc_ok(registry::view_holding(39_733_291_875))
+            } else {
+                registry::rpc_ok(registry::view_holding(10_000_001))
+            }
+        });
+        (names, dir)
+    }
+
+    /// selective-degradation-cold-read-false-arrivals / balance-accounts-zeroed-with-success-on-partial-failure:
+    /// with getAccountBalance failing and getLastBlockId answering, the October CLI printed
+    /// the main public account (39,733,291,875) and 9W9h.. (10,000,001) as 0 and exited 0;
+    /// cli_balance said success with those 0s, and on a first read (no marks yet) the 0s
+    /// became marks, so the next good read logged both as money that arrived. Now each 0 is
+    /// read again: what the sequencer gives replaces it, what it doesn't is unknown and
+    /// named, and a read with an unknown balance moves no mark.
+    #[test]
+    fn an_unread_balance_is_never_a_zero_and_moves_no_mark() {
+        let (mut names, dir) = october_balance("balance-partial", &[PUBLIC]);
+        let marks = config_dir().unwrap().join("activity-balances.json");
+        let _ = std::fs::remove_file(&marks);
+        let partial = parsed(&names.cli_balance());
+        assert_eq!(partial["success"], true, "{partial}");
+        assert_eq!(partial["partial"], true, "{partial}");
+        assert_eq!(partial["unread"], json!([format!("Public/{PUBLIC}")]), "{partial}");
+        assert_eq!(partial["value"]["public"]["balance"], Value::Null, "the main account is unknown, not 0: {partial}");
+        let other = partial["value"]["accounts"].as_array().unwrap().iter().find(|row| row["account"] == format!("Public/{OTHER}")).cloned();
+        assert_eq!(other.unwrap()["balance"], "10000001", "the CLI's 0 is replaced by what the sequencer says: {partial}");
+        let warning = partial["warning"].as_str().unwrap();
+        assert!(warning.contains("Public/CCVd…pKnk") && warning.contains("HTTP 503") && warning.contains("unknown"), "{warning}");
+        assert!(!marks.exists(), "a partial read wrote balance marks");
+        // The sequencer is back: the first whole read sets the marks, and nothing arrived.
+        cli::forget_balance();
+        let (back, back_dir) = october_balance("balance-partial-back", &[]);
+        names.sequencer = back.sequencer.clone();
+        let _ = std::fs::remove_dir_all(back_dir);
+        let whole = parsed(&names.cli_balance());
+        assert_eq!(whole["value"]["public"]["balance"], "39733291875", "{whole}");
+        assert_eq!(whole["partial"], Value::Null, "{whole}");
+        let history = activity::all(&config_dir().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(marks.exists(), "a whole read sets the marks");
+        assert!(!history.iter().any(|entry| entry["kind"] == "arrived"), "no money arrived: {history:?}");
+    }
+
+    /// Every public balance unread is no reading: the call fails and says why.
+    #[test]
+    fn a_balance_read_with_no_public_balance_is_a_failure() {
+        let (mut names, dir) = october_balance("balance-none", &[PUBLIC, OTHER]);
+        let failed = parsed(&names.cli_balance());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(failed["success"], false, "{failed}");
+        assert!(failed["error"].as_str().unwrap().contains("HTTP 503"), "{failed}");
+    }
+
+    /// The 0.4 CLI says `unknown` for a balance it couldn't read and exits 1: the rest of
+    /// its read still answers, the unknown named.
+    #[test]
+    fn a_cli_that_says_unknown_gives_a_partial_read() {
+        let tail = format!(
+            "case \"$*\" in\n*balance*) echo '  Public/{PUBLIC}  unknown  (default)'; echo '  Public/{OTHER}  7'; echo '  Private/{PRIVATE}  250  (default)'; echo 'Error: the sequencer didn'\"'\"'t answer, so 1 public balance(s) are unknown; try again when it is reachable' >&2; exit 1 ;;\nesac"
+        );
+        let (mut names, dir) = with_wallet("balance-unknown", &tail);
+        let partial = parsed(&names.cli_balance());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(partial["success"], true, "{partial}");
+        assert_eq!(partial["unread"], json!([format!("Public/{PUBLIC}")]), "{partial}");
+        assert_eq!(partial["value"]["balance"], "250", "{partial}");
+    }
+
+    /// balance-accounts-zeroed-with-success-on-partial-failure, for cli_accounts: an account
+    /// the CLI couldn't read (null) is named beside the list, never a plain success.
+    #[test]
+    fn accounts_the_sequencer_didnt_give_are_named() {
+        let list = format!(
+            r#"[{{"account":"Public/{PUBLIC}","kind":"public","label":null,"balance":null,"default":true,"public_key":null,"npk":null}},{{"account":"Public/{OTHER}","kind":"public","label":null,"balance":"5","default":false,"public_key":null,"npk":null}}]"#
+        );
+        let (mut names, dir) = with_wallet("accounts-partial", &format!("case \"$*\" in\n*account-list*) echo '{list}' ;;\nesac"));
+        let read = parsed(&names.cli_accounts());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(read["success"], true, "{read}");
+        assert_eq!(read["partial"], true, "{read}");
+        assert_eq!(read["unread"], json!([format!("Public/{PUBLIC}")]), "{read}");
+        assert_eq!(read["value"][0]["balance"], Value::Null, "{read}");
+    }
+
+    /// still-reading-message-wrong-for-a-hung-sequencer: with the sequencer accepting and
+    /// never answering, a read past the call's wait was "still catching up with the chain;
+    /// this answers in a moment", which never came. It now says the sequencer doesn't
+    /// answer, and the read is stopped rather than left hanging.
+    #[test]
+    fn a_read_held_by_a_sequencer_that_doesnt_answer_says_so_and_stops() {
+        let tail = format!("case \"$*\" in\n*balance*) sleep 8; touch \"$(dirname \"$0\")/finished\"; echo '  Private/{PRIVATE}  250  (default)' ;;\nesac");
+        let (mut names, dir) = with_wallet("balance-hung", &tail);
+        registry::SEQUENCER_DOWN.with(|down| down.set(true));
+        let started = std::time::Instant::now();
+        let first = parsed(&names.cli_balance());
+        registry::SEQUENCER_DOWN.with(|down| down.set(false));
+        assert!(started.elapsed() < std::time::Duration::from_secs(7), "{:?}", started.elapsed());
+        assert_eq!(first["success"], false, "{first}");
+        let error = first["error"].as_str().unwrap();
+        assert!(error.contains("could not reach the sequencer") && !error.contains("catching up"), "{error}");
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        let finished = dir.join("finished").exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!finished, "the read was left running");
+    }
+
+    /// slow-read-error-survives-recovery: a read that failed while the sequencer was slow
+    /// was kept and given, in 0.2 s, to the first call after it came back. A failed read is
+    /// never kept: the next call reads afresh.
+    #[test]
+    fn a_failed_slow_read_is_not_the_next_calls_answer() {
+        let tail = format!(
+            "case \"$*\" in\n*balance*) if [ -e \"$(dirname \"$0\")/slow\" ]; then sleep 6; echo 'Error: the names CLI took more than 90 s' >&2; exit 1; fi; echo '  Private/{PRIVATE}  250  (default)' ;;\nesac"
+        );
+        let (mut names, dir) = with_wallet("balance-recover", &tail);
+        std::fs::write(dir.join("slow"), "").unwrap();
+        let first = parsed(&names.cli_balance());
+        assert_eq!(first["error"], cli::STILL_READING, "{first}");
+        // The read fails meanwhile; the sequencer is back.
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        std::fs::remove_file(dir.join("slow")).unwrap();
+        let second = parsed(&names.cli_balance());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(second["success"], true, "the old failure was served: {second}");
+        assert_eq!(second["value"]["balance"], "250", "{second}");
+    }
+
+    /// receive-privately-during-outage-leaves-orphan-private-accounts: with the sequencer
+    /// down, each cli_receive_privately started a job whose CLI made a new private account
+    /// before it failed. A job is now refused before anything starts.
+    #[test]
+    fn no_job_starts_while_the_sequencer_doesnt_answer() {
+        let (mut names, dir) = with_wallet("job-down", &format!("touch \"$(dirname \"$0\")/ran\""));
+        registry::SEQUENCER_DOWN.with(|down| down.set(true));
+        let refused = parsed(&names.cli_receive_privately("jefdiesel".into()));
+        let paid = parsed(&names.cli_set_text("jefdiesel".into(), "chat".into(), "x".into()));
+        registry::SEQUENCER_DOWN.with(|down| down.set(false));
+        let ran = dir.join("ran").exists();
+        let jobs = std::fs::read_dir(dir.join("jobs")).map_or(0, |entries| entries.count());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(refused["success"], false, "{refused}");
+        let error = refused["error"].as_str().unwrap();
+        assert!(error.contains("could not reach the sequencer") && error.contains("Nothing was started"), "{error}");
+        assert_eq!(paid["success"], false, "{paid}");
+        assert!(!ran, "the CLI ran");
+        assert_eq!(jobs, 0, "a job was made");
+    }
+
+    /// resolve-slow-sequencer-exceeds-host-timeout-no-result: a resolve on a sequencer that
+    /// takes long answers inside the call, with a result field, saying it was slow.
+    #[test]
+    fn a_resolve_on_a_slow_sequencer_answers_within_the_call() {
+        let mut names = fresh();
+        names.program = Some([7; 32]);
+        names.sequencer = registry::stub_rpc(|_| {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            registry::rpc_ok(Value::Null)
+        });
+        let started = std::time::Instant::now();
+        let slow = parsed(&names.resolve("slowpoke".into()));
+        assert!(started.elapsed() < registry::READ_BUDGET + std::time::Duration::from_secs(1), "{:?}", started.elapsed());
+        assert_eq!(slow["success"], false, "{slow}");
+        assert!(slow["error"].as_str().unwrap().contains("didn't answer within"), "{slow}");
     }
 
     /// first-call-no-result-field-slow-cli-exceeds-host-timeout: on a wallet behind the chain
@@ -5946,37 +6429,84 @@ mod tests {
         assert_eq!(short["error"], "That key doesn't hold enough for this and its fee.", "{short}");
     }
 
+    /// A bridge's account is read afresh between two asks of its receipt: the balance then
+    /// holds its credit exactly when it arrives. A mint between the asks, or an ask LEZ
+    /// doesn't answer, leaves the account unread this time (its credit would otherwise be
+    /// told twice, as the bridge and as money that arrived).
+    #[test]
+    fn a_bridges_account_is_read_between_two_asks_of_its_receipt() {
+        let names = fresh();
+        let dir = config_dir().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let account = [5_u8; 32];
+        let to = format!("Public/{}", registry::account_text(&account));
+        registry::BALANCES.with(|held| held.borrow_mut().push((account, 23_000)));
+        let id = activity::add(&dir, now(), json!({ "kind": "bridge", "chain": "logos", "to": to, "amount": "3000",
+            "note": "11".repeat(32), "channel": "00".repeat(32), "state": "in_block" }));
+        let receipt = activity::bridge_receipt(&activity::all(&dir)[0]).unwrap();
+        let state = || activity::all(&dir).into_iter().find(|e| e["id"] == id.as_str()).unwrap()["state"].as_str().unwrap().to_owned();
+        let stale = [(to.clone(), 20_000_u128), ("Public/other".to_owned(), 7)];
+        // Not minted: the account is read afresh (the wallet's read may be older).
+        assert_eq!(names.settle_activity(&dir, "seq", &stale, std::time::Instant::now() + cli::CALL_BUDGET), [(to.clone(), 23_000), ("Public/other".to_owned(), 7)]);
+        assert_eq!(state(), "in_block");
+        // LEZ doesn't answer for the receipt: the account isn't read this time.
+        registry::MINTED_UNREAD.with(|unread| unread.set(true));
+        assert_eq!(names.settle_activity(&dir, "seq", &stale, std::time::Instant::now() + cli::CALL_BUDGET), [("Public/other".to_owned(), 7)]);
+        registry::MINTED_UNREAD.with(|unread| unread.set(false));
+        assert_eq!(state(), "in_block");
+        // Minted between the first ask and the second: arrived, and the account isn't read this time.
+        let next = registry::MINTED_ASKED.with(std::cell::Cell::get);
+        registry::MINTED.with(|minted| minted.borrow_mut().push((receipt, next + 1)));
+        assert_eq!(names.settle_activity(&dir, "seq", &stale, std::time::Instant::now() + cli::CALL_BUDGET), [("Public/other".to_owned(), 7)]);
+        assert_eq!(state(), "arrived");
+        // Arrived, it isn't asked again; the account is the wallet's read.
+        assert_eq!(names.settle_activity(&dir, "seq", &stale, std::time::Instant::now() + cli::CALL_BUDGET), stale);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// deposit-lost-from-activity-on-unload: names unloaded while chain_bridge waited on
     /// the node: the exact note was spent, and neither chain-sent nor the history had it.
     #[test]
     fn a_deposit_cut_off_mid_call_is_kept_and_settled_by_its_note() {
+        const A640: &str = "a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6";
         let mut names = fresh();
         let key = "4d".repeat(32);
         let to = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
-        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "a640", "value": "640080" }, { "id": "fee1", "value": "5000000" }] }));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6", "value": "640080" }, { "id": "fee1", "value": "5000000" }] }));
         node_answers("get_channel_state", json!({ "configuration_threshold": 3 }));
         // No answer, as when names is unloaded while the node proves (the real run's error
         // was the node "didn't answer", and the deposit had been made).
         node::ANSWERS.with(|answers| answers.borrow_mut().remove("channel_deposit_with_notes"));
-        registry::BALANCES.with(|held| held.borrow_mut().push((registry::parse_account(to).unwrap(), 0)));
         let cut = parsed(&names.chain_bridge(key.clone(), format!("Public/{to}"), "640,080".into(), true));
         assert_eq!(cut["success"], false, "{cut}");
         let mine = |names: &mut Names| parsed(&names.activity(key.clone()))["value"].as_array().unwrap().iter().find(|e| e["amount"] == "640080").cloned();
         let kept = mine(&mut names).expect("the deposit is in the history");
-        assert_eq!((kept["state"].as_str(), kept["note"].as_str(), kept["hash"].clone()), (Some("sending"), Some("a640"), Value::Null), "{kept}");
+        assert_eq!((kept["state"].as_str(), kept["note"].as_str(), kept["hash"].clone()), (Some("sending"), Some("a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6"), Value::Null), "{kept}");
         // Its note stays held: it isn't deposited twice.
         let again = parsed(&names.chain_bridge(key.clone(), format!("Public/{to}"), "640,080".into(), true));
         assert!(again["error"].as_str().unwrap().contains("still using its note"), "{again}");
-        // The node spent the note: the deposit was made.
+        // The node spent the note: the deposit was made. bridge-settled-after-unload-has-no-hash-or-fee:
+        // its transaction is found in a block's events by the deposit's op id, with its fee.
+        let op: Vec<u8> = registry::unhex(kept["op_id"].as_str().unwrap()).unwrap();
+        let hash = "7a".repeat(32);
+        node_answers("get_cryptarchia_info", json!({ "tip": "b2", "height": 2 }));
+        node_answers("get_block", json!({ "header": { "parent_block": "b1" } }));
+        node_answers("get_block_events", json!([{ "Tx": { "tx_hash": hash, "op_id": op, "payload": { "Deposit": { "amount": 640080 } } } }]));
+        node_answers("get_transaction", json!({ "mantle_tx": { "ops": [
+            { "opcode": 18, "payload": { "inputs": [A640] } },
+            { "opcode": 0, "payload": { "inputs": ["fee1"], "outputs": [{ "value": 4998386 }] } }] } }));
         node_answers("wallet_get_notes", json!({ "notes": [{ "id": "fee2", "value": "4998386" }] }));
-        assert_eq!(mine(&mut names).unwrap()["state"], "in_block");
+        let settled = mine(&mut names).unwrap();
+        assert_eq!((settled["state"].as_str(), settled["hash"].as_str(), settled["fee"].as_str()), (Some("in_block"), Some(hash.as_str()), Some("1614")), "{settled}");
+        assert_eq!(parsed(&names.chain_tx(hash.clone()))["value"], json!({ "hash": hash, "state": "in_block", "fee": "1614" }));
         // A refusal, by contrast, leaves no record and holds nothing.
-        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "b700", "value": "700000" }, { "id": "fee3", "value": "5000000" }] }));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7", "value": "700000" }, { "id": "fee3", "value": "5000000" }] }));
         node_refuses("channel_deposit_with_notes", "invalid public key");
         assert_eq!(parsed(&names.chain_bridge(key.clone(), format!("Public/{to}"), "700,000".into(), true))["success"], false);
         let refused = parsed(&names.activity(key.clone()))["value"].as_array().unwrap().iter().find(|e| e["amount"] == "700000").cloned().unwrap();
         assert_eq!(refused["state"], "failed", "{refused}");
-        assert!(!chain_notes_in_use(&key).contains("b700"));
+        assert!(!chain_notes_in_use(&key).contains("b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7"));
     }
 
     #[test]
@@ -6308,7 +6838,7 @@ mod tests {
         // No accounts yet: refused before anything runs.
         assert!(parsed(&names.cli_shield(String::new()))["error"].as_str().unwrap().contains("create your wallet"));
         std::fs::write(wallet.join("names.json"), format!("{{\"public\":\"{public}\",\"private\":\"yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z\"}}")).unwrap();
-        assert!(parsed(&names.cli_shield("0".into()))["error"].as_str().unwrap().contains("above zero"));
+        assert_eq!(parsed(&names.cli_shield("0".into()))["error"], "Enter an amount above 0.");
         let started = parsed(&names.cli_shield(String::new()));
         assert_eq!(started["value"]["kind"], "shield", "{started}");
         let id = started["value"]["id"].as_str().unwrap().to_owned();

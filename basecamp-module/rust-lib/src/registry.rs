@@ -14,6 +14,7 @@ use aes_gcm::{
 use argon2::{Algorithm, Argon2, Params, Version};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+use std::time::{Duration, Instant};
 
 /// How names are shown: bare, `jef` (SPEC 2).
 pub const NAME_SUFFIX: &str = "";
@@ -748,12 +749,84 @@ pub fn channel_id(sequencer: &str) -> Result<String, String> {
         .ok_or_else(|| "LEZ didn't say where deposits go. Try again later.".to_owned())
 }
 
-/// Whether the sequencer at `sequencer` answers honestly. An older CLI (the October
-/// testnet build) prints a public balance of 0 and every name as "no longer held by this
-/// wallet" when it can't read the chain, and exits 0, so its 0 and its empty list are
-/// believed only when the sequencer itself answers `getLastBlockId` with a block number
-/// right now. A 503 from a proxy, a 200 page of HTML, an empty or error reply are no
-/// answer (balance-marks-written-from-503-false-arrivals).
+/// How long one module call may spend reading the sequencer, all its requests together:
+/// the host gives a call 20 s and drops the answer after that, so a read past it is no
+/// answer at all (resolve-slow-sequencer-exceeds-host-timeout-no-result).
+#[cfg(not(test))]
+pub const READ_BUDGET: Duration = Duration::from_secs(15);
+#[cfg(test)]
+pub const READ_BUDGET: Duration = Duration::from_secs(4);
+/// The longest one request waits, within the call's budget.
+const REQUEST_CAP: Duration = Duration::from_secs(10);
+/// How long a health check (`getLastBlockId`) waits: a sequencer that takes longer to say
+/// its last block is not answering.
+pub const PROBE_WAIT: Duration = Duration::from_secs(5);
+
+/// What a call says when its time for the sequencer ran out.
+pub fn too_slow(waited: Duration) -> String {
+    // Rounded up: a wait of 4.98 s of the probe's 5 is said as 5.
+    format!("could not reach the sequencer: it didn't answer within {} s. Try again shortly", waited.as_millis().div_ceil(1000).max(1))
+}
+
+/// How long the next request may wait before `deadline`, or why there is no time left.
+pub fn request_wait(deadline: Instant, budget: Duration) -> Result<Duration, String> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left < Duration::from_millis(300) {
+        return Err(too_slow(budget));
+    }
+    Ok(left.min(REQUEST_CAP))
+}
+
+/// A request to the sequencer that failed, in words: no answer in time, no connection, or
+/// an HTTP error status (a proxy's 503) instead of a JSON-RPC reply.
+fn request_problem(error: ureq::Error, waited: Duration) -> String {
+    match error {
+        ureq::Error::Status(code, _) => format!("could not reach the sequencer: it answered HTTP {code} instead of a reading"),
+        ureq::Error::Transport(transport) => {
+            let text = transport.to_string();
+            if text.contains("timed out") || text.contains("deadline") || text.contains("WouldBlock") {
+                too_slow(waited)
+            } else {
+                format!("could not reach the sequencer: {text}")
+            }
+        }
+    }
+}
+
+/// The `result` of a JSON-RPC reply, or why the reply isn't one: an error reply, a body
+/// that isn't JSON-RPC (a page of HTML, garbage, nothing) or one without a result. A
+/// `null` result is a result (an account no transaction has touched).
+pub fn rpc_result(body: &[u8]) -> Result<Value, String> {
+    let reply: Value = serde_json::from_slice(body).map_err(|_| "could not reach the sequencer: it sent a reply that isn't JSON-RPC".to_owned())?;
+    if let Some(error) = reply.get("error").filter(|error| !error.is_null()) {
+        let message = error["message"].as_str().map_or_else(|| error.to_string(), str::to_owned);
+        return Err(format!("the sequencer refused the read: {message}"));
+    }
+    reply.get("result").cloned().ok_or_else(|| "could not reach the sequencer: its reply carries no result".to_owned())
+}
+
+/// Sends `method` to `sequencer` and returns the reply's `result`, waiting until
+/// `deadline` at most (see `request_wait`); every failure is said in words, never read as
+/// an empty answer.
+pub fn rpc(sequencer: &str, method: &str, params: Value, deadline: Instant, budget: Duration) -> Result<Value, String> {
+    let wait = request_wait(deadline, budget)?;
+    let response = ureq::post(sequencer)
+        .timeout(wait)
+        .send_json(json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }))
+        .map_err(|error| request_problem(error, wait))?;
+    // Read at most MAX_REPLY_LEN: a sequencer that sends more is refused, not believed.
+    let mut body = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(response.into_reader(), MAX_REPLY_LEN as u64 + 1), &mut body)
+        .map_err(|error| if error.to_string().contains("timed out") { too_slow(wait) } else { format!("could not reach the sequencer: its reply broke off: {error}") })?;
+    if body.len() > MAX_REPLY_LEN {
+        return Err("the sequencer sent a reply larger than any account".to_owned());
+    }
+    rpc_result(&body)
+}
+
+/// Whether the sequencer at `sequencer` answers honestly: `getLastBlockId` with a block
+/// number, within `PROBE_WAIT`. A 503 from a proxy, a 200 page of HTML, an empty or error
+/// reply are no answer (balance-marks-written-from-503-false-arrivals).
 #[cfg(not(test))]
 pub fn sequencer_reachable(sequencer: &str) -> Result<(), String> {
     probe_sequencer(sequencer)
@@ -761,13 +834,22 @@ pub fn sequencer_reachable(sequencer: &str) -> Result<(), String> {
 
 /// Asks `sequencer` for its last block, and is Ok only for a JSON-RPC reply carrying one.
 pub fn probe_sequencer(sequencer: &str) -> Result<(), String> {
-    let unreachable = |why: String| format!("could not reach the sequencer: {why}");
-    let response = ureq::post(sequencer)
-        .timeout(std::time::Duration::from_secs(10))
-        .send_json(json!({ "jsonrpc": "2.0", "id": 1, "method": "getLastBlockId", "params": [] }))
-        .map_err(|error| unreachable(error.to_string()))?;
-    let body = response.into_string().map_err(|error| unreachable(error.to_string()))?;
-    last_block_answer(&body).map(|_| ()).map_err(unreachable)
+    let result = rpc(sequencer, "getLastBlockId", json!([]), Instant::now() + PROBE_WAIT, PROBE_WAIT)?;
+    result.as_u64().map(|_| ()).ok_or_else(|| "could not reach the sequencer: it sent no block number".to_owned())
+}
+
+/// Whether the sequencer reads the registry's record of `name` (`getAccountView`), as
+/// every job about a name does first: a sequencer that says its last block but fails
+/// account reads can't run the job either.
+#[cfg(not(test))]
+pub fn name_readable(sequencer: &str, program: &AccountId, name: &str) -> Result<(), String> {
+    Registry::new(sequencer, *program).record(name, &derive(name)).map(|_| ())
+}
+
+/// Tests say whether the sequencer answers: never the network.
+#[cfg(test)]
+pub fn name_readable(sequencer: &str, _program: &AccountId, _name: &str) -> Result<(), String> {
+    sequencer_reachable(sequencer)
 }
 
 /// The block number in a `getLastBlockId` reply, or why the reply isn't one.
@@ -817,6 +899,65 @@ pub fn stub_http(reply: &'static str, connections: usize) -> String {
     format!("http://{address}/")
 }
 
+/// A stand-in sequencer on loopback that answers every request (until the test ends) with
+/// what `answer` makes of its JSON-RPC body: an HTTP status and a body. It may sleep first,
+/// to be slow. A degraded sequencer, as a proxy in front of one shows it, for tests.
+#[cfg(test)]
+pub fn stub_rpc(answer: impl Fn(&Value) -> (u16, String) + Send + Sync + 'static) -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
+    let address = listener.local_addr().expect("address");
+    let answer = std::sync::Arc::new(answer);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let answer = answer.clone();
+            std::thread::spawn(move || {
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                let body = loop {
+                    let Ok(read) = stream.read(&mut buffer) else { return };
+                    if read == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    let text = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text.lines().find_map(|line| line.strip_prefix("content-length:")).and_then(|value| value.trim().parse::<usize>().ok()).unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break request[end + 4..end + 4 + length].to_vec();
+                        }
+                    }
+                };
+                let (status, reply) = answer(&serde_json::from_slice(&body).unwrap_or(Value::Null));
+                let head = format!("HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", reply.len());
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(reply.as_bytes());
+                let _ = stream.flush();
+            });
+        }
+    });
+    format!("http://{address}/")
+}
+
+/// A JSON-RPC reply carrying `result`, for `stub_rpc`.
+#[cfg(test)]
+pub fn rpc_ok(result: Value) -> (u16, String) {
+    (200, json!({ "jsonrpc": "2.0", "id": 1, "result": result }).to_string())
+}
+
+/// What `getAccountView` answers for an account holding `balance` (and nothing else).
+#[cfg(test)]
+pub fn view_holding(balance: u128) -> Value {
+    json!({ "nonce": 0, "data": { "actor_states": { account_text(&NATIVE_TOKEN): balance.to_le_bytes().to_vec() } } })
+}
+
+/// The account a `getAccountView` request asks about.
+#[cfg(test)]
+pub fn asked_account(request: &Value) -> String {
+    request["params"][0]["account_id"].as_str().unwrap_or_default().to_owned()
+}
+
 /// A `200 OK` HTTP reply carrying `body` as JSON, for `stub_http`.
 #[cfg(test)]
 pub fn json_reply(body: &str) -> &'static str {
@@ -857,36 +998,75 @@ pub fn channel_id(_sequencer: &str) -> Result<String, String> {
 /// nothing), and a hand-over to one is most likely to a mistyped ID.
 #[cfg(not(test))]
 pub fn account_seen(sequencer: &str, account: &AccountId) -> Result<bool, String> {
-    let response = ureq::post(sequencer)
-        .timeout(std::time::Duration::from_secs(15))
-        .send_json(json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getAccountView",
-            "params": [{ "account_id": account_text(account), "program_account_id": account_text(&NATIVE_TOKEN) }],
-        }))
-        .map_err(|error| format!("could not reach the sequencer: {error}"))?;
-    let reply: Value = response.into_json().map_err(|_| "the sequencer sent an unreadable reply".to_owned())?;
+    let params = json!([{ "account_id": account_text(account), "program_account_id": account_text(&NATIVE_TOKEN) }]);
+    Ok(!rpc(sequencer, "getAccountView", params, Instant::now() + REQUEST_CAP, REQUEST_CAP)?.is_null())
+}
+
+/// LEZ's bridge program: `SHA-256("/LEE-BuiltinProgram/v1/AccountId" ‖ "bridge")`.
+pub fn bridge_program() -> AccountId {
+    sha256(&[b"/LEE-BuiltinProgram/v1/AccountId", b"bridge"])
+}
+
+/// The account in which LEZ's bridge marks the Logos Blockchain deposit `op_id` as minted
+/// (its receipt): written in the same LEZ transaction that credits the deposit, exactly
+/// once per deposit, and never by anything else.
+pub fn deposit_receipt(op_id: &[u8; 32]) -> AccountId {
+    pda(&bridge_program(), &sha256(&[b"/LEZ/v0.3/BridgeDepositReceipt/0", op_id]))
+}
+
+/// Whether LEZ has minted the deposit whose receipt is `receipt`: the bridge's state on it
+/// is written. `null` for an account nothing wrote is a real "not yet"; a reply that says
+/// neither (an error, a page of HTML, no `result`) is no answer. Read as every read is
+/// (`rpc`), by `deadline`: the call that asks shares one deadline among all its reads.
+#[cfg(not(test))]
+pub fn deposit_minted(sequencer: &str, receipt: &AccountId, deadline: Instant) -> Result<bool, String> {
+    let params = json!([{ "account_id": account_text(receipt), "program_account_id": account_text(&bridge_program()) }]);
+    let result = rpc(sequencer, "getAccountView", params, deadline, READ_BUDGET)?;
+    minted_in(&json!({ "result": result }))
+}
+
+/// What a `getAccountView` reply for a receipt says (`deposit_minted`).
+pub fn minted_in(reply: &Value) -> Result<bool, String> {
     if let Some(error) = reply.get("error") {
         return Err(format!("the sequencer refused the read: {error}"));
     }
     match reply.get("result") {
         Some(Value::Null) => Ok(false),
-        Some(_) => Ok(true),
-        None => Err("the sequencer sent an unreadable reply".to_owned()),
+        Some(account @ Value::Object(_)) => Ok(!actor_bytes(account, &bridge_program())?.is_empty()),
+        _ => Err("the sequencer sent an unreadable reply".to_owned()),
     }
 }
 
-/// What the public account `account` holds, read from the sequencer at `sequencer`:
-/// any account, not only the wallet's.
+/// Tests say which deposits LEZ minted (`MINTED`), and that it didn't answer (`MINTED_UNREAD`).
+#[cfg(test)]
+pub fn deposit_minted(_sequencer: &str, receipt: &AccountId, _deadline: Instant) -> Result<bool, String> {
+    if MINTED_UNREAD.with(std::cell::Cell::get) {
+        return Err("could not reach the sequencer".to_owned());
+    }
+    let asked = MINTED_ASKED.with(|asked| asked.replace(asked.get() + 1));
+    Ok(MINTED.with(|minted| minted.borrow().iter().any(|(minted, from)| minted == receipt && asked >= *from)))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The deposit receipts a test's sequencer holds, each from the how-many-th ask on
+    /// (`MINTED_ASKED` counts them): 0, from the start.
+    pub static MINTED: std::cell::RefCell<Vec<(AccountId, usize)>> = const { std::cell::RefCell::new(Vec::new()) };
+    pub static MINTED_ASKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Whether a test's sequencer doesn't answer receipt reads.
+    pub static MINTED_UNREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// What the public account `account` holds, read from the sequencer at `sequencer` by
+/// `deadline` (the asking call's): any account, not only the wallet's.
 #[cfg(not(test))]
-pub fn public_balance(sequencer: &str, account: &AccountId) -> Result<u128, String> {
-    Registry { sequencer: sequencer.to_owned(), program: NATIVE_TOKEN }.balance(account)
+pub fn public_balance(sequencer: &str, account: &AccountId, deadline: Instant) -> Result<u128, String> {
+    Registry { sequencer: sequencer.to_owned(), program: NATIVE_TOKEN, deadline }.balance(account)
 }
 
 /// Tests say what an account holds: never the network.
 #[cfg(test)]
-pub fn public_balance(_sequencer: &str, account: &AccountId) -> Result<u128, String> {
+pub fn public_balance(_sequencer: &str, account: &AccountId, _deadline: Instant) -> Result<u128, String> {
     BALANCES.with(|held| held.borrow().iter().find(|(id, _)| id == account).map(|(_, balance)| *balance)).ok_or_else(|| "not reached".to_owned())
 }
 
@@ -908,38 +1088,27 @@ pub fn account_seen(_sequencer: &str, account: &AccountId) -> Result<bool, Strin
     Ok(!UNSEEN.with(|unseen| unseen.borrow().contains(account)))
 }
 
-/// A registry on one network: where to read it and which program it is.
+/// A registry on one network: where to read it and which program it is, and until when
+/// the call that made it may read: every read it makes shares that one deadline.
 #[derive(Debug, Clone)]
 pub struct Registry {
     pub sequencer: String,
     pub program: AccountId,
+    pub deadline: Instant,
 }
 
 impl Registry {
-    /// `program`'s state on `account`; empty when it has none.
+    /// `program` on `sequencer`, its reads sharing `READ_BUDGET` from now.
+    pub fn new(sequencer: &str, program: AccountId) -> Self {
+        Registry { sequencer: sequencer.to_owned(), program, deadline: Instant::now() + READ_BUDGET }
+    }
+
+    /// `program`'s state on `account`; empty when it has none. A reply that isn't a
+    /// reading (an HTTP error, HTML, an error reply, no result) fails, never reads as empty.
     fn actor_state(&self, account: &AccountId, program: &AccountId) -> Result<Vec<u8>, String> {
-        let response = ureq::post(&self.sequencer)
-            .timeout(std::time::Duration::from_secs(15))
-            .send_json(json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getAccountView",
-                "params": [{ "account_id": account_text(account), "program_account_id": account_text(program) }],
-            }))
-            .map_err(|error| format!("could not reach the sequencer: {error}"))?;
-        // Read at most MAX_REPLY_LEN: a sequencer that sends more is refused, not believed.
-        let mut body = Vec::new();
-        std::io::Read::read_to_end(&mut std::io::Read::take(response.into_reader(), MAX_REPLY_LEN as u64 + 1), &mut body)
-            .map_err(|error| format!("the sequencer's reply broke off: {error}"))?;
-        if body.len() > MAX_REPLY_LEN {
-            return Err("the sequencer sent a reply larger than any account".to_owned());
-        }
-        let reply: Value =
-            serde_json::from_slice(&body).map_err(|error| format!("the sequencer sent an unreadable reply: {error}"))?;
-        if let Some(error) = reply.get("error") {
-            return Err(format!("the sequencer refused the read: {error}"));
-        }
-        actor_bytes(&reply["result"], program)
+        let params = json!([{ "account_id": account_text(account), "program_account_id": account_text(program) }]);
+        let result = rpc(&self.sequencer, "getAccountView", params, self.deadline, READ_BUDGET)?;
+        actor_bytes(&result, program)
     }
 
     /// The registry's state on `account`; empty when the account holds none.
@@ -1073,6 +1242,27 @@ mod tests {
 
     const PROGRAM: AccountId = [7; 32];
 
+    /// A LEZ 0.4 rc1 sequencer started fresh mints its genesis supply as deposits whose op
+    /// id is `"/LEZ/v0.3/GenesisDeposit" ‖ index (u64 LE)`: `getAccountView` of the receipt
+    /// this derives, under the bridge program 99GUy…7qp4, answered `actor_states: [1]` for
+    /// index 0, and `null` for the receipt of op id 00…00.
+    #[test]
+    fn a_deposits_receipt_is_where_lez_marks_it_minted() {
+        assert_eq!(account_text(&bridge_program()), "99GUyPapsAwpRKEoEQKFNAT4WJtJJyCdBnSby7Ht7qp4");
+        let mut genesis = [0_u8; 32];
+        genesis[..24].copy_from_slice(b"/LEZ/v0.3/GenesisDeposit");
+        assert_eq!(account_text(&deposit_receipt(&genesis)), "G2VEcgxXRc3KE7snS2dUQt8CYeX3CHee1n487AtxoKGb");
+        genesis[24] = 1;
+        assert_eq!(account_text(&deposit_receipt(&genesis)), "3skigWsvTNC7QmbJNtj9b1bP1KzoE118TuVkWsVhF6Xj");
+        let program = account_text(&bridge_program());
+        assert_eq!(minted_in(&json!({ "result": { "nonce": 0, "data": { "actor_states": { program.clone(): [1] } } } })), Ok(true));
+        assert_eq!(minted_in(&json!({ "result": null })), Ok(false), "nothing wrote it: not minted yet");
+        assert_eq!(minted_in(&json!({ "result": { "nonce": 0, "data": { "actor_states": {} } } })), Ok(false));
+        assert!(minted_in(&json!({ "error": { "code": -32603 } })).is_err());
+        assert!(minted_in(&json!({ "jsonrpc": "2.0" })).is_err(), "no result is no answer");
+        assert!(minted_in(&json!({ "result": "<html>" })).is_err());
+    }
+
     /// A proxy in front of a sequencer that is down answers 503, or a 200 page of HTML,
     /// or nothing: none of those is the sequencer answering, so a CLI's 0 balances and
     /// empty name list read meanwhile aren't believed (balance-marks-written-from-503-false-arrivals,
@@ -1091,6 +1281,57 @@ mod tests {
         assert!(last_block_answer(r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}"#).is_err());
         assert!(last_block_answer(r#"{"jsonrpc":"2.0","id":1,"result":null}"#).is_err());
         assert_eq!(last_block_answer(r#"{"jsonrpc":"2.0","id":1,"result":5}"#), Ok(5));
+    }
+
+    /// Every way a degraded sequencer (or a proxy in front of one) answers is a failed
+    /// read in words, never an empty account: a 503, a page of HTML, garbage, an empty
+    /// body, an error reply, a reply without a result. A null result is an account no
+    /// transaction has touched.
+    #[test]
+    fn a_reply_that_isnt_a_reading_is_never_an_empty_account() {
+        let program = [7_u8; 32];
+        let read = |status: u16, body: &'static str| {
+            let sequencer = stub_rpc(move |_| (status, body.to_owned()));
+            Registry::new(&sequencer, program).balance(&[1; 32])
+        };
+        assert!(read(503, "upstream 503").expect_err("503").contains("answered HTTP 503"));
+        assert!(read(200, "<html><body>Bad gateway</body></html>").expect_err("html").contains("isn't JSON-RPC"));
+        assert!(read(200, "\u{0}not json{{").expect_err("garbage").contains("isn't JSON-RPC"));
+        assert!(read(200, "").expect_err("empty").contains("isn't JSON-RPC"));
+        assert!(read(200, r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"internal error"}}"#).expect_err("error").contains("internal error"));
+        assert!(read(200, r#"{"jsonrpc":"2.0","id":1}"#).expect_err("no result").contains("no result"));
+        assert_eq!(read(200, r#"{"jsonrpc":"2.0","id":1,"result":null}"#), Ok(0), "an untouched account holds nothing");
+        let held = stub_rpc(|_| rpc_ok(view_holding(44_317_823)));
+        assert_eq!(Registry::new(&held, program).balance(&[1; 32]), Ok(44_317_823));
+        // No connection at all.
+        assert!(Registry::new("http://127.0.0.1:9/", program).balance(&[1; 32]).expect_err("down").starts_with("could not reach the sequencer"));
+    }
+
+    /// resolve-slow-sequencer-exceeds-host-timeout-no-result: each read waited its own 15 s,
+    /// so two of them on a slow sequencer ran past the host's 20 s and the call came back
+    /// with no result. A registry's reads now share one deadline (READ_BUDGET, 4 s in tests).
+    #[test]
+    fn the_reads_of_one_call_share_one_deadline() {
+        let slow = stub_rpc(|_| {
+            std::thread::sleep(Duration::from_millis(1500));
+            rpc_ok(view_holding(5))
+        });
+        let registry = Registry::new(&slow, [7; 32]);
+        let started = Instant::now();
+        assert_eq!(registry.balance(&[1; 32]), Ok(5));
+        assert_eq!(registry.balance(&[2; 32]), Ok(5));
+        let third = registry.balance(&[3; 32]).expect_err("past the deadline");
+        assert!(started.elapsed() < READ_BUDGET + Duration::from_millis(700), "answered within the budget: {:?}", started.elapsed());
+        assert!(third.contains("didn't answer within"), "{third}");
+        // A hung sequencer is said so within the budget, not after the host gave up.
+        let hung = stub_rpc(|_| {
+            std::thread::sleep(Duration::from_secs(30));
+            rpc_ok(Value::Null)
+        });
+        let started = Instant::now();
+        let problem = Registry::new(&hung, [7; 32]).balance(&[1; 32]).expect_err("hung");
+        assert!(started.elapsed() < READ_BUDGET + Duration::from_millis(700), "{:?}", started.elapsed());
+        assert!(problem.starts_with("could not reach the sequencer: it didn't answer within"), "{problem}");
     }
 
     /// The LEZ 0.3 testnet: its sequencer answers with `shards`, its records are

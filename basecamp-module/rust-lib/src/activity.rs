@@ -7,7 +7,9 @@
 //! An entry: `{id, at, kind, chain, from?, to?, name?, amount?, hash?, job?, fee?,
 //! state}`. `kind` is `send`, `split`, `bridge`, `pay`, `pay_account`, `shield`,
 //! `receive`, `token_send` or `arrived`; `chain` is `logos` or `lez`; `state` is
-//! `sending`, `in_block`, `arrived`, `done` or `failed`.
+//! `sending`, `in_block`, `arrived`, `done`, `failed`, `unknown`, or `expired` (a bridge
+//! not credited on LEZ within `BRIDGE_WAIT_S`). A bridge also carries the LEZ `receipt`
+//! that tells its arrival (`bridge_receipt`).
 
 use serde_json::{json, Map, Value};
 use std::path::Path;
@@ -151,7 +153,11 @@ pub fn all(dir: &Path) -> Vec<Value> {
 /// key, or a name).
 pub fn involves(entry: &Value, account: &str) -> bool {
     let account = account.trim();
-    account.is_empty() || ["from", "to", "name"].iter().any(|field| entry[*field].as_str() == Some(account)) || received(entry, account).is_some()
+    account.is_empty()
+        || ["from", "to", "name"].iter().any(|field| entry[*field].as_str() == Some(account))
+        || received(entry, account).is_some()
+        // A claim that left a credit to `account` waiting shows on its page too; it moved nothing.
+        || number(&entry["left"][account]).is_some()
 }
 
 /// What a claim (`receive`) credited `account` with, from its `received` map.
@@ -159,8 +165,8 @@ fn received(entry: &Value, account: &str) -> Option<u128> {
     number(&entry["received"][account])
 }
 
-/// How long a bridge in a block holds its LEZ account's mark while it waits to arrive
-/// (it takes about 12 hours); past this it is taken as never arriving.
+/// How long a bridge in a block may wait to arrive on LEZ (it takes about 12 hours); past
+/// this it is `expired`, shown as overdue.
 pub const BRIDGE_WAIT_S: u64 = 2 * 24 * 3600;
 
 /// How long a send on the Logos Blockchain may stay `sending` (not yet seen in a block)
@@ -178,18 +184,32 @@ fn fee_paid(entry: &Value) -> Option<u128> {
 }
 
 /// Whether `entry`'s effect on `account` may or may not be in a balance read yet: it is
-/// still being sent, or it is a bridge in a block that hasn't reached its LEZ account.
+/// still being sent. A bridge never holds its LEZ account: whether it arrived is known
+/// exactly (its receipt, `bridge_updates`), and until it does it moved nothing into it, so
+/// money from elsewhere meanwhile is told as it comes (foreign-credit-while-bridge-waits-never-in-history).
 fn in_flight(entry: &Value, account: &str, now: u64) -> bool {
     let age = now.saturating_sub(entry["at"].as_u64().unwrap_or(0));
+    if bridge_waits_for(entry, account) {
+        return false;
+    }
     match entry["state"].as_str() {
         // A Logos Blockchain send lands in minutes; one still "sending" past the bound
         // (nothing could settle it) no longer holds the marks of its keys.
         Some("sending") => entry["chain"] != "logos" || age < SENDING_WAIT_S,
-        Some("in_block") => {
-            entry["kind"] == "bridge" && entry["to"].as_str() == Some(account) && now.saturating_sub(entry["at"].as_u64().unwrap_or(0)) < BRIDGE_WAIT_S
-        }
         _ => false,
     }
+}
+
+/// Whether `entry` is a bridge into `account` that hasn't arrived and still may: it moves
+/// nothing into it yet, and is counted for it only once it arrives (or fails).
+fn bridge_waits_for(entry: &Value, account: &str) -> bool {
+    entry["kind"] == "bridge" && entry["to"].as_str() == Some(account) && on_its_way(entry)
+}
+
+/// Whether a bridge may still arrive: anything but `arrived` and `failed`. One whose send
+/// was taken as `unknown` (not seen in a block in time) still arrives by its receipt.
+fn on_its_way(entry: &Value) -> bool {
+    !matches!(entry["state"].as_str(), Some("arrived" | "failed"))
 }
 
 /// What a settled `entry` did to `account`'s balance, and whether that is known: what
@@ -201,16 +221,17 @@ fn effect(entry: &Value, account: &str) -> (i128, bool) {
     if state == "failed" {
         return (0, true);
     }
+    // A bridge that hasn't arrived moved nothing into its LEZ account, whatever is known of
+    // its send: it arrives only by its receipt.
+    if to && !from && entry["kind"] == "bridge" && state != "arrived" {
+        return (0, true);
+    }
     // Whether it landed isn't known (its job record was pruned): it moves no expected
     // balance, and what it did shows only as a balance not being certain. Counted as
     // landed, a failed send of 99,999,999,999,999,999 became an arrival of at least
     // that much (failed-send-becomes-done-after-job-prune-regressed).
     if state == "unknown" {
         return (0, false);
-    }
-    // A bridge that never arrived moved nothing into its LEZ account.
-    if to && !from && entry["kind"] == "bridge" && state != "arrived" {
-        return (0, true);
     }
     let kind = entry["kind"].as_str().unwrap_or_default();
     // A split pays itself; a token send moves a token, not the native one; a transfer moves a name.
@@ -251,138 +272,92 @@ fn effect(entry: &Value, account: &str) -> (i128, bool) {
     (delta, certain)
 }
 
-/// The bridges in a block among `entries` that have reached their LEZ account, by what
-/// the accounts hold now (`lez_now`). Per account they arrive in the order they were
-/// sent: each once the account holds what it did before the first of them was sent
-/// (`to_before`), plus what the logged entries settled since then moved in or out, plus
-/// its amount and those of the bridges before it. One credit never marks several
-/// bridges arrived, nor one bridge a credit smaller than it.
-pub fn bridges_arrived(entries: &[Value], lez_now: &std::collections::HashMap<String, u128>) -> Vec<String> {
-    bridge_updates(entries, lez_now).into_iter().filter(|(_, fields)| fields["state"] == "arrived").map(|(id, _)| id).collect()
+/// The LEZ deposit receipt a bridge is followed by (`registry::deposit_receipt`): the one it
+/// recorded, or the one its channel, note and destination give (a bridge made by an earlier
+/// version, or recorded before a call that was cut off). `None` for a bridge that names
+/// none of them: its arrival can't be told from other money.
+pub fn bridge_receipt(entry: &Value) -> Option<crate::registry::AccountId> {
+    if let Some(receipt) = entry["receipt"].as_str() {
+        return crate::registry::parse_account(receipt).ok();
+    }
+    Some(crate::registry::deposit_receipt(&bridge_op_id(entry)?))
 }
 
-/// What settling the bridges in a block among `entries` changes, `(id, fields)`. LEZ credits
-/// a deposit whole, so a bridge arrives only on a credit of exactly its amount, seen one of
-/// two ways:
-///
-/// - the account holds exactly what it did before the first followed bridge was sent
-///   (`to_before`), plus what the logged entries settled since moved in or out, plus the
-///   amounts of the bridges up to this one (the bridges arrive in the order they were sent);
-/// - between two quiet reads (nothing logged in flight) it rose, beyond what the logged
-///   entries explain, by exactly this bridge's amount, or the amounts of the first few
-///   waiting: a spend the history doesn't log no longer holds it back
-///   (bridge-stuck-in-block-after-unlogged-spend-from-destination). The reads are kept on
-///   the waiting bridges (`seen`, `seen_moved`).
-///
-/// A credit larger than the amounts is never taken for them: a 700,000 payment from
-/// elsewhere marked a 500,001 bridge arrived (single-bridge-false-arrival-on-foreign-credit-at-least-amount).
-/// This reverses the whole-sum rule aa94d3b kept ("all of them once the account holds at
-/// least what they bring"): a bridge whose credit is hidden by other unlogged money now
-/// waits rather than claim arrival. Several bridges matched by one rise can't be told from
-/// one payment of their total, so they arrive with `maybe` (the History hedges them).
-/// Once some arrive, the next one waiting is followed from what the account holds now
-/// less what the logged entries moved since it was sent (`to_before`), if that is more
-/// than its own mark (false-arrival-second-bridge-regressed).
-pub fn bridge_updates(entries: &[Value], lez_now: &std::collections::HashMap<String, u128>) -> Vec<(String, Value)> {
-    let mut pending: std::collections::BTreeMap<&str, Vec<&Value>> = std::collections::BTreeMap::new();
-    for entry in entries {
-        if entry["kind"] == "bridge" && entry["state"] == "in_block" && number(&entry["amount"]).is_some() {
-            if let Some(to) = entry["to"].as_str() {
-                pending.entry(to).or_default().push(entry);
-            }
-        }
+/// A bridge's deposit op id (`chain::deposit_op_id`): the one it recorded, or the one its
+/// channel, note and destination give.
+pub fn bridge_op_id(entry: &Value) -> Option<[u8; 32]> {
+    if let Some(op) = entry["op_id"].as_str() {
+        return <[u8; 32]>::try_from(crate::registry::unhex(op).ok()?).ok();
     }
-    let amount = |bridge: &Value| i128::try_from(number(&bridge["amount"]).unwrap_or(0)).unwrap_or(i128::MAX);
+    let channel = <[u8; 32]>::try_from(crate::registry::unhex(entry["channel"].as_str()?).ok()?).ok()?;
+    let to = crate::registry::parse_account(entry["to"].as_str()?.strip_prefix("Public/")?).ok()?;
+    crate::chain::deposit_op_id(&channel, &[entry["note"].as_str()?.to_owned()], &to)
+}
+
+/// How long a bridge's receipt is still asked after it was sent: an overdue one may still
+/// arrive, and is then told as arrived, late.
+pub const BRIDGE_FOLLOW_S: u64 = 30 * 24 * 3600;
+
+/// The bridges whose arrival on LEZ is still followed: not arrived, not failed, sent within
+/// `BRIDGE_FOLLOW_S`, with a receipt. `(id, to, receipt)`.
+pub fn bridges_followed(entries: &[Value], now: u64) -> Vec<(String, String, crate::registry::AccountId)> {
+    entries
+        .iter()
+        .filter(|entry| entry["kind"] == "bridge" && on_its_way(entry))
+        .filter(|entry| now.saturating_sub(entry["at"].as_u64().unwrap_or(0)) < BRIDGE_FOLLOW_S)
+        .filter_map(|entry| Some((entry["id"].as_str()?.to_owned(), entry["to"].as_str()?.to_owned(), bridge_receipt(entry)?)))
+        .collect()
+}
+
+/// What settling the bridges among `entries` changes, `(id, fields)`, given what LEZ says of
+/// each one's receipt (`minted`: `Some(true)` minted, `Some(false)` not yet, `None` no answer).
+///
+/// A bridge arrives when, and only when, LEZ has minted its own deposit: the receipt is
+/// written in the same LEZ transaction that credits it, once per deposit. No balance, amount
+/// or order is matched, so a payment from elsewhere is never taken for a bridge, nor one
+/// bridge's credit for another's, and an overdue bridge can't claim a later one's. A bridge
+/// still in a block after `BRIDGE_WAIT_S` is `expired` (shown as overdue); its receipt is
+/// still asked until `BRIDGE_FOLLOW_S`, and if it is minted then, the bridge arrives (`late`),
+/// one row as ever. One whose receipt isn't known (`bridge_receipt` is `None`) is never
+/// followed: its credit shows as money that arrived, and it expires the same way.
+///
+/// An arrival also takes the bridge's account off its `counted` list: a bridge that hasn't
+/// arrived moves nothing into it, so a read that counted it (an older version did, past the
+/// wait) counted 0, and its credit is counted now.
+pub fn bridge_updates(entries: &[Value], now: u64, minted: &dyn Fn(&crate::registry::AccountId) -> Option<bool>) -> Vec<(String, Value)> {
     let mut updates = Vec::new();
-    for (to, mut list) in pending {
-        let Some(now) = lez_now.get(to).and_then(|now| i128::try_from(*now).ok()) else { continue };
-        list.sort_by_key(|entry| (entry["at"].as_u64().unwrap_or(0), entry["id"].as_str().unwrap_or_default().to_owned()));
-        // What the logged entries settled from `since` (and before `until`) moved in or out of `to`.
-        let moved_between = |since: u64, until: u64| -> i128 {
-            entries
-                .iter()
-                .filter(|entry| entry["kind"] != "bridge" && (since..until).contains(&entry["at"].as_u64().unwrap_or(0)))
-                .filter(|entry| !matches!(entry["state"].as_str(), Some("sending")))
-                .map(|entry| effect(entry, to).0)
-                .sum()
-        };
-        let mut arrived: Vec<usize> = Vec::new();
-        let mut maybe = false;
-        // By the mark: the first few whose credits the account holds exactly.
-        if let Some(start) = list.iter().position(|entry| number(&entry["to_before"]).is_some()) {
-            let since = list[start]["at"].as_u64().unwrap_or(0);
-            let base = i128::try_from(number(&list[start]["to_before"]).unwrap_or(0)).unwrap_or(i128::MAX);
-            let mut needed = base.saturating_add(moved_between(since, u64::MAX));
-            let thresholds: Vec<i128> = list[start..]
-                .iter()
-                .map(|bridge| {
-                    needed = needed.saturating_add(amount(bridge));
-                    needed
-                })
-                .collect();
-            if let Some(at) = thresholds.iter().rposition(|needed| now == *needed) {
-                arrived.extend(start..=start + at);
-                maybe |= at > 0;
-            }
+    for entry in entries.iter().filter(|entry| entry["kind"] == "bridge") {
+        let Some(id) = entry["id"].as_str() else { continue };
+        let state = entry["state"].as_str().unwrap_or_default();
+        if !on_its_way(entry) {
+            continue;
         }
-        // By the rise since the last quiet read: what the account holds less all that the
-        // logged entries moved, against the same at that read.
-        let quiet = !entries.iter().any(|entry| entry["state"] == "sending" && (entry["from"].as_str() == Some(to) || entry["to"].as_str() == Some(to)));
-        let moved_now = moved_between(0, u64::MAX);
-        let last_read = list.iter().find_map(|bridge| {
-            let seen = number(&bridge["seen"]).and_then(|seen| i128::try_from(seen).ok())?;
-            Some((seen, bridge["seen_moved"].as_str()?.parse::<i128>().ok()?))
-        });
-        if quiet && arrived.is_empty() {
-            if let Some((seen, seen_moved)) = last_read {
-                let rise = (now - moved_now) - (seen - seen_moved);
-                if rise > 0 {
-                    if let Some(one) = list.iter().position(|bridge| amount(bridge) == rise) {
-                        arrived.push(one);
-                    } else {
-                        let mut total = 0_i128;
-                        if let Some(count) = list.iter().position(|bridge| {
-                            total = total.saturating_add(amount(bridge));
-                            total == rise
-                        }) {
-                            arrived.extend(0..=count);
-                            maybe = true;
-                        }
-                    }
+        let age = now.saturating_sub(entry["at"].as_u64().unwrap_or(0));
+        let receipt = bridge_receipt(entry);
+        let mut fields = serde_json::Map::new();
+        if entry["followed"].as_bool() != Some(receipt.is_some()) {
+            fields.insert("followed".to_owned(), json!(receipt.is_some()));
+        }
+        if let (Some(receipt), true) = (receipt, entry["receipt"].is_null()) {
+            fields.insert("receipt".to_owned(), json!(crate::registry::account_text(&receipt)));
+        }
+        let arrived = receipt.filter(|_| age < BRIDGE_FOLLOW_S).and_then(|receipt| minted(&receipt)) == Some(true);
+        if arrived {
+            fields.insert("state".to_owned(), json!("arrived"));
+            if state == "expired" || age >= BRIDGE_WAIT_S {
+                fields.insert("late".to_owned(), json!(true));
+            }
+            if let (Some(to), Some(counted)) = (entry["to"].as_str(), entry["counted"].as_array()) {
+                let kept: Vec<Value> = counted.iter().filter(|account| account.as_str() != Some(to)).cloned().collect();
+                if kept.len() != counted.len() {
+                    fields.insert("counted".to_owned(), Value::Array(kept));
                 }
             }
+        } else if state == "in_block" && age >= BRIDGE_WAIT_S {
+            fields.insert("state".to_owned(), json!("expired"));
         }
-        for at in &arrived {
-            if let Some(id) = list[*at]["id"].as_str() {
-                let fields = if maybe { json!({ "state": "arrived", "maybe": true }) } else { json!({ "state": "arrived" }) };
-                updates.push((id.to_owned(), fields));
-            }
-        }
-        let waiting: Vec<&Value> = list.iter().enumerate().filter(|(at, _)| !arrived.contains(at)).map(|(_, bridge)| *bridge).collect();
-        // The next one waiting, after some arrived: followed from what the account holds now.
-        let mut next_mark = None;
-        if let (false, Some(next)) = (arrived.is_empty(), waiting.first()) {
-            let reached = now - moved_between(next["at"].as_u64().unwrap_or(0), u64::MAX);
-            let own = number(&next["to_before"]).and_then(|own| i128::try_from(own).ok());
-            if own.is_none_or(|own| own < reached) {
-                next_mark = Some(reached.max(0).to_string());
-            }
-        }
-        // The read is kept on those still waiting, when nothing logged was in flight.
-        for (index, bridge) in waiting.iter().enumerate() {
-            let Some(id) = bridge["id"].as_str() else { continue };
-            let mut fields = serde_json::Map::new();
-            if let (0, Some(mark)) = (index, &next_mark) {
-                fields.insert("to_before".to_owned(), json!(mark));
-                fields.insert("followed".to_owned(), json!(true));
-            }
-            if quiet && (number(&bridge["seen"]) != u128::try_from(now).ok() || bridge["seen_moved"].as_str() != Some(moved_now.to_string().as_str())) {
-                fields.insert("seen".to_owned(), json!(now.max(0).to_string()));
-                fields.insert("seen_moved".to_owned(), json!(moved_now.to_string()));
-            }
-            if !fields.is_empty() {
-                updates.push((id.to_owned(), Value::Object(fields)));
-            }
+        if !fields.is_empty() {
+            updates.push((id.to_owned(), Value::Object(fields)));
         }
     }
     updates
@@ -446,6 +421,11 @@ pub fn note_balances(dir: &Path, at: u64, chain: &str, scope: &str, balances: &[
             }
         }
         for id in &touching {
+            // A bridge still on its way is counted once it arrives: counted now (as 0), its
+            // credit would be logged again as money that arrived (late-or-expired-bridge-arrival-logged-twice).
+            if bridge_waits_for(&all[id], account) {
+                continue;
+            }
             if let Some(counted) = all.get_mut(id).and_then(|entry| entry.as_object_mut()) {
                 let list = counted.entry("counted").or_insert_with(|| Value::Array(Vec::new()));
                 if let Some(list) = list.as_array_mut() {
@@ -583,50 +563,194 @@ mod tests {
         let _ = std::fs::remove_dir_all(d);
     }
 
+    /// A LEZ account of the tests' bridges, and a bridge to it as `chain_bridge` records one:
+    /// the channel, its one note and the account give its receipt.
+    fn t() -> String {
+        format!("Public/{}", crate::registry::account_text(&[5; 32]))
+    }
+
+    fn bridge(d: &Path, at: u64, amount: u128, note: u8) -> String {
+        add(d, at, json!({ "kind": "bridge", "chain": "logos", "from": "k".repeat(64), "to": t(), "amount": amount.to_string(),
+            "note": crate::registry::hex(&[note; 32]), "channel": "00".repeat(32), "fee": "1614", "state": "in_block" }))
+    }
+
+    fn receipt_of(d: &Path, id: &str) -> crate::registry::AccountId {
+        bridge_receipt(all(d).iter().find(|e| e["id"] == id).unwrap()).expect("a receipt")
+    }
+
+    /// One read as the module makes it: the bridges settled by what LEZ says of their
+    /// receipts (`minted`), then the balance noted.
+    fn read(d: &Path, at: u64, minted: &[crate::registry::AccountId], held: u128) -> Vec<String> {
+        for (id, fields) in bridge_updates(&all(d), at, &|receipt| Some(minted.contains(receipt))) {
+            update(d, &id, &fields);
+        }
+        note(d, at, &[(&t(), held)])
+    }
+
+    /// The rows on T's page: (kind, amount, state), oldest first.
+    fn rows(d: &Path) -> Vec<(String, String, String)> {
+        let mut rows = all(d);
+        rows.reverse();
+        rows.iter()
+            .filter(|e| involves(e, &t()))
+            .map(|e| (e["kind"].as_str().unwrap().to_owned(), e["amount"].as_str().unwrap_or("?").to_owned(), e["state"].as_str().unwrap().to_owned()))
+            .collect()
+    }
+
+    fn row(kind: &str, amount: &str, state: &str) -> (String, String, String) {
+        (kind.to_owned(), amount.to_owned(), state.to_owned())
+    }
+
     /// act-repro F8: a bridge that reached its LEZ account was logged as the bridge
     /// arriving and also as an arrival of the same amount.
     #[test]
     fn a_bridge_that_arrives_is_not_also_an_arrival() {
         let d = dir("bridge");
-        note(&d, 1, &[("Public/G", 20_010)]);
-        let bridge = add(&d, 2, json!({ "kind": "bridge", "chain": "logos", "from": "k".repeat(64), "to": "Public/G", "amount": "3000", "to_before": "20010", "state": "in_block" }));
-        assert!(note(&d, 3, &[("Public/G", 23_010)]).is_empty(), "the bridge in a block holds the mark");
-        update(&d, &bridge, &json!({ "state": "arrived" }));
-        assert!(note(&d, 4, &[("Public/G", 23_010)]).is_empty(), "{:?}", arrivals(&d));
-        assert_eq!(note(&d, 5, &[("Public/G", 24_010)]).len(), 1, "later money is still an arrival");
+        read(&d, 1, &[], 20_010);
+        let b = bridge(&d, 2, 3000, 1);
+        // Its credit and its receipt land in one LEZ transaction.
+        let minted = [receipt_of(&d, &b)];
+        assert!(read(&d, 3, &minted, 23_010).is_empty(), "{:?}", rows(&d));
+        assert_eq!(rows(&d), [row("bridge", "3000", "arrived")]);
+        assert!(read(&d, 4, &minted, 23_010).is_empty());
+        assert_eq!(read(&d, 5, &minted, 24_010).len(), 1, "later money is still an arrival");
         assert_eq!(arrivals(&d)[0]["amount"], "1000");
         let _ = std::fs::remove_dir_all(d);
     }
 
-    /// false-arrival-second-bridge: bridges of 2,000,000, 700,000 and 3,000,000 to one
-    /// account all flipped to arrived on one credit of 3,000,000 (each tested alone
-    /// against `to_before + amount`).
+    /// foreign-credit-while-bridge-waits-never-in-history (X1, X2, X3): while a bridge of
+    /// 500,001 waited, payments from elsewhere were never shown, before or after it arrived.
+    /// single-bridge-false-arrival-on-foreign-credit-at-least-amount (S8): a payment of
+    /// 700,000 marked it arrived. A payment of exactly its amount doesn't either.
     #[test]
-    fn one_credit_marks_bridges_arrived_in_order_and_only_as_far_as_it_goes() {
-        let bridge = |at: u64, amount: &str| json!({ "id": format!("{at}-bridge"), "at": at, "kind": "bridge", "chain": "logos", "to": "Public/T", "amount": amount, "to_before": "0", "state": "in_block" });
-        let mut entries = vec![bridge(1, "3000000"), bridge(2, "2000000"), bridge(3, "700000")];
-        let now = |held: u128| std::collections::HashMap::from([("Public/T".to_owned(), held)]);
-        assert!(bridges_arrived(&entries, &now(0)).is_empty());
-        assert!(bridges_arrived(&entries, &now(1_000_000)).is_empty(), "less than the first");
-        assert!(bridges_arrived(&entries, &now(3_500_000)).is_empty(), "more than the first, but not its credit alone");
-        assert_eq!(bridges_arrived(&entries, &now(3_000_000)), ["1-bridge"]);
-        assert_eq!(bridges_arrived(&entries, &now(5_000_000)), ["1-bridge", "2-bridge"]);
-        assert_eq!(bridges_arrived(&entries, &now(5_700_000)).len(), 3);
-        // More than they all bring is not their credits (single-bridge-false-arrival-on-foreign-credit-at-least-amount;
-        // this reverses aa94d3b's "all of them once it holds at least what they bring").
-        assert!(bridges_arrived(&entries, &now(9_000_000)).is_empty(), "more than all of them bring");
-        // br/f2: bridges of 700,000, 3,000,000 and 2,000,000 and one credit of 3,000,000 from elsewhere: none.
-        let f2 = vec![bridge(1, "700000"), bridge(2, "3000000"), bridge(3, "2000000")];
-        assert!(bridges_arrived(&f2, &now(3_000_000)).is_empty());
-        assert_eq!(bridges_arrived(&f2, &now(700_000)), ["1-bridge"]);
-        // A logged payment out of the account since then is allowed for.
-        entries.push(json!({ "id": "4-pay_account", "at": 4, "kind": "pay_account", "chain": "lez", "from": "Public/T", "to": "Public/Q", "amount": "500000", "fee": { "paid": "4000" }, "state": "done" }));
-        assert_eq!(bridges_arrived(&entries, &now(2_496_000)), ["1-bridge"]);
-        // Once the first has arrived, the next is followed from where it was sent.
-        entries[0]["state"] = json!("arrived");
-        entries[1]["to_before"] = json!("3000000");
-        assert!(bridges_arrived(&entries, &now(3_000_000)).is_empty(), "{:?}", bridges_arrived(&entries, &now(3_000_000)));
-        assert_eq!(bridges_arrived(&entries, &now(4_496_000)), ["2-bridge"]);
+    fn money_from_elsewhere_while_a_bridge_waits_is_its_own_row() {
+        let d = dir("foreign");
+        read(&d, 1, &[], 0);
+        let b = bridge(&d, 2, 500_001, 1);
+        read(&d, 3, &[], 0);
+        read(&d, 4, &[], 700_000);
+        assert_eq!(rows(&d), [row("bridge", "500001", "in_block"), row("arrived", "700000", "arrived")]);
+        read(&d, 5, &[], 1_200_001);
+        assert_eq!(rows(&d).len(), 3, "a payment of exactly its amount is not the bridge: {:?}", rows(&d));
+        assert_eq!(rows(&d)[0], row("bridge", "500001", "in_block"));
+        // Its own credit, then: the bridge arrives, and the rows add up to what T holds.
+        let minted = [receipt_of(&d, &b)];
+        assert!(read(&d, 6, &minted, 1_700_002).is_empty());
+        assert_eq!(rows(&d), [row("bridge", "500001", "arrived"), row("arrived", "700000", "arrived"), row("arrived", "500001", "arrived")]);
+        // X3: one that never arrives; each payment is told as it comes.
+        let _ = std::fs::remove_dir_all(d);
+        let d = dir("foreign-x3");
+        read(&d, 1, &[], 0);
+        bridge(&d, 2, 500_001, 1);
+        for (at, held) in [(3, 1000), (4, 3000), (5, 6000)] {
+            read(&d, at, &[], held);
+        }
+        assert_eq!(rows(&d), [row("bridge", "500001", "in_block"), row("arrived", "1000", "arrived"), row("arrived", "2000", "arrived"), row("arrived", "3000", "arrived")]);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// late-or-expired-bridge-arrival-logged-twice (W4, W1): a bridge credited after the
+    /// two-day wait was logged as the bridge arriving and again as a bare arrival.
+    #[test]
+    fn a_bridge_that_arrives_late_is_one_row() {
+        let d = dir("late");
+        read(&d, 1, &[], 20_000);
+        let b = bridge(&d, 2, 500_001, 1);
+        read(&d, 2 + BRIDGE_WAIT_S - 600, &[], 20_000);
+        read(&d, 2 + BRIDGE_WAIT_S + 600, &[], 20_000);
+        assert_eq!(rows(&d), [row("bridge", "500001", "expired")], "overdue, and said so");
+        let minted = [receipt_of(&d, &b)];
+        assert!(read(&d, 2 + BRIDGE_WAIT_S + 1200, &minted, 520_001).is_empty(), "{:?}", rows(&d));
+        assert_eq!(rows(&d), [row("bridge", "500001", "arrived")]);
+        assert_eq!(all(&d)[0]["late"], true);
+        // W1: one an older version counted (as 0) once it was past the wait.
+        let _ = std::fs::remove_dir_all(d);
+        let d = dir("late-counted");
+        read(&d, 1, &[], 20_000);
+        let b = bridge(&d, 2, 3000, 1);
+        update(&d, &b, &json!({ "counted": [t()] }));
+        let minted = [receipt_of(&d, &b)];
+        assert!(read(&d, 2 + BRIDGE_WAIT_S + 3600, &minted, 23_000).is_empty(), "{:?}", rows(&d));
+        assert_eq!(rows(&d), [row("bridge", "3000", "arrived")]);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// expired-bridge-takes-later-bridges-credit (W3, W2): a 49-hour-old bridge of 500,001
+    /// that never arrived took the credit of a fresh one of the same amount.
+    #[test]
+    fn an_overdue_bridge_never_takes_a_later_ones_credit() {
+        let d = dir("expired");
+        let day = 24 * 3600;
+        read(&d, 1, &[], 20_000);
+        let old = bridge(&d, 2, 500_001, 1);
+        let fresh = bridge(&d, 2 + 2 * day + 3600, 500_001, 2);
+        let now = 2 + 2 * day + 7200;
+        read(&d, now, &[], 20_000);
+        let minted = [receipt_of(&d, &fresh)];
+        read(&d, now + 60, &minted, 520_001);
+        let state = |id: &str| all(&d).into_iter().find(|e| e["id"] == id).unwrap()["state"].as_str().unwrap().to_owned();
+        assert_eq!((state(&old), state(&fresh)), ("expired".to_owned(), "arrived".to_owned()));
+        assert!(arrivals(&d).is_empty(), "{:?}", rows(&d));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// out-of-order-first-credit-before-any-read-strands-bridge (R2), and
+    /// false-arrival-second-bridge (f2b): three bridges, credited last first with no read in
+    /// between; each arrives on its own deposit, whatever the order or the amounts.
+    #[test]
+    fn bridges_arrive_each_on_its_own_deposit_in_any_order() {
+        let d = dir("any-order");
+        read(&d, 1, &[], 0);
+        let (a, b, c) = (bridge(&d, 2, 500_001, 1), bridge(&d, 3, 400_002, 2), bridge(&d, 4, 300_003, 3));
+        let (ra, rb, rc) = (receipt_of(&d, &a), receipt_of(&d, &b), receipt_of(&d, &c));
+        let state = |d: &Path| all(d).into_iter().rev().filter(|e| e["kind"] == "bridge").map(|e| e["state"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        read(&d, 5, &[rc], 300_003);
+        assert_eq!(state(&d), ["in_block", "in_block", "arrived"]);
+        read(&d, 6, &[rc, rb], 700_005);
+        assert_eq!(state(&d), ["in_block", "arrived", "arrived"]);
+        read(&d, 7, &[rc, rb, ra], 1_200_006);
+        assert_eq!(state(&d), ["arrived", "arrived", "arrived"]);
+        assert!(arrivals(&d).is_empty(), "{:?}", rows(&d));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// A bridge whose send was taken as `unknown` (not seen in a block in time) still
+    /// arrives by its receipt, and its credit is not money that arrived besides.
+    #[test]
+    fn a_bridge_whose_send_was_unknown_still_arrives_by_its_receipt() {
+        let d = dir("unknown-bridge");
+        read(&d, 1, &[], 0);
+        let b = bridge(&d, 2, 3000, 1);
+        update(&d, &b, &json!({ "state": "unknown" }));
+        read(&d, 3, &[], 0);
+        let minted = [receipt_of(&d, &b)];
+        assert!(read(&d, 4, &minted, 3000).is_empty(), "{:?}", rows(&d));
+        assert_eq!(rows(&d), [row("bridge", "3000", "arrived")]);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// A bridge with no channel or note recorded can't be followed: it never arrives, its
+    /// credit is told as money that arrived, and it is overdue past the wait.
+    #[test]
+    fn a_bridge_without_a_receipt_is_not_followed() {
+        let d = dir("unfollowed");
+        read(&d, 1, &[], 0);
+        let b = add(&d, 2, json!({ "kind": "bridge", "chain": "logos", "to": t(), "amount": "3000", "state": "in_block" }));
+        read(&d, 3, &[], 3000);
+        let entry = all(&d).into_iter().find(|e| e["id"] == b).unwrap();
+        assert_eq!((entry["state"].as_str(), entry["followed"].as_bool()), (Some("in_block"), Some(false)));
+        assert_eq!(rows(&d), [row("bridge", "3000", "in_block"), row("arrived", "3000", "arrived")]);
+        read(&d, 2 + BRIDGE_WAIT_S, &[], 3000);
+        assert_eq!(rows(&d)[0], row("bridge", "3000", "expired"));
+        // No answer from LEZ about a receipt is not an arrival.
+        let _ = std::fs::remove_dir_all(d);
+        let d = dir("unread");
+        let b = bridge(&d, 2, 3000, 1);
+        assert!(bridge_updates(&all(&d), 3, &|_| None).iter().all(|(_, fields)| fields.get("state").is_none()));
+        assert_eq!(bridges_followed(&all(&d), 3).len(), 1);
+        assert!(bridges_followed(&all(&d), 2 + BRIDGE_FOLLOW_S).is_empty(), "followed for so long");
+        let _ = b;
+        let _ = std::fs::remove_dir_all(d);
     }
 
     /// receive-entry-has-no-account-amount: a claim's entry named no account, so the payer
@@ -641,6 +765,22 @@ mod tests {
         assert!(involves(&entry, "Private/BF") && involves(&entry, "Private/9Dk3") && !involves(&entry, "Private/X"));
         // The credit is the claim's, not money that arrived; the payer's fall is no arrival either.
         assert!(note(&d, 3, &[("Private/BF", 23_619_017), ("Private/9Dk3", 4_123_256)]).is_empty(), "{:?}", arrivals(&d));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// partial-claim-job-and-pages-say-nothing-true: one of two claims landed (R1 credited
+    /// 1,000,000, payer P paid 5,070,616) and R2's credit still waits. The entry is partly
+    /// done, on all three pages, and explains P's and R1's balances.
+    #[test]
+    fn a_claim_that_stopped_partway_is_on_every_page_and_counts_what_landed() {
+        let d = dir("partial");
+        note(&d, 1, &[("Private/P", 8_929_384), ("Private/R1", 0), ("Private/R2", 0)]);
+        add(&d, 2, json!({ "kind": "receive", "chain": "lez", "from": "Private/P", "amount": "1000000", "to": "Private/R1",
+            "received": { "Private/R1": "1000000" }, "left": { "Private/R2": "1000000" }, "fee": { "about": "10141232", "paid": "5070616" }, "state": "partial" }));
+        let entry = all(&d).remove(0);
+        assert!(["Private/P", "Private/R1", "Private/R2"].iter().all(|page| involves(&entry, page)), "{entry}");
+        // P lost the fee (its refund waits as a credit), R1 got its claim, R2 is unchanged.
+        assert!(note(&d, 3, &[("Private/P", 8_929_384 - 5_070_616), ("Private/R1", 1_000_000), ("Private/R2", 0)]).is_empty(), "{:?}", arrivals(&d));
         let _ = std::fs::remove_dir_all(d);
     }
 
@@ -659,117 +799,6 @@ mod tests {
         assert_eq!(note(&d, 5, &[("Public/A", 1_000_500)]).len(), 1);
         assert_eq!(arrivals(&d)[0]["amount"], "500");
         let _ = std::fs::remove_dir_all(d);
-    }
-
-    /// false-arrival-second-bridge-regressed (f2b): bridges of 3,000,000 then 2,000,000 to
-    /// one account, both sent before either was credited (each `to_before` 0). LEZ credited
-    /// 3,000,000: the first poll marked the 3,000,000 arrived, the next poll marked the
-    /// 2,000,000 arrived too (judged alone against its own mark, 0 + 2,000,000 <= 3,000,000).
-    #[test]
-    fn a_second_bridge_is_not_taken_as_arrived_on_the_first_ones_credit() {
-        let d = dir("second-bridge");
-        let first = add(&d, 10, json!({ "kind": "bridge", "chain": "logos", "to": "Public/T", "amount": "3000000", "to_before": "0", "state": "in_block" }));
-        let second = add(&d, 11, json!({ "kind": "bridge", "chain": "logos", "to": "Public/T", "amount": "2000000", "to_before": "0", "state": "in_block" }));
-        let held = std::collections::HashMap::from([("Public/T".to_owned(), 3_000_000_u128)]);
-        let poll = |d: &Path| {
-            for (id, fields) in bridge_updates(&all(d), &held) {
-                update(d, &id, &fields);
-            }
-            let rows = all(d);
-            let state = |id: &str| rows.iter().find(|e| e["id"] == id).map(|e| e["state"].as_str().unwrap_or_default().to_owned()).unwrap();
-            (state(&first), state(&second))
-        };
-        assert_eq!(poll(&d), ("arrived".to_owned(), "in_block".to_owned()));
-        for _ in 0..3 {
-            assert_eq!(poll(&d), ("arrived".to_owned(), "in_block".to_owned()), "a later poll on the same credit");
-        }
-        // Read back from the file (a reload): the second now waits for its own 2,000,000.
-        assert_eq!(all(&d).iter().find(|e| e["id"] == second).unwrap()["to_before"], "3000000");
-        let held = std::collections::HashMap::from([("Public/T".to_owned(), 5_000_000_u128)]);
-        assert_eq!(bridges_arrived(&all(&d), &held), [second.clone()]);
-        // A mark already past the first one's credit (it landed before the second was sent) is kept.
-        let entries = vec![
-            json!({ "id": "1-bridge", "at": 1, "kind": "bridge", "to": "Public/U", "amount": "3000000", "to_before": "0", "state": "in_block" }),
-            json!({ "id": "2-bridge", "at": 2, "kind": "bridge", "to": "Public/U", "amount": "2000000", "to_before": "3000000", "state": "in_block" }),
-        ];
-        let held = std::collections::HashMap::from([("Public/U".to_owned(), 3_000_000_u128)]);
-        let updates = bridge_updates(&entries, &held);
-        assert_eq!(updates[0], ("1-bridge".to_owned(), json!({ "state": "arrived" })));
-        assert!(updates[1..].iter().all(|(id, fields)| id == "2-bridge" && fields.get("to_before").is_none() && fields.get("state").is_none()), "{updates:?}");
-        let _ = std::fs::remove_dir_all(d);
-    }
-
-    /// Settles `entries` the way the module does on each balance read: every update applied.
-    fn poll(entries: &mut [Value], to: &str, held: u128) {
-        let now = std::collections::HashMap::from([(to.to_owned(), held)]);
-        for (id, fields) in bridge_updates(entries, &now) {
-            let entry = entries.iter_mut().find(|entry| entry["id"] == id.as_str()).expect("an entry");
-            for (key, value) in fields.as_object().unwrap() {
-                entry[key] = value.clone();
-            }
-        }
-    }
-
-    fn states(entries: &[Value]) -> Vec<(String, bool)> {
-        entries.iter().filter(|e| e["kind"] == "bridge").map(|e| (e["state"].as_str().unwrap().to_owned(), e["maybe"] == true)).collect()
-    }
-
-    fn bridge_to(at: u64, to: &str, amount: &str, to_before: Option<&str>) -> Value {
-        json!({ "id": format!("{at}-bridge"), "at": at, "kind": "bridge", "chain": "logos", "to": to, "amount": amount, "to_before": to_before, "state": "in_block" })
-    }
-
-    /// single-bridge-false-arrival-on-foreign-credit-at-least-amount (S8, S7, S4): one payment
-    /// of 700,000 from elsewhere marked a 500,001 bridge arrived; one of 1,200,006 marked three.
-    #[test]
-    fn a_credit_from_elsewhere_is_not_a_bridges_arrival() {
-        let arrived = |held: &[u128], bridges: Vec<Value>| {
-            let mut entries = bridges;
-            for held in held {
-                poll(&mut entries, "Public/T", *held);
-            }
-            states(&entries)
-        };
-        // S8: 0, then a payment of 700,000 from elsewhere.
-        assert_eq!(arrived(&[0, 700_000], vec![bridge_to(1, "Public/T", "500001", Some("0"))]), [("in_block".to_owned(), false)]);
-        // S4: 1,000 from elsewhere first, then the bridge's own credit.
-        assert_eq!(arrived(&[0, 1_000, 501_001], vec![bridge_to(1, "Public/T", "500001", Some("0"))]), [("arrived".to_owned(), false)]);
-        // S7: three bridges and one payment of exactly their total: it can't be told from
-        // their credits, so they arrive hedged.
-        let three = vec![bridge_to(1, "Public/T", "300003", Some("0")), bridge_to(2, "Public/T", "400002", Some("0")), bridge_to(3, "Public/T", "500001", Some("0"))];
-        assert_eq!(arrived(&[0, 1_200_006], three.clone()), vec![("arrived".to_owned(), true); 3]);
-        assert_eq!(arrived(&[0, 1_300_006], three), vec![("in_block".to_owned(), false); 3], "more than their total");
-    }
-
-    /// bridge-stuck-in-block-after-unlogged-spend-from-destination (S5): T held 20,000, spent
-    /// 4,788 outside the History, then the bridge's 500,001 came: it stayed in a block.
-    #[test]
-    fn a_bridge_arrives_on_its_own_credit_after_an_unlogged_spend() {
-        let mut entries = vec![bridge_to(1, "Public/T", "500001", Some("20000"))];
-        for held in [20_000, 15_212] {
-            poll(&mut entries, "Public/T", held);
-        }
-        assert_eq!(states(&entries), [("in_block".to_owned(), false)]);
-        poll(&mut entries, "Public/T", 515_213);
-        assert_eq!(states(&entries), [("arrived".to_owned(), false)]);
-        // A logged send between the reads is allowed for.
-        let mut entries = vec![bridge_to(1, "Public/V", "500001", Some("20000"))];
-        poll(&mut entries, "Public/V", 20_000);
-        entries.push(json!({ "id": "2-pay", "at": 2, "kind": "pay_account", "chain": "lez", "from": "Public/V", "to": "Public/Q", "amount": "5000", "fee": { "paid": "100" }, "state": "done" }));
-        poll(&mut entries, "Public/V", 514_901);
-        assert_eq!(states(&entries), [("arrived".to_owned(), false)]);
-    }
-
-    /// bridge-with-unread-to_before-never-arrives (S6b): a bridge sent while its account
-    /// couldn't be read (to_before null), then a second one: the first's credit marked the
-    /// second arrived.
-    #[test]
-    fn an_unfollowed_bridges_credit_is_not_taken_for_a_later_ones() {
-        let mut entries = vec![bridge_to(1, "Public/T", "500001", None), bridge_to(2, "Public/T", "400002", Some("0"))];
-        poll(&mut entries, "Public/T", 0);
-        poll(&mut entries, "Public/T", 500_001);
-        assert_eq!(states(&entries), [("arrived".to_owned(), false), ("in_block".to_owned(), false)]);
-        poll(&mut entries, "Public/T", 900_003);
-        assert_eq!(states(&entries), [("arrived".to_owned(), false), ("arrived".to_owned(), false)]);
     }
 
     /// corrupt-activity-file-silently-erases-history: a truncated activity.json read as

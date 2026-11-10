@@ -181,17 +181,8 @@ pub fn connect_request(app: &str, reason: &str, now: u64) -> Result<Value, Strin
 /// added by [`add_token`] once the wallet has read them.
 pub fn transfer_request(app: &str, asset_text: &str, amount: &str, destination: &str, now: u64) -> Result<Value, String> {
     let asset = asset(asset_text)?;
-    let amount = match asset {
-        Asset::Native => {
-            let amount = crate::cli::ungrouped(amount).unwrap_or_default();
-            if !crate::cli::is_amount(&amount) {
-                return Err("the amount is a whole number of base units above zero, such as 1000".to_owned());
-            }
-            amount
-        }
-        Asset::Token(_) => crate::cli::token_amount(amount)
-            .map_err(|_| "the amount is a whole number of the token's base units above zero, at most 2^128 - 1".to_owned())?,
-    };
+    // The one way every amount is read (cli::amount), for LEZ and tokens alike.
+    let amount = crate::cli::amount_text(amount)?;
     let (to, to_kind) = match crate::cli::pay_to(destination)? {
         crate::cli::PayTo::Name(name) => (name, "name"),
         crate::cli::PayTo::Account(id) => (format!("Public/{id}"), "account"),

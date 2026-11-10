@@ -59,7 +59,7 @@ pub fn accounts(setup: &Setup) -> Result<Held, String> {
         // every account and its balance in `names balance`.
         Err(problem) if problem == cli::OLDER_CLI => {
             let mut held = Held { public: Vec::new(), private: Vec::new() };
-            for row in cli::run_accounts_any(setup)?.as_array().into_iter().flatten() {
+            for row in &cli::run_accounts_any(setup)?.rows {
                 let Some((private, id)) = row["account"].as_str().and_then(|text| crate::provider::account_ref(text).ok()) else { continue };
                 if private {
                     held.private.push((id, row["balance"].as_str().and_then(|b| b.parse().ok()).unwrap_or(0)));

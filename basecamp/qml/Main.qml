@@ -248,7 +248,7 @@ Item {
             else if (!reply.success)
                 failed(reply.error)
             else
-                done(reply.value)
+                done(reply.value, reply)
         }
         if (bridgeReady && logos.callModuleAsync)
             logos.callModuleAsync("names", method, args, settle, patience || 30000)
@@ -446,8 +446,10 @@ Item {
             cliPending = []
             return
         }
-        askLater("cli_mine", [], function(value) {
+        askLater("cli_mine", [], function(value, reply) {
             value = value || []
+            // The last list kept while reading it again fails says so (cli-mine-stale-list-unmarked-during-outage).
+            namesNote = Logic.readNote(reply)
             cliNames = value.filter(function(entry) { return !entry.registering && !entry.failed })
             cliPending = value.filter(function(entry) { return entry.registering || entry.failed })
             cliKnown = true
@@ -468,14 +470,21 @@ Item {
         if (cliPath === "")
             return
         cliBalance = undefined
-        askLater("cli_balance", [], function(value) {
+        askLater("cli_balance", [], function(value, reply) {
             cliBalance = value
+            // Balances the sequencer didn't give show as unknown, and this says which.
+            balanceNote = Logic.readNote(reply)
             loadActivity()
         }, function(message) {
             cliBalance = null
+            balanceNote = sentence(message)
             console.log("names_ui: CLI balance:", message)
         }, 120000)
     }
+
+    property string balanceNote: ""   // what the last balance read said about itself: partial, or why it failed
+    property string namesNote: ""     // the same for the names list: kept from before, and why
+    property string accountsNote: ""  // the same for the accounts list
 
     // ── Accounts and fees ───────────────────────────────────────────────
 
@@ -493,8 +502,9 @@ Item {
     function loadAccounts() {
         if (cliPath === "")
             return
-        askLater("cli_accounts", [], function(value) {
+        askLater("cli_accounts", [], function(value, reply) {
             cliAccounts = Logic.accountsShown(value)
+            accountsNote = Logic.readNote(reply)
             accountsError = ""
         }, function(message) {
             accountsError = sentence(message)
@@ -648,16 +658,15 @@ Item {
     }
 
     function chainAsked() {
-        return [chainFrom, sendToResolved(), sendAmount.text.trim()]
+        return [chainFrom, sendToResolved(), Logic.amountDigits(sendAmount.text, Logic.CHAIN_AMOUNT_MAX)]
     }
 
     /// Checks the send and shows its plan; nothing is sent.
     function chainCheck() {
         var asked = chainAsked()
         var problem = asked[0] === "" ? "Choose a key to send from." : Logic.chainToProblem(asked[1])
-        // Commas only between groups of three, as the module reads it: "1,5" is refused, not 15.
-        if (problem === "" && !/^([0-9]+|[0-9]{1,3}(,[0-9]{3})+)$/.test(asked[2]))
-            problem = "Enter a whole amount, such as 1000 or 1,000."
+        if (problem === "")
+            problem = Logic.amountProblem(sendAmount.text, Logic.CHAIN_AMOUNT_MAX)
         if (problem !== "") {
             chainProblem = problem
             return
@@ -987,20 +996,19 @@ Item {
             return ""
         if (sendKind === "chain") {
             var bad = Logic.chainToProblem(to)
-            return bad !== "" ? bad : /^([0-9]+|[0-9]{1,3}(,[0-9]{3})+)$/.test(amount) ? "" : "Enter a whole amount, such as 1000 or 1,000."
+            return bad !== "" ? bad : Logic.amountProblem(amount, Logic.CHAIN_AMOUNT_MAX)
         }
         if (/^Private\//.test(to))
             return "A private account can't be paid by its address: nobody but its holder knows its keys. Pay its name, or ask for a public account."
         if (sendKind === "token")
             return tokenSendProblem()
-        var bad = payIsAccount(to) ? payAccountProblem(to) : /^[0-9]+$/.test(amount) ? "" : "Enter a whole amount, such as 1000."
-        return bad !== "" ? bad : sendBalanceProblem(amount)
+        var bad = (payIsAccount(to) ? payAccountProblem(to) : "") || Logic.amountProblem(amount)
+        return bad !== "" ? bad : sendBalanceProblem(Logic.amountDigits(amount))
     }
 
     /// Why the account Send pays from can't pay `amount` (digits) and its fee, or "" when it
     /// can or its balance isn't known yet (send-failure-text-raw-and-no-balance-check).
-    function sendBalanceProblem(amount) {
-        var digits = String(amount).replace(/,/g, "")
+    function sendBalanceProblem(digits) {
         var from = payFromPublic ? cliPublic : cliBalance
         if (!/^[0-9]+$/.test(digits) || !from || from.balance === undefined || from.balance === null)
             return ""
@@ -1010,6 +1018,11 @@ Item {
         if (Logic.atLeast(digits, String(from.balance)))
             return "Your " + which + " account holds exactly " + grouped(digits) + ", and the fee comes on top: send a little less."
         return ""
+    }
+
+    /// The Send amount as it will be sent ("1000"), or "" while it isn't an amount.
+    function sendDigits() {
+        return Logic.amountDigits(sendAmount.text, sendKind === "chain" ? Logic.CHAIN_AMOUNT_MAX : Logic.AMOUNT_MAX)
     }
 
     /// Shows the summary to confirm; a chain send is checked by the node first.
@@ -1199,8 +1212,7 @@ Item {
 
     /// What the Move to private card moves: what was typed, else what was bridged.
     function privateMoveAmount() {
-        var typed = privateMoveField.text.trim().replace(/,/g, "")
-        return typed !== "" ? typed : bridgeAsked()[0]
+        return privateMoveField.text.trim() !== "" ? Logic.amountDigits(privateMoveField.text) : bridgeAsked()[0]
     }
 
     property bool bridgeReview: false    // Review was pressed: confirm at once if the plan is ready
@@ -1261,13 +1273,13 @@ Item {
     }
 
     function bridgeAsked() {
-        return [bridgeAmountField.text.trim().replace(/,/g, ""), bridgeFrom, bridgeNodeField.text.trim(), bridgeToPrivate ? "" : bridgeTo]
+        return [Logic.amountDigits(bridgeAmountField.text, Logic.CHAIN_AMOUNT_MAX), bridgeFrom, bridgeNodeField.text.trim(), bridgeToPrivate ? "" : bridgeTo]
     }
 
     /// Checks the fields before the module sees them; "" if they look right.
     function bridgeInputProblem(asked) {
-        if (!/^[0-9]+$/.test(asked[0]) || /^0+$/.test(asked[0]))
-            return "Enter a whole amount, such as 1000."
+        if (asked[0] === "")
+            return Logic.amountProblem(bridgeAmountField.text, Logic.CHAIN_AMOUNT_MAX)
         if (bridgeSplitHash !== "")
             return "Wait for the note to be made first."
         if (!/^[0-9a-f]{64}$/.test(asked[1]))
@@ -1509,7 +1521,7 @@ Item {
                 installWarning = value.warning ? value.warning : ""
                 loadConfig()
             } else {
-                installProblem = value.problem ? value.problem : "The install stopped: " + lastLogLine(value.log_tail)
+                installProblem = Logic.jobProblem(value, "The install stopped")
             }
         }, function() { job.asking = false })
     }
@@ -1587,7 +1599,7 @@ Item {
                 return
             claimJob = null
             claimBusy = false
-            claimLine = value.state === "done" ? job.name + " is yours again." : sentence(lastLogLine(value.log_tail))
+            claimLine = value.state === "done" ? job.name + " is yours again." : sentence(Logic.jobProblem(value, "Taking the name back didn't finish"))
             loadCliMine()
         }, function() {})
     }
@@ -1669,7 +1681,7 @@ Item {
             if (value.state === "done")
                 say("Claimed. The payments are in your private account now.", false)
             else
-                receiveProblem = value.problem ? value.problem : "Claiming didn't finish: " + lastLogLine(value.log_tail)
+                receiveProblem = Logic.jobProblem(value, "Claiming didn't finish")
             loadCliBalance()
         }, function() { job.asking = false })
     }
@@ -1687,7 +1699,7 @@ Item {
             if (value.state === "done" && value.moved)
                 shieldMoved = true
             else
-                shieldProblem = value.problem ? value.problem : "Moving to private didn't go through: " + lastLogLine(value.log_tail)
+                shieldProblem = Logic.jobProblem(value, "Moving to private didn't go through")
             loadCliBalance()
         }, function() { job.asking = false })
     }
@@ -2182,7 +2194,7 @@ Item {
                 say(settled ? (typeof job.done === "function" ? job.done(null) : job.done)
                     : "The names CLI finished, but the change does not show yet. Look the name up again in a moment.", !settled)
             } else {
-                say("The names CLI could not save it: " + lastLogLine(value.log_tail), true)
+                say(sentence(Logic.jobProblem(value, "The names CLI could not save it")), true)
             }
         }, function(message) {
             job.asking = false
@@ -2588,8 +2600,13 @@ Item {
     function holderChip() {
         if (record === null)
             return ""
-        if (cliHeld)
+        if (cliHeld) {
+            // Asked to be public, still private: cli_mine says why (register-as-public-silently-stays-private).
+            for (var i = 0; i < cliNames.length; i++)
+                if (cliNames[i].name === record.name && cliNames[i].not_public)
+                    return "Yours · held privately · not public yet: " + cliNames[i].not_public
             return "Yours · held privately"
+        }
         if (mine)
             return "Yours · public"
         return "Holder not shown"
@@ -2724,7 +2741,7 @@ Item {
 
     function payName() {
         var to = sendToResolved()
-        var amount = sendAmount.text.trim()
+        var amount = sendDigits()
         if (to === "" || amount === "")
             return
         if (payIsAccount(to)) {
@@ -2948,10 +2965,9 @@ Item {
                     job.after()
                 boardLoad()
             } else {
-                // The module's own words when it has them, never the CLI's "Error:" prefix
-                // (send-failure-text-raw-and-no-balance-check).
-                var why = value.problem ? String(value.problem) : "It didn't go through: " + lastLogLine(value.log_tail)
-                say(sentence(why.replace(/(^|: )Error: /, "$1")), true)
+                // The module's own words, never the CLI's "Error:" prefix or its last cause line
+                // (send-failure-text-raw-and-no-balance-check, transfer-failure-text-is-last-cause-line).
+                say(sentence(Logic.jobProblem(value, "It didn't go through")), true)
             }
         }, function() { job.asking = false })
     }
@@ -3396,7 +3412,7 @@ Item {
             return ""
         if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(definition))
             return "The token is its ID: letters and digits. Pick one you hold above, or paste it."
-        var amount = Logic.tokenAmountProblem(sendAmount.text)
+        var amount = Logic.amountProblem(sendAmount.text)
         return amount !== "" ? amount : Logic.tokenToProblem(sendTo.text)
     }
 
@@ -3414,7 +3430,7 @@ Item {
         if (problem !== "" || tokenJob !== null)
             return
         var definition = sendDefinition
-        var amount = sendAmount.text.trim().replace(/[,_]/g, "")
+        var amount = sendDigits()
         var to = sendToResolved()
         // The CLI checks the balance before it proves anything, and says so.
         tokenProblem = ""
@@ -3464,7 +3480,7 @@ Item {
                 if (job.after)
                     job.after()
             } else {
-                tokenProblem = value.problem ? sentence(value.problem) : "It didn't go through: " + lastLogLine(value.log_tail)
+                tokenProblem = sentence(Logic.jobProblem(value, "It didn't go through"))
             }
             loadTokens()
         }, function() { job.asking = false })
@@ -5198,8 +5214,10 @@ Item {
                         Hint { visible: root.receiveJob !== null; color: root.brass; font.pixelSize: root.px(15); text: "Proving the claim on this computer. Several minutes for each payment." }
                         Hint { visible: root.receiveProblem !== "" && root.receiveJob === null; color: root.alarm; font.pixelSize: root.px(15); text: root.receiveProblem }
                     }
+                    // A read the sequencer only partly answered, or why it failed: never "no balances".
+                    Hint { visible: root.balanceNote !== "" && root.cliBalance !== undefined; color: root.brass; font.pixelSize: root.px(15); text: root.balanceNote }
                     Hint {
-                        visible: root.walletGroups.length === 0
+                        visible: root.walletGroups.length === 0 && (root.balanceNote === "" || root.cliBalance === undefined)
                         text: root.cliBalance === undefined ? "Reading your balances…" : "No balances yet. Make a wallet in Settings, or start your node in Basecamp's Blockchain app."
                     }
 
@@ -5559,7 +5577,7 @@ Item {
                                 ? (root.chainPlan.name ? root.chainPlan.name + " · " : "") + Logic.keyShown(root.chainPlan.to)
                                 : sendToResolved()
                         }
-                        Fact { label: "Amount"; value: root.grouped(sendAmount.text.trim().replace(/,/g, "")) + (root.sendKind === "chain" ? "" : " " + root.sendTitle) }
+                        Fact { label: "Amount"; value: root.grouped(root.sendDigits()) + (root.sendKind === "chain" ? "" : " " + root.sendTitle) }
                         Fact {
                             label: "From"
                             value: root.sendKind === "chain" ? "Your node's key " + Logic.keyShown(root.chainFrom)
@@ -5862,6 +5880,7 @@ Item {
                     Card {
                         Layout.fillWidth: true
                         Part { Layout.topMargin: 0; text: "My names" }
+                        Hint { visible: root.namesNote !== ""; color: root.brass; text: root.namesNote }
                         Hint { visible: root.cliNames.length === 0 && root.cliPending.length === 0; text: root.cliKnown ? "None yet." : "Reading your names…" }
                         Repeater {
                             model: root.cliNames
@@ -6093,7 +6112,7 @@ Item {
                         visible: accountPage.row !== null && accountPage.row.address !== undefined && accountPage.row.address !== "" && !accountPage.row.later
                         label: "Address"
                         code: true
-                        value: accountPage.row ? (accountPage.row.address.length > 50 ? Logic.keyShown(accountPage.row.address) : accountPage.row.address) : ""
+                        value: accountPage.row ? Logic.keyShown(accountPage.row.address) : ""
                         full: accountPage.row ? accountPage.row.address : ""
                     }
                     Flow {
@@ -6286,6 +6305,14 @@ Item {
                             hint: root.bridgeToPrivate ? "Such as " + root.shieldMinimum : "Such as 5000000"
                             onAccepted: root.bridgeRun(false)
                         }
+                        // Why Review stays off: "1,5" is no amount, never 15.
+                        Hint {
+                            // Once Review said it below, it isn't said twice.
+                            visible: bridgeAmountField.text.trim() !== "" && root.bridgeAsked()[0] === "" && root.bridgeError !== text
+                            color: root.alarm
+                            font.pixelSize: root.px(14)
+                            text: Logic.amountProblem(bridgeAmountField.text, Logic.CHAIN_AMOUNT_MAX)
+                        }
                         // The node address: kept for the module call, no longer shown (one node: Basecamp's).
                         Field { id: bridgeNodeField; visible: false }
                         Hint {
@@ -6420,6 +6447,12 @@ Item {
                                 enabledNow: root.shieldJob === null && /^[0-9]+$/.test(root.privateMoveAmount()) && Logic.atLeast(root.cliPublic !== null ? root.cliPublic.balance : "0", root.privateMoveAmount())
                                 onPressed: root.moveToPrivate(root.privateMoveAmount())
                             }
+                        }
+                        Hint {
+                            visible: privateMoveField.text.trim() !== "" && root.privateMoveAmount() === ""
+                            color: root.alarm
+                            font.pixelSize: root.px(14)
+                            text: Logic.amountProblem(privateMoveField.text)
                         }
                         Hint { visible: root.shieldJob !== null; color: root.brass; font.pixelSize: root.px(15); text: root.shieldLine() }
                         Hint { visible: root.shieldMoved && root.shieldJob === null; color: root.good; font.pixelSize: root.px(15); text: "Moved. Your private account is ready for names." }
@@ -7018,6 +7051,7 @@ Item {
                         onPressed: root.walletShowEmpty = !root.walletShowEmpty
                     }
                     Hint { visible: root.accountsError !== "" && !root.cliOld; color: root.alarm; text: root.accountsError }
+                    Hint { visible: root.accountsNote !== "" && root.accountsError === ""; color: root.brass; text: root.accountsNote }
                     // An older names program: the two accounts it pays from, and why there's no more.
                     Fact {
                         visible: root.cliOld && root.cliAccounts === null && root.cliBalance !== undefined && root.cliBalance !== null
