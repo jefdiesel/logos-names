@@ -839,6 +839,11 @@ fn bridge_destination(to: &str, programs: &[AccountId]) -> Result<(AccountId, Op
         return Err("the bridge credits a public account: give --to as Public/<id>".to_owned());
     }
     let key = deposit::public_key_text(to);
+    // Checked whatever LEZ the sequencer runs: on 0.3 the deposit names the account the key
+    // derives, which nobody could spend from if the key isn't one (cli-bridge-03-skips-curve-check).
+    if let Some(key) = key.filter(|key| !deposit::valid_public_key(key)) {
+        return Err(deposit::Refusal::NotAKey { key }.words(&|account| AccountId::new(*account).to_string()));
+    }
     let id = match key {
         Some(key) => AccountId::new(deposit::key_account(&key)),
         None => parse_account(to)?,
@@ -4600,6 +4605,10 @@ mod input_tests {
         let (id, given) = bridge_destination(key, &[registry]).unwrap();
         assert_eq!(id, AccountId::from(&key.parse::<lee::PublicKey>().unwrap()));
         assert_eq!(given.map(hex::encode).as_deref(), Some(key));
+        // cli-bridge-03-skips-curve-check: a key that isn't one (BIP-340 vector 5) is refused
+        // whatever LEZ runs, before the sequencer is asked, as its account is no one's.
+        let off = bridge_destination("eefdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34", &[registry]).unwrap_err();
+        assert!(off.contains("isn't a public key LEZ accepts") && off.ends_with("Nothing was sent."), "{off}");
         // cli-bridge-retired-registry-account-accepted: v2 and v4.1 took a deposit.
         let sinks = bridge_sinks(None, Some(someone.parse().unwrap()));
         for program in std::iter::once(DEFAULT_PROGRAM).chain(RETIRED_PROGRAMS).chain([someone]) {
