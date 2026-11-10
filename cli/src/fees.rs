@@ -83,6 +83,15 @@ pub fn paid_line(before: u128, after: u128, moved: u128) -> Option<String> {
     Some(format!("fee paid: {paid}"))
 }
 
+/// `paid_line` from balance reads that may have failed (`None`): a fee measured from a
+/// balance that couldn't be read is unknown, never a number made from a 0 put in its place.
+pub fn paid_line_of(before: Option<u128>, after: Option<u128>, moved: u128) -> Option<String> {
+    match (before, after) {
+        (Some(before), Some(after)) => paid_line(before, after, moved),
+        _ => Some("fee paid: unknown".to_owned()),
+    }
+}
+
 /// The fee market as JSON, with what common sends cost at it (`names module fee`).
 pub fn quote_json(quote: &FeeStateQuote, headroom_blocks: u64, native_gas_limit: u64) -> serde_json::Value {
     let json = |estimate: Estimate| {
@@ -128,6 +137,10 @@ mod tests {
         assert_eq!(paid_line(1_000, 400, 500).as_deref(), Some("fee paid: 100"));
         assert_eq!(paid_line(1_000, 1_200, 0), None, "paid meanwhile: not told");
         assert_eq!(paid_line(1_000, 900, 500), None, "moved more than left: not told");
+        // A balance read that failed was a 0: after = 0 made the whole balance a "fee".
+        assert_eq!(paid_line_of(Some(1_000), None, 0).as_deref(), Some("fee paid: unknown"));
+        assert_eq!(paid_line_of(None, Some(400), 0).as_deref(), Some("fee paid: unknown"));
+        assert_eq!(paid_line_of(Some(1_000), Some(400), 500).as_deref(), Some("fee paid: 100"));
     }
 
     #[test]

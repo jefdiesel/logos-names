@@ -307,14 +307,19 @@ pub fn bridge_receipt(entry: &Value) -> Option<crate::registry::AccountId> {
 }
 
 /// A bridge's deposit op id (`chain::deposit_op_id`): the one it recorded, or the one its
-/// channel, note and destination give.
+/// channel, note and metadata give. The op id hashes the metadata sent, so it is the one
+/// recorded with the bridge (`metadata`); a bridge recorded without it was made before the
+/// metadata depended on LEZ's version, and sent the destination's 32 bytes.
 pub fn bridge_op_id(entry: &Value) -> Option<[u8; 32]> {
     if let Some(op) = entry["op_id"].as_str() {
         return <[u8; 32]>::try_from(crate::registry::unhex(op).ok()?).ok();
     }
     let channel = <[u8; 32]>::try_from(crate::registry::unhex(entry["channel"].as_str()?).ok()?).ok()?;
-    let to = crate::registry::parse_account(entry["to"].as_str()?.strip_prefix("Public/")?).ok()?;
-    crate::chain::deposit_op_id(&channel, &[entry["note"].as_str()?.to_owned()], &to)
+    let metadata = match entry["metadata"].as_str() {
+        Some(metadata) => crate::registry::unhex(metadata).ok()?,
+        None => crate::registry::parse_account(entry["to"].as_str()?.strip_prefix("Public/")?).ok()?.to_vec(),
+    };
+    crate::chain::deposit_op_id(&channel, &[entry["note"].as_str()?.to_owned()], &metadata)
 }
 
 /// How long a bridge's receipt is still asked after it was sent: an overdue one may still
@@ -386,6 +391,80 @@ pub fn bridge_updates(entries: &[Value], now: u64, minted: &dyn Fn(&crate::regis
     updates
 }
 
+/// The key an account's balance mark is kept under.
+fn mark_key(chain: &str, scope: &str, account: &str) -> String {
+    if scope.is_empty() { format!("{chain}:{account}") } else { format!("{chain}@{scope}:{account}") }
+}
+
+/// The entries that move money for `account` and aren't counted in its mark yet: those of
+/// `zone` only, when one is given (the same account on another zone is other money).
+fn touching(all: &Map<String, Value>, account: &str, zone: Option<&str>) -> Vec<String> {
+    all.iter()
+        .filter(|(_, entry)| entry["from"].as_str() == Some(account) || entry["to"].as_str() == Some(account) || received(entry, account).is_some())
+        .filter(|(_, entry)| zone.is_none_or(|zone| zone_of(entry) == zone))
+        .filter(|(_, entry)| !entry["counted"].as_array().is_some_and(|counted| counted.iter().any(|c| c.as_str() == Some(account))))
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
+/// What noting `balance` for `account` makes of it (`note_balances`): `None` when it isn't
+/// noted at all (an entry still moves money for it, or a 0 nothing explains), else its last
+/// mark and, when that is known and `balance` is above what the entries since explain, the
+/// rise and whether it is exact.
+#[allow(clippy::too_many_arguments)]
+fn rise(
+    all: &Map<String, Value>,
+    seen: &Map<String, Value>,
+    touching: &[String],
+    at: u64,
+    chain: &str,
+    key: &str,
+    account: &str,
+    balance: u128,
+) -> Option<(Option<u128>, Option<(i128, bool)>)> {
+    if touching.iter().any(|id| in_flight(&all[id], account, at)) {
+        return None;
+    }
+    let before = seen.get(key).and_then(Value::as_str).and_then(|text| text.parse::<u128>().ok());
+    let Some(mark) = before else { return Some((None, None)) };
+    let mut expected = i128::try_from(mark).unwrap_or(i128::MAX);
+    let mut certain = true;
+    for id in touching {
+        let (delta, known) = effect(&all[id], account);
+        expected = expected.saturating_add(delta);
+        certain &= known;
+    }
+    let now = i128::try_from(balance).unwrap_or(i128::MAX);
+    if balance == 0 && expected > 0 && account.starts_with("Public/") && chain == "lez" {
+        return None;
+    }
+    Some((before, (now > expected).then_some((now - expected, certain))))
+}
+
+/// Whether noting `balance` for `account` now would tell money that arrived
+/// (`note_balances`): a rise its entries don't explain. When it wouldn't, no credit can be
+/// in that balance unseen, so a bridge to the account needn't be asked about this time.
+/// `scope` and `zone` are the ones the balance is noted with (`note_zone_balances`).
+pub fn would_arrive(dir: &Path, at: u64, chain: &str, scope: &str, zone: Option<&str>, account: &str, balance: u128) -> bool {
+    let (seen, all) = (load(&balances_file(dir)), load(&file(dir)));
+    let touching = touching(&all, account, zone);
+    matches!(rise(&all, &seen, &touching, at, chain, &mark_key(chain, scope, account), account, balance), Some((_, Some(_))))
+}
+
+/// How often a followed bridge's receipt is asked (seconds) when its account's balance
+/// gives no reason to (`would_arrive`): each ask is a sequencer read on a balance call, for
+/// as long as a bridge is followed (`BRIDGE_FOLLOW_S`, 30 days).
+pub const RECEIPT_EVERY_S: u64 = 60;
+/// The same, for a bridge overdue (past `BRIDGE_WAIT_S`): one that may never arrive.
+pub const OVERDUE_RECEIPT_EVERY_S: u64 = 3600;
+
+/// Whether a bridge sent `age` seconds ago, whose receipt LEZ last answered about at
+/// `asked` (never: `None`), is due to be asked again at `now`.
+pub fn receipt_due(age: u64, asked: Option<u64>, now: u64) -> bool {
+    let every = if age < BRIDGE_WAIT_S { RECEIPT_EVERY_S } else { OVERDUE_RECEIPT_EVERY_S };
+    asked.map_or(true, |asked| now.saturating_sub(asked) >= every)
+}
+
 /// Notes what `chain`'s accounts hold now, `(account, balance)`, as read from `scope`
 /// (the sequencer, for LEZ): an account that holds more than its last mark plus what the
 /// entries settled since then moved in, less what they moved out and paid, gets an
@@ -437,48 +516,28 @@ fn note(dir: &Path, at: u64, chain: &str, scope: &str, zone: Option<&str>, balan
     let mut marks_changed = false;
     let mut entries_changed = false;
     for (account, balance) in balances {
-        let key = if scope.is_empty() { format!("{chain}:{account}") } else { format!("{chain}@{scope}:{account}") };
-        let touching: Vec<String> = all
-            .iter()
-            .filter(|(_, entry)| entry["from"].as_str() == Some(account) || entry["to"].as_str() == Some(account) || received(entry, account).is_some())
-            .filter(|(_, entry)| zone.is_none_or(|zone| zone_of(entry) == zone))
-            .filter(|(_, entry)| !entry["counted"].as_array().is_some_and(|counted| counted.iter().any(|c| c.as_str() == Some(account))))
-            .map(|(id, _)| id.clone())
-            .collect();
-        if touching.iter().any(|id| in_flight(&all[id], account, at)) {
+        let key = mark_key(chain, scope, account);
+        let touching = touching(&all, account, zone);
+        let Some((before, rise)) = rise(&all, &seen, &touching, at, chain, &key, account, *balance) else {
             continue;
-        }
-        let before = seen.get(&key).and_then(Value::as_str).and_then(|text| text.parse::<u128>().ok());
-        if let Some(before) = before {
-            let mut expected = i128::try_from(before).unwrap_or(i128::MAX);
-            let mut certain = true;
-            for id in &touching {
-                let (delta, known) = effect(&all[id], account);
-                expected = expected.saturating_add(delta);
-                certain &= known;
+        };
+        if let Some((rise, certain)) = rise {
+            let rise = rise.to_string();
+            let mut id = format!("{at}-arrived");
+            while all.contains_key(&id) {
+                id.push('1');
             }
-            let now = i128::try_from(*balance).unwrap_or(i128::MAX);
-            if *balance == 0 && expected > 0 && account.starts_with("Public/") && chain == "lez" {
-                continue;
+            let mut entry = json!({ "id": id, "at": at, "seq": next_seq(&all), "kind": "arrived", "chain": chain, "to": account, "state": "arrived", "counted": [account] });
+            entry = in_zone(entry, zone.unwrap_or(crate::zones::HOME));
+            if certain {
+                entry["amount"] = Value::from(rise);
+            } else {
+                entry["amount"] = Value::Null;
+                entry["at_least"] = Value::from(rise);
             }
-            if now > expected {
-                let rise = (now - expected).to_string();
-                let mut id = format!("{at}-arrived");
-                while all.contains_key(&id) {
-                    id.push('1');
-                }
-                let mut entry = json!({ "id": id, "at": at, "seq": next_seq(&all), "kind": "arrived", "chain": chain, "to": account, "state": "arrived", "counted": [account] });
-                entry = in_zone(entry, zone.unwrap_or(crate::zones::HOME));
-                if certain {
-                    entry["amount"] = Value::from(rise);
-                } else {
-                    entry["amount"] = Value::Null;
-                    entry["at_least"] = Value::from(rise);
-                }
-                all.insert(id.clone(), entry);
-                added.push(id);
-                entries_changed = true;
-            }
+            all.insert(id.clone(), entry);
+            added.push(id);
+            entries_changed = true;
         }
         for id in &touching {
             // A bridge still on its way is counted once it arrives: counted now (as 0), its

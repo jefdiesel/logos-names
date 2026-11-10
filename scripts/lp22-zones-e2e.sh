@@ -473,8 +473,11 @@ seq_down(URL_B)
 r = names("cli_balance")
 show("cli_balance with B's sequencer down", r, 300)
 step("B's sequencer down: no balance is invented", not r["ok"] or r.get("warning") or public_of(r) in (None, B1), r["error"] or str(r.get("warning")))
-sent = names("cli_pay_account", f"Public/{F}", "700", "false")
-step("B's sequencer down: a send is refused before anything starts", not sent["ok"] and names("running_jobs")["value"] in ([], None), str(sent["error"]))
+# The amount has a comma so that logosctl passes it as text: a bare 700 goes as a number, and
+# the call is then refused for its argument, not for the sequencer.
+sent = names("cli_pay_account", f"Public/{F}", "1,700", "false")
+step("B's sequencer down: a send is refused before anything starts",
+     not sent["ok"] and "Nothing was started" in str(sent["error"]) and names("running_jobs")["value"] in ([], None), str(sent["error"]))
 r = names("set_sequencer", URL_B2)
 step("an address that doesn't answer isn't taken for B", r["value"] is False and zone_view()["zones"][1]["sequencer"] == URL_B)
 seq_up(SEQ_B, URL_B2, BASE + 7)

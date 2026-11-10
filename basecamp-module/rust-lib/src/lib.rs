@@ -40,6 +40,7 @@ mod chain_fee;
 mod chain_inscribe;
 mod changes;
 mod cli;
+mod deposit;
 mod page_view;
 mod provider;
 mod provider_inscribe;
@@ -1004,6 +1005,9 @@ struct Names {
     zones: zones::Zones,
     /// Whether home's sequencer was asked for its channel in this run (`home_channel`).
     channel_asked: bool,
+    /// When LEZ last answered about each followed bridge's receipt (seconds), so each is
+    /// asked on its schedule (`activity::receipt_due`), not on every balance read.
+    receipt_asks: std::sync::Mutex<std::collections::BTreeMap<AccountId, u64>>,
 }
 
 /// How long a cached read about a name is used before it is read again.
@@ -1091,6 +1095,7 @@ impl Default for Names {
             publishers: HashMap::new(),
             zones: zones::Zones::new(bare_home(DEFAULT_SEQUENCER)),
             channel_asked: false,
+            receipt_asks: Default::default(),
         };
         // Files saved by versions before 0.10 were readable by every account on the
         // machine; this closes them up once.
@@ -1217,37 +1222,113 @@ fn log_started(out: &str, mut entry: Value) {
     }
 }
 
+/// How long a call that starts a job may spend on its checks, all of them together: the host
+/// gives a call 20 s and drops its answer after that, while the call goes on and may start
+/// the job anyway (job-start-checks-past-host-timeout: three checks of 15-26 s each).
+#[cfg(not(test))]
+const START_BUDGET: std::time::Duration = std::time::Duration::from_secs(12);
+#[cfg(test)]
+const START_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// One call that starts a job: the deadline every one of its checks shares, the sequencer's
+/// health check (on its own thread from the start), and the reads a check already made, so
+/// none is made twice. A job is started only once every check has passed inside the deadline.
+struct Start {
+    deadline: registry::Deadline,
+    probe: cli::Probe,
+    /// The name whose record a check read.
+    record_read: Option<String>,
+    /// Whether a check read an account: a sequencer can say its last block and fail every
+    /// account read (cli-receive-all-starts-with-only-the-probe-answering).
+    account_read: bool,
+}
+
+impl Start {
+    fn new(sequencer: &str) -> Self {
+        Start { deadline: registry::Deadline::after(START_BUDGET), probe: cli::Probe::start(sequencer), record_read: None, account_read: false }
+    }
+
+    /// Refuses when the health check has already failed: nothing more is read then.
+    fn not_down(&self) -> Result<(), String> {
+        match self.probe.answer(std::time::Instant::now()) {
+            Some(Err(why)) => Err(start_refused(&why)),
+            _ => Ok(()),
+        }
+    }
+
+    /// Refuses once the deadline has passed: no job starts after the call's time is up.
+    fn in_time(&self) -> Result<(), String> {
+        if self.deadline.passed() {
+            return Err(start_refused(&format!(
+                "the sequencer answers too slowly to check this now: the checks took more than {} s",
+                START_BUDGET.as_secs()
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Why a job was not started, said as every refusal before a job says it.
+fn start_refused(why: &str) -> String {
+    let why = why.trim().trim_end_matches(['.', ' ']);
+    let why = why.strip_suffix(". Try again shortly").unwrap_or(why);
+    format!("{why}. Nothing was started; try again when it answers.")
+}
+
 /// Refuses to pay the public account `to` (base58) by its ID when it is another wallet's
 /// and LEZ has never seen it: the wallet's send to such an account lands, keeps its fee
 /// and credits nothing (pay_account-to-unseen, F2X). One of this wallet's own accounts
-/// is paid either way; a sequencer that can't be asked leaves the send to it.
-fn payable_account(setup: &cli::Setup, to: &str) -> Result<(), String> {
-    let own = cli::balances_now(setup).is_ok_and(|rows| rows.iter().any(|(account, _)| *account == format!("Public/{to}")));
-    if own {
+/// is paid either way. Read by the job start's deadline; a read that fails refuses.
+fn payable_account(setup: &cli::Setup, to: &str, start: &mut Start) -> Result<(), String> {
+    let id = registry::parse_account(to)?;
+    start.not_down()?;
+    let seen = registry::account_seen(&setup.sequencer, &id, start.deadline).map_err(|why| start_refused(&why))?;
+    start.account_read = true;
+    // Only an unseen account needs the wallet's own list, the slowest read.
+    if seen || cli::balances_by(setup, start.deadline).is_ok_and(|rows| rows.iter().any(|(account, _)| *account == format!("Public/{to}"))) {
         return Ok(());
     }
-    let id = registry::parse_account(to)?;
-    match registry::account_seen(&setup.sequencer, &id) {
-        Ok(false) => Err(format!(
-            "Public/{to} has never been used on LEZ, so it can't be paid by its ID: the payment would cost its fee and credit nothing. Check the ID, or pay its holder's name instead."
-        )),
-        _ => Ok(()),
-    }
+    Err(format!(
+        "Public/{to} has never been used on LEZ, so it can't be paid by its ID: the payment would cost its fee and credit nothing. Check the ID, or pay its holder's name instead."
+    ))
+}
+
+/// An account any wallet job may read to see that the sequencer reads accounts: the wallet's
+/// public one, else the registry's (both are on the chain), else the native token program's.
+fn readable_account(setup: &cli::Setup, program: Option<&registry::AccountId>) -> registry::AccountId {
+    cli::default_public(setup)
+        .ok()
+        .and_then(|id| registry::parse_account(&id).ok())
+        .or_else(|| program.copied())
+        .unwrap_or(registry::NATIVE_TOKEN)
 }
 
 /// Refuses a job while the sequencer doesn't answer, before anything is made or started: a
 /// job that fails at its first read has already changed the wallet (`receive-privately`
 /// made a new private account each time:
 /// receive-privately-during-outage-leaves-orphan-private-accounts). The sequencer must say
-/// its last block and, for a job about a name, read the registry's record of it (a
-/// sequencer can do the first and fail account reads).
-fn chain_answers(setup: &cli::Setup, about: Option<(&registry::AccountId, &str)>) -> Result<(), String> {
-    let refused = |why: String| format!("{}. Nothing was started; try again when it answers.", why.trim().trim_end_matches(['.', ' ']));
-    registry::sequencer_reachable(&setup.sequencer).map_err(refused)?;
+/// its last block and read an account: for a job about a name, the registry's record of it;
+/// for a wallet job, `account` (a sequencer can do the first and fail account reads). All
+/// inside the job start's deadline.
+fn chain_answers(setup: &cli::Setup, about: Option<(&registry::AccountId, &str)>, account: &registry::AccountId, start: &mut Start) -> Result<(), String> {
+    start.not_down()?;
     if let Some((program, name)) = about {
-        registry::name_readable(&setup.sequencer, program, name).map_err(refused)?;
+        if start.record_read.as_deref() != Some(name) {
+            registry::name_readable(&setup.sequencer, program, name, start.deadline).map_err(|why| start_refused(&why))?;
+            start.record_read = Some(name.to_owned());
+        }
+        start.account_read = true;
     }
-    Ok(())
+    if !start.account_read {
+        registry::account_readable(&setup.sequencer, account, start.deadline).map_err(|why| start_refused(&why))?;
+        start.account_read = true;
+    }
+    match start.probe.answer(start.deadline.at) {
+        Some(Ok(())) => {}
+        Some(Err(why)) => return Err(start_refused(&why)),
+        None => return Err(start_refused(&start.deadline.too_slow())),
+    }
+    start.in_time()
 }
 
 /// Notes what `chain`'s accounts hold now, as read from `scope` (the sequencer, for LEZ),
@@ -2142,13 +2223,18 @@ impl Names {
         self.background_job().map_or(Ok(()), |job| Err(cli::busy_with(&job)))
     }
 
-    /// Starts a wallet job (`cli_shield`, `cli_pay_account`).
+    /// Starts a wallet job (`cli_shield`, `cli_pay_account`), its checks inside one deadline.
     fn wallet_job(&self, kind: &str, build: impl FnOnce(&cli::Setup) -> Result<Vec<String>, String>) -> Result<Value, String> {
+        self.wallet_job_by(kind, &mut Start::new(&self.sequencer), build)
+    }
+
+    /// `wallet_job`, as part of a job start (`start`) whose checks began before it.
+    fn wallet_job_by(&self, kind: &str, start: &mut Start, build: impl FnOnce(&cli::Setup) -> Result<Vec<String>, String>) -> Result<Value, String> {
         let setup = self.cli_setup()?;
         setup.wallet_ready()?;
         let command = build(&setup)?;
         self.no_background_job()?;
-        chain_answers(&setup, None)?;
+        chain_answers(&setup, None, &readable_account(&setup, self.program.as_ref()), start)?;
         let jobs = self.jobs()?;
         let id = jobs.prepare(cli::WALLET_JOB)?;
         jobs.start(&setup, &id, cli::WALLET_JOB, kind, command, None)
@@ -2242,11 +2328,22 @@ impl Names {
     }
 
     /// Starts a CLI job for the name a person typed. `build` makes the
-    /// command from the bare name and the job's id.
+    /// command from the bare name and the job's id. Its checks share one deadline.
     fn cli_job(
         &self,
         typed: &str,
         kind: &str,
+        build: impl FnOnce(&cli::Jobs, &str, &str) -> Result<(Vec<String>, Option<std::path::PathBuf>, Value), String>,
+    ) -> String {
+        self.cli_job_by(typed, kind, &mut Start::new(&self.home_sequencer()), build)
+    }
+
+    /// `cli_job`, as part of a job start (`start`) whose checks began before it.
+    fn cli_job_by(
+        &self,
+        typed: &str,
+        kind: &str,
+        start: &mut Start,
         build: impl FnOnce(&cli::Jobs, &str, &str) -> Result<(Vec<String>, Option<std::path::PathBuf>, Value), String>,
     ) -> String {
         reply((|| {
@@ -2255,10 +2352,18 @@ impl Names {
             let setup = self.cli_setup()?;
             setup.wallet_ready()?;
             self.no_background_job()?;
-            chain_answers(&setup, self.program.as_ref().map(|program| (program, name.as_str())))?;
+            let program = self.program.unwrap_or(registry::NATIVE_TOKEN);
+            chain_answers(&setup, self.program.as_ref().map(|program| (program, name.as_str())), &program, start)?;
             let jobs = self.jobs()?;
             let id = jobs.prepare(&name)?;
             let (command, scratch, extra) = build(&jobs, &name, &id)?;
+            // What `build` did (a snapshot fetched) took time too: nothing starts past the deadline.
+            if let Err(late) = start.in_time() {
+                if let Some(scratch) = &scratch {
+                    let _ = std::fs::remove_file(scratch);
+                }
+                return Err(late);
+            }
             let started = jobs.start(&setup, &id, &name, kind, command, scratch)?;
             Ok(merged(started, &extra))
         })())
@@ -2497,12 +2602,16 @@ impl Names {
     /// likely leave the name held by nobody: a program's account (the registry's, the
     /// token program's), or a public account LEZ has never seen that isn't this wallet's
     /// (a mistyped ID can't be told from a new account otherwise).
-    fn may_hold(&self, to: &str) -> Result<(), String> {
+    /// Read by the job start's deadline (`start`); a read that fails refuses.
+    fn may_hold(&self, to: &str, start: &mut Start) -> Result<(), String> {
         let id = registry::parse_account(to)?;
         self.not_a_sink(&id, "hold a name")?;
         if let (Some(bare), Ok(setup)) = (to.strip_prefix("Public/"), self.names_setup()) {
-            let own = cli::balances_now(&setup).is_ok_and(|rows| rows.iter().any(|(account, _)| account == to));
-            if !own && registry::account_seen(&setup.sequencer, &id) == Ok(false) {
+            start.not_down()?;
+            let seen = registry::account_seen(&setup.sequencer, &id, start.deadline).map_err(|why| start_refused(&why))?;
+            start.account_read = true;
+            // Only an unseen account needs the wallet's own list, the slowest read.
+            if !seen && !cli::balances_by(&setup, start.deadline).is_ok_and(|rows| rows.iter().any(|(account, _)| account == to)) {
                 return Err(format!(
                     "Public/{bare} has never been used on LEZ: check the ID, since a mistyped one would leave the name held by nobody. A new account can receive any payment first."
                 ));
@@ -2512,33 +2621,41 @@ impl Names {
     }
 
     /// The wallet's account that holds `name` (`Public/…` or `Private/…`), found as the CLI
-    /// finds it: the one whose tag the name's record holds. `None` when it can't be told
-    /// (no record, the sequencer or the CLI not answering, an account `names balance`
-    /// doesn't list).
-    fn holder_of(&mut self, name: &str) -> Option<String> {
+    /// finds it: the one whose tag the name's record holds, among the accounts the wallet
+    /// lists. `None` when it can't be told (no record, the sequencer or the CLI not answering
+    /// by the job start's deadline).
+    fn holder_of(&mut self, name: &str, start: &mut Start) -> Option<String> {
         let name = registry::parse_name(name).ok()?;
-        let registry = self.registry().ok()?;
+        let program = self.program?;
         let derived = self.derived(&name);
-        let record = registry.record(&name, &derived).ok()??;
-        let rows = cli::balances_now(&self.names_setup().ok()?).ok()?;
-        rows.into_iter()
-            .map(|(account, _)| account)
-            .find(|account| registry::parse_account(account).is_ok_and(|id| registry::owner_tag(&derived.id, &id) == record.owner))
+        start.not_down().ok()?;
+        let record = registry::Registry::by(&self.home_sequencer(), program, start.deadline).record(&name, &derived).ok()?;
+        // The record was read: the job's own check needn't read it again.
+        start.record_read = Some(name.clone());
+        let record = record?;
+        let accounts = cli::wallet_accounts(&self.names_setup().ok()?, start.deadline).ok()?;
+        accounts.into_iter().find(|account| {
+            account.split_once('/').and_then(|(_, id)| registry::parse_account(id).ok()).is_some_and(|id| registry::owner_tag(&derived.id, &id) == record.owner)
+        })
     }
 
     /// Refuses when `to` (`Public/…` or `Private/…`) already holds `name`, by the tag its
-    /// record holds. A record that can't be read leaves it to the CLI.
-    fn not_held_by(&mut self, name: &str, to: &str) -> Result<(), String> {
-        let (Ok(registry), Ok(account)) = (self.registry(), registry::parse_account(to)) else { return Ok(()) };
+    /// record holds, read by the job start's deadline. A record that can't be read refuses
+    /// too: no job about a name starts without it.
+    fn not_held_by(&mut self, name: &str, to: &str, start: &mut Start) -> Result<(), String> {
+        let (Some(program), Ok(account)) = (self.program, registry::parse_account(to)) else { return Ok(()) };
         let derived = self.derived(name);
-        match registry.record(name, &derived) {
-            Ok(Some(record)) if record.owner == registry::owner_tag(&derived.id, &account) => {
+        start.not_down()?;
+        let record = registry::Registry::by(&self.home_sequencer(), program, start.deadline).record(name, &derived).map_err(|why| start_refused(&why))?;
+        start.record_read = Some(name.to_owned());
+        match record {
+            Some(record) if record.owner == registry::owner_tag(&derived.id, &account) => {
                 Err(format!("{} already holds {name}, so nothing was sent", registry::account_text(&account)))
             }
             // A name nobody registered has nothing to hand over: refused before any job
             // and any history entry (cli-transfer-unregistered-name-starts-failing-job).
-            Ok(None) => Err(format!("{name} is not registered, so nothing was sent")),
-            _ => Ok(()),
+            None => Err(format!("{name} is not registered, so nothing was sent")),
+            Some(_) => Ok(()),
         }
     }
 
@@ -2564,7 +2681,7 @@ impl Names {
     /// returns the balances to note (`rows`, what the wallet's LEZ accounts hold as read
     /// from `sequencer`): an account a bridge goes to is read afresh, or left out when its
     /// read can't be told apart from that bridge's arrival.
-    fn settle_activity(&self, dir: &std::path::Path, sequencer: &str, rows: &[(String, u128)], deadline: std::time::Instant) -> Vec<(String, u128)> {
+    fn settle_activity(&self, dir: &std::path::Path, sequencer: &str, rows: &[(String, u128)], deadline: registry::Deadline) -> Vec<(String, u128)> {
         for entry in activity::all(dir).into_iter().filter(|entry| entry["state"] == "sending" || entry["state"] == "in_block") {
             let id = entry["id"].as_str().unwrap_or_default().to_owned();
             let mut settled = Value::Null;
@@ -2673,6 +2790,13 @@ impl Names {
         // (not minted at the second); a mint between them, or an ask LEZ doesn't answer,
         // leaves the account unread this time, so its credit is never also taken for money
         // that arrived (activity::note_balances).
+        //
+        // Bridges are followed for 30 days, and asking every one on every balance read cost
+        // reads without end (and a share of the call's deadline). The bridges to one account
+        // are asked together, and only when one is due by its age (`activity::receipt_due`:
+        // every minute, every hour once overdue) or when the account's balance rose in a way
+        // nothing explains (`activity::would_arrive`): no bridge's credit can be in the read
+        // unseen otherwise, so the wallet's read is noted as it is.
         let at = now();
         let entries = activity::all(dir);
         // A bridge is followed on the zone it went to. One to the zone in use settles with
@@ -2684,16 +2808,37 @@ impl Names {
         let (followed, elsewhere): (Vec<_>, Vec<_>) = activity::bridges_followed(&entries, at)
             .into_iter()
             .partition(|(id, _, _)| went_to.get(id.as_str()).copied().unwrap_or(zones::HOME) == here);
+        let mut asks = self.receipt_asks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        asks.retain(|receipt, _| followed.iter().chain(&elsewhere).any(|(_, _, followed)| followed == receipt));
+        let sent_at = |id: &str| entries.iter().find(|entry| entry["id"] == id).and_then(|entry| entry["at"].as_u64()).unwrap_or(0);
+        let mut accounts: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for (id, to, receipt) in &followed {
+            if activity::receipt_due(at.saturating_sub(sent_at(id)), asks.get(receipt).copied(), at) {
+                accounts.insert(to.as_str());
+            }
+        }
+        for (to, balance) in rows {
+            if followed.iter().any(|(_, bridge_to, _)| bridge_to == to) && activity::would_arrive(dir, at, "lez", zones.zone().scope(), Some(&here), to, *balance) {
+                accounts.insert(to.as_str());
+            }
+        }
         // Every read here shares the call's deadline, so the call answers inside the host's time
         // however many bridges wait; one past it is unread, and the bridge waits a round.
         let ask = |receipt: &registry::AccountId| registry::deposit_minted(sequencer, receipt, deadline).ok();
-        let mut minted: std::collections::HashMap<registry::AccountId, Option<bool>> = followed.iter().map(|(_, _, receipt)| (*receipt, ask(receipt))).collect();
+        let mut minted: std::collections::HashMap<registry::AccountId, Option<bool>> = followed
+            .iter()
+            .filter(|(_, to, _)| accounts.contains(to.as_str()))
+            .map(|(_, _, receipt)| (*receipt, ask(receipt)))
+            .collect();
+        // One to another zone is asked at that zone's sequencer, on the same schedule.
         for (id, _, receipt) in &elsewhere {
+            if !activity::receipt_due(at.saturating_sub(sent_at(id)), asks.get(receipt).copied(), at) {
+                continue;
+            }
             let theirs = went_to.get(id.as_str()).and_then(|zone| zones.index(zone)).and_then(|at| zones.at(at)).map(|zone| zone.sequencer.clone());
             minted.insert(*receipt, theirs.and_then(|sequencer| registry::deposit_minted(&sequencer, receipt, deadline).ok()));
         }
         let mut rows = rows.to_vec();
-        let accounts: std::collections::BTreeSet<&str> = followed.iter().map(|(_, to, _)| to.as_str()).collect();
         for to in accounts {
             let Some(at_row) = rows.iter().position(|(account, _)| account == to) else { continue };
             let receipts: Vec<registry::AccountId> = followed.iter().filter(|(_, bridge_to, _)| bridge_to == to).map(|(_, _, receipt)| *receipt).collect();
@@ -2723,6 +2868,13 @@ impl Names {
                 }
             }
         }
+        // An ask LEZ answered waits its schedule; one it didn't is tried again next time.
+        for (receipt, answer) in &minted {
+            if answer.is_some() {
+                asks.insert(*receipt, at);
+            }
+        }
+        drop(asks);
         for (id, mut fields) in activity::bridge_updates(&entries, at, &|receipt| minted.get(receipt).copied().flatten()) {
             if fields["state"] == "arrived" {
                 fields["arrived_at"] = json!(at);
@@ -3129,7 +3281,10 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         let snapshot = snapshot.trim().to_owned();
-        self.cli_job(&name, "claim", |jobs, name, id| {
+        // The list is fetched within the job start's deadline, like every check.
+        let mut start = Start::new(&self.home_sequencer());
+        let deadline = start.deadline;
+        self.cli_job_by(&name, "claim", &mut start, |jobs, name, id| {
             if std::path::Path::new(&snapshot).is_absolute() {
                 return Ok((cli::claim_args(name, std::path::Path::new(&snapshot))?, None, Value::Null));
             }
@@ -3138,7 +3293,7 @@ impl NamesModule for Names {
                 return Err("give the snapshot as a full path or a URL".to_owned());
             }
             let file = jobs.scratch(id, "snapshot");
-            cli::write_private(&file, &cli::fetch_snapshot(url)?).map_err(|error| format!("cannot keep the list of names: {error}"))?;
+            cli::write_private(&file, &cli::fetch_snapshot(url, deadline.left())?).map_err(|error| format!("cannot keep the list of names: {error}"))?;
             Ok((cli::claim_args(name, &file)?, Some(file), Value::Null))
         })
     }
@@ -3229,15 +3384,17 @@ impl NamesModule for Names {
             Err(error) => return reply(Err(error)),
         };
         let to = command[3].clone();
-        if let Err(refused) = self.may_hold(&to) {
+        // Every check shares one deadline, inside the host's 20 s.
+        let mut start = Start::new(&self.home_sequencer());
+        if let Err(refused) = self.may_hold(&to, &mut start) {
             return reply(Err(refused));
         }
         // Handing a name to the account that holds it is refused here, before any job, as
         // the CLI would refuse it (module-self-transfer-starts-job-logs-failed).
-        if let Err(refused) = self.not_held_by(&command[2], &to) {
+        if let Err(refused) = self.not_held_by(&command[2], &to, &mut start) {
             return reply(Err(refused));
         }
-        let out = self.cli_job(&name, "transfer", |_, _, _| Ok((command, None, Value::Null)));
+        let out = self.cli_job_by(&name, "transfer", &mut start, |_, _, _| Ok((command, None, Value::Null)));
         self.log_started(&out, json!({ "kind": "transfer", "chain": "lez", "name": registry::normalize_name(&name), "to": to }));
         // The names it holds change: read them afresh.
         self.forget_mine();
@@ -3253,8 +3410,9 @@ impl NamesModule for Names {
             Err(error) => return reply(Err(error)),
         };
         // The holder pays the fee, so its page lists it (receive-privately-entry-no-paying-account).
-        let from = self.holder_of(&name);
-        let out = self.cli_job(&name, "receive_privately", |_, _, _| Ok((command, None, Value::Null)));
+        let mut start = Start::new(&self.home_sequencer());
+        let from = self.holder_of(&name, &mut start);
+        let out = self.cli_job_by(&name, "receive_privately", &mut start, |_, _, _| Ok((command, None, Value::Null)));
         // In the history like a transfer, with the fee it paid once it ends.
         self.log_started(&out, json!({ "kind": "receive_privately", "chain": "lez", "name": registry::normalize_name(&name), "from": from }));
         out
@@ -3278,7 +3436,7 @@ impl NamesModule for Names {
         reply_marked((|| {
             let setup = self.cli_setup()?;
             setup.wallet_ready()?;
-            let deadline = std::time::Instant::now() + cli::CALL_BUDGET;
+            let deadline = registry::Deadline::after(cli::CALL_BUDGET);
             let read = cli::balance_read(&setup, deadline)?;
             // Only a read in which the sequencer gave every balance moves the History: an
             // unread balance is never a 0 (selective-degradation-cold-read-false-arrivals).
@@ -3328,7 +3486,7 @@ impl NamesModule for Names {
             // The destination too, before anything is remembered: a refused call leaves
             // config.json as it was (bridge-to-saves-before-validating).
             if let Some(to) = cli::bridge_to(&to)? {
-                self.not_a_sink(&registry::parse_account(&to)?, "take a bridge")?;
+                self.not_a_sink(&registry::parse_account(&to.account)?, "take a bridge")?;
             }
             let setup = self.cli_setup()?;
             if self.bridge_key.as_deref() != Some(key.as_str()) || self.bridge_node.as_deref() != Some(node.as_str()) {
@@ -3493,9 +3651,9 @@ impl NamesModule for Names {
         }
         let listed = (|| -> Result<(Value, Option<String>), String> {
             let dir = config_dir().ok_or("no folder for the Wallet's history")?;
-            let deadline = std::time::Instant::now() + cli::CALL_BUDGET;
+            let deadline = registry::Deadline::after(cli::CALL_BUDGET);
             let setup = self.cli_setup().ok();
-            let read = setup.as_ref().and_then(|setup| cli::balances_now(setup).ok());
+            let read = setup.as_ref().and_then(|setup| cli::balances_by(setup, deadline).ok());
             let sequencer = setup.as_ref().map_or_else(|| self.sequencer.clone(), |setup| setup.sequencer.clone());
             let rows = self.settle_activity(&dir, &sequencer, read.as_deref().unwrap_or_default(), deadline);
             if setup.is_some() && read.is_some() {
@@ -3551,10 +3709,12 @@ impl NamesModule for Names {
             // A program's account and the empty one are refused as cli_bridge_to and
             // cli_transfer refuse them (pay-account-accepts-program-account).
             self.not_a_sink(&registry::parse_account(&to)?, "take a payment")?;
+            // Every check shares one deadline, inside the host's 20 s.
+            let mut start = Start::new(&self.sequencer);
             if let Ok(setup) = self.cli_setup() {
-                payable_account(&setup, &to)?;
+                payable_account(&setup, &to, &mut start)?;
             }
-            self.wallet_job("pay_account", |setup| cli::pay_account_args(setup, &account, &amount, from_private))
+            self.wallet_job_by("pay_account", &mut start, |setup| cli::pay_account_args(setup, &account, &amount, from_private))
         })());
         let from = self.cli_setup().ok().and_then(|setup| {
             if from_private { cli::default_private(&setup).ok().map(|id| format!("Private/{id}")) } else { cli::default_public(&setup).ok().map(|id| format!("Public/{id}")) }
@@ -4428,11 +4588,22 @@ impl NamesModule for Names {
             let amount = chain::whole_amount(&amount)?;
             let to = match cli::bridge_to(&to)? {
                 Some(to) => to,
-                None => cli::default_public(&self.cli_setup()?)?,
+                None => cli::BridgeTo { account: cli::default_public(&self.cli_setup()?)?, key: None },
             };
-            let account = registry::parse_account(&to)?;
+            let account = registry::parse_account(&to.account)?;
+            let (to, given_key) = (to.account, to.key);
             // As a transfer refuses them: a deposit to either lands and nobody can use it.
             self.not_a_sink(&account, "take a bridge")?;
+            // What the deposit carries: the metadata the sequencer's LEZ decodes, or the
+            // deposit is never credited (real-bridges-to-lez-0.4-never-mint). LEZ 0.4 needs the
+            // account's public key: given as the destination, or this wallet's own. Refused
+            // here, before anything is recorded or sent, when it can't be made.
+            let lez = registry::lez_version(&self.sequencer)?;
+            let key = match (lez, given_key) {
+                (deposit::Lez::V04, None) => wallet::public_key(&self.cli_setup()?, &account)?,
+                (_, key) => key,
+            };
+            let metadata = deposit::metadata(lez, &account, key.map(deposit::Evidence::Key).as_ref()).map_err(|refusal| refusal.words(&registry::account_text))?;
             let notes = chain::notes_of(&node::call("wallet_get_notes", json!([from, ""]), node::QUICK)?);
             // A note a send from here still spends (not in a block yet) is not this one's:
             // two deposits of one note both got a hash and only one could land.
@@ -4520,7 +4691,8 @@ impl NamesModule for Names {
                 // is needed, so none is read: a destination LEZ has never seen (`null`) is
                 // fine (chain-bridge-null-destination-read-taken-as-zero-strands-bridge).
                 let channel_bytes = <[u8; 32]>::try_from(registry::unhex(&channel)?).map_err(|_| "LEZ named a channel that isn't 32 bytes".to_owned())?;
-                let op_id = chain::deposit_op_id(&channel_bytes, std::slice::from_ref(&note), &account).ok_or("the note to deposit isn't 32 bytes of hex")?;
+                // Worked out from the very metadata sent: the op id changes with it.
+                let op_id = chain::deposit_op_id(&channel_bytes, std::slice::from_ref(&note), &metadata).ok_or("the note to deposit isn't 32 bytes of hex")?;
                 let receipt = registry::account_text(&registry::deposit_receipt(&op_id));
                 plan["op_id"] = json!(registry::hex(&op_id));
                 plan["receipt"] = json!(receipt);
@@ -4533,14 +4705,14 @@ impl NamesModule for Names {
                 let entry = config_dir().map(|dir| {
                     let entry = json!({ "kind": "bridge", "chain": "logos", "from": from, "to": format!("Public/{to}"),
                         "amount": amount.to_string(), "hash": null, "note": note, "channel": channel, "op_id": registry::hex(&op_id),
-                        "receipt": receipt, "followed": true });
+                        "metadata": registry::hex(&metadata), "receipt": receipt, "followed": true });
                     let id = activity::add(&dir, now(), activity::in_zone(entry, &zones.current_id()));
                     (dir, id)
                 });
-                // The deposit's metadata is the LEZ account's 32 bytes, as `names bridge` sends it.
+                // The metadata as `names bridge` sends it too (`deposit::metadata`).
                 let deposited = match node::call(
                     "channel_deposit_with_notes",
-                    json!([channel, [note], registry::hex(&account), from, [from], BRIDGE_MAX_FEE.to_string(), ""]),
+                    json!([channel, [note], registry::hex(&metadata), from, [from], BRIDGE_MAX_FEE.to_string(), ""]),
                     node::PROVING,
                 ) {
                     Ok(deposited) => deposited,
@@ -5764,6 +5936,7 @@ mod tests {
             publishers: HashMap::new(),
             zones: zones::Zones::new(bare_home(DEFAULT_SEQUENCER)),
             channel_asked: false,
+            receipt_asks: Default::default(),
         }
     }
 
@@ -5951,7 +6124,15 @@ mod tests {
         names.cli = Some(script.to_string_lossy().into_owned());
         names.cli_wallet = Some(wallet.to_string_lossy().into_owned());
         names.jobs_dir = Some(dir.join("jobs"));
+        // A stand-in sequencer on loopback that has no records: a read a job start makes of a
+        // name not in `RECORDS` never waits on the network.
+        names.sequencer = registry::stub_rpc(|request| registry::rpc_ok(if request["method"] == "getLastBlockId" { json!(7) } else { Value::Null }));
         (names, dir)
+    }
+
+    /// Whether `dir`'s jobs folder holds no job.
+    fn no_jobs(dir: &std::path::Path) -> bool {
+        std::fs::read_dir(dir.join("jobs")).map_or(true, |entries| entries.count() == 0)
     }
 
     /// transfer-case-mangled-id-loses-name: the module handed a name to an ID nobody
@@ -6014,7 +6195,7 @@ mod tests {
         names.bridge_key = Some("ab".repeat(32));
         names.bridge_node = Some("http://127.0.0.1:8080".into());
         let refused = parsed(&names.cli_bridge_to("5".into(), "12".repeat(32), "NOT-AN-ACCOUNT".into(), "http://127.0.0.1:4321".into(), false));
-        assert_eq!(refused["error"], "the bridge credits a public LEZ account: Public/ and its ID", "{refused}");
+        assert_eq!(refused["error"], "the bridge credits a public LEZ account: Public/ and its ID, or the account's public key (64 hex characters)", "{refused}");
         assert_eq!((names.bridge_key.clone(), names.bridge_node.clone()), (Some("ab".repeat(32)), Some("http://127.0.0.1:8080".to_owned())));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -6134,9 +6315,10 @@ mod tests {
         let done = job_end(&mut names, &id);
         assert_eq!(done["state"], "done");
         let program = registry::account_text(&[7; 32]);
+        let sequencer = names.sequencer.clone();
         assert_eq!(
             done["log_tail"],
-            format!("[--program={program}]\n[--rpc={DEFAULT_SEQUENCER}]\n[set-text]\n[--]\n[jef]\n[chat]\n[say \"hi\"\nand $(id)]")
+            format!("[--program={program}]\n[--rpc={sequencer}]\n[set-text]\n[--]\n[jef]\n[chat]\n[say \"hi\"\nand $(id)]")
         );
 
         let page = parsed(&names.cli_set_page("jef".into(), "text/plain; charset=utf-8".into(), "line 1\n-- line 2".into()));
@@ -6261,6 +6443,134 @@ mod tests {
         let warning = seen["warning"].as_str().unwrap();
         assert!(warning.starts_with("Your names as read ") && warning.contains("HTTP 503"), "{warning}");
         assert!(seen["as_of"].as_u64().is_some(), "{seen}");
+    }
+
+    /// job-start-checks-past-host-timeout: with a slow sequencer, cli_transfer's checks each
+    /// had their own budget (16 s, 10 s, 15 s, 5 s + 15 s), so the call ran past the host's
+    /// 20 s, came back with no result, and could start the job anyway. Now every check of a
+    /// job start shares one deadline (3 s in tests), and nothing starts once it has passed.
+    #[test]
+    fn the_checks_of_a_job_start_share_one_deadline() {
+        let (mut names, dir) = with_fake_cli("startdeadline", "exit 0");
+        let seen = "9Dk3PQD467hXAbsbMzrFYVPu5HFvUqKkU7VdoQD9oirA";
+        let derived = registry::derive("xferslow");
+        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner: [3; 32], expires: registry::NEVER, profile: registry::Profile::default(), claimed: false })));
+        // Each read takes 1.6 s: either alone fits the 3 s a job start has, the two together don't.
+        registry::STUB_DELAY.with(|delay| delay.set(std::time::Duration::from_millis(1600)));
+        let started = std::time::Instant::now();
+        let refused = parsed(&names.cli_transfer("xferslow".into(), format!("Public/{seen}")));
+        let took = started.elapsed();
+        registry::STUB_DELAY.with(|delay| delay.set(std::time::Duration::ZERO));
+        assert_eq!(refused["success"], false, "{refused}");
+        let error = refused["error"].as_str().unwrap();
+        assert!(error.ends_with("Nothing was started; try again when it answers."), "{error}");
+        assert!(error.contains(&format!("didn't answer within {} s", START_BUDGET.as_secs())), "{error}");
+        assert!(took < START_BUDGET + std::time::Duration::from_millis(600), "answered inside the deadline: {took:?}");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(no_jobs(&dir), "nothing started, not even after the answer");
+        // A sequencer quick enough for every check: the same hand-over starts.
+        registry::STUB_DELAY.with(|delay| delay.set(std::time::Duration::from_millis(400)));
+        let started = parsed(&names.cli_transfer("xferslow".into(), format!("Public/{seen}")));
+        registry::STUB_DELAY.with(|delay| delay.set(std::time::Duration::ZERO));
+        let id = started["value"]["id"].as_str().unwrap_or_else(|| panic!("a job: {started}")).to_owned();
+        assert_eq!(job_end(&mut names, &id)["state"], "done");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The deadline is checked last, right before a job starts: a check that passed late
+    /// still starts nothing.
+    #[test]
+    fn nothing_starts_once_the_deadline_has_passed() {
+        let mut start = Start::new("http://127.0.0.1:9/");
+        assert_eq!(start.in_time(), Ok(()));
+        start.deadline = registry::Deadline { start: start.deadline.start, at: std::time::Instant::now() };
+        let late = start.in_time().expect_err("past the deadline");
+        assert!(late.starts_with("the sequencer answers too slowly to check this now") && late.ends_with("Nothing was started; try again when it answers."), "{late}");
+        assert_eq!(
+            start_refused("could not reach the sequencer: it didn't answer within 12 s. Try again shortly"),
+            "could not reach the sequencer: it didn't answer within 12 s. Nothing was started; try again when it answers."
+        );
+    }
+
+    /// cli-receive-all-starts-with-only-the-probe-answering: with the sequencer saying its
+    /// last block and refusing every other read, cli_receive_all started a job that failed
+    /// at its first read. A wallet job now needs an account read too.
+    #[test]
+    fn a_wallet_job_needs_the_sequencer_to_read_accounts() {
+        let (mut names, dir) = with_fake_cli("probeonly", "case \"$*\" in *--help*) exit 0;; esac\nexit 0");
+        registry::ACCOUNTS_UNREADABLE.with(|down| down.set(true));
+        let refused = [parsed(&names.cli_receive_all()), parsed(&names.cli_receive())];
+        registry::ACCOUNTS_UNREADABLE.with(|down| down.set(false));
+        for refused in &refused {
+            let error = refused["error"].as_str().unwrap_or_else(|| panic!("refused: {refused}"));
+            assert!(error.contains("HTTP 503") && error.ends_with("Nothing was started; try again when it answers."), "{error}");
+        }
+        assert!(no_jobs(&dir), "nothing started");
+        let started = parsed(&names.cli_receive_all());
+        let id = started["value"]["id"].as_str().unwrap_or_else(|| panic!("a job: {started}")).to_owned();
+        assert_eq!(job_end(&mut names, &id)["state"], "done");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// cli-balance-bare-it-didnt-answer: with the 0.4 CLI, when only the health check
+    /// answered, cli_balance failed with a bare "it didn't answer". Each balance the CLI
+    /// couldn't read is read by the module itself: the sequencer's own reason, or its answer.
+    #[test]
+    fn a_balance_the_cli_couldnt_read_says_why_or_is_read_again() {
+        let (a, b) = ("CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "9Dk3PQD467hXAbsbMzrFYVPu5HFvUqKkU7VdoQD9oirA");
+        let tail = format!(
+            "case \"$*\" in *balance*) echo 'public accounts (seen on chain):'; echo '  Public/{a}  unknown  (default)'; echo '  Public/{b}  unknown'; echo \"Error: the sequencer didn't answer, so 2 public balance(s) are unknown; try again when it is reachable\" >&2; exit 1;; esac"
+        );
+        let (mut names, dir) = with_fake_cli("balanceunknown", &tail);
+        names.sequencer = registry::stub_rpc(|request| if request["method"] == "getLastBlockId" { registry::rpc_ok(json!(7)) } else { (503, "upstream 503".into()) });
+        let down = parsed(&names.cli_balance());
+        assert_eq!(down["success"], false, "{down}");
+        assert_eq!(down["error"], "could not reach the sequencer: it answered HTTP 503 instead of a reading", "{down}");
+        // The sequencer answers the module: the balances are what it gives, and whole.
+        names.sequencer = registry::stub_rpc(|request| registry::rpc_ok(if request["method"] == "getLastBlockId" { json!(7) } else { registry::view_holding(5) }));
+        let read = parsed(&names.cli_balance());
+        assert_eq!(read["success"], true, "{read}");
+        assert_eq!(read["partial"], Value::Null, "{read}");
+        assert_eq!(read["value"]["public"]["balance"], "5", "{read}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// october-cli-mine-blames-the-sequencer: the October CLI called seqoct "no longer held
+    /// by this wallet" (it couldn't decode its record), and cli_mine failed with "The
+    /// sequencer didn't give the record of seqoct" though the sequencer gave it. The module
+    /// reads the record itself and lists a name one of the wallet's accounts holds.
+    #[test]
+    fn a_name_the_cli_couldnt_read_but_the_wallet_holds_is_listed() {
+        let holder = "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk";
+        let tail = format!("case \"$*\" in *\"account list\"*) echo '/0 Public/{holder}';; *) echo 'seqoct.lez  no longer held by this wallet'; echo 'goneold.lez  no longer held by this wallet';; esac");
+        let (mut names, dir) = with_fake_cli("mineoct", &tail);
+        let derived = registry::derive("seqoct");
+        let owner = registry::owner_tag(&derived.id, &registry::parse_account(holder).unwrap());
+        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner, expires: registry::NEVER, profile: registry::Profile::default(), claimed: false })));
+        let mine = parsed(&names.cli_mine());
+        assert_eq!(mine["success"], true, "{mine}");
+        // goneold has no record (the stand-in sequencer gives none): it really is gone.
+        assert_eq!(
+            mine["value"],
+            json!([{ "name": "seqoct", "display": "seqoct", "signer": "cli", "state": "held by a deposit (no expiry)", "lapsed": false, "registering": false, "failed": false, "private": false, "not_public": null }]),
+            "{mine}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_name_listed_from_its_record_reads_as_the_cli_writes_it() {
+        assert_eq!(cli::readable(0), "1970-01-01 00:00:00Z");
+        assert_eq!(cli::readable(1_794_243_900_000), "2026-11-09 17:05:00Z");
+        let record = |expires| registry::Resolved { owner: [3; 32], expires, profile: registry::Profile::default(), claimed: false };
+        let held = cli::held_entry("jef", &record(1_794_243_900_000), "Private/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", 1_794_243_000_000);
+        assert_eq!((held["state"].as_str(), held["lapsed"].as_bool(), held["private"].as_bool()), (Some("held until 2026-11-09 17:05:00Z"), Some(false), Some(true)));
+        let lapsed = cli::held_entry("jef", &record(1_794_243_900_000), "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", 1_794_243_900_000);
+        assert_eq!((lapsed["state"].as_str(), lapsed["lapsed"].as_bool(), lapsed["private"].as_bool()), (Some("lapsed until 2026-11-09 17:05:00Z"), Some(true), Some(false)));
+        assert_eq!(
+            cli::listed_accounts("/0 Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk (default)\n/1/0 Private/9Dk3PQD467hXAbsbMzrFYVPu5HFvUqKkU7VdoQD9oirA, Public/nope"),
+            ["Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "Private/9Dk3PQD467hXAbsbMzrFYVPu5HFvUqKkU7VdoQD9oirA"]
+        );
     }
 
     #[test]
@@ -6438,6 +6748,66 @@ mod tests {
         assert!(parsed(&names.chain_bridge(NODE_KEY.into(), format!("Private/{to}"), "1000000".into(), false))["error"].as_str().unwrap().contains("public LEZ account"));
         // Nor one with a second prefix inside (account-prefix-double-strip: sent to the node as Public/<id>).
         assert!(parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/Private/{to}"), "1000000".into(), false))["error"].as_str().unwrap().contains("Public/ once"));
+    }
+
+    /// real-bridges-to-lez-0.4-never-mint: the module sent the account's 32 bytes as the
+    /// deposit's metadata, which LEZ 0.4 can't decode, so no bridge was ever credited. On 0.4
+    /// a deposit carries the account's public key (tag 1, Key evidence): the wallet's own,
+    /// or one given as the destination. Without it, or when LEZ's version can't be told,
+    /// nothing is recorded or sent. The op id and receipt are worked out from those bytes.
+    #[test]
+    fn a_bridge_to_lez_0_4_carries_the_accounts_key_and_is_refused_without_it() {
+        const E8: &str = "e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8";
+        const KEY: &str = "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
+        let key = deposit::public_key_text(KEY).unwrap();
+        let mine = deposit::key_account(&key);
+        let other = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
+        // The wallet holds `mine` (its key told by `module accounts`), not `other`.
+        let accounts = json!({ "public": [registry::account_text(&mine)], "private": [], "keys": { registry::account_text(&mine): KEY } });
+        let (mut names, dir) = with_fake_cli("bridge-04", &format!("echo '{accounts}'"));
+        registry::LEZ.with(|lez| lez.set(Some(deposit::Lez::V04)));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": E8, "value": "1000000" }, { "id": "c0de", "value": "5000000" }] }));
+        node_answers("get_channel_state", json!({ "configuration_threshold": 3 }));
+        node_answers("channel_deposit_with_notes", json!("ab".repeat(32)));
+        let history = || activity::all(&config_dir().unwrap()).len();
+        let before = history();
+        // Another's account by its ID: refused, plan or send, before anything is recorded.
+        for send in [false, true] {
+            let refused = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{other}"), "1000000".into(), send));
+            let said = refused["error"].as_str().unwrap();
+            assert!(said.contains(&format!("doesn't hold Public/{other}")) && said.contains("public key") && said.ends_with("Nothing was sent."), "{said}");
+        }
+        // LEZ's version can't be told: refused the same way.
+        registry::LEZ.with(|lez| lez.set(None));
+        let unknown = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{}", registry::account_text(&mine)), "1000000".into(), true));
+        assert_eq!(unknown["error"], deposit::UNKNOWN_LEZ);
+        registry::LEZ.with(|lez| lez.set(Some(deposit::Lez::V04)));
+        assert!(!node_asked().contains(&"channel_deposit_with_notes".to_owned()), "nothing deposited");
+        assert_eq!(history(), before, "nothing recorded");
+        // The wallet's own account by its ID: its key, from the wallet, is the evidence.
+        let sent = parsed(&names.chain_bridge(NODE_KEY.into(), format!("Public/{}", registry::account_text(&mine)), "1000000".into(), true));
+        assert_eq!(sent["value"]["sent"], true, "{sent}");
+        let metadata = [&[1_u8, 0][..], &key[..]].concat();
+        let asked = node::ASKED.with(|asked| asked.borrow().iter().rev().find(|(m, _)| m == "channel_deposit_with_notes").map(|(_, a)| a.clone())).unwrap();
+        assert_eq!(asked[2], registry::hex(&metadata), "tag 1, Key, the account's key: {asked}");
+        assert_eq!(deposit::credited(deposit::Lez::V04, &metadata), Some(mine));
+        // Followed by the receipt of the op id of exactly those bytes.
+        let op = chain::deposit_op_id(&[2; 32], &[E8.to_owned()], &metadata).unwrap();
+        assert_eq!(sent["value"]["op_id"], registry::hex(&op));
+        assert_eq!(sent["value"]["receipt"], registry::account_text(&registry::deposit_receipt(&op)));
+        let entry = activity::all(&config_dir().unwrap()).into_iter().find(|e| e["kind"] == "bridge" && e["hash"] == "ab".repeat(32)).unwrap();
+        assert_eq!(entry["metadata"], registry::hex(&metadata));
+        // Recomputed from what it recorded (as for an entry that lost its op id), the same.
+        let mut bare = entry.clone();
+        bare["op_id"] = Value::Null;
+        assert_eq!(activity::bridge_op_id(&bare), Some(op));
+        // Another's account by its public key: that key is the evidence.
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "e9".repeat(32), "value": "1000000" }, { "id": "c1de", "value": "5000000" }] }));
+        let theirs = "dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659";
+        let by_key = parsed(&names.chain_bridge(NODE_KEY.into(), theirs.into(), "1000000".into(), false));
+        let their_account = deposit::key_account(&deposit::public_key_text(theirs).unwrap());
+        assert_eq!(by_key["value"]["to"], registry::account_text(&their_account), "{by_key}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
 
@@ -6877,7 +7247,9 @@ mod tests {
     /// `from`, so the holder account that paid its fee (479,472) showed nothing.
     #[test]
     fn a_receive_privately_entry_names_the_holder_that_pays() {
-        let tail = format!("case \"$*\" in\n*balance*) echo '  Public/{PUBLIC}  267605984  (default)'; echo '  Private/{PRIVATE}  250  (default)' ;;\nesac");
+        // The holder is found among the accounts the wallet lists, which needs no read of the
+        // sequencer (a job start's deadline is spent on the sequencer's checks).
+        let tail = format!("case \"$*\" in\n*\"account list\"*) echo '/0 Public/{PUBLIC} (default)'; echo '/1/0 Private/{PRIVATE}' ;;\nesac");
         let (mut names, dir) = with_wallet("rp-holder", &tail);
         let derived = registry::derive("probealpha");
         let holder = registry::parse_account(PUBLIC).unwrap();
@@ -7039,21 +7411,77 @@ mod tests {
         let receipt = activity::bridge_receipt(&activity::all(&dir)[0]).unwrap();
         let state = || activity::all(&dir).into_iter().find(|e| e["id"] == id.as_str()).unwrap()["state"].as_str().unwrap().to_owned();
         let stale = [(to.clone(), 20_000_u128), ("Public/other".to_owned(), 7)];
+        // Each step below is a later round, when the receipt is due again.
+        let due_again = || names.receipt_asks.lock().unwrap().clear();
         // Not minted: the account is read afresh (the wallet's read may be older).
-        assert_eq!(names.settle_activity(&dir, "seq", &stale, std::time::Instant::now() + cli::CALL_BUDGET), [(to.clone(), 23_000), ("Public/other".to_owned(), 7)]);
+        assert_eq!(names.settle_activity(&dir, "seq", &stale, registry::Deadline::after(cli::CALL_BUDGET)), [(to.clone(), 23_000), ("Public/other".to_owned(), 7)]);
         assert_eq!(state(), "in_block");
         // LEZ doesn't answer for the receipt: the account isn't read this time.
+        due_again();
         registry::MINTED_UNREAD.with(|unread| unread.set(true));
-        assert_eq!(names.settle_activity(&dir, "seq", &stale, std::time::Instant::now() + cli::CALL_BUDGET), [("Public/other".to_owned(), 7)]);
+        assert_eq!(names.settle_activity(&dir, "seq", &stale, registry::Deadline::after(cli::CALL_BUDGET)), [("Public/other".to_owned(), 7)]);
         registry::MINTED_UNREAD.with(|unread| unread.set(false));
         assert_eq!(state(), "in_block");
         // Minted between the first ask and the second: arrived, and the account isn't read this time.
+        due_again();
         let next = registry::MINTED_ASKED.with(std::cell::Cell::get);
         registry::MINTED.with(|minted| minted.borrow_mut().push((receipt, next + 1)));
-        assert_eq!(names.settle_activity(&dir, "seq", &stale, std::time::Instant::now() + cli::CALL_BUDGET), [("Public/other".to_owned(), 7)]);
+        assert_eq!(names.settle_activity(&dir, "seq", &stale, registry::Deadline::after(cli::CALL_BUDGET)), [("Public/other".to_owned(), 7)]);
         assert_eq!(state(), "arrived");
         // Arrived, it isn't asked again; the account is the wallet's read.
-        assert_eq!(names.settle_activity(&dir, "seq", &stale, std::time::Instant::now() + cli::CALL_BUDGET), stale);
+        due_again();
+        assert_eq!(names.settle_activity(&dir, "seq", &stale, registry::Deadline::after(cli::CALL_BUDGET)), stale);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// bridges-followed-30-days-cost-receipt-reads: every balance read asked every followed
+    /// bridge's receipt twice, for 30 days. Now an overdue bridge is asked hourly, unless its
+    /// account's balance rose in a way nothing explains; then at once, so a mint in between
+    /// is still told once, as the bridge arriving late, never also as money that arrived.
+    #[test]
+    fn an_overdue_bridge_is_asked_on_its_schedule_or_when_its_account_rises() {
+        let names = fresh();
+        let dir = config_dir().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let account = [6_u8; 32];
+        let to = format!("Public/{}", registry::account_text(&account));
+        registry::BALANCES.with(|held| held.borrow_mut().push((account, 10_000)));
+        let three_days = 3 * 24 * 3600;
+        let id = activity::add(&dir, now() - three_days, json!({ "kind": "bridge", "chain": "logos", "to": to, "amount": "3000",
+            "note": "12".repeat(32), "channel": "00".repeat(32), "state": "in_block" }));
+        let receipt = activity::bridge_receipt(&activity::all(&dir)[0]).unwrap();
+        let asked = || registry::MINTED_ASKED.with(std::cell::Cell::get);
+        let settle = |balance: u128| {
+            let rows = names.settle_activity(&dir, "seq", &[(to.clone(), balance)], registry::Deadline::after(cli::CALL_BUDGET));
+            // Noted as the module notes it: under the zone in use's marks, with its entries.
+            names.note_lez(&rows);
+            rows
+        };
+        // First round: asked (never asked before), around a fresh read; the mark is set.
+        let first = asked();
+        assert_eq!(settle(10_000), [(to.clone(), 10_000)]);
+        assert_eq!(asked() - first, 2, "before and after the fresh read");
+        // Rounds with nothing new: not asked, the wallet's read noted as it is.
+        let quiet = asked();
+        for _ in 0..5 {
+            assert_eq!(settle(10_000), [(to.clone(), 10_000)]);
+        }
+        assert_eq!(asked(), quiet, "an overdue bridge isn't asked on every balance read");
+        // Minted meanwhile: the account rose, so the receipt is asked now, whatever the hour.
+        registry::MINTED.with(|minted| minted.borrow_mut().push((receipt, 0)));
+        registry::BALANCES.with(|held| held.borrow_mut().iter_mut().for_each(|(id, held)| if *id == account { *held = 13_000 }));
+        assert_eq!(settle(13_000), [(to.clone(), 13_000)]);
+        let all = activity::all(&dir);
+        let bridge = all.iter().find(|e| e["id"] == id.as_str()).unwrap();
+        assert_eq!((bridge["state"].as_str(), bridge["late"].as_bool()), (Some("arrived"), Some(true)), "{bridge}");
+        assert!(!all.iter().any(|e| e["kind"] == "arrived"), "the credit is the bridge's, told once: {all:?}");
+        // The schedule itself: every minute while it waits, hourly once overdue.
+        assert!(activity::receipt_due(60, None, 1_000));
+        assert!(!activity::receipt_due(60, Some(990), 1_000));
+        assert!(activity::receipt_due(60, Some(940), 1_000));
+        assert!(!activity::receipt_due(three_days, Some(10_000 - 600), 10_000));
+        assert!(activity::receipt_due(three_days, Some(10_000 - 3_600), 10_000));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -7258,6 +7686,7 @@ mod tests {
     #[test]
     fn another_app_can_read_names_but_not_pay_or_repoint_the_module() {
         let (mut names, dir) = with_fake_cli("other-app", "echo should-not-run > \"$(dirname \"$0\")/ran\"");
+        let sequencer = names.sequencer.clone();
         as_caller(logos_rust_sdk::LogosCaller::Module { name: "evil_ui".into(), instance: None });
         let paid = parsed(&names.cli_pay("victim".into(), "1000000".into()));
         assert_eq!(paid["success"], false, "{paid}");
@@ -7273,7 +7702,7 @@ mod tests {
         assert!(!names.set_cli_wallet(dir.to_string_lossy().into_owned()));
         assert!(!names.set_wallet_files(String::new(), String::new()));
         assert!(!names.set_registry(registry::account_text(&[9; 32])));
-        assert_eq!(parsed(&names.get_config())["sequencer"], DEFAULT_SEQUENCER);
+        assert_eq!(parsed(&names.get_config())["sequencer"], sequencer.as_str());
         assert!(!dir.join("ran").exists(), "the CLI must not have run");
         // Reading stays open to every app.
         assert_eq!(names.normalize("@Jef".into()), "jef");

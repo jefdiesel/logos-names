@@ -90,6 +90,19 @@ struct Defaults {
     labels: std::collections::BTreeMap<String, String>,
 }
 
+/// Whether `name` is queued to be made public (`then_public`), as its registration goes on. A
+/// new commitment says it afresh from `public` (`--public`), so a `--public` that was refused
+/// before its commitment leaves nothing behind for a later plain registration to act on. A
+/// resumed one keeps what was asked when it was made, and `--public` can still ask it now.
+fn queue_public(then_public: &mut Vec<String>, name: &str, public: bool, fresh: bool) {
+    let queued = then_public.iter().any(|queued| queued == name);
+    if public && !queued {
+        then_public.push(name.to_owned());
+    } else if !public && fresh && queued {
+        then_public.retain(|queued| queued != name);
+    }
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Pending {
     owner: String,
@@ -603,7 +616,9 @@ enum Command {
         /// are used, so it may be a little more.
         #[arg(value_parser = tokens::parse_amount, allow_hyphen_values = true)]
         amount: u128,
-        /// The LEZ public account to credit, such as `Public/<id>`.
+        /// The LEZ public account to credit: `Public/<id>`, or its public key (64 hex
+        /// characters). LEZ 0.4 credits a bridge only to an account named by its key, so for
+        /// an account this wallet doesn't hold, give its key (its owner can tell it).
         #[arg(long)]
         to: String,
         /// The Logos Blockchain public key (64 hex characters) whose notes pay, as the
@@ -748,9 +763,14 @@ mod board;
 mod claims;
 mod chain;
 mod chain_fee;
+/// The deposit encoding, one file shared with the Basecamp module so both send the same bytes.
+#[path = "../../basecamp-module/rust-lib/src/deposit.rs"]
+#[allow(dead_code)] // the receipt and op id parts are the module's (the CLI's tests check them)
+mod deposit;
 mod fees;
 mod plan;
 mod module;
+mod prover;
 mod tokens;
 
 /// The text entry that points a name to another (SPEC.md §7, Forwarding).
@@ -809,22 +829,68 @@ fn parse_payee_name(input: &str) -> Result<String, String> {
     parse_name(input)
 }
 
-/// The LEZ account `names bridge` credits: a public one (`Public/<id>` or bare) that
-/// someone can use, never the empty account or a program's (`programs`), as the
-/// Basecamp module refuses them (cli-bridge-direct-amount-zero-and-private-prefix).
-fn bridge_destination(to: &str, programs: &[AccountId]) -> Result<AccountId, String> {
+/// The LEZ account `names bridge` credits: a public one (`Public/<id>` or bare, or its
+/// public key as 64 hex, which names the account and is what LEZ 0.4 needs for one this
+/// wallet doesn't hold) that someone can use, never the empty account or a program's
+/// (`programs`), as the Basecamp module refuses them
+/// (cli-bridge-direct-amount-zero-and-private-prefix). With the key when one was given.
+fn bridge_destination(to: &str, programs: &[AccountId]) -> Result<(AccountId, Option<[u8; 32]>), String> {
     let to = to.trim();
     if to.starts_with("Private/") {
         return Err("the bridge credits a public account: give --to as Public/<id>".to_owned());
     }
-    let id = parse_account(to)?;
+    let key = deposit::public_key_text(to);
+    // Checked whatever LEZ the sequencer runs: on 0.3 the deposit names the account the key
+    // derives, which nobody could spend from if the key isn't one (cli-bridge-03-skips-curve-check).
+    if let Some(key) = key.filter(|key| !deposit::valid_public_key(key)) {
+        return Err(deposit::Refusal::NotAKey { key }.words(&|account| AccountId::new(*account).to_string()));
+    }
+    let id = match key {
+        Some(key) => AccountId::new(deposit::key_account(&key)),
+        None => parse_account(to)?,
+    };
     if id.value().iter().all(|byte| *byte == 0) {
         return Err("that is the empty account (all 1s), which no one holds".to_owned());
     }
     if programs.contains(&id) {
         return Err("that is a program's account, which can't take a bridge".to_owned());
     }
-    Ok(id)
+    Ok((id, key))
+}
+
+/// Which LEZ the sequencer at `rpc` runs (`deposit::lez_of`), so a deposit carries the
+/// metadata it decodes; refused when it can't be told.
+fn lez_version(rpc: &str) -> Result<deposit::Lez> {
+    let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": deposit::PROBE_METHOD, "params": [deposit::PROBE_ACCOUNT] });
+    let mut response = ureq::post(rpc)
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .header("Content-Type", "application/json")
+        .send(body.to_string())
+        .with_context(|| format!("cannot reach the sequencer at {rpc}"))?;
+    let reply: serde_json::Value = serde_json::from_str(&response.body_mut().read_to_string().unwrap_or_default()).unwrap_or_default();
+    deposit::lez_of(&reply).ok_or_else(|| anyhow!(deposit::UNKNOWN_LEZ))
+}
+
+/// The public key of `account` when this wallet holds it: what LEZ 0.4 needs to credit a
+/// bridge to it. Opening the wallet reads its file and signs nothing.
+async fn held_public_key(overrides: Option<WalletConfigOverrides>, account: AccountId) -> Option<[u8; 32]> {
+    let wallet = open_wallet(overrides, false, false).await.ok()?;
+    wallet.get_account_public_signing_key(account).map(|key| *lee::PublicKey::new_from_private_key(key).value())
+}
+
+/// The metadata of a deposit crediting `to` (`deposit::metadata`), for the LEZ at `rpc`:
+/// on 0.4 with `key` (given as `--to`) or the wallet's own key for `to`, and refused in
+/// plain words, before anything is sent, when neither is there.
+async fn bridge_metadata(rpc: &str, overrides: Option<WalletConfigOverrides>, to: AccountId, key: Option<[u8; 32]>) -> Result<Vec<u8>> {
+    let lez = lez_version(rpc)?;
+    let key = match (lez, key) {
+        (deposit::Lez::V04, None) => held_public_key(overrides, to).await,
+        (_, key) => key,
+    };
+    deposit::metadata(lez, to.value(), key.map(deposit::Evidence::Key).as_ref())
+        .map_err(|refusal| anyhow!(refusal.words(&|account: &[u8; 32]| AccountId::new(*account).to_string())))
 }
 
 /// How `names balance` ends: an error when it could not catch up with the chain or read
@@ -1047,16 +1113,21 @@ impl Client {
     }
 
     /// What `account` can spend: a private account's balance as this wallet
-    /// knows it after catching up with the chain, or a public one's on chain.
-    async fn spendable(&mut self, account: AccountId) -> u128 {
+    /// knows it after catching up with the chain, or a public one's on chain. A read that
+    /// fails says so, never 0 (setup-unreachable-says-holds-0).
+    async fn spendable(&mut self, account: AccountId) -> Result<u128> {
         if self.is_private(account) {
-            self.wallet.sync_to_latest_block().await.ok();
             self.wallet
+                .sync_to_latest_block()
+                .await
+                .context("could not catch the wallet up with the chain to read its private accounts")?;
+            Ok(self
+                .wallet
                 .get_account_private(account)
                 .and_then(|found| found.data.native_balance().ok())
-                .unwrap_or(0)
+                .unwrap_or(0))
         } else {
-            self.wallet.get_account_balance(account).await.unwrap_or(0)
+            self.wallet.get_account_balance(account).await.with_context(|| format!("could not read what Public/{account} holds"))
         }
     }
 
@@ -1067,8 +1138,12 @@ impl Client {
     /// The wallet's regular private accounts as a job starts, in the order the wallet picks a
     /// fee payer from them: each one's note and the credits waiting for it (`plan`).
     async fn private_holdings(&mut self) -> Result<Vec<plan::Holding<AccountId>>> {
-        self.wallet.sync_to_latest_block().await.ok();
-        let pending = self.wallet.owned_pending_messages().await.unwrap_or_default();
+        // Read, or the plan says why it couldn't: never a plan made from no credits.
+        self.wallet
+            .sync_to_latest_block()
+            .await
+            .context("could not catch the wallet up with the chain to read its private accounts")?;
+        let pending = self.wallet.owned_pending_messages().await.context("could not read the payments waiting for this wallet")?;
         Ok(self
             .wallet
             .storage()
@@ -1097,6 +1172,7 @@ impl Client {
     /// them, before the first is proven (`plan`); refuses in words when they can't. A job of
     /// several steps says what it takes in all.
     async fn plan_private(&mut self, job: &str, steps: &[plan::Step<AccountId>]) -> Result<plan::Costed<AccountId>> {
+        prover::to_prove()?;
         let holdings = self.private_holdings().await?;
         let costed = match plan::check(&holdings, steps) {
             Ok(costed) => costed,
@@ -1299,6 +1375,12 @@ impl Client {
     /// Registers `name` with a first profile that holds the name and its receiving keys.
     /// Registers `name`: commit, wait, reveal. Without `wait` it returns `false` once
     /// the commitment is made, leaving the rest to a background `names register`.
+    /// `public` asks for the name to be made public once registered: it belongs to this
+    /// registration only, never queued for a later one (then-public-survives-refused-register).
+    /// It is queued (`then_public`) with the commitment, never before it, and a resumed
+    /// commitment keeps what it asked (`queue_public`); the caller reads the queue once this
+    /// returns `true` to know whether the name is to be made public.
+    #[allow(clippy::too_many_arguments)]
     async fn register(
         &mut self,
         name: &str,
@@ -1306,6 +1388,7 @@ impl Client {
         term: u8,
         now: Option<u64>,
         wait: bool,
+        public: bool,
         rpc: Option<&str>,
     ) -> Result<bool> {
         let Derived { id, key } = derive(name);
@@ -1366,12 +1449,11 @@ impl Client {
         // as it sends it.
         if resumed.is_none() {
             if self.is_private(owner) {
-                let public = defaults.then_public.iter().any(|queued| queued == name);
                 let steps = self.registration_steps(name, owner, fee, deposit, public).await?;
                 let job = if public { format!("registering {name}{NAME_SUFFIX} and making it public") } else { format!("registering {name}{NAME_SUFFIX}") };
                 self.plan_private(&job, &steps).await?;
             } else if fee > 0 {
-                let have = self.spendable(owner).await;
+                let have = self.spendable(owner).await?;
                 if have < fee {
                     bail!(
                         "{owner} holds {have}, less than the {fee} that registering {name}{NAME_SUFFIX} takes; add funds to it first"
@@ -1385,6 +1467,7 @@ impl Client {
                 if let Some(pending) = defaults.pending.get_mut(name) {
                     pending.failed = None;
                 }
+                queue_public(&mut defaults.then_public, name, public, false);
                 save_defaults(&defaults)?;
                 found
             }
@@ -1404,15 +1487,19 @@ impl Client {
                     name.to_owned(),
                     Pending { owner: owner.to_string(), secret: hex::encode(secret), made, failed: None },
                 );
+                queue_public(&mut defaults.then_public, name, public, true);
                 save_defaults(&defaults)?;
                 (secret, made)
             }
         };
+        // What this commitment asked, now queued with it: a resumed one keeps a `--public`
+        // asked when it was made, and the background finish is told so by its own arguments.
+        let public = defaults.then_public.iter().any(|queued| queued == name);
 
         // Step 2: reveal, once the commitment is old enough.
         let ready = made.saturating_add(MIN_COMMIT_AGE_MS);
         if !wait {
-            let log = self.finish_in_background(name, owner, term, rpc)?;
+            let log = self.finish_in_background(name, owner, term, public, rpc)?;
             println!(
                 "{name}{NAME_SUFFIX} is committed; it finishes by itself in about {} minutes, from {}",
                 MIN_COMMIT_AGE_MS / 60_000 + 5,
@@ -1507,18 +1594,19 @@ impl Client {
             pending.failed = Some(format!("{error:#}"));
             let _ = save_defaults(&defaults);
         }
-        error.context(format!("{name}{NAME_SUFFIX} was not registered; `names register {name}` tries again"))
+        let public = if defaults.then_public.iter().any(|queued| queued == name) { " --public" } else { "" };
+        error.context(format!("{name}{NAME_SUFFIX} was not registered; `names register {name}{public}` tries again"))
     }
 
     /// Starts `names register <name> --wait` detached from this terminal, logging to
-    /// a file next to the wallet. It resumes the saved commitment.
-    fn finish_in_background(&self, name: &str, owner: AccountId, term: u8, rpc: Option<&str>) -> Result<PathBuf> {
+    /// a file next to the wallet. It resumes the saved commitment, and makes the name public
+    /// once registered when this registration asked for it (`public`).
+    fn finish_in_background(&self, name: &str, owner: AccountId, term: u8, public: bool, rpc: Option<&str>) -> Result<PathBuf> {
         let log = register_log(name)?;
         let file = std::fs::File::create(&log).with_context(|| format!("cannot write {}", log.display()))?;
-        let term = ["30d", "1y", "5y"][usize::from(term)];
         let mut command = std::process::Command::new(std::env::current_exe()?);
         command
-            .args(["register", name, "--owner", &owner.to_string(), "--term", term, "--wait"])
+            .args(finisher_args(name, owner, term, public))
             .env("LOGOS_NAMES_PROGRAM", self.program.to_string())
             .stdin(std::process::Stdio::null())
             .stdout(file.try_clone()?)
@@ -1724,7 +1812,12 @@ impl Client {
         let holder = self.holder(name, &id, &record)?;
         // The deposit account's whole balance comes back to whoever releases.
         let held = deposit_address(&self.program, &id);
-        let refund = self.wallet.get_account_balance(held).await.unwrap_or(0);
+        // A read that failed is no refund of 0: the release would leave the deposit behind.
+        let refund = self
+            .wallet
+            .get_account_balance(held)
+            .await
+            .with_context(|| format!("could not read {name}{NAME_SUFFIX}'s deposit, so nothing was released"))?;
         let mut mentions = self.on_record_and_page(&id, holder);
         if refund > 0 {
             println!("releasing {name}{NAME_SUFFIX}; its deposit of {refund} comes back to you");
@@ -1757,6 +1850,9 @@ impl Client {
     ) -> Result<()> {
         let dry_run = std::env::var_os("LOGOS_NAMES_DRY_RUN").is_some();
         let private = mentions.iter().any(|mention| mention.identity.is_private());
+        if private {
+            prover::to_prove()?;
+        }
         let paying = mentions.clone();
         let before = if private { None } else { Some(self.held_by(&paying).await) };
         let wealth = if private { self.private_wealth().await } else { None };
@@ -1811,7 +1907,7 @@ impl Client {
         println!("applied in block {block}");
         match before {
             Some(before) => {
-                if let Some(line) = fees::paid_line(before, self.held_by(&paying).await, spent) {
+                if let Some(line) = fees::paid_line_of(before, self.held_by(&paying).await, spent) {
                     println!("{line}");
                 }
             }
@@ -1827,7 +1923,8 @@ impl Client {
     /// signing public accounts this wallet holds keys for, read from the chain, and every private account of this
     /// wallet, as the wallet last saw them. Measured before and after a change, the
     /// difference less what it moved is its fee (LEZ 0.4 keeps no receipt of fees).
-    async fn held_by(&self, mentions: &[AccountMention]) -> u128 {
+    /// `None` when a public balance couldn't be read: the fee is unknown then.
+    async fn held_by(&self, mentions: &[AccountMention]) -> Option<u128> {
         let mut held = 0_u128;
         let key_chain = self.wallet.storage().key_chain();
         for (id, _) in key_chain.private_account_ids() {
@@ -1843,9 +1940,9 @@ impl Client {
             .filter(|account| self.wallet.get_account_public_signing_key(*account).is_some())
             .collect();
         for id in signers {
-            held = held.saturating_add(self.wallet.get_account_balance(id).await.unwrap_or(0));
+            held = held.saturating_add(self.wallet.get_account_balance(id).await.ok()?);
         }
-        held
+        Some(held)
     }
 
     /// Waits for `hash` to be included and returns its block. A block includes reverted
@@ -1900,6 +1997,7 @@ impl Client {
         message: &[u8],
         programs: Vec<(AccountId, Program)>,
     ) -> Result<u64> {
+        prover::to_run()?;
         let actors: Vec<Actor> = mentions.iter().map(AccountMention::actor).collect();
         let mut states = std::collections::HashMap::new();
         for actor in &actors {
@@ -1995,6 +2093,9 @@ impl Client {
             bail!("{name}{NAME_SUFFIX}'s public account {to} has never been used on this chain, and LEZ can't credit it without its owner's public key; {how}");
         }
 
+        if self.is_private(from) {
+            prover::to_prove()?;
+        }
         println!("paying {amount} to {name}{NAME_SUFFIX} ({to})");
         let paying = vec![self.signer(from).balance()];
         let held = self.held_by(&paying).await;
@@ -2040,7 +2141,7 @@ impl Client {
             bail!("transfer {hash} was included in block {block} but {name} was not credited");
         }
         println!("paid in block {block}");
-        if let Some(line) = fees::paid_line(held, self.held_by(&paying).await, amount) {
+        if let Some(line) = fees::paid_line_of(held, self.held_by(&paying).await, amount) {
             println!("{line}");
         }
         Ok(())
@@ -2060,6 +2161,7 @@ impl Client {
 
     /// Pays `amount` to the private receiving keys `name` publishes.
     async fn pay_private(&mut self, name: &str, amount: u128, from: AccountId) -> Result<()> {
+        prover::to_prove()?;
         let (_, _, profile) = self.lookup(name).await?;
         let recipient = private_keys_of(name, &profile)?;
         let paying = vec![self.signer(from).balance()];
@@ -2086,7 +2188,7 @@ impl Client {
             println!("submitted {hash}");
             let block = self.finish(hash).await.context("the transfer was not applied")?;
             println!("included in block {block}; it waits for {name}{NAME_SUFFIX}'s holder as a pending credit, which they claim with `names receive`");
-            if let Some(line) = fees::paid_line(held, self.held_by(&paying).await, amount) {
+            if let Some(line) = fees::paid_line_of(held, self.held_by(&paying).await, amount) {
                 println!("{line}");
             }
             return Ok(());
@@ -2110,7 +2212,7 @@ impl Client {
         }
         println!("included in block {block}; {from} was debited {debited} (the amount, plus any fee)");
         println!("it waits for {name}{NAME_SUFFIX}'s holder as a pending credit, which they claim with `names receive`");
-        if let Some(line) = fees::paid_line(held, self.held_by(&paying).await, amount) {
+        if let Some(line) = fees::paid_line_of(held, self.held_by(&paying).await, amount) {
             println!("{line}");
         }
         Ok(())
@@ -2176,6 +2278,7 @@ impl Client {
             println!("nothing worth claiming");
             return Ok(());
         }
+        prover::to_prove()?;
         // The largest first: when the payer can't pay for every claim, the most arrives.
         let mut pending = pending;
         pending.sort_by_key(|message| std::cmp::Reverse(message.native_credit().unwrap_or(0)));
@@ -2832,6 +2935,22 @@ fn sequencer_overrides(cli: &Cli) -> Result<Option<WalletConfigOverrides>> {
     Ok(Some(overrides))
 }
 
+/// What `names setup` says of the public account before moving `shield` to private, from the
+/// read of its balance (`None`: nothing to move, nothing read): nothing when it holds enough,
+/// what to send when it doesn't, and an error when the read failed, never "holds 0"
+/// (setup-unreachable-says-holds-0: an account holding 86,000,000 was said to hold 0).
+fn setup_short<E: std::fmt::Display>(public: AccountId, read: Option<Result<u128, E>>, shield: u128) -> Result<Option<String>> {
+    match read {
+        None => Ok(None),
+        Some(Err(error)) => bail!(
+            "the accounts are made, but what Public/{public} holds could not be read ({}), so nothing was moved. Run `names setup` again when the sequencer answers.",
+            format!("{error:#}").trim().trim_end_matches('.')
+        ),
+        Some(Ok(balance)) if balance < shield => Ok(Some(unfunded_setup(public, balance, shield))),
+        Some(Ok(_)) => Ok(None),
+    }
+}
+
 /// What `names setup` says when the public account `public` holds `balance`, less than
 /// the `shield` to move (the Basecamp module reads its "holds" and "at least" figures).
 fn unfunded_setup(public: AccountId, balance: u128, shield: u128) -> String {
@@ -2880,6 +2999,47 @@ const COMMIT_CYCLES: u64 = 23_214;
 const REVEAL_CYCLES: u64 = 165_000;
 /// A profile change's or a hand-over's cycles (see [`call_cycles`]).
 const CHANGE_CYCLES: u64 = 65_590;
+
+/// The arguments of the background `names register` that finishes a registration: the same
+/// name, holder and term, `--public` only when this registration asked for it.
+fn finisher_args(name: &str, owner: AccountId, term: u8, public: bool) -> Vec<String> {
+    let term = ["30d", "1y", "5y"][usize::from(term)];
+    let mut args: Vec<String> = ["register", name, "--owner", &owner.to_string(), "--term", term, "--wait"].iter().map(|arg| (*arg).to_owned()).collect();
+    if public {
+        args.push("--public".to_owned());
+    }
+    args
+}
+
+impl Defaults {
+    /// `name` is registered to this wallet. Asked to be public (`public`), it is kept as
+    /// asked until it is (`names mine` says "not public yet"); registered without it, no
+    /// earlier request for it stays.
+    fn registered(&mut self, name: &str, public: bool) {
+        if !self.names.iter().any(|known| known == name) {
+            self.names.push(name.to_owned());
+        }
+        if public {
+            if !self.then_public.iter().any(|queued| queued == name) {
+                self.then_public.push(name.to_owned());
+            }
+        } else {
+            self.then_public.retain(|queued| queued != name);
+            self.public_failed.remove(name);
+        }
+    }
+
+    /// A registration of `name` was refused or failed: a request to make it public goes
+    /// with it, unless the name is this wallet's (then it stays for `names make-public`) or
+    /// its commitment is kept to resume (then `names register <name>` finishes it as asked,
+    /// public-request-lost-when-registration-fails-after-commit).
+    fn registration_failed(&mut self, name: &str) {
+        if !self.names.iter().any(|known| known == name) && !self.pending.contains_key(name) {
+            self.then_public.retain(|queued| queued != name);
+            self.public_failed.remove(name);
+        }
+    }
+}
 
 /// Who funds a name's gas when it is made public: its holder if it holds `PUBLIC_GAS_FUND`
 /// (`holds`), else the main private account (an anon's own account holds only its deposit).
@@ -2951,9 +3111,9 @@ async fn setup(client: &mut Client, asked: Option<u128>) -> Result<()> {
     println!("public account   Public/{public}");
     println!("private account  Private/{private}");
 
-    let balance = client.wallet.get_account_balance(public).await.unwrap_or(0);
-    if balance < shield {
-        let short = unfunded_setup(public, balance, shield);
+    // Accounts only: nothing to read.
+    let read = if shield > 0 { Some(client.wallet.get_account_balance(public).await) } else { None };
+    if let Some(short) = setup_short(public, read, shield)? {
         // Asked for and not made, it is an error, so a script never takes it for done.
         if asked.is_some() {
             bail!(short);
@@ -3099,11 +3259,13 @@ fn pick_notes(mut notes: Vec<(String, u128)>, amount: u128, most: usize) -> (Vec
 }
 
 /// Deposits whole notes of `from_key` into the LEZ channel through the user's own node,
-/// with the LEZ account as the deposit's metadata: the sequencer reads it as
-/// `borsh(AccountId)` and credits that account once the deposit is final.
+/// crediting `to` (`bridge_destination`): the deposit's metadata is what the sequencer's
+/// LEZ decodes (`bridge_metadata`), and it credits the account once the deposit is final.
+/// Everything that can be refused is checked before the node is asked for anything.
 #[allow(clippy::too_many_arguments)]
-fn bridge(
+async fn bridge(
     rpc: &str,
+    overrides: Option<WalletConfigOverrides>,
     node: &str,
     amount: u128,
     to: &str,
@@ -3116,11 +3278,12 @@ fn bridge(
     if amount == 0 {
         bail!("Enter an amount above 0.");
     }
-    let to = bridge_destination(to, programs).map_err(|error| anyhow!(error))?;
+    let (to, key) = bridge_destination(to, programs).map_err(|error| anyhow!(error))?;
     let from_key = from_key.trim().to_lowercase();
     if from_key.len() != 64 || hex::decode(&from_key).is_err() {
         bail!("--from-key must be a 64-character hex public key");
     }
+    let metadata = bridge_metadata(rpc, overrides, to, key).await?;
     let channel = rpc_call(rpc, "getChannelId", serde_json::json!({}))?;
     let channel = channel
         .as_str()
@@ -3158,7 +3321,7 @@ fn bridge(
     }
     let body = serde_json::json!({
         "tip": null,
-        "deposit": { "channel_id": channel, "inputs": picked, "metadata": borsh::to_vec(&to)? },
+        "deposit": { "channel_id": channel, "inputs": picked, "metadata": metadata },
         "change_public_key": from_key,
         "funding_public_keys": [from_key],
         "max_tx_fee": max_fee,
@@ -3431,25 +3594,11 @@ fn rpc_call(rpc: &str, method: &str, params: serde_json::Value) -> Result<serde_
     Ok(reply["result"].clone())
 }
 
-/// Private changes are proven by RISC Zero's `r0vm`. The installer puts it next to
-/// `names`; use that copy unless `RISC0_SERVER_PATH` names another.
-fn use_bundled_prover() {
-    if std::env::var_os("RISC0_SERVER_PATH").is_some() {
-        return;
-    }
-    let bundled = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.canonicalize().ok())
-        .and_then(|exe| Some(exe.parent()?.join("r0vm")));
-    if let Some(r0vm) = bundled.filter(|path| path.is_file()) {
-        // SAFETY: called first thing in main, before any other thread starts.
-        unsafe { std::env::set_var("RISC0_SERVER_PATH", r0vm) };
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    use_bundled_prover();
+    // Where programs run and proofs are made: the r0vm the installer puts next to `names`
+    // unless RISC0_SERVER_PATH names another, or in-process in a local-prove build (`prover`).
+    prover::start();
     let cli = Cli::parse();
     if let Command::Man { dir } = &cli.command {
         return write_man_pages(dir);
@@ -3511,7 +3660,7 @@ async fn main() -> Result<()> {
         }
         Command::Bridge { amount, to, from_key, node, max_fee, yes } => {
             let rpc = cli.rpc.as_deref().unwrap_or(DEFAULT_RPC);
-            return bridge(rpc, &node, amount, &to, &bridge_sinks(cli.program, cli.token_program), &from_key, max_fee, yes);
+            return bridge(rpc, overrides, &node, amount, &to, &bridge_sinks(cli.program, cli.token_program), &from_key, max_fee, yes).await;
         }
         // Only a name target needs the registry; everything else is between you and your node.
         Command::Chain(command) if command.name().is_none() => return chain::run(command.clone(), None),
@@ -3751,26 +3900,23 @@ async fn main() -> Result<()> {
                 Some(owner) => owner,
                 None => default_private()?,
             };
-            if public {
-                let mut defaults = load_defaults();
-                if !defaults.then_public.contains(&name) {
-                    defaults.then_public.push(name.clone());
-                    save_defaults(&defaults)?;
-                }
-            }
+            // `--public` belongs to this registration: nothing is queued for a later one, and a
+            // refusal or failure leaves no request behind (then-public-survives-refused-register).
+            // `register` queues it with the commitment, never before it, so a refused `--public`
+            // leaves nothing that a later plain registration would act on.
             let finished = async {
-                if !client.register(&name, owner, term, now, wait, cli.rpc.as_deref()).await? {
+                if !client.register(&name, owner, term, now, wait, public, cli.rpc.as_deref()).await? {
                     return Ok(());
                 }
                 let mut defaults = load_defaults();
-                if !defaults.names.contains(&name) {
-                    defaults.names.push(name.clone());
-                }
+                // As the commitment asked: a resumed one made with `--public` stays public.
+                let public = public || defaults.then_public.contains(&name);
+                defaults.registered(&name, public);
                 save_defaults(&defaults)?;
                 // Registered privately first, so nothing showed who registered it; now moved to a
-                // public account that a private transfer funds. The request stays queued until it
-                // is done, and a stop is kept for `names mine` (register-as-public-silently-stays-private).
-                if defaults.then_public.contains(&name) {
+                // public account that a private transfer funds. The request stays until it is
+                // done, and a stop is kept for `names mine` (register-as-public-silently-stays-private).
+                if public {
                     if let Err(error) = client.make_public(&name).await {
                         let why = format!("{error:#}").trim_end_matches('.').to_owned();
                         let mut defaults = load_defaults();
@@ -3784,6 +3930,11 @@ async fn main() -> Result<()> {
                 Ok::<(), anyhow::Error>(())
             }
             .await;
+            if finished.is_err() {
+                let mut defaults = load_defaults();
+                defaults.registration_failed(&name);
+                save_defaults(&defaults)?;
+            }
             // A registration finishing in the background is no longer running.
             if wait {
                 let mut defaults = load_defaults();
@@ -4115,18 +4266,104 @@ mod shortlist_tests {
     }
 }
 
-/// What a bridge deposit's metadata is: the Names module builds it from the account's 32
-/// bytes, so they must be exactly what `names bridge` sends (`borsh::to_vec(&to)`).
+/// The deposit encoding the module and `names bridge` share (`deposit.rs`), fed to LEZ
+/// 0.4's own decoder (`bridge_core`, v0.4.0-rc1): real-bridges-to-lez-0.4-never-mint. The
+/// sequencer runs `DepositMetadata::try_from_slice` on a final deposit's metadata and
+/// credits `recipient.account_id()`; a decode failure leaves the deposit in custody.
 #[cfg(test)]
 mod bridge_metadata_tests {
-    use super::{AccountId, parse_account};
+    use super::deposit::{self, Evidence, Lez};
+    use borsh::BorshDeserialize as _;
+    use bridge_core::DepositMetadata;
+    use lee::{AccountId, PrivateKey, PublicKey};
+    use lee_core::program::PdaSeed;
+    use sha2::Digest as _;
 
+    /// 32 bytes that look random, the same every run.
+    fn bytes(seed: u64) -> [u8; 32] {
+        sha2::Sha256::digest(seed.to_le_bytes()).into()
+    }
+
+    /// The wallet's own accounts: the key the CLI reads from its signing key makes metadata
+    /// that LEZ 0.4 decodes to that very account.
     #[test]
-    fn a_deposits_metadata_is_the_accounts_32_bytes_raw() {
-        let bytes: [u8; 32] = std::array::from_fn(|i| u8::try_from(i * 7 + 1).unwrap_or(0));
-        assert_eq!(borsh::to_vec(&AccountId::new(bytes)).expect("borsh"), bytes.to_vec(), "no length prefix, no tag");
-        let to = parse_account("Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk").expect("an account");
-        assert_eq!(borsh::to_vec(&to).expect("borsh").len(), 32);
+    fn a_wallet_accounts_key_decodes_to_that_account() {
+        for seed in 0..64 {
+            let Ok(private) = PrivateKey::try_new(bytes(seed)) else { continue };
+            let public = PublicKey::new_from_private_key(&private);
+            let account = AccountId::from(&public);
+            assert_eq!(deposit::key_account(public.value()), *account.value(), "the account of a key");
+            let metadata = deposit::metadata(Lez::V04, account.value(), Some(&Evidence::Key(*public.value()))).expect("metadata");
+            let decoded = DepositMetadata::try_from_slice(&metadata).expect("LEZ 0.4 decodes it");
+            assert_eq!(decoded.recipient.account_id(), account, "credits the account");
+            assert_eq!(deposit::credited(Lez::V04, &metadata), Some(*account.value()));
+        }
+    }
+
+    /// The bytes the module and the CLI sent until now (the account's 32 bytes) are what
+    /// LEZ 0.4 can't decode: every such bridge stayed in custody. LEZ 0.3 reads them.
+    #[test]
+    fn the_bare_account_is_lez_0_3_metadata_and_lez_0_4_refuses_it() {
+        let account = AccountId::new(bytes(7));
+        let metadata = deposit::metadata(Lez::V03, account.value(), None).expect("metadata");
+        assert_eq!(metadata, borsh::to_vec(&account).expect("borsh"), "0.3's DepositMetadata {{ recipient_id }}");
+        assert_eq!(AccountId::try_from_slice(&metadata).expect("0.3 decodes it"), account);
+        assert!(DepositMetadata::try_from_slice(&metadata).is_err(), "0.4 can't");
+    }
+
+    /// The curve check in `deposit.rs` (the module has no curve library) agrees with LEZ's
+    /// own `PublicKey::try_new`, which the decoder runs, for thousands of 32-byte values;
+    /// metadata is made only from a key LEZ accepts.
+    #[test]
+    fn the_curve_check_agrees_with_lez() {
+        let (mut valid, mut invalid) = (0, 0);
+        for seed in 0..4000 {
+            let candidate = bytes(seed);
+            let lez = PublicKey::try_new(candidate).is_ok();
+            assert_eq!(deposit::valid_public_key(&candidate), lez, "{}", hex::encode(candidate));
+            let decodes = DepositMetadata::try_from_slice(&[&[1, 0][..], &candidate[..]].concat()).is_ok();
+            assert_eq!(decodes, lez, "the decoder accepts exactly the keys LEZ does");
+            let made = deposit::metadata(Lez::V04, &deposit::key_account(&candidate), Some(&Evidence::Key(candidate)));
+            assert_eq!(made.is_ok(), lez);
+            if lez { valid += 1 } else { invalid += 1 }
+        }
+        assert!(valid > 1000 && invalid > 1000, "both kinds seen: {valid} valid, {invalid} not");
+        for edge in [[0_u8; 32], [0xff; 32]] {
+            assert_eq!(deposit::valid_public_key(&edge), PublicKey::try_new(edge).is_ok(), "{}", hex::encode(edge));
+        }
+    }
+
+    /// A program's account (PDA evidence) decodes to it too.
+    #[test]
+    fn pda_evidence_decodes_to_the_programs_account() {
+        let (program, seed) = (bytes(1), bytes(2));
+        let account = AccountId::for_public_pda(&AccountId::new(program), &PdaSeed::new(seed));
+        assert_eq!(deposit::pda_account(&program, &seed), *account.value());
+        let metadata = deposit::metadata(Lez::V04, account.value(), Some(&Evidence::Pda { program, seed })).expect("metadata");
+        assert_eq!(DepositMetadata::try_from_slice(&metadata).expect("decodes").recipient.account_id(), account);
+    }
+
+    /// The receipt LEZ writes when it mints a deposit, and the bridge program, as LEZ 0.4's
+    /// bridge derives them: the module follows a bridge by this account.
+    #[test]
+    fn the_receipt_is_lez_0_4s_own() {
+        assert_eq!(deposit::bridge_program(), *bridge_core::bridge_account_id().value());
+        for seed in 0..16 {
+            let op = bytes(seed);
+            assert_eq!(deposit::receipt(&op), *bridge_core::deposit_receipt_account_id(bridge_core::bridge_account_id(), op).value());
+        }
+    }
+
+    /// For an account the wallet doesn't hold, LEZ 0.4 needs the key; the refusal says how
+    /// to give it, and that nothing was sent.
+    #[test]
+    fn a_foreign_account_without_its_key_is_refused_in_plain_words() {
+        let account = AccountId::new(bytes(9));
+        let refusal = deposit::metadata(Lez::V04, account.value(), None).unwrap_err();
+        let said = refusal.words(&|id: &[u8; 32]| AccountId::new(*id).to_string());
+        assert!(said.contains(&format!("doesn't hold Public/{account}")), "{said}");
+        assert!(said.contains("public key (64 hex characters"), "{said}");
+        assert!(said.ends_with("Nothing was sent."), "{said}");
     }
 }
 
@@ -4365,7 +4602,17 @@ mod input_tests {
         assert_eq!(bridge_destination(&format!("Private/{someone}"), &[registry]).unwrap_err(), "the bridge credits a public account: give --to as Public/<id>");
         assert_eq!(bridge_destination("Public/11111111111111111111111111111111", &[registry]).unwrap_err(), "that is the empty account (all 1s), which no one holds");
         assert_eq!(bridge_destination(&format!("Public/{DEFAULT_PROGRAM}"), &[registry]).unwrap_err(), "that is a program's account, which can't take a bridge");
-        assert_eq!(bridge_destination(&format!("Public/{someone}"), &[registry]).unwrap().to_string(), someone);
+        let (id, key) = bridge_destination(&format!("Public/{someone}"), &[registry]).unwrap();
+        assert_eq!((id.to_string().as_str(), key), (someone, None));
+        // Its public key names the account too, and is kept for the deposit's metadata.
+        let key = "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
+        let (id, given) = bridge_destination(key, &[registry]).unwrap();
+        assert_eq!(id, AccountId::from(&key.parse::<lee::PublicKey>().unwrap()));
+        assert_eq!(given.map(hex::encode).as_deref(), Some(key));
+        // cli-bridge-03-skips-curve-check: a key that isn't one (BIP-340 vector 5) is refused
+        // whatever LEZ runs, before the sequencer is asked, as its account is no one's.
+        let off = bridge_destination("eefdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34", &[registry]).unwrap_err();
+        assert!(off.contains("isn't a public key LEZ accepts") && off.ends_with("Nothing was sent."), "{off}");
         // cli-bridge-retired-registry-account-accepted: v2 and v4.1 took a deposit.
         let sinks = bridge_sinks(None, Some(someone.parse().unwrap()));
         for program in std::iter::once(DEFAULT_PROGRAM).chain(RETIRED_PROGRAMS).chain([someone]) {
@@ -4373,9 +4620,12 @@ mod input_tests {
         }
         assert_eq!(sinks.len(), 6);
         // Nothing reached the network: the unreachable node and sequencer were never asked.
-        let zero = bridge("http://127.0.0.1:9", "http://127.0.0.1:9", 0, &format!("Public/{someone}"), &[registry], &"66".repeat(32), 100_000, true);
+        let refused = |amount, to: String| {
+            futures::executor::block_on(bridge("http://127.0.0.1:9", None, "http://127.0.0.1:9", amount, &to, &[registry], &"66".repeat(32), 100_000, true))
+        };
+        let zero = refused(0, format!("Public/{someone}"));
         assert_eq!(zero.unwrap_err().to_string(), "Enter an amount above 0.");
-        let private = bridge("http://127.0.0.1:9", "http://127.0.0.1:9", 1_000, &format!("Private/{someone}"), &[registry], &"66".repeat(32), 100_000, true);
+        let private = refused(1_000, format!("Private/{someone}"));
         assert_eq!(private.unwrap_err().to_string(), "the bridge credits a public account: give --to as Public/<id>");
         assert_eq!(Cli::try_parse_from(["names", "bridge", "0", "--to", someone, "--from-key", "k"]).err().map(|e| e.to_string().contains("Enter an amount above 0.")), Some(true));
     }
@@ -4541,5 +4791,113 @@ mod wallet_storage_tests {
         assert!(made.iter().all(|id| saved.contains(id)), "every account made is still in the wallet: {made:?} vs {saved:?}");
         assert_eq!(saved.len(), before + 4);
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod job_ties_and_failed_reads {
+    use super::*;
+    use clap::Parser as _;
+
+    /// then-public-survives-refused-register: a refused `names register vpubname --public`
+    /// left vpubname queued to be made public, so a later plain `names register vpubname`
+    /// would have been made public. The request now belongs to the registration that asks.
+    #[test]
+    fn a_request_to_make_a_name_public_goes_with_its_registration() {
+        let mut defaults = Defaults::default();
+        // Left queued by an older CLI's refused registration: a refusal clears it.
+        defaults.then_public.push("vpubname".to_owned());
+        defaults.registration_failed("vpubname");
+        assert!(defaults.then_public.is_empty());
+        // A plain registration is private, and clears any request left from before.
+        defaults.then_public.push("vpubname".to_owned());
+        defaults.public_failed.insert("vpubname".to_owned(), "stopped".to_owned());
+        defaults.registered("vpubname", false);
+        assert!(defaults.then_public.is_empty() && defaults.public_failed.is_empty());
+        assert_eq!(defaults.names, ["vpubname"]);
+        // Registered as asked to be public: kept until it is, for `names mine`; making it
+        // public stopping after the registration keeps it for `names make-public`.
+        defaults.registered("other", true);
+        defaults.public_failed.insert("other".to_owned(), "stopped".to_owned());
+        defaults.registration_failed("other");
+        assert_eq!(defaults.then_public, ["other"]);
+        assert!(defaults.public_failed.contains_key("other"));
+        // public-request-lost-when-registration-fails-after-commit: a `--public` registration
+        // that committed and then failed keeps its request with the commitment it resumes.
+        defaults.then_public.push("vpubr".to_owned());
+        defaults.pending.insert("vpubr".to_owned(), Pending { owner: String::new(), secret: String::new(), made: 0, failed: None });
+        defaults.registration_failed("vpubr");
+        assert!(defaults.then_public.contains(&"vpubr".to_owned()));
+        // Once nothing is left to resume, a failure takes the request with it.
+        defaults.pending.remove("vpubr");
+        defaults.registration_failed("vpubr");
+        assert!(!defaults.then_public.contains(&"vpubr".to_owned()));
+    }
+
+    /// The registration that finishes in the background makes the name public only when the
+    /// one that started it asked, by its own argument, never by a queue in names.json.
+    #[test]
+    fn the_background_finish_carries_its_own_request() {
+        let owner = AccountId::new([5; 32]);
+        let plain = finisher_args("vpubname", owner, 1, false);
+        assert_eq!(plain, ["register", "vpubname", "--owner", &owner.to_string(), "--term", "1y", "--wait"]);
+        let public = finisher_args("vpubname", owner, 2, true);
+        assert_eq!(public.last().map(String::as_str), Some("--public"));
+        assert_eq!(public[5], "5y");
+        // What the finisher is started with parses as the command it is.
+        let parsed = Cli::try_parse_from(std::iter::once("names".to_owned()).chain(public)).expect("parses");
+        assert!(matches!(parsed.command, Command::Register { public: true, wait: true, .. }));
+    }
+
+    /// setup-unreachable-says-holds-0: with the sequencer unreachable, `names setup` said
+    /// "holds 0; send it at least …" of an account holding 86,000,000.
+    #[test]
+    fn setup_says_a_failed_read_failed_never_0() {
+        let public = AccountId::new([5; 32]);
+        let failed = setup_short(public, Some(Err("could not reach the sequencer")), 14_000_000).expect_err("a failed read");
+        let failed = failed.to_string();
+        assert!(failed.contains("could not be read (could not reach the sequencer)") && failed.contains("nothing was moved"), "{failed}");
+        assert!(!failed.contains("holds 0"), "{failed}");
+        let short = setup_short::<String>(public, Some(Ok(1_000)), 14_000_000).expect("read").expect("short");
+        assert!(short.contains("holds 1,000; send it at least 14,000,000"), "{short}");
+        assert_eq!(setup_short::<String>(public, Some(Ok(14_000_000)), 14_000_000).expect("read"), None);
+        // Accounts only: nothing is read, nothing can fail.
+        assert_eq!(setup_short::<String>(public, None, 0).expect("nothing read"), None);
+    }
+}
+
+#[cfg(test)]
+mod register_public_tests {
+    use super::queue_public;
+
+    /// then-public-stays-queued-after-a-refused-register-public (2026-11-09 verifier, defect 2):
+    /// `register vpubname --public` was refused before its commitment and left vpubname
+    /// queued, so the next plain `register vpubname` was planned, and would have finished, as
+    /// a public one. Now only a commitment queues it, and a new plain one clears it.
+    #[test]
+    fn a_new_plain_commitment_clears_a_queue_left_by_a_refused_public_one() {
+        // What an older names left behind after the refused --public.
+        let mut queued = vec!["vpubname".to_owned(), "other".to_owned()];
+        queue_public(&mut queued, "vpubname", false, true);
+        assert_eq!(queued, ["other"]);
+        // A fresh --public commitment queues it, once.
+        queue_public(&mut queued, "vpubname", true, true);
+        queue_public(&mut queued, "vpubname", true, true);
+        assert_eq!(queued, ["other", "vpubname"]);
+    }
+
+    #[test]
+    fn a_resumed_registration_keeps_what_its_commitment_asked() {
+        // The background `names register <name> --wait` that finishes a --public registration
+        // passes no --public: it must still make the name public after the reveal.
+        let mut queued = vec!["pubname".to_owned()];
+        queue_public(&mut queued, "pubname", false, false);
+        assert_eq!(queued, ["pubname"]);
+        // A plain one resumed stays plain; --public on resuming asks for it now.
+        let mut queued = Vec::new();
+        queue_public(&mut queued, "plain", false, false);
+        assert!(queued.is_empty());
+        queue_public(&mut queued, "plain", true, false);
+        assert_eq!(queued, ["plain"]);
     }
 }
