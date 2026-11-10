@@ -3691,12 +3691,153 @@ Item {
         return left <= 1 ? "Expires in about a minute." : "Expires in " + left + " minutes."
     }
 
+    // ── An app asking for an inscription on the Logos Blockchain ────────
+    //
+    // A testimonial an app wants inscribed (propose_inscription). It has its own
+    // sheet: it is paid from one of the node's chain accounts, never a LEZ
+    // account, and its fee is the node's own figure for the account chosen.
+    // Pricing holds none of the account's funds, so it is asked as soon as an
+    // account is ticked.
+
+    property var inscribeRequests: []       // pending_inscriptions: the oldest first
+    property string inscribeFrom: ""        // the chain account ticked on the sheet
+    property string inscribeFor: ""         // which request that tick is for
+    property var inscribePlan: null         // chain_inscribe's plan for that account
+    property string inscribePlanFor: ""     // "<request id> <key>" the plan (or problem) is for
+    property string inscribePlanAsked: ""   // the same, for the plan being read now
+    property string inscribeProblem: ""     // why the node wouldn't price it for that account
+    property bool inscribeUnderstood: false // an unvouched app's warning was read
+    property bool inscribeBusy: false       // an answer is on its way to the module
+    property string inscribeError: ""
+    readonly property var inscribeRequest: inscribeRequests.length > 0 ? inscribeRequests[0] : null
+
+    /// Reads the inscriptions waiting for the person. On the first sight of
+    /// one, the first account that holds anything is ticked and priced.
+    function loadInscribeRequests() {
+        askLater("pending_inscriptions", [], function(value) {
+            inscribeRequests = Array.isArray(value) ? value : []
+            var request = inscribeRequest
+            if (request === null) {
+                inscribeFor = ""
+                inscribeFrom = ""
+                inscribePlan = null
+                inscribePlanFor = ""
+                inscribeProblem = ""
+                return
+            }
+            var choices = request.choices || []
+            if (inscribeFor !== request.id) {
+                inscribeFor = request.id
+                inscribeUnderstood = false
+                inscribeError = ""
+                // Nothing is ticked for an app that may be a fake: choosing is deliberate (M-2).
+                inscribeFrom = appPublisherFailed(request) ? "" : Logic.inscribeFirstChoice(choices)
+            } else if (inscribeFrom !== "" && !request.node
+                       && !choices.some(function(choice) { return choice.key === inscribeFrom })) {
+                // The account left the node's wallet since it was ticked.
+                inscribeFrom = ""
+            }
+            loadInscribePlan()
+        }, function(message) {
+            console.log("names_ui: pending_inscriptions:", message)
+        }, 20000)
+    }
+
+    /// Asks the node what the sheet's inscription costs from the ticked account:
+    /// once for each request and account, and again after a refusal that time
+    /// mends (one still on its way from that account).
+    function loadInscribePlan() {
+        var request = inscribeRequest
+        if (request === null || inscribeFrom === "" || inscribeBusy || request.node)
+            return
+        var wanted = request.id + " " + inscribeFrom
+        if (inscribePlanAsked === wanted || (inscribePlanFor === wanted && inscribePlan !== null))
+            return
+        if (inscribePlanFor !== wanted) {
+            inscribePlan = null
+            inscribeProblem = ""
+            inscribePlanFor = wanted
+        }
+        inscribePlanAsked = wanted
+        askLater("chain_inscribe", [inscribeFrom, request.text, false], function(plan) {
+            if (inscribePlanAsked === wanted)
+                inscribePlanAsked = ""
+            if (inscribePlanFor !== wanted)
+                return
+            inscribePlan = plan
+            inscribeProblem = ""
+        }, function(message) {
+            if (inscribePlanAsked === wanted)
+                inscribePlanAsked = ""
+            if (inscribePlanFor !== wanted)
+                return
+            inscribePlan = null
+            // The module being busy isn't the account's problem: it is asked again.
+            inscribeProblem = message === moduleBusy ? "" : sentence(message)
+        }, 30000)
+    }
+
+    function chooseInscribeAccount(key) {
+        if (inscribeRequest === null || inscribeBusy)
+            return
+        inscribeFrom = key
+        inscribeError = ""
+        loadInscribePlan()
+    }
+
+    function inscribeCanApprove() {
+        return Logic.inscribeCanApprove({
+            request: inscribeRequest, chosen: inscribeFrom, busy: inscribeBusy,
+            plan: inscribePlanFor === (inscribeRequest ? inscribeRequest.id + " " + inscribeFrom : "") ? inscribePlan : null,
+            problem: inscribeProblem,
+            risky: inscribeRequest !== null && appPublisherFailed(inscribeRequest), understood: inscribeUnderstood })
+    }
+
+    function answerInscribeRequest(approve) {
+        var request = inscribeRequest
+        if (request === null || inscribeBusy || (approve && !inscribeCanApprove()))
+            return
+        inscribeBusy = true
+        inscribeError = ""
+        var from = inscribeFrom
+        askLater(approve ? "approve_inscription" : "reject_request", approve ? [request.id, from] : [request.id], function(value) {
+            inscribeBusy = false
+            if (approve && value && value.state === "done")
+                say("Inscribed for " + request.app + ", from " + Logic.keyShown(from) + ". It paid a fee of " + grouped(value.fee) + ". It's final in a few minutes.", false)
+            else if (approve)
+                say("The inscription for " + request.app + " may not have been sent. Your node's history shows whether it was.", true)
+            loadInscribeRequests()
+            loadChain()
+            loadActivity()
+        }, function(message) {
+            inscribeBusy = false
+            // No answer to an approval isn't a refusal: the node may still be proving and
+            // sending it. The request leaves the list once the module has its outcome.
+            inscribeError = approve && message === moduleBusy
+                ? "No answer yet: the inscription may still be on its way. Look at the history below before approving anything again."
+                : sentence(message)
+            // What it costs may have changed with what was refused.
+            inscribePlanFor = ""
+            loadInscribeRequests()
+            loadActivity()
+        // The node may take three minutes to fund it and three more to take it.
+        }, approve ? 420000 : 30000)
+    }
+
     Timer {
         interval: 3000
         repeat: true
         running: root.bridgeReady && root.configKnown && !root.appBusy
         triggeredOnStart: true
         onTriggered: { root.clockTick = Date.now(); root.loadAppRequests() }
+    }
+    // Its own timer: an inscription being sent doesn't stop payment requests being read.
+    Timer {
+        interval: 3000
+        repeat: true
+        running: root.bridgeReady && root.configKnown && !root.inscribeBusy
+        triggeredOnStart: true
+        onTriggered: root.loadInscribeRequests()
     }
 
     TextEdit { id: clipboard; visible: false }
@@ -8750,6 +8891,202 @@ Item {
                         label: "Reject"
                         enabledNow: !root.appBusy
                         onPressed: root.answerAppRequest(false)
+                    }
+                }
+            }
+        }
+    }
+
+    // An app's request to inscribe a testimonial on the Logos Blockchain, shown
+    // once no other request waits: who asks, the words, the chain account that
+    // pays, and the fee the node asks for it.
+    Rectangle {
+        id: inscribeSheet
+        visible: root.appRequest === null && root.inscribeRequest !== null
+        anchors.fill: parent
+        color: Qt.rgba(root.slate.r, root.slate.g, root.slate.b, 0.94)
+        readonly property var request: root.inscribeRequest
+        readonly property var choices: request !== null ? (request.choices || []) : []
+        readonly property string nodeProblem: request !== null && request.node ? root.sentence(request.node) : ""
+        readonly property bool risky: request !== null && root.appPublisherFailed(request)
+        readonly property var fee: Logic.inscribeFee(root.inscribeFrom,
+            request !== null && root.inscribePlanFor === request.id + " " + root.inscribeFrom ? root.inscribePlan : null,
+            root.inscribeProblem)
+        // Nothing behind it can be pressed while it shows.
+        MouseArea { anchors.fill: parent; hoverEnabled: true; onWheel: function(wheel) { wheel.accepted = true } }
+        Flickable {
+            anchors.fill: parent
+            contentWidth: width
+            contentHeight: Math.max(height, inscribeCard.implicitHeight + root.px(64))
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            Card {
+                id: inscribeCard
+                width: Math.min(inscribeSheet.width - root.px(64), root.px(760))
+                x: (inscribeSheet.width - width) / 2
+                y: Math.max(root.px(32), (inscribeSheet.height - implicitHeight) / 2)
+                Text {
+                    Layout.fillWidth: true
+                    text: Logic.inscribeTitle(inscribeSheet.request)
+                    textFormat: Text.PlainText
+                    color: root.ink
+                    font.family: root.sans
+                    font.pixelSize: root.px(24)
+                    font.weight: Font.DemiBold
+                    wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                }
+                Hint {
+                    font.pixelSize: root.px(15)
+                    text: inscribeSheet.request === null ? "" : "Asked by the app “" + inscribeSheet.request.app + "”, as Basecamp names it. "
+                        + root.appExpiresIn(inscribeSheet.request) + (root.inscribeRequests.length > 1 ? " " + (root.inscribeRequests.length - 1) + " more waiting." : "")
+                }
+                // Who publishes the app, checked against its LNS name by the Program Registry.
+                Text {
+                    readonly property var line: inscribeSheet.request === null ? null : Logic.publisherLine(inscribeSheet.request.publisher)
+                    visible: line !== null
+                    Layout.fillWidth: true
+                    text: line === null ? "" : line.text
+                    textFormat: Text.PlainText
+                    color: line === null ? root.dim : line.tone === "good" ? root.good : line.tone === "warn" ? root.alarm : root.dim
+                    font.family: root.sans
+                    font.pixelSize: root.px(16)
+                    font.weight: line !== null && line.tone !== "plain" ? Font.DemiBold : Font.Normal
+                    wrapMode: Text.WordWrap
+                }
+
+                // The words, whole, as they will be written.
+                Part { text: "What it writes" }
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: inscribeWords.implicitHeight + 24
+                    radius: 6
+                    color: root.raised
+                    border.width: 1
+                    border.color: root.line
+                    Text {
+                        id: inscribeWords
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.margins: 12
+                        text: inscribeSheet.request !== null ? inscribeSheet.request.text : ""
+                        textFormat: Text.PlainText
+                        color: root.ink
+                        font.family: root.sans
+                        font.pixelSize: root.px(18)
+                        lineHeight: 1.25
+                        wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                    }
+                }
+                Hint {
+                    text: "An inscription is public and stays on the Logos Blockchain for good: anyone can read these words and see the account that paid for them. It can't be changed or removed."
+                }
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 6
+                    Fact { label: "Chain"; value: "Logos Blockchain (not the LEZ zone)" }
+                    Fact { label: "Filed under"; code: true; value: inscribeSheet.request !== null ? inscribeSheet.request.submission : "" }
+                    Fact { label: "Moves"; value: "Nothing but the fee" }
+                }
+
+                // The chain account that inscribes it and pays.
+                Part { text: "Inscribe and pay the fee from" }
+                Repeater {
+                    model: inscribeSheet.choices
+                    Rectangle {
+                        id: inscribeRow
+                        required property var modelData
+                        readonly property bool ticked: root.inscribeFrom === modelData.key
+                        readonly property var shown: Logic.inscribeChoice(modelData)
+                        Layout.fillWidth: true
+                        implicitHeight: root.px(44)
+                        radius: 6
+                        color: ticked ? root.raised : "transparent"
+                        border.width: 1
+                        border.color: ticked ? root.brass : root.line
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 12
+                            anchors.rightMargin: 12
+                            spacing: 10
+                            Rectangle {
+                                Layout.preferredWidth: 18
+                                Layout.preferredHeight: 18
+                                radius: 9
+                                color: inscribeRow.ticked ? root.brass : "transparent"
+                                border.width: 2
+                                border.color: inscribeRow.ticked ? root.brass : root.dim
+                            }
+                            Text { text: inscribeRow.shown.title; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(16); elide: Text.ElideRight; Layout.maximumWidth: root.px(260) }
+                            Text { text: inscribeRow.shown.sub; color: root.dim; font.family: root.mono; font.pixelSize: root.px(15); elide: Text.ElideRight; Layout.fillWidth: true }
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.chooseInscribeAccount(inscribeRow.modelData.key)
+                        }
+                    }
+                }
+                Hint {
+                    visible: inscribeSheet.nodeProblem !== ""
+                    color: root.alarm
+                    textFormat: Text.PlainText
+                    text: inscribeSheet.nodeProblem + " You can still reject this."
+                }
+                Hint {
+                    visible: inscribeSheet.request !== null && inscribeSheet.nodeProblem === "" && inscribeSheet.choices.length === 0
+                    color: root.alarm
+                    text: "Your node's wallet has no Logos Blockchain account yet. Add one on the Blockchain page; an inscription can't be paid from a LEZ account."
+                }
+                Fact {
+                    visible: inscribeSheet.nodeProblem === "" && inscribeSheet.choices.length > 0 && inscribeSheet.fee.tone !== "bad"
+                    label: "Network fee"
+                    value: inscribeSheet.fee.text
+                }
+                Hint {
+                    visible: inscribeSheet.nodeProblem === "" && inscribeSheet.choices.length > 0 && inscribeSheet.fee.tone === "bad"
+                    color: root.alarm
+                    textFormat: Text.PlainText
+                    text: inscribeSheet.fee.text
+                }
+
+                // An app that may be a fake needs a second, deliberate tick.
+                RowLayout {
+                    visible: inscribeSheet.risky
+                    Layout.fillWidth: true
+                    spacing: 10
+                    Rectangle {
+                        Layout.preferredWidth: 18
+                        Layout.preferredHeight: 18
+                        Layout.alignment: Qt.AlignTop
+                        radius: 4
+                        color: root.inscribeUnderstood ? root.alarm : "transparent"
+                        border.width: 2
+                        border.color: root.alarm
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.inscribeUnderstood = !root.inscribeUnderstood }
+                    }
+                    Hint {
+                        color: root.ink
+                        text: "I've read the warning above and still want these words inscribed from my account."
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.inscribeUnderstood = !root.inscribeUnderstood }
+                    }
+                }
+
+                Hint { visible: root.inscribeError !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.inscribeError }
+                Hint { visible: root.inscribeBusy; color: root.brass; text: "Signing it and sending it to your node. This can take a minute or two…" }
+                RowLayout {
+                    Layout.topMargin: 8
+                    spacing: 10
+                    Action {
+                        label: "Approve and inscribe"
+                        strong: true
+                        enabledNow: root.inscribeCanApprove()
+                        onPressed: root.answerInscribeRequest(true)
+                    }
+                    Action {
+                        label: "Reject"
+                        enabledNow: !root.inscribeBusy
+                        onPressed: root.answerInscribeRequest(false)
                     }
                 }
             }

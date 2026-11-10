@@ -137,6 +137,18 @@ BRIDGE = r"""
             if (method === "chain_account_new") {
                 return ok({ key: "e613268c7dd432c972e872d03fff5f79d6a3cbcc8103f34afc2b33fef998bf1d", title: "names-1", label: args[0], ready: false,
                     note: "Your node uses this account from its next start: stop and start it in Basecamp's Blockchain app. Until then it can't send, and don't have anything sent to it: what reaches it before your node uses it isn't seen." }) }
+            // An app's inscription request (LP-0022): its sheet, the accounts offered, the node's fee.
+            if (method === "pending_inscriptions") return ok(!mock.inscription ? [] : [{ id: "i1", kind: "inscribe", state: "pending", app: "testimonial_ui",
+                created: Date.now(), expires: Date.now() + 600000, chain: "logos", says: "inscribes on the Logos blockchain", submission: "lp-0022:names-wallet",
+                text: mock.inscription.text || "One wallet for my zone accounts and my Logos Blockchain accounts: I sent on both, bridged between them and never opened a terminal.",
+                publisher: mock.inscription.publisher || { status: "verified", publisher: "jef", module: "testimonial_ui", version: "0.2.0" },
+                choices: mock.inscription.node ? [] : [
+                    { key: "66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b", balance: "1191220464", label: "Main" },
+                    { key: "73058ad5edb0e72b66c3e05ae90471382c3bb4d61314db995ef40e674dbf591e", balance: "25000000" },
+                    { key: "e613268c7dd432c972e872d03fff5f79d6a3cbcc8103f34afc2b33fef998bf1d", balance: "0", title: "names-1", label: "Savings" }] }]
+                .map(function(r) { if (mock.inscription.node) r.node = mock.inscription.node; return r }))
+            if (method === "chain_inscribe") return mock.inscription && mock.inscription.problem ? JSON.stringify({ success: false, value: null, error: mock.inscription.problem })
+                : ok({ from: args[0], balance: "1191220464", text: args[1], bytes: 181, first: true, fee_estimate: mock.inscription && mock.inscription.noFigure ? null : "1086" })
             if (method === "chain_stake") return ok({ staked: "34002373886", notes: 4538, keys: ["66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b"], epoch: 7,
                 next_epoch_in_s: 113623, claimable: "26280", vouchers: 2, reward_per_voucher: "13140" })
             if (method === "chain_bridge") { var asked = String(args[2]).replace(/,/g, "")
@@ -324,6 +336,13 @@ SCENARIOS = {
     # Paying an account rather than a name.
     "approve-verified": 'root.appRequests = [{ id: "r1", kind: "connect", app: "forumer_ui", reason: "to post on the forum as you", created: Date.now(), expires: Date.now() + 600000, choices: [{ account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", label: "Names wallet, main public account", granted: false }], publisher: { status: "verified", publisher: "forumer", module: "forumer_ui", version: "1.2.0" } }]; root.appChosen = ["Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk"]; root.appChosenFor = "r1"',
     "approve-fake": 'root.appRequests = [{ id: "r1", kind: "connect", app: "forumer_ui", reason: "to post on the forum as you", created: Date.now(), expires: Date.now() + 600000, choices: [{ account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", label: "Names wallet, main public account", granted: false }], publisher: { status: "mismatch", publisher: "forumer", module: "forumer_ui", version: "1.2.0" } }]; root.appChosen = ["Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk"]; root.appChosenFor = "r1"',
+    # An app asks for a testimonial inscribed on the Logos Blockchain (the stand-in's pending_inscriptions).
+    "inscribe": 'root.openWallet("home")',
+    "inscribe-short": 'root.openWallet("home")',
+    "inscribe-nofigure": 'root.openWallet("home")',
+    "inscribe-node-down": 'root.openWallet("home")',
+    "inscribe-fake": 'root.openWallet("home")',
+    "inscribe-fake-chosen": 'root.openWallet("home"); Qt.callLater(function() { Qt.callLater(function() { root.chooseInscribeAccount("73058ad5edb0e72b66c3e05ae90471382c3bb4d61314db995ef40e674dbf591e"); root.inscribeUnderstood = true }) })',
     "settings-oldcli": 'root.section = "settings"; root.loadAccounts()',
     "settings-accounts": 'root.section = "settings"; root.loadAccounts(); root.accountRenaming = "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR"',
     "settings-account-new": 'root.section = "settings"; root.loadAccounts(); root.accountNewKind = "private"',
@@ -366,6 +385,13 @@ MOCKS = {
     "settings-oldcli": {"status": {"outdated": True}, "accountsError": "Your names program is older than this app and can't do this yet: it comes with the LEZ 0.4 update. The rest of the app still works."},
     "wallet-waiting": {"tokenPending": [{"position": 21, "definition": "GoLDdef1nition11111111111111111111111111111", "name": "Gold", "amount": "50", "to": "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z"}]},
     "wallet-sending": {"private": "250000000", "public": "1250000"},
+    "inscribe": {"inscription": {}},
+    "inscribe-short": {"inscription": {"problem": "That key doesn't hold enough for this and its fee."}},
+    "inscribe-nofigure": {"inscription": {"noFigure": True}},
+    "inscribe-node-down": {"nodeDown": True, "inscription": {"node": "Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app."}},
+    "inscribe-fake": {"inscription": {"publisher": {"status": "mismatch", "publisher": "jef", "module": "testimonial_ui", "version": "0.2.0"},
+                                      "text": "Line one of a longer testimonial.\nLine two, with a very long unbroken word: " + "x" * 300}},
+    "inscribe-fake-chosen": {"inscription": {"publisher": {"status": "mismatch", "publisher": "jef", "module": "testimonial_ui", "version": "0.2.0"}}},
 }
 
 def main():
@@ -387,7 +413,7 @@ def main():
             "registry": "null" if scenario == "unset" else json.dumps("DbYLkKwd2b13bQhceVj351mpPw7QmRzEjRT2EfU56CKH"),
             "mock": json.dumps(MOCKS.get(scenario, {})),
             "bridge_key": "" if scenario == "get-tokens" else "8e3b0f4a2c71d95e6a0b4c8d2f1e7a3954c6b0d8e2f4a6c8b0d2e4f6a8c0b2d4",
-            "scenario": SCENARIOS[scenario], "out": out, "height": 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "name", "settings-accounts", "settings-oldcli", "settings-account-new", "settings-network") else 1500 if scenario.startswith("get-tokens") or scenario.startswith("wallet") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
+            "scenario": SCENARIOS[scenario], "out": out, "height": 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "name", "settings-accounts", "settings-oldcli", "settings-account-new", "settings-network") else 1500 if scenario.startswith("get-tokens") or scenario.startswith("wallet") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1100 if scenario.startswith("inscribe") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
         }
         # Beside Main.qml, so its relative imports (logic.mjs) resolve.
         with tempfile.NamedTemporaryFile("w", suffix=".qml", delete=False, dir=os.path.join(HERE, "..", "qml")) as handle:

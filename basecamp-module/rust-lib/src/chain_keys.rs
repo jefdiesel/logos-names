@@ -127,7 +127,7 @@ pub fn label_input(text: &str) -> Result<String, String> {
 
 /// Characters that show nothing, break the line or turn the text around (Unicode Cf,
 /// Zl and Zp, and the fillers that render blank), except the emoji joiners (`joins`).
-fn unseen(c: char) -> bool {
+pub(crate) fn unseen(c: char) -> bool {
     matches!(c,
         '\u{00AD}' | '\u{034F}' | '\u{061C}' | '\u{0600}'..='\u{0605}' | '\u{06DD}' | '\u{070F}' | '\u{08E2}'
         | '\u{115F}' | '\u{1160}' | '\u{17B4}' | '\u{17B5}' | '\u{180E}' | '\u{200B}' | '\u{200E}' | '\u{200F}'
@@ -310,7 +310,7 @@ pub fn remove(ask: &mut Ask, records: &mut Map<String, Value>, key: &str) -> Res
 }
 
 /// Whether the module's record of `key` hides it.
-fn hidden(records: &Map<String, Value>, key: &str) -> bool {
+pub(crate) fn hidden(records: &Map<String, Value>, key: &str) -> bool {
     records.get(key).is_some_and(|r| r["hidden"] == Value::Bool(true))
 }
 

@@ -19,7 +19,8 @@ your app ──propose──▶ names module ──queue──▶ Names app (app
     └──── request_status ◀──┴──── approve / reject ◀─┘
                             │
                             ├─ transfer: names CLI job (`names pay`, `auth-transfer send`)
-                            └─ call:     names CLI (`names module send`) tries, signs, sends
+                            ├─ call:     names CLI (`names module send`) tries, signs, sends
+                            └─ inscribe: the person's own Logos Blockchain node signs and sends
 ```
 
 1. **Connect.** Your app calls `request_access`. The person sees your app's
@@ -70,27 +71,32 @@ balances are 128-bit numbers.
 | `account_balances()` | The LEZ balance of each account you were given. Reads run in the background and the answer comes at once with the last balance read. Ask again for a newer one; the chain is read at most every 15 s. | `[{account, account_kind, balance, updating, error}]`; `balance` is decimal text, or null until first read |
 | `propose_transfer(asset, amount, destination)` | Asks to send `amount` of `asset` to `destination`. `asset` is `LEZ`, the native token (empty also means LEZ), or a token of the wallet's token program, written as its definition's account ID in base58 (see [Token transfers](#token-transfers)). `destination` is a name such as `alice`, or `Public/<id>`. The person picks the account it comes from. Checked when you call it. | a request |
 | `propose_call(program_id, accounts_json, instruction_hex, summary)` | Asks to run a program, signed by an account the person picks (details below). | a request |
+| `propose_inscription(text)` | Asks to inscribe a testimonial on the Logos Blockchain (not the LEZ zone), paid from one of the person's node's accounts, which they pick. Needs no access first (see [Inscriptions](#inscriptions-on-the-logos-blockchain)). | a request |
 | `request_status(request_id)` | How your request stands. Only the app that made a request can read it. | a request |
 | `cancel_request(request_id)` | Withdraws your request while it's pending. | a request, `state: "cancelled"` |
 | `drop_access()` | Gives up the access you were given. | `{revoked}` |
 
-You must call `request_access` before you propose anything. Otherwise
-`propose_*` fails with `ask for access first (request_access), then propose it`.
+You must call `request_access` before `propose_transfer` or `propose_call`.
+Otherwise they fail with `ask for access first (request_access), then propose it`.
+`propose_inscription` is the exception: it names no account and reads nothing
+of the person's, so it needs no access.
 
 ### A request
 
 ```json
 {
   "request": "9f3c…(32 hex)",
-  "kind": "connect | transfer | call",
+  "kind": "connect | transfer | call | inscribe",
   "state": "pending | approved | running | done | failed | rejected | expired | cancelled",
   "created": 1793735537880, "expires": 1793736137880, "decided": null,
-  "account": "Public/…",          // the account the person chose (transfer, call)
+  "account": "Public/…",          // the account the person chose (transfer, call; inscribe: a chain key, 64 hex)
   "accounts": ["Public/…"],       // connect: all the accounts you now have
   "asset": "LEZ", "asset_kind": "native", "amount": "1000", "destination": "alice",   // transfer
   "token_name": null,             // transfer of a token: its definition's name
   "program": "<base58>",          // call
-  "tx": "<hash>",                 // call: the transaction sent
+  "tx": "<hash>",                 // call, inscribe: the transaction sent
+  "chain": "logos", "submission": "lp-0022:names-wallet", "text": "…",   // inscribe
+  "fee": "1086", "channel": "<64 hex>", "msg_id": "<64 hex>",            // inscribe, once done
   "error": null                   // failed: why, without the wallet's details
 }
 ```
@@ -100,8 +106,8 @@ You must call `request_access` before you propose anything. Otherwise
 | `pending` | Waiting for the person |
 | `approved` | Access given (`connect`) |
 | `running` | A transfer is being proven and sent: about 4 minutes from a private account, one block from a public one |
-| `done` | Included in a block and not reverted. A call also gives `tx`, its hash |
-| `failed` | `error` says why, in general terms. The wallet's own message, which may mention the person's balances, goes only to the Names app |
+| `done` | Included in a block and not reverted. A call also gives `tx`, its hash. An inscription is `done` when the person's node has taken it: `tx` is its hash, and it is final a few minutes later |
+| `failed` | `error` says why, in general terms. The wallet's own message, which may mention the person's balances, goes only to the Names app. For an inscription the error is always `the inscription may not have been sent`, and `account` is the key that was to pay: the node took it under another hash, or didn't answer after it was handed over, so it may still land. Don't ask again before the person has looked at their node's history |
 | `rejected` / `expired` / `cancelled` | Nothing was signed or sent |
 
 Times are in milliseconds. A decided request stays readable for a day.
@@ -191,6 +197,40 @@ names("propose_transfer", [demoTokenId, "250", "alice"], function(v) { requestId
   changes their token program in between, approving it fails and it stays
   pending, so they reject it and you can ask again.
 
+### Inscriptions on the Logos Blockchain
+
+`propose_inscription(text)` asks the wallet to write a testimonial on the Logos
+Blockchain itself, as a channel inscription. Everything else in this SDK
+happens on the LEZ zone.
+
+```qml
+names("propose_inscription", [text], function(v) { requestId = v.request; poll.start() })
+```
+
+- `text` is 1 to 1,024 bytes of UTF-8 with something in it besides spaces, no
+  control characters except newline and tab, and no character that turns the
+  text around or shows nothing (bidi marks and overrides, zero-width space,
+  BOM, line separators and the like; the emoji and script joiners are fine).
+  It is checked when you call.
+- You name no account. In the Names app the person sees your app's name and
+  publisher, the words, that an inscription is public and permanent, the
+  accounts their own node holds with their balances, and the fee their node
+  asks for it from the account they tick. Nothing is held or sent before they
+  approve.
+- What is inscribed is `{"submission":"lp-0022:names-wallet","text":"…"}`, on
+  the paying account's own channel
+  (`sha256("lp-0022:testimonial:" || its inscription key)`), signed by an
+  Ed25519 inscription key the wallet keeps for that account. The only thing
+  that moves is the fee; the node may fund at most 100,000 for it, and an
+  inscription that would cost more is refused when its fee is shown.
+- Approving sends it at once. `done` gives `account` (the key that paid), `tx`,
+  `fee` (what it paid), `channel` and `msg_id`.
+- The person needs a running Logos Blockchain node in Basecamp with an account
+  that holds enough for the fee. If the node is stopped, or refuses the
+  inscription before it is sent, the request stays pending and the person is
+  told why; they can still reject it.
+- The queue limits below apply as for any request.
+
 ### Limits
 
 | Limit | Value |
@@ -214,9 +254,12 @@ gets `only the Names app can do this`.
 
 | Method | Value |
 |---|---|
-| `pending_requests()` | the waiting requests, oldest first, with everything the prompt shows and `choices`: `[{account, account_kind, pays, label, granted}]`. A payment comes from the wallet's main public or private account (`pays`). A call can be signed by any of its public accounts; those beyond the main one are read in the background and can appear a few seconds later |
+| `pending_requests()` | the waiting connect, transfer and call requests (not inscriptions), oldest first, with everything the prompt shows and `choices`: `[{account, account_kind, pays, label, granted}]`. A payment comes from the wallet's main public or private account (`pays`). A call can be signed by any of its public accounts; those beyond the main one are read in the background and can appear a few seconds later |
 | `approve_request(request_id, account)` | approves with one of the request's `choices` (for `connect`, one or more separated by commas). A transfer starts as a CLI job, and its `job` is in the value. If the wallet is busy, the request stays pending and the error says so |
-| `reject_request(request_id)` | the rejected request |
+| `reject_request(request_id)` | the rejected request, of any kind |
+| `pending_inscriptions()` | the waiting inscription requests, oldest first: `{id, app, publisher, says, submission, text, created, expires, choices}`. `choices` is `[{key, balance, label?, title?}]`, the accounts the person's node holds, named as the Blockchain tab names them and without an empty account they hid. If the node can't be asked, `choices` is empty and `node` says why |
+| `approve_inscription(request_id, from_key)` | inscribes it from that account and answers when the node has taken it (`done`) or may have (`failed`). Refused before anything is sent (the key isn't one the node holds, the node is stopped, the account can't pay the fee): the request stays pending and the error says why |
+| `chain_inscribe(from_key, text, send)` | with `send` false, the plan the sheet shows: `fee_estimate`, the node's own fee for this inscription from this account, asked in a way that holds none of the account's funds (`null` when the node can't say; an error when it is above the 100,000 a send pays) |
 | `app_grants()` | `[{app, accounts, since}]` |
 | `revoke_app(app)` | `{revoked}` |
 
@@ -386,7 +429,8 @@ transaction with the code that does it, and record how they were tested:
 - [Testimonial](../../apps/testimonial/README.md) (`apps/testimonial/`): a
   program call (`propose_call`) whose message and PDA seeds are built in
   JavaScript and checked against the program's Rust encoding, then a list read
-  back from the chain with per-month counts.
+  back from the chain with per-month counts. Its "Logos Blockchain" choice
+  inscribes the testimonial there instead (`propose_inscription`).
 - [Faucet](../../apps/faucet/README.md) (`apps/faucet/`): access and account
   selection, then a request to a disclosed, optional faucet service, with its
   rate limits explained and the balance watched with `account_balances`.
@@ -403,6 +447,7 @@ reads or another HTTP service, give the app a small C++ backend (a universal
   calling module. A caller that can't be named is refused, and so is a module
   that names itself `host`.
 - **Only the Names app decides.** `pending_requests`, `approve_request`,
+  `pending_inscriptions`, `approve_inscription`,
   `reject_request`, `app_grants` and `revoke_app` refuse every app except
   `names_ui` and the host. This is the same check that guards the module's
   paying and signing methods (`cli_pay`, `cli_pay_account`, `wallet` and
@@ -420,7 +465,17 @@ reads or another HTTP service, give the app a small C++ backend (a universal
   if the person gave it that private account. A failed payment tells the app
   only that it failed.
 - **Keys never leave their wallet.** Payments and calls both run in the names
-  CLI, which signs with its own keys. The names module never holds a key.
+  CLI, which signs with its own keys. The names module never holds a key for
+  funds: an inscription's fee is paid by the person's node from its own
+  keystore. The module holds only the inscription keys (one per chain account,
+  mode 0600), which sign what an account's channel says and can move nothing.
+- **An inscription needs no grant, and gets nothing.** The app that asks
+  learns nothing until the person approves; then it learns the one account
+  that paid (or was to pay, when the outcome is `failed`). The words are shown whole before approval, an app whose publisher
+  can't be verified needs an extra tick, and a request that failed after it
+  was handed to the node (taken under another hash, or no answer in time) is
+  never offered again: its notes count as spent and the account inscribes
+  nothing else until it lands or 15 minutes pass.
 - **Prompts can't be spoofed by text.** Your `reason` and `summary` lose
   control, bidi-override and zero-width characters. The app shows them as
   plain text, labelled as your words.

@@ -38,6 +38,9 @@ pub enum Shape {
     Deposit { channel: String, metadata: usize },
     /// `leader_claim`: one LeaderClaim op, its fee paid from the funding key.
     Claim,
+    /// `chain_inscribe`: the inscription's own op, as it will be sent, its fee paid by a
+    /// transfer from the key with the change back to it.
+    Inscribe { op: Value },
 }
 
 /// The stand-in note `i`: an op id no transaction has, so no wallet holds it.
@@ -68,6 +71,7 @@ pub fn request(shape: &Shape, from: &str, values: &[u128]) -> Value {
             json!([{ "opcode": 0x30, "payload": { "pk": from, "rewards_root": "00".repeat(32), "voucher_nullifier": note_id(CLAIM_NULLIFIER) } }]),
             json!([]),
         ),
+        Shape::Inscribe { op } => (json!([op]), json!([])),
     };
     json!({
         "tip": null,
@@ -243,6 +247,13 @@ mod tests {
         // As the node stored a real deposit (spike 5): metadata a list of bytes.
         assert_eq!(deposit["tx_builder"]["mantle_tx"]["ops"][0]["payload"]["metadata"], json!(vec![0; 32]));
         assert_eq!(request(&Shape::Claim, A, &[5])["tx_builder"]["mantle_tx"]["ops"][0]["opcode"], 0x30);
+        // An inscription: its own op as it will be sent, paid by stand-ins, nothing paid out.
+        let op = json!({ "opcode": 0x11, "payload": { "channel_id": "aa".repeat(32), "inscription": "7b7d", "parent": "00".repeat(32), "signer": "bb".repeat(32) } });
+        let inscribe = request(&Shape::Inscribe { op: op.clone() }, A, &[100_000]);
+        assert_eq!(inscribe["tx_builder"]["mantle_tx"]["ops"], json!([op]));
+        assert_eq!(inscribe["funding_public_keys"], json!([]));
+        assert_eq!(inscribe["tx_builder"]["pending_transfer"], json!({ "inputs": [note_id(1)], "outputs": [] }));
+        assert_eq!(inscribe["tx_builder"]["ledger_inputs"][0]["note"], json!({ "value": 100_000, "pk": A }));
     }
 
     /// Largest notes first, one more each time the node says they can't pay it.

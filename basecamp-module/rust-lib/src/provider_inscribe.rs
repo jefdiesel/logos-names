@@ -106,16 +106,30 @@ impl Names {
 }
 
 /// The chain accounts an inscription can come from: the keys the node's wallet holds,
-/// `[{key, balance}]`, as `chain_accounts` lists them.
+/// `[{key, balance, label?, title?}]`, as `chain_accounts` lists them: with the label the person
+/// gave the account, and without an account they hid while it holds nothing.
 fn chain_choices() -> Result<Value, String> {
     let keys = crate::node::call("wallet_get_known_addresses", json!([]), crate::node::QUICK)?;
+    let records = crate::config_dir().map(|dir| crate::activity::load(&crate::chain_keys::records_path(&dir))).unwrap_or_default();
     let mut held = Vec::new();
     for key in keys.as_array().into_iter().flatten().filter_map(|k| k.as_str().and_then(chain::parse_key)).take(crate::MAX_WALLET_ACCOUNTS) {
-        match crate::node::call("wallet_get_balance", json!([key]), crate::node::QUICK) {
-            Ok(balance) => held.push(json!({ "key": key, "balance": chain::balance_of(&balance).to_string() })),
-            Err(error) if chain::not_held(&error) => {}
+        let balance = match crate::node::call("wallet_get_balance", json!([key]), crate::node::QUICK) {
+            Ok(balance) => chain::balance_of(&balance),
+            Err(error) if chain::not_held(&error) => continue,
             Err(error) => return Err(error),
+        };
+        if balance == 0 && crate::chain_keys::hidden(&records, &key) {
+            continue;
         }
+        let mut choice = json!({ "key": key, "balance": balance.to_string() });
+        // As `chain_accounts` names it: the person's label, and the keystore title of an
+        // account made in the Names app.
+        for field in ["label", "title"] {
+            if let Some(text) = records.get(&key).and_then(|record| record[field].as_str()).filter(|text| !text.is_empty()) {
+                choice[field] = Value::from(text);
+            }
+        }
+        held.push(choice);
     }
     Ok(Value::from(held))
 }
@@ -233,6 +247,31 @@ mod tests {
         let pending = parsed(&names.pending_inscriptions());
         assert_eq!(pending["value"][0]["choices"], json!([{ "key": FROM, "balance": "100000" }]), "{pending}");
         assert!(pending["value"][0].get("node").is_none(), "{pending}");
+    }
+
+    /// inscribe-in-generic-sheet: an inscription request was listed by `pending_requests`
+    /// with the wallet's LEZ accounts as its choices, none of which can approve it. And the
+    /// chain accounts offered carry the person's labels, less those hidden and empty.
+    #[test]
+    fn an_inscription_is_offered_chain_accounts_only_named_as_the_person_named_them() {
+        solo_node("x");
+        let other = "ab".repeat(32);
+        let records = json!({ FROM: { "label": "Savings" }, other.as_str(): { "title": "names-1", "label": "", "hidden": true } });
+        crate::save_object(&crate::chain_keys::records_path(&crate::config_dir().unwrap()), records.as_object().unwrap());
+        let mut names = Names::default();
+        as_app("testimonial_ui");
+        let id = parsed(&names.propose_inscription("x".into()))["value"]["request"].as_str().unwrap().to_owned();
+        as_app("host");
+        assert_eq!(parsed(&names.pending_requests())["value"], json!([]), "not in the sheet that offers LEZ accounts");
+        let lez = parsed(&names.approve_request(id.clone(), "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk".into()));
+        assert_eq!(lez["success"], false, "{lez}");
+        let pending = parsed(&names.pending_inscriptions());
+        assert_eq!(pending["value"][0]["choices"], json!([{ "key": FROM, "balance": "100000", "label": "Savings" }, { "key": other, "balance": "100000", "title": "names-1" }]), "hidden but holding: shown");
+        // Hidden and holding nothing: not offered.
+        crate::node::ANSWERS.with(|a| a.borrow_mut().insert("wallet_get_balance".into(), json!({ "success": true, "value": "0", "error": null })));
+        let pending = parsed(&names.pending_inscriptions());
+        assert_eq!(pending["value"][0]["choices"], json!([{ "key": FROM, "balance": "0", "label": "Savings" }]), "{pending}");
+        assert_eq!(parsed(&names.reject_request(id))["value"]["state"], "rejected");
     }
 
     #[test]

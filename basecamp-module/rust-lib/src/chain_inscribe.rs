@@ -8,9 +8,12 @@
 //!    fee from the chosen key (change back to it), signed by the node over the funded
 //!    transaction's hash. It moves nothing, but the node HOLDS the notes it funds with:
 //!    another funding (or send) from them is refused until they are spent in a block or
-//!    10 final blocks pass (31.6 s on a solo node). So the funding a plan gets is kept
-//!    (`FUNDED_FILE`) and the send of the same inscription uses it, rather than asking
-//!    again and being refused by the plan's own hold.
+//!    10 final blocks pass (31.6 s on a solo node). So only a send asks for it. A plan
+//!    (`send` false) is priced with stand-ins of the key's notes instead (chain_fee.rs),
+//!    which holds none of them: looking at an inscription's fee, as the approval sheet
+//!    does, leaves the account free to send. A funding whose send then failed is kept
+//!    (`FUNDED_FILE`) and the next send of the same inscription uses it, rather than
+//!    asking again and being refused by that funding's own hold.
 //! 2. The hash is computed here, as the node does: blake2b-256 of `MANTLE_TXHASH_V1`
 //!    and the ops' canonical encoding. The inscription is signed with the account's
 //!    Ed25519 inscription key over that hash.
@@ -46,7 +49,7 @@ pub const FUNDED_FILE: &str = "chain-inscribe-funded.json";
 pub const FUNDED_FOR_S: u64 = 15 * 60;
 /// Said when the node holds a key's notes for an inscription priced a moment ago.
 /// The time given is the one measured (a solo test node); on a network it is 10 of its blocks.
-pub const HELD: &str = "Your node is holding this key's notes for an inscription priced here a moment ago: they aren't short. It lets them go once 10 more blocks are final (about 30 seconds on a solo test node), or spends them when that inscription is sent. Try again then. Nothing was sent.";
+pub const HELD: &str = "Your node is holding this key's notes for an inscription it funded a moment ago that wasn't sent: they aren't short. It lets them go once 10 more blocks are final (about 30 seconds on a solo test node), or spends them when that inscription is sent. Try again then. Nothing was sent.";
 /// The parent of a channel's first message.
 pub const ZERO: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -57,7 +60,10 @@ const TX_HASH_PREFIX: &[u8] = b"MANTLE_TXHASH_V1";
 type Blake2b256 = Blake2b<U32>;
 
 /// Testimonial text as the LEZ testimonial program takes it: 1-1024 bytes, not only
-/// spaces, no control characters but line breaks and tabs.
+/// spaces, no control characters but line breaks and tabs. And, for an inscription, none
+/// of the characters that turn the text around or show nothing (`chain_keys::unseen`, the
+/// rule an account's label has; the emoji and script joiners stay): the approval sheet
+/// shows the text, and what it shows must read as what is inscribed.
 pub fn validate_text(text: &str) -> Result<(), String> {
     if text.trim().is_empty() {
         return Err("a testimonial needs some text".into());
@@ -67,6 +73,9 @@ pub fn validate_text(text: &str) -> Result<(), String> {
     }
     if text.chars().any(|c| c.is_control() && c != '\n' && c != '\t') {
         return Err("a testimonial has no control characters other than line breaks and tabs".into());
+    }
+    if text.chars().any(crate::chain_keys::unseen) {
+        return Err("an inscribed testimonial has no characters that turn the text around or show nothing".into());
     }
     Ok(())
 }
@@ -263,8 +272,35 @@ pub fn run(from_key: &str, text: &str, send: bool) -> Result<Value, String> {
     }) {
         return Err("Your last inscription from this key is still waiting to land. Try again in a minute. Nothing was sent.".into());
     }
-    // The funding a plan of this same inscription got, while its notes are still there;
-    // otherwise the node funds it now (and holds the notes it uses).
+    let mut plan = json!({
+        "from": from, "balance": balance.to_string(), "signer": hex(&signer), "channel": channel, "parent": parent, "first": first,
+        "submission": SUBMISSION, "text": text, "bytes": bytes.len(), "msg_id": msg_id(&op)?,
+        "fee_estimate": null, "hash": null, "fee": null,
+    });
+    let short = chain::problem("wallet_fund_tx", "not enough");
+    if !send {
+        // Priced with stand-ins of the key's notes (chain_fee.rs), so the node holds none
+        // of them for a plan: less those a send made here still spends.
+        let busy = crate::chain_notes_in_use(&from);
+        let (in_flight, free): (Vec<_>, Vec<_>) = notes.iter().partition(|(id, _)| busy.contains(*id));
+        let values = |notes: Vec<(&String, &Value)>| notes.into_iter().map(|(_, value)| chain::amount(value)).collect::<Vec<u128>>();
+        let shape = crate::chain_fee::Shape::Inscribe { op: op.clone() };
+        let ask = |request: String| node::call("wallet_fund_tx", json!([request]), node::QUICK);
+        match crate::chain_fee::with_busy(&shape, &from, &values(free), &values(in_flight), ask)? {
+            // A send is funded with at most MAX_FEE, so a plan above it is one no send can meet.
+            crate::chain_fee::Estimate::Fee(fee) if fee > u128::from(MAX_FEE) => {
+                return Err(format!("this inscription would cost a fee of {fee}, more than the {MAX_FEE} the wallet pays for one; nothing was sent"));
+            }
+            crate::chain_fee::Estimate::Fee(fee) => plan["fee_estimate"] = Value::from(fee.to_string()),
+            crate::chain_fee::Estimate::Short => return Err(short),
+            crate::chain_fee::Estimate::InFlight => return Err(crate::IN_FLIGHT.to_owned()),
+            // The node didn't say: the plan stands without a figure.
+            crate::chain_fee::Estimate::Unknown => {}
+        }
+        return Ok(plan);
+    }
+    // The funding an earlier send of this same inscription got and didn't use, while its
+    // notes are still there; otherwise the node funds it now (and holds the notes it uses).
     let kept_path = dir.join(FUNDED_FILE);
     let mut kept = kept_fundings(&kept_path, at);
     let key_op = op.to_string();
@@ -277,8 +313,8 @@ pub fn run(from_key: &str, text: &str, send: bool) -> Result<Value, String> {
         None => {
             let funded = node::call("wallet_fund_tx", json!([fund_request(&op, &from).to_string()]), node::PROVING).map_err(|error| {
                 // "Not enough" from a key that holds enough: its notes are in a send made
-                // here still waiting to land, or held for a plan made here a moment ago.
-                if error != chain::problem("wallet_fund_tx", "not enough") {
+                // here still waiting to land, or held for a funding made here a moment ago.
+                if error != short {
                     return error;
                 }
                 if crate::chain_notes_in_use(&from).iter().any(|note| notes.contains_key(note)) {
@@ -296,14 +332,7 @@ pub fn run(from_key: &str, text: &str, send: bool) -> Result<Value, String> {
     };
     let ops = funded_ops(&funded, &op, &from)?;
     let fee = chain::transfer_fee(&json!({ "mantle_tx": { "ops": ops } }), &notes);
-    let mut plan = json!({
-        "from": from, "balance": balance.to_string(), "signer": hex(&signer), "channel": channel, "parent": parent, "first": first,
-        "submission": SUBMISSION, "text": text, "bytes": bytes.len(), "msg_id": msg_id(&op)?,
-        "fee_estimate": fee.map(|f| f.to_string()), "hash": null, "fee": null,
-    });
-    if !send {
-        return Ok(plan);
-    }
+    plan["fee_estimate"] = fee.map_or(Value::Null, |f| Value::from(f.to_string()));
     let busy = crate::chain_notes_in_use(&from);
     let (inputs, _) = chain::transfer_parts(&json!({ "mantle_tx": { "ops": ops } }));
     if inputs.iter().any(|input| busy.contains(input)) {
@@ -312,25 +341,39 @@ pub fn run(from_key: &str, text: &str, send: bool) -> Result<Value, String> {
     let hash = tx_hash(&ops)?;
     let signature = key.sign(&hash).to_bytes();
     let signed = signed_tx(&ops, &signature, &funded["transfer_proof"]);
-    let submitted = node::call("submit_signed_transaction", json!([signed.to_string()]), node::PROVING)?;
-    // The node hashes what it took; the signature is only good for the hash signed here.
     let ours = hex(&hash);
+    // Followed as a send is: its notes count as spent until it lands, and it is in the history.
+    let follow = || {
+        crate::chain_sent_add(&ours, json!({ "from": from, "inputs": inputs, "fee": fee.map(|f| f.to_string()), "at": at,
+            "channel": channel, "msg_id": plan["msg_id"] }));
+        crate::activity::add(&dir, at, json!({ "kind": "inscribe", "chain": "logos", "from": from, "channel": channel,
+            "submission": SUBMISSION, "text": text, "hash": ours, "fee": fee.map(|f| f.to_string()) }));
+    };
+    let submitted = match node::call("submit_signed_transaction", json!([signed.to_string()]), node::PROVING) {
+        Ok(submitted) => submitted,
+        // No answer (the wait ran out, the node stopped mid-call): the node may have taken
+        // it, so it is followed as sent and never sent again as if nothing had happened
+        // (inscribe-submit-timeout-sent-twice). A refusal is the node saying it took nothing.
+        Err(error) if error.contains("didn't answer") => {
+            follow();
+            return Err(format!("the node didn't answer after the inscription was handed to it, signed as {ours}; check it with chain_tx"));
+        }
+        Err(error) => return Err(error),
+    };
+    // The node hashes what it took; the signature is only good for the hash signed here.
     if chain::hash_of(&submitted).as_deref() != Some(ours.as_str()) {
         return Err(format!("the node took the inscription as {submitted} but it was signed as {ours}; check it with chain_tx"));
     }
     // Spent by this transaction: never used again.
     kept.remove(&key_op);
     crate::save_object(&kept_path, &kept);
-    crate::chain_sent_add(&ours, json!({ "from": from, "inputs": inputs, "fee": fee.map(|f| f.to_string()), "at": at,
-        "channel": channel, "msg_id": plan["msg_id"] }));
-    crate::activity::add(&dir, at, json!({ "kind": "inscribe", "chain": "logos", "from": from, "channel": channel,
-        "submission": SUBMISSION, "text": text, "hash": ours, "fee": fee.map(|f| f.to_string()) }));
+    follow();
     plan["hash"] = Value::from(ours);
     plan["fee"] = fee.map_or(Value::Null, |f| Value::from(f.to_string()));
     Ok(plan)
 }
 
-/// The fundings kept for plans (`FUNDED_FILE`), those still young enough to use.
+/// The fundings kept from sends that failed (`FUNDED_FILE`), those still young enough to use.
 fn kept_fundings(path: &Path, at: u64) -> Map<String, Value> {
     let mut kept = crate::activity::load(path);
     kept.retain(|_, entry| at.saturating_sub(entry["at"].as_u64().unwrap_or(0)) < FUNDED_FOR_S);
@@ -346,9 +389,10 @@ fn holds_notes(kept: &Map<String, Value>, from: &str, notes: &Map<String, Value>
     })
 }
 
-/// Whether an inscription priced here (a plan, `send` false) may have the node holding
-/// notes of `from` (its notes now: `notes`), so that a node's "not enough" for another
-/// send or split from it means held, not short (plan-holds-notes-other-ops-say-short).
+/// Whether an inscription funded here and not sent (a send that failed after its funding)
+/// may have the node holding notes of `from` (its notes now: `notes`), so that a node's
+/// "not enough" for another send or split from it means held, not short
+/// (plan-holds-notes-other-ops-say-short). A plan funds nothing, so it holds nothing.
 pub fn plan_holds_notes_of(from: &str, notes: &Map<String, Value>) -> bool {
     let Some(dir) = crate::config_dir() else { return false };
     holds_notes(&kept_fundings(&dir.join(FUNDED_FILE), crate::now()), from, notes)
@@ -481,42 +525,123 @@ mod tests {
         assert!(again.contains("still waiting to land"), "{again}");
     }
 
-    fn funds_asked() -> usize {
-        asked().iter().filter(|m| *m == "wallet_fund_tx").count()
+    /// inscribe-submit-timeout-sent-twice: a submit the node didn't answer in time was
+    /// taken as refused, so nothing followed it and the same request could be approved
+    /// (and paid for) again once the first had landed. It is followed as sent.
+    #[test]
+    fn a_submit_the_node_did_not_answer_is_followed_as_sent_and_not_sent_again() {
+        let (op, ops) = solo_node("slow node");
+        // No answer set for submit_signed_transaction: the node "didn't answer".
+        let error = run(FROM, "slow node", true).unwrap_err();
+        let hash = hex(&tx_hash(&ops).unwrap());
+        assert!(error.contains("didn't answer") && error.contains(&format!("signed as {hash}")), "{error}");
+        let kept = crate::chain_sent();
+        assert_eq!(kept[&hash]["inputs"], json!([NOTE]), "{kept:?}");
+        assert_eq!(kept[&hash]["msg_id"], msg_id(&op).unwrap());
+        let history = crate::activity::load(&crate::config_dir().unwrap().join("activity.json"));
+        assert!(history.values().any(|entry| entry["kind"] == "inscribe" && entry["hash"] == hash.as_str()), "{history:?}");
+        // While it may still land, the key inscribes nothing else: not this text, not another.
+        answer("submit_signed_transaction", json!(hash));
+        for text in ["slow node", "another"] {
+            let again = run(FROM, text, true).unwrap_err();
+            assert!(again.contains("still waiting to land"), "{again}");
+        }
+        assert_eq!(asked().iter().filter(|m| *m == "submit_signed_transaction").count(), 1, "handed to the node once");
+        // A refusal is still the node saying it took nothing: nothing is followed.
+        let (_, ops) = solo_node("refused");
+        refuse("submit_signed_transaction", "mempool is full");
+        let refused = run(FROM, "refused", true).unwrap_err();
+        assert!(refused.contains("mempool is full") && !refused.contains("signed as"), "{refused}");
+        assert!(!crate::chain_sent().contains_key(&hex(&tx_hash(&ops).unwrap())));
     }
 
-    /// The node holds the notes it funds with (spike 3: a second funding at once was
-    /// refused for 31.6 s), so a plan's funding is what its send uses.
     #[test]
-    fn the_send_uses_the_funding_its_plan_got_since_the_node_holds_those_notes() {
+    fn refuses_text_that_reorders_what_is_shown_and_a_plan_above_the_fee_a_send_pays() {
+        for hidden in ["\u{202E}", "\u{2066}", "\u{200F}", "\u{061C}", "\u{200B}", "\u{FEFF}", "\u{2028}", "\u{E0041}"] {
+            assert!(validate_text(&format!("good{hidden}dab")).is_err(), "{hidden:?}");
+        }
+        // Joiners stay: emoji sequences and several scripts need them.
+        assert!(validate_text("\u{1F468}\u{200D}\u{1F469} \u{0645}\u{06CC}\u{200C}\u{062E}").is_ok());
+        let (op, _) = solo_node("dear");
+        let dear = json!({ "opcode": 0, "payload": { "inputs": ["01".repeat(32)], "outputs": [{ "value": 0, "pk": FROM }] } });
+        answer("wallet_fund_tx", json!({ "funded_tx": { "ops": [op, dear] }, "transfer_proof": {} }));
+        answer("wallet_get_notes", json!({ "notes": [{ "id": NOTE, "value": "200001" }] }));
+        let plan = run(FROM, "dear", false);
+        assert!(plan.as_ref().is_err_and(|error| error.contains("more than the 100000")), "{plan:?}");
+    }
+
+    /// The `wallet_fund_tx` requests the node was asked, as JSON.
+    fn fund_requests() -> Vec<Value> {
+        node::ASKED.with(|asked| {
+            asked.borrow().iter().filter(|(m, _)| m == "wallet_fund_tx").map(|(_, args)| serde_json::from_str(args[0].as_str().unwrap()).unwrap()).collect()
+        })
+    }
+
+    /// Fundings asked with the key itself as the funding key: the node holds the notes
+    /// it picks for these.
+    fn funds_asked() -> usize {
+        fund_requests().iter().filter(|request| request["funding_public_keys"] == json!([FROM])).count()
+    }
+
+    /// plan-holds-notes: a plan asked the node for a real funding, which held the key's
+    /// notes (spike 3: a second funding at once was refused for 31.6 s), so looking at an
+    /// inscription's fee stopped the account sending. A plan is priced with stand-ins.
+    #[test]
+    fn a_plan_is_priced_with_stand_ins_so_the_node_holds_none_of_the_keys_notes() {
+        let (op, _) = solo_node("held");
+        let plan = run(FROM, "held", false).unwrap();
+        assert_eq!(plan["fee_estimate"], "1086", "{plan}");
+        let asked = fund_requests();
+        assert_eq!(asked.len(), 1);
+        // The inscription itself, paid by a stand-in of the key's one note: no funding key
+        // (so the node can't pull in a real note), and not the note's own id.
+        assert_eq!(asked[0]["tx_builder"]["mantle_tx"]["ops"], json!([op]));
+        assert_eq!(asked[0]["funding_public_keys"], json!([]));
+        assert_eq!(asked[0]["tx_builder"]["ledger_inputs"][0]["note"], json!({ "value": 100_000, "pk": FROM }));
+        assert!(!asked[0].to_string().contains(NOTE), "the real note isn't named");
+        assert_eq!(funds_asked(), 0);
+        // Nothing is kept for a plan, so nothing is said to be held after it: another
+        // text is priced at once, and a send the node refuses as short is said as short.
+        assert!(!crate::config_dir().unwrap().join(FUNDED_FILE).exists());
+        assert_eq!(run(FROM, "another text", false).unwrap()["fee_estimate"], "1086");
+        assert!(!plan_holds_notes_of(FROM, &chain::notes_of(&json!({ "notes": [{ "id": NOTE, "value": "100000" }] }))));
+        // A plan from notes a send made here still spends says to wait, not that it is short.
+        crate::chain_sent_add(&"ab".repeat(32), json!({ "from": FROM, "inputs": [NOTE], "at": crate::now() }));
+        assert_eq!(run(FROM, "held", false).unwrap_err(), crate::IN_FLIGHT);
+    }
+
+    /// The node holds the notes it funds with, so a funding whose send then failed is
+    /// what the next send of the same inscription uses.
+    #[test]
+    fn a_send_that_failed_after_its_funding_is_sent_again_with_that_funding() {
         let (_, ops) = solo_node("held");
-        run(FROM, "held", false).unwrap();
-        run(FROM, "held", false).unwrap();
-        assert_eq!(funds_asked(), 1, "a second plan of the same inscription doesn't fund it again");
+        refuse("submit_signed_transaction", "mempool is full");
+        assert!(run(FROM, "held", true).is_err());
+        assert_eq!(funds_asked(), 1);
         // From here the node refuses any funding from FROM, as it does while it holds the note.
         refuse("wallet_fund_tx", "Failed to fund tx: Wallet does not have enough funds, available=0");
+        // Another inscription from the key meanwhile: held, not short.
+        assert_eq!(run(FROM, "second", true).unwrap_err(), HELD);
         answer("submit_signed_transaction", json!(hex(&tx_hash(&ops).unwrap())));
         let sent = run(FROM, "held", true).unwrap();
         assert_eq!(sent["fee"], "1086", "{sent}");
-        assert_eq!(funds_asked(), 1, "the send used the plan's funding");
-        // Another from the same key while the send waits to land: said as a send says it.
+        assert_eq!(funds_asked(), 2, "the first send's and the one refused: this send used the kept funding");
+        // Another from the same key while the send waits to land: said as a send says it
+        // (the node prices stand-ins whatever it holds).
+        answer("wallet_fund_tx", json!({ "funded_tx": { "ops": ops }, "transfer_proof": null }));
         assert_eq!(run(FROM, "other text", false).unwrap_err(), crate::IN_FLIGHT);
-        // A plan of one text, then another, while the node holds the first one's notes.
-        solo_node("first");
-        run(FROM, "first", false).unwrap();
-        refuse("wallet_fund_tx", "Failed to fund tx: Wallet does not have enough funds, available=0");
-        assert_eq!(run(FROM, "second", false).unwrap_err(), HELD);
     }
 
-    /// plan-holds-notes-other-ops-say-short: an inscription plan's funding holds the key's
-    /// notes on the node, and a send or split from the key right after was refused "That
-    /// key doesn't hold enough" though it held 100,000 (solo node, verify/adv.sh V1).
+    /// plan-holds-notes-other-ops-say-short: a funding the node made for an inscription
+    /// holds the key's notes, and a send or split from the key right after was refused
+    /// "That key doesn't hold enough" though it held 100,000 (solo node, verify/adv.sh V1).
     #[test]
-    fn a_send_or_split_while_a_plan_holds_the_keys_notes_says_held_not_short() {
+    fn a_send_or_split_while_an_unsent_funding_holds_the_keys_notes_says_held_not_short() {
         use crate::NamesModule as _;
         let to = "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225";
         solo_node("hold test");
-        run(FROM, "hold test", false).unwrap();
+        refuse("submit_signed_transaction", "mempool is full");
+        assert!(run(FROM, "hold test", true).is_err());
         // From here the node refuses any other funding from FROM, as it did on the solo node.
         refuse("wallet_transfer_funds", "Failed to fund tx: Wallet does not have enough funds, available=0");
         let mut names = crate::Names::default();
@@ -524,13 +649,15 @@ mod tests {
         assert_eq!(sent["error"], HELD, "{sent}");
         let split: Value = serde_json::from_str(&names.chain_split(FROM.into(), "1,000".into(), true)).unwrap();
         assert_eq!(split["error"], HELD, "{split}");
-        // No plan holds them: the node's "not enough" is said as before.
+        // Nothing funded (a plan alone holds nothing): the node's "not enough" is said as before.
         solo_node("hold test");
+        run(FROM, "hold test", false).unwrap();
         refuse("wallet_transfer_funds", "Failed to fund tx: Wallet does not have enough funds, available=0");
         let short: Value = serde_json::from_str(&names.chain_send(FROM.into(), to.into(), "1,000".into(), true)).unwrap();
         assert_eq!(short["error"], "That key doesn't hold enough for this and its fee.", "{short}");
-        // A plan whose note has left the wallet holds nothing any more.
-        run(FROM, "hold test", false).unwrap();
+        // A funding whose note has left the wallet holds nothing any more.
+        refuse("submit_signed_transaction", "mempool is full");
+        assert!(run(FROM, "hold test", true).is_err());
         answer("wallet_get_notes", json!({ "notes": [{ "id": "c0de", "value": "98914" }] }));
         let gone: Value = serde_json::from_str(&names.chain_send(FROM.into(), to.into(), "1,000".into(), true)).unwrap();
         assert_eq!(gone["error"], "That key doesn't hold enough for this and its fee.", "{gone}");
@@ -539,9 +666,10 @@ mod tests {
     #[test]
     fn a_kept_funding_whose_notes_are_gone_is_not_used() {
         let (_, _) = solo_node("x");
-        run(FROM, "x", false).unwrap();
+        refuse("submit_signed_transaction", "mempool is full");
+        assert!(run(FROM, "x", true).is_err());
         answer("wallet_get_notes", json!({ "notes": [{ "id": "c0de", "value": "98914" }] }));
-        let _ = run(FROM, "x", false);
+        let _ = run(FROM, "x", true);
         assert_eq!(funds_asked(), 2, "its note was spent elsewhere, so the node is asked again");
     }
 

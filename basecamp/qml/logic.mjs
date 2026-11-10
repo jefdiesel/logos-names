@@ -472,6 +472,7 @@ export function activityLine(entry, now, account) {
     var title = "", sub = "", sign = "-"
     switch (kind) {
     case "send": title = "Sent on the Logos Blockchain"; sub = "to " + (e.name ? e.name : whoShown(e.to)); break
+    case "inscribe": title = "Inscribed a testimonial"; sub = "on the Logos Blockchain, from " + whoShown(e.from); sign = ""; break
     case "split": title = "Made a note of exactly " + amount; sub = "on " + whoShown(e.from) + (e.fee ? " · fee " + grouped(e.fee) : ""); sign = ""; break
     case "bridge": title = "Bridge to LEZ"; sub = "from " + whoShown(e.from) + " into " + whoShown(e.to); break
     case "pay": title = "Paid " + (e.name || "a name"); sub = "on LEZ"; break
@@ -634,4 +635,49 @@ export function claimFeeLine(plan) {
         return ""
     var line = "Each claim costs about " + groupDigits(plan.fee_about) + " in fees and cashes one reward of " + groupDigits(plan.reward_per_voucher || "0") + "."
     return plan.warning ? line + " " + plan.warning : line
+}
+
+// ── An app's inscription request (Wallet Provider SDK, LP-0022) ───────
+
+/// The heading of an inscription request's sheet.
+export function inscribeTitle(request) {
+    return request ? String(request.app || "An app") + " asks you to inscribe a testimonial on the Logos Blockchain" : ""
+}
+
+/// One chain account offered for an inscription, in words: {title, sub}.
+export function inscribeChoice(choice) {
+    var c = choice || {}
+    return { title: chainKeyTitle(c), sub: keyShown(c.key) + " · holds " + grouped(c.balance || "0") }
+}
+
+/// The account ticked when an inscription request is first seen: the first that holds
+/// anything (an empty one can't pay the fee), or none.
+export function inscribeFirstChoice(choices) {
+    var holding = (choices || []).filter(function(c) { return /^\d+$/.test(String(c.balance)) && !/^0+$/.test(String(c.balance)) })
+    return holding.length > 0 ? holding[0].key : ""
+}
+
+/// The sheet's fee line for the chosen account: {text, tone}. `plan` is chain_inscribe's
+/// plan for it (null while it is read), `problem` why the node refused the plan.
+export function inscribeFee(chosen, plan, problem) {
+    if (!chosen)
+        return { text: "Choose the account that pays it", tone: "plain" }
+    if (problem)
+        return { text: String(problem), tone: "bad" }
+    if (!plan)
+        return { text: "Asking your node…", tone: "plain" }
+    if (/^\d+$/.test(String(plan.fee_estimate)))
+        return { text: "About " + groupDigits(plan.fee_estimate) + ", paid from this account: your node's figure at its gas prices now. The fee paid is shown once it's sent.", tone: "plain" }
+    return { text: "Your node couldn't say in advance. The fee paid is shown once it's sent.", tone: "plain" }
+}
+
+/// Whether the inscription on the sheet may be approved: an account is chosen, the node
+/// priced it for that account (or couldn't say), and nothing is on its way.
+export function inscribeCanApprove(state) {
+    var s = state || {}
+    if (!s.request || s.busy || !s.chosen || s.request.node)
+        return false
+    if (s.risky && !s.understood)
+        return false
+    return !!s.plan && !s.problem
 }

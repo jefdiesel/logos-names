@@ -854,14 +854,14 @@ pub trait NamesModule: Send + 'static {
     /// and its own channel (`sha256("lp-0022:testimonial:" || signer)`), which the first
     /// inscription creates and later ones extend. Without `send` the plan `{from, balance,
     /// signer, channel, parent, first, submission, text, bytes, msg_id, fee_estimate}`
-    /// (the fee the node's funding asks now). A plan moves nothing, but it does hold
-    /// notes: the node keeps the notes that funding uses for it until they are spent or
-    /// 10 more blocks are final (31.6 s measured on a solo node). The send of the same
-    /// inscription uses that funding; any other send, split or inscription from the key
-    /// meanwhile is refused as held (not short), and a plan for another key holds that
-    /// key's notes too, so price only the key the person picks. With `send` the
-    /// inscription is signed and sent (it cannot be undone) and `hash` and `fee` (what
-    /// it pays) are set; `chain_tx` follows it. Names app only. Through logosctl, write
+    /// (the fee the node asks now, or absent when it couldn't say). A plan moves and
+    /// holds nothing: the node prices it on stand-ins for the key's notes (`chain_fee`),
+    /// so any number of plans, sends and splits can follow at once. With `send` the
+    /// inscription is funded, signed and sent (it cannot be undone) and `hash` and `fee`
+    /// (what it pays) are set; `chain_tx` follows it. A send the node refused after
+    /// funding it leaves that key's notes held for about 10 final blocks: the same
+    /// inscription sent again uses that funding, anything else from the key meanwhile is
+    /// refused as held (not short). Names app only. Through logosctl, write
     /// a text or key that is only digits, or `true`/`false`, as `str:2026`:
     /// logosctl 0.3.2 sends it as a number or boolean otherwise, and the host refuses the
     /// call ("dispatch_failed: expected string") before names runs.
@@ -877,11 +877,13 @@ pub trait NamesModule: Send + 'static {
     fn propose_inscription(&mut self, text: String) -> String;
 
     /// The inscription requests waiting for the person, oldest first: `[{id, app, text,
-    /// says, submission, publisher, choices: [{key, balance}]}]`, the choices the keys
+    /// says, submission, publisher, choices: [{key, balance, label?, title?}]}]`, the choices the keys
     /// the node's wallet holds. When the node can't list them (stopped, say), each request
-    /// is still listed, with `choices` empty and `node` saying why, so it can be rejected. The fee for a choice is `chain_inscribe(key, text,
-    /// false)`'s `fee_estimate`, which holds that key's notes for a while (see
-    /// `chain_inscribe`): ask it for the chosen key, not every choice. Names app only.
+    /// is still listed, with `choices` empty and `node` saying why, so it can be rejected.
+    /// A choice carries the `label` the person gave the account (or its keystore `title`),
+    /// and an account hidden while it holds nothing is left out, as in `chain_accounts`.
+    /// The fee for a choice is `chain_inscribe(key, text, false)`'s `fee_estimate`, which
+    /// holds nothing. `pending_requests` doesn't list these. Names app only.
     fn pending_inscriptions(&mut self) -> String;
 
     /// Approves inscription request `request_id` with the node key `from_key`: it is
@@ -4254,7 +4256,10 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         self.provider_refresh();
-        let pending: Vec<Value> = self.store().requests.iter().filter(|request| request["state"] == "pending").cloned().collect();
+        // An inscription is paid from a chain account, not one of these: it has its own
+        // list and approval (`pending_inscriptions`, `approve_inscription`).
+        let pending: Vec<Value> =
+            self.store().requests.iter().filter(|request| request["state"] == "pending" && request["kind"] != provider::INSCRIBE).cloned().collect();
         // The wallet's other public accounts take the CLI a moment to list, so
         // they come from a read in the background and join the choices once known.
         let others = if pending.iter().any(|request| request["kind"] != provider::TRANSFER) { self.publics_read_lately() } else { Vec::new() };

@@ -365,24 +365,23 @@ step("plan: a first inscription into the key's own channel, which the node doesn
      p1["ok"] and v1["first"] is True and v1["parent"] == ZERO and not before["ok"] and "No channel found" in str(before["error"])
      and CH == hashlib.sha256(b"lp-0022:testimonial:" + bytes.fromhex(SIGNER)).hexdigest(),
      f"channel {CH[:16]}…, signer {SIGNER[:16]}…")
-step("plan: the inscription is the testimonial's JSON, its fee from the node's funding",
+step("plan: the inscription is the testimonial's JSON, its fee as the node prices it",
      p1["ok"] and v1["text"] == TEXT1 and v1["submission"] == "lp-0022:names-wallet" and str(v1.get("fee_estimate", "")).isdigit()
      and v1["balance"] == str(a0), f"fee_estimate {v1.get('fee_estimate')}, balance {v1.get('balance')} = node {a0}")
 step("plan moves nothing: a second plan of it gives the same fee, the node's balance and notes unchanged",
      p2["ok"] and p2["value"]["fee_estimate"] == v1.get("fee_estimate") and p2["value"]["channel"] == CH
      and balance(A) == a0 and notes(A) == n0, f"A {a0} -> {balance(A)}, notes {len(n0)} -> {len(notes(A) or {})}")
-# The node holds the notes it funded the plan with (services/wallet PendingNotes, 10 final
-# blocks): another inscription from A can't be funded now, and names says why.
-held = names("chain_inscribe", A, "a different text, priced at once", "false")
-show("names chain_inscribe A plan of another text, at once", held)
-direct = node("wallet_fund_tx", "@" + os.path.join(W, "probe-fund.json")) if json.dump({"tip": None, "tx_builder": {"mantle_tx": {"ops": [
-    {"opcode": 17, "payload": {"channel_id": "cd" * 32, "inscription": "00", "parent": ZERO, "signer": SIGNER}}]}, "ledger_inputs": [],
-    "pending_transfer": {"inputs": [], "outputs": []}, "channel_multi_sig_proofs": {}}, "change_public_key": A, "funding_public_keys": [A],
-    "max_tx_fee": 100000, "priority_fee_percent": 0}, open(os.path.join(W, "probe-fund.json"), "w")) is None else None
-show("node wallet_fund_tx from A, asked directly", direct)
-step("the node holds the plan's notes: a funding from A is refused by the node itself, and names says it is held, not short",
-     not held["ok"] and "holding this key's notes" in str(held["error"]) and not direct["ok"] and "not have enough funds" in str(direct["error"])
-     and balance(A) == a0, str(direct["error"])[:80])
+# A plan is priced with stand-ins of the key's notes (chain_fee.rs), so the node holds
+# none of A's notes for it: another text is priced at once, a send from A can be planned,
+# and the send below is funded by the node at its first asking.
+other = names("chain_inscribe", A, "a different text, priced at once", "false")
+show("names chain_inscribe A plan of another text, at once", other)
+sendable = names("chain_send", A, B, "1,000", "false")
+show("names chain_send A -> B plan, at once", sendable)
+step("a plan holds none of the key's notes: another inscription and a send from A are priced at once",
+     other["ok"] and str(other["value"].get("fee_estimate", "")).isdigit() and sendable["ok"] and str(sendable["value"].get("fee_about", "")).isdigit() and not sendable["value"].get("in_flight") and not sendable["value"].get("cannot_pay_fee")
+     and balance(A) == a0 and notes(A) == n0,
+     f"other text fee {other['value'].get('fee_estimate') if other['ok'] else other['error']}, send fee {sendable['value'].get('fee_about') if sendable['ok'] else sendable['error']}")
 
 # ── The first inscription ──────────────────────────────────────────────────
 say("\n== chain_inscribe (send=true): the first inscription")
@@ -393,6 +392,8 @@ sv1 = s1["value"] if s1["ok"] else {}
 H1 = sv1.get("hash") or ""
 step("send: a hash, the fee it pays", s1["ok"] and re.fullmatch(r"[0-9a-f]{64}", H1) is not None and str(sv1.get("fee")).isdigit(),
      f"hash {H1}, fee {sv1.get('fee')} (plan said about {v1.get('fee_estimate')})")
+step("send: funded at once after three plans, and it pays the fee its plan said",
+     s1["ok"] and sv1.get("fee") == v1.get("fee_estimate"), f"paid {sv1.get('fee')}, plan {v1.get('fee_estimate')}")
 if not H1:
     abort("no hash", stop_node=True)
 landed = wait_for(lambda: (lambda c: c if c["ok"] and c["value"].get("tip_message") == sv1["msg_id"] else None)(channel(CH)), 120)
@@ -478,6 +479,9 @@ for k in (node("wallet_get_known_addresses")["value"] or []):
 step("pending_inscriptions: the sheet's facts (app, text, what it does) and the node's own keys as choices, with their balances",
      bool(mine) and mine["app"] == "host" and mine["says"] == "inscribes on the Logos blockchain" and mine["text"] == TEXT3
      and {c["key"]: c["balance"] for c in mine["choices"]} == held, f"{len(held)} keys held by the node")
+generic = names("pending_requests")
+step("pending_requests (the sheet that offers LEZ accounts) doesn't list the inscription",
+     generic["ok"] and not any(r.get("id") == RID for r in (generic["value"] or [])), f"{len(generic['value'] or []) if generic['ok'] else generic['error']} listed")
 est = names("chain_inscribe", A, TEXT3, "false")
 a5 = balance(A)
 mark = len(daemon_log())
@@ -490,7 +494,8 @@ _, tx4 = block_with(H4, mark) if H4 else (None, None)
 b4 = inscription_in(tx4)
 step("approve_inscription: inscribed from the chosen account, in a block, the channel's tip, fee as estimated",
      ok_["ok"] and ov["state"] == "done" and ov["account"] == A and bool(landed4) and b4 is not None
-     and json.loads(bytes.fromhex(b4["inscription"]).decode())["text"] == TEXT3 and balance(A) == a5 - int(ov["fee"]),
+     and json.loads(bytes.fromhex(b4["inscription"]).decode())["text"] == TEXT3 and balance(A) == a5 - int(ov["fee"])
+     and est["ok"] and ov["fee"] == est["value"].get("fee_estimate"),
      f"tx {H4[:16]}…, fee {ov.get('fee')} (estimate {est['value'].get('fee_estimate') if est['ok'] else est['error']})")
 st = names("request_status", RID)
 show("names request_status", st)

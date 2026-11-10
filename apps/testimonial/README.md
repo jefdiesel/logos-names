@@ -111,6 +111,29 @@ Timer {
 A `failed` call is never retried for the person: on LEZ 0.4 a sent call that fails still pays
 its fee.
 
+## The other target: an inscription on the Logos Blockchain (LP-0022)
+
+"Where to write it" has a second choice, **Logos Blockchain**. It needs no connection, no
+program ID and no username: the app calls `propose_inscription(text)` and follows the request.
+
+```qml
+names("propose_inscription", [body], function(v) { follow(v, "inscribe") })
+```
+
+In the Names app the person sees the words, that an inscription is public and permanent, the
+accounts their own Logos Blockchain node holds, and the fee their node asks from the account
+they tick; approving inscribes `{"submission":"lp-0022:names-wallet","text":"…"}` on that
+account's own channel. `done` carries the account that paid, the transaction hash, the fee
+paid and the channel, which the app shows. `failed` means it may still have been sent, so the
+app says to look at the Names app's history before asking again. The text rules are the
+wallet's (1 to 1,024 bytes, no control characters but newline and tab, and no character that
+turns the text around or shows nothing) and `Logic.inscriptionProblem` checks the same ones
+before asking. While the wallet sends an approved inscription the names module answers nothing
+else for a minute or more; the app keeps asking for the status instead of giving up.
+
+Inscriptions aren't listed in this app: Basecamp gives it no way to read the node, and each
+account has its own channel. The transaction shows in the Names app's history.
+
 ## Reading the list
 
 The list is read with plain sequencer reads, as `testimonial list` does: the head, then each
@@ -138,6 +161,10 @@ cargo test -p testimonial_core --test js_vectors          # the vectors file vs 
 cd apps/testimonial && nix build .#lgx-portable --accept-flake-config \
   --override-input names path:/abs/path/to/basecamp-module   # only when the copy isn't a git checkout
 ```
+
+`python3 apps/testimonial/tools/render.py <qml binary> <out dir>` renders the page offscreen with
+a stand-in for the Logos bridge (both targets, and an inscription waiting, done, failed, rejected
+and refused), with the Logos design system's `qml` folder on `QML_IMPORT_PATH`.
 
 `test/vectors.json` is written by `testimonial/core/tests/js_vectors.rs`
 (`WRITE_VECTORS=1 cargo test -p testimonial_core --test js_vectors`) and checked by both that
