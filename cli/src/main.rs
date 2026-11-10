@@ -1593,7 +1593,8 @@ impl Client {
             pending.failed = Some(format!("{error:#}"));
             let _ = save_defaults(&defaults);
         }
-        error.context(format!("{name}{NAME_SUFFIX} was not registered; `names register {name}` tries again"))
+        let public = if defaults.then_public.iter().any(|queued| queued == name) { " --public" } else { "" };
+        error.context(format!("{name}{NAME_SUFFIX} was not registered; `names register {name}{public}` tries again"))
     }
 
     /// Starts `names register <name> --wait` detached from this terminal, logging to
@@ -3028,9 +3029,11 @@ impl Defaults {
     }
 
     /// A registration of `name` was refused or failed: a request to make it public goes
-    /// with it, unless the name is this wallet's (then it stays for `names make-public`).
+    /// with it, unless the name is this wallet's (then it stays for `names make-public`) or
+    /// its commitment is kept to resume (then `names register <name>` finishes it as asked,
+    /// public-request-lost-when-registration-fails-after-commit).
     fn registration_failed(&mut self, name: &str) {
-        if !self.names.iter().any(|known| known == name) {
+        if !self.names.iter().any(|known| known == name) && !self.pending.contains_key(name) {
             self.then_public.retain(|queued| queued != name);
             self.public_failed.remove(name);
         }
@@ -4818,6 +4821,16 @@ mod job_ties_and_failed_reads {
         defaults.registration_failed("other");
         assert_eq!(defaults.then_public, ["other"]);
         assert!(defaults.public_failed.contains_key("other"));
+        // public-request-lost-when-registration-fails-after-commit: a `--public` registration
+        // that committed and then failed keeps its request with the commitment it resumes.
+        defaults.then_public.push("vpubr".to_owned());
+        defaults.pending.insert("vpubr".to_owned(), Pending { owner: String::new(), secret: String::new(), made: 0, failed: None });
+        defaults.registration_failed("vpubr");
+        assert!(defaults.then_public.contains(&"vpubr".to_owned()));
+        // Once nothing is left to resume, a failure takes the request with it.
+        defaults.pending.remove("vpubr");
+        defaults.registration_failed("vpubr");
+        assert!(!defaults.then_public.contains(&"vpubr".to_owned()));
     }
 
     /// The registration that finishes in the background makes the name public only when the
