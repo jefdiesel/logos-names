@@ -629,8 +629,12 @@ pub fn app_view(request: &Value) -> Value {
             for key in ["asset", "asset_kind", "token_name", "amount", "destination"] {
                 view[key] = request[key].clone();
             }
+            zone_view(&mut view, request);
         }
-        Some(CALL) => view["program"] = request["program"].clone(),
+        Some(CALL) => {
+            view["program"] = request["program"].clone();
+            zone_view(&mut view, request);
+        }
         Some(INSCRIBE) => {
             for key in ["chain", "says", "submission", "text", "fee", "channel", "msg_id"] {
                 view[key] = request[key].clone();
@@ -639,6 +643,14 @@ pub fn app_view(request: &Value) -> Value {
         _ => {}
     }
     view
+}
+
+/// Adds the zone a transfer or a call was asked for to the app's view of it: `zone`
+/// (`home`, or the zone's channel) and `zone_channel` when it is known. Never what the
+/// person calls the zone.
+fn zone_view(view: &mut Value, request: &Value) {
+    view["zone"] = json!(request["zone"].as_str().unwrap_or(crate::zones::HOME));
+    view["zone_channel"] = request["zone_channel"].clone();
 }
 
 #[cfg(test)]

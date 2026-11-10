@@ -10,6 +10,10 @@
 //! `sending`, `in_block`, `arrived`, `done`, `failed`, `unknown`, or `expired` (a bridge
 //! not credited on LEZ within `BRIDGE_WAIT_S`). A bridge also carries the LEZ `receipt`
 //! that tells its arrival (`bridge_receipt`).
+//!
+//! What an entry did on LEZ it did on one zone (`zones`): an entry made while an added
+//! zone was in use carries its `zone` (the zone's channel); one without is the home
+//! zone's. Balance marks are kept per zone too (`note_zone_balances`).
 
 use serde_json::{json, Map, Value};
 use std::path::Path;
@@ -147,6 +151,25 @@ pub fn all(dir: &Path) -> Vec<Value> {
     let mut rows: Vec<Value> = load(&file(dir)).into_values().collect();
     rows.sort_by_key(|entry| std::cmp::Reverse((entry["at"].as_u64().unwrap_or(0), entry["seq"].as_u64().unwrap_or(0))));
     rows
+}
+
+/// The zone `entry`'s LEZ side is on: its `zone`, or home.
+pub fn zone_of(entry: &Value) -> &str {
+    entry["zone"].as_str().unwrap_or(crate::zones::HOME)
+}
+
+/// Whether `entry` did something on LEZ: a LEZ entry, or a bridge (sent on the Logos
+/// Blockchain, credited on a zone).
+pub fn on_lez(entry: &Value) -> bool {
+    entry["chain"] == "lez" || entry["kind"] == "bridge"
+}
+
+/// `entry`, said to be on `zone`. Home's entries carry no mark, as before zones.
+pub fn in_zone(mut entry: Value, zone: &str) -> Value {
+    if zone != crate::zones::HOME {
+        entry["zone"] = Value::from(zone);
+    }
+    entry
 }
 
 /// Whether `entry` involves `account` (a LEZ account `Public/…`/`Private/…`, a node
@@ -373,6 +396,41 @@ pub fn bridge_updates(entries: &[Value], now: u64, minted: &dyn Fn(&crate::regis
 /// explain is not believed (an older CLI printed 0 when the sequencer didn't answer).
 /// Returns the entries added.
 pub fn note_balances(dir: &Path, at: u64, chain: &str, scope: &str, balances: &[(String, u128)]) -> Vec<String> {
+    note(dir, at, chain, scope, None, balances)
+}
+
+/// `note_balances` for the LEZ accounts of `zone`, read from the sequencer of that zone
+/// (`scope`: its channel, or its address while the channel isn't known). Only that zone's
+/// entries explain a change: the same account on another zone is other money, and what
+/// arrives is told as arriving on this one.
+pub fn note_zone_balances(dir: &Path, at: u64, scope: &str, zone: &str, balances: &[(String, u128)]) -> Vec<String> {
+    note(dir, at, "lez", scope, Some(zone), balances)
+}
+
+/// Moves `chain`'s balance marks kept under `from` to `to`, when a zone's marks change
+/// what they are kept under (its channel, once known, instead of its sequencer's
+/// address), so the next read isn't a first one. A moved mark takes the place of one
+/// already under `to`: the moved ones are those the wallet read last, and the history's
+/// entries are counted against them.
+pub fn move_marks(dir: &Path, chain: &str, from: &str, to: &str) {
+    if from == to || from.is_empty() || to.is_empty() {
+        return;
+    }
+    let mut seen = load(&balances_file(dir));
+    let (old, new) = (format!("{chain}@{from}:"), format!("{chain}@{to}:"));
+    let moved: Vec<String> = seen.keys().filter(|key| key.starts_with(&old)).cloned().collect();
+    if moved.is_empty() {
+        return;
+    }
+    for key in moved {
+        if let Some(mark) = seen.remove(&key) {
+            seen.insert(format!("{new}{}", &key[old.len()..]), mark);
+        }
+    }
+    save(&balances_file(dir), &seen);
+}
+
+fn note(dir: &Path, at: u64, chain: &str, scope: &str, zone: Option<&str>, balances: &[(String, u128)]) -> Vec<String> {
     let mut seen = load(&balances_file(dir));
     let mut all = load(&file(dir));
     let mut added = Vec::new();
@@ -383,6 +441,7 @@ pub fn note_balances(dir: &Path, at: u64, chain: &str, scope: &str, balances: &[
         let touching: Vec<String> = all
             .iter()
             .filter(|(_, entry)| entry["from"].as_str() == Some(account) || entry["to"].as_str() == Some(account) || received(entry, account).is_some())
+            .filter(|(_, entry)| zone.is_none_or(|zone| zone_of(entry) == zone))
             .filter(|(_, entry)| !entry["counted"].as_array().is_some_and(|counted| counted.iter().any(|c| c.as_str() == Some(account))))
             .map(|(id, _)| id.clone())
             .collect();
@@ -409,6 +468,7 @@ pub fn note_balances(dir: &Path, at: u64, chain: &str, scope: &str, balances: &[
                     id.push('1');
                 }
                 let mut entry = json!({ "id": id, "at": at, "seq": next_seq(&all), "kind": "arrived", "chain": chain, "to": account, "state": "arrived", "counted": [account] });
+                entry = in_zone(entry, zone.unwrap_or(crate::zones::HOME));
                 if certain {
                     entry["amount"] = Value::from(rise);
                 } else {
@@ -850,6 +910,73 @@ mod tests {
         add(&d, 1794168080, json!({ "kind": "bridge", "amount": "4" }));
         let order: Vec<String> = all(&d).iter().map(|e| e["amount"].as_str().unwrap().to_owned()).collect();
         assert_eq!(order, ["4", "3", "2", "1"]);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    const ZONE: &str = "abababababababababababababababababababababababababababababababab";
+
+    fn note_on(d: &Path, at: u64, zone: &str, rows: &[(&str, u128)]) -> Vec<String> {
+        let rows: Vec<(String, u128)> = rows.iter().map(|(a, b)| ((*a).to_owned(), *b)).collect();
+        let scope = if zone == crate::zones::HOME { "0101" } else { zone };
+        note_zone_balances(d, at, scope, zone, &rows)
+    }
+
+    /// The same account is other money on another zone: each zone has its own marks, and
+    /// only its own entries explain a change there.
+    #[test]
+    fn each_zone_has_its_own_marks_and_entries() {
+        let d = dir("zones");
+        assert!(note_on(&d, 1, crate::zones::HOME, &[("Public/X", 100)]).is_empty());
+        // The first read on the other zone only sets its mark, whatever home holds.
+        assert!(note_on(&d, 2, ZONE, &[("Public/X", 7_000)]).is_empty());
+        // A payment made on the other zone explains nothing on home, and the other way round.
+        let pay = add(&d, 3, in_zone(json!({ "kind": "pay_account", "chain": "lez", "from": "Public/X", "to": "Public/Y", "amount": "1000" }), ZONE));
+        update(&d, &pay, &json!({ "state": "done", "fee": { "about": "10", "at_most": "10", "paid": "10" } }));
+        assert_eq!(zone_of(&all(&d)[0]), ZONE);
+        assert!(note_on(&d, 4, crate::zones::HOME, &[("Public/X", 100)]).is_empty(), "{:?}", arrivals(&d));
+        assert!(note_on(&d, 5, ZONE, &[("Public/X", 5_990)]).is_empty(), "{:?}", arrivals(&d));
+        // Money that arrives on the other zone is told as arriving there.
+        let told = note_on(&d, 6, ZONE, &[("Public/X", 6_990)]);
+        assert_eq!(told.len(), 1);
+        let arrived = arrivals(&d);
+        assert_eq!((arrived[0]["amount"].as_str(), zone_of(&arrived[0])), (Some("1000"), ZONE));
+        // And on home as home's, with no mark of a zone, as before zones.
+        assert_eq!(note_on(&d, 7, crate::zones::HOME, &[("Public/X", 150)]).len(), 1);
+        let arrived = arrivals(&d);
+        assert_eq!(arrived[0]["amount"], "50");
+        assert!(arrived[0]["zone"].is_null() && zone_of(&arrived[0]) == crate::zones::HOME);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn an_entry_says_its_zone_only_off_home() {
+        let entry = json!({ "kind": "pay_account", "chain": "lez" });
+        assert!(in_zone(entry.clone(), crate::zones::HOME)["zone"].is_null());
+        assert_eq!(in_zone(entry.clone(), ZONE)["zone"], ZONE);
+        assert!(on_lez(&entry) && on_lez(&json!({ "kind": "bridge", "chain": "logos" })));
+        assert!(!on_lez(&json!({ "kind": "send", "chain": "logos" })));
+    }
+
+    /// A zone's marks are kept under its channel once that is known: they move there from
+    /// its sequencer's address, so the next read isn't taken for a first one.
+    #[test]
+    fn marks_move_with_what_a_zone_is_kept_under() {
+        let d = dir("move");
+        assert!(note(&d, 1, &[("Public/X", 100), ("Private/P", 5)]).is_empty());
+        move_marks(&d, "lez", SEQ, ZONE);
+        // Nothing is kept under the address any more: a read there is a first one again.
+        assert!(note(&d, 2, &[("Public/X", 900)]).is_empty());
+        // Under the channel, the read carries on from the mark.
+        let rows = [("Public/X".to_owned(), 130_u128), ("Private/P".to_owned(), 5)];
+        assert_eq!(note_balances(&d, 3, "lez", ZONE, &rows).len(), 1);
+        assert_eq!(arrivals(&d)[0]["amount"], "30");
+        // The marks last read win over ones left under the new place, and moving nothing
+        // (the same place, or none) changes nothing.
+        move_marks(&d, "lez", SEQ, ZONE);
+        move_marks(&d, "lez", ZONE, ZONE);
+        move_marks(&d, "lez", "", ZONE);
+        let rows = [("Public/X".to_owned(), 900_u128)];
+        assert!(note_balances(&d, 4, "lez", ZONE, &rows).is_empty(), "{:?}", arrivals(&d));
         let _ = std::fs::remove_dir_all(d);
     }
 
