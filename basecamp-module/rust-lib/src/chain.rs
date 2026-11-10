@@ -300,6 +300,24 @@ mod tests {
         assert_eq!(deposit_in_events(&json!([]), &node), None);
     }
 
+    /// Two real deposits on a solo node followed by a LEZ v0.4.0-rc1 sequencer (2026-11-09,
+    /// channel 01…01): one sent with the account's 32 bytes, whose op id the sequencer named when
+    /// it refused to decode it ("Skipping pending deposit event 852ee6f8… Unexpected variant tag:
+    /// 41"), and one with LEZ 0.4's metadata (tag 1, Key, the account's key), minted: its receipt,
+    /// derived from the op id below, holds the bridge's state [1].
+    #[test]
+    fn deposit_op_ids_are_the_ones_a_rc1_sequencer_used() {
+        let channel = [1_u8; 32];
+        let bare = crate::registry::parse_account("3oRTrDMCWuSfnbUgUJCa1vqoedtUUi4xWmMdfJ4emVZC").unwrap();
+        let refused = deposit_op_id(&channel, &["40c4ae274f819ad7b5b6925a987175a92563c31ab5b81fdba11007b21f604c19".to_owned()], &bare).unwrap();
+        assert_eq!(crate::registry::hex(&refused), "852ee6f8924ffa2775b0ce89430555519967b64bf31bd27e5ed37288f78a183f");
+        let metadata = crate::registry::unhex("0100f5193a338bba3044151b4572e96ab9b1cfcae9cc802c403eb235c2f2fccc9819").unwrap();
+        assert_eq!(crate::deposit::credited(crate::deposit::Lez::V04, &metadata), Some(bare), "the key's account");
+        let minted = deposit_op_id(&channel, &["efc36b4d59b3dd7c7cfa7a28456341807de2a74463aed87a0bdb635697f70c04".to_owned()], &metadata).unwrap();
+        assert_eq!(crate::registry::hex(&minted), "0c9efe6b31411b532be65d990b5c52bed70a47ad76da43d57818dff903195734");
+        assert_eq!(crate::registry::account_text(&crate::registry::deposit_receipt(&minted)), "HKKoMBnoX6Cz1C1hBrgD9pjVLztqNwEMhCsPxVgfPqkp");
+    }
+
     /// bridge-fee-reported-as-max: the node took 1614 (inputs 104298274, change
     /// 99296660, deposit 5000000) while the reply said 100000, the cap.
     #[test]
