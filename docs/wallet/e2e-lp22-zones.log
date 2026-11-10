@@ -1,0 +1,133 @@
+lp22-zones-e2e 2026-11-10T10:23:09Z host minim4-5 work dir /Volumes/exos162/logos/dev/lp22/zones/e2e-3930
+  names lgx /nix/store/axj11sdjjmf6lzyrxjvj2681cvnrzg8r-logos-names-module-lib-lgx-0.15.3 sha256 b669800204c62502c891059ab956ac2fcd2ef6ae3b66ca5aaab14f861181b37f
+  names CLI /Volumes/exos162/logos/dev/lp22/target-ws/release/names sha256 a5f6a63dd62030ad9619623bc4ed74431cf6064355f9d8fe166c754155de7dcf
+  sequencer /Volumes/exos162/logos/dev/lp22/target-seq/release/sequencer_service sha256 7e9215c44a57d75aa789f92c2b31a624fccd1d72a0ba3777d4839084437566c1
+Daemon started (pid 77010)
+Logs: /Volumes/exos162/logos/dev/lp22/zones/e2e-3930/session/logs/daemon.log
+== session 2026-11-10T10:23:11Z ports 3930-3937
+    two chains made: A channel 01010101… (local.json as it is), B channel b2b2b2b2… (its own)
+    install names: exit 0 
+    module load names: {"dependencies_loaded":[],"module":"names","status":"ok","version":"0.15.3"}
+
+== 1. HOME: zone A, the wallet made and funded there
+    sequencer seq-a up on http://127.0.0.1:3930 (pid 77035), block 1, channel 0101010101010101010101010101010101010101010101010101010101010101
+PASS the names CLI is taken
+PASS home reads from sequencer A — true
+    cli_status (0.25s): {"busy": null, "cli": "/Volumes/exos162/logos/dev/lp22/target-ws/release/names", "installing": null, "old_wallet": false, "outdated": false, "private": null, "prover": false, "public": null, "wallet": false, "wallet_dir": "/Volumes/exos162/logos/dev/lp22/zones/e2e-3930/home/.lee/wallet"}
+PASS home has no wallet yet, and would keep it in this run's own folder — /Volumes/exos162/logos/dev/lp22/zones/e2e-3930/home/.lee/wallet
+    cli_create_wallet (0.35s): {"phrase": "<24 words, not shown>", "private": "4HmviACx85xuYHncCEzLjTPC8ZudKypXfGgb4PfRTDoU", "public": "Ez417rcrk2j5PRMXzTuXzZ6zH6efpytXDQB4UtqzVHT2"}
+PASS home's wallet is made — Public/Ez417rcrk2j5PRMXzTuXzZ6zH6efpytXDQB4UtqzVHT2
+    the funded local-test account: Public/6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV, holds 10000000000000 on A
+    funded Public/Ez417rcrk2j5PRMXzTuXzZ6zH6efpytXDQB4UtqzVHT2 with 5000000000: exit 0 Transaction hash is fc85cda2c917108f8cb8e96f67a658e9941afaec1f6e612c3c49a2a75f9932ca / Transaction is included in block 2 / Transaction data is Public(PublicTransaction { message: TransactionMessage { 
+PASS home's public account is funded on A
+    cli_balance (0.26s): {"account": "4HmviACx85xuYHncCEzLjTPC8ZudKypXfGgb4PfRTDoU", "accounts": [{"account": "Public/A3eRVNcwGhca11irW2PAsgy2A5Mdgt1nFn5nsjybHzzy", "balance": "0", "default": false, "kind": "public"}, {"account": "Public/Ez417rcrk2j5PRMXzTuXzZ6zH6efpytXDQB4UtqzVHT2", "balance": "5000000000", "default": true, "kind": "public"}, {"account": "Private/4HmviACx85xuYHncCEzLjTPC8ZudKypXfGgb4PfRTDoU", "balance": 
+PASS the module reads home's balance from A — 5000000000
+    cli_pay_account F 1,000 (0.58s): {"id": "-wallet-1794306208500", "kind": "pay_account", "name": "-wallet", "started": 1794306208501, "state": "running"}
+    job (0.05s): {"exit": 0, "fee": {"about": null, "at_most": null, "paid": "4088"}, "finished": 1794306232788, "id": "-wallet-1794306208500", "kind": "pay_account", "log_tail": "Transaction hash is 317ef24956c7cb63eea62c17bcc046714ced6065c2608760cfb44ad3bd8f1e2d\nTransaction is included in block 3\nTransaction data is Public(PublicTransaction { message: TransactionMessage { public_context: PublicExecutionContext { actors: {Actor { account_id: 6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV, program_account_id: 11
+PASS a public send on home lands on A — F 9994999995648 -> 9994999996648; home holds 4999994912
+    zones: Home [home] http://127.0.0.1:3930 IN USE
+PASS one zone, home, and its channel is learnt from its sequencer — 0101010101010101010101010101010101010101010101010101010101010101
+
+== 2. A SECOND ZONE: A is gone (a network drop), B is added with its own sequencer
+    sequencer on http://127.0.0.1:3930 stopped
+    cli_balance with home's sequencer down (0.02s): {"account": "4HmviACx85xuYHncCEzLjTPC8ZudKypXfGgb4PfRTDoU", "accounts": [{"account": "Public/A3eRVNcwGhca11irW2PAsgy2A5Mdgt1nFn5nsjybHzzy", "balance": "0", "default": false, "kind": "public"}, {"account": "Public/Ez417rcrk2j5PRMXzTuXzZ6zH6efpytXDQB4UtqzVHT2", "balance": "4999994912", "default": true
+PASS home's sequencer down: the zones still answer, and nothing is invented for the balance — None
+    sequencer seq-b up on http://127.0.0.1:3931 (pid 77264), block 1, channel b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2
+    zone_add Second (0.07s): {"added": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2", "current": "home", "max": 16, "zones": [{"channel": "0101010101010101010101010101010101010101010101010101010101010101", "current": true, "has_wallet": true, "home": true, "id": "home", "name": "Home", "sequencer": "http://127.0.0.1:3930", "token_program": null, "wallet_dir": "/Volumes/exos162/logos/dev/lp22/zones/e2e-3930/home/.lee/wallet"}, {"channel": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2", "current": false, "has_wallet": false, "home": false, "id": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2", "name": "Second", "sequencer": "http://127.0.0.1:3931", "token_program": null, "wallet_dir": "/Volumes/exos162/logos/dev/lp22/zones/e2e-3930/home/.config/logos-names/zones/b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2/wallet"}]}
+PASS B is added as a zone, known by its own channel, home still in use — Home [home] http://127.0.0.1:3930 IN USE; Second [b2b2b2b2…] http://127.0.0.1:3931 (no wallet)
+PASS the same chain can't be added twice — that sequencer serves Second, a zone already set up here (channel b2b2b2b2…b2b2). To use this sequencer for it, change that zone's sequencer.
+PASS home can't take the sequencer of another zone here — that sequencer serves Second, a zone already set up here. Switch to it, or change its sequencer instead.
+    zone_use Second (0.03s): {"current": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2", "max": 16, "zones": [{"channel": "0101010101010101010101010101010101010101010101010101010101010101", "current": false, "has_wallet": true, "home": true, "id": "home", "name": "Home", "sequencer": "http://127.0.0.1:3930",
+PASS B is the zone in use, and get_config says so — {"channel": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2", "home": false, "id": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2", "name": "Second"}
+PASS B has its own wallet folder, with no wallet in it yet — /Volumes/exos162/logos/dev/lp22/zones/e2e-3930/home/.config/logos-names/zones/b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2/wallet
+PASS a name can't be registered off home: names are kept there — names are kept on Home, and this wallet is using Second now. Switch to Home to do this. Nothing was started.
+    cli_create_wallet on Second (0.24s): {"phrase": "<24 words, not shown>", "private": "iBQfe52ESUWicWaaKdzWRDHgbyyzixbp4zGPxp6K8x2", "public": "AQGGEJG2YNWbHxCtzFcFBJBfJ7b5DzyS8pGEa2fDMEdE"}
+PASS B's wallet is its own: other accounts, another recovery phrase, home's wallet file untouched — Public/AQGGEJG2YNWbHxCtzFcFBJBfJ7b5DzyS8pGEa2fDMEdE in /Volumes/exos162/logos/dev/lp22/zones/e2e-3930/home/.config/logos-names/zones/b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2/wallet
+PASS B's wallet folder is the owner's alone — 0o700
+    funded Public/AQGGEJG2YNWbHxCtzFcFBJBfJ7b5DzyS8pGEa2fDMEdE with 3000000000: exit 0 Transaction hash is ffd4bc02ccd5fd93869ea7688589f0411100d50bb338f5f46560d23371a1c8c5 / Transaction is included in block 2 / Transaction data is Public(PublicTransaction { message: TransactionMessage { 
+PASS B's public account is funded on B
+    cli_balance on Second (0.28s): {"account": "iBQfe52ESUWicWaaKdzWRDHgbyyzixbp4zGPxp6K8x2", "accounts": [{"account": "Public/AQGGEJG2YNWbHxCtzFcFBJBfJ7b5DzyS8pGEa2fDMEdE", "balance": "3000000000", "default": true, "kind": "public"}, {"account": "Public/AwRxWNBv1LsqDBjmUh6XMm7DuYhHhiVa14oWot1ELubA", "balance": "0", "default": false, "kind": "public"}, {"account": "Private/iBQfe52ESUWicWaaKdzWRDHgbyyzixbp4zGPxp6K8x2", "balance": "0
+PASS the module reads B's balance from B's sequencer — 3000000000
+    cli_pay_account F 2,500 on Second (0.06s): {"id": "-wallet-1794306261401", "kind": "pay_account", "name": "-wallet", "started": 1794306261402, "state": "running"}
+    job (0.05s): {"exit": 0, "fee": {"about": null, "at_most": null, "paid": "4088"}, "finished": 1794306273618, "id": "-wallet-1794306261401", "kind": "pay_account", "log_tail": "Transaction hash is a0e1806d392a5b521b4c8eb39ef08bc3e28a1519ae144cbe057591459265eb15\nTransaction is included in block 3\nTransaction data is Public(PublicTransaction { message: TransactionMessage { public_context: PublicExecutionContext { actors: {Actor { account_id: 6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV, program_account_id: 11
+PASS a public send on B lands on B — F 9996999995648 -> 9996999998148; B holds 2999993412
+    history: [('pay_account', '2500', 'b2b2b2b2', 'Second'), ('pay_account', '1000', 'home', 'Home')]
+PASS the history marks B's send with B's zone and home's with none — 1 on B, 1 on home
+
+== 3. RESTART: the daemon and the module are stopped and started again
+    daemon stop: {"message":"Daemon shutting down.","status":"ok"}
+    daemon start: Daemon started (pid 77494)
+Logs: /Volumes/exos162/logos/dev/lp22/zones/e2e-3930/session/logs/daemon.log
+    module load names: {"dependencies_loaded":[],"module":"names","status":"ok","version":"0.15.3"}
+    zones: Home [home] http://127.0.0.1:3930; Second [b2b2b2b2…] http://127.0.0.1:3931 IN USE
+PASS after a restart: both zones, B in use with its sequencer, wallet and balance as before — B holds 2999993412
+PASS the wallet on B is still B's — AQGGEJG2YNWbHxCtzFcFBJBfJ7b5DzyS8pGEa2fDMEdE
+
+== 4. SEQUENCER SWITCH: B's chain is served from another address
+    sequencer on http://127.0.0.1:3931 stopped
+    cli_balance with B's sequencer down (0.04s): {"account": "iBQfe52ESUWicWaaKdzWRDHgbyyzixbp4zGPxp6K8x2", "accounts": [{"account": "Public/AQGGEJG2YNWbHxCtzFcFBJBfJ7b5DzyS8pGEa2fDMEdE", "balance": "2999993412", "default": true, "kind": "public"}, {"account": "Public/AwRxWNBv1LsqDBjmUh6XMm7DuYhHhiVa14oWot1ELubA", "balance": "0", "default": false,
+PASS B's sequencer down: no balance is invented — None
+PASS B's sequencer down: a send is refused before anything starts — could not reach the sequencer: http://127.0.0.1:3931/: Connection Failed: Connect error: Connection refused (os error 61). Nothing was started; try again when it answers.
+PASS an address that doesn't answer isn't taken for B
+    sequencer seq-b up on http://127.0.0.1:3932 (pid 77513), block 3, channel b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2
+    zone_sequencer Second -> its second address (0.17s): {"changed": true, "channel": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2", "current": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2", "max": 16, "zones": [{"channel": "0101010101010101010101010101010101010101010101010101010101010101", "current": false, "has_
+PASS B takes the other sequencer of its own chain — Home [home] http://127.0.0.1:3930; Second [b2b2b2b2…] http://127.0.0.1:3932 IN USE
+PASS after the switch: the same wallet, accounts and balance — B holds 2999993412
+PASS after the switch: B's history is still there — 1 entries on B's public account
+    job (0.06s): {"exit": 0, "fee": {"about": null, "at_most": null, "paid": "4088"}, "finished": 1794306304868, "id": "-wallet-1794306280832", "kind": "pay_account", "log_tail": "Transaction hash is 06595c29436c3c41bcc53cd9270e26a33ac2df0f2226553df63f3009b7b20410\nTransaction is included in block 4\nTransaction data is Public(PublicTransaction { message: TransactionMessage { public_context: PublicExecutionContext { actors: {Actor { account_id: 6iArKUXxhUJqS7kCaPNhwMWt3ro71PDyBj7jwAyE2VQV, program_account_id: 11
+PASS a send through the new sequencer lands — F 9996999998148 -> 9996999999648; B holds 2999987824
+
+== 5. ANOTHER CHAIN IS REFUSED, and home is still home
+    sequencer on http://127.0.0.1:3932 stopped
+    sequencer seq-a up on http://127.0.0.1:3930 (pid 77673), block 3, channel 0101010101010101010101010101010101010101010101010101010101010101
+PASS B can't take a sequencer of another chain — that sequencer serves Home, a zone already set up here. Switch to it, or change its sequencer instead.
+PASS back on home — Home [home] http://127.0.0.1:3930 IN USE; Second [b2b2b2b2…] http://127.0.0.1:3932
+PASS home's wallet and balance are home's own, untouched by B — home holds 4999994912; B's account on A holds 0
+PASS an account's page on home lists home's sends only (F was paid on both zones) — [('pay_account', '1000', 'home')]
+PASS the same account's page on B lists B's sends only (B's sequencer is down: the page is still read) — [('pay_account', '1500', 'b2b2b2b2'), ('pay_account', '2500', 'b2b2b2b2')]
+
+== 6. REMOVE AND ADD AGAIN
+PASS home can't be removed — the home zone can't be removed: names are kept on it
+PASS the zone in use can't be removed — Second is the zone in use; switch to another one first
+    zone_remove Second (0.02s): {"current": "home", "max": 16, "removed": {"channel": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2", "name": "Second", "wallet_dir": "/Volumes/exos162/logos/dev/lp22/zones/e2e-3930/home/.config/logos-names/zones/b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2/wallet"}, "zones": [{"channel": "0101010101010101010101010101010101010101010101010101010101010101", "c
+PASS B is removed, and its wallet folder stays where it is — {'channel': 'b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2', 'name': 'Second', 'wallet_dir': '/Volumes/exos162/logos/dev/lp22/zones/e2e-3930/home/.config/logos-names/zones/b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2/wallet'}
+PASS the removed zone's history is kept, marked as a zone that is no longer here — 2 entries
+PASS home works as before with one zone — home holds 4999994912
+    sequencer on http://127.0.0.1:3930 stopped
+    sequencer seq-b up on http://127.0.0.1:3932 (pid 77726), block 4, channel b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2
+PASS added again (home's sequencer is down; its channel is known): the wallet left behind is found — Home [home] http://127.0.0.1:3930 IN USE; Second again [b2b2b2b2…] http://127.0.0.1:3932
+PASS and it holds what it held — B holds 2999987824
+    sequencer on http://127.0.0.1:3932 stopped
+
+== 7. THE CLI: names zone, with no --rpc and no wallet folder given
+    sequencer seq-a up on http://127.0.0.1:3930 (pid 77736), block 3, channel 0101010101010101010101010101010101010101010101010101010101010101
+PASS CLI: home takes A's sequencer, and its channel is learnt — Home now uses http://127.0.0.1:3930 (channel 0101010101010101010101010101010101010101010101010101010101010101).
+PASS CLI: on home, balance is home's wallet on A — home holds 4999994912; exit 0 
+    sequencer on http://127.0.0.1:3930 stopped
+    sequencer seq-b up on http://127.0.0.1:3932 (pid 77747), block 4, channel b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2
+PASS CLI: a sequencer that doesn't answer isn't added — Error: that sequencer didn't say which chain it serves, so it can't be added. (it can't be reached: io: Connection refused (os error 61))
+PASS CLI: B is added with its channel, and the wallet the app left there is found (home's sequencer is down) — 2b2b2), served by http://127.0.0.1:3932.
+Its wallet is the one already in /Volumes/exos162/logos/dev/lp22/zones/e2e-3930/home/.config/logos-names/zones/b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2/wallet.
+Use it with `names zone use b2b2b2b2`, or `--zone b2b2b2b2` on one command.
+PASS CLI: --zone runs one command on B: B's wallet, B's balance, and it says which zone — B holds 2999987824; zone: Second CLI (http://127.0.0.1:3932)
+PASS CLI: B in use: every command runs there — Using Second CLI from now on (sequencer http://127.0.0.1:3932).
+LNS names are kept on Home: add `--zone home` to a command about a name.
+PASS CLI: a command about a name is refused away from home — Error: names are kept on Home, and this command would run on Second CLI. Add `--zone home` to it, or switch with `names zone use home`. Nothing was started.
+PASS CLI: --zone and --rpc together are refused — Error: give --zone or --rpc (LOGOS_NAMES_RPC), not both: a zone has its own sequencer, and `names zone sequencer` changes it
+PASS CLI: a public send on B lands on B — F 9996999999648 -> 9996999999948; B holds 2999983436; 
+    sequencer on http://127.0.0.1:3932 stopped
+    sequencer seq-b up on http://127.0.0.1:3931 (pid 77888), block 5, channel b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2
+PASS CLI: B doesn't take an address that doesn't answer — Error: that sequencer didn't say which chain it serves, so it can't be told to be Second CLI's. Nothing was changed. (it can't be reached: io: Connection refused (os error 61))
+PASS CLI: B takes another sequencer of its own chain: the same wallet and balance — Second CLI now uses http://127.0.0.1:3931, the same chain: its wallet and what it holds are as they were.
+PASS CLI: the zone in use can't be removed — Error: Second CLI is the zone in use; switch to another one first
+PASS CLI: B is removed, and its wallet folder stays — t folder stays in /Volumes/exos162/logos/dev/lp22/zones/e2e-3930/home/.config/logos-names/zones/b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2/wallet: adding the zone again finds it.
+PASS CLI: its list is its own file, the owner's alone, and the app's settings are as they were — 0o600; app zones ['Home', 'Second again']
+    sequencer on http://127.0.0.1:3931 stopped
+
+    config.json: sequencer http://127.0.0.1:3930, zone home, zones [('Home', '01010101', 'http://127.0.0.1:3930'), ('Second again', 'b2b2b2b2', 'http://127.0.0.1:3932')]
+PASS the saved configuration is the owner's alone — 0o600
+RESULT 57 PASS, 0 FAIL
+
+== stopping everything
+{"message":"Daemon shutting down.","status":"ok"}
+all stopped: pgrep -fl /Volumes/exos162/logos/dev/lp22/zones/e2e-3930 prints nothing

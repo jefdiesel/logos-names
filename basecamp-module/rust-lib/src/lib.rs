@@ -45,10 +45,12 @@ mod page_view;
 mod provider;
 mod provider_inscribe;
 mod spell;
+mod text;
 mod registry;
 mod shortlist;
 mod wallet;
 mod zones;
+use text::is_http_url;
 
 use changes::{Change, Mention};
 use registry::{AccountId, Derived, Registry, Settings};
@@ -1111,30 +1113,6 @@ impl Default for Names {
         }
         names
     }
-}
-
-/// A sequencer URL the module will talk to: `https://`, or `http://` only to this
-/// machine (a local dev chain). Plain http elsewhere would let anyone on the network
-/// swap name records and payment keys.
-fn is_http_url(url: &str) -> bool {
-    // Plain URL characters only, and no `user@` part: a backslash, a space or an `@` is
-    // read one way here and another by the HTTP library, which let `http://` reach any
-    // host (SF-2). A sequencer address never needs them.
-    let plain = |c: char| c.is_ascii_alphanumeric() || "-._~:/?#[]!$&'()*+,;=%".contains(c);
-    if url.is_empty() || !url.chars().all(plain) {
-        return false;
-    }
-    if let Some(rest) = url.strip_prefix("https://") {
-        return rest.split(['/', '?', '#']).next().is_some_and(|host| !host.is_empty());
-    }
-    let Some(rest) = url.strip_prefix("http://") else { return false };
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let host = if let Some(bracketed) = host.strip_prefix('[') {
-        bracketed.split(']').next().unwrap_or("")
-    } else {
-        host.split(':').next().unwrap_or("")
-    };
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 /// The one app that may use the methods that spend, sign, change the module's

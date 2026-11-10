@@ -77,37 +77,7 @@ pub fn app_name(name: &str) -> Result<String, String> {
     Ok(name.to_owned())
 }
 
-/// Text an app wrote, made safe to put in front of the person: control
-/// characters and the Unicode marks that reorder or hide text (bidi
-/// overrides, zero-width characters) become spaces, runs of space collapse,
-/// and it is cut to `max` characters with an ellipsis.
-pub fn clean_text(text: &str, max: usize) -> String {
-    let hidden = |c: char| {
-        c.is_control()
-            || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}' | '\u{061C}')
-    };
-    let mut out = String::new();
-    let mut space = false;
-    for c in text.chars() {
-        let c = if hidden(c) || c.is_whitespace() { ' ' } else { c };
-        if c == ' ' {
-            if !space && !out.is_empty() {
-                out.push(' ');
-            }
-            space = true;
-        } else {
-            out.push(c);
-            space = false;
-        }
-    }
-    let out = out.trim_end().to_owned();
-    if out.chars().count() > max {
-        let cut: String = out.chars().take(max.saturating_sub(1)).collect();
-        format!("{}…", cut.trim_end())
-    } else {
-        out
-    }
-}
+pub use crate::text::clean_text;
 
 /// An account written `Public/<id>` or `Private/<id>`: whether it is private,
 /// and its ID. A bare ID is refused, so public and private are never confused.

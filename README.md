@@ -196,13 +196,43 @@ What to know:
   can be approved only there. The approval sheet names the zone.
 - At most 16 zones.
 
+With the CLI, the same under `names zone`:
+
+```sh
+names zone list                               # the zones, their sequencers and wallet folders
+names zone add https://seq.example --name Second   # the zone that sequencer serves
+names zone use second                         # every command runs on it from now on
+names --zone second balance                   # or one command only
+names zone sequencer second https://other.example  # another sequencer of the same chain
+names zone rename second "Second zone"
+names zone remove second                      # its wallet folder stays
+```
+
+A zone is named by its name, by `home`, or by its channel (the first characters are
+enough). On an added zone `names` uses that zone's sequencer and its wallet folder,
+and says so on every command (`zone: Second (https://…)`). `names setup --shield=0`
+makes a wallet there, and `names wallet restore-keys` brings your recovery phrase's
+accounts. Commands about a name are refused away from Home; add `--zone home`.
+`names zone sequencer home <address>` sets the sequencer Home's commands use, in
+place of the public testnet; a sequencer of another chain needs `--other-chain` once
+Home has a wallet.
+
+The CLI keeps its own list, in `~/.config/logos-names/cli-zones.json`, and its own
+zone in use. The Names app's list is separate, so a command in a terminal never
+changes the zone the app's screens show. Both keep an added zone's wallet in the
+same folder, so a zone set up in both is one wallet. `--rpc` (or `LOGOS_NAMES_RPC`)
+still names a sequencer directly and sets the zones aside; it can't be combined with
+`--zone`.
+
 Limits: an added zone's history stays on this computer under the zone's channel,
 and is shown without a zone name once the zone is removed. Home's own channel is
 learned the first time its sequencer answers; until then a change of Home's
-sequencer can't be checked against it, and a zone can't be added. There are no
-`names` commands for zones yet: the CLI takes one sequencer at a time (`--rpc`).
+sequencer can't be checked against it, and a zone can't be added. A zone added in
+the app isn't on the CLI's list until it is added there too, and the other way
+round. `names token send` to a name works on Home only, since names are read there.
 
-Test: `scripts/lp22-zones-e2e.sh` (two standalone sequencers, one wallet).
+Test: `scripts/lp22-zones-e2e.sh` (two standalone sequencers, one wallet, the module
+over Logos Core IPC and then the CLI on its own).
 
 ## Logos accounts
 

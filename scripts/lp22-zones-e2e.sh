@@ -18,6 +18,10 @@
 #   5. a sequencer of another chain is refused for B; back on home the balance is home's own
 #      and home's account page lists nothing of B's
 #   6. B is removed (its wallet folder stays) and added again: the wallet is found
+#   7. the names CLI on its own (`names zone`): home is given A's sequencer, B is added and
+#      found with the wallet the app left there, a send lands on B, B's sequencer is changed,
+#      a command about a name is refused away from home, B is removed; the app's own
+#      settings are untouched throughout
 #
 # One sequencer runs at a time, and every send is public (no proof is made). Runs on the
 # Mac mini with bash, through the lock:
@@ -558,6 +562,89 @@ status = names("cli_status")
 step("and it holds what it held", public_of(r) == B2 and status["ok"] and status["value"]["public"] == P_B, f"B holds {public_of(r)}")
 names("zone_use", "home")
 seq_down(URL_B2)
+
+# ── 7. the CLI's own zones ──
+say("\n== 7. THE CLI: names zone, with no --rpc and no wallet folder given")
+CLI_ZONES = os.path.join(W, "home", ".config", "logos-names", "cli-zones.json")
+app_before = saved()
+
+
+def zcli(*args, timeout=240):
+    """`names` as a person types it: the zone decides the sequencer and the wallet folder."""
+    env = {k: v for k, v in os.environ.items() if k not in ("LOGOS_NAMES_RPC", "LEE_WALLET_HOME_DIR", "LOGOS_NAMES_ZONE")}
+    env["LEE_WALLET_PASSWORD"] = ""
+    p = subprocess.run([NAMES_BIN, *args], capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL, env=env)
+    return p.returncode, p.stdout.strip(), p.stderr.strip()
+
+
+def zlist():
+    rc, out, err = zcli("zone", "list", "--json")
+    try:
+        return json.loads(out)
+    except ValueError:
+        return {"zones": [], "current": None, "error": err[-200:]}
+
+
+def held(out, account):
+    found = re.search(rf"Public/{account}\s+([\d,]+)", out)
+    return int(found.group(1).replace(",", "")) if found else None
+
+
+seq_up(SEQ_A, URL_A, BASE + 5)
+# Home is the public testnet until told otherwise; this run stays on its own chains.
+rc, out, err = zcli("zone", "sequencer", "home", URL_A, "--other-chain")
+view = zlist()
+step("CLI: home takes A's sequencer, and its channel is learnt", rc == 0 and len(view["zones"]) == 1 and view["zones"][0]["sequencer"] == URL_A
+     and view["zones"][0]["channel"] == CHANNEL_A and view["current"] == "home", (out or err)[-200:])
+rc, out, err = zcli("balance")
+step("CLI: on home, balance is home's wallet on A", rc == 0 and held(out, P_HOME) == H1 and "zone:" not in err, f"home holds {held(out, P_HOME)}; exit {rc} {err[-200:] if rc else ''}")
+seq_down(URL_A)
+seq_up(SEQ_B, URL_B2, BASE + 7)
+rc, out, err = zcli("zone", "add", URL_A, "--name", "Nowhere")
+step("CLI: a sequencer that doesn't answer isn't added", rc != 0 and len(zlist()["zones"]) == 1, err[-200:])
+rc, out, err = zcli("zone", "add", URL_B2, "--name", "Second CLI")
+view = zlist()
+step("CLI: B is added with its channel, and the wallet the app left there is found (home's sequencer is down)",
+     rc == 0 and len(view["zones"]) == 2 and view["zones"][1]["id"] == ZB and view["zones"][1]["wallet_dir"] == B_WALLET and view["zones"][1]["has_wallet"] is True
+     and view["current"] == "home" and "already in" in out, out[-300:] if rc == 0 else err[-300:])
+rc, out, err = zcli("--zone", "b2b2", "balance")
+step("CLI: --zone runs one command on B: B's wallet, B's balance, and it says which zone", rc == 0 and held(out, P_B) == B2 and f"zone: Second CLI ({URL_B2})" in err,
+     f"B holds {held(out, P_B)}; {err[-120:]}")
+rc, out, err = zcli("zone", "use", "second cli")
+rc2, out2, err2 = zcli("balance")
+step("CLI: B in use: every command runs there", rc == 0 and zlist()["current"] == ZB and rc2 == 0 and held(out2, P_B) == B2, out[-200:] if rc == 0 else err[-200:])
+rc, out, err = zcli("resolve", "jef")
+step("CLI: a command about a name is refused away from home", rc != 0 and "names are kept on Home" in err and "Nothing was started" in err, err[-200:])
+rc, out, err = zcli("--zone", "home", "--rpc", URL_B2, "balance")
+step("CLI: --zone and --rpc together are refused", rc != 0 and "not both" in err, err[-200:])
+f_before = on_chain(FUND_B, URL_B2, F)
+rc, out, err = zcli("wallet", "auth-transfer", "send", "--from", f"Public/{P_B}", "--to", f"Public/{F}", "--amount", "300")
+f_after = on_chain(FUND_B, URL_B2, F)
+rc2, out2, err2 = zcli("balance")
+B3 = held(out2, P_B)
+step("CLI: a public send on B lands on B", rc == 0 and f_before is not None and f_after == f_before + 300 and B3 is not None and B3 <= B2 - 300,
+     f"F {f_before} -> {f_after}; B holds {B3}; {err[-200:] if rc else ''}")
+seq_down(URL_B2)
+seq_up(SEQ_B, URL_B, BASE + 6)
+rc, out, err = zcli("zone", "sequencer", "second cli", URL_A)
+step("CLI: B doesn't take an address that doesn't answer", rc != 0 and zlist()["zones"][1]["sequencer"] == URL_B2, err[-200:])
+kept = storage_hash(B_WALLET)
+rc, out, err = zcli("zone", "sequencer", "second cli", URL_B)
+view = zlist()
+rc2, out2, err2 = zcli("balance")
+step("CLI: B takes another sequencer of its own chain: the same wallet and balance", rc == 0 and "the same chain" in out and view["zones"][1]["sequencer"] == URL_B
+     and view["zones"][1]["channel"] == CHANNEL_B and rc2 == 0 and held(out2, P_B) == B3, out[-200:] if rc == 0 else err[-200:])
+rc, out, err = zcli("zone", "remove", "second cli")
+step("CLI: the zone in use can't be removed", rc != 0 and len(zlist()["zones"]) == 2, err[-200:])
+zcli("zone", "use", "home")
+kept = storage_hash(B_WALLET)
+rc, out, err = zcli("zone", "remove", "second cli")
+view = zlist()
+step("CLI: B is removed, and its wallet folder stays", rc == 0 and len(view["zones"]) == 1 and view["current"] == "home" and B_WALLET in out and storage_hash(B_WALLET) == kept and kept is not None,
+     out[-200:] if rc == 0 else err[-200:])
+step("CLI: its list is its own file, the owner's alone, and the app's settings are as they were",
+     saved() == app_before and stat.S_IMODE(os.stat(CLI_ZONES).st_mode) & 0o077 == 0, f"{oct(stat.S_IMODE(os.stat(CLI_ZONES).st_mode))}; app zones {[z.get('name') for z in saved().get('zones', [])]}")
+seq_down(URL_B)
 
 final = saved()
 say(f"\n    config.json: sequencer {final.get('sequencer')}, zone {final.get('zone')}, zones {[(z.get('name'), str(z.get('channel'))[:8], z.get('sequencer')) for z in final.get('zones', [])]}")

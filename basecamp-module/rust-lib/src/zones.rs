@@ -15,6 +15,9 @@
 //! Home's settings stay where they always were, the flat `sequencer`, `registry`,
 //! `cli_wallet` and `token_program`: an older version reads those and finds the home
 //! zone, and what it changes there is read back as home's.
+//!
+//! The `names` CLI includes this file by path for `names zone` (with `text.rs`), so the
+//! CLI's zones follow the same rules. It needs only those two files and `serde_json`.
 
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -54,7 +57,7 @@ pub fn channel(text: &str) -> Option<String> {
 /// A zone's name as the person typed it: one line of 1 to `MAX_NAME` characters, with
 /// nothing that hides or reorders text.
 pub fn name(text: &str) -> Result<String, String> {
-    let cleaned = crate::provider::clean_text(text, usize::MAX);
+    let cleaned = crate::text::clean_text(text, usize::MAX);
     let spaced = text.trim().split(' ').filter(|word| !word.is_empty()).collect::<Vec<_>>().join(" ");
     if cleaned != spaced {
         return Err("a zone's name is one line, with no control or hidden characters".to_owned());
@@ -130,6 +133,13 @@ pub fn sequencer_change(
     }
 }
 
+/// Whether `text` can be a program's account ID: 32 bytes in base58 are 32 to 44 of its
+/// characters. What uses the ID reads it in full; this only keeps other text out of the list.
+fn account_like(text: &str) -> bool {
+    const BASE58: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    (32..=44).contains(&text.len()) && text.chars().all(|c| BASE58.contains(c))
+}
+
 /// A channel cut short for a sentence.
 pub fn short(channel: &str) -> String {
     if channel.len() > 16 {
@@ -161,14 +171,14 @@ impl Zone {
     /// the module would talk to. Fields that don't read are left empty.
     fn saved(value: &Value) -> Option<Zone> {
         let text = |key: &str| value[key].as_str().map(str::trim).filter(|text| !text.is_empty()).map(str::to_owned);
-        let sequencer = text("sequencer").filter(|url| crate::is_http_url(url))?;
+        let sequencer = text("sequencer").filter(|url| crate::text::is_http_url(url))?;
         let channel = value["channel"].as_str().and_then(channel)?;
         Some(Zone {
             name: text("name").and_then(|typed| name(&typed).ok()).unwrap_or_else(|| default_name(&channel)),
             channel: Some(channel),
             sequencer,
             wallet: text("wallet"),
-            token_program: text("token_program").filter(|id| crate::registry::parse_account(id).is_ok()),
+            token_program: text("token_program").filter(|id| account_like(id)),
         })
     }
 }
