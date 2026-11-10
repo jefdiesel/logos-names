@@ -4572,6 +4572,10 @@ impl NamesModule for Names {
             let (to, given_key) = (to.account, to.key);
             // As a transfer refuses them: a deposit to either lands and nobody can use it.
             self.not_a_sink(&account, "take a bridge")?;
+            // The node first: it is on this computer and answers at once, so a node that
+            // isn't running is said before the sequencer is waited for (a bridge plan with
+            // the node stopped and the sequencer unreachable took 10 s to blame the sequencer).
+            let notes = chain::notes_of(&node::call("wallet_get_notes", json!([from, ""]), node::QUICK)?);
             // What the deposit carries: the metadata the sequencer's LEZ decodes, or the
             // deposit is never credited (real-bridges-to-lez-0.4-never-mint). LEZ 0.4 needs the
             // account's public key: given as the destination, or this wallet's own. Refused
@@ -4582,7 +4586,6 @@ impl NamesModule for Names {
                 (_, key) => key,
             };
             let metadata = deposit::metadata(lez, &account, key.map(deposit::Evidence::Key).as_ref()).map_err(|refusal| refusal.words(&registry::account_text))?;
-            let notes = chain::notes_of(&node::call("wallet_get_notes", json!([from, ""]), node::QUICK)?);
             // A note a send from here still spends (not in a block yet) is not this one's:
             // two deposits of one note both got a hash and only one could land.
             let busy = chain_notes_in_use(&from);
@@ -6611,6 +6614,22 @@ mod tests {
         let mut names = fresh();
         assert!(!names.set_sequencer("http://evil.test".into()));
         assert_eq!(parsed(&names.get_config())["sequencer"], DEFAULT_SEQUENCER);
+    }
+
+    /// bridge-plan-node-stopped-blames-the-sequencer: with the node stopped and the sequencer
+    /// not answering, a bridge plan waited 10 s for the sequencer and blamed it. The node is
+    /// asked first: it is on this computer, and its being down is what the person can fix.
+    #[test]
+    fn a_bridge_with_the_node_stopped_says_so_before_the_sequencer_is_asked() {
+        let mut names = fresh();
+        node_refuses("wallet_get_notes", "The node is not running.");
+        // The sequencer tells nothing either: asked first, its refusal would be the answer.
+        registry::LEZ.with(|lez| lez.set(None));
+        let to = format!("Public/{}", registry::account_text(&[6; 32]));
+        let down = parsed(&names.chain_bridge(NODE_KEY.into(), to, "1,000".into(), false));
+        registry::LEZ.with(|lez| lez.set(Some(deposit::Lez::V03)));
+        assert_eq!(down["success"], false, "{down}");
+        assert!(down["error"].as_str().unwrap().contains("isn't running"), "{down}");
     }
 
     fn as_caller(caller: logos_rust_sdk::LogosCaller) {
