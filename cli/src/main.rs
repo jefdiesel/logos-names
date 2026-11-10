@@ -4204,7 +4204,7 @@ mod bridge_metadata_tests {
     fn the_bare_account_is_lez_0_3_metadata_and_lez_0_4_refuses_it() {
         let account = AccountId::new(bytes(7));
         let metadata = deposit::metadata(Lez::V03, account.value(), None).expect("metadata");
-        assert_eq!(metadata, borsh::to_vec(&account).expect("borsh"), "0.3's DepositMetadata { recipient_id }");
+        assert_eq!(metadata, borsh::to_vec(&account).expect("borsh"), "0.3's DepositMetadata {{ recipient_id }}");
         assert_eq!(AccountId::try_from_slice(&metadata).expect("0.3 decodes it"), account);
         assert!(DepositMetadata::try_from_slice(&metadata).is_err(), "0.4 can't");
     }
@@ -4514,9 +4514,12 @@ mod input_tests {
         }
         assert_eq!(sinks.len(), 6);
         // Nothing reached the network: the unreachable node and sequencer were never asked.
-        let zero = bridge("http://127.0.0.1:9", "http://127.0.0.1:9", 0, &format!("Public/{someone}"), &[registry], &"66".repeat(32), 100_000, true);
+        let refused = |amount, to: String| {
+            futures::executor::block_on(bridge("http://127.0.0.1:9", None, "http://127.0.0.1:9", amount, &to, &[registry], &"66".repeat(32), 100_000, true))
+        };
+        let zero = refused(0, format!("Public/{someone}"));
         assert_eq!(zero.unwrap_err().to_string(), "Enter an amount above 0.");
-        let private = bridge("http://127.0.0.1:9", "http://127.0.0.1:9", 1_000, &format!("Private/{someone}"), &[registry], &"66".repeat(32), 100_000, true);
+        let private = refused(1_000, format!("Private/{someone}"));
         assert_eq!(private.unwrap_err().to_string(), "the bridge credits a public account: give --to as Public/<id>");
         assert_eq!(Cli::try_parse_from(["names", "bridge", "0", "--to", someone, "--from-key", "k"]).err().map(|e| e.to_string().contains("Enter an amount above 0.")), Some(true));
     }
