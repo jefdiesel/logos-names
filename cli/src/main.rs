@@ -90,6 +90,19 @@ struct Defaults {
     labels: std::collections::BTreeMap<String, String>,
 }
 
+/// Whether `name` is queued to be made public (`then_public`), as its registration goes on. A
+/// new commitment says it afresh from `public` (`--public`), so a `--public` that was refused
+/// before its commitment leaves nothing behind for a later plain registration to act on. A
+/// resumed one keeps what was asked when it was made, and `--public` can still ask it now.
+fn queue_public(then_public: &mut Vec<String>, name: &str, public: bool, fresh: bool) {
+    let queued = then_public.iter().any(|queued| queued == name);
+    if public && !queued {
+        then_public.push(name.to_owned());
+    } else if !public && fresh && queued {
+        then_public.retain(|queued| queued != name);
+    }
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Pending {
     owner: String,
@@ -756,6 +769,7 @@ mod deposit;
 mod fees;
 mod plan;
 mod module;
+mod prover;
 mod tokens;
 
 /// The text entry that points a name to another (SPEC.md §7, Forwarding).
@@ -1152,6 +1166,7 @@ impl Client {
     /// them, before the first is proven (`plan`); refuses in words when they can't. A job of
     /// several steps says what it takes in all.
     async fn plan_private(&mut self, job: &str, steps: &[plan::Step<AccountId>]) -> Result<plan::Costed<AccountId>> {
+        prover::to_prove()?;
         let holdings = self.private_holdings().await?;
         let costed = match plan::check(&holdings, steps) {
             Ok(costed) => costed,
@@ -1356,6 +1371,9 @@ impl Client {
     /// the commitment is made, leaving the rest to a background `names register`.
     /// `public` asks for the name to be made public once registered: it belongs to this
     /// registration only, never queued for a later one (then-public-survives-refused-register).
+    /// It is queued (`then_public`) with the commitment, never before it, and a resumed
+    /// commitment keeps what it asked (`queue_public`); the caller reads the queue once this
+    /// returns `true` to know whether the name is to be made public.
     #[allow(clippy::too_many_arguments)]
     async fn register(
         &mut self,
@@ -1443,6 +1461,7 @@ impl Client {
                 if let Some(pending) = defaults.pending.get_mut(name) {
                     pending.failed = None;
                 }
+                queue_public(&mut defaults.then_public, name, public, false);
                 save_defaults(&defaults)?;
                 found
             }
@@ -1462,10 +1481,14 @@ impl Client {
                     name.to_owned(),
                     Pending { owner: owner.to_string(), secret: hex::encode(secret), made, failed: None },
                 );
+                queue_public(&mut defaults.then_public, name, public, true);
                 save_defaults(&defaults)?;
                 (secret, made)
             }
         };
+        // What this commitment asked, now queued with it: a resumed one keeps a `--public`
+        // asked when it was made, and the background finish is told so by its own arguments.
+        let public = defaults.then_public.iter().any(|queued| queued == name);
 
         // Step 2: reveal, once the commitment is old enough.
         let ready = made.saturating_add(MIN_COMMIT_AGE_MS);
@@ -1820,6 +1843,9 @@ impl Client {
     ) -> Result<()> {
         let dry_run = std::env::var_os("LOGOS_NAMES_DRY_RUN").is_some();
         let private = mentions.iter().any(|mention| mention.identity.is_private());
+        if private {
+            prover::to_prove()?;
+        }
         let paying = mentions.clone();
         let before = if private { None } else { Some(self.held_by(&paying).await) };
         let wealth = if private { self.private_wealth().await } else { None };
@@ -1964,6 +1990,7 @@ impl Client {
         message: &[u8],
         programs: Vec<(AccountId, Program)>,
     ) -> Result<u64> {
+        prover::to_run()?;
         let actors: Vec<Actor> = mentions.iter().map(AccountMention::actor).collect();
         let mut states = std::collections::HashMap::new();
         for actor in &actors {
@@ -2059,6 +2086,9 @@ impl Client {
             bail!("{name}{NAME_SUFFIX}'s public account {to} has never been used on this chain, and LEZ can't credit it without its owner's public key; {how}");
         }
 
+        if self.is_private(from) {
+            prover::to_prove()?;
+        }
         println!("paying {amount} to {name}{NAME_SUFFIX} ({to})");
         let paying = vec![self.signer(from).balance()];
         let held = self.held_by(&paying).await;
@@ -2124,6 +2154,7 @@ impl Client {
 
     /// Pays `amount` to the private receiving keys `name` publishes.
     async fn pay_private(&mut self, name: &str, amount: u128, from: AccountId) -> Result<()> {
+        prover::to_prove()?;
         let (_, _, profile) = self.lookup(name).await?;
         let recipient = private_keys_of(name, &profile)?;
         let paying = vec![self.signer(from).balance()];
@@ -2240,6 +2271,7 @@ impl Client {
             println!("nothing worth claiming");
             return Ok(());
         }
+        prover::to_prove()?;
         // The largest first: when the payer can't pay for every claim, the most arrives.
         let mut pending = pending;
         pending.sort_by_key(|message| std::cmp::Reverse(message.native_credit().unwrap_or(0)));
@@ -3553,25 +3585,11 @@ fn rpc_call(rpc: &str, method: &str, params: serde_json::Value) -> Result<serde_
     Ok(reply["result"].clone())
 }
 
-/// Private changes are proven by RISC Zero's `r0vm`. The installer puts it next to
-/// `names`; use that copy unless `RISC0_SERVER_PATH` names another.
-fn use_bundled_prover() {
-    if std::env::var_os("RISC0_SERVER_PATH").is_some() {
-        return;
-    }
-    let bundled = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.canonicalize().ok())
-        .and_then(|exe| Some(exe.parent()?.join("r0vm")));
-    if let Some(r0vm) = bundled.filter(|path| path.is_file()) {
-        // SAFETY: called first thing in main, before any other thread starts.
-        unsafe { std::env::set_var("RISC0_SERVER_PATH", r0vm) };
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    use_bundled_prover();
+    // Where programs run and proofs are made: the r0vm the installer puts next to `names`
+    // unless RISC0_SERVER_PATH names another, or in-process in a local-prove build (`prover`).
+    prover::start();
     let cli = Cli::parse();
     if let Command::Man { dir } = &cli.command {
         return write_man_pages(dir);
@@ -3875,11 +3893,15 @@ async fn main() -> Result<()> {
             };
             // `--public` belongs to this registration: nothing is queued for a later one, and a
             // refusal or failure leaves no request behind (then-public-survives-refused-register).
+            // `register` queues it with the commitment, never before it, so a refused `--public`
+            // leaves nothing that a later plain registration would act on.
             let finished = async {
                 if !client.register(&name, owner, term, now, wait, public, cli.rpc.as_deref()).await? {
                     return Ok(());
                 }
                 let mut defaults = load_defaults();
+                // As the commitment asked: a resumed one made with `--public` stays public.
+                let public = public || defaults.then_public.contains(&name);
                 defaults.registered(&name, public);
                 save_defaults(&defaults)?;
                 // Registered privately first, so nothing showed who registered it; now moved to a
@@ -4818,5 +4840,41 @@ mod job_ties_and_failed_reads {
         assert_eq!(setup_short::<String>(public, Some(Ok(14_000_000)), 14_000_000).expect("read"), None);
         // Accounts only: nothing is read, nothing can fail.
         assert_eq!(setup_short::<String>(public, None, 0).expect("nothing read"), None);
+    }
+}
+
+#[cfg(test)]
+mod register_public_tests {
+    use super::queue_public;
+
+    /// then-public-stays-queued-after-a-refused-register-public (2026-11-09 verifier, defect 2):
+    /// `register vpubname --public` was refused before its commitment and left vpubname
+    /// queued, so the next plain `register vpubname` was planned, and would have finished, as
+    /// a public one. Now only a commitment queues it, and a new plain one clears it.
+    #[test]
+    fn a_new_plain_commitment_clears_a_queue_left_by_a_refused_public_one() {
+        // What an older names left behind after the refused --public.
+        let mut queued = vec!["vpubname".to_owned(), "other".to_owned()];
+        queue_public(&mut queued, "vpubname", false, true);
+        assert_eq!(queued, ["other"]);
+        // A fresh --public commitment queues it, once.
+        queue_public(&mut queued, "vpubname", true, true);
+        queue_public(&mut queued, "vpubname", true, true);
+        assert_eq!(queued, ["other", "vpubname"]);
+    }
+
+    #[test]
+    fn a_resumed_registration_keeps_what_its_commitment_asked() {
+        // The background `names register <name> --wait` that finishes a --public registration
+        // passes no --public: it must still make the name public after the reveal.
+        let mut queued = vec!["pubname".to_owned()];
+        queue_public(&mut queued, "pubname", false, false);
+        assert_eq!(queued, ["pubname"]);
+        // A plain one resumed stays plain; --public on resuming asks for it now.
+        let mut queued = Vec::new();
+        queue_public(&mut queued, "plain", false, false);
+        assert!(queued.is_empty());
+        queue_public(&mut queued, "plain", true, false);
+        assert_eq!(queued, ["plain"]);
     }
 }

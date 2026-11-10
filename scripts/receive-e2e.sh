@@ -25,8 +25,18 @@
 # `names` process itself, where a guard sees it: a move to private (14,000,000, Public to
 # Private) reached peak_rss 6215 MB with RAYON_NUM_THREADS=4 and 6232 MB with 2 (2026-11-09,
 # rc1, the succinct receipt's last stage), just above guard.sh's default MAX_RSS_GB=6, which
-# killed it before it was sent. A running rc1 sequencer starts short `r0vm` executors of its
+# killed it before it was sent. With MAX_RSS_GB=7 (2026-11-09, rc1, RAYON_NUM_THREADS=4): a move
+# to private landed at peak_rss 6904 MB (17,000,000 into a funded wallet's private account,
+# 494 s) and 6371 MB (60,000,000 into a new one, 508 s), but a payment from a private account
+# to someone's private keys passed 7 GB (7887 MB at the last 2 s sample) and was killed before
+# it was sent, so this script's step 2 and the claims after it don't fit under 7 GB. The guard
+# also kills a proof when the machine's free memory falls below 8%, whoever uses it: mini-lock
+# checks free memory only as a job starts. A running rc1 sequencer starts short `r0vm` executors of its
 # own, so `pgrep r0vm` is not empty while one runs: check the r0vm's parent, never `names`.
+# On a machine with no r0vm at all (the Mac mini since 2026-11-09), build the sequencer with
+# `--features standalone,prove` so it runs programs in-process (a plain one panics at genesis:
+# "No such file or directory"); a `names` built without local-prove then refuses every call
+# that would run a program, before anything is sent ("no r0vm was found …").
 #
 #   SEQ_BIN=… SEQ_CONFIG=… NAMES=… WORK=<new dir> RPC_PORT=3250 METRICS_PORT=9250 scripts/receive-e2e.sh
 set -euo pipefail

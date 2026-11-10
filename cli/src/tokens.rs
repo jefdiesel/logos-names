@@ -1138,6 +1138,7 @@ impl Client {
         };
         let before = self.held_by(&paying).await;
         let hash = if proven {
+            crate::prover::to_prove()?;
             let quote = self.wallet.client().get_fee_state().await?;
             let estimate = crate::fees::private(&quote, self.wallet.config().private_fee_headroom_blocks);
             println!("{}", crate::fees::estimate_line(&estimate, "paid inside the proof"));

@@ -625,6 +625,7 @@ impl Client {
         if name.is_empty() {
             bail!("could not find a free anonymous name; try again");
         }
+        crate::prover::to_prove()?;
         let from = default_private()?;
         let id = derive(&name).id;
         let tier = length_proof(&id)?.1;
@@ -647,7 +648,7 @@ impl Client {
         let mut defaults = load_defaults();
         defaults.anon = Some(name.clone());
         save_defaults(&defaults)?;
-        // Made public by the registration that asks for it, once registered, never queued.
+        // Made public by the registration that asks for it, queued with its commitment.
         self.register(&name, account, 1, None, false, public, rpc).await?;
         let mut defaults = load_defaults();
         if !defaults.names.contains(&name) {

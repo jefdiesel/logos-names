@@ -14,7 +14,8 @@ default = []
 # RAYON_NUM_THREADS, never through the external r0vm (whose all-core run panicked the Mac
 # mini on 2026-11-06). For testing on a shared machine only: release builds leave it off and
 # prove with the bundled r0vm as before. Note that with it built in, risc0 proves locally
-# even when RISC0_PROVER is unset.
+# even when RISC0_PROVER is unset. A build without it, and with no r0vm to find, refuses
+# every call that would run a program, before anything is sent (src/prover.rs).
 local-prove = ["lee/prove"]
 
 [dependencies]
@@ -32,6 +33,9 @@ wallet.workspace = true
 clock_core.workspace = true
 # The prototype token program's wire types (docs/wallet/TOKENS.md); its own workspace.
 token_core = { path = "../wallet-tokens/core", package = "wallet_tokens_core" }
+# Only to find the r0vm risc0 would use, as names starts (src/prover.rs).
+risc0-zkvm.workspace = true
+rzup = { version = "0.5.1", default-features = false }
 
 anyhow = "1.0.98"
 borsh.workspace = true
