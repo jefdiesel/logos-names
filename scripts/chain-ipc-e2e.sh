@@ -614,9 +614,14 @@ notes_b = sorted((n["id"], n["value"]) for n in node("wallet_get_notes", B, "")[
 log_mark = len(daemon_log())
 r = names("chain_send", B, A, f"{hb:,}", "true")
 show(f"names chain_send B -> A {hb:,} (all B holds, nothing left for the fee)", r)
-time.sleep(3)
-later = [json.loads(line.split("Received new block: ", 1)[1]) for line in daemon_log()[log_mark:].splitlines()
-         if "Received new block: " in line]
+# Two blocks must pass to see that none carries anything. A solo node's blocks come when it
+# wins a slot, so they are waited for (a fixed 3 s saw only one block in one run).
+for _ in range(30):
+    time.sleep(3)
+    later = [json.loads(line.split("Received new block: ", 1)[1]) for line in daemon_log()[log_mark:].splitlines()
+             if "Received new block: " in line]
+    if len(later) >= 2:
+        break
 carried = sum(len(b.get("transactions", [])) for b in later)
 notes_b2 = sorted((n["id"], n["value"]) for n in node("wallet_get_notes", B, "")["value"]["notes"])
 say(f"    node: B {balance(B)} in {len(notes_b2)} notes (was {hb} in {len(notes_b)}); {len(later)} blocks since, carrying {carried} transactions")
