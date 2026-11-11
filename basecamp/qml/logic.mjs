@@ -554,7 +554,7 @@ function accountSide(e, kind, page) {
         // A credit to this account the claim left for later: it still waits, nothing moved.
         return function(line) {
             line.title = "Still waiting to be claimed"
-            line.sub = "on LEZ, claim it with Receive once your paying account holds enough"
+            line.sub = "on LEZ, not claimed yet: claim it with Receive"
             line.amount = grouped(left[page])
             line.sign = ""
             return line

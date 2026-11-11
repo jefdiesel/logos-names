@@ -1040,12 +1040,18 @@ pub fn parse_claims(log: &str) -> (Option<String>, Vec<(String, u128)>) {
 
 /// What a `names receive` run left waiting, from its log: `(Private/<id>, amount)` for each
 /// `left waiting: N to Private/<id>: …` line, whether it was worth less than claiming it, its
-/// payer couldn't also pay for it, or the run stopped before it.
+/// payer couldn't also pay for it, or the run stopped before it. A fee's refund is not a
+/// payment left waiting: the claims' payer sweeps its own refunds into its next proof, so
+/// one listed before the claims may be spent by them (`names balance` tells refunds apart).
 pub fn parse_left(log: &str) -> Vec<(String, u128)> {
     log.lines()
         .map(str::trim)
         .filter_map(|line| {
-            let mut words = line.strip_prefix("left waiting: ")?.split_whitespace();
+            let rest = line.strip_prefix("left waiting: ")?;
+            if rest.contains(", a fee's refund") {
+                return None;
+            }
+            let mut words = rest.split_whitespace();
             let amount = words.next()?.parse::<u128>().ok()?;
             let to = words.nth(1)?.trim_end_matches([':', ',']);
             (to.starts_with("Private/") && registry::parse_account(to).is_ok()).then(|| (to.to_owned(), amount))
@@ -3092,7 +3098,8 @@ mod tests {
              left waiting: junk to {r2}: not claimed\n\
              left waiting: 5 to Public/{PUBLIC}: no\n"
         );
-        assert_eq!(parse_left(&log), vec![("Private/9Dk3Yx4ZQnHxAZ2c4pkuDZ7cHKu8M1NC2vWqzTzS2r8q".to_owned(), 3_169_135), (r2.to_owned(), 1_000_000)]);
+        // The fee's refund is not a payment waiting: the payer's next proof may sweep it.
+        assert_eq!(parse_left(&log), vec![(r2.to_owned(), 1_000_000)]);
     }
 
     /// wallet-job-allowed-while-detached-registration-pending: a registration the CLI finishes

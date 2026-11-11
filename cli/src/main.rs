@@ -1496,12 +1496,16 @@ impl Client {
                 let made = self.now().await;
                 let promised = commitment(&id, &holder, &secret);
                 println!("step 1 of 2: committing to {name}{NAME_SUFFIX}");
-                self.send(
-                    vec![self.own_actor(owner), self.registry_actor(commitment_seed(&promised))],
-                    &Instruction::Commit { commitment: promised, now: made },
-                    0,
-                )
-                .await?;
+                let sent = self
+                    .send(
+                        vec![self.own_actor(owner), self.registry_actor(commitment_seed(&promised))],
+                        &Instruction::Commit { commitment: promised, now: made },
+                        0,
+                    )
+                    .await;
+                if let Err(error) = sent {
+                    return Err(self.past_window(error, made).await);
+                }
                 defaults.pending.insert(
                     name.to_owned(),
                     Pending { owner: owner.to_string(), secret: hex::encode(secret), made, failed: None },
@@ -1594,6 +1598,7 @@ impl Client {
                 Ok(Some(_)) => return Err(self.give_up(name, error.context("someone else holds the name"))),
                 _ => {}
             }
+            let error = self.past_window(error, claimed).await;
             if attempt >= REVEAL_ATTEMPTS || self.now().await.saturating_add(TIME_WINDOW_MS) >= expires_at {
                 return Err(self.give_up(name, error));
             }
@@ -1604,6 +1609,20 @@ impl Client {
         save_defaults(&defaults)?;
         println!("{name}{NAME_SUFFIX} is registered");
         Ok(true)
+    }
+
+    /// A commit or reveal claims the chain's time before its proof is made, and the program
+    /// takes it only within TIME_WINDOW_MS of that. One whose proof took longer is dropped by
+    /// the chain ("outside the validity window"), charged nothing: say that, not that another
+    /// change took its place (a slow prover, 10 to 13 minutes at 4 threads on a shared machine).
+    async fn past_window(&self, error: anyhow::Error, claimed: u64) -> anyhow::Error {
+        if self.now().await < claimed.saturating_add(TIME_WINDOW_MS) {
+            return error;
+        }
+        anyhow!(
+            "the chain dropped it and charged nothing: its proof took longer than the {} minutes a commitment or registration stays valid after the chain time it claims, so it arrived too late. Proving on this computer is too slow for it now: try again with fewer other programs running, or on a faster computer",
+            TIME_WINDOW_MS / 60_000
+        )
     }
 
     /// Records why registering `name` stopped, for `names mine`, and returns the error.
@@ -2386,7 +2405,7 @@ impl Client {
                     }
                     let done = if landed.is_empty() { "nothing was claimed".to_owned() } else { format!("claimed {} of {count} ({})", landed.len(), landed.join(", ")) };
                     bail!(
-                        "{done}. The claim of {} into Private/{to} stopped: {error:#}. It and the rest still wait, nothing of them is lost: run `names receive` again once Private/{payer} holds enough",
+                        "{done}. The claim of {} into Private/{to} stopped: {error:#}. It and the rest still wait, nothing of them is lost: run `names receive` again",
                         plan::grouped(amount)
                     );
                 }
