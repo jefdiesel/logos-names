@@ -2716,10 +2716,11 @@ impl Jobs {
                     record["error"] = Value::from(why);
                 }
             }
-            jobs.write(&job, &record);
+            // Gone before the job reads as ended, so nothing that sees it ended finds the file.
             if let Some(scratch) = scratch {
                 let _ = std::fs::remove_file(scratch);
             }
+            jobs.write(&job, &record);
             if let Ok(mut watched) = WATCHED.lock() {
                 watched.remove(&job);
             }

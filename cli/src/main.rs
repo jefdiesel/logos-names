@@ -88,6 +88,32 @@ struct Defaults {
     /// or removed once set, so these are kept here.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     labels: std::collections::BTreeMap<String, String>,
+    /// How long, in milliseconds, this computer last took to prove a private commit or
+    /// registration, so the next one claims a time that allows for it (`proving_lead`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proof_ms: Option<u64>,
+}
+
+/// How far ahead of the chain's time a private commit or registration claims its time, for a
+/// proof that took `measured` milliseconds last time. The program takes one only in a block
+/// dated in `[claimed, claimed + TIME_WINDOW_MS)`, and the proof is made after the time is
+/// claimed, so a proof longer than the window always arrived too late. Claiming later moves
+/// the window to where the proof ends: half a window short of the last proof, so one that
+/// runs up to five minutes faster or slower than last time still lands. A later claim gives
+/// nothing away: no block dated before it takes the call, so a commitment still really waits
+/// MIN_COMMIT_AGE_MS, and a reveal still waits for the commitment to be that old before its
+/// proof begins. One that arrives early is dropped and charged nothing, like a late one.
+fn proving_lead(measured: Option<u64>) -> u64 {
+    const MAX_LEAD_MS: u64 = 60 * 60 * 1000;
+    measured.map_or(0, |ms| ms.saturating_sub(TIME_WINDOW_MS / 2)).min(MAX_LEAD_MS)
+}
+
+/// How long proving takes here, in words: as measured last time, when there is a measurement.
+fn proving_words() -> String {
+    match load_defaults().proof_ms {
+        Some(ms) => format!("about {} minutes, as last time", ms.div_ceil(60_000).max(1)),
+        None => "a few minutes".to_owned(),
+    }
 }
 
 /// Whether `name` is queued to be made public (`then_public`), as its registration goes on. A
@@ -1059,6 +1085,8 @@ fn readable(time: u64) -> String {
 struct Client {
     wallet: WalletCore<SequencerClient>,
     program: AccountId,
+    /// How long the last private transaction took to prove and submit, in milliseconds.
+    proved_ms: Option<u64>,
 }
 
 /// What registering a name costs. `amount` leaves the payer, to the name's deposit
@@ -1500,19 +1528,37 @@ impl Client {
             None => {
                 let mut secret = [0u8; 32];
                 getrandom::fill(&mut secret).map_err(|e| anyhow!("no randomness: {e}"))?;
-                let made = self.now().await;
                 let promised = commitment(&id, &holder, &secret);
                 println!("step 1 of 2: committing to {name}{NAME_SUFFIX}");
-                let sent = self
-                    .send(
-                        vec![self.own_actor(owner), self.registry_actor(commitment_seed(&promised))],
-                        &Instruction::Commit { commitment: promised, now: made },
-                        0,
-                    )
-                    .await;
-                if let Err(error) = sent {
-                    return Err(self.past_window(error, made).await);
-                }
+                // A commit that missed its window is dropped and charged nothing, and the miss
+                // measured this computer's proof: one more try claims a time that allows for it.
+                let mut attempt = 0;
+                let made = loop {
+                    attempt += 1;
+                    let made = self.claim_time(owner).await;
+                    let sent = self
+                        .send(
+                            vec![self.own_actor(owner), self.registry_actor(commitment_seed(&promised))],
+                            &Instruction::Commit { commitment: promised, now: made },
+                            0,
+                        )
+                        .await;
+                    let Err(error) = sent else {
+                        self.note_proof();
+                        break made;
+                    };
+                    let (error, missed) = self.past_window(error, made).await;
+                    if !missed {
+                        return Err(error);
+                    }
+                    self.note_proof();
+                    if attempt >= COMMIT_ATTEMPTS {
+                        return Err(error);
+                    }
+                    println!("the commitment did not land ({error:#}); trying again (attempt {} of {COMMIT_ATTEMPTS})", attempt + 1);
+                };
+                // note_proof saved the measurement to the file; keep it when this copy is saved.
+                defaults.proof_ms = load_defaults().proof_ms;
                 defaults.pending.insert(
                     name.to_owned(),
                     Pending { owner: owner.to_string(), secret: hex::encode(secret), made, failed: None },
@@ -1539,7 +1585,7 @@ impl Client {
                 "  it waits until the commitment is {} minutes old, so nobody who saw it can take the name first,",
                 MIN_COMMIT_AGE_MS / 60_000
             );
-            println!("  then proves the last step on this computer (about 4 minutes); keep this computer on and awake");
+            println!("  then proves the last step on this computer ({}); keep this computer on and awake", proving_words());
             println!("check with `names mine`; the log is {}", log.display());
             return Ok(false);
         }
@@ -1564,16 +1610,16 @@ impl Client {
         let sealed = seal_profile(&key, &profile);
         println!("payments to {name}{NAME_SUFFIX} will arrive privately at Private/{receiving}");
         let promised = commitment(&id, &holder, &secret);
-        // A reveal claims the chain's time before its proof is made, and the program
-        // takes it only within TIME_WINDOW_MS of that; a slow chain can include it too
-        // late. The commitment stays usable for MAX_COMMIT_AGE_MS, so try again.
+        // A reveal claims a time before its proof is made, and the program takes it only
+        // within TIME_WINDOW_MS of that (`proving_lead`); a slow proof or chain can land it
+        // outside. The commitment stays usable for MAX_COMMIT_AGE_MS, so try again.
         let expires_at = made.saturating_add(MAX_COMMIT_AGE_MS);
         let mut attempt = 0;
         loop {
             attempt += 1;
             let claimed = match now {
                 Some(now) => now,
-                None => self.now().await,
+                None => self.claim_time(owner).await,
             };
             let kind = if deposit { "a deposit" } else { "a fee" };
             println!("step 2 of 2: registering {name}{NAME_SUFFIX} at {claimed} for {kind} of {fee}");
@@ -1598,14 +1644,20 @@ impl Client {
                     fee,
                 )
                 .await;
-            let Err(error) = sent else { break };
+            let Err(error) = sent else {
+                self.note_proof();
+                break;
+            };
             // The wait may have given up on a reveal that landed after all.
             match self.record(&id).await {
                 Ok(Some(held)) if held.owner == holder => break,
                 Ok(Some(_)) => return Err(self.give_up(name, error.context("someone else holds the name"))),
                 _ => {}
             }
-            let error = self.past_window(error, claimed).await;
+            let (error, missed) = self.past_window(error, claimed).await;
+            if missed {
+                self.note_proof();
+            }
             if attempt >= REVEAL_ATTEMPTS || self.now().await.saturating_add(TIME_WINDOW_MS) >= expires_at {
                 return Err(self.give_up(name, error));
             }
@@ -1618,17 +1670,61 @@ impl Client {
         Ok(true)
     }
 
-    /// A commit or reveal claims the chain's time before its proof is made, and the program
-    /// takes it only within TIME_WINDOW_MS of that. One whose proof took longer is dropped by
-    /// the chain ("outside the validity window"), charged nothing: say that, not that another
-    /// change took its place (a slow prover, 10 to 13 minutes at 4 threads on a shared machine).
-    async fn past_window(&self, error: anyhow::Error, claimed: u64) -> anyhow::Error {
-        if self.now().await < claimed.saturating_add(TIME_WINDOW_MS) {
-            return error;
+    /// The time a commit or registration signed by `owner` claims: the chain's, and for a
+    /// private owner, whose proof is made after the time is claimed, later by `proving_lead`.
+    async fn claim_time(&self, owner: AccountId) -> u64 {
+        let now = self.now().await;
+        if !self.is_private(owner) {
+            return now;
         }
-        anyhow!(
-            "the chain dropped it and charged nothing: its proof took longer than the {} minutes a commitment or registration stays valid after the chain time it claims, so it arrived too late. Proving on this computer is too slow for it now: try again with fewer other programs running, or on a faster computer",
-            TIME_WINDOW_MS / 60_000
+        let lead = proving_lead(load_defaults().proof_ms);
+        if lead > 0 {
+            println!(
+                "claiming the chain's time plus {} minutes, as proving took about {} minutes here last time",
+                lead.div_ceil(60_000),
+                (lead + TIME_WINDOW_MS / 2).div_ceil(60_000)
+            );
+        }
+        now.saturating_add(lead)
+    }
+
+    /// Saves how long the last private transaction took to prove, for `claim_time`.
+    fn note_proof(&mut self) {
+        if let Some(ms) = self.proved_ms.take() {
+            let mut defaults = load_defaults();
+            defaults.proof_ms = Some(ms);
+            let _ = save_defaults(&defaults);
+        }
+    }
+
+    /// A commit or reveal is taken only in a block dated in `[claimed, claimed +
+    /// TIME_WINDOW_MS)`. One that arrived outside it is dropped by the chain ("outside the
+    /// validity window"), charged nothing: say that, not that another change took its place,
+    /// and whether it missed (true), so the caller saves the proof's time and tries again.
+    async fn past_window(&self, error: anyhow::Error, claimed: u64) -> (anyhow::Error, bool) {
+        // Only a proof that was made and sent can miss; a call the wallet, the sequencer or the
+        // program refused says why, and that is passed on as it is.
+        let text = format!("{error:#}");
+        let refused = ["refused", "Failed to execute program", "Guest panicked"].iter().any(|said| text.contains(said));
+        if self.proved_ms.is_none() || (refused && !text.contains("validity window")) {
+            return (error, false);
+        }
+        let now = self.now().await;
+        if now < claimed {
+            return (
+                anyhow!("the chain dropped it and charged nothing: it arrived before the time it claimed, as its proof was faster than last time"),
+                true,
+            );
+        }
+        if now < claimed.saturating_add(TIME_WINDOW_MS) {
+            return (error, false);
+        }
+        (
+            anyhow!(
+                "the chain dropped it and charged nothing: it arrived more than {} minutes after the time it claimed, as its proof took longer than that",
+                TIME_WINDOW_MS / 60_000
+            ),
+            true,
         )
     }
 
@@ -1922,13 +2018,12 @@ impl Client {
             if dry_run {
                 bail!("LOGOS_NAMES_DRY_RUN is set, so nothing was sent (a private change is not tried first)");
             }
-            println!("acting privately; proving it on this computer (about 4 minutes), so the chain never learns your account");
+            println!("acting privately; proving it on this computer ({}), so the chain never learns your account", proving_words());
             let catalog: ProgramCatalog = programs.into_iter().collect();
-            self.wallet
-                .send_privacy_preserving_tx(mentions, 0, message, &catalog)
-                .await
-                .map_err(|error| refused_or(error, "the sequencer did not accept the transaction"))?
-                .0
+            let started = std::time::Instant::now();
+            let sent = self.wallet.send_privacy_preserving_tx(mentions, 0, message, &catalog).await;
+            self.proved_ms = Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
+            sent.map_err(|error| refused_or(error, "the sequencer did not accept the transaction"))?.0
         } else {
             // A call that fails is billed what it ran and keeps nothing, so try it here
             // first: the same run tells what a refused call would be refused for, and
@@ -2148,7 +2243,7 @@ impl Client {
         // From a private account this is a deshielded transfer: the chain sees the
         // public account credited, but not who paid.
         let (hash, _) = if self.is_private(from) {
-            println!("from a private account; proving it on this computer (about 4 minutes), so the chain never learns your account");
+            println!("from a private account; proving it on this computer ({}), so the chain never learns your account", proving_words());
             NativeTokenTransfer(&self.wallet)
                 .transfer(self.signer(from), AccountIdentity::PublicNoSign(to), amount, CreditDelivery::Automatic)
                 .await
@@ -3008,6 +3103,8 @@ fn unfunded_setup(public: AccountId, balance: u128, shield: u128) -> String {
 
 /// How many times `register` sends its reveal before giving up.
 const REVEAL_ATTEMPTS: u32 = 4;
+/// How many times `names register` tries its commitment when one misses its window (`past_window`).
+const COMMIT_ATTEMPTS: u32 = 2;
 
 /// How many blocks to wait for a transaction to be included before giving up.
 const TX_POLL_MAX_BLOCKS: usize = 60;
@@ -3850,6 +3947,7 @@ async fn main() -> Result<()> {
         )
         .await?,
         program,
+        proved_ms: None,
     };
 
     match cli.command {
@@ -4967,6 +5065,30 @@ mod wallet_storage_tests {
 mod job_ties_and_failed_reads {
     use super::*;
     use clap::Parser as _;
+
+    /// register-public-never-lands-on-a-slow-prover: on the Mini a private commit's proof took
+    /// 10.5 minutes, past the 10-minute window after its claimed time, so the chain dropped
+    /// it every time. The claimed time now moves later by the last proof's time, less half a
+    /// window, so a proof up to five minutes faster or slower than last time still lands.
+    #[test]
+    fn a_slow_prover_claims_a_later_time() {
+        let window = TIME_WINDOW_MS;
+        assert_eq!(proving_lead(None), 0, "nothing measured yet: the chain's time");
+        assert_eq!(proving_lead(Some(60_000)), 0, "a fast proof needs no lead");
+        let mini = 630_000;
+        let lead = proving_lead(Some(mini));
+        assert_eq!(lead, mini - window / 2);
+        // The proof arrives `mini` after the time was read: inside [lead, lead + window).
+        assert!(lead <= mini && mini < lead + window);
+        for proof in [mini - window / 2, mini + window / 2 - 1] {
+            assert!(lead <= proof && proof < lead + window, "a proof of {proof} ms lands");
+        }
+        assert_eq!(proving_lead(Some(u64::MAX)), 60 * 60 * 1000, "the lead has a ceiling");
+        let saved: Defaults = serde_json::from_str(r#"{"public":null,"private":null,"proof_ms":630000}"#).expect("parses");
+        assert_eq!(saved.proof_ms, Some(mini));
+        let old: Defaults = serde_json::from_str(r#"{"public":null,"private":null}"#).expect("an old file parses");
+        assert_eq!(old.proof_ms, None);
+    }
 
     /// then-public-survives-refused-register: a refused `names register vpubname --public`
     /// left vpubname queued to be made public, so a later plain `names register vpubname`

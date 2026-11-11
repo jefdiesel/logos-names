@@ -638,7 +638,7 @@ impl Client {
         // link between it and the account that paid.
         let (account, _) = self.wallet.create_new_account_private(None);
         crate::save_wallet(&mut self.wallet)?;
-        println!("{name}: making its private account and funding it privately (about 4 minutes)");
+        println!("{name}: making its private account and funding it privately ({})", proving_words());
         let (hash, _) = NativeTokenTransfer(&self.wallet)
             .transfer(self.signer(from), self.signer(account), fee, CreditDelivery::Automatic)
             .await
@@ -722,7 +722,9 @@ impl Client {
         // The gas comes from the holder if it can pay, else from the main private
         // account (an anon's own account holds only its deposit). Either way it
         // leaves the private pool, so the chain can't see which account paid.
-        let gas_from = gas_payer(holder, self.spendable(holder).await?, default_private()?);
+        // As `registration_steps` planned it: with no main private account set up, the holder,
+        // whose shortfall the plan below then refuses before anything is sent.
+        let gas_from = gas_payer(holder, self.spendable(holder).await?, default_private().unwrap_or(holder));
         let mut steps = self.public_steps(name, holder, gas_from).await?;
         if funded.is_some() {
             steps.remove(0);
@@ -743,7 +745,7 @@ impl Client {
                 save_defaults(&defaults)?;
                 let payer = costed.payers.first().copied().unwrap_or(gas_from);
                 println!("{}", crate::fees::estimate_line(&steps[0].fee /* the funding step: kept when nothing was funded before */, &format!("paid inside the proof, from Private/{payer}")));
-                println!("step 1 of 3: funding Public/{public} with {PUBLIC_GAS_FUND} for gas, privately (about 4 minutes)");
+                println!("step 1 of 3: funding Public/{public} with {PUBLIC_GAS_FUND} for gas, privately ({})", proving_words());
                 let before = self.private_wealth().await;
                 let (hash, _) = NativeTokenTransfer(&self.wallet)
                     .transfer(self.signer(gas_from), AccountIdentity::Public(public), PUBLIC_GAS_FUND, CreditDelivery::Automatic)
@@ -756,7 +758,7 @@ impl Client {
                 public
             }
         };
-        println!("step 2 of 3: moving {name}{NAME_SUFFIX} to it (about 4 minutes)");
+        println!("step 2 of 3: moving {name}{NAME_SUFFIX} to it ({})", proving_words());
         self.transfer(name, public).await.map_err(|error| {
             error.context(format!(
                 "Public/{public} holds {name}{NAME_SUFFIX}'s gas, but the name was not handed to it; `names make-public {name}` tries again and uses that account"
