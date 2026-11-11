@@ -347,7 +347,9 @@ pub fn bridges_followed(entries: &[Value], now: u64) -> Vec<(String, String, cra
 /// still in a block after `BRIDGE_WAIT_S` is `expired` (shown as overdue); its receipt is
 /// still asked until `BRIDGE_FOLLOW_S`, and if it is minted then, the bridge arrives (`late`),
 /// one row as ever. One whose receipt isn't known (`bridge_receipt` is `None`) is never
-/// followed: its credit shows as money that arrived, and it expires the same way.
+/// followed: its credit shows as money that arrived, and it stays `in_block` however old it
+/// is. Nothing can say it didn't arrive, so it is never called overdue (a bridge recorded
+/// by a version that kept no note, credited within the day, was shown as overdue).
 ///
 /// An arrival also takes the bridge's account off its `counted` list: a bridge that hasn't
 /// arrived moves nothing into it, so a read that counted it (an older version did, past the
@@ -381,7 +383,7 @@ pub fn bridge_updates(entries: &[Value], now: u64, minted: &dyn Fn(&crate::regis
                     fields.insert("counted".to_owned(), Value::Array(kept));
                 }
             }
-        } else if state == "in_block" && age >= BRIDGE_WAIT_S {
+        } else if state == "in_block" && age >= BRIDGE_WAIT_S && receipt.is_some() {
             fields.insert("state".to_owned(), json!("expired"));
         }
         if !fields.is_empty() {
@@ -849,7 +851,9 @@ mod tests {
     }
 
     /// A bridge with no channel or note recorded can't be followed: it never arrives, its
-    /// credit is told as money that arrived, and it is overdue past the wait.
+    /// credit is told as money that arrived, and it is never called overdue, since nothing
+    /// can say it didn't arrive (unfollowed-bridge-shown-overdue-after-it-arrived: the
+    /// testnet bridge of 2026-11-06, recorded without its note and credited, went `expired`).
     #[test]
     fn a_bridge_without_a_receipt_is_not_followed() {
         let d = dir("unfollowed");
@@ -860,7 +864,12 @@ mod tests {
         assert_eq!((entry["state"].as_str(), entry["followed"].as_bool()), (Some("in_block"), Some(false)));
         assert_eq!(rows(&d), [row("bridge", "3000", "in_block"), row("arrived", "3000", "arrived")]);
         read(&d, 2 + BRIDGE_WAIT_S, &[], 3000);
-        assert_eq!(rows(&d)[0], row("bridge", "3000", "expired"));
+        assert_eq!(rows(&d)[0], row("bridge", "3000", "in_block"));
+        // As that bridge was recorded: a channel and a destination, no note.
+        let old = add(&d, 2, json!({ "kind": "bridge", "chain": "logos", "to": t(), "channel": "01".repeat(32), "amount": "10000000", "to_before": "1", "state": "in_block" }));
+        read(&d, 2 + 4 * 24 * 3600, &[], 3000);
+        let entry = all(&d).into_iter().find(|e| e["id"] == old).unwrap();
+        assert_eq!((entry["state"].as_str(), entry["followed"].as_bool()), (Some("in_block"), Some(false)));
         // No answer from LEZ about a receipt is not an arrival.
         let _ = std::fs::remove_dir_all(d);
         let d = dir("unread");

@@ -1111,12 +1111,19 @@ impl Client {
 
     /// `program`'s state on `account`; empty if it has none.
     async fn actor_state_of(&self, account: AccountId, program: AccountId) -> Result<Vec<u8>> {
-        let view = self
-            .wallet
-            .get_account_view(Actor::new(account, program))
-            .await
-            .context("failed to read the account from the sequencer")?;
-        Ok(view.map_or_else(Vec::new, |found| found.data.actor_state(program).to_vec()))
+        match self.wallet.get_account_view(Actor::new(account, program)).await {
+            Ok(view) => Ok(view.map_or_else(Vec::new, |found| found.data.actor_state(program).to_vec())),
+            // A LEZ 0.3 sequencer (the public testnet until it moves to 0.4) answers the same
+            // call in a form the 0.4 wallet can't read: ask again and read that form.
+            Err(error) => {
+                let rpc = self.wallet.config().sequencer.sequencer_addr.to_string();
+                let params = serde_json::json!([{ "account_id": account.to_string(), "program_account_id": program.to_string() }]);
+                match rpc_call(&rpc, "getAccountView", params).ok().as_ref().and_then(|reply| lez03_actor_state(reply, &program.to_string())) {
+                    Some(state) => Ok(state),
+                    None => Err(error).context("failed to read the account from the sequencer"),
+                }
+            }
+        }
     }
 
     /// The wallet's account that holds `record` as the name `id`, public or private.
@@ -1267,7 +1274,7 @@ impl Client {
             return Ok(None);
         }
         Ok(Some(
-            borsh::from_slice(&bytes).context("the record does not hold a name record")?,
+            borsh::from_slice(&lez03_record(bytes)).context("the record does not hold a name record")?,
         ))
     }
 
@@ -1277,7 +1284,7 @@ impl Client {
             return Ok(None);
         }
         Ok(Some(
-            borsh::from_slice(&bytes).context("the settings account does not hold settings")?,
+            borsh::from_slice(&lez03_settings(bytes)).context("the settings account does not hold settings")?,
         ))
     }
     /// The chain's time in milliseconds, from the clock program's account. If that
@@ -3441,6 +3448,38 @@ fn native_send_parts(args: &[String]) -> Option<(String, u128)> {
     Some((from, value("amount")?.parse().ok()?))
 }
 
+/// `program`'s state in a LEZ 0.3 sequencer's `getAccountView` reply, which lists every
+/// program's bytes under `shards`; empty when the account has none of it. `None` when the
+/// reply isn't a 0.3 one, so a reply that can't be read is never taken for an empty account.
+fn lez03_actor_state(reply: &serde_json::Value, program: &str) -> Option<Vec<u8>> {
+    let shards = reply["data"]["shards"].as_object()?;
+    match shards.get(program) {
+        None => Some(Vec::new()),
+        Some(state) => state.as_array()?.iter().map(|b| b.as_u64().and_then(|b| u8::try_from(b).ok())).collect(),
+    }
+}
+
+/// The registry before version 6 (the one on the LEZ 0.3 testnet).
+const BEFORE_CLAIMS: u8 = 6;
+
+/// A name record as this build reads it: one written before version 6 ends at `sealed`
+/// and was never claimed, so it gets the `claimed` byte it lacks.
+fn lez03_record(mut bytes: Vec<u8>) -> Vec<u8> {
+    if bytes.first().is_some_and(|version| *version < BEFORE_CLAIMS) {
+        bytes.push(0);
+    }
+    bytes
+}
+
+/// The settings as this build reads them: ones written before version 6 have no claims
+/// list, so they get an empty one (root, end time and earlier registry, all zeros).
+fn lez03_settings(mut bytes: Vec<u8>) -> Vec<u8> {
+    if bytes.first().is_some_and(|version| *version < BEFORE_CLAIMS) {
+        bytes.extend([0; 32 + 8 + 32]);
+    }
+    bytes
+}
+
 /// A native balance from a sequencer's `getAccountView` result (16 little-endian bytes
 /// under the native program; null or none is 0).
 fn native_balance_of(result: &serde_json::Value) -> Option<u128> {
@@ -4569,6 +4608,47 @@ mod balance_tests {
         assert!(super::mine_read(0).is_ok());
         let unread = super::mine_read(2).expect_err("unknown names fail").to_string();
         assert!(unread.contains("2 name(s) are unknown"), "{unread}");
+    }
+}
+
+#[cfg(test)]
+mod lez03_tests {
+    use super::{lez03_actor_state, lez03_record, lez03_settings};
+    use names_core::{NameRecord, Settings};
+    use serde_json::json;
+
+    fn unhex(text: &str) -> Vec<u8> {
+        (0..text.len()).step_by(2).map(|at| u8::from_str_radix(&text[at..at + 2], 16).expect("hex")).collect()
+    }
+
+    /// cli-cannot-read-the-0.3-testnet: `names resolve` on the public testnet failed with
+    /// "unknown field `shards`, expected `actor_states`". Its sequencer lists each
+    /// program's bytes under `shards`; a reply in another form is not an empty account.
+    #[test]
+    fn a_lez_0_3_reply_gives_the_programs_state() {
+        let reply = json!({ "nonce": 0, "data": { "shards": { "prog": [5, 6], "other": [1] } } });
+        assert_eq!(lez03_actor_state(&reply, "prog"), Some(vec![5, 6]));
+        assert_eq!(lez03_actor_state(&json!({ "nonce": 0, "data": { "shards": {} } }), "prog"), Some(Vec::new()));
+        assert_eq!(lez03_actor_state(&json!({ "data": { "actor_states": { "prog": [9] } } }), "prog"), None);
+        assert_eq!(lez03_actor_state(&json!(null), "prog"), None);
+        assert_eq!(lez03_actor_state(&json!({ "data": { "shards": { "prog": [300] } } }), "prog"), None);
+    }
+
+    /// The testnet's records are version 5 (no `claimed`) and its settings have no claims
+    /// list; version 6 ones are read as they are.
+    #[test]
+    fn version_5_records_and_settings_decode() {
+        let v5 = unhex(&format!("05{}{}01000000ab", "01".repeat(32), "ff".repeat(8)));
+        let record: NameRecord = borsh::from_slice(&lez03_record(v5)).expect("a v5 record decodes");
+        assert_eq!((record.version, record.owner, record.expires, record.sealed, record.claimed), (5, [1; 32], u64::MAX, vec![0xab], false));
+        let v6 = unhex(&format!("06{}{}01000000ab01", "01".repeat(32), "ff".repeat(8)));
+        let record: NameRecord = borsh::from_slice(&lez03_record(v6)).expect("a v6 record decodes");
+        assert!(record.claimed);
+
+        let admin = "b6b80d9b12a1f9e36d60476dd4e41b4a2d5412671592f7447827728f83557808";
+        let live = unhex(&format!("05{admin}{admin}{}01{}{}", "00".repeat(48), "00e1f505000000000000000000000000", "00943577000000000000000000000000"));
+        let settings: Settings = borsh::from_slice(&lez03_settings(live)).expect("the live v5 settings decode");
+        assert_eq!((settings.deposits, settings.claims_root, settings.claims_until), ([100_000_000, 2_000_000_000], [0; 32], 0));
     }
 }
 
