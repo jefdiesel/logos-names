@@ -15,7 +15,7 @@ lee_core = { workspace = true, features = ["host"] }
 lee.workspace = true
 common.workspace = true
 wallet.workspace = true
-sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc1", features = ["client"] }
+sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3", features = ["client"] }
 borsh.workspace = true
 url = "2"
 anyhow = "1.0.98"

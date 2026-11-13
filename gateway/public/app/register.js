@@ -152,7 +152,7 @@ export function defaultRpc() { return _rpc; }
 
 // The account the chain keeps its clock on, and the program whose state there holds it:
 // { block_id: u64, timestamp: u64 }, in milliseconds.
-const CLOCK_ACCOUNT = formatAccountId(utf8("/LEZ/ClockProgramAccount/0000001"));
+const CLOCK_ACCOUNT = formatAccountId(utf8("/LEZ/ClockProgramAccount/0000000"));
 const CLOCK_PROGRAM = "2hwaRW8sMnyKLLRbDRw8k68tiv9bnfq98oxcdtcp157Z";
 
 /**

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end test of the Names Wallet against a real LEZ v0.4.0-rc1 sequencer in standalone
+# End-to-end test of the Names Wallet against a real LEZ v0.4.0-rc3 sequencer in standalone
 # mode, on a fresh throwaway chain. CI (.github/workflows/wallet-e2e.yml) and a local rehearsal
 # run this same script.
 #
@@ -32,7 +32,7 @@
 # fresh chain made from networks/local.json funds. Never point this at a public network.
 #
 # Inputs (environment):
-#   SEQ_BIN          sequencer_service built with `--features standalone` (LEZ v0.4.0-rc1)
+#   SEQ_BIN          sequencer_service built with `--features standalone` (LEZ v0.4.0-rc3)
 #   SEQ_CONFIG       its networks/local.json
 #   NAMES            the `names` CLI from this checkout (cargo build --release -p names_cli)
 #   NAMES_ELF        the registry guest (logos_names.bin, from cargo build -p names_methods)
@@ -122,7 +122,7 @@ new_wallet() {
   cat > "$1/wallet_config.json" <<EOF
 {
   "gas_limit": 2000000,
-  "private_fee_headroom_blocks": 5,
+  "fee_headroom_blocks": 5,
   "seq_block_poll_max_amount": 100,
   "seq_poll_max_retries": 5,
   "seq_poll_timeout": "12s",
@@ -474,4 +474,4 @@ echo "$LOCKED: B -> R, B's account cleared"
 say "the chain is still healthy"
 rpc getLastBlockId
 echo
-say "PASS: registry, payments, tokens, testimonial, accounts and fees, a drop and a restart${LEZREG:+, apps by publisher}${STORAGE_BIN:+ and by CID}, sends back and forth, a name handed on and back, on a fresh rc1 standalone chain"
+say "PASS: registry, payments, tokens, testimonial, accounts and fees, a drop and a restart${LEZREG:+, apps by publisher}${STORAGE_BIN:+ and by CID}, sends back and forth, a name handed on and back, on a fresh rc3 standalone chain"

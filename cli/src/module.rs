@@ -135,7 +135,7 @@ impl Client {
             Request::AccountUse { account } => self.module_account_use(&account).await,
             Request::Fee => {
                 let quote = self.wallet.client().get_fee_state().await?;
-                let headroom = self.wallet.config().private_fee_headroom_blocks;
+                let headroom = self.wallet.config().fee_headroom_blocks;
                 println!("{}", fees::quote_json(&quote, headroom, NATIVE_TRANSFER_GAS_LIMIT));
                 Ok(())
             }

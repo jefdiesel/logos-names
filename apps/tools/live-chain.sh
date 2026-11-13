@@ -32,7 +32,7 @@ mkdir -p "$W"
 cat > "$W/wallet_config.json" <<EOF
 {
   "gas_limit": 2000000,
-  "private_fee_headroom_blocks": 5,
+  "fee_headroom_blocks": 5,
   "seq_block_poll_max_amount": 100,
   "seq_poll_max_retries": 5,
   "seq_poll_timeout": "12s",

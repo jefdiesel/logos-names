@@ -1,7 +1,7 @@
 #!/bin/bash
 # LP-0022 zones: two LEZ zones in one Names wallet, each with its own sequencer, over REAL
 # Logos Core IPC (logosctl 0.3.2 and the names module from its lgx), the real names CLI and
-# REAL standalone LEZ sequencers (v0.4.0-rc1, `--features standalone`). Nothing here is on a
+# REAL standalone LEZ sequencers (v0.4.0-rc3, `--features standalone`). Nothing here is on a
 # public chain: both chains are made by this script and thrown away with its work dir.
 #
 # Zone A is LEZ's networks/local.json as it is. Zone B is the same file with its own
@@ -239,7 +239,7 @@ def cli(wallet, url, *args, timeout=240):
 def funder(wallet, url):
     """A wallet that holds the chain's funded local-test account; returns the account."""
     os.makedirs(wallet, mode=0o700)
-    json.dump({"gas_limit": 2000000, "private_fee_headroom_blocks": 5, "seq_block_poll_max_amount": 100, "seq_poll_max_retries": 5,
+    json.dump({"gas_limit": 2000000, "fee_headroom_blocks": 5, "seq_block_poll_max_amount": 100, "seq_poll_max_retries": 5,
                "seq_poll_timeout": "12s", "seq_tx_poll_max_blocks": 5, "sequencer": {"sequencer_addr": url + "/"}},
               open(os.path.join(wallet, "wallet_config.json"), "w"))
     rc, out, err = cli(wallet, url, "wallet", "check-health")

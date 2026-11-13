@@ -9,7 +9,7 @@ mod rpc;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use clock_core::{CLOCK_01_PROGRAM_ACCOUNT_ID, ClockAccountData, clock_account_id};
+use clock_core::{CLOCK_PROGRAM_ACCOUNT_ID, ClockAccountData, clock_account_id};
 use common::{HashType, transaction::LeeTransaction};
 use lee::{
     PublicTransaction, Simulation,
@@ -284,7 +284,7 @@ async fn chain_now(w: &WalletCore<SequencerClient>) -> u64 {
             .unwrap_or(u64::MAX)
             .saturating_sub(60_000)
     };
-    actor_state(w, CLOCK_01_PROGRAM_ACCOUNT_ID, clock_account_id())
+    actor_state(w, CLOCK_PROGRAM_ACCOUNT_ID, clock_account_id())
         .await
         .ok()
         .and_then(|s| borsh::from_slice::<ClockAccountData>(&s).ok())

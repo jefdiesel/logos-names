@@ -1140,7 +1140,7 @@ impl Client {
         let hash = if proven {
             crate::prover::to_prove()?;
             let quote = self.wallet.client().get_fee_state().await?;
-            let estimate = crate::fees::private(&quote, self.wallet.config().private_fee_headroom_blocks);
+            let estimate = crate::fees::private(&quote, self.wallet.config().fee_headroom_blocks);
             println!("{}", crate::fees::estimate_line(&estimate, "paid inside the proof"));
             if std::env::var_os("LOGOS_NAMES_DRY_RUN").is_some() {
                 bail!(

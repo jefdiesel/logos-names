@@ -388,7 +388,10 @@ Rules:
   least `now`, so `now` is never in the future, and uses it as the time. A
   client takes `now` from the chain's clock: the timestamp, in the last 8 of 16
   bytes, of the clock program's actor state on the account whose ID is the ASCII
-  bytes `/LEZ/ClockProgramAccount/0000001`. It does not use its own clock: a
+  bytes `/LEZ/ClockProgramAccount/0000000` (LEZ 0.4 rc3 keeps one clock account;
+  rc1 had three and this read `…/0000001`). The sequencer ticks the clock as the
+  last transaction of each block, so the value read is the previous block's time,
+  never ahead of the next block's. It does not use its own clock: a
   transaction whose `now` is ahead of the chain fails and is still charged.
 - **Fees.** `fee` must equal the settings' price for `term`, and `treasury` must
   be the settings' treasury; the program then moves `fee` from the signer to

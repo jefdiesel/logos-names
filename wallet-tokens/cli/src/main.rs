@@ -29,8 +29,8 @@ use wallet::{
     utils::{fetch_config_path, fetch_persistent_storage_path, read_password},
 };
 
-/// `program_loader_core::MAX_SEGMENT_DATA_LEN` at v0.4.0-rc1
-/// (lez/programs/program_loader/core/src/lib.rs:24).
+/// `program_loader_core::MAX_SEGMENT_DATA_LEN` at v0.4.0-rc3 (unchanged from rc1)
+/// (lez/programs/program_loader/core/src/lib.rs:23).
 const MAX_SEGMENT_DATA_LEN: usize = 96 * 1024;
 
 #[derive(Parser)]
@@ -176,7 +176,7 @@ async fn run_wallet(args: Vec<String>, overrides: WalletConfigOverrides) -> Resu
     use clap::Parser as _;
     use wallet::cli::{Args, execute_subcommand};
 
-    let Args { command, dry_run, fee_payer, refund_to, .. } =
+    let Args { command, dry_run, allow_revert, gas_limit, max_fee, tip, fee_headroom, fee_payer, refund_to, .. } =
         Args::parse_from(std::iter::once("wallet-tokens wallet".to_owned()).chain(args));
     let config_path = fetch_config_path()?;
     let storage_path = fetch_persistent_storage_path()?;
@@ -197,15 +197,17 @@ async fn run_wallet(args: Vec<String>, overrides: WalletConfigOverrides) -> Resu
         wallet
     };
     wallet.set_dry_run(dry_run);
-    wallet.set_private_fee_payer(fee_payer);
-    wallet.set_private_refund_target(refund_to);
+    wallet.set_allow_revert(allow_revert);
+    wallet.set_fee_params(wallet::FeeParams { gas_limit, max_fee, tip, headroom_blocks: fee_headroom, payer: fee_payer, refund_to });
     match execute_subcommand(&mut wallet, command).await {
-        Err(error)
-            if matches!(error.root_cause().downcast_ref(), Some(ExecutionFailureKind::DryRun)) =>
-        {
-            Ok(())
-        }
-        result => result.map(|_| ()),
+        Err(error) => match error.root_cause().downcast_ref() {
+            Some(ExecutionFailureKind::DryRun(report)) => {
+                println!("{report}");
+                Ok(())
+            }
+            _ => Err(error),
+        },
+        Ok(_) => Ok(()),
     }
 }
 

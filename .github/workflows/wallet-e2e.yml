@@ -2,7 +2,7 @@
 # (standalone mode) and are included in CI"). Nothing here needs a secret: the payer is LEZ's
 # own published local-test genesis account, funded by networks/local.json on a fresh chain.
 #
-# Job `chain`: builds LEZ sequencer_service --features standalone at v0.4.0-rc1 (cached), the
+# Job `chain`: builds LEZ sequencer_service --features standalone at v0.4.0-rc3 (cached), the
 # `names` CLI, the registry and testimonial guests and the prototype token CLI from this
 # commit, then runs scripts/wallet-e2e.sh: deploy + configure the registry, register a name
 # (commit, the program's 15-minute wait, reveal), `names pay` and a transfer with balances
@@ -21,13 +21,13 @@ on:
   workflow_dispatch:
 
 env:
-  LEZ_TAG: v0.4.0-rc1
-  LEZ_COMMIT: "1806e873"  # quoted: unquoted YAML reads it as 1806 × 10^873
+  LEZ_TAG: v0.4.0-rc3
+  LEZ_COMMIT: "bafd07be"  # quoted: a hex commit can read as a number in YAML (1806e873 did)
   CARGO_TERM_COLOR: never
 
 jobs:
   chain:
-    name: Wallet on a standalone rc1 sequencer
+    name: Wallet on a standalone rc3 sequencer
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:

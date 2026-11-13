@@ -405,7 +405,7 @@ dependencies = [
 [[package]]
 name = "build_utils"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.4.0-rc1#1806e873ea2ac0e1b608aa7cf2f9b6e1fb12db21"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.4.0-rc3#bafd07be0701398f9bc435f73ab05e9a7936c301"
 dependencies = [
  "anyhow",
  "risc0-binfmt",
@@ -1493,7 +1493,7 @@ dependencies = [
 [[package]]
 name = "lee"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.4.0-rc1#1806e873ea2ac0e1b608aa7cf2f9b6e1fb12db21"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.4.0-rc3#bafd07be0701398f9bc435f73ab05e9a7936c301"
 dependencies = [
  "anyhow",
  "borsh",
@@ -1518,7 +1518,7 @@ dependencies = [
 [[package]]
 name = "lee_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.4.0-rc1#1806e873ea2ac0e1b608aa7cf2f9b6e1fb12db21"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.4.0-rc3#bafd07be0701398f9bc435f73ab05e9a7936c301"
 dependencies = [
  "base58",
  "borsh",
@@ -1889,12 +1889,13 @@ dependencies = [
 [[package]]
 name = "program_loader_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.4.0-rc1#1806e873ea2ac0e1b608aa7cf2f9b6e1fb12db21"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.4.0-rc3#bafd07be0701398f9bc435f73ab05e9a7936c301"
 dependencies = [
  "borsh",
  "lee_core",
  "risc0-binfmt",
  "risc0-zkos-v1compat",
+ "thiserror",
 ]
 
 [[package]]

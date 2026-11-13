@@ -1,6 +1,15 @@
 # Porting Names to LEZ 0.4
 
-Branch `lez-0.4`, pinned to `v0.4.0-rc1`. The 0.3 deployment stays live until the 0.4 testnet launches.
+Branch `lez-0.4`, pinned to `v0.4.0-rc1`; branch `rc3-port` moves it to `v0.4.0-rc3` (`bafd07be`, below). The 0.3 deployment stays live until the 0.4 testnet launches.
+
+## rc1 to rc3
+
+What LEZ `v0.4.0-rc3` changed for Names, and what the port did:
+
+- **Clock.** One clock account, `/LEZ/ClockProgramAccount/0000000` (rc1 had three; Names read `…/0000001`). The CLI, the module (`registry.rs`), the web app (`register.js`), the testimonial client and app, and SPEC §8 read the new one. The tick is the last transaction of each block, so the time read is the previous block's: still never ahead of the block a transaction lands in, so the `[now, now + 10 min)` window is unchanged. `AssertTimestamp` is gone; the registry never sent it (its time check is the transaction's validity window, which the sequencer checks against the block it builds).
+- **Loader.** Headers and segments are stored as a tagged `LoaderEntry`; the CLI reads a header with `ProgramHeader::from_loader_actor_state`. The loader charges 1 gas per byte it reads, so a deploy costs about the program's size in gas; deploys go through the LEZ wallet, which measures it.
+- **Wallet.** It measures each public transaction's gas by simulating it, declares the measured gas plus 25%, prices `max_fee` at the fee headroom, and refuses to send a transaction whose simulation reverts. `private_fee_headroom_blocks` became `fee_headroom_blocks` (the old key still reads). `names wallet` takes rc3's new `--allow-revert`, `--gas-limit`, `--max-fee` and `--tip`, and prints a dry run's report.
+- Unchanged: the record layout, ids, PDAs, the commit/reveal rules, the claims format, the public transaction format, risc0 3.0.5 and the toolchain. The guest's image id changes because it links rc3's `lee_core`.
 
 ## What changed in the program
 

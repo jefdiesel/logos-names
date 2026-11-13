@@ -13,10 +13,10 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 token_core = { path = "core", package = "wallet_tokens_core" }
 # The same pins as Names on its lez-0.4 branch.
-lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc1" }
-lee = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc1" }
-wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc1" }
-common = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc1" }
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3" }
+lee = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3" }
+wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3" }
+common = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3" }
 risc0-zkvm = { version = "3.0.5", default-features = false, features = ["std"] }
 borsh = "1.5.7"
 
