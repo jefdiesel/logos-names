@@ -10,14 +10,18 @@ on the chain in the clear; version 2 keeps neither.
 
 ## 1. What is private and what is not
 
-The registry is built so that knowing a name is the only way to find it.
+The registry never stores a name, so finding one means knowing or guessing it.
+Guessing is cheap for short and common names (below).
 
 - **The chain never sees a name.** Every instruction, account address and
   event uses a 32-byte identifier derived from the name (section 3).
 - **What a name resolves to is sealed**: encrypted under a key that is also
   derived from the name (section 5). The registry program stores the bytes and
   cannot read them.
-- **There is no list of names** and nothing links one record to another.
+- **The chain keeps no list of names.** Record addresses can still be listed by
+  scanning blocks, and a guessed name can be checked against them. A record's
+  owner tag doesn't link it to the holder's other records, but a public holder,
+  or receiving keys shared between names, can.
 
 What this does not hide:
 
@@ -54,8 +58,24 @@ What this does not hide:
   Only a private-account holder is hidden. Whoever serves the RPC, holding a
   dictionary of name identifiers, can also tell which names a client looks up.
 - **The connection.** Whoever serves the sequencer's RPC sees which record
-  addresses a client reads and from where, though not the names.
-- **Clients never tie a name to an account.** A conforming client sets only
+  addresses a client reads and from where, and so which names, for any name it
+  can guess. It can also lie: nothing in its answer is authenticated, so for any
+  name it can guess, a lying RPC can make the name resolve to keys or an account
+  of its choosing. For any name at all, it can answer "not registered" or return
+  an older record (keys from before a transfer, say); nothing binds an answer to
+  the chain's latest state.
+- **Receiving keys point to one account.** A private account's ID is computed
+  from its keys (on LEZ 0.4, `SHA-256(prefix ‖ npk ‖ vpk)`; on v0.3.1 an
+  identifier was hashed in too), so anyone who resolves a name can compute the
+  wallet account its published keys were made for, and tell which names publish
+  the same keys. On LEZ 0.4 every payment to the keys arrives at that account,
+  as a pending credit its holder claims (`names receive`); on v0.3.1 a payment the
+  `names` CLI sent used a random identifier and landed on a fresh account. That
+  is why each name should get keys of its own. The CLI makes a new private
+  account for every name, and so does the Basecamp module (its `auto` choice);
+  names the module registered before that share their wallet's first private
+  account's keys until Receive privately is run on them again.
+- **Clients publish no account.** A conforming client sets only
   `npk` and `vpk` in a profile, never `account`; pays a name only through its
   receiving keys; never displays an address or the keys behind a name; and
   writes no reverse record (section 6). Those fields remain in the format for
@@ -250,17 +270,18 @@ own clock in milliseconds and a grace period of 30 days (2,592,000,000 ms):
 
 **Paying a name.**
 
-- Private: send a shielded transfer to the key pair (`npk`, `vpk`) with a fresh
-  random identifier. If `npk` is `None`, the name does not accept private
+- Private: send a shielded transfer to the key pair (`npk`, `vpk`). On LEZ 0.4
+  it arrives as a pending credit to the account those keys derive, which the
+  holder claims with a private transaction of their own (`names receive`). If `npk` is `None`, the name does not accept private
   payments. A client SHOULD prefer this whenever the name offers it.
 - Public: send to `account`. If it is `None`, the name does not accept public
   payments.
 - A wallet should show the user what it resolved before sending, as it would
   for a pasted address.
 
-What a private payment hides depends on where it is sent from. The recipient is
-always hidden: each payment lands on a fresh private account only the holder can
-find. Sent from a public account, the sender and the amount are visible. Sent
+What a private payment hides depends on where it is sent from. On LEZ 0.4 every
+payment to a name arrives at the one account its keys derive, which anyone who
+resolves the name can compute (section 1). Sent from a public account, the sender and the amount are visible. Sent
 from a private account, neither is.
 
 **Reverse (account to name).** Read the registry's actor state on the account and
@@ -803,6 +824,11 @@ No relay or proxy may stand between the page and the sequencer: one would see
 every visitor's address and the record addresses they read, which a dictionary
 of names turns back into names (section 1). A site whose sequencer does not
 allow cross-origin requests shows no names and points to `names open`.
+
+The Names web app (`/app` on the project site) does not meet this yet. The
+testnet RPC refuses browsers, so the app reads the chain through a relay run by
+the project (`lez.buggers.online/lez`), which can see what this section
+warns about.
 
 ### 12.4 Model Context Protocol
 

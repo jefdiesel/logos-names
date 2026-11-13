@@ -183,8 +183,8 @@ pub struct Derived {
 /// `master = Argon2id(name, "logos-names/v5", 64 MiB, 3 passes, 1 lane)`, then
 /// `id = SHA-256("logos-names/v5/id" ‖ master)` and
 /// `key = SHA-256("logos-names/v5/key" ‖ master)`. Slow and memory-hard on
-/// purpose, so that scanning for names is expensive; callers that ask
-/// repeatedly should keep the result.
+/// purpose, to slow down guessing (short and common names stay cheap to
+/// guess); callers that ask repeatedly should keep the result.
 pub fn derive(name: &str) -> Derived {
     let master = master(name);
     Derived {

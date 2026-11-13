@@ -606,8 +606,11 @@ enum Command {
         name: String,
     },
     /// Pay a name. By default the payment goes to the name's private receiving keys:
-    /// nobody, the payer included, learns the account behind the name, and the chain
-    /// shows neither recipient nor amount; proving it takes a few minutes. With
+    /// the chain shows neither recipient nor amount; proving it takes a few minutes.
+    /// The keys are fixed per name: anyone who resolves it can tell which names share
+    /// them and compute the wallet account they come from. On LEZ 0.4 every payment to
+    /// the name arrives at that one account, as a credit its holder claims with
+    /// `names receive`. With
     /// `--public`, or when the name has only a public account, it is an ordinary
     /// public transfer to that account.
     Pay {
@@ -1582,7 +1585,7 @@ impl Client {
                 readable(ready)
             );
             println!(
-                "  it waits until the commitment is {} minutes old, so nobody who saw it can take the name first,",
+                "  it waits until the commitment is {} minutes old, so someone who sees the reveal can't take the name first,",
                 MIN_COMMIT_AGE_MS / 60_000
             );
             println!("  then proves the last step on this computer ({}); keep this computer on and awake", proving_words());

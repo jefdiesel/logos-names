@@ -43,7 +43,9 @@
 <main>
   <h1>Logos Names</h1>
   <p class="lede">Names like <code>jef</code> for the Logos Execution Zone. Pay a name instead
-  of a 32-byte account. The chain never sees the name, so nobody can list or browse them.</p>
+  of a 32-byte account. The chain never stores the name, only an identifier derived from it.
+  That doesn't keep names secret: anyone can guess a name and check it against the chain's
+  records, and short or common names are cheap to find.</p>
   <p class="note">This runs on the <strong>public LEZ testnet</strong> (testnet v0.3). Its
   tokens are test tokens and worth nothing. Names won't carry over
   to testnet v0.4.</p>
@@ -91,7 +93,10 @@ names set-logos-account myname &lt;address&gt;  <span class="c"># link a Logos a
 names pay shop 1000 --public        <span class="c"># to a public account the holder published</span></code></pre>
   <p>Names are private by default. Each carries private receiving keys, made when it is
   registered, and payments go to them: the chain shows neither the recipient nor the
-  amount, and nobody, the payer included, learns the account behind the name. A holder can
+  amount. The keys are fixed per name: anyone who resolves it can tell which names share
+  them and compute the wallet account they come from. (On testnet 0.3 each payment from
+  <code>names pay</code> lands on a fresh account only the recipient can link; on LEZ 0.4
+  every payment arrives at the keys' own account.) A holder can
   also publish a public account with <code>names set-account myname &lt;account&gt;</code>, for
   names meant to be paid openly; anyone who resolves the name then sees that account. The recipient
   finds payments with <code>names wallet account sync-private</code>. Everything private (holding a

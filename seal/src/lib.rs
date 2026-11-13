@@ -74,7 +74,7 @@ pub struct PageContent {
 }
 
 /// Derives the identifier and key of `name`, which must already be normalised.
-/// This is slow on purpose: it is what makes scanning for names expensive.
+/// Slow on purpose, to slow guessing down; short or common names stay cheap to guess.
 #[must_use]
 pub fn derive(name: &str) -> Derived {
     let master = master(name);
