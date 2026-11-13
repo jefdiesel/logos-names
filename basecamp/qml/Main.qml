@@ -908,7 +908,7 @@ Item {
 
     readonly property var walletGroups: Logic.walletGroups(cliBalance, cliAccounts, tokenProgram !== "" ? tokenHoldings : null, watchedTokens, watchedNames,
                                                            chainAccounts, chainAccounts === null && chainError !== "", chainStake, namesByNpk,
-                                                           mainName, mainName)
+                                                           mainName, mainName).concat(Logic.bridgedGroups(bridgedHoldings))
 
     /// The wallet's names by the npk their profiles publish: {npk: [name]}, from the lookups.
     readonly property var namesByNpk: {
@@ -3484,6 +3484,7 @@ Item {
     property string tokenProgram: ""     // the token program the module uses, "" if none
     property bool tokenProgramEditing: false
     property var tokenHoldings: null     // [{account, account_kind, definition, name, balance}]; null until first read
+    property var bridgedHoldings: []     // token_source_holdings: [{token_program, app, holdings, updating, error}]
     property var tokenPending: []        // [{position, definition, name, amount, to}]
     property bool tokenUpdating: false   // a newer read is on its way
     property string tokenError: ""       // why the last read failed
@@ -3501,6 +3502,12 @@ Item {
     /// Reads holdings and pending credits (the module answers at once, with
     /// what it last read, and reads again in the background).
     function loadTokens() {
+        // Tokens of the token sources apps registered (bridged tokens), whatever the wallet's own program.
+        askLater("token_source_holdings", [], function(value) {
+            bridgedHoldings = Array.isArray(value) ? value : []
+        }, function(message) {
+            console.log("names_ui: token sources:", message)
+        })
         if (tokenProgram === "")
             return
         askLater("cli_token_holdings", [""], function(value) {
@@ -3722,6 +3729,10 @@ Item {
             return false
         if (appRequestRisky(appRequest) && !appUnderstood)
             return false
+        // A private call can be approved only once the wallet has simulated it and found
+        // nothing it refuses (docs/wallet/BRIDGE-SDK.md).
+        if (appRequest.kind === "private_call" && (appRequest.check !== "ready" || !appRequest.sheet || appRequest.sheet.refused))
+            return false
         return true
     }
 
@@ -3731,6 +3742,8 @@ Item {
         // An app whose publisher check failed may be a fake, whatever it asks (M-2).
         if (appPublisherFailed(request))
             return true
+        if (request.kind === "private_call")
+            return !!request.sheet && (request.sheet.warnings || []).length > 0
         return (request.kind === "call" || appIsToken(request)) && ((request.warnings || []).length > 0)
     }
 
@@ -3776,6 +3789,12 @@ Item {
                 say("Sending " + grouped(request.amount) + " " + request.asset + " to " + request.destination + " for " + request.app + ". It takes a few minutes.", false)
             else if (approve && request.kind === "call")
                 say("Sent for " + request.app + ".", false)
+            else if (approve && request.kind === "private_call")
+                say("Proving it for " + request.app + " on this computer: about 11 minutes. You can pause or cancel it in Activity until it is sent.", false)
+            else if (approve && request.kind === "secret")
+                say(request.app + " can now get its own values from " + accountShort(request.account) + ".", false)
+            else if (approve && request.kind === "token_source")
+                say("Its tokens now show in your holdings.", false)
             else if (approve)
                 say(request.app + " can now see the accounts you chose.", false)
             loadAppRequests()
@@ -3802,6 +3821,12 @@ Item {
             return request.app + " wants to see your accounts"
         if (request.kind === "transfer")
             return request.app + " asks you to send " + appSends(request)
+        if (request.kind === "private_call")
+            return request.app + " asks for a private transaction from " + accountShort(request.account)
+        if (request.kind === "secret")
+            return request.app + " asks for secret values of its own"
+        if (request.kind === "token_source")
+            return request.app + " asks to show its tokens in your holdings"
         return request.app + " asks you to sign a program call"
     }
 
@@ -9100,8 +9125,94 @@ Item {
                     }
                 }
 
+                // A private call: what the wallet's own simulation shows it does. The app's
+                // words are shown apart and never decide anything.
+                ColumnLayout {
+                    visible: appSheet.kind === "private_call"
+                    Layout.fillWidth: true
+                    spacing: 6
+                    readonly property var sheet: appSheet.kind === "private_call" && appSheet.request.sheet ? appSheet.request.sheet : null
+                    Fact { visible: root.zoneFact(appSheet.request) !== ""; label: "Zone"; value: root.zoneFact(appSheet.request) }
+                    Fact { label: "From"; code: true; value: appSheet.kind === "private_call" ? root.accountShort(appSheet.request.account) : ""; full: appSheet.kind === "private_call" ? appSheet.request.account : "" }
+                    Hint {
+                        visible: appSheet.kind === "private_call" && appSheet.request.check !== "ready"
+                        color: appSheet.kind === "private_call" && appSheet.request.check === "failed" ? root.alarm : root.brass
+                        textFormat: Text.PlainText
+                        text: appSheet.kind !== "private_call" ? ""
+                            : appSheet.request.check === "failed" ? "The wallet couldn't simulate it, so it can't be approved: " + (appSheet.request.check_problem || "")
+                            : "Simulating it against the chain to see what it really does…"
+                    }
+                    Part { visible: parent.sheet !== null; text: "What it does (simulated by your wallet)" }
+                    Repeater {
+                        model: parent.sheet ? parent.sheet.lines : []
+                        Hint { required property string modelData; textFormat: Text.PlainText; color: root.ink; text: "•  " + modelData }
+                    }
+                    Repeater {
+                        model: parent.sheet ? parent.sheet.refusals : []
+                        Hint { required property string modelData; textFormat: Text.PlainText; color: root.alarm; text: "✕  " + modelData }
+                    }
+                    Part { visible: parent.sheet !== null; text: "Programs" }
+                    Repeater {
+                        model: parent.sheet ? parent.sheet.programs : []
+                        Fact {
+                            required property var modelData
+                            label: modelData.new_for_app ? "New for this app" : "Used before"
+                            value: (modelData.label && modelData.label.text ? modelData.label.text + " · " : "") + root.shorten(modelData.program) + " · " + root.programStatus(modelData.label)
+                        }
+                    }
+                    Part { visible: parent.sheet !== null && parent.sheet.public_changes.length > 0; text: "Public changes" }
+                    Repeater {
+                        model: parent.sheet ? parent.sheet.public_changes : []
+                        Hint { required property string modelData; textFormat: Text.PlainText; color: root.ink; text: "•  " + modelData }
+                    }
+                    Part { visible: parent.sheet !== null; text: "Privacy" }
+                    Repeater {
+                        model: parent.sheet ? parent.sheet.privacy : []
+                        Hint { required property string modelData; textFormat: Text.PlainText; color: root.ink; text: "•  " + modelData }
+                    }
+                    Repeater {
+                        model: parent.sheet ? parent.sheet.warnings : []
+                        Hint { required property string modelData; textFormat: Text.PlainText; color: root.alarm; text: "!  " + modelData }
+                    }
+                    Fact { label: "Data"; value: appSheet.kind === "private_call" ? appSheet.request.message_len + " bytes, proven, not published" : "" }
+                    Hint { visible: appSheet.kind === "private_call"; textFormat: Text.PlainText; color: root.brass; text: appSheet.kind === "private_call" ? appSheet.request.prove_expect : "" }
+                    Hint {
+                        visible: appSheet.kind === "private_call" && appSheet.request.app_summary !== ""
+                        textFormat: Text.PlainText
+                        font.pixelSize: root.px(15)
+                        text: appSheet.kind === "private_call" ? "The app describes it as: “" + appSheet.request.app_summary + "” (its own words, not checked)" : ""
+                    }
+                }
+
+                // A secret grant: what the app gets, and what it can't do with it.
+                ColumnLayout {
+                    visible: appSheet.kind === "secret"
+                    Layout.fillWidth: true
+                    spacing: 6
+                    Fact { label: "Account"; code: true; value: appSheet.kind === "secret" ? root.accountShort(appSheet.request.account) : ""; full: appSheet.kind === "secret" ? appSheet.request.account : "" }
+                    Fact { label: "For"; value: appSheet.kind === "secret" ? appSheet.request.scope : "" }
+                    Hint { visible: appSheet.kind === "secret"; textFormat: Text.PlainText; color: root.ink; text: appSheet.kind === "secret" ? appSheet.request.explanation : "" }
+                }
+
+                // A token source: which tokens it adds to the holdings view.
+                ColumnLayout {
+                    visible: appSheet.kind === "token_source"
+                    Layout.fillWidth: true
+                    spacing: 6
+                    Fact { label: "Token program"; code: true; value: appSheet.kind === "token_source" ? root.shorten(appSheet.request.token_program) : ""; full: appSheet.kind === "token_source" ? appSheet.request.token_program : "" }
+                    Repeater {
+                        model: appSheet.kind === "token_source" ? appSheet.request.definitions : []
+                        Fact {
+                            required property var modelData
+                            label: modelData.symbol !== "" ? modelData.symbol : "Token"
+                            value: modelData.name + " · " + modelData.decimals + " decimals · " + root.shorten(modelData.definition) + (modelData.origin !== "" ? " · " + modelData.origin : "")
+                        }
+                    }
+                    Hint { visible: appSheet.kind === "token_source"; textFormat: Text.PlainText; color: root.ink; text: "The names and decimals are the app's words. Approving only lists these tokens with your holdings; it moves nothing." }
+                }
+
                 // The account to use.
-                Part { text: appSheet.kind === "connect" ? "Accounts it may see" : appSheet.kind === "call" ? "Sign with" : "Pay from" }
+                Part { text: appSheet.kind === "connect" ? "Accounts it may see" : appSheet.kind === "call" ? "Sign with" : appSheet.kind === "private_call" || appSheet.kind === "secret" ? "Account" : appSheet.kind === "token_source" ? "Confirm" : "Pay from" }
                 Repeater {
                     model: appSheet.request !== null ? (appSheet.request.choices || []) : []
                     Rectangle {

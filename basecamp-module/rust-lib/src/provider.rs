@@ -58,6 +58,8 @@ pub const TRANSFER: &str = "transfer";
 pub const CALL: &str = "call";
 /// A testimonial inscribed on the Logos Blockchain (LP-0022, provider_inscribe.rs).
 pub const INSCRIBE: &str = "inscribe";
+/// A private call, a secret grant and a token source (provider_private.rs).
+pub use crate::provider_private::{PRIVATE_CALL, SECRET, TOKEN_SOURCE};
 
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -418,6 +420,8 @@ pub struct Store {
     pub requests: Vec<Value>,
     /// app → `{accounts: [account], since}`.
     pub grants: Map<String, Value>,
+    /// Secret grants, programs remembered per app and token sources (`provider_private.rs`).
+    pub private: crate::provider_private::Grants,
 }
 
 impl Store {
@@ -437,7 +441,10 @@ impl Store {
             .filter(|request| {
                 ok_text(&request["id"], 64)
                     && request["app"].as_str().is_some_and(|app| app_name(app).is_ok())
-                    && matches!(request["kind"].as_str(), Some(CONNECT | TRANSFER | CALL | INSCRIBE))
+                    && matches!(
+                        request["kind"].as_str(),
+                        Some(CONNECT | TRANSFER | CALL | INSCRIBE | PRIVATE_CALL | SECRET | TOKEN_SOURCE)
+                    )
                     && ok_text(&request["state"], 16)
                     && request["created"].is_u64()
                     && request["expires"].is_u64()
@@ -463,14 +470,16 @@ impl Store {
                 grants.insert(app.clone(), json!({ "accounts": accounts, "since": grant["since"].as_u64().unwrap_or(0) }));
             }
         }
-        Self { path, requests, grants }
+        let private = crate::provider_private::Grants::load(&saved);
+        Self { path, requests, grants, private }
     }
 
     /// Writes the store, 0600, in one step. Failing to save is not an error
     /// for the caller: the store still serves this run.
     pub fn save(&self) {
         if let Some(path) = &self.path {
-            let saved = json!({ "requests": self.requests, "grants": self.grants });
+            let mut saved = json!({ "requests": self.requests, "grants": self.grants });
+            self.private.save_into(&mut saved);
             let _ = crate::cli::write_private(path, saved.to_string().as_bytes());
         }
     }
@@ -575,7 +584,8 @@ impl Store {
 
     /// Takes back everything `app` was given. Returns whether it had anything.
     pub fn revoke(&mut self, app: &str) -> bool {
-        self.grants.remove(app).is_some()
+        let private = self.private.revoke(app);
+        self.grants.remove(app).is_some() || private
     }
 }
 
@@ -610,6 +620,16 @@ pub fn app_view(request: &Value) -> Value {
                 view[key] = request[key].clone();
             }
         }
+        // The app sees how its call stands, never the simulation (it may show the person's
+        // balances): `check` is running, ready, refused or failed; `phase` while it runs.
+        Some(PRIVATE_CALL) => {
+            for key in ["programs", "check", "phase", "message_len"] {
+                view[key] = request[key].clone();
+            }
+            zone_view(&mut view, request);
+        }
+        Some(SECRET) => view["scope"] = request["scope"].clone(),
+        Some(TOKEN_SOURCE) => view["token_program"] = request["token_program"].clone(),
         _ => {}
     }
     view
