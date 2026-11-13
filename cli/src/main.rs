@@ -388,9 +388,10 @@ enum Command {
         name: String,
     },
     /// Pay a name. By default the payment goes to the name's private receiving keys:
-    /// the chain shows neither recipient nor amount, though anyone who resolves the
-    /// name can work out which private account those keys belong to; proving it takes
-    /// a few minutes. With
+    /// the chain shows neither recipient nor amount; proving it takes a few minutes.
+    /// The keys are fixed per name: anyone who resolves it can tell which names share
+    /// them and compute the wallet account they come from, though each payment from
+    /// this CLI lands on a fresh account only the recipient can link. With
     /// `--public`, or when the name has only a public account, it is an ordinary
     /// public transfer to that account.
     Pay {

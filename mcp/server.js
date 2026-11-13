@@ -43,16 +43,18 @@ const tools = [
       "Look up a Logos name. Returns whether it can be paid privately, its public account " +
       "if the holder chose to publish one, and its text entries (such as chat, inbox and " +
       "agent). By default a name is paid privately with `names pay <name>`, and the chain shows " +
-      "neither recipient nor amount, but anyone who resolves the name can work out which " +
-      "private account its receiving keys belong to; a published public account shows its " +
-      "balance and history to anyone. " +
+      "neither recipient nor amount. A name's receiving keys are fixed: anyone who resolves it " +
+      "can tell which names share them and compute the wallet account they come from, though " +
+      "each payment from the `names` CLI lands on a fresh account only the recipient can link. " +
+      "A published public account shows its balance and history to anyone. " +
       "A name held by a deposit never expires: its `expires` is null. Otherwise names expire: " +
       "`expires` is when, in milliseconds since the Unix epoch, and `lapsed` is " +
       "true once that has passed and the name is in its 30-day grace period, after which it " +
       "is no longer registered. Do not pay a lapsed name without the user knowing it has lapsed. " +
       "The chain never stores names, but the RPC this tool asks sees which record is looked " +
-      "up (and so the name, if it can guess it) and could answer falsely; any name that can be " +
-      "guessed can be found. A record keeps only a tag of the holder's account, not the account.",
+      "up (and so the name, if it can guess it) and could answer falsely: for a name it can " +
+      "guess, with keys or an account of its choosing; for any name, with \"not registered\" or an " +
+      "older record (keys from before a transfer, say). Any name that can be guessed can be found. A record keeps only a tag of the holder's account, not the account.",
     inputSchema: nameArgument,
     async run({ name: typed }) {
       const name = requireName(typed);

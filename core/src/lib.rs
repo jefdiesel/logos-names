@@ -1,21 +1,23 @@
 //! Logos Names: a private name registry for the Logos Execution Zone (LEZ v0.3).
 //!
 //! A name such as `jef.lez` resolves to where it can be paid, some free-form
-//! entries and an optional page. The registry is built so that knowing a name
-//! is the only way to find it:
+//! entries and an optional page. The registry never stores a name, so finding
+//! one means knowing or guessing it (short and common names are cheap to guess):
 //!
 //! - The chain never sees a name. Clients derive a 32-byte identifier from the
 //!   name and every instruction, account address and event uses only that.
 //! - What a name resolves to is stored sealed: encrypted by the client under a
 //!   key that is also derived from the name. This program stores the bytes and
 //!   cannot read them.
-//! - There is no list of names. Nothing links one record to another.
+//! - There is no list of names, though record addresses can be listed by
+//!   scanning blocks and a guessed name checked against them.
 //!
 //! - No holder is named. A record keeps a tag of its holder's account bound to
 //!   that one name ([`owner_tag`]), and no effect or event carries an account.
 //!   A holder acting from a LEZ private account, through a privacy-preserving
 //!   transaction, never appears on chain; one acting from a public account is
-//!   seen signing, but its names stay unlinked to each other.
+//!   seen signing, and anyone who knows its names can test that account against
+//!   their tags (SPEC.md section 1).
 //!
 //! What stays public is that some identifier is registered, until when, and
 //! the fee paid into the treasury.

@@ -61,8 +61,17 @@ What this does not hide:
   addresses a client reads and from where, and so which names, for any name it
   can guess. It can also lie: nothing in its answer is authenticated, so for any
   name it can guess, a lying RPC can make the name resolve to keys or an account
-  of its choosing.
-- **Clients never tie a name to an account.** A conforming client sets only
+  of its choosing. For any name at all, it can answer "not registered" or return
+  an older record (keys from before a transfer, say); nothing binds an answer to
+  the chain's latest state.
+- **Receiving keys point to one account.** A private account's ID is computed
+  from its keys (on LEZ v0.3.1, `SHA-256(prefix ‖ npk ‖ vpk ‖ identifier)`), so
+  anyone who resolves a name can compute the wallet account its published keys
+  were made for, and tell which names publish the same keys. A payment the
+  `names` CLI sends uses a random identifier, so it lands on a fresh account only
+  the recipient can link. That is why each name gets keys of its own: the CLI and
+  the Basecamp module make a new private account for every name.
+- **Clients publish no account.** A conforming client sets only
   `npk` and `vpk` in a profile, never `account`; pays a name only through its
   receiving keys; never displays an address or the keys behind a name; and
   writes no reverse record (section 6). Those fields remain in the format for
@@ -610,6 +619,11 @@ No relay or proxy may stand between the page and the sequencer: one would see
 every visitor's address and the record addresses they read, which a dictionary
 of names turns back into names (section 1). A site whose sequencer does not
 allow cross-origin requests shows no names and points to `names open`.
+
+The Names web app (`/app` on the project site) does not meet this yet. The
+testnet RPC refuses browsers, so the app reads the chain through a relay run by
+the project (`lez.buggers.online/lez`), which can see what this section
+warns about.
 
 ### 12.4 Model Context Protocol
 

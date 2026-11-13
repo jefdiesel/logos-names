@@ -93,8 +93,9 @@ names set-logos-account myname &lt;address&gt;  <span class="c"># link a Logos a
 names pay shop 1000 --public        <span class="c"># to a public account the holder published</span></code></pre>
   <p>Names are private by default. Each carries private receiving keys, made when it is
   registered, and payments go to them: the chain shows neither the recipient nor the
-  amount, though anyone who resolves the name can work out which private account its keys
-  belong to. A holder can
+  amount. The keys are fixed per name: anyone who resolves it can tell which names share
+  them and compute the wallet account they come from, though each payment from
+  <code>names pay</code> lands on a fresh account only the recipient can link. A holder can
   also publish a public account with <code>names set-account myname &lt;account&gt;</code>, for
   names meant to be paid openly; anyone who resolves the name then sees that account. The recipient
   finds payments with <code>names wallet account sync-private</code>. Everything private (holding a
