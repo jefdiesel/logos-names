@@ -8,7 +8,6 @@
 
 import {
   GRACE_MS,
-  base58Decode,
   decodeNameRecord,
   decodeProfile,
   deriveName,
@@ -19,25 +18,18 @@ import {
   readActorState,
   recordAddress,
 } from "./names.js";
+import {
+  CHAINS,
+  DEFAULTS,
+  DEFAULT_PEER,
+  PRESETS,
+  checkSettings,
+  dropLegacySettings,
+  loadSettings,
+  resetSettings,
+  saveSettings,
+} from "./settings.js";
 
-// Each chain the app knows, with the registry and board deployed on it.
-const CHAINS = {
-  "https://lez.buggers.online/lez": {
-    registry: "38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq",
-    board: "8PwnCKStKQtoBxJCgopCG6CPPMJCUWba1SDG1SXtXYTf",
-  },
-  "https://lez.buggers.online": {
-    registry: "m82S3dUDxdcMBtZtXpHXYcVhU68U7bS4AKqsi6NomJm",
-    board: "CKqLLZrTUNiw5KLtQCZ9oSDXWWEtCHLpKjp7pQAaP5q4",
-  },
-};
-// The Logos messaging (Waku) node chat connects to: the default "door" on a stable
-// named tunnel. Overridable in settings, or via ?peer= in the URL.
-const DEFAULT_PEER =
-  "/dns4/msg.buggers.online/tcp/443/wss/p2p/16Uiu2HAkxrwXguVQUCPqMyXrn9VuPNce2xoK9Nr7AW2zcHQeS6dg";
-const DEFAULTS = { rpc: "https://lez.buggers.online/lez", ...CHAINS["https://lez.buggers.online/lez"], peer: DEFAULT_PEER };
-const PRESETS = Object.keys(CHAINS);
-const STORE_KEY = "lns-app-settings";
 const ONBOARD_KEY = "lns-onboarded"; // { name } once this device has been through setup
 const WALLET_REC = "lns-wallet-device"; // wallet.js vault record (presence = a wallet exists)
 
@@ -45,52 +37,19 @@ const $ = (id) => document.getElementById(id);
 
 // ---------- settings ----------
 
-const PEER_RE = /^\/(dns4|dns6|dns|ip4|ip6)\/[^/]+\/tcp\/\d+\/(wss|tls\/ws)\/p2p\/\w+$/;
-
-function urlSettings() {
-  const out = {};
+// Chain and messaging node: chosen in the Settings drawer only, never by a link
+// (settings.js says why).
+const storage = (() => {
   try {
-    const q = new URLSearchParams(location.search);
-    const peer = q.get("peer");
-    if (peer && PEER_RE.test(peer)) out.peer = peer;
-    const rpc = q.get("rpc");
-    if (rpc) {
-      const u = new URL(rpc);
-      if (u.protocol === "https:" || u.protocol === "http:") out.rpc = rpc;
-    }
+    return localStorage;
   } catch {
-    // bad URL params: ignore
+    return null; // blocked site data: settings last until the page closes
   }
-  return out;
-}
+})();
 
-function loadSettings() {
-  try {
-    const saved = { ...DEFAULTS, ...JSON.parse(localStorage.getItem(STORE_KEY) || "{}"), ...urlSettings() };
-    return CHAINS[saved.rpc] ? { rpc: saved.rpc, ...CHAINS[saved.rpc], peer: saved.peer } : saved;
-  } catch {
-    return { ...DEFAULTS, ...urlSettings() };
-  }
-}
-
-function saveSettings(next) {
-  try {
-    localStorage.setItem(STORE_KEY, JSON.stringify(next));
-  } catch {
-    // private windows: settings last until the page closes
-  }
-}
-
-const isProgramId = (text) => {
-  try {
-    return base58Decode(text).length === 32;
-  } catch {
-    return false;
-  }
-};
-
-let settings = loadSettings();
-if (Object.keys(urlSettings()).length) saveSettings(settings);
+// Settings saved by older builds are dropped once (a link may have written them).
+const droppedSettings = dropLegacySettings(storage);
+let settings = loadSettings(storage);
 
 function fillSettings() {
   const preset = PRESETS.includes(settings.rpc) ? settings.rpc : "custom";
@@ -110,19 +69,7 @@ function readSettingsForm() {
   const registry = $("registry").value.trim();
   const board = $("board").value.trim();
   const peer = $("peer").value.trim() || DEFAULT_PEER;
-  let url;
-  try {
-    url = new URL(rpc);
-  } catch {
-    return { error: "The RPC URL isn't a valid web address." };
-  }
-  if (url.protocol !== "https:" && url.protocol !== "http:") return { error: "The RPC URL must start with https://." };
-  if (!isProgramId(registry)) return { error: "The registry program isn't a valid program ID." };
-  if (!isProgramId(board)) return { error: "The board program isn't a valid program ID." };
-  if (!PEER_RE.test(peer)) {
-    return { error: "The messaging node must be a WebSocket address like /dns4/…/tcp/443/wss/p2p/…" };
-  }
-  return { value: { rpc, registry, board, peer } };
+  return checkSettings({ rpc, registry, board, peer });
 }
 
 // ---------- reading the chain (for resolving who you message) ----------
@@ -519,15 +466,12 @@ $("settings-save").addEventListener("click", () => {
     return;
   }
   settings = value;
-  saveSettings(settings);
+  saveSettings(storage, settings);
   openDrawer(false);
   if (step === "chat") openChat();
 });
 $("settings-reset").addEventListener("click", () => {
-  settings = { ...DEFAULTS };
-  try {
-    localStorage.removeItem(STORE_KEY);
-  } catch {}
+  settings = resetSettings(storage);
   fillSettings();
 });
 
@@ -537,6 +481,25 @@ $("settings-reset").addEventListener("click", () => {
 
 // Your wallet is home — it opens there so your account + balance are the first thing,
 // not a link at the bottom. A #name link opens chat to message that name.
+// Say once that old settings were dropped, and what they pointed at, so a person who
+// chose another chain can choose it again (chats kept for that chain come back then).
+if (droppedSettings) {
+  const was = [droppedSettings.rpc && `chain ${droppedSettings.rpc}`, droppedSettings.peer && `messaging node ${droppedSettings.peer}`]
+    .filter(Boolean)
+    .join(" and ");
+  let text =
+    `This page's settings were reset to the defaults (they were set to ${was}), because a link could have set them. ` +
+    "If you chose that yourself, choose it again in About → Settings; your chats there come back when you do.";
+  if (pendingRegistration()) {
+    text +=
+      " A name claim was waiting, and it now runs against the default chain. If you started it on that other " +
+      "chain it will fail here: choose that chain again in Settings, then reload this page.";
+  }
+  const note = $("settings-notice");
+  note.textContent = text;
+  note.hidden = false;
+}
+
 const deepLink = normalizeName(decodeURIComponent(location.hash.slice(1)));
 if (pendingRegistration()) show("name"); // a claim is mid-wait — resume it
 else if (deepLink) show("chat");
