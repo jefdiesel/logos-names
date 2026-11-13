@@ -8881,7 +8881,8 @@ mod tests {
         connect(&mut names, "lez_bridge", &format!("Public/{PUBLIC}"));
         as_caller(app("lez_bridge"));
         assert!(parsed(&names.propose_private_call(account.clone(), call.to_string(), String::new()))["error"].as_str().unwrap().contains("wasn't given"));
-        connect(&mut names, "lez_bridge", &account);
+        // An app with access asking again isn't prompted, so the private account is added here.
+        names.store().grant("lez_bridge", &[account.clone()], 0).unwrap();
         as_caller(app("lez_bridge"));
         let asked = parsed(&names.propose_private_call(account.clone(), call.to_string(), "Claim 100 dUSDC".into()))["value"].clone();
         let id = asked["request"].as_str().unwrap().to_owned();
