@@ -171,7 +171,7 @@ mod tests {
     }
 
     // From Python's `hmac` and `hashlib` with the formula above (docs/wallet/BRIDGE-SDK.md,
-    // "App secrets", has the script).
+    // "App secrets", states the formula; the script itself is not kept in the repository).
     const VECTOR_MASTER_0: &str = "d3d73d74e8003e7236d01e9b4bfcd9db81d6ade99c2304c4527ef46f5ef4b716";
     const VECTOR_BRIDGE: [&str; 2] = [
         "8bdd25262f56570aa34cd58d46bd80fc6de18deedc75ac8fdc8994c500f19e59",

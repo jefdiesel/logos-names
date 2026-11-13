@@ -277,7 +277,7 @@ pub fn private_call_request(app: &str, account: &str, call_json: &str, summary: 
     request.insert("declared".into(), declared.json());
     request.insert("reveal_account".into(), json!(call["reveal_account"] == true));
     request.insert("app_summary".into(), json!(clean_text(summary, provider::MAX_TEXT)));
-    // Filled by the CLI's simulation (`check`: running, ready, refused or failed).
+    // Filled by the CLI's simulation (`check`: running, ready or failed; a refusal is `sheet.refused`).
     request.insert("check".into(), json!("running"));
     request.insert("prove_expect".into(), json!(PROVE_EXPECT));
     Ok(Value::Object(request))

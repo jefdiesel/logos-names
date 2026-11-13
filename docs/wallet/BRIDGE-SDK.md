@@ -26,7 +26,8 @@ value = SHA256(tag | m)                               what the app gets (tag: 1-
 
 - `app` is `current_caller()`'s module name, never an argument, so `lez_bridge` can't ask for
   `other_app`'s values. The account's key is behind HMAC, so no value gives it.
-- For the bridge: scope `RFP022/deposit`, context `cfgId | token | u256(denom)`, index `i`:
+- For the bridge: scope `RFP022/deposit`, context `cfgId(32) | token(20) | u256(denom)` (84
+  bytes: the 20-byte Ethereum token address, zero for ETH; `u256` is 32 bytes big-endian), index `i`:
   `m` is the bridge's `s`, and asking with tag `RFP022/ck` gives exactly `k`. The app can
   compute commitments, nullifiers, the one-time opening and recovery scans from `k`; it never
   holds `s`. Exits: scope `RFP022/exit`, tag `RFP022/ek` gives `k'`.
@@ -211,9 +212,11 @@ channel), and `names zone` manages the CLI's own list.
 ## 5. What the bridge side must adapt (for the workers on `rfp-022`)
 
 1. **Secrets:** derive `s` through the wallet: `app_secret(V, "RFP022/deposit", hex(cfgId | token
-   | u256(denom)), "RFP022/ck", i, n)` gives `k_i`; exits `("RFP022/exit", cfgId | token |
-   u256(denom) | ethDest | u256(maxRelayFee), "RFP022/ek")`. Release-address keys: a tag such as
-   `RFP022/release-key` over scope `RFP022/release`. These replace `client/src/kdf.rs`'s
+   | u256(denom)), "RFP022/ck", i, n)` gives `k_i`; exits `("RFP022/exit", cfgId(32) | token(20) |
+   u256(denom) | ethDest(20) | u256(maxRelayFee), "RFP022/ek")` (136 bytes). Release-address keys:
+   scope `RFP022/release`, tag exactly `RFP022/release-key`, context `cfgId(32) | token(20) |
+   u256(denom) | u256(maxRelayFee)`. The token is always the 20-byte address and every `u256` is
+   32 bytes big-endian; the bridge client (`lez-bridge/client/src/kdf.rs`) uses exactly these. These replace `client/src/kdf.rs`'s
    `AccountRoot` (which reads the account key directly) when the bridge runs under the Names
    wallet; deposits made with the old KDF or raw secrets keep their old path.
 2. **The CLI's own wallet** (`lez-bridge` with `LEE_WALLET_HOME_DIR`) can reproduce the wallet's
@@ -224,7 +227,10 @@ channel), and `names zone` manages the CLI's own list.
    mentions, in that order, as `accounts` entries; PDAs by seed; the token and native actors of
    the account with `openings: true`; `fee_payer: "account"` when sponsored) and calls
    `propose_private_call(V, call, summary)`, then polls `request_status`. It never proves itself.
-   It should pass `declared.credits` (the denomination) and `declared.max_fee`.
+   It passes `declared.credits` (the denomination) and `declared.max_fee`: for a sponsored claim
+   the bridge declares `max_fee` = the sponsor amount; for an unsponsored claim and for a burn it
+   declares 20000000 unless the person sets another cap (`--max-fee`). The dry runs measured at
+   most 9,300,135 for a claim and 8,794,890 for a burn.
 4. **Burns:** `BurnWithNotice` as a private call from V: programs `[token, bridge]`, root actor
    token, accounts: the definition (token program), the bridge config PDA (bridge program),
    `declared.debits = [{asset: <definition>, amount: <denom>}]`.

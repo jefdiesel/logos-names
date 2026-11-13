@@ -915,8 +915,9 @@ pub trait NamesModule: Send + 'static {
     /// private `account` (one this app was given) across up to 4 programs. `call_json` is
     /// `{programs, accounts, message, openings, fee_payer, declared, reveal_account}`
     /// (PROVIDER-SDK.md). The wallet simulates it against the chain first and shows the person
-    /// what it really changes; `request_status` gives `check` (`running`, `ready`, `refused`,
-    /// `failed`) and, once approved, `phase`. `summary` (280 characters) is shown as the app's words.
+    /// what it really changes; `request_status` gives `check` (`running`, `ready` or
+    /// `failed`; a call the wallet refuses is `ready` with `sheet.refused` true and can't be
+    /// approved) and, once approved, `phase`. `summary` (280 characters) is shown as the app's words.
     fn propose_private_call(&mut self, account: String, call_json: String, summary: String) -> String;
 
     /// Asks the person to list a token program's definitions in their holdings, with the
