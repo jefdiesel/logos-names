@@ -41,7 +41,7 @@ use lee_core::{
     program::{PdaSeed, Publication},
 };
 use sha2::{Digest as _, Sha256};
-use wallet::{AccountIdentity, AccountMention, AsyncDelivery, ExecutionFailureKind, WalletSequencerClient as _};
+use wallet::{AccountIdentity, AccountMention, AsyncDelivery, ExecutionFailureKind};
 
 use crate::{Client, parse_account};
 
@@ -186,7 +186,11 @@ impl Client {
         };
         let mut mentions = vec![own(programs[0], false)];
         for entry in &input.accounts {
-            let program = program_of(entry["program"].as_str().unwrap_or("native"))?;
+            // As the module writes it, every entry names its program; one that doesn't is the root's.
+            let program = match entry["program"].as_str() {
+                Some(text) => program_of(text)?,
+                None => programs[0],
+            };
             if program != native_program() && !programs.contains(&program) {
                 bail!("{program} is not one of the call's programs");
             }
@@ -271,7 +275,7 @@ impl Client {
         self.wallet.set_dry_run(false);
         match dry {
             Err(ExecutionFailureKind::DryRun) => {}
-            Err(error) => bail!("refused: the wallet's own simulation of this call fails: {error}"),
+            Err(error) => bail!("refused: the wallet's own simulation of this call fails: {error} ({error:?})"),
             Ok(_) => bail!("the wallet sent a transaction during a dry run; stop and check the wallet"),
         }
         let cycles = dry_number(&printed, "public cycles").ok_or_else(|| anyhow!("the wallet's dry run gave no cycles"))?;
@@ -302,15 +306,20 @@ impl Client {
             accounts.entry(actor.account_id).or_default().set_actor_state(actor.program_account_id, state.into());
         }
         let aliases: Vec<AccountId> = call.openings.iter().map(|opening| call.account.blinded(opening)).collect();
+        let mut public_accounts: Vec<(AccountId, Account)> =
+            accounts.iter().map(|(id, data)| (*id, Account { data: data.clone(), ..Account::default() })).collect();
+        public_accounts.push((call.account, Account { data: own_data.clone(), ..Account::default() }));
         let mut state = V03State::new()
             .with_named_programs(catalog.iter().cloned())
+            .with_public_accounts(public_accounts)
+            // Every address the call names may be sent an async message; the replay only needs it
+            // to publish it, as settlement would with the recipient's binding.
             .with_recovery_bindings(
-                std::iter::once(call.account).chain(aliases.iter().copied()).map(|address| RecoveryBinding { address, note: EncryptedNote::default() }),
+                std::iter::once(call.account)
+                    .chain(aliases.iter().copied())
+                    .chain(accounts.keys().copied())
+                    .map(|address| RecoveryBinding { address, note: EncryptedNote::default() }),
             );
-        for (id, data) in &accounts {
-            state.force_insert_account(*id, Account { data: data.clone(), ..Account::default() });
-        }
-        state.force_insert_account(call.account, Account { data: own_data.clone(), ..Account::default() });
         let actors: BTreeSet<Actor> = call.mentions.iter().map(|(actor, _, _)| *actor).collect();
         let authorized: HashSet<AccountId> = std::iter::once(call.account).chain(aliases.iter().copied()).collect();
         let block = self.wallet.get_last_block_id().await.context("could not read the chain's height")?;
@@ -326,6 +335,7 @@ impl Client {
         let mut unread_to_own: BTreeSet<AccountId> = BTreeSet::new();
         let mut used_aliases: BTreeSet<AccountId> = BTreeSet::new();
         let mut public_bytes: Vec<u8> = Vec::new();
+        let mut public_credits: Vec<serde_json::Value> = Vec::new();
         for (_, publication) in state.publications_from(0) {
             let Publication::Clear { body, .. } = publication else { continue };
             let to = body.to.account_id;
@@ -355,6 +365,18 @@ impl Client {
                     unread_to_own.insert(program);
                 }
             } else {
+                // Sent to a public address, to be taken in later: shown as what it credits.
+                let program = body.to.program_account_id;
+                if program == native_program() {
+                    if let Ok(native_token::Message::Credit(amount)) = borsh::from_slice::<native_token::Message>(&body.message) {
+                        public_credits.push(serde_json::json!({ "account": to.to_string(), "program": "native", "kind": "native_credit", "amount": amount.to_string() }));
+                    }
+                } else if call.token_programs.contains(&program) {
+                    if let Ok(token_core::Message::Credit { definition, amount }) = borsh::from_slice::<token_core::Message>(&body.message) {
+                        public_credits.push(serde_json::json!({ "account": to.to_string(), "program": program.to_string(), "kind": "token_credit",
+                            "definition": definition.to_string(), "amount": amount.to_string() }));
+                    }
+                }
                 public_bytes.extend_from_slice(&borsh::to_vec(&body).unwrap_or_default());
             }
         }
@@ -441,6 +463,7 @@ impl Client {
             };
             public_rows.push(row);
         }
+        public_rows.extend(public_credits);
         for event in &events {
             public_bytes.extend_from_slice(&borsh::to_vec(event).unwrap_or_default());
         }
@@ -451,8 +474,9 @@ impl Client {
         // anything else that changes what this call does does.
         let delta = |row: &serde_json::Value| -> serde_json::Value {
             let parse = |key: &str| row[key].as_str().and_then(|t| t.parse::<i128>().ok());
-            match (parse("before"), parse("after")) {
-                (Some(b), Some(a)) => serde_json::json!((a - b).to_string()),
+            match (parse("before"), parse("after"), parse("amount")) {
+                (Some(b), Some(a), _) => serde_json::json!((a - b).to_string()),
+                (_, _, Some(amount)) => serde_json::json!(amount.to_string()),
                 _ => row["changed"].clone(),
             }
         };

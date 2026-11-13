@@ -481,6 +481,17 @@ pub fn review(request: &Value, report: &Value, labels: &Map<String, Value>, toke
                     public_lines.push(format!("{}: supply {} → {}", token_label(definition, None), grouped(before), grouped(after)));
                 }
             }
+            Some("native_credit") => {
+                if let Some(amount) = number(&row["amount"]) {
+                    public_lines.push(format!("Public/{at} is sent {} LEZ (a credit it takes in later)", grouped(amount)));
+                }
+            }
+            Some("token_credit") => {
+                if let Some(amount) = number(&row["amount"]) {
+                    let definition = row["definition"].as_str().unwrap_or_default();
+                    public_lines.push(format!("Public/{at} is sent {} {} (a credit it takes in later)", grouped(amount), token_label(definition, None)));
+                }
+            }
             Some("token_holding") => {
                 if let (Some(before), Some(after)) = (before, after) {
                     let definition = row["definition"].as_str().unwrap_or_default();
@@ -945,8 +956,16 @@ mod tests {
         let refusals = sheet["refusals"].to_string();
         assert!(refusals.contains("takes 500 (500,000,000 base units) dUSDC"), "{refusals}");
         assert!(refusals.contains("takes 70,000,000 LEZ"), "{refusals}");
-        // The person sees the drain itself, not only the refusal.
+        // The person sees the drain itself, not only the refusal, and where it goes.
         assert!(sheet["lines"].to_string().contains("pays 500"), "{sheet:#}");
+        let mut with_credit = report.clone();
+        with_credit["public"] = json!([{ "account": CONFIG, "program": TOKEN, "kind": "token_credit", "definition": DUSDC, "amount": "500000000" },
+                                       { "account": CONFIG, "program": "native", "kind": "native_credit", "amount": "70000000" }]);
+        let shown = review(&request, &with_credit, &Map::new(), &names(), &[]);
+        assert_eq!(shown["public_changes"], json!([
+            "Public/6iArKU…2VQV is sent 500,000,000 dUSDC (FBqNAw…LQZJ) (a credit it takes in later)",
+            "Public/6iArKU…2VQV is sent 70,000,000 LEZ (a credit it takes in later)"
+        ]));
         // Declared, the same debit is shown and allowed.
         let request = private_call_request(
             "app",

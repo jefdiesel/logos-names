@@ -91,7 +91,7 @@ def b58(t):
     return b"\0" * (len(t) - len(t.lstrip("1"))) + raw
 out, V, TP, D, P = sys.argv[1:]
 msg = bytes([0]) + b58(D) + b58(P) + (100_000_000).to_bytes(16, "little")   # token Transfer (tag 0)
-call = {"account": "Private/" + V, "programs": [TP], "accounts": [], "message": msg.hex(), "openings": [],
+call = {"account": "Private/" + V, "programs": [TP], "accounts": [{"account": P, "program": TP}], "message": msg.hex(), "openings": [],
         "fee_payer": "account", "token_programs": [TP]}
 fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
 with os.fdopen(fd, "w") as f: json.dump(call, f)
