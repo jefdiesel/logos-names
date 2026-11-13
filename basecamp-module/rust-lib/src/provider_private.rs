@@ -33,7 +33,7 @@ pub const MAX_OPENINGS: usize = 4;
 /// A private call's root message. A bridge claim through an RFP-021 attestation carries a
 /// 32-sibling Merkle path (1,028 bytes), the execution header RLP (682 bytes on Sepolia) and
 /// an `eth_getProof` account and storage proof (9 + 3 nodes on the v2 demo): about 7 KB, and
-/// measured at 6,964 bytes for the v2 demo's leaf 1 (docs/wallet/BRIDGE-SDK.md). Mainnet
+/// measured at 6,595 bytes for the v2 demo's leaf 1 (docs/wallet/BRIDGE-SDK.md). Mainnet
 /// proofs run to about 12 account and 8 storage nodes of at most 532 bytes, about 12.5 KB in
 /// all, so 16 KiB holds any honest claim while four waiting requests per app stay under
 /// 128 KiB of hex in `provider.json`.
@@ -798,7 +798,7 @@ mod tests {
                 { "account": CONFIG, "program": "native" },
                 { "actor": "account", "program": "native", "openings": true },
             ],
-            "message": "00".repeat(6964),
+            "message": "00".repeat(6595),
             "openings": ["33".repeat(32)],
             "fee_payer": "account",
             "declared": serde_json::from_str::<Value>(debits).unwrap(),
@@ -839,7 +839,7 @@ mod tests {
     fn a_bridge_claim_is_checked_when_it_is_asked_for() {
         let made = private_call_request("lez_bridge", &format!("Private/{V}"), &claim_call("{\"max_fee\": \"10000000\"}"), "Claim 100 dUSDC", 7).unwrap();
         assert_eq!(made["kind"], PRIVATE_CALL);
-        assert_eq!(made["message_len"], 6964);
+        assert_eq!(made["message_len"], 6595);
         assert_eq!(made["programs"][0], BRIDGE);
         assert_eq!(made["mentions"][1]["account"], registry::account_text(&registry::pda(&registry::parse_account(BRIDGE).unwrap(), &[0x11; 32])));
         assert_eq!(made["mentions"][5]["program"], "native");

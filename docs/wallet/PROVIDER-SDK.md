@@ -20,6 +20,9 @@ your app ──propose──▶ names module ──queue──▶ Names app (app
                             │
                             ├─ transfer: names CLI job (`names pay`, `auth-transfer send`)
                             ├─ call:     names CLI (`names module send`) tries, signs, sends
+                            ├─ private call: names CLI simulates (`module private-call plan`),
+                            │                then proves and sends (`module private-call send`)
+                            ├─ secret:   names CLI derives the app's values (`module app-secret`)
                             └─ inscribe: the person's own Logos Blockchain node signs and sends
 ```
 
@@ -85,6 +88,10 @@ balances are 128-bit numbers.
 | `account_balances()` | The LEZ balance of each account you were given. Reads run in the background and the answer comes at once with the last balance read. Ask again for a newer one; the chain is read at most every 15 s. | `[{account, account_kind, balance, updating, error}]`; `balance` is decimal text, or null until first read |
 | `propose_transfer(asset, amount, destination)` | Asks to send `amount` of `asset` to `destination`. `asset` is `LEZ`, the native token (empty also means LEZ), or a token of the wallet's token program, written as its definition's account ID in base58 (see [Token transfers](#token-transfers)). `destination` is a name such as `alice`, or `Public/<id>`. The person picks the account it comes from. Checked when you call it. | a request |
 | `propose_call(program_id, accounts_json, instruction_hex, summary)` | Asks to run a program, signed by an account the person picks (details below). | a request |
+| `propose_private_call(account, call_json, summary)` | Asks for a privacy-preserving transaction from one of the private accounts you were given, across up to 4 programs (see [Private calls](#private-calls)). | a request |
+| `app_secret(account, scope, context_hex, tag, first, count)` | Values the wallet derives for your app from one of your accounts; the first use of each (account, scope) is approved by the person (see [App secrets](#app-secrets)). | `{granted: false, request}` or `{granted: true, account, scope, tag, first, values}` |
+| `propose_token_source(token_program, definitions_json)` | Asks to list a token program's definitions, with names, symbols and decimals, in the person's holdings (see [Token sources](#token-sources)). Needs no access first. | a request |
+| `token_sources()` | The token sources the person accepted. | `[{token_program, definitions, app, since}]` |
 | `propose_inscription(text)` | Asks to inscribe a testimonial on the Logos Blockchain (not the LEZ zone), paid from one of the person's node's accounts, which they pick. Needs no access first (see [Inscriptions](#inscriptions-on-the-logos-blockchain)). | a request |
 | `request_status(request_id)` | How your request stands. Only the app that made a request can read it. | a request |
 | `cancel_request(request_id)` | Withdraws your request while it's pending. | a request, `state: "cancelled"` |
@@ -100,7 +107,7 @@ of the person's, so it needs no access.
 ```json
 {
   "request": "9f3c…(32 hex)",
-  "kind": "connect | transfer | call | inscribe",
+  "kind": "connect | transfer | call | inscribe | private_call | secret | token_source",
   "state": "pending | approved | running | done | failed | rejected | expired | cancelled",
   "created": 1793735537880, "expires": 1793736137880, "decided": null,
   "account": "Public/…",          // the account the person chose (transfer, call; inscribe: a chain key, 64 hex)
@@ -112,6 +119,10 @@ of the person's, so it needs no access.
   "tx": "<hash>",                 // call, inscribe: the transaction sent
   "chain": "logos", "submission": "lp-0022:names-wallet", "text": "…",   // inscribe
   "fee": "1086", "channel": "<64 hex>", "msg_id": "<64 hex>",            // inscribe, once done
+  "programs": ["<base58>"], "check": "running | ready | failed", "phase": "plan | simulate | prove | submit | confirm",
+  "message_len": 6595,                                                   // private call
+  "scope": "RFP022/deposit",                                             // secret
+  "token_program": "<base58>",                                           // token source
   "error": null                   // failed: why, without the wallet's details
 }
 ```
@@ -246,6 +257,133 @@ names("propose_inscription", [text], function(v) { requestId = v.request; poll.s
   told why; they can still reject it.
 - The queue limits below apply as for any request.
 
+### Private calls
+
+`propose_private_call(account, call_json, summary)` asks the wallet to build, prove and send a
+privacy-preserving transaction from `account` (`Private/<id>`, one you were given). It can reach
+several programs in one transaction, which `propose_call` can't. `call_json`:
+
+```json
+{
+  "programs": ["<root program>", "<other program>", "…"],     // 1-4, the root's first
+  "accounts": [                                               // up to 16 actors besides the root
+    { "actor": "account", "program": "<id or native>", "openings": true },  // the account's own actor
+    { "account": "<base58>", "program": "<id or native>" },               // a public account, never signed
+    { "seed": "<64 hex>", "of": "<program>", "program": "<id or native>" } // a PDA of `of`
+  ],
+  "message": "<hex>",                       // the root message, at most 16,384 bytes
+  "openings": ["<64 hex>"],                 // one-time recipients of the account, 0-4
+  "fee_payer": "account",                   // "account" (it pays its own fee) or "wallet" (any private account)
+  "declared": {                             // what you say the call moves
+    "debits":  [{ "asset": "LEZ | <token definition>", "amount": "…" }],
+    "credits": [{ "asset": "LEZ | <token definition>", "amount": "…" }],
+    "max_fee": "…"
+  },
+  "reveal_account": false                   // true only if the call publishes the account's ID on purpose
+}
+```
+
+- The root actor is the account's own actor of `programs[0]`; you don't list it. `program`
+  defaults to the root program. `"native"` is the LEZ balance.
+- The person's account is the only private account a call reaches; the wallet signs nothing
+  public in it. A one-time address `account.blinded(opening)` that you declare is received
+  inside the proof, so a credit to it lands in the account and the address is never linked to it.
+- **Nothing you write decides what the person sees.** The names CLI simulates the call twice
+  when you ask: the wallet's own dry run of the exact transaction, and a replay of it with LEE's
+  executor that shows what each account ends with. `check` is `running` meanwhile (seconds to a
+  minute), then `ready` or `failed`. The sheet shows what the simulation found: what the account
+  receives and pays, per asset; the fee (about, and at most); every public account's change; the
+  programs with their Program Registry status and whether your app used them before; what
+  becomes public and that the account's ID doesn't; proving time and memory; then your summary,
+  marked as your words.
+- **Refused, whatever the person clicks:** a debit of LEZ or of a token beyond what you
+  declared; a change to data the account already keeps for a program the wallet can't value; a
+  fee that can exceed your `max_fee`, or paid from another account when you said `account`; the
+  account's ID in public state or events unless you set `reveal_account`; anything the
+  simulation can't run or read.
+- **Approving** starts a wallet job that simulates again and stops unless the effects are those
+  the person approved, then proves on the person's computer (about 11 minutes and 9.5 GB for a
+  bridge claim on an Apple M4 16 GB, 4 threads), sends and waits for the block. `state` is
+  `running` with `phase`; `done` gives `tx`. You may `cancel_request` it until `phase` is
+  `submit`; the person can pause, resume or cancel it in the Names app.
+- One wallet job runs at a time: a call approved while another job runs stays pending, and the
+  person is told why.
+
+### App secrets
+
+`app_secret(account, scope, context_hex, tag, first, count)` gives your app values derived from
+one of the person's accounts that you were given:
+
+```text
+m_i   = HKDF-SHA256(ikm = the account's key, salt = "logos-names/app-secret/v1",
+                    info = "logos-names/app-secret/v1/info" | u8 len(app) | app | u8 len(scope) | scope
+                           | u16be len(context) | context | account id | u64be i)
+value = SHA256(tag | m_i)        for i in first .. first + count
+```
+
+- `app` is your module's name as Basecamp gives it, never an argument: another app gets other
+  values. `m_i` never leaves the wallet; you get `SHA256(tag | m_i)` for a tag of your choice
+  (1-32 printable ASCII). `scope` is 1-64 printable ASCII, `context_hex` up to 256 bytes, `count`
+  1-64.
+- The same call gives the same values after the person restores the wallet from its recovery
+  phrase (accounts made again in the same order are the same accounts). An account imported from
+  a key is refused, since the phrase doesn't restore it.
+- The first call for an (account, scope) returns `{granted: false, request}`: the person sees
+  your app, the account, the scope, and that you get values from which the account's key can't
+  be recovered and with which nothing can be spent. Poll `request_status`; once `approved`, call
+  again. The person can take a grant back in Settings.
+- At most 120 calls an hour per app; each runs the names CLI (about a second).
+- Example, the RFP-022 bridge: the deposit master `s` of deposit `i` is `m_i` with scope
+  `RFP022/deposit` and context `cfgId | token | u256(denom)`; asking with tag `RFP022/ck` gives
+  the claim secret `k = SHA256("RFP022/ck" | s)`, while `s` stays in the wallet.
+
+### Token sources
+
+`propose_token_source(token_program, definitions_json)` asks the person to list a token
+program's tokens with their holdings. `definitions_json` is `[{definition, name, symbol,
+decimals, origin}]`, up to 16; the names are your words, shown with the definition IDs. The
+program must speak the wallet's token messages (`wallet-tokens/`; the RFP-022 bridge's token
+program does). Once approved, the Names app lists them as "Bridged tokens" with their decimals,
+and can send them through the same path as its own tokens.
+
+### Worked example: a private bridge claim
+
+The RFP-022 bridge mini-app claims a Sepolia deposit to the person's private account `V`,
+minted to a one-time address of `V` and sponsored from the bridge's float:
+
+```qml
+// 1. The claim secret, from the wallet (asked once per account and scope).
+names("app_secret", [V, "RFP022/deposit", cfgId + token + u256(denom), "RFP022/ck", index, 1], function(v) {
+    if (!v.granted) { requestId = v.request.request; poll.start(); return }
+    k = v.values[0]                                   // the deposit was made with this k
+})
+// 2. The claim: ClaimPlan's accounts, in order (rfp-022 lez-bridge cli/src/main.rs).
+var call = {
+    programs: [bridge, tokenProgram, attestProgram],
+    accounts: [
+        { seed: anchorSeed, of: attestProgram, program: attestProgram },
+        { seed: nullifierSeed, of: bridge },
+        { seed: configSeed, of: bridge },
+        { account: dUSDC, program: tokenProgram },
+        { actor: "account", program: tokenProgram, openings: true },
+        { seed: configSeed, of: bridge, program: "native" },
+        { actor: "account", program: "native", openings: true }
+    ],
+    message: claimAttestedHex,                        // borsh(Message::Instruction(ClaimAttested {..}))
+    openings: [sha256("RFP022/alias" + k)],
+    fee_payer: "account",                             // paid from the sponsored credit
+    declared: { credits: [{ asset: dUSDC, amount: "100000000" }], max_fee: "20000000" }
+}
+names("propose_private_call", [V, JSON.stringify(call), "Claim 100 dUSDC from Sepolia"], function(v) {
+    requestId = v.request; poll.start()              // check → ready, then the person approves
+})
+```
+
+The person sees the sheet in [BRIDGE-SDK.md](BRIDGE-SDK.md) §2: 100 dUSDC and 20,000,000 LEZ to
+`V`, nothing leaving it but the fee, the float's and the supply's public changes, the one-time
+address, and that `V`'s ID appears in nothing public. `scripts/bridge-claim-call.py` builds this
+call from a demo run's frozen material.
+
 ### Limits
 
 | Limit | Value |
@@ -257,6 +395,9 @@ names("propose_inscription", [text], function(v) { requestId = v.request; poll.s
 | Apps with access | 64 |
 | `reason`, `summary` | 280 characters; control and bidi characters are removed |
 | Actors a call reaches besides the signer's own / its message | 16 / 2,048 bytes |
+| A private call's programs / actors besides its root / message / one-time addresses | 4 / 16 / 16,384 bytes / 4 |
+| `app_secret` values per call / calls per hour / grants per app | 64 / 120 / 16 |
+| Token sources / definitions each | 16 / 16 |
 
 Requests and grants are kept in `~/.config/logos-names/provider.json`. The
 file is mode 0600 and written atomically, so a grant survives a restart and a
@@ -276,7 +417,13 @@ gets `only the Names app can do this`.
 | `approve_inscription(request_id, from_key)` | inscribes it from that account and answers when the node has taken it (`done`) or may have (`failed`). Refused before anything is sent (the key isn't one the node holds, the node is stopped, the account can't pay the fee): the request stays pending and the error says why |
 | `chain_inscribe(from_key, text, send)` | with `send` false, the plan the sheet shows: `fee_estimate`, the node's own fee for this inscription from this account, asked in a way that holds none of the account's funds (`null` when the node can't say; an error when it is above the 100,000 a send pays) |
 | `app_grants()` | `[{app, accounts, since}]` |
-| `revoke_app(app)` | `{revoked}` |
+| `revoke_app(app)` | `{revoked}`; also its secret grants and remembered programs |
+| `secret_grants()` / `revoke_secret(app, account, scope)` | `[{app, account, scope, since}]` / `{revoked}` |
+| `private_call_control(request_id, action)` | `pause`, `resume` or `cancel` an approved private call until it is being sent |
+| `token_source_holdings()` | `[{token_program, app, holdings: [{account, account_kind, definition, name, symbol, decimals, origin, balance}], updating, error}]` |
+| `cli_token_send_source(token_program, definition, amount, to, from_private, to_public)` | a token send job, as `cli_token_send`, for a token source's token |
+| `remove_token_source(token_program)` | `{removed}` |
+| (in `pending_requests`) a private call's `sheet` | `{lines, public_changes, privacy, programs, warnings, refusals, refused, digest}`; Approve works only when `check` is `ready` and `refused` is false |
 
 ## Worked example: a tip jar
 
@@ -496,3 +643,19 @@ reads or another HTTP service, give the app a small C++ backend (a universal
   plain text, labelled as your words.
 - **Bounded.** The queue has limits per app and in total, a per-hour cap,
   expiry, and size limits, so an app can't flood the person or the disk.
+- **A private call is shown as it is, not as the app says.** Its sheet comes from the wallet's
+  simulation; a debit beyond what the app declared is refused; the job proves only a call whose
+  effects still equal the approved ones, starting from the states it simulated. What the privacy
+  check covers: the public state and events the call leaves, not the bytes of messages between
+  programs.
+- **App secrets are one-way.** An app gets `SHA256(tag | m)`; `m` and the account's key stay in
+  the names CLI's wallet.
+
+## Compatibility
+
+`propose_private_call`, `app_secret`, token sources and the private-call controls need the
+`names` module and names CLI from the `bridge-sdk` branch (module 0.15.3 today; it would ship
+as the next minor, so ask for `"version": ">=0.16.0"` once it is out; the version bump is left
+to the release). Against an older module these
+methods don't exist: check with a call and fall back to telling the person to update the Names
+app.
