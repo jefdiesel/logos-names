@@ -19,25 +19,8 @@ import {
   readShard,
   recordAddress,
 } from "./names.js";
+import { CHAINS, DEFAULTS, DEFAULT_PEER, PEER_RE, PRESETS, loadSettings, resetSettings, saveSettings } from "./settings.js";
 
-// Each chain the app knows, with the registry and board deployed on it.
-const CHAINS = {
-  "https://lez.buggers.online/lez": {
-    registry: "38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq",
-    board: "8PwnCKStKQtoBxJCgopCG6CPPMJCUWba1SDG1SXtXYTf",
-  },
-  "https://lez.buggers.online": {
-    registry: "m82S3dUDxdcMBtZtXpHXYcVhU68U7bS4AKqsi6NomJm",
-    board: "CKqLLZrTUNiw5KLtQCZ9oSDXWWEtCHLpKjp7pQAaP5q4",
-  },
-};
-// The Logos messaging (Waku) node chat connects to: the default "door" on a stable
-// named tunnel. Overridable in settings, or via ?peer= in the URL.
-const DEFAULT_PEER =
-  "/dns4/msg.buggers.online/tcp/443/wss/p2p/16Uiu2HAkxrwXguVQUCPqMyXrn9VuPNce2xoK9Nr7AW2zcHQeS6dg";
-const DEFAULTS = { rpc: "https://lez.buggers.online/lez", ...CHAINS["https://lez.buggers.online/lez"], peer: DEFAULT_PEER };
-const PRESETS = Object.keys(CHAINS);
-const STORE_KEY = "lns-app-settings";
 const ONBOARD_KEY = "lns-onboarded"; // { name } once this device has been through setup
 const WALLET_REC = "lns-wallet-device"; // wallet.js vault record (presence = a wallet exists)
 
@@ -45,41 +28,15 @@ const $ = (id) => document.getElementById(id);
 
 // ---------- settings ----------
 
-const PEER_RE = /^\/(dns4|dns6|dns|ip4|ip6)\/[^/]+\/tcp\/\d+\/(wss|tls\/ws)\/p2p\/\w+$/;
-
-function urlSettings() {
-  const out = {};
+// Chain and messaging node: chosen in the Settings drawer only, never by a link
+// (settings.js says why).
+const storage = (() => {
   try {
-    const q = new URLSearchParams(location.search);
-    const peer = q.get("peer");
-    if (peer && PEER_RE.test(peer)) out.peer = peer;
-    const rpc = q.get("rpc");
-    if (rpc) {
-      const u = new URL(rpc);
-      if (u.protocol === "https:" || u.protocol === "http:") out.rpc = rpc;
-    }
+    return localStorage;
   } catch {
-    // bad URL params: ignore
+    return null; // blocked site data: settings last until the page closes
   }
-  return out;
-}
-
-function loadSettings() {
-  try {
-    const saved = { ...DEFAULTS, ...JSON.parse(localStorage.getItem(STORE_KEY) || "{}"), ...urlSettings() };
-    return CHAINS[saved.rpc] ? { rpc: saved.rpc, ...CHAINS[saved.rpc], peer: saved.peer } : saved;
-  } catch {
-    return { ...DEFAULTS, ...urlSettings() };
-  }
-}
-
-function saveSettings(next) {
-  try {
-    localStorage.setItem(STORE_KEY, JSON.stringify(next));
-  } catch {
-    // private windows: settings last until the page closes
-  }
-}
+})();
 
 const isProgramId = (text) => {
   try {
@@ -89,8 +46,7 @@ const isProgramId = (text) => {
   }
 };
 
-let settings = loadSettings();
-if (Object.keys(urlSettings()).length) saveSettings(settings);
+let settings = loadSettings(storage);
 
 function fillSettings() {
   const preset = PRESETS.includes(settings.rpc) ? settings.rpc : "custom";
@@ -465,15 +421,12 @@ $("settings-save").addEventListener("click", () => {
     return;
   }
   settings = value;
-  saveSettings(settings);
+  saveSettings(storage, settings);
   openDrawer(false);
   if (step === "chat") openChat();
 });
 $("settings-reset").addEventListener("click", () => {
-  settings = { ...DEFAULTS };
-  try {
-    localStorage.removeItem(STORE_KEY);
-  } catch {}
+  settings = resetSettings(storage);
   fillSettings();
 });
 
