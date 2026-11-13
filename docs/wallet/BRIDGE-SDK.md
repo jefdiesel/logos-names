@@ -239,9 +239,11 @@ channel), and `names zone` manages the CLI's own list.
 
 | What | Where | Result |
 |---|---|---|
-| Module unit tests (`cargo test --lib`): app-secret vectors (checked against Python `hmac`), domain separation, bad asks; private-call checks and limits; the claim sheet (golden, hand-made and **from the live reports**); refusals (drain, undeclared fee, unvaluable data, account ID public); grants, revocation, token sources, job phases | `dev/bridge-sdk/target-modtest` | see the commit that adds the live golden test |
+| Module unit tests (`cargo test --lib`): app-secret vectors (checked against Python `hmac`), domain separation, bad asks; private-call checks and limits; the claim sheet (golden, hand-made and **from the live reports**); refusals (drain, undeclared fee, unvaluable data, account ID public); grants, revocation, token sources, job phases | `dev/bridge-sdk/target-modtest` | **337 passed, 0 failed** (320 before this branch); includes module flow tests through a stand-in CLI: `app_secret` grant/identity/revoke, a private call simulated → sheet → approved → job input with the approved digest → done, a refused one never approvable, its message dropped from `provider.json` |
 | names CLI tests (`cargo test --release -p names_cli --features local-prove`), incl. `a_wallet_restored_from_its_phrase_derives_the_same_values` and the dry-run line parser | `dev/bridge-sdk/target-ws` | 102 passed, 0 failed |
-| `scripts/bridge-sdk-e2e.sh` on the local LEZ 0.4 sequencer `seq2` (127.0.0.1:3250), a COPY of `run/sepolia2/wallet`, the v2 demo's frozen proof material; plans only | `dev/bridge-sdk/e2e` | **10 PASS, 0 FAIL** |
+| `scripts/bridge-sdk-e2e.sh` on the local LEZ 0.4 sequencer `seq2` (127.0.0.1:3250), a COPY of `run/sepolia2/wallet`, the v2 demo's frozen proof material; plans only | `dev/bridge-sdk/e2e` | **11 PASS, 0 FAIL** (incl. the wallet's own `token list` reading V's and P's bridged dUSDC) |
+| QML: `basecamp/tools/render.py` offscreen, scenarios `approve-private-call`, `approve-private-refused`, `approve-secret`, `approve-token-source`, `wallet-bridged`, plus `start`, `approve-verified`, `approve-zone` | Mini, Qt 6.11 | all render; not opened inside Basecamp |
+| Not run: the module packaged as an lgx and driven over `logosctl` (a nix build needs store space the Mini's `/nix` didn't have: 2.4-4.6 GB free), so the generated C++/QML interface of the new methods is untested; no proof (by design) | | |
 
 The live leaf-1 plan (15 s, mostly the wallet catching up 388 blocks): public cycles 81,568 (the
 same as the bridge CLI's own dry run), fee about 5,723,160 and at most 9,300,135 from V,
