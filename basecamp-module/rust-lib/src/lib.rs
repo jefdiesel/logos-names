@@ -1578,21 +1578,26 @@ fn the_new_account(before: &[AccountId], after: &[AccountId]) -> Result<AccountI
     }
 }
 
-/// Whether the wallet's answer to `save` says it saved. A number other than 0, a
-/// `false`, or an object with `success: false` or an `error` means it did not.
+/// Whether the wallet's answer to `save` says it saved. The 0.3 wallet module
+/// (`lez_core` 0.5.0, logos-execution-zone-module b89e5d24df,
+/// src/lez_core_module.cpp:1282-1284) answers `save` with the `int64_t` code of
+/// `wallet_ffi_save`: 0 is `Success`; 5 (`StorageError`, which includes a failed
+/// write) and 99 (`InternalError`) are failures, as `open`'s answer is read below.
+/// Only a clear failure counts as one: a non-zero code, `false`, or an object with
+/// `success: false` or an `error`. Anything else (no answer at all, say) is taken as
+/// saved, so an unexpected shape can't block every registration.
 fn wallet_saved(answer: &Value) -> Result<(), String> {
     let failed = match answer {
-        Value::Number(code) => code.as_i64() != Some(0),
+        Value::Number(code) => code.as_f64() != Some(0.0),
         Value::Bool(saved) => !saved,
         Value::Object(fields) => {
             fields.get("success") == Some(&Value::Bool(false))
                 || fields.get("error").and_then(Value::as_str).is_some_and(|error| !error.is_empty())
         }
-        Value::String(text) => !text.trim().is_empty() && text.to_ascii_lowercase().contains("error"),
         _ => false,
     };
     if failed {
-        Err(format!("the LEZ wallet could not save ({answer}); nothing was published"))
+        Err(format!("the LEZ wallet could not save (code {answer}); nothing was published"))
     } else {
         Ok(())
     }
@@ -2914,10 +2919,22 @@ mod tests {
 
     #[test]
     fn a_save_counts_only_when_the_wallet_says_so() {
-        for saved in [json!(0), json!(true), Value::Null, json!({}), json!({"success": true}), json!("")] {
+        // What the 0.3 module really sends: `wallet_ffi_save`'s code as a number
+        // (0 Success, 3 WalletNotInitialized, 5 StorageError, 99 InternalError).
+        assert_eq!(wallet_saved(&json!(0)), Ok(()));
+        assert_eq!(wallet_saved(&json!(0.0)), Ok(()));
+        for failed in [json!(3), json!(5), json!(99), json!(-1)] {
+            assert!(wallet_saved(&failed).is_err(), "{failed}");
+        }
+        // Should the code arrive as text, `call` parses it into a number first.
+        assert_eq!(serde_json::from_str::<Value>("5").ok().as_ref().map(wallet_saved), Some(Err(
+            "the LEZ wallet could not save (code 5); nothing was published".to_owned()
+        )));
+        // Other shapes fail only when they clearly say so.
+        for saved in [json!(true), Value::Null, json!({}), json!({"success": true}), json!(""), json!("saved")] {
             assert_eq!(wallet_saved(&saved), Ok(()), "{saved}");
         }
-        for failed in [json!(1), json!(-3), json!(false), json!({"success": false}), json!({"error": "disk full"}), json!("StorageError")] {
+        for failed in [json!(false), json!({"success": false}), json!({"error": "disk full"})] {
             assert!(wallet_saved(&failed).is_err(), "{failed}");
         }
     }
