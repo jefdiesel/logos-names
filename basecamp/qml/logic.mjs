@@ -789,6 +789,15 @@ export function bridgeNetStatus(value, clock) {
     return out
 }
 
+/// The blocks of `bridgeNetRows` the LEZ 0.4 card shows: every account that holds something
+/// there, and every watched one; the wallet's accounts the network has never seen are folded
+/// into one line (`empty`, how many) unless `showEmpty`.
+export function bridgeNetShown(rows, showEmpty) {
+    var list = Array.isArray(rows) ? rows : []
+    var empty = list.filter(function(r) { return !r.found && !r.watched })
+    return { shown: showEmpty ? list : list.filter(function(r) { return r.found || r.watched }), empty: empty.length }
+}
+
 /// One block per public account of a `bridge_net_balances` read: `{account, title, found,
 /// assets: [{symbol, name, amount}]}`, native LEZ first, then each bridged token with its
 /// decimals. An account the network has never seen has no assets (`found` false).

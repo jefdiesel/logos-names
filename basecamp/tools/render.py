@@ -323,6 +323,8 @@ SCENARIOS = {
     "wallet-net04-down": 'root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4") })',
     "wallet-net04-never": 'root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4") })',
     "wallet-net04-reset": 'root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4") })',
+    "wallet-net04-many": 'root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4") })',
+    "wallet-net04-many-open": 'root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); root.bridgeNetShowEmpty = true })',
     "wallet-net04-watch": 'root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); bridgeNetWatchField.text = "Public/0OIl"; root.bridgeNetWatch(bridgeNetWatchField.text, true) })',
     "wallet-net04-activity": 'root.go("activity"); root.loadActivity()',
     "wallet-net04-send": 'root.openWallet("home"); root.openSend({ id: "lez-public", kind: "lez", title: "LEZ", definition: "", fromPrivate: false }, "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR"); sendAmount.text = "1000"',
@@ -458,6 +460,12 @@ MOCKS = {
     "welcome-moved": {"private": "5000000", "public": "1000000"},
     "pay-account": {"private": "250000000", "public": "1250000"},
     "wallet-down": {"nodeDown": True},
+    # The owner's wallet as the real-setup test read it: 14 public accounts, one holding something.
+    "wallet-net04-many": {"bridgeNet": dict(NET04, not_read=0, read=dict(NET04_READ, accounts=[NET04_READ["accounts"][0]] + [
+        {"account": "Public/" + a, "found": False, "native": "0", "tokens": net04_held("0", "0"), "other_tokens": 0} for a in
+        ["WJhfAxHvoPvFGZ1DYFLvwZLETEGqWx3kbpz5jdoDVAb", "4FxHAXMqG45em3UZPYzVLEKGzWm2JNS1JSRZMSspFgtP", "6Fbtv64VQE1NciFYqmZdiNMSxud1sGLQPN1Y7iPsMipm", "74Xmu712RoXa9GuGcEox1S6cCseckVr1KVH8Uwfzy2F6",
+         "8sWBKiKPR56CTc55yvD61Gnm9iKeaeRg2hEMjqvC6A2b", "9W9huNeAds11pdGpMijrdhTkSQ8upNudRnrZJbNNWfoW", "BHJQN5ePVJoLTkfHF6jk2Nwio3gJcqa4joNpdtphxfVB", "CCE8TqnKQavGSnqzwoUf9T3mfpNJmFtmnwb4252UiaY9",
+         "CKBM6zaH6nhpYGM9WkBXKLpFhCtYVp5Z2ULy5mBFACjr", "CnhoAmXXnZeLS2Q7RGPwxnK5G2LYFyEzoLQibtKAycqE", "F3MsAVK7RXyktPT1hpHYgBpiLq8TfD9FA1dQTvEeaBb9"]]))},
     "wallet-net04-watch": {"bridgeNet": dict(NET04, watched=["Public/BVDcg8SbSdCTKzx4mJbSpVgEuaoPEMhxmmRwvVCGyBnD"], read=dict(NET04_READ, accounts=NET04_READ["accounts"] + [
         {"account": "Public/BVDcg8SbSdCTKzx4mJbSpVgEuaoPEMhxmmRwvVCGyBnD", "found": True, "native": "99799912984428", "tokens": net04_held("0", "0"), "other_tokens": 0, "watched": True}]))},
     "wallet-net04-down": {"bridgeNet": dict(NET04, error="can't reach the bridge test network: it answered HTTP 502 instead of a reading")},
@@ -488,6 +496,8 @@ MOCKS = {
                                       "text": "Line one of a longer testimonial.\nLine two, with a very long unbroken word: " + "x" * 300}},
     "inscribe-fake-chosen": {"inscription": {"publisher": {"status": "mismatch", "publisher": "jef", "module": "testimonial_ui", "version": "0.2.0"}}},
 }
+
+MOCKS["wallet-net04-many-open"] = MOCKS["wallet-net04-many"]
 
 def main():
     qml, out_dir = sys.argv[1], sys.argv[2]

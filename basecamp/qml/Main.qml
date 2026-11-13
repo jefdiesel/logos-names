@@ -628,6 +628,8 @@ Item {
     onBridgeNetAccountsChanged: if (walletNet === "0.4") loadBridgeNet()
     readonly property var bridgeNetStatusNow: Logic.bridgeNetStatus(bridgeNet, clockShown)
     readonly property var bridgeNetBlocks: Logic.bridgeNetRows(bridgeNet ? bridgeNet.read : null)
+    property bool bridgeNetShowEmpty: false   // the wallet's accounts with nothing there, shown one by one
+    readonly property var bridgeNetView: Logic.bridgeNetShown(bridgeNetBlocks, bridgeNetShowEmpty)
 
     /// A time of day for a reading taken at `seconds`.
     function clockShown(seconds) {
@@ -5644,7 +5646,7 @@ Item {
                         }
                         // One block per public account: native LEZ, then each bridged token.
                         Repeater {
-                            model: root.bridgeNetBlocks
+                            model: root.bridgeNetView.shown
                             ColumnLayout {
                                 id: netAccount
                                 required property var modelData
@@ -5685,6 +5687,22 @@ Item {
                                 }
                                 Hint { visible: netAccount.modelData.other > 0; font.pixelSize: root.px(14); text: "Also holds " + netAccount.modelData.other + (netAccount.modelData.other === 1 ? " other token" : " other tokens") + " that the bridge didn't make. Not shown." }
                             }
+                        }
+                        // The wallet's accounts this network has never seen, in one line.
+                        RowLayout {
+                            visible: root.bridgeNetView.empty > 0 || root.bridgeNetShowEmpty
+                            Layout.fillWidth: true
+                            spacing: 12
+                            Hint {
+                                font.pixelSize: root.px(15)
+                                text: root.bridgeNetShowEmpty ? "" : "Nothing on this network for " + (root.bridgeNetView.empty === 1 ? "1 other public account." : root.bridgeNetView.empty + " other public accounts.")
+                            }
+                            Link { text: root.bridgeNetShowEmpty ? "Hide empty accounts" : "Show them"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.bridgeNetShowEmpty = !root.bridgeNetShowEmpty }
+                        }
+                        Hint {
+                            visible: root.bridgeNet !== null && root.bridgeNet.not_read > 0
+                            font.pixelSize: root.px(14)
+                            text: root.bridgeNet !== null && root.bridgeNet.not_read > 0 ? root.bridgeNet.not_read + (root.bridgeNet.not_read === 1 ? " more account wasn't" : " more accounts weren't") + " read: at most 24 are read here." : ""
                         }
                         Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: root.line }
                         // Any public account can be watched here, the wallet's or not.

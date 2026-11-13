@@ -567,9 +567,10 @@ pub trait NamesModule: Send + 'static {
     /// What the wallet's public accounts hold on the bridge test network (LEZ 0.4, the
     /// RFP-022 bridge's own chain, `bridge_net::RPC`), read only, beside the public Logos
     /// testnet (LEZ 0.3) every other method uses. `accounts` is a JSON list of `Public/<id>`
-    /// (at most 12; `Private/…` ones are counted in `private_accounts` and not read: that needs
+    /// (24 are read at most, the rest counted in `not_read`; `Private/…` ones are counted in
+    /// `private_accounts` and not read: that needs
     /// LEZ 0.4 viewing keys). Answers at once with the last read, `{network, version, rpc, read,
-    /// updating, error, private_accounts}`, and reads again on its own thread when the last read
+    /// updating, error, private_accounts, watched, not_read}`, and reads again on its own thread when the last read
     /// is 30 s old. `read` is null until the first read ends, else `{channel, height, read_at,
     /// bridge, tokens: [{definition, symbol, decimals, name}], token_problem, reset_at,
     /// accounts: [{account, found, native, tokens: [{definition, symbol, decimals, amount}],
@@ -3649,6 +3650,9 @@ impl NamesModule for Names {
                 }
             }
             let watched_now: Vec<String> = accounts[own..].iter().map(|id| format!("Public/{}", registry::account_text(id))).collect();
+            // At most MAX_ACCOUNTS a read, the wallet's own first; the rest are said, not read.
+            let not_read = accounts.len().saturating_sub(bridge_net::MAX_ACCOUNTS);
+            accounts.truncate(bridge_net::MAX_ACCOUNTS);
             // One constant names the network; a test or a trial of a new chain may point
             // elsewhere for one run.
             let url = std::env::var("LOGOS_NAMES_BRIDGE_RPC").ok().filter(|url| !url.trim().is_empty()).unwrap_or_else(|| bridge_net::RPC.to_owned());
@@ -3679,6 +3683,7 @@ impl NamesModule for Names {
                 "error": read["error"],
                 "private_accounts": private,
                 "watched": watched_now,
+                "not_read": not_read,
             }))
         })())
     }
@@ -6770,6 +6775,10 @@ mod tests {
         let row = &value["read"]["accounts"][1];
         assert_eq!((row["account"].as_str(), row["found"].as_bool(), row["watched"].as_bool()), (Some(&*format!("Public/{unseen}")), Some(false), Some(true)), "{value}");
         assert_eq!(parsed(&names.bridge_net_watch(unseen.into(), false))["value"], json!([]));
+        // More accounts than one read takes: the first 24 are read, the rest counted.
+        let many: Vec<String> = (1..=26u8).map(|n| format!("Public/{}", registry::account_text(&[n; 32]))).collect();
+        let answer = parsed(&names.bridge_net_balances(json!(many).to_string()));
+        assert_eq!(answer["value"]["not_read"].as_u64(), Some(2), "{answer}");
         as_caller(logos_rust_sdk::LogosCaller::Module { name: "evil_ui".into(), instance: None });
         assert_eq!(parsed(&names.bridge_net_balances(asked))["success"], false);
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);

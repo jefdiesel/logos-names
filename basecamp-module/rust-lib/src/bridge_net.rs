@@ -49,8 +49,11 @@ pub const CHAIN: &str = "lez-0.4";
 pub const ZONE: &str = "bridge-0.4";
 /// How often it is read at most (WALLET-READ.md, polling rule).
 pub const EVERY: Duration = Duration::from_secs(30);
-/// The most accounts one read asks about (one request each; the edge allows 50 per 10 s).
-pub const MAX_ACCOUNTS: usize = 12;
+/// The most accounts one read asks about: one request each, a short pause apart, so a read of
+/// all of them (plus 3 to 5 others) stays well under the edge's 50 requests per 10 s per IP.
+pub const MAX_ACCOUNTS: usize = 24;
+/// The pause between two account reads.
+const ACCOUNT_PAUSE: Duration = Duration::from_millis(120);
 /// How long the token list is kept before the Config is read again (seconds).
 const TOKENS_FRESH_S: u64 = 3600;
 /// How long a reset is told after it was seen (seconds).
@@ -306,7 +309,8 @@ pub fn public_account(text: &str) -> Result<AccountId, String> {
 }
 
 /// The accounts a `bridge_net_balances` call names: a JSON list of `Public/<id>` (or bare IDs),
-/// in order, without repeats, at most `MAX_ACCOUNTS`. Private ones are counted and left out.
+/// in order, without repeats. Private ones are counted and left out. The caller keeps at most
+/// `MAX_ACCOUNTS` of them and says how many it left out.
 pub fn accounts_asked(text: &str) -> Result<(Vec<AccountId>, usize), String> {
     let list: Vec<String> = match text.trim() {
         "" => Vec::new(),
@@ -323,7 +327,6 @@ pub fn accounts_asked(text: &str) -> Result<(Vec<AccountId>, usize), String> {
             accounts.push(account);
         }
     }
-    accounts.truncate(MAX_ACCOUNTS);
     Ok((accounts, private))
 }
 
@@ -413,7 +416,10 @@ pub fn read(url: &str, accounts: &[AccountId], dir: &Path, now: u64) -> Result<V
     };
 
     let mut rows = Vec::new();
-    for account in accounts {
+    for (at, account) in accounts.iter().enumerate() {
+        if at > 0 {
+            std::thread::sleep(ACCOUNT_PAUSE);
+        }
         let text = registry::account_text(account);
         let read = call(url, "getAccount", json!([text]), deadline)?;
         if read.is_null() {
