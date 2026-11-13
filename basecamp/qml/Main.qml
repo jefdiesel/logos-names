@@ -113,9 +113,9 @@ Item {
     property bool configKnown: false   // the names module has answered once
     // The names module this app needs: the same release (metadata.json asks for it
     // at install, but an older module can still be the one Basecamp loaded).
-    readonly property string neededModule: "0.15.3"
+    readonly property string neededModule: "0.16.0"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.15.9"
+    readonly property string appVersion: "0.16.0"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -615,6 +615,56 @@ Item {
     }
 
     property string balanceNote: ""   // what the last balance read said about itself: partial, or why it failed
+
+    // ── Two networks: LEZ 0.3 (public Logos testnet) and LEZ 0.4 (bridge test network) ──
+
+    /// Which network the Wallet's balances show: "0.3" (the public Logos testnet, where
+    /// everything else in the app runs) or "0.4" (the bridge test network, read only).
+    property string walletNet: "0.3"
+    property var bridgeNet: null          // bridge_net_balances, or null until it answers
+    property string bridgeNetProblem: ""  // why the module couldn't be asked
+    readonly property var bridgeNetAccounts: Logic.publicAccounts(cliBalance, cliAccounts)
+    // A newly read account list is asked about at once (the module answers from memory).
+    onBridgeNetAccountsChanged: if (walletNet === "0.4") loadBridgeNet()
+    readonly property var bridgeNetStatusNow: Logic.bridgeNetStatus(bridgeNet, clockShown)
+    readonly property var bridgeNetBlocks: Logic.bridgeNetRows(bridgeNet ? bridgeNet.read : null)
+
+    /// A time of day for a reading taken at `seconds`.
+    function clockShown(seconds) {
+        return Qt.formatTime(new Date(Number(seconds) * 1000), "hh:mm")
+    }
+
+    /// Asks the module what the public accounts hold on the bridge test network. It answers
+    /// at once with its last read and reads again itself, at most every 30 s.
+    function loadBridgeNet() {
+        askLater("bridge_net_balances", [JSON.stringify(bridgeNetAccounts)], function(value) {
+            bridgeNet = value
+            bridgeNetProblem = ""
+            if (value && value.updating)
+                bridgeNetSoon.restart()
+        }, function(message) {
+            bridgeNetProblem = sentence(message)
+        })
+    }
+
+    /// Switches the Wallet's balances to network `net` ("0.3" or "0.4").
+    function setWalletNet(net) {
+        walletNet = net
+        walletRowOpen = ""
+        if (net === "0.4")
+            loadBridgeNet()
+    }
+
+    // Read only while the bridge test network's balances are on screen, every 30 s.
+    Timer {
+        id: bridgeNetPoll
+        interval: 30000
+        repeat: true
+        running: root.walletNet === "0.4" && root.section === "wallet" && root.walletView === "home" && Qt.application.state === Qt.ApplicationActive
+        onTriggered: root.loadBridgeNet()
+    }
+    // A read under way: ask again shortly for its result (the module answers from memory).
+    Timer { id: bridgeNetSoon; interval: 3000; onTriggered: root.loadBridgeNet() }
     property string namesNote: ""     // the same for the names list: kept from before, and why
     property string accountsNote: ""  // the same for the accounts list
 
@@ -1053,6 +1103,8 @@ Item {
         loadWatched()
         loadChain()
         loadFee()
+        if (walletNet === "0.4")
+            loadBridgeNet()
     }
 
     /// The Send screen for `asset` (a walletRows row), to `to` if given.
@@ -4632,6 +4684,26 @@ Item {
     }
 
     /// A line of explanation under a control.
+    /// Which network an action or view runs on, in the words the app uses everywhere:
+    /// `net` is "0.3" (LEZ 0.3, the public Logos testnet), "0.4" (LEZ 0.4, the bridge test
+    /// network), "chain" (the Logos Blockchain), "both" (the Logos Blockchain into LEZ 0.3) or
+    /// "0.3+chain" (the balances of LEZ 0.3 and of the Logos Blockchain).
+    component RunsOn: Text {
+        property string net: "0.3"
+        property string prefix: "Runs on"
+        Layout.fillWidth: true
+        textFormat: Text.StyledText
+        wrapMode: Text.Wrap
+        color: root.dim
+        font.family: root.sans
+        font.pixelSize: root.px(14)
+        text: prefix + " " + (net === "0.4" ? "<b>LEZ 0.4</b> · bridge test network"
+            : net === "chain" ? "<b>the Logos Blockchain</b>"
+            : net === "both" ? "<b>the Logos Blockchain</b> and <b>LEZ 0.3</b> · public Logos testnet"
+            : net === "0.3+chain" ? "<b>LEZ 0.3</b> · public Logos testnet, and on <b>the Logos Blockchain</b>"
+            : "<b>LEZ 0.3</b> · public Logos testnet")
+    }
+
     component Hint: Text {
         Layout.fillWidth: true
         color: root.dim
@@ -5480,9 +5552,140 @@ Item {
                             }
                         }
                     }
+                    // Which network the balances below are on: a two-way switch, LEZ 0.3 by default.
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Accessible.name: "Network"
+                        Repeater {
+                            model: [Logic.NET_03, Logic.NET_04]
+                            Rectangle {
+                                id: netChoice
+                                required property var modelData
+                                readonly property bool current: root.walletNet === modelData.id
+                                Layout.fillWidth: true
+                                implicitHeight: netChoiceText.implicitHeight + root.px(18)
+                                radius: 8
+                                color: current ? root.raised : netChoiceArea.containsMouse ? root.hover : "transparent"
+                                border.width: 1
+                                border.color: current ? root.ink : root.line
+                                Accessible.role: Accessible.RadioButton
+                                Accessible.name: modelData.version + ", " + modelData.name
+                                Accessible.checked: current
+                                Column {
+                                    id: netChoiceText
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    anchors.left: parent.left
+                                    anchors.leftMargin: root.px(14)
+                                    spacing: 1
+                                    Text { text: netChoice.modelData.version; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); font.weight: netChoice.current ? Font.DemiBold : Font.Normal }
+                                    Text { text: netChoice.modelData.name; color: root.dim; font.family: root.sans; font.pixelSize: root.px(13) }
+                                }
+                                MouseArea {
+                                    id: netChoiceArea
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.setWalletNet(netChoice.modelData.id)
+                                }
+                            }
+                        }
+                    }
+                    RunsOn { net: root.walletNet === "0.4" ? "0.4" : "0.3+chain"; prefix: "Balances on" }
+
+                    // ── LEZ 0.4, the bridge test network: read only ──
+                    Card {
+                        visible: root.walletNet === "0.4"
+                        Layout.fillWidth: true
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 10
+                            Text { Layout.fillWidth: true; text: "Bridge test network"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
+                            Text { text: "LEZ 0.4 · read only"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
+                        }
+                        Hint { font.pixelSize: root.px(15); text: "The bridge's own chain, where bridged Sepolia tokens arrive. It is reset now and then." }
+                        Hint {
+                            font.pixelSize: root.px(15)
+                            color: root.bridgeNetStatusNow.tone === "bad" ? root.alarm : root.bridgeNetStatusNow.tone === "warn" ? root.brass : root.dim
+                            text: root.bridgeNetProblem !== "" ? root.bridgeNetProblem : root.bridgeNetStatusNow.line
+                        }
+                        Hint { visible: root.bridgeNetStatusNow.reset !== ""; font.pixelSize: root.px(15); color: root.brass; text: root.bridgeNetStatusNow.reset }
+                        Hint {
+                            visible: root.bridgeNet !== null && root.bridgeNet.read && root.bridgeNet.read.token_problem
+                            font.pixelSize: root.px(15)
+                            color: root.brass
+                            text: root.bridgeNet !== null && root.bridgeNet.read && root.bridgeNet.read.token_problem ? "Can't read the bridge's token list, so bridged tokens aren't shown." : ""
+                        }
+                        Hint {
+                            visible: root.bridgeNetAccounts.length === 0
+                            font.pixelSize: root.px(15)
+                            text: root.cliBalance === undefined ? "Reading your accounts…" : "Your wallet has no public account to look up here."
+                        }
+                        // One block per public account: native LEZ, then each bridged token.
+                        Repeater {
+                            model: root.bridgeNetBlocks
+                            ColumnLayout {
+                                id: netAccount
+                                required property var modelData
+                                Layout.fillWidth: true
+                                spacing: 6
+                                Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: root.line }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Layout.topMargin: 4
+                                    Text { Layout.fillWidth: true; text: netAccount.modelData.title; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); font.weight: Font.DemiBold }
+                                    Link { text: "Copy"; color: root.dim; font.pixelSize: root.px(14); onPressed: root.copy(netAccount.modelData.account, "The account ID") }
+                                }
+                                Hint { visible: !netAccount.modelData.found; font.pixelSize: root.px(15); text: "Nothing on this network." }
+                                Repeater {
+                                    model: netAccount.modelData.assets
+                                    RowLayout {
+                                        id: netAsset
+                                        required property var modelData
+                                        Layout.fillWidth: true
+                                        spacing: 12
+                                        ColumnLayout {
+                                            spacing: 0
+                                            Text { text: netAsset.modelData.symbol; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold }
+                                            Text { text: netAsset.modelData.name; textFormat: Text.PlainText; color: root.dim; font.family: root.sans; font.pixelSize: root.px(13) }
+                                        }
+                                        Item { Layout.fillWidth: true }
+                                        Text {
+                                            text: root.walletHidden ? "••••••" : netAsset.modelData.amount
+                                            color: root.ink
+                                            font.family: root.sans
+                                            font.pixelSize: root.px(18)
+                                            font.weight: Font.DemiBold
+                                            horizontalAlignment: Text.AlignRight
+                                        }
+                                    }
+                                }
+                                Hint { visible: netAccount.modelData.other > 0; font.pixelSize: root.px(14); text: "Also holds " + netAccount.modelData.other + (netAccount.modelData.other === 1 ? " other token" : " other tokens") + " that the bridge didn't make. Not shown." }
+                            }
+                        }
+                        Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: root.line }
+                        Hint { font.pixelSize: root.px(14); text: "Private balances on the bridge test network are not shown yet." }
+                        Hint { font.pixelSize: root.px(14); text: "Sending on the bridge test network isn't in the wallet yet." }
+                    }
+                    // What runs on LEZ 0.3 only, unavailable while LEZ 0.4 is shown.
+                    ColumnLayout {
+                        visible: root.walletNet === "0.4"
+                        Layout.fillWidth: true
+                        spacing: 8
+                        RowLayout {
+                            spacing: 10
+                            Action { label: "Send"; enabledNow: false }
+                            Action { label: "Receive"; enabledNow: false }
+                            Action { label: "LNS names"; enabledNow: false }
+                            Action { label: "Add a token"; enabledNow: false }
+                        }
+                        RunsOn { net: "0.3" }
+                        Hint { font.pixelSize: root.px(15); text: "These run on LEZ 0.3, the public Logos testnet, as messages do. Switch to LEZ 0.3 to use them." }
+                    }
+
                     // Which zone the LEZ balances below are on, once there is more than one.
                     RowLayout {
-                        visible: root.zonesMany
+                        visible: root.walletNet === "0.3" && root.zonesMany
                         Layout.fillWidth: true
                         spacing: 10
                         Hint {
@@ -5494,7 +5697,7 @@ Item {
                         Link { text: "Zones"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.go("settings") }
                     }
                     Card {
-                        visible: !root.zoneHome && root.cliStatus !== null && !root.cliStatus.wallet
+                        visible: root.walletNet === "0.3" && !root.zoneHome && root.cliStatus !== null && !root.cliStatus.wallet
                         Layout.fillWidth: true
                         Hint { textFormat: Text.PlainText; color: root.ink; text: root.zoneName + " has no wallet yet. A zone's wallet is its own: new accounts, and a recovery phrase of its own to write down." }
                         Action { label: root.walletBusy ? "Making it…" : "Make this zone's wallet"; strong: true; enabledNow: !root.walletBusy && root.cliPath !== ""; onPressed: root.createWallet() }
@@ -5504,7 +5707,7 @@ Item {
                     Hint { visible: root.notice !== "" && root.sendingLine() === ""; color: root.noticeIsError ? root.alarm : root.dim; font.pixelSize: root.px(16); text: root.notice }
                     // Payments to your names' private keys wait until you claim them (SC-1).
                     Card {
-                        visible: root.waitingPayments !== null || root.receiveJob !== null || root.receiveProblem !== ""
+                        visible: root.walletNet === "0.3" && (root.waitingPayments !== null || root.receiveJob !== null || root.receiveProblem !== "")
                         Layout.fillWidth: true
                         Hint {
                             visible: root.waitingPayments !== null
@@ -5523,15 +5726,15 @@ Item {
                         Hint { visible: root.receiveProblem !== "" && root.receiveJob === null; color: root.alarm; font.pixelSize: root.px(15); text: root.receiveProblem }
                     }
                     // A read the sequencer only partly answered, or why it failed: never "no balances".
-                    Hint { visible: root.balanceNote !== "" && root.cliBalance !== undefined; color: root.brass; font.pixelSize: root.px(15); text: root.balanceNote }
+                    Hint { visible: root.walletNet === "0.3" && root.balanceNote !== "" && root.cliBalance !== undefined; color: root.brass; font.pixelSize: root.px(15); text: root.balanceNote }
                     Hint {
-                        visible: root.walletGroups.length === 0 && (root.balanceNote === "" || root.cliBalance === undefined)
+                        visible: root.walletNet === "0.3" && root.walletGroups.length === 0 && (root.balanceNote === "" || root.cliBalance === undefined)
                         text: root.cliBalance === undefined ? "Reading your balances…" : "No balances yet. Make a wallet in Settings, or start your node in Basecamp's Blockchain app."
                     }
 
                     // One card per chain: its total, then (open) one row per address.
                     Repeater {
-                        model: root.walletGroups
+                        model: root.walletNet === "0.3" ? root.walletGroups : []
                         Rectangle {
                             id: groupCard
                             required property var modelData
@@ -5756,7 +5959,7 @@ Item {
 
                     // Tokens sent to your name's private keys, waiting to be taken in.
                     Rectangle {
-                        visible: root.tokenProgram !== "" && root.tokenPending.length > 0
+                        visible: root.walletNet === "0.3" && root.tokenProgram !== "" && root.tokenPending.length > 0
                         Layout.fillWidth: true
                         implicitHeight: waitingRow.implicitHeight + root.px(24)
                         radius: 12
@@ -5781,12 +5984,14 @@ Item {
                     }
 
                     RowLayout {
+                        visible: root.walletNet === "0.3"
                         Layout.topMargin: 6
                         spacing: 10
                         Action { visible: !root.cliOutdated; label: "Add a token"; onPressed: { root.addTokenProblem = ""; root.walletView = "add"; addTokenField.forceActiveFocus() } }
                         Item { Layout.fillWidth: true }
                     }
                     Hint {
+                        visible: root.walletNet === "0.3"
                         font.pixelSize: root.px(14)
                         text: "Private accounts are seen only by you; public ones and the Logos Blockchain by anyone. LEZ and the Logos Blockchain are separate chains with their own addresses; the bridge moves tokens into LEZ."
                     }
@@ -5800,6 +6005,7 @@ Item {
                     spacing: 12
                     Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
                     Text { text: root.sendKind === "chain" ? "Send on the Logos Blockchain" : "Send " + root.sendTitle; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
+                    RunsOn { net: root.sendKind === "chain" ? "chain" : "0.3" }
 
                     Part { text: "From" }
                     PickRow {
@@ -5918,6 +6124,7 @@ Item {
                     spacing: 14
                     Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
                     Text { text: root.receiveKind === "chain" ? "Receive on the Logos Blockchain" : "Receive LEZ and tokens"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
+                    RunsOn { net: root.receiveKind === "chain" ? "chain" : "0.3" }
 
                     Card {
                         visible: root.receiveKind !== "chain"
@@ -6177,6 +6384,7 @@ Item {
                     spacing: 14
                     Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
                     Text { text: "Names"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
+                    RunsOn { net: "0.3" }
                     Hint { text: "Your wallet can hold many names. Names held privately can't be linked to each other on chain; a name held publicly shows its holder. Each name is paid into its own private account unless it publishes a public one." }
                     // On another zone the names are still listed, and changed only on Home.
                     Card {
@@ -6322,6 +6530,7 @@ Item {
                     spacing: 12
                     Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
                     Text { text: "Add a token"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
+                    RunsOn { net: "0.3" }
                     Hint { text: "Paste the token's address, its ID on LEZ. It stays in your wallet from now on, even before you hold any." }
                     Part { text: "Token address" }
                     Field { id: addTokenField; Layout.fillWidth: true; size: 17; code: true; hint: "32 to 44 letters and digits" }
@@ -6493,6 +6702,7 @@ Item {
                         onPressed: root.walletView = "home"
                     }
                     Text { text: "Bridge"; color: root.ink; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(28) }
+                    RunsOn { net: "both" }
                     Hint { font.pixelSize: root.px(15); text: "Moves the native coin between the Logos Blockchain and LEZ. Tokens made on LEZ stay on LEZ: only the native coin crosses." }
                     ColumnLayout {
                         readonly property var bridges: root.activityRows.filter(function(e) { return e.kind === "bridge" || e.kind === "split" })

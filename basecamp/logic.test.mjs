@@ -2,6 +2,7 @@
 // engine cannot run in CI. Run with: node basecamp/logic.test.mjs
 import { atLeast, someAmount, entryShown, amountRead, amountProblem, amountDigits, AMOUNT_MAX, CHAIN_AMOUNT_MAX, jobProblem, tokenToProblem, tokenSendProves, tokenShown, feeEstimate, feePaid, accountTitle, accountsShown, publisherLine, durationWords, keyShown, chainToProblem, stakeLines, rewardsLine, grouped, addDigits, walletAssets, subDigits, walletGroups, stakeTable, activityLine, activityFor, agoShown, readNote, chainKeyTitle, chainKeySub, chainUsable, chainLaterNote } from "./qml/logic.mjs";
 import { readFileSync } from "node:fs";
+import { publicAccounts, decimalShown, bridgeNetStatus, bridgeNetRows, NET_03, NET_04 } from "./qml/logic.mjs";
 
 let failures = 0;
 const check = (label, got, want) => {
@@ -303,6 +304,43 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     [true, false, false, false, false, false, true, true, false, false]);
   check("history: an inscription", [activityLine({ kind: "inscribe", chain: "logos", from: K1, hash: "ab".repeat(32), fee: "1086", state: "in_block", at: 1794200000 }, 1794205600000)].map(l => [l.title, l.sub, l.amount, l.sign, l.state]),
     [["Inscribed a testimonial", "on the Logos Blockchain, from key e3635f20…ce07 · fee 1,086", "", "", "In a block"]]);
+}
+
+// The bridge test network (LEZ 0.4): accounts asked about, amounts with decimals, status lines.
+{
+  const OWNER = "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk";
+  const OTHER = "BVDcg8SbSdCTKzx4mJbSpVgEuaoPEMhxmmRwvVCGyBnD";
+  check("net names", [NET_03.version + " " + NET_03.name, NET_04.version + " " + NET_04.name], ["LEZ 0.3 public Logos testnet", "LEZ 0.4 bridge test network"]);
+  check("publicAccounts from both reads, once, no private",
+    publicAccounts({ public: { account: OWNER, balance: "0" }, accounts: [{ account: "Public/" + OTHER, kind: "public" }, { account: "Private/" + OTHER, kind: "private" }] },
+                   [{ account: "Public/" + OWNER, kind: "public" }]),
+    ["Public/" + OWNER, "Public/" + OTHER]);
+  check("publicAccounts nothing read", [publicAccounts(null, null), publicAccounts(undefined, [])], [[], []]);
+  check("publicAccounts refuses junk", publicAccounts({ public: { account: "not an id" } }, [{ account: "Public/0OIl", kind: "public" }]), []);
+  check("decimalShown", [decimalShown("100000000000000000", 18), decimalShown("123456789", 6), decimalShown("0", 6), decimalShown("1234567000000", 6), decimalShown("23786858", 0), decimalShown("1", 18), decimalShown("000100", 2)],
+    ["0.1", "123.456789", "0", "1,234,567", "23,786,858", "0.000000000000000001", "1"]);
+  check("decimalShown past 2^53", decimalShown("340282366920938463463374607431768211455", 18), "340,282,366,920,938,463,463.374607431768211455");
+  const clock = (s) => "t" + s;
+  const read = { channel: "b4a9", height: 1572, read_at: 100, bridge: true, token_problem: null, reset_at: null,
+    tokens: [{ definition: "9ANd", symbol: "dUSDC", decimals: 6, name: "Wrapped dUSDC (demo)" }, { definition: "DbPG", symbol: "wETH", decimals: 18, name: "Wrapped Sepolia ETH (demo)" }],
+    accounts: [{ account: "Public/" + OWNER, found: true, native: "23786858", other_tokens: 0,
+                 tokens: [{ definition: "9ANd", symbol: "dUSDC", decimals: 6, name: "Wrapped dUSDC (demo)", amount: "0" }, { definition: "DbPG", symbol: "wETH", decimals: 18, name: "Wrapped Sepolia ETH (demo)", amount: "100000000000000000" }] },
+               { account: "Public/" + OTHER, found: false, native: "0", other_tokens: 0, tokens: [] }] };
+  check("bridgeNetStatus reading", bridgeNetStatus(null, clock), { line: "Reading the bridge test network…", tone: "plain", reset: "" });
+  check("bridgeNetStatus never read, down", bridgeNetStatus({ read: null, error: "can't reach the bridge test network: it answered HTTP 502 instead of a reading" }, clock),
+    { line: "Can't read the bridge test network: it answered HTTP 502 instead of a reading", tone: "bad", reset: "" });
+  check("bridgeNetStatus fresh", bridgeNetStatus({ read, error: null }, clock), { line: "Updated t100 · block 1,572", tone: "plain", reset: "" });
+  check("bridgeNetStatus stale", bridgeNetStatus({ read, error: "can't reach" }, clock).line, "Can't reach the bridge test network now. Showing what it said at t100.");
+  check("bridgeNetStatus reset", bridgeNetStatus({ read: Object.assign({}, read, { reset_at: 90 }) }, clock).reset, "The bridge test network was reset at t90. What was held there before is gone; balances start again.");
+  check("bridgeNetRows", bridgeNetRows(read).map((r) => [r.title, r.found, r.assets.map((a) => a.symbol + " " + a.amount)]),
+    [["Public account CCVd76Tk…pKnk", true, ["LEZ 23,786,858", "dUSDC 0", "wETH 0.1"]], ["Public account BVDcg8Sb…yBnD", false, []]]);
+  check("bridgeNetRows none", [bridgeNetRows(null), bridgeNetRows({})], [[], []]);
+  check("activityLine arrived on the bridge test network",
+    ((l) => [l.title, l.sub, l.amount, l.sign])(activityLine({ kind: "arrived", chain: "lez-0.4", network: "bridge-0.4", to: "Public/" + OWNER, amount: "100000000000000000", token: "DbPG", symbol: "wETH", decimals: 18, state: "arrived", at: 1 }, 2000)),
+    ["Arrived", "in Public CCVd76Tk…pKnk on LEZ 0.4, the bridge test network", "0.1 wETH", "+"]);
+  check("activityLine native on the bridge test network",
+    ((l) => [l.sub, l.amount])(activityLine({ kind: "arrived", chain: "lez-0.4", to: "Public/" + OWNER, amount: "5", state: "arrived", at: 1 }, 2000)),
+    ["in Public CCVd76Tk…pKnk on LEZ 0.4, the bridge test network", "5"]);
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
