@@ -8,7 +8,6 @@
 
 import {
   GRACE_MS,
-  base58Decode,
   decodeNameRecord,
   decodeProfile,
   deriveName,
@@ -19,7 +18,17 @@ import {
   readShard,
   recordAddress,
 } from "./names.js";
-import { CHAINS, DEFAULTS, DEFAULT_PEER, PEER_RE, PRESETS, loadSettings, resetSettings, saveSettings } from "./settings.js";
+import {
+  CHAINS,
+  DEFAULTS,
+  DEFAULT_PEER,
+  PRESETS,
+  checkSettings,
+  dropLegacySettings,
+  loadSettings,
+  resetSettings,
+  saveSettings,
+} from "./settings.js";
 
 const ONBOARD_KEY = "lns-onboarded"; // { name } once this device has been through setup
 const WALLET_REC = "lns-wallet-device"; // wallet.js vault record (presence = a wallet exists)
@@ -38,14 +47,8 @@ const storage = (() => {
   }
 })();
 
-const isProgramId = (text) => {
-  try {
-    return base58Decode(text).length === 32;
-  } catch {
-    return false;
-  }
-};
-
+// Settings saved by older builds are dropped once (a link may have written them).
+const droppedSettings = dropLegacySettings(storage);
 let settings = loadSettings(storage);
 
 function fillSettings() {
@@ -66,19 +69,7 @@ function readSettingsForm() {
   const registry = $("registry").value.trim();
   const board = $("board").value.trim();
   const peer = $("peer").value.trim() || DEFAULT_PEER;
-  let url;
-  try {
-    url = new URL(rpc);
-  } catch {
-    return { error: "The RPC URL isn't a valid web address." };
-  }
-  if (url.protocol !== "https:" && url.protocol !== "http:") return { error: "The RPC URL must start with https://." };
-  if (!isProgramId(registry)) return { error: "The registry program isn't a valid program ID." };
-  if (!isProgramId(board)) return { error: "The board program isn't a valid program ID." };
-  if (!PEER_RE.test(peer)) {
-    return { error: "The messaging node must be a WebSocket address like /dns4/…/tcp/443/wss/p2p/…" };
-  }
-  return { value: { rpc, registry, board, peer } };
+  return checkSettings({ rpc, registry, board, peer });
 }
 
 // ---------- reading the chain (for resolving who you message) ----------
@@ -436,6 +427,25 @@ $("settings-reset").addEventListener("click", () => {
 
 // Your wallet is home — it opens there so your account + balance are the first thing,
 // not a link at the bottom. A #name link opens chat to message that name.
+// Say once that old settings were dropped, and what they pointed at, so a person who
+// chose another chain can choose it again (chats kept for that chain come back then).
+if (droppedSettings) {
+  const was = [droppedSettings.rpc && `chain ${droppedSettings.rpc}`, droppedSettings.peer && `messaging node ${droppedSettings.peer}`]
+    .filter(Boolean)
+    .join(" and ");
+  let text =
+    `This page's settings were reset to the defaults (they were set to ${was}), because a link could have set them. ` +
+    "If you chose that yourself, choose it again in About → Settings; your chats there come back when you do.";
+  if (pendingRegistration()) {
+    text +=
+      " A name claim was waiting, and it now runs against the default chain. If you started it on that other " +
+      "chain it will fail here: choose that chain again in Settings, then reload this page.";
+  }
+  const note = $("settings-notice");
+  note.textContent = text;
+  note.hidden = false;
+}
+
 const deepLink = normalizeName(decodeURIComponent(location.hash.slice(1)));
 if (pendingRegistration()) show("name"); // a claim is mid-wait — resume it
 else if (deepLink) show("chat");
