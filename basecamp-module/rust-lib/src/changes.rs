@@ -224,7 +224,7 @@ impl Registry {
     /// The record of a name and which of `held` (the open wallet's public
     /// accounts) holds it. The chain stores only the holder's tag, so each
     /// account is tried, as the CLI's `holder` does.
-    fn holder(&self, name: &str, derived: &Derived, held: &[AccountId]) -> Result<(Resolved, AccountId), String> {
+    pub(crate) fn holder(&self, name: &str, derived: &Derived, held: &[AccountId]) -> Result<(Resolved, AccountId), String> {
         let record = self.held_record(name, derived)?;
         let holder = held
             .iter()
