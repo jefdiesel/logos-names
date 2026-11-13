@@ -101,6 +101,7 @@ BRIDGE = r"""
             }
             // The bridge test network (LEZ 0.4), as bridge_net_balances answers from its last read.
             if (method === "bridge_net_balances") return ok(mock.bridgeNet || %(bridge_net)s)
+            if (method === "bridge_net_watch") return ok(args[1] ? [String(args[0])] : [])
             if (method === "activity") return ok(mock.activity || [
                 { id: "a1", at: Date.now() - 2 * 3600000, kind: "bridge", chain: "logos", from: "66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b", to: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", amount: "1000000", state: "in_block" },
                 { id: "a2", at: Date.now() - 2 * 3600000 - 120000, kind: "split", chain: "logos", from: "66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b", amount: "1000000", fee: "2018", state: "in_block" },
@@ -225,10 +226,8 @@ BRIDGE = r"""
             return ok(null)
         }
     }
-    // A "-light" scenario renders in the light theme and puts the saved theme back after.
-    property string themeBefore: ""
-    Timer { interval: 300; running: true; onTriggered: { if (%(light)s) { root.themeBefore = Theme.settings.theme; Theme.settings.theme = "light" } %(scenario)s; shot.start() } }
-    Timer { id: shot; interval: 500; onTriggered: root.grabToImage(function(result) { result.saveToFile("%(out)s"); if (root.themeBefore !== "") Theme.settings.theme = root.themeBefore; Qt.quit() }) }
+    Timer { interval: 300; running: true; onTriggered: { %(scenario)s; shot.start() } }
+    Timer { id: shot; interval: 500; onTriggered: root.grabToImage(function(result) { result.saveToFile("%(out)s"); Qt.quit() }) }
 """
 
 HOME_CHANNEL = "01" * 32
@@ -324,6 +323,7 @@ SCENARIOS = {
     "wallet-net04-down": 'root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4") })',
     "wallet-net04-never": 'root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4") })',
     "wallet-net04-reset": 'root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4") })',
+    "wallet-net04-watch": 'root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); bridgeNetWatchField.text = "Public/0OIl"; root.bridgeNetWatch(bridgeNetWatchField.text, true) })',
     "wallet-net04-activity": 'root.go("activity"); root.loadActivity()',
     "wallet-net04-send": 'root.openWallet("home"); root.openSend({ id: "lez-public", kind: "lez", title: "LEZ", definition: "", fromPrivate: false }, "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR"); sendAmount.text = "1000"',
     "wallet-waiting": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home")',
@@ -458,6 +458,8 @@ MOCKS = {
     "welcome-moved": {"private": "5000000", "public": "1000000"},
     "pay-account": {"private": "250000000", "public": "1250000"},
     "wallet-down": {"nodeDown": True},
+    "wallet-net04-watch": {"bridgeNet": dict(NET04, watched=["Public/BVDcg8SbSdCTKzx4mJbSpVgEuaoPEMhxmmRwvVCGyBnD"], read=dict(NET04_READ, accounts=NET04_READ["accounts"] + [
+        {"account": "Public/BVDcg8SbSdCTKzx4mJbSpVgEuaoPEMhxmmRwvVCGyBnD", "found": True, "native": "99799912984428", "tokens": net04_held("0", "0"), "other_tokens": 0, "watched": True}]))},
     "wallet-net04-down": {"bridgeNet": dict(NET04, error="can't reach the bridge test network: it answered HTTP 502 instead of a reading")},
     "wallet-net04-never": {"bridgeNet": dict(NET04, read=None, error="can't reach the bridge test network: timed out")},
     "wallet-net04-reset": {"bridgeNet": dict(NET04, read=dict(NET04_READ, height=12, reset_at=1791999000,
@@ -509,12 +511,14 @@ def main():
             "bridge_key": "" if scenario == "get-tokens" else "8e3b0f4a2c71d95e6a0b4c8d2f1e7a3954c6b0d8e2f4a6c8b0d2e4f6a8c0b2d4",
             "home_channel": HOME_CHANNEL,
             "bridge_net": json.dumps(NET04),
-            "light": "true" if scenario.endswith("-light") else "false",
             "scenario": (SCENARIOS[scenario] % dict(filled, zone_request=zone_request(scenario == "approve-zone"))) if "%(zone" in SCENARIOS[scenario] else SCENARIOS[scenario], "out": out, "height": 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "name", "settings-accounts", "settings-oldcli", "settings-account-new", "settings-network") or scenario.startswith("settings-zones") else 1100 if scenario.startswith("approve-") and "zone" in scenario else 1500 if scenario.startswith("get-tokens") or scenario.startswith("wallet") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1100 if scenario.startswith("inscribe") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
         }
         # Beside Main.qml, so its relative imports (logic.mjs) resolve.
         with tempfile.NamedTemporaryFile("w", suffix=".qml", delete=False, dir=os.path.join(HERE, "..", "qml")) as handle:
-            handle.write(source.replace(marker, marker + bridge, 1))
+            # A "-light" scenario reads the light palette directly. Never through Theme.settings:
+            # that is design-system.ini, shared by every Logos app and render on the machine.
+            themed = source.replace("Theme.palette", "Theme.lightTheme").replace("Theme.isDark", "false") if scenario.endswith("-light") else source
+            handle.write(themed.replace(marker, marker + bridge, 1))
         try:
             result = subprocess.run([qml, handle.name], capture_output=True, text=True, timeout=60)
         except subprocess.TimeoutExpired:

@@ -580,6 +580,13 @@ pub trait NamesModule: Send + 'static {
     /// the History as `arrived` entries with `chain` `lez-0.4`. Nothing is sent. Names app only.
     fn bridge_net_balances(&mut self, accounts: String) -> String;
 
+    /// Adds (`watch`) or removes a public account (`Public/<id>` or a bare ID, 32 bytes in
+    /// base58) from the accounts `bridge_net_balances` also reads, besides the ones it is given:
+    /// any public account, the wallet's or not (at most 8). Gives the list, `["Public/<id>"]`.
+    /// An account the network has never seen reads as `found` false. Watched rows carry
+    /// `watched` and never go to the History. Kept on this device. Names app only.
+    fn bridge_net_watch(&mut self, account: String, watch: bool) -> String;
+
     /// The Wallet's history, newest first: what this app sent on either chain (followed
     /// until it settles: `sending`, `in_block`, `arrived` for a bridge credited on LEZ,
     /// `done`/`failed` for a LEZ job) and money seen arriving (`arrived`: a balance that
@@ -3631,14 +3638,32 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         reply((|| {
-            let (accounts, private) = bridge_net::accounts_asked(&accounts)?;
+            let (mut accounts, private) = bridge_net::accounts_asked(&accounts)?;
             let dir = config_dir().ok_or("no folder for the Wallet's files")?;
+            // The watched accounts come after the wallet's own, once each.
+            let watched: Vec<AccountId> = bridge_net::watched(&dir).iter().filter_map(|text| bridge_net::public_account(text).ok()).collect();
+            let own = accounts.len();
+            for account in &watched {
+                if !accounts.contains(account) {
+                    accounts.push(*account);
+                }
+            }
+            let watched_now: Vec<String> = accounts[own..].iter().map(|id| format!("Public/{}", registry::account_text(id))).collect();
             // One constant names the network; a test or a trial of a new chain may point
             // elsewhere for one run.
             let url = std::env::var("LOGOS_NAMES_BRIDGE_RPC").ok().filter(|url| !url.trim().is_empty()).unwrap_or_else(|| bridge_net::RPC.to_owned());
             let key = format!("bridge-net:{url}:{}", accounts.iter().map(registry::account_text).collect::<Vec<_>>().join(","));
             let (fetch_url, fetch_dir) = (url.clone(), dir.clone());
-            let read = self.read_in_background(key, bridge_net::EVERY, move || bridge_net::read(&fetch_url, &accounts, &fetch_dir, now()));
+            let marked = watched_now.clone();
+            let read = self.read_in_background(key, bridge_net::EVERY, move || {
+                let mut read = bridge_net::read(&fetch_url, &accounts, &fetch_dir, now())?;
+                for row in read["accounts"].as_array_mut().into_iter().flatten() {
+                    if row["account"].as_str().is_some_and(|account| marked.iter().any(|m| m == account)) {
+                        row["watched"] = Value::Bool(true);
+                    }
+                }
+                Ok(read)
+            });
             // Each read's balances go to the History once.
             if let Some(at) = read["value"]["read_at"].as_u64() {
                 if bridge_net::LAST_NOTED.fetch_max(at, std::sync::atomic::Ordering::SeqCst) < at {
@@ -3653,7 +3678,18 @@ impl NamesModule for Names {
                 "updating": read["updating"],
                 "error": read["error"],
                 "private_accounts": private,
+                "watched": watched_now,
             }))
+        })())
+    }
+
+    fn bridge_net_watch(&mut self, account: String, watch: bool) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let dir = config_dir().ok_or("no folder for the Wallet's files")?;
+            Ok(Value::from(bridge_net::watch(&dir, &account, watch)?))
         })())
     }
 
@@ -6720,6 +6756,20 @@ mod tests {
         assert_eq!((account["native"].as_str(), account["tokens"][1]["symbol"].as_str(), account["tokens"][1]["amount"].as_str()), (Some("23786858"), Some("wETH"), Some("100000000000000000")), "{value}");
         assert_eq!(value["read"]["accounts"].as_array().map(Vec::len), Some(1), "the private account isn't read");
         assert!(parsed(&names.bridge_net_balances("[\"Public/abc\"]".into()))["error"].as_str().unwrap().contains("public account"));
+        // A watched account that isn't the wallet's: read too, marked, nothing there.
+        let unseen = "4wBqpZM9xaSheZzJSMawUKKwhdpChKbZ5eu5ky4Vigw";
+        assert_eq!(parsed(&names.bridge_net_watch(unseen.into(), true))["value"], json!([format!("Public/{unseen}")]));
+        let mut value = parsed(&names.bridge_net_balances(asked.clone()))["value"].clone();
+        for _ in 0..100 {
+            if value["read"]["accounts"].as_array().is_some_and(|rows| rows.len() == 2) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            value = parsed(&names.bridge_net_balances(asked.clone()))["value"].clone();
+        }
+        let row = &value["read"]["accounts"][1];
+        assert_eq!((row["account"].as_str(), row["found"].as_bool(), row["watched"].as_bool()), (Some(&*format!("Public/{unseen}")), Some(false), Some(true)), "{value}");
+        assert_eq!(parsed(&names.bridge_net_watch(unseen.into(), false))["value"], json!([]));
         as_caller(logos_rust_sdk::LogosCaller::Module { name: "evil_ui".into(), instance: None });
         assert_eq!(parsed(&names.bridge_net_balances(asked))["success"], false);
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);

@@ -647,6 +647,25 @@ Item {
         })
     }
 
+    property string bridgeNetWatchProblem: ""
+
+    /// Watches (or stops watching) a public account on the bridge test network.
+    function bridgeNetWatch(account, on) {
+        var problem = on ? Logic.publicIdProblem(account) : ""
+        if (problem !== "") {
+            bridgeNetWatchProblem = problem
+            return
+        }
+        askLater("bridge_net_watch", [String(account).trim(), on], function() {
+            bridgeNetWatchProblem = ""
+            if (on)
+                bridgeNetWatchField.text = ""
+            loadBridgeNet()
+        }, function(message) {
+            bridgeNetWatchProblem = sentence(message)
+        })
+    }
+
     /// Switches the Wallet's balances to network `net` ("0.3" or "0.4").
     function setWalletNet(net) {
         walletNet = net
@@ -4500,7 +4519,7 @@ Item {
             Layout.preferredWidth: root.px(18)
             horizontalAlignment: Text.AlignHCenter
             text: act.line.sign === "+" ? "↓" : act.line.sign === "-" ? "↑" : "⇄"
-            color: act.line.sign === "+" ? root.good : root.dim
+            color: act.line.sign === "+" && !act.line.quiet ? root.good : root.dim
             font.family: root.sans
             font.pixelSize: root.px(act.small ? 14 : 16)
         }
@@ -4529,7 +4548,7 @@ Item {
                 Layout.alignment: Qt.AlignRight
                 visible: act.line.amount !== ""
                 text: root.walletHidden ? "••••••" : act.line.sign + act.line.amount
-                color: act.line.sign === "+" ? root.good : root.ink
+                color: act.line.sign === "+" && !act.line.quiet ? root.good : root.ink
                 font.family: root.sans
                 font.weight: Font.DemiBold
                 font.pixelSize: root.px(act.small ? 14 : 15)
@@ -5603,7 +5622,7 @@ Item {
                             Text { Layout.fillWidth: true; text: "Bridge test network"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
                             Text { text: "LEZ 0.4 · read only"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
                         }
-                        Hint { font.pixelSize: root.px(15); text: "The bridge's own chain, where bridged Sepolia tokens arrive. It is reset now and then." }
+                        Hint { font.pixelSize: root.px(15); text: "Our own chain for the bridge, where bridged Sepolia tokens arrive. It is reset now and then." }
                         Hint {
                             font.pixelSize: root.px(15)
                             color: root.bridgeNetStatusNow.tone === "bad" ? root.alarm : root.bridgeNetStatusNow.tone === "warn" ? root.brass : root.dim
@@ -5633,7 +5652,9 @@ Item {
                                 RowLayout {
                                     Layout.fillWidth: true
                                     Layout.topMargin: 4
+                                    spacing: 14
                                     Text { Layout.fillWidth: true; text: netAccount.modelData.title; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); font.weight: Font.DemiBold }
+                                    Link { visible: netAccount.modelData.watched; text: "Stop watching"; color: root.dim; font.pixelSize: root.px(14); onPressed: root.bridgeNetWatch(netAccount.modelData.account, false) }
                                     Link { text: "Copy"; color: root.dim; font.pixelSize: root.px(14); onPressed: root.copy(netAccount.modelData.account, "The account ID") }
                                 }
                                 Hint { visible: !netAccount.modelData.found; font.pixelSize: root.px(15); text: "Nothing on this network." }
@@ -5664,6 +5685,14 @@ Item {
                             }
                         }
                         Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: root.line }
+                        // Any public account can be watched here, the wallet's or not.
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 10
+                            Field { id: bridgeNetWatchField; Layout.fillWidth: true; size: 15; code: true; hint: "Watch a public account: paste its ID"; onAccepted: root.bridgeNetWatch(bridgeNetWatchField.text, true) }
+                            Action { label: "Watch"; onPressed: root.bridgeNetWatch(bridgeNetWatchField.text, true) }
+                        }
+                        Hint { visible: root.bridgeNetWatchProblem !== ""; font.pixelSize: root.px(14); color: root.alarm; text: root.bridgeNetWatchProblem }
                         Hint { font.pixelSize: root.px(14); text: "Private balances on the bridge test network are not shown yet." }
                         Hint { font.pixelSize: root.px(14); text: "Sending on the bridge test network isn't in the wallet yet." }
                     }
@@ -6591,6 +6620,7 @@ Item {
                     Layout.maximumWidth: 680
                     spacing: 12
                     Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
+                    RunsOn { net: accountPage.row !== null && accountPage.row.kind === "chain" ? "chain" : "0.3" }
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: root.px(14)

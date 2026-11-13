@@ -68,6 +68,39 @@ pub static LAST_NOTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 
 /// What the state file next to the History remembers between reads and runs.
 const STATE_FILE: &str = "bridge-net.json";
+/// The accounts the person asked to watch here, besides the wallet's own.
+const WATCH_FILE: &str = "bridge-net-watch.json";
+/// The most accounts watched.
+pub const MAX_WATCHED: usize = 8;
+
+/// The accounts watched on the bridge test network, `Public/<id>`, in the order added.
+pub fn watched(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join(WATCH_FILE))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Vec<String>>(&text).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|text| public_account(&text).ok().map(|id| format!("Public/{}", registry::account_text(&id))))
+        .take(MAX_WATCHED)
+        .collect()
+}
+
+/// Adds (`on`) or removes a public account from the watched ones; gives the list. Any public
+/// account ID can be watched: one the network has never seen reads as nothing there.
+pub fn watch(dir: &Path, text: &str, on: bool) -> Result<Vec<String>, String> {
+    let account = format!("Public/{}", registry::account_text(&public_account(text)?));
+    let mut list = watched(dir);
+    list.retain(|item| *item != account);
+    if on {
+        if list.len() >= MAX_WATCHED {
+            return Err(format!("at most {MAX_WATCHED} accounts can be watched; stop watching one first"));
+        }
+        list.push(account);
+    }
+    std::fs::create_dir_all(dir).map_err(|error| format!("can't keep the list: {error}"))?;
+    crate::cli::write_private(&dir.join(WATCH_FILE), Value::from(list.clone()).to_string().as_bytes()).map_err(|error| format!("can't keep the list: {error}"))?;
+    Ok(list)
+}
 
 /// The Config's address: `SHA256(PDA prefix ‖ program ‖ seed)`.
 pub fn config_address(program: &AccountId) -> AccountId {
@@ -437,7 +470,9 @@ pub fn marks(read: &Value) -> Option<Vec<(String, Vec<(String, u128)>, Option<Va
         return None;
     }
     let channel = read["channel"].as_str()?;
-    let accounts = read["accounts"].as_array()?;
+    // Only the wallet's own accounts go to its History, not the ones it watches.
+    let own: Vec<Value> = read["accounts"].as_array()?.iter().filter(|a| a["watched"] != true).cloned().collect();
+    let accounts = &own;
     let mut out = vec![(
         channel.to_owned(),
         accounts.iter().filter_map(|a| Some((a["account"].as_str()?.to_owned(), a["native"].as_str()?.parse().ok()?))).collect(),
@@ -661,6 +696,27 @@ mod tests {
         assert!(why.starts_with("can't reach the bridge test network"), "{why}");
         assert!(!dir.join(STATE_FILE).exists(), "nothing remembered from a failed read");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn watched_accounts_are_kept_checked_and_bounded() {
+        let dir = scratch("watch");
+        assert_eq!(watch(&dir, OWNER, true).unwrap(), vec![format!("Public/{OWNER}")]);
+        assert_eq!(watch(&dir, &format!(" Public/{OWNER} "), true).unwrap(), vec![format!("Public/{OWNER}")], "once");
+        assert!(watch(&dir, "abc", true).is_err());
+        assert!(watch(&dir, &format!("Private/{UNSEEN}"), true).is_err());
+        assert_eq!(watch(&dir, UNSEEN, true).unwrap().len(), 2);
+        assert_eq!(watch(&dir, OWNER, false).unwrap(), vec![format!("Public/{UNSEEN}")]);
+        assert_eq!(watched(&dir), vec![format!("Public/{UNSEEN}")]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn watched_rows_stay_out_of_the_history() {
+        let read = json!({ "channel": CHANNEL, "read_at": 5, "token_problem": null, "tokens": [],
+            "accounts": [{ "account": "Public/A", "native": "1", "tokens": [] }, { "account": "Public/B", "native": "2", "tokens": [], "watched": true }] });
+        let marks = marks(&read).unwrap();
+        assert_eq!(marks[0].1, vec![("Public/A".to_owned(), 1)]);
     }
 
     /// The real network, through the real HTTPS client: reads only. Run by hand with

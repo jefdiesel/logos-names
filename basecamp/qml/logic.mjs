@@ -537,7 +537,12 @@ export function activityLine(entry, now, account) {
         sub += (sub ? " · " : "") + "zone " + e.zone_name
     else if (e.zone_name === null && e.zone)
         sub += (sub ? " · " : "") + "a zone removed since"
-    return { title: title, sub: sub, amount: amount, sign: amount === "" ? "" : sign, state: stateText, tone: tone, ago: agoShown(e.at, now) }
+    // The bridge test network's rows are new UI: told in ink, never in green (`quiet`).
+    var quiet = e.chain === "lez-0.4"
+    if (quiet && tone === "good") tone = "plain"
+    var line = { title: title, sub: sub, amount: amount, sign: amount === "" ? "" : sign, state: stateText, tone: tone, ago: agoShown(e.at, now) }
+    if (quiet) line.quiet = true
+    return line
 }
 
 /// Whether entry `e`'s money landed: a change done, a bridge arrived on LEZ, a Logos
@@ -727,6 +732,16 @@ export function publicAccounts(cliBalance, accounts) {
     return out
 }
 
+/// Why `text` isn't a public account ID to watch, or "": base58 of 32 to 44 characters,
+/// with an optional `Public/`. The module checks it decodes to exactly 32 bytes.
+export function publicIdProblem(text) {
+    var id = String(text === null || text === undefined ? "" : text).trim()
+    if (id === "") return "Paste a public account ID."
+    if (/^Private\//.test(id)) return "A private account can't be read on the bridge test network yet."
+    id = id.replace(/^Public\//, "")
+    return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(id) ? "" : "That isn't a public account ID: 32 to 44 letters and digits, without 0, O, I or l."
+}
+
 /// `digits` base units (decimal text) shown with `decimals` places, trailing zeros cut:
 /// `100000000000000000`, 18 → `0.1`; `123456789`, 6 → `123.456789`; whole part grouped.
 export function decimalShown(digits, decimals) {
@@ -774,6 +789,7 @@ export function bridgeNetRows(read) {
                 assets.push({ symbol: String(t.symbol || ""), name: t.name ? String(t.name) : "Bridged token", amount: decimalShown(t.amount, t.decimals) })
             })
         }
-        return { account: a.account, title: "Public account " + keyShown(String(a.account || "").replace(/^Public\//, "")), found: !!a.found, other: Number(a.other_tokens) || 0, assets: assets }
+        var id = keyShown(String(a.account || "").replace(/^Public\//, ""))
+        return { account: a.account, title: (a.watched ? "Watched account " : "Public account ") + id, found: !!a.found, watched: !!a.watched, other: Number(a.other_tokens) || 0, assets: assets }
     })
 }
