@@ -42,15 +42,17 @@ const tools = [
     description:
       "Look up a Logos name. Returns whether it can be paid privately, its public account " +
       "if the holder chose to publish one, and its text entries (such as chat, inbox and " +
-      "agent). By default a name is paid privately with `names pay <name>`, and nobody, the " +
-      "payer included, learns the account behind it; a published public account shows its " +
+      "agent). By default a name is paid privately with `names pay <name>`, and the chain shows " +
+      "neither recipient nor amount, but anyone who resolves the name can work out which " +
+      "private account its receiving keys belong to; a published public account shows its " +
       "balance and history to anyone. " +
       "A name held by a deposit never expires: its `expires` is null. Otherwise names expire: " +
       "`expires` is when, in milliseconds since the Unix epoch, and `lapsed` is " +
       "true once that has passed and the name is in its 30-day grace period, after which it " +
       "is no longer registered. Do not pay a lapsed name without the user knowing it has lapsed. " +
-      "Looking a name up reveals nothing to the chain, which never sees names, and who holds " +
-      "a name is not public: the chain keeps only a tag of the holder's account.",
+      "The chain never stores names, but the RPC this tool asks sees which record is looked " +
+      "up (and so the name, if it can guess it) and could answer falsely; any name that can be " +
+      "guessed can be found. A record keeps only a tag of the holder's account, not the account.",
     inputSchema: nameArgument,
     async run({ name: typed }) {
       const name = requireName(typed);

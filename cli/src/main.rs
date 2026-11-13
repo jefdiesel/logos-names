@@ -388,8 +388,9 @@ enum Command {
         name: String,
     },
     /// Pay a name. By default the payment goes to the name's private receiving keys:
-    /// nobody, the payer included, learns the account behind the name, and the chain
-    /// shows neither recipient nor amount; proving it takes a few minutes. With
+    /// the chain shows neither recipient nor amount, though anyone who resolves the
+    /// name can work out which private account those keys belong to; proving it takes
+    /// a few minutes. With
     /// `--public`, or when the name has only a public account, it is an ordinary
     /// public transfer to that account.
     Pay {
@@ -1000,7 +1001,7 @@ impl Client {
                 readable(ready)
             );
             println!(
-                "  it waits until the commitment is {} minutes old, so nobody who saw it can take the name first,",
+                "  it waits until the commitment is {} minutes old, so someone who sees the reveal can't take the name first,",
                 MIN_COMMIT_AGE_MS / 60_000
             );
             println!("  then proves the last step on this computer (about 4 minutes); keep this computer on and awake");

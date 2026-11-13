@@ -10,14 +10,18 @@ on the chain in the clear; version 2 keeps neither.
 
 ## 1. What is private and what is not
 
-The registry is built so that knowing a name is the only way to find it.
+The registry never stores a name, so finding one means knowing or guessing it.
+Guessing is cheap for short and common names (below).
 
 - **The chain never sees a name.** Every instruction, account address and
   event uses a 32-byte identifier derived from the name (section 3).
 - **What a name resolves to is sealed**: encrypted under a key that is also
   derived from the name (section 5). The registry program stores the bytes and
   cannot read them.
-- **There is no list of names** and nothing links one record to another.
+- **The chain keeps no list of names.** Record addresses can still be listed by
+  scanning blocks, and a guessed name can be checked against them. A record's
+  owner tag doesn't link it to the holder's other records, but a public holder,
+  or receiving keys shared between names, can.
 
 What this does not hide:
 
@@ -54,7 +58,9 @@ What this does not hide:
   Only a private-account holder is hidden. Whoever serves the RPC, holding a
   dictionary of name identifiers, can also tell which names a client looks up.
 - **The connection.** Whoever serves the sequencer's RPC sees which record
-  addresses a client reads and from where, though not the names.
+  addresses a client reads and from where, and so which names, for any name it
+  can guess. It can also lie: nothing in its answer is authenticated, so a lying
+  RPC can make a name resolve to keys or an account of its choosing.
 - **Clients never tie a name to an account.** A conforming client sets only
   `npk` and `vpk` in a profile, never `account`; pays a name only through its
   receiving keys; never displays an address or the keys behind a name; and
