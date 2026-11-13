@@ -106,13 +106,20 @@ pub fn accounts(setup: &Setup) -> Result<Held, String> {
 }
 
 /// The keys others use to pay the private account `choice`: an account ID, or
-/// `auto` for the wallet's first one, made if it has none.
+/// `auto` for a new private account the CLI makes (and saves) for this call.
 pub fn private_keys(setup: &Setup, choice: &str) -> Result<([u8; 32], Vec<u8>), String> {
+    receiving_keys(setup, choice).map(|(_, npk, vpk)| (npk, vpk))
+}
+
+/// As [`private_keys`], with the account the keys belong to: for `auto`, the one
+/// the CLI just made, which a registration remembers so a retry reuses it.
+pub fn receiving_keys(setup: &Setup, choice: &str) -> Result<(AccountId, [u8; 32], Vec<u8>), String> {
     let keys = answer(&cli::run_text(setup, request(&["keys", "--", choice.trim()]), LOOK)?)?;
     let read = |field: &str| keys[field].as_str().and_then(|text| registry::unhex(text).ok());
     let npk = read("npk").and_then(|bytes| <[u8; 32]>::try_from(bytes).ok());
-    match (npk, read("vpk")) {
-        (Some(npk), Some(vpk)) => Ok((npk, vpk)),
+    let account = keys["account"].as_str().and_then(|text| registry::parse_account(text).ok());
+    match (account, npk, read("vpk")) {
+        (Some(account), Some(npk), Some(vpk)) => Ok((account, npk, vpk)),
         _ => Err("the names CLI did not give that account's receiving keys".to_owned()),
     }
 }

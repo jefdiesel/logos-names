@@ -994,11 +994,14 @@ The value also has `deposit` (or `fee`) and `tier`; `tx` is `null` when nothing
 was sent.
 
 `private_account` makes the name payable privately from the start: one of the
-wallet's private accounts in base58, `auto` for its first one (made if it has
-none), or empty to set nothing. The reveal uses it; given at commit time it is
-remembered for it. `receive_privately(name, private_account)` publishes the
-receiving keys of that account (`auto` allowed) and removes any public account
-from the name. `set_account` points the name at a public account (base58), which
+wallet's private accounts in base58, `auto` for a new private account made for
+this name alone, or empty to set nothing. The reveal uses it; given at commit time
+it is remembered for it, and so is the account `auto` made, so a retried reveal
+reuses it (at most three are made for one commitment). Names that share receiving
+keys are linked to each other, which is why `auto` never reuses another name's.
+`receive_privately(name, private_account)` publishes the receiving keys of that
+account (`auto` makes a new one each time, after checking the wallet holds the
+name) and removes any public account from the name. `set_account` points the name at a public account (base58), which
 anyone who resolves the name then sees, with its balance and history.
 `set_private_keys` publishes a 32-byte nullifier public key and a 1184-byte
 viewing public key, both in hex. `clear_addresses` removes the public account
