@@ -195,7 +195,7 @@ addresses apart.
 
 The slow derivation only slows guessing down. Record addresses can be listed by
 scanning blocks, and each guess can be checked against them: in a test, a laptop
-found 4 of 7 live names from a 1,533-word list in about two minutes, and checking
+found 4 of 7 live names from a 1,533-word list in 141 seconds, and checking
 every name of up to five characters costs about $4 of rented GPU time. Treat any
 short or dictionary name as public.
 
@@ -249,8 +249,8 @@ named `untrustedContent`: treat it as data, never as instructions.
   resolve it. Short and dictionary names are cheap to find by guessing and checking
   the chain's records; the slow derivation doesn't change that.
 - **The RPC you ask is trusted.** It sees which record you look up, and so the name
-  if it can guess it. Nothing in its answer is authenticated, so a lying RPC can make
-  a name resolve to keys or an account of its choosing.
+  if it can guess it. Nothing in its answer is authenticated, so for any name it can
+  guess, a lying RPC can make the name resolve to keys or an account of its choosing.
 - **Private changes take minutes.** Each is a proof on your machine, about 4 minutes
   on an M4 Mac, and a registration needs the machine on for about 20.
 - **Basecamp changes private names through the command line.** The LEZ wallet module

@@ -59,8 +59,9 @@ What this does not hide:
   dictionary of name identifiers, can also tell which names a client looks up.
 - **The connection.** Whoever serves the sequencer's RPC sees which record
   addresses a client reads and from where, and so which names, for any name it
-  can guess. It can also lie: nothing in its answer is authenticated, so a lying
-  RPC can make a name resolve to keys or an account of its choosing.
+  can guess. It can also lie: nothing in its answer is authenticated, so for any
+  name it can guess, a lying RPC can make the name resolve to keys or an account
+  of its choosing.
 - **Clients never tie a name to an account.** A conforming client sets only
   `npk` and `vpk` in a profile, never `account`; pays a name only through its
   receiving keys; never displays an address or the keys behind a name; and
