@@ -129,9 +129,9 @@ Privacy
  • Public: the programs it runs (3), the public accounts it reaches and the changes above, the fee reserve, and the time.
  • Public: the one-time address B8UnZG…i3wT and what it receives. Nobody can tell it is yours.
  • Private: Private/2if1…, its balance, and the message to it (proven, not shown).
- • Checked: your account's ID appears nowhere in what becomes public.
+ • Checked: your account's ID appears nowhere in the public state and events this call leaves (the messages between programs aren't checked).
 Data: 6,595 bytes, proven, not published
-Proving runs on this computer: about 11 minutes and about 9.5 GB … pause or cancel until it is sent.
+Proving runs on this computer: about 11 minutes and about 9.5 GB …
 The app describes it as: "…" (its own words, not checked)
 ```
 (Golden test `the_claim_sheet_says_what_the_simulation_shows`; the live e2e numbers are in
@@ -143,8 +143,11 @@ again and **refuses unless the digest equals the one the person approved**, chec
 wallet's pre-check hook that the proof starts from the simulated account states, then proves,
 sends and waits for the block. Phases print `phase: plan|simulate|prove|submit|confirm`; the
 module follows them (`request_status.phase`). Pause (SIGSTOP), resume and cancel (TERM, then
-KILL) act on the job's process group until `submit` (`private_call_control`; an app's
-`cancel_request` too). One wallet job at a time, as for every job.
+KILL) act on the job's process group until `submit` (module method `private_call_control`; an
+app's `cancel_request` too). **The Names app has no buttons for them yet** (to do). `submit` is
+printed only after the wallet has proven and handed the transaction over, so a cancel late in
+proving may come after it went; the request then says it may have been sent. One wallet job at
+a time, as for every job.
 
 **Abuse cases.** A mini-app asking to prove a drain: the replay shows the debit, the sheet
 shows "pays N", and the rule refuses it unless the app declared it (then the person sees exactly

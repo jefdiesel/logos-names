@@ -5063,7 +5063,7 @@ impl NamesModule for Names {
                 let app = request["app"].as_str().unwrap_or_default().to_owned();
                 let granted = store.granted(&app);
                 let kind = request["kind"].as_str().unwrap_or_default().to_owned();
-                if kind == provider::TRANSFER || kind == provider::CALL {
+                if kind == provider::TRANSFER || kind == provider::CALL || kind == provider::PRIVATE_CALL {
                     // Which zone it was asked for, as it is called now, and whether that
                     // is the one in use (it can only be approved there).
                     let asked = request["zone"].as_str().unwrap_or(zones::HOME).to_owned();
@@ -6030,7 +6030,9 @@ impl Names {
                 });
                 stored["state"] = json!("cancelled");
                 stored["decided"] = json!(now);
-                stored["error"] = json!("cancelled before it was sent; nothing was sent");
+                // `submit` is printed only once the wallet has proven and handed it over, so a
+                // cancel late in proving may come after it went: never say nothing was sent.
+                stored["error"] = json!("cancelled while it was being proven; if the proof had just finished it may still have been sent, so check the account before asking again");
             }
             _ => return Err("the action is pause, resume or cancel".to_owned()),
         }
@@ -8772,6 +8774,178 @@ mod tests {
         assert_eq!((status["state"].as_str(), status["error"].as_str()), (Some("failed"), Some("the wallet couldn't send it")), "{status}");
         assert!(approve(&mut names, &id, &format!("Public/{PUBLIC}"))["error"].as_str().unwrap().contains("failed already"));
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ── Private calls and app secrets (provider_private.rs) ─────────────
+
+    /// Asks `ask` until `done` holds of its value.
+    fn waited(names: &mut Names, ask: impl Fn(&mut Names) -> String, done: impl Fn(&Value) -> bool) -> Value {
+        for _ in 0..200 {
+            let answer = parsed(&ask(names));
+            if done(&answer["value"]) {
+                return answer["value"].clone();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("it never got there");
+    }
+
+    #[test]
+    fn an_app_gets_its_secrets_only_after_the_person_approves_and_only_its_own() {
+        let values = format!("[\"{}\",\"{}\"]", "ab".repeat(32), "cd".repeat(32));
+        let tail = format!(
+            "case \"$*\" in\n\
+             *\"module app-secret\"*) cat > \"$(dirname \"$0\")/secret-in.json\"; echo '{{\"account\":\"Private/{PRIVATE}\",\"values\":{values}}}' ;;\n\
+             esac"
+        );
+        let (mut names, dir) = with_wallet("provider-secret", &tail);
+        let account = format!("Private/{PRIVATE}");
+        connect(&mut names, "lez_bridge", &account);
+        as_caller(app("lez_bridge"));
+        let ask = |names: &mut Names| names.app_secret(account.clone(), "RFP022/deposit".into(), "abcd".into(), "RFP022/ck".into(), 0, 2);
+        let first = parsed(&ask(&mut names))["value"].clone();
+        assert_eq!(first["granted"], false, "{first}");
+        assert_eq!(first["request"]["kind"], "secret");
+        assert!(!dir.join("secret-in.json").exists(), "nothing is derived before the person approves");
+        // Asking again gives the same request, not a second prompt.
+        assert_eq!(parsed(&ask(&mut names))["value"]["request"]["request"], first["request"]["request"]);
+        let id = first["request"]["request"].as_str().unwrap().to_owned();
+        // The Names app sees what the app gets, and approves it with the account it names.
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let pending = parsed(&names.pending_requests())["value"].clone();
+        let shown = pending.as_array().unwrap().iter().find(|r| r["id"] == id.as_str()).unwrap().clone();
+        assert!(shown["explanation"].as_str().unwrap().contains("never the account's key"), "{shown}");
+        assert_eq!(shown["choices"], json!([{ "account": account, "account_kind": "private", "pays": false, "label": "the account the app asked for", "granted": true }]));
+        assert!(approve(&mut names, &id, &format!("Public/{PUBLIC}"))["error"].as_str().unwrap().contains("the account it names"));
+        assert_eq!(approve(&mut names, &id, &account)["value"]["state"], "approved");
+        as_caller(app("lez_bridge"));
+        let got = parsed(&ask(&mut names))["value"].clone();
+        assert_eq!(got["granted"], true, "{got}");
+        assert_eq!(got["values"], json!(["ab".repeat(32), "cd".repeat(32)]));
+        // The CLI was told the caller's name, not anything the app passed.
+        let sent: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("secret-in.json")).unwrap()).unwrap();
+        assert_eq!((sent["app"].as_str(), sent["scope"].as_str(), sent["context"].as_str(), sent["count"].as_u64()), (Some("lez_bridge"), Some("RFP022/deposit"), Some("abcd"), Some(2)));
+        // Another app, even one given the same account, must ask for its own.
+        connect(&mut names, "other_ui", &account);
+        as_caller(app("other_ui"));
+        assert_eq!(parsed(&names.app_secret(account.clone(), "RFP022/deposit".into(), "abcd".into(), "RFP022/ck".into(), 0, 2))["value"]["granted"], false);
+        // An account the app wasn't given is refused; a taken-back grant asks again.
+        as_caller(app("lez_bridge"));
+        assert!(parsed(&names.app_secret(format!("Public/{PUBLIC}"), "RFP022/deposit".into(), "".into(), "t".into(), 0, 1))["error"].as_str().unwrap().contains("wasn't given"));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert_eq!(parsed(&names.revoke_secret("lez_bridge".into(), account.clone(), "RFP022/deposit".into()))["value"]["revoked"], true);
+        as_caller(app("lez_bridge"));
+        assert_eq!(parsed(&ask(&mut names))["value"]["granted"], false);
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_private_call_is_simulated_shown_and_sent_only_as_approved() {
+        let report = include_str!("../testdata/bridge-claim-leaf1.report.json").replace("2if1EJVcZwFT3oXxF4uewB2mk2XDXpmCWwTtBwUQ6HUC", PRIVATE);
+        let report: Value = serde_json::from_str(&report).unwrap();
+        let digest = report["digest"].as_str().unwrap().to_owned();
+        let tail = format!(
+            "case \"$*\" in\n\
+             *\"private-call plan\"*) cat > \"$(dirname \"$0\")/plan-in.json\"; echo 'phase: simulate'; echo '{}' ;;\n\
+             *\"private-call send\"*) for a in \"$@\"; do case \"$a\" in --input=*) cp \"${{a#--input=}}\" \"$(dirname \"$0\")/sent.json\" ;; esac; done; echo 'phase: prove'; echo 'phase: submit'; echo 'submitted feedbeef'; echo 'applied in block 9' ;;\n\
+             esac",
+            json!({ "report": report })
+        );
+        let (mut names, dir) = with_wallet("provider-private-call", &tail);
+        let account = format!("Private/{PRIVATE}");
+        let (bridge, token, attest, dusdc) = (
+            "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7",
+            "4VScJ7mtwaanQ5gcSZZw2iAMHYAbLrVmbYKwEGx2eSex",
+            "4VhxvwLN5n3u3rZbsz2VNFVavLwc1niNvgxq8JJ15veK",
+            "FBqNAwJs9T4eNDw9pQXxXrLZNcnR1sTnnBEYzhudLQZJ",
+        );
+        let call = json!({
+            "programs": [bridge, token, attest],
+            "accounts": [
+                { "seed": "11".repeat(32), "of": attest, "program": attest },
+                { "seed": "22".repeat(32), "of": bridge },
+                { "account": dusdc, "program": token },
+                { "actor": "account", "program": token, "openings": true },
+                { "actor": "account", "program": "native", "openings": true },
+            ],
+            "message": "07".repeat(6595),
+            "openings": ["33".repeat(32)],
+            "fee_payer": "account",
+            "declared": { "credits": [{ "asset": dusdc, "amount": "100000000" }], "max_fee": "20000000" },
+        });
+        // Not before access, and only from an account the app was given.
+        as_caller(app("lez_bridge"));
+        assert!(parsed(&names.propose_private_call(account.clone(), call.to_string(), String::new()))["error"].as_str().unwrap().contains("request_access"));
+        connect(&mut names, "lez_bridge", &format!("Public/{PUBLIC}"));
+        as_caller(app("lez_bridge"));
+        assert!(parsed(&names.propose_private_call(account.clone(), call.to_string(), String::new()))["error"].as_str().unwrap().contains("wasn't given"));
+        connect(&mut names, "lez_bridge", &account);
+        as_caller(app("lez_bridge"));
+        let asked = parsed(&names.propose_private_call(account.clone(), call.to_string(), "Claim 100 dUSDC".into()))["value"].clone();
+        let id = asked["request"].as_str().unwrap().to_owned();
+        assert_eq!(asked["check"], "running", "{asked}");
+        // The simulation ends; the app sees only that it is ready, never what it found.
+        let status = waited(&mut names, |names| names.request_status(id.clone()), |v| v["check"] == "ready");
+        assert!(status.get("report").is_none() && status.get("sheet").is_none() && status.get("message").is_none(), "{status}");
+        // The CLI got the call as the module keeps it: every entry names its program, and the
+        // token programs the wallet reads.
+        let plan_in: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("plan-in.json")).unwrap()).unwrap();
+        assert_eq!(plan_in["account"], account.as_str());
+        assert!(plan_in["accounts"].as_array().unwrap().iter().all(|entry| entry["program"].is_string()), "{plan_in}");
+        assert_eq!(plan_in["accounts"][1]["program"], bridge);
+        assert!(plan_in["expect_digest"].is_null());
+        // The Names app sees the sheet, and no raw report or message.
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let pending = parsed(&names.pending_requests())["value"].clone();
+        let shown = pending.as_array().unwrap().iter().find(|r| r["id"] == id.as_str()).unwrap().clone();
+        assert_eq!(shown["sheet"]["refused"], false, "{shown}");
+        assert!(shown["sheet"]["lines"][1].as_str().unwrap().contains("receives 100,000,000"), "{}", shown["sheet"]);
+        assert!(shown.get("report").is_none() && shown.get("message").is_none());
+        // Approved: a wallet job proves and sends exactly what was shown.
+        let approved = approve(&mut names, &id, &account)["value"].clone();
+        assert_eq!(approved["state"], "running", "{approved}");
+        let done = waited(&mut names, |names| names.request_status(id.clone()), |v| v["state"] == "done");
+        assert_eq!(done["tx"], "feedbeef", "{done}");
+        let sent: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("sent.json")).unwrap()).unwrap();
+        assert_eq!(sent["expect_digest"], digest.as_str());
+        assert_eq!(sent["message"], "07".repeat(6595));
+        // The message (which may carry an app's secret) is not kept once it is sent.
+        let kept = std::fs::read_to_string(dir.join("provider.json")).unwrap();
+        assert!(!kept.contains(&"07".repeat(64)), "the message stays out of provider.json");
+        // The programs are remembered for the app: the next call's sheet doesn't flag them as new.
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert_eq!(names.store().private.programs_of("lez_bridge").len(), 3);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_refused_or_unchecked_private_call_cant_be_approved_and_forgets_its_message() {
+        let mut report: Value = serde_json::from_str(&include_str!("../testdata/bridge-drain.report.json").replace("2if1EJVcZwFT3oXxF4uewB2mk2XDXpmCWwTtBwUQ6HUC", PRIVATE)).unwrap();
+        report["fee"]["payer"] = json!(format!("Private/{PRIVATE}"));
+        let tail = format!("case \"$*\" in\n*\"private-call plan\"*) cat > /dev/null; sleep 1; echo '{}' ;;\nesac", json!({ "report": report }));
+        let (mut names, dir) = with_wallet("provider-private-refused", &tail);
+        let account = format!("Private/{PRIVATE}");
+        connect(&mut names, "evil_ui", &account);
+        as_caller(app("evil_ui"));
+        let token = "4VScJ7mtwaanQ5gcSZZw2iAMHYAbLrVmbYKwEGx2eSex";
+        let call = json!({ "programs": [token], "accounts": [], "message": "05".repeat(80) });
+        let id = parsed(&names.propose_private_call(account.clone(), call.to_string(), "Free airdrop!".into()))["value"]["request"].as_str().unwrap().to_owned();
+        // While it is still being checked, nothing can approve it.
+        assert!(approve(&mut names, &id, &account)["error"].as_str().unwrap().contains("hasn't finished checking"));
+        as_caller(app("evil_ui"));
+        waited(&mut names, |names| names.request_status(id.clone()), |v| v["check"] == "ready");
+        assert!(approve(&mut names, &id, &account)["error"].as_str().unwrap().contains("refuses this call"));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let pending = parsed(&names.pending_requests())["value"].clone();
+        let shown = pending.as_array().unwrap().iter().find(|r| r["id"] == id.as_str()).unwrap().clone();
+        assert_eq!(shown["sheet"]["refused"], true);
+        assert!(shown["sheet"]["lines"].to_string().contains("pays 100,000,000"), "{shown}");
+        // Rejected: its message and the simulation are dropped from the store.
+        assert_eq!(parsed(&names.reject_request(id.clone()))["value"]["state"], "rejected");
+        let kept = std::fs::read_to_string(dir.join("provider.json")).unwrap();
+        assert!(!kept.contains(&"05".repeat(80)) && !kept.contains("\"report\""), "{kept}");
         let _ = std::fs::remove_dir_all(dir);
     }
 

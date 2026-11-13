@@ -381,6 +381,12 @@ impl Client {
             }
         }
 
+        // A message to the account that isn't a credit the wallet reads (a transfer out of its
+        // LEZ or tokens, say) is taken in by the proof too: never shown as nothing.
+        if let Some(program) = unread_to_own.iter().find(|program| **program == native_program() || call.token_programs.contains(program)) {
+            bail!("refused: the wallet can't explain this call: it sends the account a message under {program} that isn't a credit");
+        }
+
         // The account: what it holds before and after, as the proof will leave it.
         let after_own = state.get_account_by_id(call.account).data;
         let mut own_rows = Vec::new();

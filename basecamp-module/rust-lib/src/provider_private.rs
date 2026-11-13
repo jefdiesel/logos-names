@@ -54,7 +54,7 @@ pub const MAX_SECRET_CALLS_PER_HOUR: usize = 120;
 /// Proving a private bridge claim, measured on an Apple M4 with 16 GB, 4 threads, the CPU
 /// prover (rfp-022 HANDOFF §3: 666-686 s, peak footprint 9,374-9,550 MB). Shown before
 /// approval; a call of another shape takes about as long, since the circuit dominates.
-pub const PROVE_EXPECT: &str = "Proving runs on this computer: about 11 minutes and about 9.5 GB of memory (measured for a bridge claim on an Apple M4 with 16 GB, 4 threads). Other apps may be slow meanwhile; you can pause or cancel it until it is sent.";
+pub const PROVE_EXPECT: &str = "Proving runs on this computer: about 11 minutes and about 9.5 GB of memory (measured for a bridge claim on an Apple M4 with 16 GB, 4 threads). Other apps may be slow meanwhile.";
 
 /// A program ID in base58, `Public/` allowed.
 fn program_id(text: &str) -> Result<AccountId, String> {
@@ -447,7 +447,10 @@ pub fn review(request: &Value, report: &Value, labels: &Map<String, Value>, toke
         let new = !remembered.iter().any(|known| known == program);
         programs.push(json!({ "program": program, "label": label, "new_for_app": new }));
         if new {
-            warnings.push(format!("This app hasn't used {} ({}) before.", program_name(program, labels), short(program)));
+            warnings.push(match labels.get(program).and_then(|label| label["text"].as_str()) {
+                Some(text) => format!("This app hasn't used {} ({}) before.", clean_text(text, 60), short(program)),
+                None => format!("This app hasn't used program {} before.", short(program)),
+            });
         }
         if label["registry"] != true {
             if !warnings.iter().any(|w| w.contains("Program Registry isn't installed")) {
@@ -530,7 +533,7 @@ pub fn review(request: &Value, report: &Value, labels: &Map<String, Value>, toke
             ));
         }
     } else {
-        privacy.push("Checked: your account's ID appears nowhere in what becomes public.".to_owned());
+        privacy.push("Checked: your account's ID appears nowhere in the public state and events this call leaves (the messages between programs aren't checked).".to_owned());
     }
 
     json!({
@@ -926,12 +929,12 @@ mod tests {
                 "Public: the programs it runs (3), the public accounts it reaches and the changes above, the fee reserve, and the time.",
                 "Public: the one-time address AePC3x…vGkN and what it receives. Nobody can tell it is yours.",
                 "Private: Private/2if1EJVcZwFT3oXxF4uewB2mk2XDXpmCWwTtBwUQ6HUC, its balance, and the message to it (proven, not shown).",
-                "Checked: your account's ID appears nowhere in what becomes public."
+                "Checked: your account's ID appears nowhere in the public state and events this call leaves (the messages between programs aren't checked)."
             ])
         );
         // Three programs new for the app, and no registry installed.
         let warnings = sheet["warnings"].to_string();
-        assert!(warnings.contains("hasn't used JECKBk…nUx7"), "{warnings}");
+        assert!(warnings.contains("hasn't used program JECKBk…nUx7"), "{warnings}");
         assert!(warnings.contains("Program Registry isn't installed"), "{warnings}");
         // Remembered programs and a verified registry leave no warnings.
         let mut labels = Map::new();

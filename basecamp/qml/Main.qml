@@ -3790,7 +3790,7 @@ Item {
             else if (approve && request.kind === "call")
                 say("Sent for " + request.app + ".", false)
             else if (approve && request.kind === "private_call")
-                say("Proving it for " + request.app + " on this computer: about 11 minutes. You can pause or cancel it in Activity until it is sent.", false)
+                say("Proving it for " + request.app + " on this computer: about 11 minutes.", false)
             else if (approve && request.kind === "secret")
                 say(request.app + " can now get its own values from " + accountShort(request.account) + ".", false)
             else if (approve && request.kind === "token_source")
@@ -9156,8 +9156,9 @@ Item {
                         model: parent.sheet ? parent.sheet.programs : []
                         Fact {
                             required property var modelData
-                            label: modelData.new_for_app ? "New for this app" : "Used before"
+                            label: "Program"
                             value: (modelData.label && modelData.label.text ? modelData.label.text + " · " : "") + root.shorten(modelData.program) + " · " + root.programStatus(modelData.label)
+                                   + (modelData.new_for_app ? " · new for this app" : "")
                         }
                     }
                     Part { visible: parent.sheet !== null && parent.sheet.public_changes.length > 0; text: "Public changes" }
@@ -9304,7 +9305,7 @@ Item {
                     Layout.topMargin: 8
                     spacing: 10
                     Action {
-                        label: appSheet.kind === "connect" ? "Share" : appSheet.kind === "call" ? "Approve and sign" : "Approve and send"
+                        label: appSheet.kind === "connect" ? "Share" : appSheet.kind === "call" ? "Approve and sign" : appSheet.kind === "private_call" ? "Approve, prove and send" : appSheet.kind === "secret" ? "Allow" : appSheet.kind === "token_source" ? "Show these tokens" : "Approve and send"
                         strong: true
                         enabledNow: root.appCanApprove()
                         onPressed: root.answerAppRequest(true)

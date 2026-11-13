@@ -478,7 +478,23 @@ impl Store {
     /// for the caller: the store still serves this run.
     pub fn save(&self) {
         if let Some(path) = &self.path {
-            let mut saved = json!({ "requests": self.requests, "grants": self.grants });
+            // A private call's message (which may carry an app's secret) and its simulation are
+            // kept only while the person may still approve it; the job has its own copy.
+            let requests: Vec<Value> = self
+                .requests
+                .iter()
+                .map(|request| {
+                    let mut request = request.clone();
+                    if request["kind"] == PRIVATE_CALL && request["state"] != "pending" {
+                        if let Some(fields) = request.as_object_mut() {
+                            fields.remove("message");
+                            fields.remove("report");
+                        }
+                    }
+                    request
+                })
+                .collect();
+            let mut saved = json!({ "requests": requests, "grants": self.grants });
             self.private.save_into(&mut saved);
             let _ = crate::cli::write_private(path, saved.to_string().as_bytes());
         }

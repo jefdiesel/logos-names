@@ -305,7 +305,9 @@ several programs in one transaction, which `propose_call` can't. `call_json`:
   the person approved, then proves on the person's computer (about 11 minutes and 9.5 GB for a
   bridge claim on an Apple M4 16 GB, 4 threads), sends and waits for the block. `state` is
   `running` with `phase`; `done` gives `tx`. You may `cancel_request` it until `phase` is
-  `submit`; the person can pause, resume or cancel it in the Names app.
+  `submit` (a cancel late in proving may come after it was sent: the request says so); the
+  module can also pause and resume it (`private_call_control`, Names app only; no buttons in
+  the app yet).
 - One wallet job runs at a time: a call approved while another job runs stays pending, and the
   person is told why.
 

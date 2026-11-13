@@ -116,5 +116,15 @@ a1=$(secret "$A"); a2=$(secret "$A"); b1=$(secret "$B")
 printf '%s' "$C" | names module app-secret > "$W/out/secret-foreign.log" 2>&1 && no "a Private/ that is a public account is refused" || ok "a private ask for a public account is refused"
 echo "$a1" | python3 -I -c 'import json,sys; v=json.loads(sys.stdin.read())["values"]; assert len(v)==3 and all(len(x)==64 for x in v)' && ok "values are 3 × 32 bytes" || no "value shape"
 
+echo "## 6. bridged tokens: the wallet's own token read, pointed at the bridge's token program"
+names --token-program="$TP" token list --json > "$W/out/holdings.log" 2>&1
+tail -1 "$W/out/holdings.log" | python3 -I -c '
+import json, sys
+v = json.loads(sys.stdin.read()); V, D = sys.argv[1], sys.argv[2]
+rows = [r for r in v.get("holdings", []) if r.get("definition") == D]
+mine = [r for r in rows if r["account"] == "Private/" + V]
+assert mine and int(mine[0]["balance"]) == 100_000_000, rows
+print("holdings:", [(r["account"][:14], r["balance"], r.get("name")) for r in rows])' "$V" "$DUSDC" && ok "the wallet lists V's 100,000,000 bridged dUSDC through its own token code" || { no "bridged holdings"; tail -3 "$W/out/holdings.log"; }
+
 echo "pass $pass fail $fail"
 [ "$fail" -eq 0 ]
