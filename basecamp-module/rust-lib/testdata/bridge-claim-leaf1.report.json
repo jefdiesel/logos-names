@@ -1,0 +1,77 @@
+{
+ "account": "Private/2if1EJVcZwFT3oXxF4uewB2mk2XDXpmCWwTtBwUQ6HUC",
+ "account_public": false,
+ "aliases": [
+  "B8UnZGJdFP3dtvUFeXsp8NTySWBY2qU8FwDK4oari3wT"
+ ],
+ "digest": "4ed3316a7b745ad02b6e29f3d1f85f451bf9a87a911ba72a5556bcefc55483f6",
+ "events": 1,
+ "fee": {
+  "about": "5723160",
+  "at_most": "9300135",
+  "headroom": "9300135",
+  "payer": "Private/2if1EJVcZwFT3oXxF4uewB2mk2XDXpmCWwTtBwUQ6HUC"
+ },
+ "message_len": 6595,
+ "own": [
+  {
+   "after": "34276840",
+   "asset": "LEZ",
+   "before": "14276840"
+  },
+  {
+   "after": "200000000",
+   "asset": "token",
+   "before": "100000000",
+   "definition": "FBqNAwJs9T4eNDw9pQXxXrLZNcnR1sTnnBEYzhudLQZJ",
+   "name": "Wrapped dUSDC (Sepolia demo v2)",
+   "program": "4VScJ7mtwaanQ5gcSZZw2iAMHYAbLrVmbYKwEGx2eSex"
+  },
+  {
+   "asset": "data",
+   "before_empty": true,
+   "changed": false,
+   "program": "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7"
+  }
+ ],
+ "public": [
+  {
+   "account": "9kvUCizAjm6czTcE8pmWvHB6TEYdJBBWur2XFrANTe7D",
+   "before_empty": false,
+   "changed": false,
+   "kind": "data",
+   "program": "4VhxvwLN5n3u3rZbsz2VNFVavLwc1niNvgxq8JJ15veK"
+  },
+  {
+   "account": "END4S7z6yodhFSoJsDmPu2SWQySH94KxpuaKfSW1cXFu",
+   "before_empty": true,
+   "changed": true,
+   "kind": "data",
+   "program": "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7"
+  },
+  {
+   "account": "HugSoWM7Hp1eXMqknfCewWNMoraweLG3HkezfNGtqKf3",
+   "before_empty": false,
+   "changed": true,
+   "kind": "data",
+   "program": "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7"
+  },
+  {
+   "account": "FBqNAwJs9T4eNDw9pQXxXrLZNcnR1sTnnBEYzhudLQZJ",
+   "after": "300000000",
+   "before": "200000000",
+   "definition": "FBqNAwJs9T4eNDw9pQXxXrLZNcnR1sTnnBEYzhudLQZJ",
+   "kind": "token_definition",
+   "program": "4VScJ7mtwaanQ5gcSZZw2iAMHYAbLrVmbYKwEGx2eSex"
+  },
+  {
+   "account": "HugSoWM7Hp1eXMqknfCewWNMoraweLG3HkezfNGtqKf3",
+   "after": "60000000",
+   "before": "80000000",
+   "kind": "native",
+   "program": "native"
+  }
+ ],
+ "public_cycles": 81568,
+ "waiting_credits": "0"
+}

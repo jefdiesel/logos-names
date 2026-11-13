@@ -942,6 +942,53 @@ mod tests {
         assert_eq!(sheet["warnings"], json!([]));
     }
 
+    /// Golden, from the live dry run on the local LEZ 0.4 sequencer (scripts/bridge-sdk-e2e.sh,
+    /// 2026-11-13): the names CLI's report for the v2 demo's private attested claim of leaf 1,
+    /// and for a drain of the same account disguised as a call.
+    #[test]
+    fn the_real_claim_and_drain_reports_give_these_sheets() {
+        let claim: Value = serde_json::from_str(include_str!("../testdata/bridge-claim-leaf1.report.json")).unwrap();
+        let request = private_call_request(
+            "lez_bridge",
+            &format!("Private/{V}"),
+            &claim_call(&json!({ "credits": [{ "asset": DUSDC, "amount": "100000000" }], "max_fee": "20000000" }).to_string()),
+            "Claim 100 dUSDC from Sepolia",
+            1,
+        )
+        .unwrap();
+        let sheet = review(&request, &claim, &Map::new(), &names(), &[]);
+        assert_eq!(sheet["refused"], false, "{sheet:#}");
+        assert_eq!(
+            sheet["lines"],
+            json!([
+                "Private/2if1EJ…6HUC receives 20,000,000 LEZ.",
+                "Private/2if1EJ…6HUC receives 100 (100,000,000 base units) dUSDC (FBqNAw…LQZJ).",
+                "Nothing leaves your account except the fee.",
+                "Fee: about 5,723,160 LEZ, at most 9,300,135, paid inside the proof from your account; what isn't used comes back to it."
+            ])
+        );
+        assert_eq!(
+            sheet["public_changes"],
+            json!([
+                "Public/END4S7…cXFu: JECKBk…nUx7's data changes",
+                "Public/HugSoW…qKf3: JECKBk…nUx7's data changes",
+                "dUSDC (FBqNAw…LQZJ): supply 200,000,000 → 300,000,000",
+                "Public/HugSoW…qKf3: LEZ 80,000,000 → 60,000,000"
+            ])
+        );
+        assert!(sheet["privacy"].to_string().contains("one-time address B8UnZG…i3wT"), "{sheet:#}");
+        assert!(sheet["privacy"].to_string().contains("appears nowhere"));
+        assert_eq!(sheet["digest"], claim["digest"]);
+
+        let drain: Value = serde_json::from_str(include_str!("../testdata/bridge-drain.report.json")).unwrap();
+        let request = private_call_request("evil_app", &format!("Private/{V}"), &claim_call("{}"), "Free airdrop", 1).unwrap();
+        let sheet = review(&request, &drain, &Map::new(), &names(), &[]);
+        assert_eq!(sheet["refused"], true);
+        assert!(sheet["lines"].to_string().contains("pays 100 (100,000,000 base units) dUSDC"), "{sheet:#}");
+        assert!(sheet["refusals"].to_string().contains("but the app declared 0"), "{sheet:#}");
+        assert_eq!(sheet["public_changes"], json!(["Public/6NAoZK…4f4f: dUSDC (FBqNAw…LQZJ) 100,000,000 → 200,000,000"]));
+    }
+
     #[test]
     fn a_call_that_takes_more_than_declared_is_refused() {
         // A "claim" whose simulation drains the account's dUSDC and LEZ.

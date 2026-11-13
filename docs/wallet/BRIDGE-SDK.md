@@ -232,6 +232,20 @@ channel), and `names zone` manages the CLI's own list.
 7. **`modules/CLI-CONTRACT.md` §0.4 (secrets on argv)** no longer applies to the wallet path:
    no secret goes on any argv; the call goes to the CLI in a 0600 file or on stdin.
 
-## 6. Tests
+## 6. Tests (2026-11-13, Mac mini, under `mini-lock.sh`)
 
-See PROVIDER-SDK.md's compatibility note and the branch's commit messages for what ran where.
+| What | Where | Result |
+|---|---|---|
+| Module unit tests (`cargo test --lib`): app-secret vectors (checked against Python `hmac`), domain separation, bad asks; private-call checks and limits; the claim sheet (golden, hand-made and **from the live reports**); refusals (drain, undeclared fee, unvaluable data, account ID public); grants, revocation, token sources, job phases | `dev/bridge-sdk/target-modtest` | see the commit that adds the live golden test |
+| names CLI tests (`cargo test --release -p names_cli --features local-prove`), incl. `a_wallet_restored_from_its_phrase_derives_the_same_values` and the dry-run line parser | `dev/bridge-sdk/target-ws` | 102 passed, 0 failed |
+| `scripts/bridge-sdk-e2e.sh` on the local LEZ 0.4 sequencer `seq2` (127.0.0.1:3250), a COPY of `run/sepolia2/wallet`, the v2 demo's frozen proof material; plans only | `dev/bridge-sdk/e2e` | **10 PASS, 0 FAIL** |
+
+The live leaf-1 plan (15 s, mostly the wallet catching up 388 blocks): public cycles 81,568 (the
+same as the bridge CLI's own dry run), fee about 5,723,160 and at most 9,300,135 from V,
+V +20,000,000 LEZ (14,276,840 → 34,276,840) and +100,000,000 dUSDC (100,000,000 → 200,000,000),
+the float −20,000,000, dUSDC supply +100,000,000, the nullifier PDA created, one-time address
+`B8UnZG…i3wT` (equal to the bridge CLI's), V's ID absent from the public state and events; the
+message 6,595 bytes, byte-identical in encoding to the on-chain public claim of leaf 3 (block
+2853) apart from the opening. Planning twice gives the same digest; a send with another digest
+stops before `phase: prove`. The drain (V's 100,000,000 dUSDC to P, nothing declared) shows as
+"pays 100 dUSDC" with P's holding +100,000,000 and is refused. Nothing was proven or sent.
