@@ -69,8 +69,10 @@ What this does not hide:
   anyone who resolves a name can compute the wallet account its published keys
   were made for, and tell which names publish the same keys. A payment the
   `names` CLI sends uses a random identifier, so it lands on a fresh account only
-  the recipient can link. That is why each name gets keys of its own: the CLI and
-  the Basecamp module make a new private account for every name.
+  the recipient can link. That is why each name should get keys of its own. The
+  CLI makes a new private account for every name; the Basecamp module does too
+  from this change on, but names it registered earlier share their wallet's first
+  private account's keys until Receive privately is run on them again.
 - **Clients publish no account.** A conforming client sets only
   `npk` and `vpk` in a profile, never `account`; pays a name only through its
   receiving keys; never displays an address or the keys behind a name; and

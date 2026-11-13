@@ -821,9 +821,9 @@ struct Commitment {
     /// The private account `auto` made for this name, once made: reused by a
     /// retried reveal, and by a new commitment that replaces this one.
     auto_account: Option<String>,
-    /// How many private accounts `auto` has started to make for this name.
-    /// Bounded by [`MAX_AUTO_ACCOUNTS`], so a failure that keeps repeating
-    /// can't fill the wallet with unused accounts.
+    /// How many private accounts `auto` has asked the wallet for under this
+    /// commitment. Bounded by [`MAX_AUTO_ACCOUNTS`], so a failure that keeps
+    /// repeating can't fill the wallet with unused accounts.
     accounts_made: u8,
     /// The reveal's transaction, once sent.
     revealed: Option<String>,
@@ -1397,7 +1397,7 @@ impl Names {
         let saved = commitments.get(&registry.program, &name).filter(|saved| saved.owner == owner);
         // What `auto` already made for this name, kept if a new commitment
         // replaces this one, so it isn't left unused.
-        let carried = saved.as_ref().map(|saved| (saved.auto_account.clone(), saved.accounts_made));
+        let carried = saved.as_ref().map(|saved| saved.auto_account.clone());
         let status = |stage: &str, tx: Option<&str>, ready_at: Option<u64>| {
             json!({
                 "name": name,
@@ -1442,30 +1442,38 @@ impl Names {
                     None
                 } else {
                     let remembered = saved.auto_account.clone().unwrap_or_default();
-                    let account = match receiving_account(&choice, &remembered, &wallet::accounts()?.private)? {
-                        Some(account) => account,
+                    let before = wallet::accounts()?.private;
+                    let account = match receiving_account(&choice, &remembered, &before)? {
+                        // A named account the wallet already keeps: nothing to save.
+                        Some(account) if choice.trim() != "auto" => account,
+                        Some(account) => {
+                            // Made by an earlier try, whose save may have failed.
+                            wallet::save()?;
+                            account
+                        }
                         None => {
                             if saved.accounts_made >= MAX_AUTO_ACCOUNTS {
                                 return Err(format!(
-                                    "{MAX_AUTO_ACCOUNTS} private accounts were already started for {name} and none could be used; \
-                                     check the LEZ wallet, or register with one of its private accounts"
+                                    "asked the LEZ wallet for a private account for {name} {MAX_AUTO_ACCOUNTS} times without one being usable; \
+                                     check the wallet. This registration tries again once its commitment expires (within 24 hours)."
                                 ));
                             }
-                            // Count the attempt before making the account, and
-                            // remember the account before the wallet is saved and
-                            // anything is sent, so no failure makes a second one.
+                            // Count the attempt just before the wallet makes the
+                            // account, and remember the account before the wallet is
+                            // saved and anything is sent, so no failure makes a second.
                             saved.accounts_made += 1;
                             commitments.put(&registry.program, &name, &saved);
                             commitments.save_checked()?;
-                            let account = wallet::new_private_account()?;
+                            wallet::create_private_account()?;
+                            let account = the_new_account(&before, &wallet::accounts()?.private)?;
                             saved.auto_account = Some(registry::account_text(&account));
                             commitments.put(&registry.program, &name, &saved);
                             commitments.save_checked()?;
+                            // Never publish the keys of an account the wallet has not stored.
+                            wallet::save()?;
                             account
                         }
                     };
-                    // Never publish the keys of an account the wallet has not stored.
-                    wallet::save()?;
                     Some(wallet::private_keys(&account)?)
                 };
                 let change = registry.reveal(&name, &derived, &owner, &saved.secret, keys)?;
@@ -1483,7 +1491,10 @@ impl Names {
         let secret: [u8; 32] = registry::fresh_bytes()?;
         let (change, made) = registry.commit(&name, &derived, &owner, &secret)?;
         let sent = self.send(&registry, &held, &name, &change)?;
-        let (auto_account, accounts_made) = carried.unwrap_or_default();
+        // The account `auto` made carries over; the attempt count starts again
+        // with each commitment.
+        let auto_account = carried.flatten();
+        let accounts_made = 0;
         let saved = Commitment {
             owner,
             secret,
@@ -1509,8 +1520,9 @@ impl Names {
     }
 }
 
-/// How many private accounts `auto` may start to make for one name's
-/// registration before it stops and says so.
+/// How many private accounts `auto` may ask the wallet for under one commitment
+/// before it stops and says so. A new commitment (after the old one expires)
+/// starts the count again.
 const MAX_AUTO_ACCOUNTS: u8 = 3;
 
 /// The receiving keys of the wallet's private account `choice`: an account ID,
@@ -1520,9 +1532,13 @@ fn private_keys(choice: &str) -> Result<([u8; 32], Vec<u8>), String> {
     let held = wallet::accounts()?.private;
     let account = match receiving_account(choice, "", &held)? {
         Some(account) => account,
-        None => wallet::new_private_account()?,
+        None => {
+            let account = wallet::new_private_account()?;
+            // Never publish the keys of an account the wallet has not stored.
+            wallet::save()?;
+            account
+        }
     };
-    wallet::save()?;
     wallet::private_keys(&account)
 }
 
@@ -2634,8 +2650,14 @@ mod wallet {
         // If the wallet can't list its accounts first, stop: with no list to
         // compare against, an old (shared) account could pass for the new one.
         let before = accounts()?.private;
-        call("create_account_private", json!([]), SEND)?;
+        create_private_account()?;
         super::the_new_account(&before, &accounts()?.private)
+    }
+
+    /// Asks the wallet to make a private account. Which one it made is found by
+    /// comparing its accounts before and after ([`super::the_new_account`]).
+    pub fn create_private_account() -> Result<(), String> {
+        call("create_account_private", json!([]), SEND).map(drop)
     }
 
     /// Saves the wallet, and fails unless the wallet says it saved. Unsaved, a
@@ -2701,6 +2723,10 @@ mod wallet {
     }
 
     pub fn save() -> Result<(), String> {
+        Err(CLOSED.to_owned())
+    }
+
+    pub fn create_private_account() -> Result<(), String> {
         Err(CLOSED.to_owned())
     }
 
