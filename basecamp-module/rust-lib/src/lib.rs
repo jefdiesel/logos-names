@@ -171,14 +171,15 @@ pub trait NamesModule: Send + 'static {
     /// and stays usable for 24 hours. The value also has `deposit` (or `fee`)
     /// and `tier`; `tx` is null when nothing was sent.
     /// `private_account` makes the name payable privately from the start: one
-    /// of the wallet's private accounts (base58), `auto` for its first one
-    /// (made if it has none), or empty to set nothing. It is used by the
-    /// reveal; given at commit time it is remembered for it.
+    /// of the wallet's private accounts (base58), `auto` for a new private
+    /// account made for this name alone, or empty to set nothing. It is used by
+    /// the reveal; given at commit time it is remembered for it, and the account
+    /// `auto` makes is remembered too, so a retried reveal reuses it.
     fn register_name(&mut self, name: String, owner: String, private_account: String) -> String;
 
     /// Makes `name` payable privately and only privately: publishes the
-    /// receiving keys of `private_account` (as for `register_name`, `auto` allowed)
-    /// and removes any public account from the name.
+    /// receiving keys of `private_account` (as for `register_name`; `auto` makes a
+    /// new private account each time) and removes any public account from the name.
     fn receive_privately(&mut self, name: String, private_account: String) -> String;
 
     /// Points `name` at a public account (base58). Anyone who resolves the
@@ -1415,7 +1416,22 @@ impl Names {
                     return Ok(status("revealed", saved.revealed.as_deref(), Some(saved.ready_at())));
                 }
                 let choice = if private_account.trim().is_empty() { saved.private_account.clone() } else { private_account.to_owned() };
-                let keys = if choice.trim().is_empty() { None } else { Some(private_keys(&choice)?) };
+                let keys = if choice.trim().is_empty() {
+                    None
+                } else {
+                    let account = receiving_account(
+                        &choice,
+                        &saved.private_account,
+                        &wallet::accounts()?.private,
+                        wallet::new_private_account,
+                    )?;
+                    // Remember the account before sending, so a retried reveal
+                    // publishes the same keys instead of making another account.
+                    saved.private_account = registry::account_text(&account);
+                    commitments.put(&registry.program, &name, &saved);
+                    commitments.save();
+                    Some(wallet::private_keys(&account)?)
+                };
                 let change = registry.reveal(&name, &derived, &owner, &saved.secret, keys)?;
                 let sent = self.send(&registry, &held, &name, &change)?;
                 saved.revealed = sent["tx"].as_str().map(str::to_owned);
@@ -1455,25 +1471,39 @@ impl Names {
 }
 
 /// The receiving keys of the wallet's private account `choice`: an account ID,
-/// or `auto` for its first private account, which is made if it has none.
+/// or `auto` for a new private account made for this call.
 fn private_keys(choice: &str) -> Result<([u8; 32], Vec<u8>), String> {
     let held = wallet::accounts()?.private;
-    let account = if choice.trim() == "auto" {
-        match held.first() {
-            Some(account) => *account,
-            None => wallet::new_private_account()?,
-        }
-    } else {
-        let account = registry::parse_account(choice)?;
-        if !held.contains(&account) {
-            return Err(format!(
-                "{} is not one of the open wallet's private accounts",
-                registry::account_text(&account)
-            ));
-        }
-        account
-    };
+    let account = receiving_account(choice, "", &held, wallet::new_private_account)?;
     wallet::private_keys(&account)
+}
+
+/// The private account whose receiving keys a name publishes, for `choice`: one of
+/// the wallet's private accounts (`held`), or `auto`. `auto` makes a new account with
+/// `make`, as the CLI does for every name: names that share receiving keys are linked
+/// to each other, and the keys show the account they belong to to anyone who resolves
+/// the names. `remembered` is what an earlier `auto` made for this same registration;
+/// it is reused while the wallet still holds it, so a retry makes no second account.
+fn receiving_account(
+    choice: &str,
+    remembered: &str,
+    held: &[AccountId],
+    make: impl FnOnce() -> Result<AccountId, String>,
+) -> Result<AccountId, String> {
+    if choice.trim() == "auto" {
+        return match registry::parse_account(remembered) {
+            Ok(account) if held.contains(&account) => Ok(account),
+            _ => make(),
+        };
+    }
+    let account = registry::parse_account(choice)?;
+    if !held.contains(&account) {
+        return Err(format!(
+            "{} is not one of the open wallet's private accounts",
+            registry::account_text(&account)
+        ));
+    }
+    Ok(account)
 }
 
 /// What registering a name of `tier` takes under `settings`, for `deposit`.
@@ -2741,6 +2771,34 @@ mod tests {
         assert_eq!(settings["deposits"]["normal"], "100");
         assert_eq!(settings["deposits"]["three"], "2000");
         assert_eq!(settings["admin"], registry::account_text(&[1; 32]));
+    }
+
+    #[test]
+    fn auto_gives_each_name_its_own_receiving_account() {
+        let first = [1; 32];
+        let mut made = vec![[9; 32], [8; 32]];
+        let mut make = || made.pop().ok_or_else(|| "made too many".to_owned());
+        let held = [first];
+        // Two names each get a new account, never the wallet's first one.
+        let one = receiving_account("auto", "auto", &held, &mut make).expect("one");
+        let two = receiving_account(" auto ", "", &held, &mut make).expect("two");
+        assert_ne!(one, first);
+        assert_ne!(two, first);
+        assert_ne!(one, two);
+        // A retried reveal reuses the account its first try made.
+        let held = [first, one, two];
+        let remembered = registry::account_text(&one);
+        let never = || -> Result<AccountId, String> { panic!("a retry made a new account") };
+        assert_eq!(receiving_account("auto", &remembered, &held, never), Ok(one));
+        // ... unless the wallet no longer holds it.
+        let made_again = || Ok([7; 32]);
+        assert_eq!(receiving_account("auto", &remembered, &[first], made_again), Ok([7; 32]));
+        // A named account is used as is, and must be the wallet's.
+        let never = || -> Result<AccountId, String> { panic!("a named account made a new one") };
+        assert_eq!(receiving_account(&registry::account_text(&two), "", &held, never), Ok(two));
+        let never = || -> Result<AccountId, String> { panic!("a named account made a new one") };
+        let refused = receiving_account(&registry::account_text(&[3; 32]), "", &held, never);
+        assert!(refused.expect_err("not the wallet's").contains("not one of the open wallet's private accounts"));
     }
 
     #[test]
