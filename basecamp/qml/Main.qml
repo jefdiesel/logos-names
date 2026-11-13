@@ -4706,7 +4706,7 @@ Item {
     /// Which network an action or view runs on, in the words the app uses everywhere:
     /// `net` is "0.3" (LEZ 0.3, the public Logos testnet), "0.4" (LEZ 0.4, the bridge test
     /// network), "chain" (the Logos Blockchain), "both" (the Logos Blockchain into LEZ 0.3) or
-    /// "0.3+chain" (the balances of LEZ 0.3 and of the Logos Blockchain).
+    /// "0.3+chain" (the balances of LEZ 0.3 and of the Logos Blockchain) or "messages" (chat).
     component RunsOn: Text {
         property string net: "0.3"
         property string prefix: "Runs on"
@@ -4720,6 +4720,7 @@ Item {
             : net === "chain" ? "<b>the Logos Blockchain</b>"
             : net === "both" ? "<b>the Logos Blockchain</b> and <b>LEZ 0.3</b> · public Logos testnet"
             : net === "0.3+chain" ? "<b>LEZ 0.3</b> · public Logos testnet, and on <b>the Logos Blockchain</b>"
+            : net === "messages" ? "<b>Logos Messaging</b>; LNS names are looked up on <b>LEZ 0.3</b> · public Logos testnet"
             : "<b>LEZ 0.3</b> · public Logos testnet")
     }
 
@@ -5288,6 +5289,7 @@ Item {
                         font.pixelSize: root.px(14)
                     }
                 }
+                RunsOn { net: "messages" }
                 // Not connected: the Chat app starts the chat module.
                 Rectangle {
                     visible: root.chatError !== ""
@@ -6239,6 +6241,7 @@ Item {
                         Item { Layout.fillWidth: true }
                         Link { text: root.chainReading ? "Reading…" : "Refresh"; color: root.faint; font.pixelSize: root.px(15); onPressed: root.loadChain() }
                     }
+                    RunsOn { net: "chain" }
                     Hint { visible: root.chainError !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.chainError }
                     Action {
                         visible: /isn't running|didn't answer/.test(root.chainError)
@@ -7395,6 +7398,9 @@ Item {
                 width: Math.min(parent.width - 112, root.tool === "settings" ? 1040 : 820)
                 spacing: 22
 
+                // Names and profiles are kept on LEZ 0.3.
+                RunsOn { visible: root.section === "search" || root.section === "profile"; net: "0.3"; prefix: "LNS names and profiles live on" }
+
                 // Search: look up any name.
                 ColumnLayout {
                     visible: root.section === "search"
@@ -7985,6 +7991,7 @@ Item {
                         font.weight: Font.DemiBold
                         font.pixelSize: root.px(36)
                     }
+                    RunsOn { net: "0.3" }
                     Hint {
                         font.pixelSize: root.px(18)
                         text: "Pick a name people can use to find your profile and page. Held privately, with a deposit you get back when you release it."

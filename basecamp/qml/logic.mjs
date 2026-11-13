@@ -466,7 +466,7 @@ export function activityLine(entry, now, account) {
     if (page !== "") {
         var own = accountSide(e, kind, page)
         if (own)
-            return own(activityLine(e, now))
+            return lezNamed(own(activityLine(e, now)), e)
     }
     var amount = e.amount ? grouped(e.amount) : ""
     var title = "", sub = "", sign = "-"
@@ -542,6 +542,19 @@ export function activityLine(entry, now, account) {
     if (quiet && tone === "good") tone = "plain"
     var line = { title: title, sub: sub, amount: amount, sign: amount === "" ? "" : sign, state: stateText, tone: tone, ago: agoShown(e.at, now) }
     if (quiet) line.quiet = true
+    return lezNamed(line, e)
+}
+
+/// `line` of entry `e` with its LEZ named: a home-zone entry is on LEZ 0.3, the public Logos
+/// testnet. Another zone names itself (`zone …`), and the bridge test network's entries
+/// already say LEZ 0.4. Saying it twice changes nothing.
+function lezNamed(line, e) {
+    if (!(e.chain === "lez" || e.kind === "bridge") || e.zone)
+        return line
+    var named = function(text) { return String(text).replace(/\b(on|to) LEZ\b(?! 0\.)/g, "$1 LEZ 0.3") }
+    line.title = named(line.title)
+    line.sub = named(line.sub)
+    line.state = named(line.state)
     return line
 }
 
