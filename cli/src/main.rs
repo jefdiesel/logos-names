@@ -290,7 +290,8 @@ const DEFAULT_RPC: &str = "https://testnet.lez.logos.co";
 #[derive(Parser)]
 #[command(
     name = "names",
-    version,
+    // The LEZ line this CLI speaks: the Names module runs only a CLI marked LEZ v0.4 on LEZ 0.4.
+    version = concat!(env!("CARGO_PKG_VERSION"), " (LEZ v0.4.0-rc3)"),
     about = "Register and resolve Logos names",
     long_about = "Register and resolve Logos names on the Logos Execution Zone (LEZ).\n\n\
         Looking a name up needs no setup. Anything that changes the chain signs and pays \

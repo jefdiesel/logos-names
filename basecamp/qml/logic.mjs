@@ -549,9 +549,11 @@ export function activityLine(entry, now, account) {
 /// testnet. Another zone names itself (`zone …`), and the bridge test network's entries
 /// already say LEZ 0.4. Saying it twice changes nothing.
 function lezNamed(line, e) {
-    if (!(e.chain === "lez" || e.kind === "bridge") || e.zone)
+    // An entry made while the names network was LEZ 0.4 carries that network's home id.
+    var net = e.zone === "bridge-0.4" ? "LEZ 0.4" : "LEZ 0.3"
+    if (!(e.chain === "lez" || e.kind === "bridge") || (e.zone && e.zone !== "bridge-0.4"))
         return line
-    var named = function(text) { return String(text).replace(/\b(on|to) LEZ\b(?! 0\.)/g, "$1 LEZ 0.3") }
+    var named = function(text) { return String(text).replace(/\b(on|to) LEZ\b(?! 0\.)/g, "$1 " + net) }
     line.title = named(line.title)
     line.sub = named(line.sub)
     line.state = named(line.state)
@@ -742,6 +744,13 @@ export function publicAccounts(cliBalance, accounts) {
         cliBalance.accounts.forEach(function(a) { if (a && a.kind === "public") add(a.account) })
     if (cliBalance && cliBalance["public"] && cliBalance["public"].account)
         add(cliBalance["public"].account)
+    return out
+}
+
+/// `first`, then those of `more` it doesn't have, each `Public/<id>` once.
+export function mergedAccounts(first, more) {
+    var out = (Array.isArray(first) ? first : []).slice()
+    ;(Array.isArray(more) ? more : []).forEach(function(a) { if (typeof a === "string" && out.indexOf(a) < 0) out.push(a) })
     return out
 }
 

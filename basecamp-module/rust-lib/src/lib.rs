@@ -65,6 +65,73 @@ const DEFAULT_SEQUENCER: &str = "https://testnet.lez.logos.co";
 /// The canonical registry on the default network: the one SPEC.md section 11
 /// lists, registry v5 in deposit mode.
 const DEFAULT_REGISTRY: &str = "38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq";
+// ── The two names networks (the site's rule: every action says which one it runs on) ──
+//
+// LEZ 0.3 is the public Logos testnet: `DEFAULT_SEQUENCER` and `DEFAULT_REGISTRY` above, kept
+// in config.json's flat fields as every version before kept them, so a rollback reads them.
+// LEZ 0.4 is the bridge test network, our own chain: its LNS registry and RPC below, kept
+// under `lez04` in config.json. The names network in use (`names_network`) picks one set;
+// nothing of one is ever used for the other: each has its own CLI, wallet folder and zones.
+
+/// LEZ 0.4, the bridge test network: its RPC, through the public filter. On the Mac mini
+/// that runs the chain, `http://127.0.0.1:3290` reaches it directly (`set_sequencer`).
+const LEZ04_SEQUENCER: &str = "https://lez.nameswallet.app/";
+/// The LNS registry on LEZ 0.4 (branch `rc3-port`, deployed 2026-11-13; deposit mode).
+const LEZ04_REGISTRY: &str = "6Yxj5k8AiuBSuMAYVQFGrYKjJGUSSaWWgoB9D9XXN3gA";
+/// What LEZ 0.4's home zone is called in the history and in other apps' requests, so
+/// nothing done there is ever counted or approved as LEZ 0.3's (`bridge_net::ZONE`).
+const LEZ04_HOME_ID: &str = bridge_net::ZONE;
+/// The settings in config.json that belong to one names network.
+const NET_KEYS: [&str; 9] = ["sequencer", "registry", "cli", "cli_wallet", "wallet_config", "wallet_storage", "token_program", "zones", "zone"];
+/// What a LEZ 0.4 names CLI says after its version (`names --version`): the module runs
+/// only such a CLI on LEZ 0.4, and tells when LEZ 0.3 is given one (it reads, can't send).
+const LEZ04_CLI_MARK: &str = "(LEZ v0.4";
+
+/// Which names network the module uses: where names are looked up, registered and paid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Net {
+    #[default]
+    Lez03,
+    Lez04,
+}
+
+impl Net {
+    fn id(self) -> &'static str {
+        match self {
+            Net::Lez03 => "lez-0.3",
+            Net::Lez04 => "lez-0.4",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Net> {
+        match text.trim() {
+            "lez-0.3" | "0.3" => Some(Net::Lez03),
+            "lez-0.4" | "0.4" => Some(Net::Lez04),
+            _ => None,
+        }
+    }
+
+    /// How the app names it, beside every action: `{id, version, name}`.
+    fn shown(self) -> Value {
+        match self {
+            Net::Lez03 => json!({ "id": "lez-0.3", "version": "LEZ 0.3", "name": "public Logos testnet" }),
+            Net::Lez04 => json!({ "id": "lez-0.4", "version": "LEZ 0.4", "name": "bridge test network" }),
+        }
+    }
+}
+
+/// Whether two folders are the same one (links followed where they exist).
+fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let real = |path: &std::path::Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+    real(a) == real(b)
+}
+
+/// Where LEZ 0.4's wallet is kept unless another folder is chosen: never LEZ 0.3's, since
+/// a LEZ 0.4 CLI moves an older wallet aside (`names module restore`).
+fn lez04_wallet_dir(config: &std::path::Path) -> std::path::PathBuf {
+    config.join("lez-0.4").join("wallet")
+}
+
 /// The snapshot of the earlier chain, published as a static file with the web app.
 const CLAIMS_SNAPSHOT: &str = "https://logos-names.wrapit.workers.dev/claims/lez-0.3.json";
 /// Registries a saved configuration may still name whose names use an older
@@ -256,6 +323,13 @@ pub trait NamesModule: Send + 'static {
 
     /// The sequencer URL, registry program ID and wallet files in use.
     fn get_config(&mut self) -> String;
+
+    /// Switches the names network to `network`: `lez-0.3` (the public Logos testnet, the
+    /// default) or `lez-0.4` (the bridge test network). Names are then looked up,
+    /// registered and paid there, with that network's own CLI, wallet folder, registry and
+    /// sequencer; the other network's settings are kept as they are. Refused while the
+    /// wallet is busy. The value is `get_config`'s. Names app only.
+    fn set_names_network(&mut self, network: String) -> String;
 
     /// Use the registry with this program account ID (base58), and remember it
     /// across restarts. Returns false and changes nothing if it is not an
@@ -466,6 +540,12 @@ pub trait NamesModule: Send + 'static {
     /// Pays `amount` (base units, decimal text) to `name` from the CLI wallet's
     /// private account, privately (`names pay`). A CLI job; about 4 minutes.
     fn cli_pay(&mut self, name: String, amount: String) -> String;
+
+    /// Pays `amount` to `name`'s public account from the CLI wallet's default public
+    /// account (`names pay --public --from=Public/…`): no proof, about one block, and the
+    /// chain shows both accounts and the amount. A name that publishes no public account
+    /// can't be paid this way (the CLI refuses). A CLI job.
+    fn cli_pay_public(&mut self, name: String, amount: String) -> String;
 
     /// The names CLI's default private account and its balance:
     /// `{account, balance, public}` (decimal text), or null if it has none.
@@ -1092,6 +1172,12 @@ struct Names {
     zones: zones::Zones,
     /// Whether home's sequencer was asked for its channel in this run (`home_channel`).
     channel_asked: bool,
+    /// The names network in use; the fields above are its settings.
+    net: Net,
+    /// The other names network's settings as saved (`NET_KEYS`), kept as they are.
+    parked: Value,
+    /// What each CLI said its version is, by path and modification time.
+    cli_lines: std::sync::Mutex<HashMap<std::path::PathBuf, (std::time::SystemTime, String)>>,
     /// When LEZ last answered about each followed bridge's receipt (seconds), so each is
     /// asked on its schedule (`activity::receipt_due`), not on every balance read.
     receipt_asks: std::sync::Mutex<std::collections::BTreeMap<AccountId, u64>>,
@@ -1185,6 +1271,9 @@ impl Default for Names {
             zones: zones::Zones::new(bare_home(DEFAULT_SEQUENCER)),
             channel_asked: false,
             receipt_asks: Default::default(),
+            net: Net::Lez03,
+            parked: Value::Null,
+            cli_lines: Default::default(),
         };
         // Files saved by versions before 0.10 were readable by every account on the
         // machine; this closes them up once.
@@ -1196,7 +1285,7 @@ impl Default for Names {
             .and_then(|dir| std::fs::read_to_string(dir.join("config.json")).ok())
             .and_then(|text| serde_json::from_str::<Value>(&text).ok());
         if let Some(saved) = saved {
-            names.apply_saved(&saved);
+            names.apply_network(&saved);
         }
         names
     }
@@ -1210,7 +1299,7 @@ const NAMES_APP: &str = "names_ui";
 /// `get_config` reports it so the Names app can refuse a module from another
 /// release (the app's own metadata asks for at least this at install, but an
 /// older module can still be the one loaded).
-const MODULE_VERSION: &str = "0.16.0";
+const MODULE_VERSION: &str = "0.17.0";
 
 /// Whether `caller` may use those methods. Basecamp gives each app its own
 /// credential, named after the app, so the module knows which app is calling.
@@ -1258,6 +1347,7 @@ fn public_config(config: &Value) -> Value {
         "token_program": config["token_program"],
         "zone": { "id": config["zone"]["id"], "channel": config["zone"]["channel"], "home": config["zone"]["home"] },
         "module_version": config["module_version"],
+        "names_network": config["names_network"],
     })
 }
 
@@ -1711,6 +1801,109 @@ fn pending() -> Result<Pending, String> {
 }
 
 impl Names {
+    /// Applies a saved configuration on the names network it names (`names_network`):
+    /// LEZ 0.3's settings are the flat fields, LEZ 0.4's are under `lez04`.
+    fn apply_network(&mut self, saved: &Value) {
+        let net = saved["names_network"].as_str().and_then(Net::parse).unwrap_or_default();
+        match net {
+            Net::Lez03 => {
+                self.apply_saved(saved);
+                self.parked = saved["lez04"].clone();
+            }
+            Net::Lez04 => {
+                self.net = Net::Lez04;
+                self.sequencer = LEZ04_SEQUENCER.to_owned();
+                self.program = registry::parse_account(LEZ04_REGISTRY).ok();
+                self.zones = zones::Zones::new(bare_home(LEZ04_SEQUENCER)).with_home_id(LEZ04_HOME_ID);
+                let mut view = saved.clone();
+                let block = &saved["lez04"];
+                for key in NET_KEYS {
+                    view[key] = block[key].clone();
+                }
+                // A folder of LEZ 0.4's own, unless one was chosen.
+                if view["cli_wallet"].as_str().is_none() {
+                    view["cli_wallet"] = json!(config_dir().map(|dir| lez04_wallet_dir(&dir)));
+                }
+                self.apply_saved(&view);
+                // The registry is LEZ 0.4's unless one was set there.
+                if block["registry"].as_str().is_none() {
+                    self.program = registry::parse_account(LEZ04_REGISTRY).ok();
+                }
+                // Zones are LEZ 0.3's: LEZ 0.4 has its home only, known by its own id.
+                let home = self.zones.home().clone();
+                self.zones = zones::Zones::new(home).with_home_id(LEZ04_HOME_ID);
+                self.parked = json!(NET_KEYS.iter().map(|key| (key.to_string(), saved[*key].clone())).collect::<Map<String, Value>>());
+            }
+        }
+    }
+
+    /// The other names network's wallet folder, so neither network's CLI is ever given
+    /// the other's wallet.
+    fn other_wallet(&self) -> Option<std::path::PathBuf> {
+        match self.net {
+            Net::Lez03 => self.parked["cli_wallet"]
+                .as_str()
+                .map(std::path::PathBuf::from)
+                .or_else(|| config_dir().map(|dir| lez04_wallet_dir(&dir))),
+            Net::Lez04 => cli::find_wallet(self.parked["cli_wallet"].as_str()),
+        }
+    }
+
+    /// What the CLI at `program` says its version is (`names --version`), asked once per
+    /// build of it.
+    fn cli_line(&self, program: &std::path::Path) -> Result<String, String> {
+        let modified = std::fs::metadata(program).and_then(|meta| meta.modified()).map_err(|_| format!("there is no program at {}", program.display()))?;
+        if let Some((when, line)) = self.cli_lines.lock().ok().and_then(|lines| lines.get(program).cloned()) {
+            if when == modified {
+                return Ok(line);
+            }
+        }
+        let line = cli::version(program)?;
+        if let Ok(mut lines) = self.cli_lines.lock() {
+            lines.insert(program.to_path_buf(), (modified, line.clone()));
+        }
+        Ok(line)
+    }
+
+    /// Switches the names network: saves this one's settings, then loads the other's as the
+    /// module starts with them. What runs in the background keeps running.
+    fn switch_network(&mut self, net: Net) -> Result<(), String> {
+        if net == self.net {
+            return Ok(());
+        }
+        if let Some(job) = self.wallet_busy() {
+            return Err(format!(
+                "your wallet is busy ({}); switch networks when it is done",
+                job["kind"].as_str().unwrap_or("a change")
+            ));
+        }
+        let dir = config_dir().ok_or("this device has nowhere to keep the Wallet's settings")?;
+        if net == Net::Lez04 {
+            let wallet = lez04_wallet_dir(&dir);
+            std::fs::create_dir_all(&wallet).map_err(|error| format!("can't make LEZ 0.4's wallet folder: {error}"))?;
+            use std::os::unix::fs::PermissionsExt;
+            for folder in [wallet.as_path(), wallet.parent().unwrap_or(&wallet)] {
+                let _ = std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700));
+            }
+        }
+        let mut saved = self.saved_config();
+        saved["names_network"] = json!(net.id());
+        cli::write_private(&dir.join("config.json"), saved.to_string().as_bytes()).map_err(|error| format!("can't save the switch: {error}"))?;
+        let secret_calls = std::mem::take(&mut self.secret_calls);
+        let private_checks = self.private_checks.clone();
+        let board_reads = self.board_reads.clone();
+        let (jobs_dir, bin_dir, provider_path) = (self.jobs_dir.clone(), self.bin_dir.clone(), self.provider_path.clone());
+        *self = Names::default();
+        self.secret_calls = secret_calls;
+        self.private_checks = private_checks;
+        self.board_reads = board_reads;
+        self.jobs_dir = jobs_dir;
+        self.bin_dir = bin_dir;
+        self.provider_path = provider_path;
+        self.board_reads.lock().map(|mut reads| reads.clear()).ok();
+        Ok(())
+    }
+
     /// Applies a saved configuration. A registry that this version can't read
     /// is ignored, so the default stands.
     fn apply_saved(&mut self, saved: &Value) {
@@ -1820,6 +2013,9 @@ impl Names {
         config["cli"] = json!(cli::find_program(self.cli.as_deref()).map(|path| path.to_string_lossy().into_owned()));
         config["cli_wallet"] = json!(cli::find_wallet(self.cli_wallet.as_deref()).map(|dir| dir.to_string_lossy().into_owned()));
         config["module_version"] = json!(MODULE_VERSION);
+        config["names_network"] = self.net.shown();
+        config["names_networks"] = json!([Net::Lez03.shown(), Net::Lez04.shown()]);
+        config["cli_line"] = json!(cli::find_program(self.cli.as_deref()).and_then(|path| self.cli_line(&path).ok()));
         config
     }
 
@@ -2229,6 +2425,15 @@ impl Names {
     /// Refuses a request another app made for another zone than the one in use, or for a
     /// chain the zone no longer is: the same account ID is another account there.
     fn asked_here(&self, request: &Value) -> Result<(), String> {
+        // A request from before there were two networks was asked on LEZ 0.3.
+        let network = request["network"].as_str().and_then(Net::parse).unwrap_or_default();
+        if network != self.net {
+            return Err(format!(
+                "this was asked for {}, and the wallet is on {} now. Switch back to approve it, or reject it.",
+                network.shown()["version"].as_str().unwrap_or_default(),
+                self.net.shown()["version"].as_str().unwrap_or_default()
+            ));
+        }
         let asked = request["zone"].as_str().unwrap_or(zones::HOME);
         let zones = self.zones_now();
         if asked == zones.current_id() {
@@ -2251,10 +2456,34 @@ impl Names {
     }
 
     fn cli_setup(&self) -> Result<cli::Setup, String> {
-        let program = cli::find_program(self.cli.as_deref()).ok_or(
-            "no names CLI found at ~/.local/bin/names or on PATH; install it, or give its path in App settings",
-        )?;
+        let program = match self.net {
+            Net::Lez03 => cli::find_program(self.cli.as_deref()).ok_or(
+                "no names CLI found at ~/.local/bin/names or on PATH; install it, or give its path in App settings",
+            )?,
+            // LEZ 0.4 never falls back to a CLI found on the computer: that one is LEZ 0.3's.
+            Net::Lez04 => {
+                let program = self.cli.as_deref().map(std::path::PathBuf::from).ok_or(
+                    "no names CLI for LEZ 0.4 is set: give the path of a LEZ 0.4 names CLI in App settings (none is published yet)",
+                )?;
+                let line = self.cli_line(&program)?;
+                if !line.contains(LEZ04_CLI_MARK) {
+                    return Err(format!(
+                        "the names CLI set for LEZ 0.4 ({line}) is not a LEZ 0.4 one; give the path of a LEZ 0.4 names CLI in App settings. Nothing was sent."
+                    ));
+                }
+                program
+            }
+        };
         let wallet = cli::find_wallet(self.cli_wallet.as_deref()).ok_or("no wallet directory for the names CLI")?;
+        if self.other_wallet().is_some_and(|other| same_dir(&other, &wallet)) {
+            return Err(format!(
+                "the wallet folder set here is the one {} uses; each network keeps its own wallet. Choose another folder in App settings. Nothing was sent.",
+                match self.net {
+                    Net::Lez03 => "LEZ 0.4",
+                    Net::Lez04 => "LEZ 0.3",
+                }
+            ));
+        }
         Ok(cli::Setup {
             program,
             wallet,
@@ -2266,7 +2495,12 @@ impl Names {
     fn jobs(&self) -> Result<cli::Jobs, String> {
         self.jobs_dir
             .clone()
-            .or_else(|| config_dir().map(|dir| dir.join("jobs")))
+            .or_else(|| {
+                config_dir().map(|dir| match self.net {
+                    Net::Lez03 => dir.join("jobs"),
+                    Net::Lez04 => dir.join("lez-0.4").join("jobs"),
+                })
+            })
             .map(|dir| cli::Jobs { dir })
             .ok_or_else(|| "this device has nowhere to keep a job's log".to_owned())
     }
@@ -2474,8 +2708,32 @@ impl Names {
     /// error for the caller: the setting still applies to this run.
     fn save(&self) {
         if let Some(dir) = config_dir() {
-            let _ = cli::write_private(&dir.join("config.json"), self.config().to_string().as_bytes());
+            let _ = cli::write_private(&dir.join("config.json"), self.saved_config().to_string().as_bytes());
         }
+    }
+
+    /// What config.json holds: LEZ 0.3's settings in the flat fields whichever network is
+    /// in use (as every version before kept them), LEZ 0.4's under `lez04`, and which one
+    /// is in use.
+    fn saved_config(&self) -> Value {
+        let mut out = self.config();
+        match self.net {
+            Net::Lez03 => {
+                if self.parked.is_object() {
+                    out["lez04"] = self.parked.clone();
+                }
+            }
+            Net::Lez04 => {
+                let mut block = Map::new();
+                for key in NET_KEYS {
+                    block.insert(key.to_owned(), out[key].take());
+                    out[key] = self.parked[key].clone();
+                }
+                out["lez04"] = Value::Object(block);
+            }
+        }
+        out["names_network"] = json!(self.net.id());
+        out
     }
 
     fn registry(&self) -> Result<Registry, String> {
@@ -2800,7 +3058,8 @@ impl Names {
         }
         // Every registry this module knows, whichever is configured now
         // (not-a-sink-forgets-default-registry-after-set-registry).
-        let known_registry = std::iter::once(DEFAULT_REGISTRY)
+        let known_registry = [DEFAULT_REGISTRY, LEZ04_REGISTRY]
+            .into_iter()
             .chain(RETIRED_REGISTRIES)
             .any(|program| registry::parse_account(program).is_ok_and(|program| program == *id));
         if known_registry || Some(*id) == self.program || Some(*id) == self.token_program {
@@ -3401,6 +3660,17 @@ impl NamesModule for Names {
         })
     }
 
+    fn set_names_network(&mut self, network: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let net = Net::parse(&network).ok_or("the networks are lez-0.3 and lez-0.4")?;
+            self.switch_network(net)?;
+            Ok(self.shown_config())
+        })())
+    }
+
     fn get_config(&mut self) -> String {
         // Another app sees only what any reader of the chain could know: who you follow,
         // like and message, your main name and your files stay with the Names app (AUTH-1).
@@ -3637,6 +3907,9 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         reply((|| {
+            if self.net == Net::Lez04 {
+                return Err("the faucet pays on LEZ 0.3 only; LEZ 0.4 has no faucet in the app".to_owned());
+            }
             if !self.on_home() {
                 let home = &self.zones.home().name;
                 return Err(format!("the faucet pays on {home} only. Switch to {home} to ask it."));
@@ -3682,6 +3955,9 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         reply((|| {
+            if self.net == Net::Lez04 {
+                return Err("no names CLI for LEZ 0.4 is published yet, so none can be installed from here: give the path of a LEZ 0.4 names CLI in App settings".to_owned());
+            }
             let jobs = self.jobs()?;
             let (bin, man) = self.install_dirs()?;
             let ours = bin.join("names");
@@ -4164,6 +4440,24 @@ impl NamesModule for Names {
         out
     }
 
+    fn cli_pay_public(&mut self, name: String, amount: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let setup = match self.cli_setup() {
+            Ok(setup) => setup,
+            Err(error) => return reply(Err(error)),
+        };
+        let command = match cli::pay_public_args(&setup, &name, &amount) {
+            Ok(command) => command,
+            Err(error) => return reply(Err(error)),
+        };
+        let from = cli::default_public(&setup).ok().map(|id| format!("Public/{id}"));
+        let out = self.cli_job(&name, "pay", |_, _, _| Ok((command, None, Value::Null)));
+        self.log_started(&out, json!({ "kind": "pay", "chain": "lez", "from": from, "name": registry::normalize_name(&name), "amount": cli::amount_text(&amount).ok() }));
+        out
+    }
+
     fn board_follows(&mut self) -> String {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
@@ -4247,9 +4541,9 @@ impl NamesModule for Names {
         } else {
             return false;
         };
-        // One folder holds one chain's wallet: another zone's is refused.
+        // One folder holds one chain's wallet: another zone's, or the other network's, is refused.
         let used = chosen.as_deref().map(std::path::PathBuf::from).or_else(|| cli::find_wallet(None));
-        if used.is_some_and(|dir| self.wallet_taken(&dir).is_some()) {
+        if used.as_ref().is_some_and(|dir| self.wallet_taken(dir).is_some() || self.other_wallet().is_some_and(|other| same_dir(&other, dir))) {
             return false;
         }
         self.cli_wallet = chosen;
@@ -4310,6 +4604,9 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         reply((|| {
+            if self.net == Net::Lez04 {
+                return Err("zones are kept on LEZ 0.3; LEZ 0.4 has its own chain only. Switch to LEZ 0.3 to add one.".to_owned());
+            }
             let url = sequencer.trim();
             if !is_http_url(url) {
                 return Err(NOT_A_SEQUENCER.to_owned());
@@ -5334,6 +5631,7 @@ impl NamesModule for Names {
             request["zone"] = json!(zones.current_id());
             request["zone_name"] = json!(zones.zone().name);
             request["zone_channel"] = json!(zones.zone().channel);
+            request["network"] = json!(self.net.id());
             let id = request["id"].as_str().unwrap_or_default().to_owned();
             let input = provider_private::cli_input(&request, None, &self.known_token_programs());
             let view = self.queue_any(&app, request, now)?;
@@ -5548,6 +5846,7 @@ impl Names {
             request["zone"] = json!(zones.current_id());
             request["zone_name"] = json!(zones.zone().name);
             request["zone_channel"] = json!(zones.zone().channel);
+            request["network"] = json!(self.net.id());
         }
         let store = self.store();
         if store.granted(app).is_empty() {
@@ -6628,6 +6927,9 @@ mod tests {
             zones: zones::Zones::new(bare_home(DEFAULT_SEQUENCER)),
             channel_asked: false,
             receipt_asks: Default::default(),
+            net: Net::Lez03,
+            parked: Value::Null,
+            cli_lines: Default::default(),
         }
     }
 
@@ -10150,5 +10452,115 @@ mod tests {
         assert_eq!(parsed(&names.cli_balance())["value"]["balance"], "250");
         assert!(activity::all(&config).is_empty(), "{:?}", activity::all(&config));
         zone_test_end(dir);
+    }
+
+
+    // ── The two names networks ──────────────────────────────────────────
+
+    /// A stand-in CLI in `dir` that says `version` to `--version` and answers `module --help`.
+    fn versioned_cli(dir: &std::path::Path, version: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(dir).unwrap();
+        let script = dir.join("names");
+        std::fs::write(&script, format!("#!/bin/sh\n[ \"$1\" = --version ] && echo '{version}'\nexit 0\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    fn saved_file() -> Value {
+        serde_json::from_str(&std::fs::read_to_string(config_dir().unwrap().join("config.json")).unwrap()).unwrap()
+    }
+
+    /// Switching keeps LEZ 0.3's settings in the flat fields (what an older version reads),
+    /// LEZ 0.4's under `lez04`, and each network's registry, sequencer, CLI and wallet apart.
+    #[test]
+    fn each_names_network_keeps_its_own_settings() {
+        use std::os::unix::fs::PermissionsExt;
+        let config = config_dir().unwrap();
+        let _ = std::fs::remove_dir_all(&config);
+        std::fs::create_dir_all(&config).unwrap();
+        let wallet03 = config.join("w03");
+        std::fs::create_dir_all(&wallet03).unwrap();
+        std::fs::set_permissions(&wallet03, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let cli03 = versioned_cli(&config.join("bin03"), "names 0.1.0");
+        std::fs::write(
+            config.join("config.json"),
+            json!({ "sequencer": DEFAULT_SEQUENCER, "registry": DEFAULT_REGISTRY, "cli": cli03, "cli_wallet": wallet03, "main_name": "jefdiesel" }).to_string(),
+        )
+        .unwrap();
+        let mut names = Names::default();
+        assert_eq!(names.net, Net::Lez03);
+        let shown = parsed(&names.get_config());
+        assert_eq!(shown["names_network"]["id"], "lez-0.3");
+        assert_eq!(shown["registry"], DEFAULT_REGISTRY);
+
+        let switched = parsed(&names.set_names_network("lez-0.4".into()));
+        assert_eq!(switched["value"]["names_network"]["version"], "LEZ 0.4", "{switched}");
+        assert_eq!(switched["value"]["registry"], LEZ04_REGISTRY);
+        assert_eq!(switched["value"]["sequencer"], LEZ04_SEQUENCER);
+        assert_eq!(names.zones.current_id(), LEZ04_HOME_ID, "LEZ 0.4's history is never LEZ 0.3's home");
+        assert_eq!(names.cli, None, "LEZ 0.3's CLI is not carried over");
+        assert!(same_dir(&cli::find_wallet(names.cli_wallet.as_deref()).unwrap(), &lez04_wallet_dir(&config)));
+        assert_eq!(names.main_name.as_deref(), Some("jefdiesel"), "what isn't a network's stays");
+        let file = saved_file();
+        assert_eq!(file["names_network"], "lez-0.4");
+        assert_eq!(file["registry"], DEFAULT_REGISTRY, "the flat fields stay LEZ 0.3's: {file}");
+        assert_eq!(file["cli"], json!(cli03));
+        assert_eq!(file["lez04"]["registry"], LEZ04_REGISTRY);
+
+        // A setting changed on LEZ 0.4 stays there.
+        assert!(names.set_sequencer("http://127.0.0.1:9".into()) || names.sequencer == LEZ04_SEQUENCER);
+        let cli04 = versioned_cli(&config.join("bin04"), "names 0.17.0 (LEZ v0.4.0-rc3)");
+        assert!(names.set_cli(cli04.to_string_lossy().into_owned()));
+        // A fresh module (the next Basecamp start) is on LEZ 0.4 with those settings.
+        let again = Names::default();
+        assert_eq!((again.net, again.cli.clone()), (Net::Lez04, Some(cli04.to_string_lossy().into_owned())));
+
+        let back = parsed(&names.set_names_network("lez-0.3".into()));
+        assert_eq!(back["value"]["registry"], DEFAULT_REGISTRY, "{back}");
+        assert_eq!(names.cli, Some(cli03.to_string_lossy().into_owned()));
+        assert_eq!(names.zones.current_id(), zones::HOME);
+        let file = saved_file();
+        assert_eq!((file["names_network"].as_str(), file["lez04"]["cli"].as_str()), (Some("lez-0.3"), cli04.to_str()));
+        assert!(parsed(&names.set_names_network("lez-0.5".into()))["error"].is_string());
+    }
+
+    /// LEZ 0.4 runs only a CLI that says it is a LEZ 0.4 one, never one found on the
+    /// computer, and never with LEZ 0.3's wallet folder.
+    #[test]
+    fn lez04_runs_only_its_own_cli_and_wallet() {
+        use std::os::unix::fs::PermissionsExt;
+        let config = config_dir().unwrap();
+        let _ = std::fs::remove_dir_all(&config);
+        std::fs::create_dir_all(&config).unwrap();
+        let wallet03 = config.join("w03");
+        std::fs::create_dir_all(&wallet03).unwrap();
+        std::fs::set_permissions(&wallet03, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(config.join("config.json"), json!({ "cli_wallet": wallet03, "names_network": "lez-0.4" }).to_string()).unwrap();
+        let mut names = Names::default();
+        assert_eq!(names.net, Net::Lez04);
+        assert!(names.cli_setup().unwrap_err().contains("no names CLI for LEZ 0.4 is set"));
+        let old = versioned_cli(&config.join("old"), "names 0.1.0");
+        assert!(names.set_cli(old.to_string_lossy().into_owned()));
+        assert!(names.cli_setup().unwrap_err().contains("is not a LEZ 0.4 one"));
+        let new = versioned_cli(&config.join("new"), "names 0.17.0 (LEZ v0.4.0-rc3)");
+        assert!(names.set_cli(new.to_string_lossy().into_owned()));
+        std::fs::create_dir_all(lez04_wallet_dir(&config)).unwrap();
+        assert!(names.cli_setup().is_ok());
+        assert!(!names.set_cli_wallet(wallet03.to_string_lossy().into_owned()), "LEZ 0.3's wallet is refused on LEZ 0.4");
+        names.cli_wallet = Some(wallet03.to_string_lossy().into_owned());
+        assert!(names.cli_setup().unwrap_err().contains("each network keeps its own wallet"));
+        assert!(parsed(&names.cli_install())["error"].as_str().unwrap().contains("no names CLI for LEZ 0.4 is published"));
+        assert!(parsed(&names.zone_add(String::new(), "http://127.0.0.1:9".into()))["error"].as_str().unwrap().contains("zones are kept on LEZ 0.3"));
+    }
+
+    /// Another app's request is approved only on the network it was asked on.
+    #[test]
+    fn a_request_is_approved_only_on_its_own_network() {
+        let names = fresh();
+        assert!(names.asked_here(&json!({ "zone": "home" })).is_ok(), "a request from before is LEZ 0.3's");
+        assert!(names.asked_here(&json!({ "zone": "home", "network": "lez-0.3" })).is_ok());
+        let refused = names.asked_here(&json!({ "zone": "home", "network": "lez-0.4" })).unwrap_err();
+        assert!(refused.contains("asked for LEZ 0.4") && refused.contains("on LEZ 0.3"), "{refused}");
     }
 }

@@ -113,9 +113,9 @@ Item {
     property bool configKnown: false   // the names module has answered once
     // The names module this app needs: the same release (metadata.json asks for it
     // at install, but an older module can still be the one Basecamp loaded).
-    readonly property string neededModule: "0.16.0"
+    readonly property string neededModule: "0.17.0"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.16.0"
+    readonly property string appVersion: "0.17.0"
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -324,6 +324,7 @@ Item {
                 return true
             }
             moduleOutdated = ""
+            namesNet = config.names_network && config.names_network.id === "lez-0.4" ? "0.4" : "0.3"
             registry = config.registry ? config.registry : ""
             sequencer = config.sequencer ? config.sequencer : ""
             zoneId = config.zone && config.zone.id ? config.zone.id : "home"
@@ -618,12 +619,21 @@ Item {
 
     // ── Two networks: LEZ 0.3 (public Logos testnet) and LEZ 0.4 (bridge test network) ──
 
-    /// Which network the Wallet's balances show: "0.3" (the public Logos testnet, where
-    /// everything else in the app runs) or "0.4" (the bridge test network, read only).
-    property string walletNet: "0.3"
+    /// The names network the module is on: "0.3" (LEZ 0.3, the public Logos testnet, the
+    /// default) or "0.4" (LEZ 0.4, the bridge test network). Names are looked up, registered
+    /// and paid there, with that network's own CLI and wallet (set_names_network).
+    property string namesNet: "0.3"
+    /// Which network the Wallet shows: always the names network, so a balance, a name and a
+    /// payment on one screen are on the same chain. One switch for both.
+    readonly property string walletNet: namesNet
+    property bool netSwitching: false
+    property string netProblem: ""
+    /// The public accounts LEZ 0.3's wallet listed before a switch to LEZ 0.4, so the LEZ 0.4
+    /// balances still show what they hold there (LEZ 0.4's own wallet may have none yet).
+    property var accounts03: []
     property var bridgeNet: null          // bridge_net_balances, or null until it answers
     property string bridgeNetProblem: ""  // why the module couldn't be asked
-    readonly property var bridgeNetAccounts: Logic.publicAccounts(cliBalance, cliAccounts)
+    readonly property var bridgeNetAccounts: Logic.mergedAccounts(Logic.publicAccounts(cliBalance, cliAccounts), namesNet === "0.4" ? accounts03 : [])
     // A newly read account list is asked about at once (the module answers from memory).
     onBridgeNetAccountsChanged: if (walletNet === "0.4") loadBridgeNet()
     readonly property var bridgeNetStatusNow: Logic.bridgeNetStatus(bridgeNet, clockShown)
@@ -668,12 +678,29 @@ Item {
         })
     }
 
-    /// Switches the Wallet's balances to network `net` ("0.3" or "0.4").
+    /// Switches the names network, and with it the Wallet, to `net` ("0.3" or "0.4"). The
+    /// module keeps each network's settings apart; everything shown is read again.
     function setWalletNet(net) {
-        walletNet = net
-        walletRowOpen = ""
-        if (net === "0.4")
-            loadBridgeNet()
+        if (net === namesNet || netSwitching)
+            return
+        if (namesNet === "0.3")
+            accounts03 = Logic.publicAccounts(cliBalance, cliAccounts)
+        netSwitching = true
+        netProblem = ""
+        askLater("set_names_network", ["lez-" + net], function(value) {
+            netSwitching = false
+            walletRowOpen = ""
+            record = null
+            missing = ""
+            bridgeNet = null
+            namesNet = net
+            loadConfig()
+            if (net === "0.4")
+                loadBridgeNet()
+        }, function(message) {
+            netSwitching = false
+            netProblem = sentence(message)
+        })
     }
 
     // Read only while the bridge test network's balances are on screen, every 30 s.
@@ -1254,7 +1281,12 @@ Item {
             tokenSend()
             return
         }
-        payFromPublic = !sendFromPrivate && !sendToName()
+        // On LEZ 0.4 a name is paid from the public account: paying privately isn't offered there.
+        payFromPublic = (!sendFromPrivate && !sendToName()) || (namesNet === "0.4" && sendToName())
+        if (namesNet === "0.4" && !sendToName()) {
+            say("Sending on LEZ 0.4 isn't in the wallet yet: only paying a name is. Switch to LEZ 0.3 to send.", true)
+            return
+        }
         payName()
     }
 
@@ -2983,13 +3015,19 @@ Item {
             say(sentence(error.message), true)
             return
         }
+        // On LEZ 0.4 only a name's public account is paid: a payment to its private keys
+        // is proven on this computer, which isn't offered there yet.
+        if (namesNet === "0.4" && recipient && !recipient["public"]) {
+            say((target !== "" ? target : to) + " takes only private payments, which aren't offered on LEZ 0.4 yet. Switch to LEZ 0.3 to pay it privately.", true)
+            return
+        }
         if (target !== "" && payForwardSeen !== to + "→" + target) {
             payForwardSeen = to + "→" + target
             say(to + " forwards to " + target + ", so the payment goes to " + target + ". Press Pay again to send it.", false)
             return
         }
         payForwardSeen = ""
-        boardStart("cli_pay", [to, amount], "Your payment to " + (target !== "" ? to + " → " + target : to), function() {
+        boardStart(namesNet === "0.4" ? "cli_pay_public" : "cli_pay", [to, amount], "Your payment to " + (target !== "" ? to + " → " + target : to) + (namesNet === "0.4" ? " on LEZ 0.4, from your public account" : ""), function() {
             sendAmount.text = ""
             loadCliBalance()
         })
@@ -4735,7 +4773,7 @@ Item {
     /// network), "chain" (the Logos Blockchain), "both" (the Logos Blockchain into LEZ 0.3) or
     /// "0.3+chain" (the balances of LEZ 0.3 and of the Logos Blockchain) or "messages" (chat).
     component RunsOn: Text {
-        property string net: "0.3"
+        property string net: root.namesNet
         property string prefix: "Runs on"
         Layout.fillWidth: true
         textFormat: Text.StyledText
@@ -4747,8 +4785,64 @@ Item {
             : net === "chain" ? "<b>the Logos Blockchain</b>"
             : net === "both" ? "<b>the Logos Blockchain</b> and <b>LEZ 0.3</b> · public Logos testnet"
             : net === "0.3+chain" ? "<b>LEZ 0.3</b> · public Logos testnet, and on <b>the Logos Blockchain</b>"
-            : net === "messages" ? "<b>Logos Messaging</b>; LNS names are looked up on <b>LEZ 0.3</b> · public Logos testnet"
+            : net === "messages" ? "<b>Logos Messaging</b>; LNS names are looked up on " + (root.namesNet === "0.4" ? "<b>LEZ 0.4</b> · bridge test network" : "<b>LEZ 0.3</b> · public Logos testnet")
             : "<b>LEZ 0.3</b> · public Logos testnet")
+    }
+
+    /// The names network switch: LEZ 0.3 | LEZ 0.4. Shown only beside actions that work on
+    /// both; everything else says the one it runs on (RunsOn).
+    component NetSwitch: ColumnLayout {
+        Layout.fillWidth: true
+        spacing: 6
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+            Accessible.name: "Network"
+            Repeater {
+                model: [Logic.NET_03, Logic.NET_04]
+                Rectangle {
+                    id: netChoice
+                    required property var modelData
+                    readonly property bool current: root.namesNet === modelData.id
+                    Layout.fillWidth: true
+                    implicitHeight: netChoiceText.implicitHeight + root.px(18)
+                    radius: 8
+                    color: current ? root.raised : netChoiceArea.containsMouse ? root.hover : "transparent"
+                    border.width: 1
+                    border.color: current ? root.ink : root.line
+                    opacity: root.netSwitching && !current ? 0.5 : 1
+                    Accessible.role: Accessible.RadioButton
+                    Accessible.name: modelData.version + ", " + modelData.name
+                    Accessible.checked: current
+                    Column {
+                        id: netChoiceText
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.left: parent.left
+                        anchors.leftMargin: root.px(14)
+                        spacing: 1
+                        Text { text: netChoice.modelData.version; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); font.weight: netChoice.current ? Font.DemiBold : Font.Normal }
+                        Text { text: netChoice.modelData.name; color: root.dim; font.family: root.sans; font.pixelSize: root.px(13) }
+                    }
+                    MouseArea {
+                        id: netChoiceArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.setWalletNet(netChoice.modelData.id)
+                    }
+                }
+            }
+        }
+        Text {
+            visible: root.netProblem !== "" || root.netSwitching
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            textFormat: Text.PlainText
+            color: root.netProblem !== "" ? root.alarm : root.dim
+            font.family: root.sans
+            font.pixelSize: root.px(14)
+            text: root.netProblem !== "" ? root.netProblem : "Switching…"
+        }
     }
 
     component Hint: Text {
@@ -5600,45 +5694,8 @@ Item {
                             }
                         }
                     }
-                    // Which network the balances below are on: a two-way switch, LEZ 0.3 by default.
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
-                        Accessible.name: "Network"
-                        Repeater {
-                            model: [Logic.NET_03, Logic.NET_04]
-                            Rectangle {
-                                id: netChoice
-                                required property var modelData
-                                readonly property bool current: root.walletNet === modelData.id
-                                Layout.fillWidth: true
-                                implicitHeight: netChoiceText.implicitHeight + root.px(18)
-                                radius: 8
-                                color: current ? root.raised : netChoiceArea.containsMouse ? root.hover : "transparent"
-                                border.width: 1
-                                border.color: current ? root.ink : root.line
-                                Accessible.role: Accessible.RadioButton
-                                Accessible.name: modelData.version + ", " + modelData.name
-                                Accessible.checked: current
-                                Column {
-                                    id: netChoiceText
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    anchors.left: parent.left
-                                    anchors.leftMargin: root.px(14)
-                                    spacing: 1
-                                    Text { text: netChoice.modelData.version; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); font.weight: netChoice.current ? Font.DemiBold : Font.Normal }
-                                    Text { text: netChoice.modelData.name; color: root.dim; font.family: root.sans; font.pixelSize: root.px(13) }
-                                }
-                                MouseArea {
-                                    id: netChoiceArea
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.setWalletNet(netChoice.modelData.id)
-                                }
-                            }
-                        }
-                    }
+                    // Which network the balances below are on: the names network switch.
+                    NetSwitch {}
                     RunsOn { net: root.walletNet === "0.4" ? "0.4" : "0.3+chain"; prefix: "Balances on" }
 
                     // ── LEZ 0.4, the bridge test network: read only ──
@@ -5739,7 +5796,7 @@ Item {
                         }
                         Hint { visible: root.bridgeNetWatchProblem !== ""; font.pixelSize: root.px(14); color: root.alarm; text: root.bridgeNetWatchProblem }
                         Hint { font.pixelSize: root.px(14); text: "Private balances on the bridge test network are not shown yet." }
-                        Hint { font.pixelSize: root.px(14); text: "Sending on the bridge test network isn't in the wallet yet." }
+                        Hint { font.pixelSize: root.px(14); text: "Sending on the bridge test network isn't in the wallet yet, apart from paying a name." }
                     }
                     // What runs on LEZ 0.3 only, unavailable while LEZ 0.4 is shown.
                     ColumnLayout {
@@ -5748,13 +5805,13 @@ Item {
                         spacing: 8
                         RowLayout {
                             spacing: 10
+                            Action { label: "LNS names"; onPressed: root.walletView = "names" }
                             Action { label: "Send"; enabledNow: false }
                             Action { label: "Receive"; enabledNow: false }
-                            Action { label: "LNS names"; enabledNow: false }
                             Action { label: "Add a token"; enabledNow: false }
                         }
-                        RunsOn { net: "0.3" }
-                        Hint { font.pixelSize: root.px(15); text: "These run on LEZ 0.3, the public Logos testnet, as messages do. Switch to LEZ 0.3 to use them." }
+                        RunsOn { net: "0.4"; prefix: "LNS names run on" }
+                        Hint { font.pixelSize: root.px(15); text: "Send, Receive and Add a token run on LEZ 0.3 only, the public Logos testnet. Switch to LEZ 0.3 to use them. A name can be paid on LEZ 0.4 from its page (Pay)." }
                     }
 
                     // Which zone the LEZ balances below are on, once there is more than one.
@@ -6079,7 +6136,12 @@ Item {
                     spacing: 12
                     Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
                     Text { text: root.sendKind === "chain" ? "Send on the Logos Blockchain" : "Send " + root.sendTitle; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
-                    RunsOn { net: root.sendKind === "chain" ? "chain" : "0.3" }
+                    RunsOn { net: root.sendKind === "chain" ? "chain" : root.namesNet }
+                    Hint {
+                        visible: root.sendKind !== "chain" && root.namesNet === "0.4"
+                        color: root.brass
+                        text: "On LEZ 0.4 the wallet pays only a name's public account, from your public account: the chain shows both accounts and the amount. Paying a name's private keys isn't offered there yet (it is proven on this computer), and other sends aren't in the wallet yet."
+                    }
 
                     Part { text: "From" }
                     PickRow {
@@ -6459,7 +6521,8 @@ Item {
                     spacing: 14
                     Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
                     Text { text: "Names"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
-                    RunsOn { net: "0.3" }
+                    NetSwitch {}
+                    RunsOn {}
                     Hint { text: "Your wallet can hold many names. Names held privately can't be linked to each other on chain; a name held publicly shows its holder. Each name is paid into its own private account unless it publishes a public one." }
                     // On another zone the names are still listed, and changed only on Home.
                     Card {
@@ -7442,7 +7505,8 @@ Item {
                 spacing: 22
 
                 // Names and profiles are kept on LEZ 0.3.
-                RunsOn { visible: root.section === "search" || root.section === "profile"; net: "0.3"; prefix: "LNS names and profiles live on" }
+                NetSwitch { visible: root.section === "search" && root.record === null }
+                RunsOn { visible: root.section === "search" || root.section === "profile"; prefix: "LNS names and profiles: looked up on" }
 
                 // Search: look up any name.
                 ColumnLayout {
@@ -8034,7 +8098,8 @@ Item {
                         font.weight: Font.DemiBold
                         font.pixelSize: root.px(36)
                     }
-                    RunsOn { net: "0.3" }
+                    NetSwitch {}
+                    RunsOn {}
                     Hint {
                         font.pixelSize: root.px(18)
                         text: "Pick a name people can use to find your profile and page. Held privately, with a deposit you get back when you release it."
@@ -8168,8 +8233,13 @@ Item {
                         }
                         Hint { visible: root.claimLine !== ""; text: root.claimLine }
                     }
+                    Hint {
+                        visible: root.namesNet === "0.4"
+                        color: root.brass
+                        text: "Registering privately isn't offered on LEZ 0.4 yet: its proofs are untested there. Register from a public account below, or switch to LEZ 0.3."
+                    }
                     Card {
-                        visible: root.cliPath !== "" && !(root.deposit !== null && root.deposit.tier === "locked")
+                        visible: root.namesNet === "0.3" && root.cliPath !== "" && !(root.deposit !== null && root.deposit.tier === "locked")
                         Layout.fillWidth: true
                         Text {
                             text: "Register privately"
@@ -8262,14 +8332,14 @@ Item {
                         }
                     }
                     Link {
-                        visible: root.cliPath !== "" && root.wallet.length > 0 && !(root.deposit !== null && root.deposit.tier === "locked")
+                        visible: root.namesNet === "0.3" && root.cliPath !== "" && root.wallet.length > 0 && !(root.deposit !== null && root.deposit.tier === "locked")
                         text: root.publicRegisterOpen ? "Hide the public option" : "Register from a public account instead"
                         color: root.faint
                         font.pixelSize: root.px(16)
                         onPressed: root.publicRegisterOpen = !root.publicRegisterOpen
                     }
                     Panel {
-                        visible: root.wallet.length > 0 && (root.cliPath === "" || root.publicRegisterOpen)
+                        visible: root.wallet.length > 0 && (root.cliPath === "" || root.publicRegisterOpen || root.namesNet === "0.4")
                         title: root.cliPath !== "" ? "From a public account" : "Register it to"
                         Accounts {}
                         Hint {

@@ -2,7 +2,7 @@
 // engine cannot run in CI. Run with: node basecamp/logic.test.mjs
 import { atLeast, someAmount, entryShown, amountRead, amountProblem, amountDigits, AMOUNT_MAX, CHAIN_AMOUNT_MAX, jobProblem, tokenToProblem, tokenSendProves, tokenShown, feeEstimate, feePaid, accountTitle, accountsShown, publisherLine, durationWords, keyShown, chainToProblem, stakeLines, rewardsLine, grouped, addDigits, walletAssets, subDigits, walletGroups, stakeTable, activityLine, activityFor, agoShown, readNote, chainKeyTitle, chainKeySub, chainUsable, chainLaterNote } from "./qml/logic.mjs";
 import { readFileSync } from "node:fs";
-import { publicAccounts, decimalShown, bridgeNetStatus, bridgeNetRows, bridgeNetShown, publicIdProblem, NET_03, NET_04 } from "./qml/logic.mjs";
+import { publicAccounts, decimalShown, bridgeNetStatus, bridgeNetRows, bridgeNetShown, publicIdProblem, NET_03, NET_04, mergedAccounts } from "./qml/logic.mjs";
 
 let failures = 0;
 const check = (label, got, want) => {
@@ -351,6 +351,14 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("activityLine native on the bridge test network",
     ((l) => [l.sub, l.amount])(activityLine({ kind: "arrived", chain: "lez-0.4", to: "Public/" + OWNER, amount: "5", state: "arrived", at: 1 }, 2000)),
     ["in Public CCVd76Tk…pKnk on LEZ 0.4, the bridge test network", "5"]);
+  // The names network on LEZ 0.4: its own entries say LEZ 0.4, LEZ 0.3's accounts are added once.
+  check("activityLine paid a name while on LEZ 0.4",
+    ((l) => [l.title, l.sub])(activityLine({ kind: "pay", chain: "lez", zone: "bridge-0.4", name: "lns-smoke-ourzerofour", amount: "1000", state: "done", at: 1 }, 2000)),
+    ["Paid lns-smoke-ourzerofour", "on LEZ 0.4"]);
+  check("activityLine paid a name on LEZ 0.3",
+    ((l) => l.sub)(activityLine({ kind: "pay", chain: "lez", name: "ada", amount: "1000", state: "done", at: 1 }, 2000)), "on LEZ 0.3");
+  check("mergedAccounts", mergedAccounts(["Public/a", "Public/b"], ["Public/b", "Public/c", 7]), ["Public/a", "Public/b", "Public/c"]);
+  check("mergedAccounts empty", mergedAccounts(null, undefined), []);
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");

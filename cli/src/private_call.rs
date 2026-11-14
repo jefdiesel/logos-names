@@ -261,7 +261,7 @@ impl Client {
         let wallet_mentions: Vec<AccountMention> = call.mentions.iter().map(|(_, mention, _)| mention.clone()).collect();
         let programs: ProgramCatalog = catalog.iter().cloned().collect();
         self.wallet.set_dry_run(true);
-        let (dry, printed) = captured(self.wallet.send_tx_with_pre_check(
+        let (dry, mut printed) = captured(self.wallet.send_tx_with_pre_check(
             wallet_mentions,
             0,
             call.message.clone(),
@@ -274,7 +274,12 @@ impl Client {
         .await;
         self.wallet.set_dry_run(false);
         match dry {
-            Err(ExecutionFailureKind::DryRun) => {}
+            // rc3 hands the dry run's report back instead of printing it; its text is the
+            // lines rc1 printed, which are read below.
+            Err(ExecutionFailureKind::DryRun(report)) => {
+                printed.push('\n');
+                printed.push_str(&report.to_string());
+            }
             Err(error) => bail!("refused: the wallet's own simulation of this call fails: {error} ({error:?})"),
             Ok(_) => bail!("the wallet sent a transaction during a dry run; stop and check the wallet"),
         }

@@ -293,6 +293,14 @@ pub fn pay_args(name: &str, amount: &str) -> Result<Vec<String>, String> {
     Ok(vec!["pay".to_owned(), "--".to_owned(), name, amount])
 }
 
+/// `names pay --public` from the wallet's default public account: the name's public
+/// account is paid in the open, with no proof.
+pub fn pay_public_args(setup: &Setup, name: &str, amount: &str) -> Result<Vec<String>, String> {
+    let mut args = pay_from_public_args(setup, name, amount)?;
+    args.insert(1, "--public".to_owned());
+    Ok(args)
+}
+
 /// `names pay` from the wallet's default public account rather than its
 /// private one: the chain then shows that account paying.
 pub fn pay_from_public_args(setup: &Setup, name: &str, amount: &str) -> Result<Vec<String>, String> {

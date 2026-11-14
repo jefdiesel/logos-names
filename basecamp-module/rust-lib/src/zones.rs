@@ -46,6 +46,10 @@ pub struct Zone {
 pub struct Zones {
     list: Vec<Zone>,
     current: usize,
+    /// What the first zone is called (`HOME`, unless the names network gives it another
+    /// name: `with_home_id`), so what is kept under one network's home is never read as
+    /// another network's.
+    home_id: String,
 }
 
 /// A channel as a sequencer names it: 64 hex characters, kept in lower case.
@@ -189,7 +193,13 @@ impl Zones {
         if home.name.is_empty() {
             home.name = "Home".to_owned();
         }
-        Self { list: vec![home], current: 0 }
+        Self { list: vec![home], current: 0, home_id: HOME.to_owned() }
+    }
+
+    /// The same zones, the first one called `id` instead of `HOME`.
+    pub fn with_home_id(mut self, id: &str) -> Self {
+        self.home_id = id.to_owned();
+        self
     }
 
     /// The zones a configuration saved. `home` is made from its flat fields, which are
@@ -253,7 +263,7 @@ impl Zones {
     pub fn id(&self, index: usize) -> String {
         match self.list.get(index) {
             Some(zone) if index > 0 => zone.channel.clone().unwrap_or_default(),
-            _ => HOME.to_owned(),
+            _ => self.home_id.clone(),
         }
     }
 
@@ -264,7 +274,7 @@ impl Zones {
     /// The zone called `id` (`home`, or a channel in either case).
     pub fn index(&self, id: &str) -> Option<usize> {
         let id = id.trim();
-        if id == HOME {
+        if id == self.home_id {
             return Some(0);
         }
         let wanted = channel(id)?;
