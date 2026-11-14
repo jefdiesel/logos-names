@@ -10571,7 +10571,7 @@ mod tests {
         assert_eq!((shown["sequencer"].as_str(), shown["names_sequencer"].as_str(), shown["cli_wallet"].as_str()), (Some(ZONE_B), Some("http://127.0.0.1:9"), Some(zone_wallet.as_str())), "{shown}");
         assert_eq!(shown["zone"], json!({ "id": second, "name": "Second", "channel": second, "home": false }), "{shown}");
         as_caller(app("evil_ui"));
-        let other = parsed(&again.get_config());
+        let other = parsed(&again.get_config())["value"].clone();
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
         assert_eq!(other["zone"], json!({ "id": second, "channel": second, "home": false }), "{other}");
         assert!(!other.to_string().contains("Second") && other.get("cli_wallet").is_none(), "{other}");
