@@ -105,6 +105,46 @@ Tests:
   Then, put back, it signs once, with the shown hash.
 - e2e step "sign refuses a hash that isn't the approved one", with the real CLI.
 
+## 6. Signing the same call again when the payer's nonce moved
+
+The relay may answer "busy, rebuild" when its payer has another transaction in flight. The
+half-signed transaction names the payer's nonce, so it is dead once that nonce is used. **Before
+0.17's `resign_relayed_call`, an app could not get the same call signed again without the person
+approving a second time:** the request ends `done`, approving it again is refused, and a new
+`propose_relayed_call` makes a new request and a new sheet.
+
+`resign_relayed_call(request_id)` is the one exception, and it is narrow:
+- **Who:** only the app that made the request, only a relayed call the person approved and the
+  wallet signed, only on LEZ 0.4, and only while the app still has the program declared.
+- **Limits:** within 10 minutes of the approval, at most 3 times (`RESIGN_WINDOW_MS`,
+  `MAX_RESIGNS`).
+- **What is compared:**
+  - The kept bytes are hashed again against what was approved.
+  - The CLI builds the call again from the chain's nonces.
+  - `provider_public::resign_check` compares that build with the build the person approved
+    (`approved_report`). Every field the sheet showed must be the same: the account, program,
+    payer, gas limit, tip, max fee, actors, the accounts it creates, whether it reaches the
+    account's LEZ balance, the message's length and SHA-256.
+  - The set of signers must be the same, and so must the signing account's nonce. If that nonce
+    moved, the approved call may have landed, so this is refused.
+  - The payer's nonce must be newer than the last one signed.
+  - Only then does the CLI sign the new hash, and it rebuilds and compares the hash once more as
+    in §5.
+- **Anything else needs a new approval** ("Propose it again"). That includes an unchanged payer
+  nonce: the transaction already given is still the one to send.
+
+Tests:
+- `provider_public::tests::a_re_sign_is_allowed_only_for_a_newer_payer_nonce`: each of the 11
+  fields changed is refused; so are the account's nonce moved, the payer's nonce unchanged or
+  older, a third signer, and an unchanged hash.
+- The module flow test `a_relayed_call_is_built_shown_signed_and_handed_back_never_sent`:
+  - another app is refused;
+  - an unchanged nonce is refused;
+  - the max fee, the payer or the bytes changed are each refused;
+  - the account's nonce moved is refused;
+  - a newer payer nonce is signed again, 3 times, then refused;
+  - past 10 minutes it is refused.
+
 ## What the wallet does not do
 
 It sends nothing and pays nothing. It never talks to the relay and never reads Sepolia. It can't

@@ -647,7 +647,7 @@ pub fn app_view(request: &Value) -> Value {
         // A relayed call: how its build stands, and once approved, the half-signed transaction
         // and its hash (what the app hands its relay). The person's other accounts never show.
         Some(crate::provider_public::RELAYED_CALL) => {
-            for key in ["program", "check", "message_len", "transaction", "hash"] {
+            for key in ["program", "check", "message_len", "transaction", "hash", "resigns"] {
                 view[key] = request[key].clone();
             }
             view["payer"] = request["fee"]["payer"].clone();

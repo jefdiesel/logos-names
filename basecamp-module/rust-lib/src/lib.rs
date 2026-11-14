@@ -332,6 +332,13 @@ pub trait NamesModule: Send + 'static {
     /// wallet is busy. The value is `get_config`'s. Names app only.
     fn set_names_network(&mut self, network: String) -> String;
 
+    /// Sets the bridge program the Wallet reads on LEZ 0.4 (its Config lists the bridged
+    /// tokens): a program ID, or empty for the built-in default. Kept in config.json under
+    /// `lez04.bridge_program`, whichever network is in use; a redeployed bridge needs this,
+    /// not a new build. False, and nothing changed, for anything that isn't a program ID.
+    /// Names app only.
+    fn set_bridge_program(&mut self, program_id: String) -> bool;
+
     /// Use the registry with this program account ID (base58), and remember it
     /// across restarts. Returns false and changes nothing if it is not an
     /// account ID.
@@ -1042,6 +1049,14 @@ pub trait NamesModule: Send + 'static {
     /// only for now.
     fn propose_relayed_call(&mut self, account: String, call_json: String, summary: String) -> String;
 
+    /// Signs this app's approved relayed call `request_id` again, without asking the person,
+    /// when the fee payer's nonce has moved (a relay that had another transaction in flight)
+    /// and NOTHING else has: the same account and account nonce, program, bytes, actors, payer,
+    /// gas limit, tip and max fee. At most 3 times, within 10 minutes of the approval. Any other
+    /// change is refused: propose the call again for the person to approve. The value is the
+    /// request, with the new `transaction` and `hash`.
+    fn resign_relayed_call(&mut self, request_id: String) -> String;
+
     /// Asks the person to list a token program's definitions in their holdings, with the
     /// names, symbols and decimals given: `definitions_json` is `[{definition, name, symbol,
     /// decimals, origin}]` (up to 16).
@@ -1192,6 +1207,9 @@ struct Names {
     net: Net,
     /// The other names network's settings as saved (`NET_KEYS`), kept as they are.
     parked: Value,
+    /// The bridge program on LEZ 0.4, if set (config.json `lez04.bridge_program`); else
+    /// `bridge_net::DEFAULT_BRIDGE_PROGRAM`. A redeployed bridge is a new setting, not a build.
+    bridge_program: Option<AccountId>,
     /// What each CLI said its version is, by path and modification time.
     cli_lines: std::sync::Mutex<HashMap<std::path::PathBuf, (std::time::SystemTime, String)>>,
     /// When LEZ last answered about each followed bridge's receipt (seconds), so each is
@@ -1292,6 +1310,7 @@ impl Default for Names {
             receipt_asks: Default::default(),
             net: Net::Lez03,
             parked: Value::Null,
+            bridge_program: None,
             cli_lines: Default::default(),
         };
         // Files saved by versions before 0.10 were readable by every account on the
@@ -1823,6 +1842,7 @@ impl Names {
     /// Applies a saved configuration on the names network it names (`names_network`):
     /// LEZ 0.3's settings are the flat fields, LEZ 0.4's are under `lez04`.
     fn apply_network(&mut self, saved: &Value) {
+        self.bridge_program = saved["lez04"]["bridge_program"].as_str().and_then(|text| registry::parse_account(text).ok());
         let net = saved["names_network"].as_str().and_then(Net::parse).unwrap_or_default();
         match net {
             Net::Lez03 => {
@@ -2044,6 +2064,7 @@ impl Names {
         config["cli_wallet"] = json!(self.resolve_wallet(self.cli_wallet.as_deref()).map(|dir| dir.to_string_lossy().into_owned()));
         config["module_version"] = json!(MODULE_VERSION);
         config["names_network"] = self.net.shown();
+        config["bridge_program"] = json!(registry::account_text(&self.bridge_program_now()));
         config["names_networks"] = json!([Net::Lez03.shown(), Net::Lez04.shown()]);
         // What the CLI said its version is, if it was asked already (cli_status asks): get_config
         // never runs the CLI, whoever calls it.
@@ -2764,8 +2785,28 @@ impl Names {
                 out["lez04"] = Value::Object(block);
             }
         }
+        if let Some(program) = &self.bridge_program {
+            if !out["lez04"].is_object() {
+                out["lez04"] = json!({});
+            }
+            out["lez04"]["bridge_program"] = json!(registry::account_text(program));
+        }
         out["names_network"] = json!(self.net.id());
         out
+    }
+
+    /// The bridge program read on LEZ 0.4 (`set_bridge_program`).
+    fn bridge_program_now(&self) -> AccountId {
+        self.bridge_program
+            .unwrap_or_else(|| registry::parse_account(bridge_net::DEFAULT_BRIDGE_PROGRAM).expect("the default bridge program is an account ID"))
+    }
+
+    /// LEZ 0.4's RPC as configured: the sequencer in use there, or the one kept for it.
+    fn lez04_rpc(&self) -> String {
+        match self.net {
+            Net::Lez04 => self.sequencer.clone(),
+            Net::Lez03 => self.parked["sequencer"].as_str().filter(|url| is_http_url(url)).unwrap_or(bridge_net::RPC).to_owned(),
+        }
     }
 
     fn registry(&self) -> Result<Registry, String> {
@@ -3692,6 +3733,23 @@ impl NamesModule for Names {
         })
     }
 
+    fn set_bridge_program(&mut self, program_id: String) -> bool {
+        if only_the_names_app().is_err() {
+            return false;
+        }
+        let text = program_id.trim();
+        self.bridge_program = if text.is_empty() {
+            None
+        } else {
+            match registry::parse_account(text.strip_prefix("Public/").unwrap_or(text)) {
+                Ok(program) if program != registry::NATIVE_TOKEN => Some(program),
+                _ => return false,
+            }
+        };
+        self.save();
+        true
+    }
+
     fn set_names_network(&mut self, network: String) -> String {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
@@ -4097,12 +4155,13 @@ impl NamesModule for Names {
             accounts.truncate(bridge_net::MAX_ACCOUNTS);
             // One constant names the network; a test or a trial of a new chain may point
             // elsewhere for one run.
-            let url = std::env::var("LOGOS_NAMES_BRIDGE_RPC").ok().filter(|url| !url.trim().is_empty()).unwrap_or_else(|| bridge_net::RPC.to_owned());
-            let key = format!("bridge-net:{url}:{}", accounts.iter().map(registry::account_text).collect::<Vec<_>>().join(","));
+            let url = std::env::var("LOGOS_NAMES_BRIDGE_RPC").ok().filter(|url| !url.trim().is_empty()).unwrap_or_else(|| self.lez04_rpc());
+            let program = self.bridge_program_now();
+            let key = format!("bridge-net:{url}:{}:{}", registry::account_text(&program), accounts.iter().map(registry::account_text).collect::<Vec<_>>().join(","));
             let (fetch_url, fetch_dir) = (url.clone(), dir.clone());
             let marked = watched_now.clone();
             let read = self.read_in_background(key, bridge_net::EVERY, move || {
-                let mut read = bridge_net::read(&fetch_url, &accounts, &fetch_dir, now())?;
+                let mut read = bridge_net::read(&fetch_url, &program, &accounts, &fetch_dir, now())?;
                 for row in read["accounts"].as_array_mut().into_iter().flatten() {
                     if row["account"].as_str().is_some_and(|account| marked.iter().any(|m| m == account)) {
                         row["watched"] = Value::Bool(true);
@@ -5684,6 +5743,10 @@ impl NamesModule for Names {
         })())
     }
 
+    fn resign_relayed_call(&mut self, request_id: String) -> String {
+        reply(self.resign(request_id.trim()))
+    }
+
     fn declare_programs(&mut self, programs_json: String, reason: String) -> String {
         reply((|| {
             let app = asking_app()?;
@@ -6535,22 +6598,15 @@ impl Names {
             if registry::hex(&<sha2::Sha256 as sha2::Digest>::digest(&message)) != request["report"]["message_sha256"].as_str().unwrap_or_default() {
                 return Err("the call to sign isn't the one shown; nothing was signed. Reject it.".to_owned());
             }
-            let setup = self.cli_setup()?;
-            setup.wallet_ready()?;
-            let jobs = self.jobs()?;
-            let file = jobs.dir.join(format!("relayed-{id}.json"));
-            std::fs::create_dir_all(&jobs.dir).map_err(|error| format!("cannot keep the call: {error}"))?;
-            cli::write_private(&file, provider_public::cli_input(request, Some(&hash)).to_string().as_bytes()).map_err(|error| format!("cannot keep the call: {error}"))?;
-            let signed = cli::run_capture_text(&setup, vec!["module".into(), "public-call".into(), "sign".into(), format!("--input={}", file.display())], PUBLIC_PLAN_PATIENCE);
-            let _ = std::fs::remove_file(&file);
-            let signed: Value = serde_json::from_str(cli::last_line(&signed?)).map_err(|_| "the names CLI gave no signed call".to_owned())?;
-            if signed["hash"] != hash.as_str() || !signed["transaction"].is_string() {
-                return Err("the signed call isn't the one approved; nothing is given to the app".to_owned());
-            }
+            let transaction = self.sign_relayed(id, request, &hash)?;
             outcome["state"] = json!("done");
             outcome["account"] = request["account"].clone();
             outcome["hash"] = json!(hash);
-            outcome["transaction"] = signed["transaction"].clone();
+            outcome["transaction"] = json!(transaction);
+            // What the person approved, kept as the yardstick of any re-sign (`resign_relayed_call`).
+            outcome["approved_report"] = request["report"].clone();
+            outcome["signed_payer_nonce"] = provider_public::payer_nonce(&request["report"]).map_or(Value::Null, |n| json!(n.to_string()));
+            outcome["resigns"] = json!(0);
         }
         let store = self.store();
         let view = match store.get_mut(id) {
@@ -6558,14 +6614,87 @@ impl Names {
                 for (key, value) in outcome.as_object().into_iter().flatten() {
                     stored[key.as_str()] = value.clone();
                 }
-                // The message was kept only to be signed.
-                if let Some(fields) = stored.as_object_mut() {
-                    fields.remove("message");
+                // The message was kept only to be signed (a relayed call's, for a bounded re-sign).
+                if stored["kind"] != provider_public::RELAYED_CALL {
+                    if let Some(fields) = stored.as_object_mut() {
+                        fields.remove("message");
+                    }
                 }
                 provider::app_view(stored)
             }
             None => outcome,
         };
+        store.save();
+        Ok(view)
+    }
+
+    /// Has the names CLI sign a relayed call as `hash` says (`module public-call sign`): it
+    /// rebuilds the transaction from the chain's nonces and signs only if the hash is that one.
+    /// The half-signed transaction, hex.
+    fn sign_relayed(&self, id: &str, request: &Value, hash: &str) -> Result<String, String> {
+        let setup = self.cli_setup()?;
+        setup.wallet_ready()?;
+        let jobs = self.jobs()?;
+        let file = jobs.dir.join(format!("relayed-{id}.json"));
+        std::fs::create_dir_all(&jobs.dir).map_err(|error| format!("cannot keep the call: {error}"))?;
+        cli::write_private(&file, provider_public::cli_input(request, Some(hash)).to_string().as_bytes()).map_err(|error| format!("cannot keep the call: {error}"))?;
+        let signed = cli::run_capture_text(&setup, vec!["module".into(), "public-call".into(), "sign".into(), format!("--input={}", file.display())], PUBLIC_PLAN_PATIENCE);
+        let _ = std::fs::remove_file(&file);
+        let signed: Value = serde_json::from_str(cli::last_line(&signed?)).map_err(|_| "the names CLI gave no signed call".to_owned())?;
+        match signed["transaction"].as_str() {
+            Some(transaction) if signed["hash"] == hash => Ok(transaction.to_owned()),
+            _ => Err("the signed call isn't the one approved; nothing is given to the app".to_owned()),
+        }
+    }
+
+    /// `resign_relayed_call`: signs an approved relayed call again when its payer's nonce has
+    /// moved and nothing else has (`provider_public::resign_check`), within the window and the
+    /// count the approval allows. Anything else needs the person's approval again.
+    fn resign(&mut self, id: &str) -> Result<Value, String> {
+        let app = asking_app()?;
+        let now = provider::now_ms();
+        let request = self.store().get(id).filter(|r| r["app"] == app.as_str()).cloned().ok_or("there is no such request")?;
+        if request["kind"] != provider_public::RELAYED_CALL || request["state"] != "done" || !request["approved_report"].is_object() {
+            return Err("only a relayed call the person approved and the wallet signed can be signed again".to_owned());
+        }
+        let decided = request["decided"].as_u64().unwrap_or(0);
+        if now.saturating_sub(decided) > provider_public::RESIGN_WINDOW_MS {
+            return Err(provider_public::ASK_AGAIN.replace("{why}", "the approval is more than 10 minutes old"));
+        }
+        if request["resigns"].as_u64().unwrap_or(0) >= provider_public::MAX_RESIGNS {
+            return Err(provider_public::ASK_AGAIN.replace("{why}", "it was signed again 3 times already"));
+        }
+        self.asked_here(&request)?;
+        if self.net != Net::Lez04 {
+            return Err("the wallet is on LEZ 0.3 now; it signs relayed calls on LEZ 0.4 only".to_owned());
+        }
+        let program = request["program"].as_str().unwrap_or_default().to_owned();
+        if !self.store().private.declared_of(&app).contains(&program) {
+            return Err("this app no longer has that program declared".to_owned());
+        }
+        // The kept bytes are still the approved ones.
+        let message = registry::unhex(request["message"].as_str().unwrap_or_default()).unwrap_or_default();
+        if registry::hex(&<sha2::Sha256 as sha2::Digest>::digest(&message)) != request["approved_report"]["message_sha256"].as_str().unwrap_or_default() {
+            return Err("the call to sign isn't the one approved; nothing was signed".to_owned());
+        }
+        // The wallet builds it again (nonces from the chain) and compares the build with what
+        // the person approved, field by field: only the payer's nonce may have moved.
+        let setup = self.cli_setup()?;
+        setup.wallet_ready()?;
+        let output = cli::run_with_input(&setup, vec!["module".into(), "public-call".into(), "plan".into()], &provider_public::cli_input(&request, None).to_string(), PUBLIC_PLAN_PATIENCE)
+            .map_err(|error| format!("the wallet couldn't build this call again: {error}"))?;
+        let report: Value = serde_json::from_str(cli::last_line(&output)).map_err(|_| "the names CLI gave no build the wallet can read".to_owned())?;
+        let last_payer_nonce = request["signed_payer_nonce"].as_str().and_then(|n| n.parse::<u128>().ok());
+        let hash = provider_public::resign_check(&request["approved_report"], last_payer_nonce, &report)?;
+        let transaction = self.sign_relayed(id, &request, &hash)?;
+        let store = self.store();
+        let stored = store.get_mut(id).ok_or("there is no such request")?;
+        stored["transaction"] = json!(transaction);
+        stored["hash"] = json!(hash);
+        stored["resigns"] = json!(stored["resigns"].as_u64().unwrap_or(0) + 1);
+        stored["signed_payer_nonce"] = provider_public::payer_nonce(&report).map_or(Value::Null, |n| json!(n.to_string()));
+        stored["resigned"] = json!(now);
+        let view = provider::app_view(stored);
         store.save();
         Ok(view)
     }
@@ -7098,6 +7227,7 @@ mod tests {
             receipt_asks: Default::default(),
             net: Net::Lez03,
             parked: Value::Null,
+            bridge_program: None,
             cli_lines: Default::default(),
         }
     }
@@ -9575,17 +9705,19 @@ mod tests {
             "hash": hash, "account": account, "program": bridge, "payer": payer, "gas_limit": 120000, "tip": "0", "max_fee": "900000",
             "message_len": 2, "message_sha256": registry::hex(&sha2::Sha256::digest([0u8, 0xff])),
             "actors": [{ "account": PUBLIC, "program": bridge }], "creates": [], "own_balance": false,
+            "nonces": { PUBLIC: "3", payer.trim_start_matches("Public/"): "41" },
         });
         let signed = json!({ "hash": hash, "transaction": "beef" });
-        let tail = format!(
-            "case \"$*\" in\n\
+        // The stand-in CLI answers a plan and a signing with what the test puts in its folder.
+        let tail = "case \"$*\" in\n\
              *--version*) echo 'names 0.17.0 (LEZ v0.4.0-rc3)' ;;\n\
-             *\"public-call plan\"*) cat > \"$(dirname \"$0\")/plan-in.json\"; echo '{report}' ;;\n\
-             *\"public-call sign\"*) for a in \"$@\"; do case \"$a\" in --input=*) cp \"${{a#--input=}}\" \"$(dirname \"$0\")/sign-in.json\" ;; esac; done; echo '{signed}' ;;\n\
+             *\"public-call plan\"*) cat > \"$(dirname \"$0\")/plan-in.json\"; cat \"$(dirname \"$0\")/plan-out.json\" ;;\n\
+             *\"public-call sign\"*) for a in \"$@\"; do case \"$a\" in --input=*) cp \"${a#--input=}\" \"$(dirname \"$0\")/sign-in.json\" ;; esac; done; cat \"$(dirname \"$0\")/sign-out.json\" ;;\n\
              *) echo 'unexpected'; exit 1 ;;\n\
-             esac"
-        );
-        let (mut names, dir) = with_wallet("provider-relayed-call", &tail);
+             esac";
+        let (mut names, dir) = with_wallet("provider-relayed-call", tail);
+        std::fs::write(dir.join("plan-out.json"), report.to_string()).unwrap();
+        std::fs::write(dir.join("sign-out.json"), signed.to_string()).unwrap();
         let call = json!({ "program": bridge, "message": "00ff", "privacy": "bridge_public_claim", "fee": { "payer": payer, "gas_limit": 120000, "tip": "0", "max_fee": "900000" } });
         connect(&mut names, "lez_bridge", &account);
         // LEZ 0.3: refused.
@@ -9634,6 +9766,40 @@ mod tests {
         let status = parsed(&names.request_status(id.clone()))["value"].clone();
         assert_eq!((status["transaction"].as_str(), status["hash"].as_str(), status["payer"].as_str()), (Some("beef"), Some(hash.as_str()), Some(payer)), "{status}");
         assert!(approve(&mut names, &id, &account)["error"].as_str().unwrap().contains("done already"));
+
+        // A re-sign without the person: only when the payer's nonce moved and nothing else.
+        let rebuilt = |payer_nonce: &str, account_nonce: &str, new_hash: &str, tweak: &dyn Fn(&mut Value)| {
+            let mut again = report.clone();
+            again["hash"] = json!(new_hash);
+            again["nonces"] = json!({ PUBLIC: account_nonce, payer.trim_start_matches("Public/"): payer_nonce });
+            tweak(&mut again);
+            std::fs::write(dir.join("plan-out.json"), again.to_string()).unwrap();
+            std::fs::write(dir.join("sign-out.json"), json!({ "hash": new_hash, "transaction": format!("beef{payer_nonce}") }).to_string()).unwrap();
+        };
+        as_caller(app("other_app"));
+        assert!(parsed(&names.resign_relayed_call(id.clone()))["error"].as_str().unwrap().contains("no such request"), "another app's");
+        as_caller(app("lez_bridge"));
+        rebuilt("41", "3", &hash, &|_| {});
+        assert!(parsed(&names.resign_relayed_call(id.clone()))["error"].as_str().unwrap().contains("hasn't moved"));
+        for (field, value) in [("max_fee", json!("900001")), ("payer", json!(account)), ("message_sha256", json!("00".repeat(32)))] {
+            rebuilt("42", "3", &"ef".repeat(32), &|again| again[field] = value.clone());
+            let refused = parsed(&names.resign_relayed_call(id.clone()));
+            assert!(refused["error"].as_str().unwrap().contains("Propose it again"), "{field}: {refused}");
+        }
+        rebuilt("42", "4", &"ef".repeat(32), &|_| {});
+        assert!(parsed(&names.resign_relayed_call(id.clone()))["error"].as_str().unwrap().contains("your account was used"));
+        rebuilt("42", "3", &"ef".repeat(32), &|_| {});
+        let resigned = parsed(&names.resign_relayed_call(id.clone()))["value"].clone();
+        assert_eq!((resigned["transaction"].as_str(), resigned["hash"].as_str(), resigned["resigns"].as_u64()), (Some("beef42"), Some("ef".repeat(32).as_str()), Some(1)), "{resigned}");
+        rebuilt("43", "3", &"e0".repeat(32), &|_| {});
+        assert_eq!(parsed(&names.resign_relayed_call(id.clone()))["value"]["resigns"], 2);
+        rebuilt("44", "3", &"e1".repeat(32), &|_| {});
+        assert_eq!(parsed(&names.resign_relayed_call(id.clone()))["value"]["resigns"], 3);
+        rebuilt("45", "3", &"e2".repeat(32), &|_| {});
+        assert!(parsed(&names.resign_relayed_call(id.clone()))["error"].as_str().unwrap().contains("3 times"));
+        names.store().get_mut(&id).unwrap()["resigns"] = json!(0);
+        names.store().get_mut(&id).unwrap()["decided"] = json!(provider::now_ms() - provider_public::RESIGN_WINDOW_MS - 1);
+        assert!(parsed(&names.resign_relayed_call(id.clone()))["error"].as_str().unwrap().contains("more than 10 minutes"));
         // Revoking the app takes its declared programs back.
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
         parsed(&names.revoke_app("lez_bridge".into()));
@@ -10805,6 +10971,31 @@ mod tests {
         assert!(names.cli_setup().err().unwrap().contains("each network keeps its own wallet"));
         assert!(parsed(&names.cli_install())["error"].as_str().unwrap().contains("no names CLI for LEZ 0.4 is published"));
         assert!(parsed(&names.zone_add(String::new(), "http://127.0.0.1:9".into()))["error"].as_str().unwrap().contains("zones are kept on LEZ 0.3"));
+    }
+
+    /// The bridge read on LEZ 0.4 is a setting (config.json `lez04.bridge_program`): set without
+    /// a rebuild, kept through a network switch and a restart, the default when unset.
+    #[test]
+    fn the_bridge_program_is_a_setting_not_a_build() {
+        let config = config_dir().unwrap();
+        let _ = std::fs::remove_dir_all(&config);
+        std::fs::create_dir_all(&config).unwrap();
+        let mut names = Names::default();
+        assert_eq!(parsed(&names.get_config())["bridge_program"], bridge_net::DEFAULT_BRIDGE_PROGRAM);
+        let redeployed = registry::account_text(&[5; 32]);
+        assert!(names.set_bridge_program(format!("Public/{redeployed}")));
+        assert_eq!(saved_file()["lez04"]["bridge_program"], redeployed.as_str());
+        assert_eq!(saved_file()["registry"], DEFAULT_REGISTRY, "LEZ 0.3's flat fields stay as they were");
+        assert!(!names.set_bridge_program("not a program".into()));
+        assert!(!names.set_bridge_program(registry::account_text(&registry::NATIVE_TOKEN)));
+        assert_eq!(parsed(&names.set_names_network("lez-0.4".into()))["value"]["bridge_program"], redeployed.as_str());
+        assert_eq!(parsed(&names.set_names_network("lez-0.3".into()))["value"]["bridge_program"], redeployed.as_str());
+        assert_eq!(registry::account_text(&Names::default().bridge_program_now()), redeployed, "after a restart");
+        assert!(names.set_bridge_program(String::new()));
+        assert_eq!(parsed(&names.get_config())["bridge_program"], bridge_net::DEFAULT_BRIDGE_PROGRAM);
+        as_caller(logos_rust_sdk::LogosCaller::Module { name: "evil_ui".into(), instance: None });
+        assert!(!names.set_bridge_program(redeployed.clone()), "Names app only");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
     }
 
     /// Another app's request is approved only on the network it was asked on.

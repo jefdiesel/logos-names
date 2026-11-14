@@ -23,12 +23,14 @@ use std::time::Duration;
 
 // ── The one place to change when the network moves (rc3) ─────────────────
 
-/// The bridge test network's JSON-RPC endpoint (POST only, behind a filter).
+/// The bridge test network's JSON-RPC endpoint (POST only, behind a filter): the default; the
+/// read uses LEZ 0.4's configured sequencer (config.json `lez04.sequencer`), the same chain.
 pub const RPC: &str = "https://lez.nameswallet.app/";
-/// The bridge program. Its Config lists the bridged tokens, so their definitions (new at every
-/// re-genesis) are never written here. Expected to keep this id across a re-genesis (the
-/// Sepolia vault's cfgId binds it).
-pub const BRIDGE_PROGRAM: &str = "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7";
+/// The bridge program, by default. Its Config lists the bridged tokens, so their definitions
+/// (new at every re-genesis) are never written here. A redeployed bridge has a new id: it is a
+/// setting, config.json `lez04.bridge_program`, changed with the module's `set_bridge_program`
+/// (no rebuild).
+pub const DEFAULT_BRIDGE_PROGRAM: &str = "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7";
 /// Short symbols of the bridged tokens, by their Ethereum token address (the same on every
 /// re-genesis). A token the Config lists without a symbol here shows its address.
 pub const SYMBOLS: [(&str, &str); 2] = [
@@ -366,7 +368,7 @@ pub fn was_reset(saved: &Value, channel: &str, height: u64) -> bool {
 /// decimals, name}], token_problem, reset_at, accounts: [{account, found, native, tokens:
 /// [{definition, symbol, decimals, amount}], other_tokens}]}`; amounts are decimal text in
 /// base units. Any failed request fails the whole read: a balance never read is never shown.
-pub fn read(url: &str, accounts: &[AccountId], dir: &Path, now: u64) -> Result<Value, String> {
+pub fn read(url: &str, program: &AccountId, accounts: &[AccountId], dir: &Path, now: u64) -> Result<Value, String> {
     let deadline = Deadline::after(READ_BUDGET);
     let channel = call(url, "getChannelId", json!([]), deadline)?;
     let channel = channel.as_str().and_then(crate::zones::channel).ok_or("the bridge test network didn't say which chain it is")?;
@@ -376,9 +378,13 @@ pub fn read(url: &str, accounts: &[AccountId], dir: &Path, now: u64) -> Result<V
     let same_chain = !reset && saved["channel"].as_str() == Some(channel.as_str());
 
     // The token list: kept per chain for an hour, else read from the Config again.
-    let program = registry::parse_account(BRIDGE_PROGRAM)?;
+    let program = *program;
     let cached = saved["tokens"].clone();
-    let cache_good = same_chain && cached["read_at"].as_u64().is_some_and(|at| now.saturating_sub(at) < TOKENS_FRESH_S) && cached["bridge"].is_boolean();
+    // Kept only for the bridge it was read for: another bridge program reads its own Config.
+    let cache_good = same_chain
+        && cached["read_at"].as_u64().is_some_and(|at| now.saturating_sub(at) < TOKENS_FRESH_S)
+        && cached["bridge"].is_boolean()
+        && cached["program"] == registry::account_text(&program).as_str();
     let (bridge, token_program, tokens, token_problem, tokens_saved) = if cache_good {
         let token_program = cached["token_program"].as_str().and_then(|id| registry::parse_account(id).ok());
         let list = cached["list"].as_array().cloned().unwrap_or_default();
@@ -387,10 +393,10 @@ pub fn read(url: &str, accounts: &[AccountId], dir: &Path, now: u64) -> Result<V
         let config = call(url, "getAccount", json!([registry::account_text(&config_address(&program))]), deadline)?;
         if config.is_null() {
             // The bridge was there on this chain and is gone: a reset by another name.
-            if same_chain && saved["tokens"]["bridge"] == true {
+            if same_chain && saved["tokens"]["bridge"] == true && saved["tokens"]["program"] == registry::account_text(&program).as_str() {
                 reset = true;
             }
-            let saved_tokens = json!({ "read_at": now, "bridge": false, "token_program": null, "list": [], "problem": null });
+            let saved_tokens = json!({ "read_at": now, "program": registry::account_text(&program), "bridge": false, "token_program": null, "list": [], "problem": null });
             (false, None, Vec::new(), None, saved_tokens)
         } else {
             match state_under(&config, &program).and_then(|bytes| decode_config(&bytes)) {
@@ -403,12 +409,12 @@ pub fn read(url: &str, accounts: &[AccountId], dir: &Path, now: u64) -> Result<V
                         list.push(json!({ "definition": definition, "eth_token": token.eth_token, "symbol": token.symbol(), "decimals": token.decimals, "name": name }));
                     }
                     let token_program = Some(token_program);
-                    let saved_tokens = json!({ "read_at": now, "bridge": true, "token_program": token_program.map(|id| registry::account_text(&id)), "list": list, "problem": null });
+                    let saved_tokens = json!({ "read_at": now, "program": registry::account_text(&program), "bridge": true, "token_program": token_program.map(|id| registry::account_text(&id)), "list": list, "problem": null });
                     (true, token_program, list, None, saved_tokens)
                 }
                 Err(_) => {
                     let why = "can't read the bridge's token list, so bridged tokens aren't shown".to_owned();
-                    let saved_tokens = json!({ "read_at": now, "bridge": true, "token_program": null, "list": [], "problem": why });
+                    let saved_tokens = json!({ "read_at": now, "program": registry::account_text(&program), "bridge": true, "token_program": null, "list": [], "problem": why });
                     (true, None, Vec::new(), Some(why), saved_tokens)
                 }
             }
@@ -543,12 +549,12 @@ mod tests {
     const TOKEN_PROGRAM: &str = "FiooSkDaMZWNq4bFFpVXnDm2d2uoTB5S3cZ7kWhfUW4K";
 
     fn config_bytes() -> Vec<u8> {
-        bytes_of(&fixture("config.json")["result"]["data"]["actor_states"][BRIDGE_PROGRAM]).expect("bytes")
+        bytes_of(&fixture("config.json")["result"]["data"]["actor_states"][DEFAULT_BRIDGE_PROGRAM]).expect("bytes")
     }
 
     #[test]
     fn the_config_address_is_the_live_one() {
-        assert_eq!(registry::account_text(&config_address(&id(BRIDGE_PROGRAM))), "HugSoWM7Hp1eXMqknfCewWNMoraweLG3HkezfNGtqKf3");
+        assert_eq!(registry::account_text(&config_address(&id(DEFAULT_BRIDGE_PROGRAM))), "HugSoWM7Hp1eXMqknfCewWNMoraweLG3HkezfNGtqKf3");
     }
 
     #[test]
@@ -644,7 +650,7 @@ mod tests {
         static HEIGHT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(555);
         let url = network(CHANNEL, &HEIGHT, true);
         let dir = scratch("read");
-        let read = read(&url, &[id(OWNER), id(UNSEEN)], &dir, 1_000).expect("reads");
+        let read = read(&url, &id(DEFAULT_BRIDGE_PROGRAM), &[id(OWNER), id(UNSEEN)], &dir, 1_000).expect("reads");
         assert_eq!((read["channel"].as_str(), read["height"].as_u64(), read["bridge"].as_bool()), (Some(CHANNEL), Some(555), Some(true)));
         assert!(read["reset_at"].is_null() && read["token_problem"].is_null());
         let owner = &read["accounts"][0];
@@ -662,19 +668,19 @@ mod tests {
         static HEIGHT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(555);
         let dir = scratch("reset");
         let first = network(CHANNEL, &HEIGHT, true);
-        assert!(read(&first, &[id(OWNER)], &dir, 1_000).unwrap()["reset_at"].is_null());
+        assert!(read(&first, &id(DEFAULT_BRIDGE_PROGRAM), &[id(OWNER)], &dir, 1_000).unwrap()["reset_at"].is_null());
         // The same chain, later: no reset.
         HEIGHT.store(600, std::sync::atomic::Ordering::SeqCst);
-        assert!(read(&first, &[id(OWNER)], &dir, 1_100).unwrap()["reset_at"].is_null());
+        assert!(read(&first, &id(DEFAULT_BRIDGE_PROGRAM), &[id(OWNER)], &dir, 1_100).unwrap()["reset_at"].is_null());
         // The same channel, a lower height: reset, and told for a day.
         HEIGHT.store(3, std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(read(&first, &[id(OWNER)], &dir, 1_200).unwrap()["reset_at"].as_u64(), Some(1_200));
+        assert_eq!(read(&first, &id(DEFAULT_BRIDGE_PROGRAM), &[id(OWNER)], &dir, 1_200).unwrap()["reset_at"].as_u64(), Some(1_200));
         HEIGHT.store(9, std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(read(&first, &[id(OWNER)], &dir, 1_300).unwrap()["reset_at"].as_u64(), Some(1_200));
-        assert!(read(&first, &[id(OWNER)], &dir, 1_200 + RESET_TOLD_S).unwrap()["reset_at"].is_null());
+        assert_eq!(read(&first, &id(DEFAULT_BRIDGE_PROGRAM), &[id(OWNER)], &dir, 1_300).unwrap()["reset_at"].as_u64(), Some(1_200));
+        assert!(read(&first, &id(DEFAULT_BRIDGE_PROGRAM), &[id(OWNER)], &dir, 1_200 + RESET_TOLD_S).unwrap()["reset_at"].is_null());
         // Another channel: reset.
         let other = network("ab".repeat(32).leak(), &HEIGHT, true);
-        assert_eq!(read(&other, &[id(OWNER)], &dir, 200_000).unwrap()["reset_at"].as_u64(), Some(200_000));
+        assert_eq!(read(&other, &id(DEFAULT_BRIDGE_PROGRAM), &[id(OWNER)], &dir, 200_000).unwrap()["reset_at"].as_u64(), Some(200_000));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -683,14 +689,31 @@ mod tests {
         static HEIGHT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(10);
         let dir = scratch("nobridge");
         let with = network(CHANNEL, &HEIGHT, true);
-        read(&with, &[id(OWNER)], &dir, 1_000).unwrap();
+        read(&with, &id(DEFAULT_BRIDGE_PROGRAM), &[id(OWNER)], &dir, 1_000).unwrap();
         HEIGHT.store(20, std::sync::atomic::Ordering::SeqCst);
         let without = network(CHANNEL, &HEIGHT, false);
         // The token list is kept for an hour; past it the Config is read again and is gone.
-        let read = read(&without, &[id(OWNER)], &dir, 1_000 + TOKENS_FRESH_S).unwrap();
+        let read = read(&without, &id(DEFAULT_BRIDGE_PROGRAM), &[id(OWNER)], &dir, 1_000 + TOKENS_FRESH_S).unwrap();
         assert_eq!((read["bridge"].as_bool(), read["reset_at"].as_u64()), (Some(false), Some(1_000 + TOKENS_FRESH_S)));
         assert_eq!(read["accounts"][0]["native"], "23786858");
         assert!(read["accounts"][0]["tokens"].as_array().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The bridge is a setting: another bridge program reads its own Config, never the token
+    /// list kept for the one before (a redeploy with a new id shows its own tokens at once).
+    #[test]
+    fn another_bridge_program_reads_its_own_config() {
+        static HEIGHT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(10);
+        let dir = scratch("otherbridge");
+        let url = network(CHANNEL, &HEIGHT, true);
+        let first = read(&url, &id(DEFAULT_BRIDGE_PROGRAM), &[id(OWNER)], &dir, 1_000).unwrap();
+        assert_eq!(first["bridge"], true);
+        // The stand-in network has no Config for another program: that bridge isn't there.
+        let other = read(&url, &[9; 32], &[id(OWNER)], &dir, 1_001).unwrap();
+        assert_eq!(other["bridge"], false, "{other}");
+        assert!(other["accounts"][0]["tokens"].as_array().unwrap().is_empty());
+        assert!(other["reset_at"].is_null(), "another bridge setting is not a reset of the chain: {other}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -698,7 +721,7 @@ mod tests {
     fn an_unreachable_network_fails_the_read_in_words() {
         let dir = scratch("down");
         let url = registry::stub_rpc(|_| (502, json!({ "jsonrpc": "2.0", "id": 1, "error": { "code": -32603, "message": "sequencer unavailable" } }).to_string()));
-        let why = read(&url, &[id(OWNER)], &dir, 1).unwrap_err();
+        let why = read(&url, &id(DEFAULT_BRIDGE_PROGRAM), &[id(OWNER)], &dir, 1).unwrap_err();
         assert!(why.starts_with("can't reach the bridge test network"), "{why}");
         assert!(!dir.join(STATE_FILE).exists(), "nothing remembered from a failed read");
         let _ = std::fs::remove_dir_all(dir);
@@ -743,7 +766,7 @@ mod tests {
         static HEIGHT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(555);
         let dir = scratch("note");
         let url = network(CHANNEL, &HEIGHT, true);
-        let first = read(&url, &[id(OWNER)], &dir, 1_000).unwrap();
+        let first = read(&url, &id(DEFAULT_BRIDGE_PROGRAM), &[id(OWNER)], &dir, 1_000).unwrap();
         assert!(note(&dir, &first).is_empty(), "the first read only sets the marks");
         // The same balances again: nothing.
         assert!(note(&dir, &first).is_empty());

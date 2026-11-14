@@ -36,6 +36,58 @@ pub const PRIVACY: [(&str, &str); 2] = [
     ("bridge_public_claim", "A public claim publishes the claim secret and links the Sepolia deposit to this account."),
 ];
 
+/// How long after the approval a relayed call may be signed again (`resign_relayed_call`).
+pub const RESIGN_WINDOW_MS: u64 = 10 * 60 * 1000;
+/// How many times it may be.
+pub const MAX_RESIGNS: u64 = 3;
+/// What a refused re-sign says; `{why}` is filled in.
+pub const ASK_AGAIN: &str = "{why}: the wallet won't sign it again without the person. Propose it again (propose_relayed_call).";
+/// What a build must keep from the approved one for a re-sign: everything the person saw.
+const SAME_FOR_RESIGN: [&str; 11] =
+    ["account", "program", "payer", "gas_limit", "tip", "max_fee", "actors", "creates", "own_balance", "message_len", "message_sha256"];
+
+fn nonce_of(report: &Value, account: &str) -> Option<u128> {
+    report["nonces"][account.trim_start_matches("Public/")].as_str()?.parse().ok()
+}
+
+/// The fee payer's nonce in a build (`report["nonces"]`).
+pub fn payer_nonce(report: &Value) -> Option<u128> {
+    nonce_of(report, report["payer"].as_str()?)
+}
+
+/// Whether `now` (a new build of an approved relayed call) may be signed without asking the
+/// person again, and its hash if so. Only the payer's nonce may differ from `approved`, and it
+/// must be newer than the last one signed (`last_payer_nonce`): every field the sheet showed,
+/// the signing account's nonce and the set of signers must be the same.
+pub fn resign_check(approved: &Value, last_payer_nonce: Option<u128>, now: &Value) -> Result<String, String> {
+    let again = |why: &str| ASK_AGAIN.replace("{why}", why);
+    for field in SAME_FOR_RESIGN {
+        if approved[field] != now[field] || approved[field].is_null() {
+            return Err(again(&format!("the call's {field} is not the one approved")));
+        }
+    }
+    let keys = |report: &Value| report["nonces"].as_object().map(|n| n.keys().cloned().collect::<Vec<_>>()).unwrap_or_default();
+    if keys(approved).len() != 2 || keys(approved) != keys(now) {
+        return Err(again("the call's signers are not the ones approved"));
+    }
+    let account = approved["account"].as_str().unwrap_or_default();
+    match (nonce_of(approved, account), nonce_of(now, account)) {
+        (Some(before), Some(after)) if before == after => {}
+        _ => return Err(again("your account was used since the approval (its nonce moved), so the approved call may have landed")),
+    }
+    let last = last_payer_nonce.or_else(|| payer_nonce(approved)).ok_or_else(|| again("the approved call has no payer nonce"))?;
+    match payer_nonce(now) {
+        Some(nonce) if nonce > last => {}
+        Some(_) => return Err("the payer's nonce hasn't moved: the transaction already given is still the one to send".to_owned()),
+        None => return Err(again("the new build has no payer nonce")),
+    }
+    now["hash"]
+        .as_str()
+        .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()) && Some(*h) != approved["hash"].as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| again("the new build gave no new hash"))
+}
+
 /// What the wallet says about who sees the signed transaction afterwards. Fixed.
 pub const AFTER: &str = "Your wallet sends nothing and pays nothing: it gives the signed transaction back to the app. It can't see what happens to it after that. The payer can only submit exactly these bytes, once: changing the program, an account, the fee or one byte of the message breaks your signature.";
 
@@ -482,5 +534,49 @@ mod tests {
         let request = relayed_call_request("lez_bridge", ACCOUNT, &call(json!({ "accounts": accounts })), "", &declared, 1).unwrap();
         let fixture: Value = serde_json::from_str(include_str!("../testdata/relayed-call-input.json")).unwrap();
         assert_eq!(cli_input(&request, None), fixture);
+    }
+
+    fn built(payer_nonce: &str, account_nonce: &str, hash: &str) -> Value {
+        json!({
+            "hash": hash, "account": ACCOUNT, "program": BRIDGE, "payer": PAYER, "gas_limit": 120000, "tip": "0", "max_fee": "900000",
+            "nonces": { ACCOUNT.trim_start_matches("Public/"): account_nonce, PAYER.trim_start_matches("Public/"): payer_nonce },
+            "actors": [{ "account": ACCOUNT.trim_start_matches("Public/"), "program": BRIDGE }], "creates": [], "own_balance": false,
+            "message_len": 2, "message_sha256": "ee".repeat(32),
+        })
+    }
+
+    /// A re-sign without the person: only the payer's nonce may have moved, forward. Every
+    /// other field the person approved forces a new approval, as does the account's own nonce.
+    #[test]
+    fn a_re_sign_is_allowed_only_for_a_newer_payer_nonce() {
+        let approved = built("41", "3", &"aa".repeat(32));
+        assert_eq!(resign_check(&approved, None, &built("42", "3", &"bb".repeat(32))), Ok("bb".repeat(32)));
+        assert_eq!(resign_check(&approved, Some(42), &built("45", "3", &"cc".repeat(32))), Ok("cc".repeat(32)), "after an earlier re-sign");
+        assert!(resign_check(&approved, Some(42), &built("42", "3", &"bb".repeat(32))).unwrap_err().contains("hasn't moved"));
+        assert!(resign_check(&approved, None, &built("41", "3", &"aa".repeat(32))).unwrap_err().contains("hasn't moved"));
+        assert!(resign_check(&approved, None, &built("40", "3", &"bb".repeat(32))).is_err(), "an older payer nonce");
+        assert!(resign_check(&approved, None, &built("42", "4", &"bb".repeat(32))).unwrap_err().contains("your account was used"));
+        assert!(resign_check(&approved, None, &built("42", "3", &"aa".repeat(32))).unwrap_err().contains("no new hash"));
+        for (field, value) in [
+            ("account", json!(PAYER)),
+            ("program", json!(OTHER)),
+            ("payer", json!(ACCOUNT)),
+            ("gas_limit", json!(120001)),
+            ("tip", json!("1")),
+            ("max_fee", json!("900001")),
+            ("actors", json!([])),
+            ("creates", json!([OTHER])),
+            ("own_balance", json!(true)),
+            ("message_len", json!(3)),
+            ("message_sha256", json!("ff".repeat(32))),
+        ] {
+            let mut changed = built("42", "3", &"bb".repeat(32));
+            changed[field] = value;
+            let refused = resign_check(&approved, None, &changed).unwrap_err();
+            assert!(refused.contains(field) && refused.contains("Propose it again"), "{field}: {refused}");
+        }
+        let mut third = built("42", "3", &"bb".repeat(32));
+        third["nonces"]["x"] = json!("1");
+        assert!(resign_check(&approved, None, &third).unwrap_err().contains("signers"));
     }
 }
