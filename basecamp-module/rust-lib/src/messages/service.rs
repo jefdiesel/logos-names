@@ -215,8 +215,8 @@ fn set_send_state(st: &mut State, request: &str, what: &str, error: Option<Strin
         other => other.to_owned(),
     };
 
-    // propagated (on the network) or sent (validated) ends the tries; a later "sent" for it only shows on the
-    // message (the outbox entry is gone, so it is matched by request id there)
+    // propagated (on the network) or sent (validated) ends the tries; a later "sent" for the same request
+    // changes nothing (its outbox entry is gone), and the message stays shown as sent
     if state == "sent" || state == "propagated" {
         s.outbox.remove(i);
         s.send_blocked = None;

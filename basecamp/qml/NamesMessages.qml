@@ -138,7 +138,7 @@ Item {
             }
             // saved chats that can't be read
             Rectangle {
-                visible: nm.on && nm.status.unreadable !== null && nm.status.unreadable !== undefined
+                visible: !!(nm.on && nm.status.unreadable)
                 Layout.fillWidth: true
                 implicitHeight: badRow.implicitHeight + 24
                 radius: 8; color: app.noticeFill
@@ -147,7 +147,7 @@ Item {
                     x: 14; y: 12; width: parent.width - 28
                     Text { Layout.fillWidth: true; wrapMode: Text.Wrap; color: app.brass; font.family: app.sans; font.pixelSize: app.px(15); text: "The saved chats can't be read (" + (nm.on && nm.status.unreadable ? nm.status.unreadable.why : "") + "). Nothing is saved or sent until you choose. The file is kept either way." }
                     RowLayout {
-                        Btn { visible: nm.on && nm.status.unreadable && nm.status.unreadable.last_copy; label: "Use the last saved copy"; onPressed: nm.call("msg_recover", [true], function() { nm.seenChanges = -1; nm.refresh() }) }
+                        Btn { visible: !!(nm.on && nm.status.unreadable && nm.status.unreadable.last_copy); label: "Use the last saved copy"; onPressed: nm.call("msg_recover", [true], function() { nm.seenChanges = -1; nm.refresh() }) }
                         Btn { label: "Start fresh"; grave: true; onPressed: nm.call("msg_recover", [false], function() { nm.seenChanges = -1; nm.refresh() }) }
                     }
                 }
@@ -277,8 +277,8 @@ Item {
                 Text { Layout.fillWidth: true; wrapMode: Text.Wrap; text: nm.safety ? nm.safety.groups.join("  ") : ""; color: app.ink; font.family: app.mono; font.pixelSize: app.px(20) }
                 Text { text: nm.safety && nm.safety.checked ? "Checked in person" : "Not checked"; color: nm.safety && nm.safety.checked ? app.good : app.dim; font.family: app.sans; font.pixelSize: app.px(15) }
                 RowLayout {
-                    Btn { visible: nm.safety && !nm.safety.checked; label: "The codes match"; strong: true; onPressed: nm.call("msg_mark_checked", [nm.openAddress, true], function() { nm.call("msg_safety", [nm.openAddress], function(v) { nm.safety = v }) }) }
-                    Btn { visible: nm.safety && nm.safety.checked; label: "Mark as not checked"; onPressed: nm.call("msg_mark_checked", [nm.openAddress, false], function() { nm.call("msg_safety", [nm.openAddress], function(v) { nm.safety = v }) }) }
+                    Btn { visible: !!(nm.safety && !nm.safety.checked); label: "The codes match"; strong: true; onPressed: nm.call("msg_mark_checked", [nm.openAddress, true], function() { nm.call("msg_safety", [nm.openAddress], function(v) { nm.safety = v }) }) }
+                    Btn { visible: !!(nm.safety && nm.safety.checked); label: "Mark as not checked"; onPressed: nm.call("msg_mark_checked", [nm.openAddress, false], function() { nm.call("msg_safety", [nm.openAddress], function(v) { nm.safety = v }) }) }
                 }
             }
 
