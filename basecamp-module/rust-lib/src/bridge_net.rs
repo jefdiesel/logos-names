@@ -754,7 +754,7 @@ mod tests {
     #[ignore]
     fn live_read() {
         let dir = scratch("live");
-        let read = read(RPC, &[id(OWNER), id(UNSEEN)], &dir, 1).expect("the bridge test network answers");
+        let read = read(RPC, &id(DEFAULT_BRIDGE_PROGRAM), &[id(OWNER), id(UNSEEN)], &dir, 1).expect("the bridge test network answers");
         println!("{read:#}");
         assert_eq!(read["bridge"], true);
         assert_eq!(read["accounts"][1]["found"], false);
