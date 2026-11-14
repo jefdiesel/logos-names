@@ -427,6 +427,7 @@ Item {
             walletConfig = config.wallet_config ? config.wallet_config : ""
             walletStorage = config.wallet_storage ? config.wallet_storage : ""
             cliPath = config.cli ? config.cli : ""
+            bridgePrograms = Array.isArray(config.bridge_programs) ? config.bridge_programs : []
             cliWallet = config.cli_wallet ? config.cli_wallet : ""
             configKnown = true
             settingsOpen = registry === ""
@@ -764,6 +765,252 @@ Item {
     }
 
     property string bridgeNetWatchProblem: ""
+
+    // ── Claim a bridge deposit: names_ui calls the lez_bridge module itself (rfp-022
+    //    modules/NAMES-EMBED.md, Part A). The module proposes to the names module as the app
+    //    "lez_bridge", and this app's own sheets answer it in place. The claim file's text is only
+    //    ever in memory: never logged, never written. ──
+    property string claimPaste: ""
+    property var claimCheck: null          // relayed_claim_check's value
+    property bool claimChecking: false
+    property bool claimAsking: false       // relayed_claim on its way
+    property var claimNeeds: null          // relayed_claim's {needs, request, message}: a sheet first
+    property string claimNeedsState: ""
+    property var claimUncertain: null      // relayed_claim's `uncertain`: a proposal got no answer
+    property var depositClaimJob: null            // relayed_claim_status's value
+    property string claimError: ""
+    property bool claimAgain: true         // pressing Claim again is safe after claimError
+    property bool claimMissing: false      // no LEZ Bridge package here
+    property string claimNote: ""
+    property var claimDeployment: null     // the bridge module's config().deployment
+    property bool claimPolling: false      // one call at a time: the module answers one at a time
+    property bool claimNeedsPolling: false
+    property bool claimCheckWith: true     // the installed lez_bridge has relayed_claim_check_with (probed)
+    property var bridgePrograms: []        // get_config bridge_programs: the bridges this wallet reads
+    readonly property var bridgeLabels: [["JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", "bridge v2"], ["4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr", "bridge v3"]]
+    readonly property string claimAccount: claimCheck !== null && claimCheck.ok && claimCheck.deposit ? String(claimCheck.deposit.account || "") : ""
+    readonly property string claimAccountProblemNow: cliAccounts === null ? "" : Logic.claimAccountProblem(claimAccount, cliAccounts)
+    readonly property var claimBridgeNow: Logic.claimBridge(claimCheck !== null && claimCheck.call ? claimCheck.call.program : "", bridgePrograms, bridgeLabels)
+    readonly property string claimStageNow: Logic.claimStage({ missing: claimMissing, job: depositClaimJob, uncertain: claimUncertain, needs: claimNeeds,
+        asking: claimAsking, checking: claimChecking, check: claimCheck, accountProblem: claimAccountProblemNow, bridgeProblem: claimBridgeNow.problem })
+
+    /// Calls the lez_bridge module. A read the module host wasn't ready for, or that met it busy
+    /// with an earlier call, is sent again after 2, 4 and 6 s; nothing that proposes is
+    /// (`retry` false). `failed(error, kind)`.
+    function bridgeCall(method, args, done, failed, timeout, retry, attempt) {
+        if (!bridgeReady || !logos.callModuleAsync) {
+            if (failed) failed("This screen needs to run inside Basecamp.", "missing")
+            return
+        }
+        var tries = attempt || 0
+        logos.callModuleAsync("lez_bridge", method, args, function(reply) {
+            var r = Logic.bridgeReply(reply)
+            if (r.ok) {
+                if (done) done(r.value)
+                return
+            }
+            if (retry !== false && (r.kind === "starting" || r.kind === "busy") && tries < 3) {
+                againAfter(2000 * (tries + 1), function() { bridgeCall(method, args, done, failed, timeout, retry, tries + 1) })
+                return
+            }
+            if (failed) failed(r.error, r.kind)
+        }, timeout || 120000)
+    }
+    function againAfter(ms, fn) {
+        var t = Qt.createQmlObject('import QtQuick; Timer { repeat: false }', root, "claimLater")
+        t.interval = ms
+        t.triggered.connect(function() { t.destroy(); fn() })
+        t.start()
+    }
+
+    /// Opens the claim screen: is the LEZ Bridge package here, and is a claim already running?
+    function openClaim() {
+        walletView = "claim"
+        claimError = ""
+        claimNote = ""
+        claimMissing = false
+        bridgeCall("config", [], function(value) {
+            claimDeployment = value && value.deployment ? value.deployment : null
+            bridgeCall("relayed_claims", [], function(value) {
+                var job = Logic.runningClaimJob(Array.isArray(value) ? value : value && value.jobs ? value.jobs : [])
+                if (job !== null && depositClaimJob === null)
+                    depositClaimJob = job
+            })
+        }, function(message, kind) {
+            // Not installed (or too old, or never answering): one plain line, nothing else.
+            claimMissing = kind === "missing" || kind === "starting" || kind === "busy"
+            if (!claimMissing)
+                claimError = sentence(message)
+        }, 20000)
+    }
+
+    /// Back to the Wallet. A file checked and not claimed is forgotten by the module (its key leaves
+    /// its memory); a running claim goes on and is shown again when the screen opens.
+    function leaveClaim() {
+        if (claimCheck !== null && claimCheck.id && depositClaimJob === null)
+            bridgeCall("relayed_claim_forget", [claimCheck.id], null, null, 30000, false)
+        claimCheck = null
+        claimNeeds = null
+        claimUncertain = null
+        claimError = ""
+        claimPaste = ""
+        if (depositClaimJob !== null && depositClaimJob.state !== "running")
+            depositClaimJob = null
+        walletView = "home"
+    }
+
+    function pickClaimFile() {
+        claimNote = ""
+        try {
+            var d = Qt.createQmlObject('import QtQuick.Dialogs; FileDialog { title: "Choose your claim file"; nameFilters: ["Claim files (*.json)", "All files (*)"] }', root, "claimFilePicker")
+            d.accepted.connect(function() { var path = String(d.selectedFile); d.destroy(); checkClaimFile(path) })
+            d.rejected.connect(function() { d.destroy() })
+            d.open()
+        } catch (error) {
+            claimNote = "This Basecamp has no file picker here: paste the claim file's text, or its full path, below."
+        }
+    }
+
+    /// The six checks (nothing is proposed, signed or sent). A pasted file leaves the field at once.
+    function checkClaimFile(source, switched) {
+        var given = Logic.claimInput(source)
+        if (given.kind === "empty")
+            return
+        if (given.problem !== "") {
+            claimNote = given.problem
+            return
+        }
+        claimPaste = ""
+        claimNote = ""
+        claimError = ""
+        claimCheck = null
+        depositClaimJob = null
+        claimNeeds = null
+        claimUncertain = null
+        claimChecking = true
+        // The six checks without asking the wallet anything (relayed_claim_check_with, newer
+        // lez_bridge packages); an older package has only relayed_claim_check, which also asks
+        // the wallet and may take up to about a minute while it is busy.
+        var withOptions = claimCheckWith
+        var checked = function(value) {
+            // A file for the other built-in bridge: the module is switched to it and checks again.
+            if (value && !value.ok && value.error && value.error.code === "other_vault" && !switched && claimDeployment) {
+                var other = Logic.otherDeployment(claimDeployment.name)
+                bridgeCall("use_deployment", [other], function(config) {
+                    claimDeployment = config && config.deployment ? config.deployment : { name: other }
+                    checkClaimFile(source, true)
+                }, function(message) {
+                    claimChecking = false
+                    claimCheck = value
+                })
+                return
+            }
+            claimChecking = false
+            claimCheck = value
+            // A claim already started or finished for this file is shown, never started twice.
+            if (value && value.ok)
+                bridgeCall("relayed_claims", [], function(list) {
+                    var job = Logic.claimJobFor(Array.isArray(list) ? list : list && list.jobs ? list.jobs : [], value)
+                    if (job !== null)
+                        depositClaimJob = job
+                })
+        }
+        var refused = function(message, kind) {
+            if (kind === "missing" && withOptions) {
+                // No relayed_claim_check_with in this package: the older call, from now on.
+                claimCheckWith = false
+                withOptions = false
+                bridgeCall("relayed_claim_check", [source], checked, refused, 90000)
+                return
+            }
+            claimChecking = false
+            if (kind === "missing")
+                claimMissing = true
+            else
+                claimError = sentence(message)
+        }
+        if (withOptions)
+            bridgeCall("relayed_claim_check_with", [source, JSON.stringify({ wallet_hint: false })], checked, refused, 90000)
+        else
+            bridgeCall("relayed_claim_check", [source], checked, refused, 90000)
+    }
+
+    /// Claim: the module runs its gates and proposes. A wallet sheet it needs first comes up here
+    /// in place; once answered, this asks again. Never sent again by itself (it proposes).
+    function startClaim(afterUncertain) {
+        if (claimCheck === null || !claimCheck.ok || claimAsking)
+            return
+        claimAsking = true
+        claimError = ""
+        claimUncertain = null
+        bridgeCall("relayed_claim", [claimCheck.id, afterUncertain ? JSON.stringify({ after_uncertain: true }) : "{}"], function(value) {
+            claimAsking = false
+            if (value && value.needs === "uncertain") {
+                claimUncertain = value
+                return
+            }
+            if (value && value.needs) {
+                claimNeeds = value
+                claimNeedsState = value.request && value.request.state ? value.request.state : "pending"
+                return
+            }
+            depositClaimJob = value
+        }, function(message, kind) {
+            claimAsking = false
+            var failure = Logic.claimFailure(kind === "busy" ? "still answering an earlier call" : message)
+            claimError = failure.line
+            claimAgain = failure.again
+        }, 240000, false)
+    }
+
+    function pollClaimNeeds() {
+        var id = claimNeeds && claimNeeds.request ? String(claimNeeds.request.request || "") : ""
+        if (id === "" || claimNeedsPolling)
+            return
+        claimNeedsPolling = true
+        bridgeCall("wallet_request", [id], function(value) {
+            claimNeedsPolling = false
+            claimNeedsState = value && value.state ? value.state : ""
+            if (claimNeedsState === "approved" || claimNeedsState === "done") {
+                claimNeeds = null
+                startClaim(false)
+            } else if (claimNeedsState === "rejected" || claimNeedsState === "expired" || claimNeedsState === "cancelled") {
+                claimNeeds = null
+                claimError = "Nothing was signed or sent: the request was " + claimNeedsState + "."
+                claimAgain = true
+            }
+        }, function() { claimNeedsPolling = false }, 120000)
+    }
+    Timer {
+        interval: 2500
+        repeat: true
+        running: root.claimNeeds !== null && (root.claimNeedsState === "" || root.claimNeedsState === "pending")
+        onTriggered: root.pollClaimNeeds()
+    }
+
+    /// The claim's progress: the module moves the job only while it is asked, one call at a time.
+    function pollClaimJob() {
+        if (depositClaimJob === null || claimPolling)
+            return
+        claimPolling = true
+        bridgeCall("relayed_claim_status", [depositClaimJob.id], function(value) {
+            claimPolling = false
+            depositClaimJob = value
+            if (value && value.state === "done")
+                loadBridgeNet()
+        }, function() { claimPolling = false }, 150000)
+    }
+    Timer {
+        interval: 2500
+        repeat: true
+        running: root.depositClaimJob !== null && root.depositClaimJob.state === "running"
+        onTriggered: root.pollClaimJob()
+    }
+    function cancelClaim() {
+        if (depositClaimJob === null)
+            return
+        bridgeCall("relayed_claim_cancel", [depositClaimJob.id], function(value) { depositClaimJob = value }, function(message) { claimError = sentence(message) }, 120000, false)
+    }
 
     /// Watches (or stops watching) a public account on the bridge test network.
     function bridgeNetWatch(account, on) {
@@ -4012,7 +4259,8 @@ Item {
                 appChosenFor = key
                 appUnderstood = false
                 appError = ""
-                appChosen = Logic.preTicked(request, appPublisherFailed(request))
+                // Access for the bridge while this app's claim screen has its file: that account only.
+                appChosen = Logic.preTicked(request, appPublisherFailed(request), request.app === "lez_bridge" ? claimAccount : "")
             }
             if (request.kind === "transfer")
                 loadFee()
@@ -6001,7 +6249,7 @@ Item {
                         }
                     }
 
-                    // ── LEZ 0.4, the bridge test network: read only ──
+                    // ── LEZ 0.4, the bridge test network: balances, and claiming a deposit ──
                     Card {
                         visible: root.walletNet === "0.4"
                         Layout.fillWidth: true
@@ -6009,9 +6257,10 @@ Item {
                             Layout.fillWidth: true
                             spacing: 10
                             Text { Layout.fillWidth: true; text: "Bridge test network"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
-                            Text { text: "LEZ 0.4 · read only"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
+                            Text { text: "LEZ 0.4"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
                         }
                         Hint { font.pixelSize: root.px(15); text: "Our own chain for the bridge, where bridged Sepolia tokens arrive. It is reset now and then." }
+                        Action { label: "Claim a bridge deposit"; strong: true; onPressed: root.openClaim() }
                         Hint {
                             font.pixelSize: root.px(15)
                             color: root.bridgeNetStatusNow.tone === "bad" ? root.alarm : root.bridgeNetStatusNow.tone === "warn" ? root.brass : root.dim
@@ -6995,6 +7244,128 @@ Item {
                         text: root.boardJob === null ? "" : root.boardJob.label + ": proving it on this computer. Usually 5–12 min, " + Math.max(0, Math.floor((Math.max(root.clockTick, Date.now()) - root.boardJob.started) / 60000)) + " so far."
                     }
                     Hint { visible: root.notice !== "" && root.walletView === "names"; color: root.noticeIsError ? root.alarm : root.good; font.pixelSize: root.px(15); text: root.notice }
+                }
+
+                // ── Claim a bridge deposit ──
+                ColumnLayout {
+                    visible: root.walletView === "claim"
+                    Layout.fillWidth: true
+                    Layout.maximumWidth: 680
+                    spacing: 12
+                    Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.leaveClaim() }
+                    Text { text: "Claim a bridge deposit"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
+                    RunsOn { net: "0.4" }
+
+                    // No LEZ Bridge package: one plain line.
+                    Hint { visible: root.claimStageNow === "missing"; color: root.ink; text: "Install the LEZ Bridge package: Package Manager (the cube icon) → Install Local Package" }
+
+                    // The file.
+                    Hint { visible: root.claimStageNow === "start"; text: "Choose the claim file the deposit page gave you, or paste its text. The first claim asks two extra questions; later ones don't." }
+                    RowLayout {
+                        visible: root.claimStageNow === "start"
+                        spacing: 12
+                        Action { label: "Choose the claim file"; strong: true; onPressed: root.pickClaimFile() }
+                    }
+                    RowLayout {
+                        visible: root.claimStageNow === "start"
+                        Layout.fillWidth: true
+                        spacing: 10
+                        // Shown as dots: the file holds the claim's secret. It leaves the field when checked.
+                        Field { id: claimPasteField; Layout.fillWidth: true; secret: true; hint: "…or paste the claim file here"; onTextChanged: root.claimPaste = text }
+                        Action { label: "Check"; enabledNow: claimPasteField.text.trim() !== ""; onPressed: { var text = claimPasteField.text; claimPasteField.text = ""; root.checkClaimFile(text) } }
+                    }
+                    Hint { visible: root.claimNote !== ""; color: root.brass; text: root.claimNote }
+                    Hint { visible: root.claimStageNow === "checking"; text: "Checking the claim file on Sepolia and the bridge test network… nothing is signed or sent." }
+
+                    // What the file is, and the six checks.
+                    Card {
+                        visible: root.claimCheck !== null && root.claimCheck.ok === true
+                        Layout.fillWidth: true
+                        Part { Layout.topMargin: 0; text: root.claimCheck !== null && root.claimCheck.deposit ? "Claim " + root.claimCheck.deposit.amount_text : "" }
+                        Hint { font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.ok ? String(root.claimCheck.network || "LEZ 0.4 · bridge test network") : "" }
+                        Fact { label: "Into"; code: true; value: root.claimAccount; full: root.claimAccount }
+                        Fact { label: "Bridge"; value: root.claimBridgeNow.label }
+                        Fact { label: "From"; value: root.claimCheck !== null && root.claimCheck.deposit ? "Sepolia deposit, leaf " + root.claimCheck.deposit.leaf_index + " of " + root.claimCheck.deposit.leaves + " (final)" : "" }
+                        Fact { label: "Signs"; value: "Your wallet, after you approve its sheet here. It sends nothing and pays nothing." }
+                        Fact { label: "Sends and pays"; value: root.claimCheck !== null && root.claimCheck.relay ? "The bridge's relay, at most " + root.grouped(root.claimCheck.relay.max_fee) + " LEZ of its own" : "" }
+                        Repeater {
+                            model: root.claimCheck !== null && Array.isArray(root.claimCheck.checks) ? root.claimCheck.checks : []
+                            Hint {
+                                required property var modelData
+                                font.pixelSize: root.px(15)
+                                color: modelData.ok ? root.ink : root.alarm
+                                text: (modelData.ok ? "✓ " : "✗ ") + modelData.text
+                            }
+                        }
+                        Hint { visible: root.claimCheck !== null && !!root.claimCheck.privacy; font.pixelSize: root.px(15); color: root.alarm; text: root.claimCheck !== null && root.claimCheck.privacy ? root.claimCheck.privacy + " A private deposit is claimed in the LEZ Bridge app instead." : "" }
+                    }
+                    // A refusal from the check.
+                    Card {
+                        visible: root.claimStageNow === "refused"
+                        Layout.fillWidth: true
+                        Part { Layout.topMargin: 0; text: root.claimCheck !== null && root.claimCheck.error ? Logic.claimErrorTitle(root.claimCheck.error.code) : "" }
+                        Hint { text: root.claimCheck !== null && root.claimCheck.error ? String(root.claimCheck.error.message || "") : "" }
+                    }
+                    Hint { visible: root.claimStageNow === "elsewhere"; color: root.alarm; text: root.claimAccountProblemNow }
+                    Hint { visible: root.claimStageNow === "wrong_bridge"; color: root.alarm; text: root.claimBridgeNow.problem }
+
+                    // Claim.
+                    Hint { visible: root.claimStageNow === "ready" && root.claimCheck !== null && !!root.claimCheck.approval; text: root.claimCheck !== null && root.claimCheck.approval ? root.claimCheck.approval : "" }
+                    Action { visible: root.claimStageNow === "ready"; label: "Claim"; strong: true; onPressed: root.startClaim(false) }
+                    Hint { visible: root.claimStageNow === "ready"; font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.wording ? root.claimCheck.wording : "" }
+                    Hint { visible: root.claimStageNow === "asking"; text: "Asking your wallet…" }
+                    Hint {
+                        visible: root.claimStageNow === "needs"
+                        color: root.brass
+                        text: root.claimNeeds === null ? "" : (root.claimNeeds.needs === "connect" ? "First, let the LEZ Bridge see the account this deposit is for: answer the sheet in this app."
+                            : root.claimNeeds.needs === "programs" ? "First, approve the bridge's programs: answer the sheet in this app. This is asked once."
+                            : root.claimNeeds.needs === "public_account" ? "First, give the LEZ Bridge the account this deposit is for: answer the sheet in this app."
+                            : String(root.claimNeeds.message || "Answer the sheet in this app."))
+                    }
+                    Hint {
+                        visible: root.claimStageNow === "uncertain"
+                        color: root.brass
+                        text: root.claimUncertain === null ? "" : String(root.claimUncertain.message || "") + " Requests from the LEZ Bridge waiting here now: " + root.appRequests.filter(function(r) { return r.app === "lez_bridge" }).length + "."
+                    }
+                    Action { visible: root.claimStageNow === "uncertain"; label: "Continue"; onPressed: root.startClaim(true) }
+
+                    // Progress.
+                    Repeater {
+                        model: root.depositClaimJob !== null ? Logic.claimPhases(root.depositClaimJob) : []
+                        Hint {
+                            required property var modelData
+                            font.pixelSize: root.px(16)
+                            color: modelData.done ? root.good : modelData.now ? root.brass : root.dim
+                            text: (modelData.done ? "✓ " : modelData.now ? "… " : "· ") + modelData.word + ": " + modelData.hint
+                        }
+                    }
+                    Hint { visible: root.claimStageNow === "running" && root.depositClaimJob !== null && !!root.depositClaimJob.note; font.pixelSize: root.px(15); text: root.depositClaimJob !== null && root.depositClaimJob.note ? root.depositClaimJob.note : "" }
+                    Action { visible: root.claimStageNow === "running" && root.depositClaimJob !== null && root.depositClaimJob.can_cancel === true; label: "Cancel the claim"; onPressed: root.cancelClaim() }
+                    Text {
+                        visible: root.claimStageNow === "done"
+                        Layout.fillWidth: true
+                        text: root.depositClaimJob !== null ? "✓ Claimed in block " + root.depositClaimJob.block + (root.depositClaimJob.result && root.depositClaimJob.result.balance_text ? ". Now in the account: " + root.depositClaimJob.result.balance_text + " (wrapped)." : ".") : ""
+                        color: root.good
+                        font.family: root.sans
+                        font.pixelSize: root.px(20)
+                        font.weight: Font.DemiBold
+                        wrapMode: Text.WordWrap
+                    }
+                    Card {
+                        visible: root.claimStageNow === "failed"
+                        Layout.fillWidth: true
+                        Part { Layout.topMargin: 0; text: root.depositClaimJob !== null && root.depositClaimJob.error ? Logic.claimErrorTitle(root.depositClaimJob.error.code) : "The claim stopped" }
+                        Hint { text: root.depositClaimJob !== null && root.depositClaimJob.error ? String(root.depositClaimJob.error.message || "") : String(root.depositClaimJob !== null ? root.depositClaimJob.state : "") }
+                    }
+
+                    Hint { visible: root.claimError !== ""; color: root.alarm; text: root.claimError }
+                    Action { visible: root.claimError !== "" && root.claimAgain && root.claimCheck !== null && root.claimCheck.ok && root.depositClaimJob === null; label: "Try again"; onPressed: root.startClaim(false) }
+                    Link {
+                        visible: root.claimStageNow !== "start" && root.claimStageNow !== "missing" && root.claimStageNow !== "running" && root.claimStageNow !== "asking" && root.claimStageNow !== "needs"
+                        text: "Check another claim file"
+                        font.pixelSize: root.px(15)
+                        onPressed: { root.leaveClaim(); root.openClaim() }
+                    }
                 }
 
                 // ── Add a token by its address ──

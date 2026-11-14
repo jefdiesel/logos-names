@@ -198,7 +198,7 @@ export function publisherLine(publisher) {
 // check failed (it may be a fake, M-2). A declaration or a token source is ticked only when
 // exactly one account is shared with the app (that one), else nothing; a request naming an account
 // ticks that one; anything else ticks nothing.
-export function preTicked(request, publisherFailed) {
+export function preTicked(request, publisherFailed, hint) {
     if (!request || request.checking === true || publisherFailed)
         return []
     var choices = request.choices || []
@@ -206,6 +206,11 @@ export function preTicked(request, publisherFailed) {
     // The account the app asked about, when it named one and it is offered.
     if (typeof request.account === "string" && offered(request.account))
         return [request.account]
+    // An access request's hint (`account_hint`, or the claim this app's own screen is running for
+    // that app): only that box, when the wallet offers it. The person still decides.
+    var hinted = typeof request.account_hint === "string" ? request.account_hint : hint
+    if (request.kind === "connect" && typeof hinted === "string" && offered(hinted))
+        return [hinted]
     var given = choices.filter(function(choice) { return choice.granted })
     if (request.kind === "programs" || request.kind === "token_source")
         return given.length === 1 ? [given[0].account] : []
@@ -1066,4 +1071,161 @@ export function relayedSheet(sheet) {
     var list = function(a) { return (Array.isArray(a) ? a : []).map(clean) }
     return { lines: list(s.lines), warnings: list(s.warnings), privacy: clean(s.privacy), after: clean(s.after),
              says: s.app_says ? clean(s.app_says) : "", why: list(s.why), refused: s.refused === true, hash: clean(s.hash) }
+}
+
+
+// ── Claim a bridge deposit (the lez_bridge module, called from names_ui) ──
+// The module's calls and replies: rfp-022 modules/NAMES-EMBED.md, Part A.
+
+/// A raw lez_bridge reply: `{ok, value}` or `{ok: false, error, kind}`. Basecamp 0.3.2 encodes the
+/// module's JSON text twice. `kind`: "missing" (not installed, or an older package), "starting"
+/// (the host is (re)starting: a read may be sent again), "busy" (the module is still answering an
+/// earlier call: Basecamp's "timeout"), "error" (the module's own answer).
+export function bridgeReply(reply) {
+    if (reply === undefined || reply === null || String(reply) === "")
+        return { ok: false, kind: "busy", error: "The LEZ Bridge module gave no answer yet." }
+    var r = reply
+    for (var depth = 0; depth < 2 && typeof r === "string"; depth++) {
+        try { r = JSON.parse(r) } catch (e) { return { ok: false, kind: "error", error: "The LEZ Bridge module answered something that isn't JSON." } }
+    }
+    if (r && typeof r === "object" && "success" in r)
+        return r.success ? { ok: true, value: r.value } : { ok: false, kind: "error", error: String(r.error || "The LEZ Bridge module did not say why.") }
+    var said = r && typeof r === "object" ? String(r.error || "") : String(r)
+    if (/timeout/i.test(said))
+        return { ok: false, kind: "busy", error: "The LEZ Bridge module is still answering an earlier call." }
+    if (/method not found|unknown_method|no such (module|method)|module not found|not installed/i.test(said))
+        return { ok: false, kind: "missing", error: said }
+    if (/not connected|not reachable|unavailable|waiting for replica|crashed/i.test(said))
+        return { ok: false, kind: "starting", error: said }
+    return { ok: false, kind: "error", error: said }
+}
+
+/// What the claim screen shows, from what it knows. One of: "missing" (no LEZ Bridge package),
+/// "start" (choose or paste the file), "checking", "refused" (the check's refusal), "elsewhere"
+/// (the account isn't in this LEZ 0.4 wallet), "wrong_bridge" (a bridge the wallet doesn't read),
+/// "ready" (Claim), "asking" (relayed_claim on its way), "needs" (a wallet sheet is up),
+/// "uncertain" (a proposal got no answer), "running", "done", "failed".
+export function claimStage(state) {
+    var s = state || {}
+    if (s.missing) return "missing"
+    if (s.job) {
+        if (s.job.state === "done") return "done"
+        if (s.job.state === "failed" || s.job.state === "cancelled") return "failed"
+        return "running"
+    }
+    if (s.uncertain) return "uncertain"
+    if (s.needs) return "needs"
+    if (s.asking) return "asking"
+    if (s.checking) return "checking"
+    if (!s.check) return "start"
+    if (!s.check.ok) return "refused"
+    if (s.accountProblem) return "elsewhere"
+    if (s.bridgeProblem) return "wrong_bridge"
+    return "ready"
+}
+
+/// Why the claim's account can't be used here, or "": it must be one of this LEZ 0.4 wallet's own
+/// accounts (`accounts`: cli_accounts' list, or `Public/<id>` texts).
+export function claimAccountProblem(account, accounts) {
+    var want = String(account || "")
+    if (want === "") return ""
+    var held = (Array.isArray(accounts) ? accounts : []).map(function(a) { return typeof a === "string" ? a : String(a && a.account || "") })
+    if (held.indexOf(want) >= 0) return ""
+    return "This claim file pays " + want + ", which isn't in your LEZ 0.4 wallet, so the wallet can't sign its claim. "
+        + "An account from your LEZ 0.3 wallet gets into the LEZ 0.4 one when you restore its recovery phrase there, or by importing that one account (import-account-04.sh); then check the file again."
+}
+
+/// Which bridge a claim is for (its bridge program) and whether this wallet reads it: `{label,
+/// problem}`. `labels`: [[program, label]] (bridge_net's names); `bridges`: get_config's list.
+export function claimBridge(program, bridges, labels) {
+    var p = String(program || "")
+    var label = ""
+    ;(labels || []).forEach(function(pair) { if (pair[0] === p) label = pair[1] })
+    if (label === "") label = p === "" ? "" : "bridge " + p.slice(0, 6) + "…"
+    var listed = (Array.isArray(bridges) ? bridges : []).indexOf(p) >= 0
+    return { label: label, problem: p !== "" && !listed ? "This claim file is for " + label + " (" + p + "), which your wallet doesn't read on LEZ 0.4. Add it in Settings, then check the file again." : "" }
+}
+
+/// The claim job of this check among `relayed_claims` (newest first): a running or finished one for
+/// the same account and leaf, so a claim is never started twice.
+export function claimJobFor(jobs, check) {
+    if (!check || !check.deposit) return null
+    var list = Array.isArray(jobs) ? jobs : []
+    for (var i = 0; i < list.length; i++) {
+        var j = list[i]
+        if (j.check === check.id) return j
+        if (j.account === check.deposit.account && j.leaf_index !== undefined && j.leaf_index === check.deposit.leaf_index && j.state !== "failed" && j.state !== "cancelled") return j
+    }
+    return null
+}
+
+/// The running claim job among `relayed_claims`, for reopening the screen.
+export function runningClaimJob(jobs) {
+    var list = Array.isArray(jobs) ? jobs : []
+    for (var i = 0; i < list.length; i++) if (list[i].state === "running") return list[i]
+    return null
+}
+
+/// A claim job's steps, each with whether it is reached (the module's `phases`, else from `phase`).
+export const CLAIM_PHASES = [
+    { key: "approve", word: "Approved", hint: "You approve the claim in this app; your wallet signs it" },
+    { key: "relay", word: "Relayed", hint: "The bridge's relay checks it, sends it and pays the fee" },
+    { key: "confirm", word: "Confirmed", hint: "It waits for its block on the bridge test network" }
+]
+export function claimPhases(job) {
+    var order = ["approve", "relay", "confirm", "done"]
+    var at = order.indexOf(job && job.phase ? job.phase : "approve")
+    return CLAIM_PHASES.map(function(p, i) {
+        return { key: p.key, word: p.word, hint: p.hint, done: job && job.state === "done" ? true : i < at, now: i === at && !(job && job.state === "done") }
+    })
+}
+
+/// What a failed `relayed_claim` said, as the screen's line and whether pressing Claim again is
+/// safe: the wallet busy (nothing was sent) is; no answer (a request may be waiting) is not done
+/// blindly: look at the confirmation first.
+export function claimFailure(text) {
+    var t = String(text || "")
+    if (/Names Wallet is busy/i.test(t)) return { line: "Your Names Wallet was busy; nothing was sent. Press Claim again.", again: true }
+    if (/didn't answer/i.test(t)) return { line: "Your Names Wallet didn't answer in time, so a claim may be waiting for you. Look at the confirmation in this app first; don't press Claim again until it is answered or gone.", again: false }
+    if (/still answering an earlier call/i.test(t)) return { line: "The LEZ Bridge module is still answering an earlier call; nothing new was sent. Try again in a moment.", again: true }
+    return { line: t, again: true }
+}
+
+/// The claim's refusal title (rfp-022 logic.mjs relayErrorTitle, the codes the check and the job
+/// answer with).
+export function claimErrorTitle(code) {
+    var t = {
+        bad_file: "That is not a usable claim file", private_account: "This deposit is for a private account",
+        other_chain: "This deposit is on another chain", other_vault: "This deposit went to another vault",
+        cfg_mismatch: "This deposit is for another bridge", token_not_registered: "Token not supported",
+        bad_denomination: "Not a valid amount", wrong_amount: "Not a valid amount",
+        wrong_leaf: "The claim file's leaf does not match", not_in_vault: "No such deposit in the vault",
+        not_final: "Not final on Sepolia yet", root_not_attested: "Not recorded on the bridge test network yet",
+        already_claimed: "Already claimed", minting_frozen: "Claims are paused", minting_frozen_token: "Claims of this token are paused",
+        leaves_mismatch: "The vault's deposits don't add up here", no_bridge: "No bridge on this network",
+        wrong_chain: "This bridge belongs to another network", bridge_unreadable: "The bridge's settings can't be read",
+        bad_config: "The bridge module's settings are out of date", no_relay: "No claim relay for this bridge",
+        relay_cap: "The relay's limit is reached", relay_funds: "The relay is out of funds", relay_once: "The relay already sent this claim",
+        relay_refused: "The relay refused the claim", relay_busy: "The relay is busy", relay_unavailable: "The relay is not answering",
+        rate_limited: "Too many requests just now", unreachable: "The bridge test network can't be reached",
+        eth_unreachable: "Sepolia can't be read", wrong_account: "Wrong account", busy: "The relay was busy",
+        landed_or_used: "Your account was used since you approved", reverted: "Included, then refused",
+        wallet_failed: "Your Names Wallet could not finish it", wallet_rejected: "Nothing was sent",
+        wallet_no_answer: "Your Names Wallet didn't answer"
+    }
+    return t[code] || "The claim can't go on"
+}
+
+/// What the person gave: a claim file's text, a path, or nothing usable yet.
+export function claimInput(text) {
+    var t = String(text || "").trim()
+    if (t === "") return { kind: "empty", problem: "" }
+    if (t.charAt(0) === "{") return t.indexOf("logos-bridge-claim") >= 0 ? { kind: "json", problem: "" } : { kind: "json", problem: "This is not a bridge claim file." }
+    if (t.indexOf("file://") === 0 || t.charAt(0) === "/") return { kind: "path", problem: "" }
+    return { kind: "other", problem: "Paste the whole claim file (it starts with {), or choose the file." }
+}
+
+/// The other built-in deployment of the bridge module (after `other_vault`: the file is for it).
+export function otherDeployment(name) {
+    return name === "bridge-test-network" ? "bridge-test-network-v3" : "bridge-test-network"
 }

@@ -3,6 +3,7 @@
 import { atLeast, someAmount, entryShown, amountRead, amountProblem, amountDigits, AMOUNT_MAX, CHAIN_AMOUNT_MAX, jobProblem, tokenToProblem, tokenSendProves, tokenShown, feeEstimate, feePaid, accountTitle, accountsShown, publisherLine, durationWords, keyShown, chainToProblem, stakeLines, rewardsLine, grouped, addDigits, walletAssets, subDigits, walletGroups, stakeTable, activityLine, activityFor, agoShown, readNote, chainKeyTitle, chainKeySub, chainUsable, chainLaterNote } from "./qml/logic.mjs";
 import { readFileSync } from "node:fs";
 import { cliOutdatedLine, replyKind, revealNext, revealLine, mergeCliStatus, requestTickKey, normalizedReply, noWalletSaid, onNet, preTicked, sameNetAnswer, askAgainAfter, REVEAL_REFUSED_RETRY_MS } from "./qml/logic.mjs";
+import { bridgeReply, claimStage, claimAccountProblem, claimBridge, claimJobFor, runningClaimJob, claimPhases, claimFailure, claimErrorTitle, claimInput, otherDeployment } from "./qml/logic.mjs";
 import { publicAccounts, decimalShown, bridgeNetStatus, bridgeNetRows, bridgeNetShown, publicIdProblem, NET_03, NET_04, mergedAccounts } from "./qml/logic.mjs";
 
 let failures = 0;
@@ -155,6 +156,63 @@ check("cli status same network", mergeCliStatus(onNet({ wallet: true, public: "P
   check("asked again after its wait", revealNext(pending, 5001 + REVEAL_REFUSED_RETRY_MS, 0, 200000, refused).name, "alice");
   // SF-D: a busy or unanswered `mine` is asked again; a refusal isn't.
   check("mine asked again", ["busy", "none", "refused"].map((m) => askAgainAfter(m, "busy", "none")), [true, true, false]);
+}
+{
+  // Claim a bridge deposit: the lez_bridge module's replies (Basecamp 0.3.2 encodes them twice).
+  const twice = (v) => JSON.stringify(JSON.stringify(v));
+  check("bridge reply ok", bridgeReply(twice({ success: true, value: { a: 1 }, error: null })), { ok: true, value: { a: 1 } });
+  check("bridge reply error", bridgeReply(twice({ success: false, value: null, error: "no" })).kind, "error");
+  check("bridge reply kinds", ["{\"error\":\"timeout\"}", "{\"error\":\"Module not connected\"}", "{\"error\":\"Method not found\"}", "", undefined].map((r) => bridgeReply(r).kind),
+    ["busy", "starting", "missing", "busy", "busy"]);
+  const V2 = "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", V3 = "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr";
+  const labels = [[V2, "bridge v2"], [V3, "bridge v3"]];
+  const ok = { ok: true, id: "rc-1", deposit: { account: "Public/A", leaf_index: 7, leaves: 9, amount_text: "0.1 ETH" }, call: { program: V3 }, checks: [] };
+  // Every stage the screen has.
+  check("stages", [
+    claimStage({ missing: true }),
+    claimStage({}),
+    claimStage({ checking: true }),
+    claimStage({ check: { ok: false, error: { code: "already_claimed" } } }),
+    claimStage({ check: ok, accountProblem: "not in wallet" }),
+    claimStage({ check: ok, bridgeProblem: "not read" }),
+    claimStage({ check: ok }),
+    claimStage({ check: ok, asking: true }),
+    claimStage({ check: ok, needs: { needs: "connect" } }),
+    claimStage({ check: ok, uncertain: { needs: "uncertain" } }),
+    claimStage({ check: ok, job: { state: "running" } }),
+    claimStage({ check: ok, job: { state: "done" } }),
+    claimStage({ check: ok, job: { state: "failed" } }),
+  ], ["missing", "start", "checking", "refused", "elsewhere", "wrong_bridge", "ready", "asking", "needs", "uncertain", "running", "done", "failed"]);
+  // The account must be in this LEZ 0.4 wallet; the sentence says how a LEZ 0.3 one gets there.
+  check("account in wallet", claimAccountProblem("Public/A", [{ account: "Public/A" }]), "");
+  const away = claimAccountProblem("Public/B", [{ account: "Public/A" }]);
+  check("account elsewhere", away.startsWith("This claim file pays Public/B, which isn't in your LEZ 0.4 wallet") && away.includes("LEZ 0.3 wallet") && away.includes("import-account-04.sh"), true);
+  // Which bridge, and whether this wallet reads it.
+  check("bridge v3 read", claimBridge(V3, [V2, V3], labels), { label: "bridge v3", problem: "" });
+  check("bridge not read", claimBridge(V2, [V3], labels).problem.startsWith("This claim file is for bridge v2"), true);
+  check("other deployment", [otherDeployment("bridge-test-network-v3"), otherDeployment("bridge-test-network")], ["bridge-test-network", "bridge-test-network-v3"]);
+  // A claim already running or done for this file is found, never started twice.
+  const jobs = [{ id: "j2", state: "done", account: "Public/A", leaf_index: 7 }, { id: "j1", state: "running", check: "rc-0" }];
+  check("job for this file", claimJobFor(jobs, ok).id, "j2");
+  check("job by check id", claimJobFor([{ id: "j3", check: "rc-1", state: "running" }], ok).id, "j3");
+  check("no job for another leaf", claimJobFor([{ id: "j4", state: "running", account: "Public/A", leaf_index: 8 }], ok), null);
+  check("running job on reopen", runningClaimJob(jobs).id, "j1");
+  // Progress.
+  check("phases relay", claimPhases({ state: "running", phase: "relay" }).map((p) => (p.done ? "d" : p.now ? "n" : "-")).join(""), "dn-");
+  check("phases done", claimPhases({ state: "done", phase: "done" }).every((p) => p.done), true);
+  // Busy (nothing sent: Claim again) vs no answer (a request may be waiting: look first).
+  check("busy again", claimFailure("Your Names Wallet is busy; nothing was sent; try again.").again, true);
+  const silent = claimFailure("Your Names Wallet didn't answer in time (x). Nothing was sent; try again.");
+  check("no answer: look first", [silent.again, silent.line.includes("Look at the confirmation")], [false, true]);
+  check("module busy", claimFailure("still answering an earlier call").again, true);
+  check("error titles", [claimErrorTitle("already_claimed"), claimErrorTitle("other_vault"), claimErrorTitle("zzz")], ["Already claimed", "This deposit went to another vault", "The claim can't go on"]);
+  check("claim input", ["", "{\"format\":\"logos-bridge-claim\"}", "{}", "/tmp/c.json", "file:///c.json", "hello"].map((t) => claimInput(t).kind + (claimInput(t).problem ? "!" : "")),
+    ["empty", "json", "json!", "path", "path", "other!"]);
+  // The access sheet ticks only the claim's account when the bridge asks, if the wallet has it.
+  const access = { kind: "connect", app: "lez_bridge", choices: [{ account: "Public/M" }, { account: "Public/A" }] };
+  check("claim account ticked", preTicked(access, false, "Public/A"), ["Public/A"]);
+  check("hint not in wallet", preTicked(access, false, "Public/Z"), []);
+  check("module hint", preTicked(Object.assign({ account_hint: "Public/M" }, access), false, ""), ["Public/M"]);
 }
 check("publisher checking", publisherLine({ status: "checking" }), { text: "Checking who publishes it…", tone: "plain" });
 {
