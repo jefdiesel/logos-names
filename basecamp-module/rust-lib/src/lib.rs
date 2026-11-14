@@ -450,6 +450,54 @@ pub trait NamesModule: Send + 'static {
     /// Which name each chat address belongs to: `{address: name}`.
     fn chat_names(&mut self) -> String;
 
+    // ── Messages (src/messages/): chats between LNS names that work with the phone app and the Names web
+    // app (names format version 1, on logos.test through Basecamp's delivery_module). Names app only. ──
+
+    /// Whether Messages is on here, this computer's messaging address and inbox, the node's connection and
+    /// RLN state, `can_send` (false, with `send_note`, once the node refused a send for RLN), unread, requests,
+    /// `changes` (a counter a screen polls to know something changed) and whether the saved chats can be read.
+    fn msg_status(&mut self) -> String;
+
+    /// Turns Messages on: makes this computer's messaging key (once, kept in a 0600 file) and starts
+    /// listening. Returns `{address, topic, name, published}`: the screen then puts `address` in the main
+    /// name's `msg` entry with `set_text` unless `published` says it is there already.
+    fn msg_turn_on(&mut self) -> String;
+
+    /// The chats, newest first: `[{address, name, claimed, last, at, unread, checked}]`.
+    fn msg_list_chats(&mut self) -> String;
+
+    /// Messages from people not in the chats (same shape as `msg_list_chats`); `claimed` is the name they say.
+    fn msg_requests(&mut self) -> String;
+
+    /// One chat's messages, oldest first: `[{id, dir, from, text, ts, state, read}]`.
+    fn msg_messages(&mut self, address: String) -> String;
+
+    /// Sends `text` to `to`, an LNS name (its `msg` entry is looked up) or a messaging address, from the main
+    /// name when its `msg` entry is this computer's address (else as an address with no name).
+    fn msg_send(&mut self, to: String, text: String) -> String;
+
+    fn msg_mark_read(&mut self, address: String) -> String;
+
+    /// Moves a request to the chats, with the name it claimed if that name's `msg` entry is its address.
+    fn msg_accept(&mut self, address: String) -> String;
+
+    /// Blocks an address: its request and messages go, and nothing more from it is kept.
+    fn msg_block(&mut self, address: String) -> String;
+
+    fn msg_unblock(&mut self, address: String) -> String;
+
+    /// The blocked addresses.
+    fn msg_blocked(&mut self) -> String;
+
+    /// The safety code with `address`: `{groups (12 of 5 digits), qr, checked}`, the same as on their phone.
+    fn msg_safety(&mut self, address: String) -> String;
+
+    /// Marks `address` as checked in person (or not).
+    fn msg_mark_checked(&mut self, address: String, checked: bool) -> String;
+
+    /// Saved chats that can't be read: use the last saved copy, or start fresh (the file is kept aside).
+    fn msg_recover(&mut self, use_last_copy: bool) -> String;
+
     /// Remembers that chat address `address` is `name`'s.
     fn set_chat_name(&mut self, address: String, name: String) -> String;
 
@@ -985,6 +1033,8 @@ struct Names {
     /// Which name each chat address belongs to, as this device learned it (by
     /// messaging or adding that name), so group messages show who wrote them.
     chat_names: std::collections::BTreeMap<String, String>,
+    /// Names Messages (src/messages/): chats that work with the phone app and the web app, once turned on.
+    messages: messages::api::Messages<messages::Node>,
     /// Board reads, by what was asked: they take the CLI many seconds, so they
     /// run on their own thread and every call answers at once with the last result.
     board_reads: std::sync::Arc<std::sync::Mutex<HashMap<String, BoardRead>>>,
@@ -1090,6 +1140,7 @@ impl Default for Names {
             likes: Vec::new(),
             dm_names: Default::default(),
             chat_names: Default::default(),
+            messages: Default::default(),
             board_reads: Default::default(),
             read_cache: HashMap::new(),
             provider: None,
@@ -1151,6 +1202,29 @@ thread_local! {
 #[cfg(test)]
 fn calling() -> logos_rust_sdk::LogosCaller {
     TEST_CALLER.with(|caller| caller.borrow().clone())
+}
+
+/// Where Messages keeps its key and saved chats: the module's folder's `messages/`.
+fn msg_dir() -> Result<std::path::PathBuf, String> {
+    config_dir().map(|d| d.join("messages")).ok_or_else(|| "no home folder for this module".to_owned())
+}
+
+impl Names {
+    /// Runs `f` on Messages' state (started first if a key is there), Names app only, as a reply.
+    fn msg_with(&mut self, f: impl FnOnce(&mut messages::service::State) -> Result<Value, String>) -> String {
+        let ready = only_the_names_app().and_then(|_| msg_dir()).and_then(|d| self.messages.ensure(&d, messages::node));
+        reply(ready.and_then(|_| self.messages.with(f)))
+    }
+
+    /// The `msg` entry of `name` (a messaging address, lower-case hex), None if it has none. From `resolve`,
+    /// so it is the same read (and cache) as everywhere else.
+    fn msg_key_of(&mut self, name: &str) -> Result<Option<String>, String> {
+        let answer: Value = serde_json::from_str(&NamesModule::resolve(self, name.to_owned())).map_err(|e| e.to_string())?;
+        if answer["success"] != json!(true) {
+            return Err(answer["error"].as_str().unwrap_or("couldn't look the name up").to_owned());
+        }
+        Ok(answer["value"]["texts"]["msg"].as_str().and_then(messages::crypto::parse_msg_key).map(|k| messages::crypto::hex(&k)))
+    }
 }
 
 fn only_the_names_app() -> Result<(), String> {
@@ -3948,6 +4022,105 @@ impl NamesModule for Names {
         })())
     }
 
+    fn msg_status(&mut self) -> String {
+        reply(only_the_names_app().and_then(|_| msg_dir()).map(|d| self.messages.status(&d, messages::node)))
+    }
+
+    fn msg_turn_on(&mut self) -> String {
+        let outcome = only_the_names_app().and_then(|_| msg_dir()).and_then(|d| self.messages.turn_on(&d, messages::node));
+        reply(outcome.map(|mut v| {
+            let name = self.main_name.clone();
+            let published = name.as_ref().is_some_and(|n| self.msg_key_of(n).ok().flatten().as_deref() == v["address"].as_str());
+            v["name"] = json!(name);
+            v["published"] = json!(published);
+            v
+        }))
+    }
+
+    fn msg_list_chats(&mut self) -> String {
+        self.msg_with(|st| messages::api::list(st, false))
+    }
+
+    fn msg_requests(&mut self) -> String {
+        self.msg_with(|st| messages::api::list(st, true))
+    }
+
+    fn msg_messages(&mut self, address: String) -> String {
+        self.msg_with(|st| messages::api::messages(st, &address))
+    }
+
+    fn msg_send(&mut self, to: String, text: String) -> String {
+        if let Err(r) = only_the_names_app().and_then(|_| msg_dir()).and_then(|d| self.messages.ensure(&d, messages::node)) {
+            return reply(Err(r));
+        }
+        let (key, name) = match messages::crypto::parse_msg_key(&to) {
+            Some(k) => (messages::crypto::hex(&k), None),
+            None => {
+                let n = to.trim().to_ascii_lowercase();
+                let n = n.trim_end_matches(".lez").to_owned();
+                match self.msg_key_of(&n) {
+                    Ok(Some(k)) => (k, Some(n)),
+                    Ok(None) => return reply(Err(format!("{n} hasn't turned on messages yet (no msg entry)"))),
+                    Err(e) => return reply(Err(e)),
+                }
+            }
+        };
+        let me = match self.messages.with(|st| Ok(st.key.public.clone())) {
+            Ok(k) => k,
+            Err(e) => return reply(Err(e)),
+        };
+        let from = match self.main_name.clone() {
+            Some(m) if self.msg_key_of(&m).ok().flatten().as_deref() == Some(me.as_str()) => m,
+            _ => messages::crypto::nameless(&messages::crypto::parse_msg_key(&me).unwrap_or([0; 32])),
+        };
+        self.msg_with(|st| {
+            messages::service::queue_send(st, &key, name.as_deref(), &from, &text, messages::service::now_ms())
+                .map(|id| json!({ "id": id, "from": from, "to": key, "network": "logos.test" }))
+        })
+    }
+
+    fn msg_mark_read(&mut self, address: String) -> String {
+        self.msg_with(|st| messages::api::mark_read(st, &address))
+    }
+
+    fn msg_accept(&mut self, address: String) -> String {
+        let claimed = self.messages.with(|st| {
+            let s = st.store.as_ref().ok_or("the saved chats can't be read")?;
+            Ok(s.messages.iter().rev().find(|m| m.dir == "in" && m.peer == address).map(|m| m.from.clone()))
+        });
+        let name = match claimed {
+            Ok(Some(n)) if messages::crypto::is_name(&n) && !n.starts_with("msg-") => {
+                (self.msg_key_of(&n).ok().flatten().as_deref() == Some(address.to_ascii_lowercase().as_str())).then_some(n)
+            }
+            _ => None,
+        };
+        self.msg_with(|st| messages::api::accept(st, &address, name))
+    }
+
+    fn msg_block(&mut self, address: String) -> String {
+        self.msg_with(|st| messages::api::block(st, &address))
+    }
+
+    fn msg_unblock(&mut self, address: String) -> String {
+        self.msg_with(|st| messages::api::unblock(st, &address))
+    }
+
+    fn msg_blocked(&mut self) -> String {
+        self.msg_with(messages::api::blocked)
+    }
+
+    fn msg_safety(&mut self, address: String) -> String {
+        self.msg_with(|st| messages::api::safety(st, &address))
+    }
+
+    fn msg_mark_checked(&mut self, address: String, checked: bool) -> String {
+        self.msg_with(|st| messages::api::mark_checked(st, &address, checked))
+    }
+
+    fn msg_recover(&mut self, use_last_copy: bool) -> String {
+        self.msg_with(|st| messages::api::recover(st, use_last_copy))
+    }
+
     fn chat_names(&mut self) -> String {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
@@ -5961,6 +6134,35 @@ mod tests {
         serde_json::from_str(text).expect("the module answers in JSON")
     }
 
+    /// Messages through the module's own methods: off, turned on (one key, kept), a send to an address is
+    /// sealed and queued (the test node sends nowhere), status tells it, and bad input is refused plainly.
+    #[test]
+    fn messages_through_the_module() {
+        let mut n = fresh();
+        let _ = std::fs::remove_dir_all(msg_dir().unwrap());
+        assert_eq!(parsed(&n.msg_status())["value"]["on"], false);
+        assert_eq!(parsed(&n.msg_list_chats())["success"], false, "nothing before it is turned on");
+        let on = parsed(&n.msg_turn_on());
+        let me = on["value"]["address"].as_str().unwrap().to_owned();
+        assert_eq!(on["value"]["published"], false);
+        assert_eq!(parsed(&n.msg_turn_on())["value"]["address"], me.as_str());
+        let bob = messages::store::MsgKey::new(1).unwrap();
+        let sent = parsed(&n.msg_send(bob.public.clone(), "hello bob".into()));
+        assert_eq!(sent["success"], true, "{sent}");
+        assert_eq!(sent["value"]["network"], "logos.test");
+        assert!(sent["value"]["from"].as_str().unwrap().starts_with("msg-"), "no linked name: sent as the address");
+        let chats = parsed(&n.msg_list_chats());
+        assert_eq!(chats["value"][0]["address"], bob.public.as_str());
+        let msgs = parsed(&n.msg_messages(bob.public.clone()));
+        assert_eq!(msgs["value"][0]["text"], "hello bob");
+        let st = parsed(&n.msg_status());
+        assert_eq!((st["value"]["on"].as_bool(), st["value"]["network"].as_str()), (Some(true), Some("logos.test")));
+        assert_eq!(parsed(&n.msg_safety(bob.public.clone()))["value"]["groups"].as_array().unwrap().len(), 12);
+        assert_eq!(parsed(&n.msg_messages("nope".into()))["success"], false);
+        assert_eq!(parsed(&n.msg_send(bob.public.clone(), "".into()))["success"], false, "an empty text isn't sent");
+        let _ = std::fs::remove_dir_all(msg_dir().unwrap());
+    }
+
     /// A module with the built-in defaults, ignoring any saved configuration.
     fn fresh() -> Names {
         Names {
@@ -5979,6 +6181,7 @@ mod tests {
             likes: Vec::new(),
             dm_names: Default::default(),
             chat_names: Default::default(),
+            messages: Default::default(),
             board_reads: Default::default(),
             read_cache: HashMap::new(),
             provider: None,

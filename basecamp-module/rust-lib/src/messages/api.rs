@@ -69,6 +69,7 @@ impl<T: Transport> Messages<T> {
             "on": on, "network": "logos.test", "address": st.key.public, "topic": st.key.topic(),
             "connection": svc.transport.status(), "rln": svc.transport.rln(),
             "changes": st.changes, "error": st.last_error,
+            "can_send": s.map_or(true, |s| s.send_blocked.is_none()), "send_note": s.and_then(|s| s.send_blocked.clone()),
             "unreadable": st.unreadable.as_ref().map(|(why, prev)| json!({ "why": why, "last_copy": prev })),
             "unread": s.map_or(0, |s| s.messages.iter().filter(|m| m.dir == "in" && !m.read && s.contacts.get(&m.peer).is_some_and(|c| c.accepted)).count()),
             "requests": s.map_or(0, |s| s.contacts.values().filter(|c| !c.accepted).count()),

@@ -190,24 +190,41 @@ fn retry_or_fail(e: &mut Outgoing, now: i64) {
 }
 
 /// An event about a send: the outbox entry and its message follow. "sent" ends it; an error queues a retry.
+/// The node's refusals that mean this computer can't send at all yet (RLN: no membership, or a registry its
+/// messaging module can't reach), not a passing network problem.
+pub fn cant_send_here(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    e.contains("rln") || e.contains("membership") || e.contains("retry time window") || e.contains("proof")
+}
+
+/// What the composer says while sending can't work here.
+pub const CANT_SEND: &str = "Receiving works. Sending from Basecamp needs a newer messaging module and a membership";
+
 fn set_send_state(st: &mut State, request: &str, what: &str, error: Option<String>) -> bool {
     let now = now_ms();
     let Some(s) = st.store.as_mut() else { return false };
     let Some(i) = s.outbox.iter().position(|o| o.request.as_deref() == Some(request)) else { return false };
     let id = s.outbox[i].id.clone();
+    let rln = error.as_deref().is_some_and(cant_send_here);
     let state = match what {
+        "error" if rln => "failed".to_owned(),                     // retrying won't help: say so instead
         "error" => {
             retry_or_fail(&mut s.outbox[i], now);
             s.outbox[i].state.clone()
         }
         other => other.to_owned(),
     };
+
     // propagated (on the network) or sent (validated) ends the tries; a later "sent" for it only shows on the
     // message (the outbox entry is gone, so it is matched by request id there)
     if state == "sent" || state == "propagated" {
         s.outbox.remove(i);
-    } else if state != "failed" {
+        s.send_blocked = None;
+    } else {
         s.outbox[i].state = state.clone();
+    }
+    if rln {
+        s.send_blocked = Some(CANT_SEND.to_owned());           // kept in the store: it holds after a restart
     }
     if let Some(m) = s.messages.iter_mut().find(|m| m.dir == "out" && m.id == id) {
         m.state = Some(state);
@@ -355,6 +372,24 @@ impl Transport for Delivery {
     }
 }
 
+/// A node that sends nowhere and hears nothing (the module's unit tests).
+#[cfg(test)]
+pub struct Offline;
+
+#[cfg(test)]
+impl Transport for Offline {
+    fn start(&self) -> Result<(), String> { Ok(()) }
+    fn subscribe(&self, _: &str) -> Result<(), String> { Ok(()) }
+    fn send(&self, _: &str, _: &[u8]) -> Result<String, String> { Err("offline".into()) }
+    fn events(&self) -> Result<Receiver<Event>, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::mem::forget(tx);
+        Ok(rx)
+    }
+    fn status(&self) -> String { "Disconnected".into() }
+    fn rln(&self) -> String { "Disabled".into() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,6 +501,31 @@ mod tests {
         assert!(!on_received(&mut st, "h", &me.topic(), b"x", 1));
         assert!(queue_send(&mut st, &me.public, None, "alice", "hi", 1).is_err());
         assert_eq!(std::fs::read(store::path(&d)).unwrap(), b"NMS1 damaged", "never written over");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_refusal_for_rln_fails_at_once_and_says_why_until_a_send_goes_out() {
+        let d = dir("rln");
+        let me = MsgKey::new(1).unwrap();
+        let svc = Service::start(d.clone(), me.clone(), Offline);
+        let mut st = svc.state.lock().unwrap();
+        let bob = MsgKey::new(2).unwrap();
+        let id = queue_send(&mut st, &bob.public, None, "alice", "hi", 1).unwrap();
+        st.store.as_mut().unwrap().outbox[0].request = Some("r1".into());
+        assert!(set_send_state(&mut st, "r1", "error", Some("Unable to send within retry time window".into())));
+        let s = st.store.as_ref().unwrap();
+        assert_eq!(s.messages.iter().find(|m| m.id == id).unwrap().state.as_deref(), Some("failed"), "no retries: they can't help");
+        assert_eq!(s.send_blocked.as_deref(), Some(CANT_SEND));
+        assert_eq!(s.outbox[0].state, "failed");
+        // a send that goes out (a newer module, a membership) clears it
+        let id2 = queue_send(&mut st, &bob.public, None, "alice", "again", 2).unwrap();
+        let o = st.store.as_mut().unwrap().outbox.iter_mut().find(|o| o.id == id2).unwrap();
+        o.request = Some("r2".into());
+        set_send_state(&mut st, "r2", "propagated", None);
+        assert_eq!(st.store.as_ref().unwrap().send_blocked, None);
+        assert!(!cant_send_here("no peers"));
+        drop(st);
         let _ = std::fs::remove_dir_all(&d);
     }
 

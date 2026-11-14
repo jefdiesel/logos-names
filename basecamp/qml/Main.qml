@@ -61,7 +61,7 @@ Item {
     property string walletProblem: ""  // why the wallet cannot be used, if it cannot
     property int fromIndex: 0
     property string tool: ""           // the open panel: "", "pay" or "settings"
-    property string section: "wallet"  // wallet, messages, profile, search or settings
+    property string section: "wallet"  // wallet, nmessages (Messages), messages (Logos Chat), profile, search or settings
     // The board (Home): see board/ and the names module's board_* calls.
     property string boardView: "all"   // all, following or thread
     property string boardThreadOf: ""  // the post a thread view shows, <name>/<n>
@@ -219,6 +219,14 @@ Item {
     }
 
     /// Asks the names module, returning its value or throwing its error.
+    /// Messages (NamesMessages.qml): one call to the names module's msg_* methods, its answer parsed.
+    function msgCall(method, args, done) {
+        if (bridgeReady && logos.callModuleAsync)
+            logos.callModuleAsync("names", method, args, function(reply) { done(parsed(reply)) }, 30000)
+        else
+            done(parsed(bridgeReady ? logos.callModule("names", method, args) : null))
+    }
+
     function ask(method, args) {
         var reply = call("names", method, args)
         if (!reply || reply.success === undefined)
@@ -4890,7 +4898,8 @@ Item {
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Wallet"; current: root.section === "wallet" && root.walletView !== "names"; onPressed: root.openWallet("home") }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Activity"; current: root.section === "activity"; onPressed: { root.go("activity"); root.loadActivity() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Names"; current: root.section === "wallet" && root.walletView === "names"; onPressed: { root.openWallet("names"); root.loadCliMine() } }
-                Tab { Layout.fillWidth: true; alignLeft: true; label: "Messages"; current: root.section === "messages"; onPressed: { root.go("messages"); root.chatLoad() } }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Messages"; current: root.section === "nmessages"; onPressed: root.go("nmessages") }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Logos Chat"; current: root.section === "messages"; onPressed: { root.go("messages"); root.chatLoad() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Profile"; current: root.section === "profile"; onPressed: { root.say("", false); root.openProfile() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Search"; current: root.section === "search"; onPressed: { root.go("search"); searchField.forceActiveFocus() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Settings"; current: root.section === "settings"; onPressed: { root.go("settings"); root.registering = false; root.gettingTokens = false; root.record = null; root.missing = ""; root.loadAccounts() } }
@@ -5177,7 +5186,16 @@ Item {
             }
         }
 
-        // Messages: name-to-name DMs.
+        // Messages that work with the phone app and the web app: its own file (NamesMessages.qml).
+        NamesMessages {
+            id: namesMessages
+            app: root
+            visible: root.section === "nmessages" && !root.needsWelcome
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+        }
+
+        // Logos Chat: name-to-name DMs through Basecamp's chat module.
         Item {
             visible: root.section === "messages" && !root.needsWelcome
             Layout.fillWidth: true

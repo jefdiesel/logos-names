@@ -9,3 +9,18 @@ pub mod service;
 pub mod store;
 #[cfg(test)]
 mod probe;
+
+/// The messaging node the module uses: Basecamp's delivery_module; in unit tests, one that sends nowhere.
+#[cfg(not(test))]
+pub type Node = service::Delivery;
+#[cfg(test)]
+pub type Node = service::Offline;
+
+#[cfg(not(test))]
+pub fn node() -> Node {
+    service::Delivery
+}
+#[cfg(test)]
+pub fn node() -> Node {
+    service::Offline
+}

@@ -61,6 +61,25 @@ BRIDGE = r"""
                 if (method === "get_messages") return JSON.stringify([{ from_self: false, content: "hey, saw your post on the board", timestamp_ms: 1 }, { from_self: true, content: "thanks! it's all made privately as a name", timestamp_ms: 2 }, { from_self: false, content: "nice. how long did the post take?", timestamp_ms: 3 }])
                 return JSON.stringify(null)
             }
+            // Messages (NamesMessages.qml): stand-ins for the names module's msg_* methods.
+            if (module === "names" && /^msg_/.test(method)) {
+                var mm = (%(mock)s).msg || {}
+                var BOBK = "b87671777b19b9dcce3ef31aed5c393069c383930435043144b68e11e42fb625", ADAK = "339c4c154c2b15c5a9d305ef5ffe019be3d413825552f8b514fc7463f7dd540e"
+                if (method === "msg_status") return ok(Object.assign({ on: true, network: "logos.test", address: "2546442a132e86b322e0a2719d6eb4b4d928b470327e53ea6d96295657430c00",
+                    topic: "/names/1/msg-a245f0b9f7a8b85c/proto", connection: "Connected", rln: "Ready", changes: 3, error: null, can_send: true, send_note: null,
+                    unreadable: null, unread: 2, requests: 1, dropped: 0 }, mm.status || {}))
+                if (method === "msg_list_chats") return ok([
+                    { address: BOBK, name: "pixel8", claimed: "pixel8", last: "sent you the photos, check the bridge page", at: Date.now() - 60000, unread: 2, checked: true },
+                    { address: ADAK, name: "ada", claimed: "ada", last: "see you at the meetup", at: Date.now() - 7200000, unread: 0, checked: false }])
+                if (method === "msg_requests") return ok([{ address: "c3f0a9e4b1d2c3f0a9e4b1d2c3f0a9e4b1d2c3f0a9e4b1d2c3f0a9e4b1d2ffee", name: null, claimed: "jef", last: "hey, is this the right address for the bridge test?", at: Date.now() - 300000, unread: 1, checked: false }])
+                if (method === "msg_messages") return ok([
+                    { id: "e1", dir: "in", from: "pixel8", text: "hello from the phone", ts: Date.now() - 3600000, state: null, read: true },
+                    { id: "out-1", dir: "out", from: "jef", text: "hi! this is the Basecamp wallet", ts: Date.now() - 3500000, state: mm.sendState || "sent", read: true },
+                    { id: "e2", dir: "in", from: "pixel8", text: "sent you the photos, check the bridge page", ts: Date.now() - 60000, state: null, read: false }])
+                if (method === "msg_safety") return ok({ groups: ["03360", "05100", "70043", "27379", "77022", "62967", "83578", "00120", "52013", "54780", "98481", "73927"], qr: "names-safety:1:0", checked: false })
+                if (method === "msg_blocked") return ok([])
+                return ok(true)
+            }
             var names = %(names)s
             if (module === "lez_core")
                 return method === "account_id_from_base58" ? "15145aee" : ""
@@ -306,6 +325,11 @@ SCENARIOS = {
     "anon-off": 'root.anonOn = true',
     "poster": 'root.show("linus")',
     "messages": 'root.section = "messages"; root.chatLoad(); root.chatOpen("c1")',
+    "nmessages": 'root.section = "nmessages"',
+    "nmessages-off": 'root.section = "nmessages"',
+    "nmessages-chat": 'root.section = "nmessages"; Qt.callLater(function() { namesMessages.openChat("b87671777b19b9dcce3ef31aed5c393069c383930435043144b68e11e42fb625", "pixel8") })',
+    "nmessages-cantsend": 'root.section = "nmessages"; Qt.callLater(function() { namesMessages.openChat("b87671777b19b9dcce3ef31aed5c393069c383930435043144b68e11e42fb625", "pixel8") })',
+    "nmessages-requests": 'root.section = "nmessages"; Qt.callLater(function() { namesMessages.view = "requests" })',
     "group": 'root.section = "messages"; root.chatLoad(); Qt.callLater(function() { root.chatOpen("g1") })',
     "spelling": 'boardComposer.text = "I recieve teh posts"; root.boardSpellCheck()',
     "profile-tab": 'root.openProfile()',
@@ -397,6 +421,8 @@ ZONE_ACTIVITY = [
     {"id": "z4", "at": 1791970000, "kind": "send", "chain": "logos", "from": "66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b", "to": "73058ad5edb0e72b66c3e05ae90471382c3bb4d61314db995ef40e674dbf591e", "amount": "5000", "fee": "2018", "state": "in_block"},
 ]
 MOCKS = {
+    "nmessages-off": {"msg": {"status": {"on": False}}},
+    "nmessages-cantsend": {"msg": {"sendState": "failed", "status": {"can_send": False, "send_note": "Receiving works. Sending from Basecamp needs a newer messaging module and a membership"}}},
     "settings-zones": {"zones": zones("home")},
     "settings-zones-add": {"zones": zones("home")},
     "settings-zones-remove": {"zones": zones("home")},

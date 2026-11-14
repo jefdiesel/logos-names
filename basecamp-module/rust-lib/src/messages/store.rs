@@ -138,6 +138,10 @@ pub struct Store {
     /// Requests deleted unread because of the caps or a block, counted (shown as a number, never the text).
     #[serde(default)]
     pub dropped: u64,
+    /// Set when the node refused a send in a way that means this computer can't send yet (RLN); cleared by a
+    /// send that goes out.
+    #[serde(default)]
+    pub send_blocked: Option<String>,
 }
 
 pub enum Load {
