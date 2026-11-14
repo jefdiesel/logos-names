@@ -1,9 +1,13 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
+  push:            # every branch, so tests don't have to queue on the Mini's build lock
   pull_request:
+
+# A newer push to the same branch cancels the older run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   core:
