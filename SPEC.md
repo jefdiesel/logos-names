@@ -1032,7 +1032,9 @@ reuses it (at most three are made for one commitment). Names that share receivin
 keys are linked to each other, which is why `auto` never reuses another name's.
 `receive_privately(name, private_account)` publishes the receiving keys of that
 account (`auto` makes a new one each time, after checking the wallet holds the
-name) and removes any public account from the name. `set_account` points the name at a public account (base58), which
+name) and removes any public account from the name. The names CLI marks an account it made
+for `auto` (`"fresh": true` in `names module keys`), and the module refuses `auto` with a CLI
+too old to say so, whose `auto` gave every name the wallet's first private account. `set_account` points the name at a public account (base58), which
 anyone who resolves the name then sees, with its balance and history.
 `set_private_keys` publishes a 32-byte nullifier public key and a 1184-byte
 viewing public key, both in hex. `clear_addresses` removes the public account

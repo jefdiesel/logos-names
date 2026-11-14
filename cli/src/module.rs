@@ -284,7 +284,8 @@ impl Client {
         // theirs: names that share receiving keys are linked to each other, and the keys show
         // the wallet account they come from to anyone who resolves the names. The module
         // remembers the account it gets for a registration and passes its ID on a retry.
-        let account: AccountId = if account == "auto" {
+        let fresh = account == "auto";
+        let account: AccountId = if fresh {
             self.new_receiving_keys()?.0
         } else {
             parse_account(account).map_err(|error| anyhow!(error))?
@@ -302,6 +303,9 @@ impl Client {
                 "account": account.to_string(),
                 "npk": hex::encode(keys.nullifier_public_key.0),
                 "vpk": hex::encode(keys.viewing_public_key.to_bytes()),
+                // Marks an account made for this answer, so the module can tell this CLI from
+                // an older one whose `auto` gave the wallet's first account to every name.
+                "fresh": fresh,
             })
         );
         Ok(())
