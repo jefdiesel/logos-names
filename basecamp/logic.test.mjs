@@ -2,6 +2,7 @@
 // engine cannot run in CI. Run with: node basecamp/logic.test.mjs
 import { atLeast, someAmount, entryShown, amountRead, amountProblem, amountDigits, AMOUNT_MAX, CHAIN_AMOUNT_MAX, jobProblem, tokenToProblem, tokenSendProves, tokenShown, feeEstimate, feePaid, accountTitle, accountsShown, publisherLine, durationWords, keyShown, chainToProblem, stakeLines, rewardsLine, grouped, addDigits, walletAssets, subDigits, walletGroups, stakeTable, activityLine, activityFor, agoShown, readNote, chainKeyTitle, chainKeySub, chainUsable, chainLaterNote } from "./qml/logic.mjs";
 import { readFileSync } from "node:fs";
+import { cliOutdatedLine } from "./qml/logic.mjs";
 import { publicAccounts, decimalShown, bridgeNetStatus, bridgeNetRows, bridgeNetShown, publicIdProblem, NET_03, NET_04, mergedAccounts } from "./qml/logic.mjs";
 
 let failures = 0;
@@ -334,6 +335,13 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("bridgeNetStatus reset", bridgeNetStatus({ read: Object.assign({}, read, { reset_at: 90 }) }, clock).reset, "The bridge test network was reset at t90. What was held there before is gone; balances start again.");
   check("bridgeNetRows", bridgeNetRows(read).map((r) => [r.title, r.found, r.assets.map((a) => a.symbol + " " + a.amount)]),
     [["Public account CCVd76Tk…pKnk", true, ["LEZ 23,786,858", "dUSDC 0", "wETH 0.1"]], ["Public account BVDcg8Sb…yBnD", false, []]]);
+  check("cliOutdatedLine 0.3", cliOutdatedLine("0.3", "names 0.1.0"), "The names tool this app uses for LEZ 0.3 (names 0.1.0) is too old for that network as it is now, so creating a wallet there doesn't work with it. LEZ 0.4 is unaffected: switch to it above.");
+  check("cliOutdatedLine no reset, no install", ["0.3", "0.4"].map((n) => /reset|Install/.test(cliOutdatedLine(n, ""))), [false, false]);
+  check("bridgeNetRows two bridges", bridgeNetRows({ bridges: [{ program: "A" }, { program: "B" }], accounts: [{ account: "Public/" + OTHER, found: true, native: "0",
+    tokens: [{ bridge: "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", symbol: "wETH", name: "Wrapped ETH", amount: "1", decimals: 0 }, { bridge: "7".repeat(44), symbol: "wETH", amount: "2", decimals: 0 }] }] })[0].assets.map((a) => a.name),
+    ["Native", "Wrapped ETH · bridge JECKBkvo…nUx7", "Bridged token · bridge 77777777…7777"]);
+  check("bridgeNetRows one bridge unchanged", bridgeNetRows({ bridges: [{ program: "A" }], accounts: [{ account: "Public/" + OTHER, found: true, native: "0",
+    tokens: [{ bridge: "A", symbol: "wETH", name: "Wrapped ETH", amount: "1", decimals: 0 }] }] })[0].assets.map((a) => a.name), ["Native", "Wrapped ETH"]);
   check("bridgeNetRows watched", bridgeNetRows({ accounts: [{ account: "Public/" + OTHER, found: false, watched: true }] }).map((r) => [r.title, r.watched]), [["Watched account BVDcg8Sb…yBnD", true]]);
   check("publicIdProblem", [publicIdProblem(OWNER), publicIdProblem(" Public/" + OWNER + " "), publicIdProblem(""), publicIdProblem("Private/" + OWNER), publicIdProblem("0OIl" + OWNER)],
     ["", "", "Paste a public account ID.", "A private account can't be read on the bridge test network yet.", "That isn't a public account ID: 32 to 44 letters and digits, without 0, O, I or l."]);

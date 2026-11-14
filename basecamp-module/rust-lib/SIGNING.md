@@ -71,16 +71,30 @@ Test: `the_wallet_s_own_programs_are_never_signed_for_this_way` (0.3 and 0.4 reg
 token program, each refused at declaration, as root, as an actor's program and as a PDA's owner;
 the bridge still passes).
 
-**The program that holds the person's bridged tokens is never the root.** On LEZ 0.4 the
-bridge's token program (named in the bridge Config) holds the dUSDC and wETH the wallet shows. A
-root call to it, signed by the holder, can move them; reached from another program (a bridge
-claim declares it), a transfer refuses, because it isn't the root signer. So it is refused as the
-root only (`not_root`), together with the wallet's own token programs.
-- The wallet reads the bridge's token program from the chain each time it checks (`bridge_net::token_program_of`).
-- If that read fails, the wallet signs nothing: proposing is refused, and a stored call's sheet is
-  refused (fail closed).
-- Tests: `the_bridged_tokens_program_is_refused_as_root_only` and the module test
-  `the_module_holds_its_own_programs_and_the_bridged_tokens_at_every_step`.
+**The programs that hold the person's bridged tokens are never the root.** On LEZ 0.4 each
+bridge's token program (named in that bridge's Config) holds the dUSDC and wETH the wallet shows.
+A root call to one, signed by the holder, can move them; reached from another program (a bridge
+claim declares it), a transfer refuses, because it isn't the root signer. So each is refused as
+the root only (`not_root`), together with the wallet's own token programs.
+- The bridges are a list (config.json `lez04.bridge_programs`, at most 4; an earlier build's
+  single `lez04.bridge_program` reads as a list of one; none set means the default bridge).
+- The wallet reads every listed bridge's token program from the chain each time it checks
+  (`bridge_net::token_program_of`, at propose, at approval and at re-sign).
+- It doesn't rely on the sequencer alone (the wallet never submits a relayed call, so a lying
+  sequencer isn't caught by a failed send): the default bridge's token program
+  (`3gF78HRJNCfabkWFiszahVVacq181aU8SSGua8Cj9ZE4`) is built in, and every token program ever read
+  from a bridge's Config is kept for good (`bridge-token-programs.json` beside config.json,
+  append-only). The refused set is the union: built in, kept, read now. A sequencer that
+  answers "no Config" can't shrink it.
+- The token programs of the token sources apps added (`token_source`) are refused as the root
+  the same way: they hold tokens the wallet shows.
+- If any one bridge's Config can't be read, the wallet signs nothing: proposing is refused
+  ("the wallet couldn't check the token program of bridge <id> just now, so it signs nothing; try
+  again"), and a stored call's sheet is refused (fail closed). A bridge with no Config on the
+  chain adds nothing.
+- Tests: `the_bridged_tokens_program_is_refused_as_root_only`, and the module tests
+  `the_module_holds_its_own_programs_and_the_bridged_tokens_at_every_step` and
+  `every_bridge_s_token_program_is_refused_as_root` (two bridges with different token programs).
 
 **Every rule is applied again at approval and at re-sign** (`programs_allowed`). This covers a
 relayed call stored by an earlier build, or proposed before the configuration changed: its sheet

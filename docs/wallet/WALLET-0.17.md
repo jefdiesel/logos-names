@@ -40,13 +40,23 @@ Not in: `pressure-fixes` (11 commits on `main`, partly ported to the 0.4 line al
   - its home zone is called `bridge-0.4`, so its history and other apps' requests are never
     LEZ 0.3's.
 - **Requests from other apps carry their network** and can be approved only on it.
-- **The bridge is a setting, not a build constant.** The bridge program the Wallet reads on LEZ
-  0.4 (its Config lists the bridged tokens) lives in config.json under `lez04.bridge_program`.
-  The default is `JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7`, today's. Change it with the
-  module's `set_bridge_program(<id>)`, or `""` to go back to the default:
-  `logosctl call names set_bridge_program str:<id>` in a session, or the Names app. The read
-  goes to LEZ 0.4's configured sequencer (`lez04.sequencer`). The module holds no vault and no
-  relay endpoint: those are the bridge app's.
+- **The bridges are a setting, not a build constant, and there may be several.** The bridge
+  programs the Wallet reads on LEZ 0.4 (each Config lists that bridge's tokens) live in
+  config.json under `lez04.bridge_programs`, a list of at most 4. The first is also written as
+  `lez04.bridge_program`, which an earlier 0.17 build reads; a file with only
+  `lez04.bridge_program` reads as a list of one. With none set, the default is
+  `JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7`, today's.
+  - Set the whole list with the module's `set_bridge_programs(<JSON array>)` (adding or removing
+    a bridge is sending the new list; `[]` goes back to the default), or one bridge with
+    `set_bridge_program(<id>)`: `logosctl call names set_bridge_programs str:'["<id>","<id>"]'`
+    in a session. An install script writes `lez04.bridge_programs` into config.json itself.
+    Names app or host only.
+  - The balance view shows every bridge's tokens, each row naming its bridge when there are
+    several; it is still one request per account. Every bridge's token program is refused as a
+    relayed call's root: built in for the default bridge, kept once read, and read again at
+    every check (SIGNING.md).
+  - The read goes to LEZ 0.4's configured sequencer (`lez04.sequencer`). The module holds no
+    vault and no relay endpoint: those are the bridge app's.
 
 ## What works where
 

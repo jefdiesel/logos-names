@@ -336,12 +336,20 @@ pub trait NamesModule: Send + 'static {
     /// wallet is busy. The value is `get_config`'s. Names app only.
     fn set_names_network(&mut self, network: String) -> String;
 
-    /// Sets the bridge program the Wallet reads on LEZ 0.4 (its Config lists the bridged
-    /// tokens): a program ID, or empty for the built-in default. Kept in config.json under
-    /// `lez04.bridge_program`, whichever network is in use; a redeployed bridge needs this,
-    /// not a new build. False, and nothing changed, for anything that isn't a program ID.
-    /// Names app only.
+    /// Sets the one bridge program the Wallet reads on LEZ 0.4 (its Config lists the bridged
+    /// tokens): a program ID, or empty for the built-in default. It replaces the whole list
+    /// (`set_bridge_programs`). Kept in config.json under `lez04.bridge_programs` (and
+    /// `lez04.bridge_program`, the first, for earlier 0.17 builds), whichever network is in use;
+    /// a redeployed bridge needs this, not a new build. False, and nothing changed, for
+    /// anything that isn't a program ID. Names app only.
     fn set_bridge_program(&mut self, program_id: String) -> bool;
+
+    /// Sets every bridge the Wallet knows on LEZ 0.4: a JSON array of 0 to 4 program IDs
+    /// (`[]` for the built-in default). Adding or removing a bridge is sending the new list.
+    /// Each bridge's tokens are shown, and each bridge's token program is refused as the root
+    /// of a relayed call. False, and nothing changed, for a list that isn't 0-4 distinct
+    /// program IDs (the native token is not one). Names app only.
+    fn set_bridge_programs(&mut self, programs_json: String) -> bool;
 
     /// Use the registry with this program account ID (base58), and remember it
     /// across restarts. Returns false and changes nothing if it is not an
@@ -1211,9 +1219,11 @@ struct Names {
     net: Net,
     /// The other names network's settings as saved (`NET_KEYS`), kept as they are.
     parked: Value,
-    /// The bridge program on LEZ 0.4, if set (config.json `lez04.bridge_program`); else
-    /// `bridge_net::DEFAULT_BRIDGE_PROGRAM`. A redeployed bridge is a new setting, not a build.
-    bridge_program: Option<AccountId>,
+    /// The bridge programs on LEZ 0.4, if set (config.json `lez04.bridge_programs`, or an
+    /// earlier build's single `lez04.bridge_program`); empty means
+    /// `bridge_net::DEFAULT_BRIDGE_PROGRAM`. At most `bridge_net::MAX_BRIDGES`. A redeployed or
+    /// second bridge is a setting, not a build.
+    bridge_programs: Vec<AccountId>,
     /// What each CLI said its version is, by path and modification time.
     cli_lines: std::sync::Mutex<HashMap<std::path::PathBuf, (std::time::SystemTime, String)>>,
     /// When LEZ last answered about each followed bridge's receipt (seconds), so each is
@@ -1314,7 +1324,7 @@ impl Default for Names {
             receipt_asks: Default::default(),
             net: Net::Lez03,
             parked: Value::Null,
-            bridge_program: None,
+            bridge_programs: Vec::new(),
             cli_lines: Default::default(),
         };
         // Files saved by versions before 0.10 were readable by every account on the
@@ -1851,11 +1861,35 @@ fn pending() -> Result<Pending, String> {
         .ok_or_else(|| "this device has nowhere to keep a commitment".to_owned())
 }
 
+/// A bridge program ID as typed (`Public/` allowed); the native token is not one.
+fn bridge_id(text: &str) -> Option<AccountId> {
+    let text = text.trim();
+    registry::parse_account(text.strip_prefix("Public/").unwrap_or(text)).ok().filter(|program| *program != registry::NATIVE_TOKEN)
+}
+
+/// The bridges saved under `lez04`: `bridge_programs` (a list), else the single
+/// `bridge_program` an earlier 0.17 build wrote. Ids that aren't programs, the native token and
+/// repeats are left out; at most `bridge_net::MAX_BRIDGES`.
+fn saved_bridges(block: &Value) -> Vec<AccountId> {
+    let texts: Vec<&str> = match block["bridge_programs"].as_array() {
+        Some(list) => list.iter().filter_map(Value::as_str).collect(),
+        None => block["bridge_program"].as_str().into_iter().collect(),
+    };
+    let mut out = Vec::new();
+    for program in texts.into_iter().filter_map(bridge_id) {
+        if !out.contains(&program) {
+            out.push(program);
+        }
+    }
+    out.truncate(bridge_net::MAX_BRIDGES);
+    out
+}
+
 impl Names {
     /// Applies a saved configuration on the names network it names (`names_network`):
     /// LEZ 0.3's settings are the flat fields, LEZ 0.4's are under `lez04`.
     fn apply_network(&mut self, saved: &Value) {
-        self.bridge_program = saved["lez04"]["bridge_program"].as_str().and_then(|text| registry::parse_account(text).ok());
+        self.bridge_programs = saved_bridges(&saved["lez04"]);
         let net = saved["names_network"].as_str().and_then(Net::parse).unwrap_or_default();
         match net {
             Net::Lez03 => {
@@ -2077,7 +2111,9 @@ impl Names {
         config["cli_wallet"] = json!(self.resolve_wallet(self.cli_wallet.as_deref()).map(|dir| dir.to_string_lossy().into_owned()));
         config["module_version"] = json!(MODULE_VERSION);
         config["names_network"] = self.net.shown();
-        config["bridge_program"] = json!(registry::account_text(&self.bridge_program_now()));
+        let bridges = self.bridge_programs_now();
+        config["bridge_program"] = json!(registry::account_text(&bridges[0]));
+        config["bridge_programs"] = json!(bridges.iter().map(registry::account_text).collect::<Vec<_>>());
         config["names_networks"] = json!([Net::Lez03.shown(), Net::Lez04.shown()]);
         // What the CLI said its version is, if it was asked already (cli_status asks): get_config
         // never runs the CLI, whoever calls it.
@@ -2798,20 +2834,25 @@ impl Names {
                 out["lez04"] = Value::Object(block);
             }
         }
-        if let Some(program) = &self.bridge_program {
+        if let Some(first) = self.bridge_programs.first() {
             if !out["lez04"].is_object() {
                 out["lez04"] = json!({});
             }
-            out["lez04"]["bridge_program"] = json!(registry::account_text(program));
+            out["lez04"]["bridge_programs"] = json!(self.bridge_programs.iter().map(registry::account_text).collect::<Vec<_>>());
+            // An earlier 0.17 build reads only this one.
+            out["lez04"]["bridge_program"] = json!(registry::account_text(first));
         }
         out["names_network"] = json!(self.net.id());
         out
     }
 
-    /// The bridge program read on LEZ 0.4 (`set_bridge_program`).
-    fn bridge_program_now(&self) -> AccountId {
-        self.bridge_program
-            .unwrap_or_else(|| registry::parse_account(bridge_net::DEFAULT_BRIDGE_PROGRAM).expect("the default bridge program is an account ID"))
+    /// The bridge programs read on LEZ 0.4 (`set_bridge_programs`): never empty.
+    fn bridge_programs_now(&self) -> Vec<AccountId> {
+        if self.bridge_programs.is_empty() {
+            vec![registry::parse_account(bridge_net::DEFAULT_BRIDGE_PROGRAM).expect("the default bridge program is an account ID")]
+        } else {
+            self.bridge_programs.clone()
+        }
     }
 
     /// LEZ 0.4's RPC as configured: the sequencer in use there, or the one kept for it.
@@ -3751,14 +3792,34 @@ impl NamesModule for Names {
             return false;
         }
         let text = program_id.trim();
-        self.bridge_program = if text.is_empty() {
-            None
+        self.bridge_programs = if text.is_empty() {
+            Vec::new()
         } else {
-            match registry::parse_account(text.strip_prefix("Public/").unwrap_or(text)) {
-                Ok(program) if program != registry::NATIVE_TOKEN => Some(program),
-                _ => return false,
+            match bridge_id(text) {
+                Some(program) => vec![program],
+                None => return false,
             }
         };
+        self.save();
+        true
+    }
+
+    fn set_bridge_programs(&mut self, programs_json: String) -> bool {
+        if only_the_names_app().is_err() {
+            return false;
+        }
+        let Ok(list) = serde_json::from_str::<Vec<String>>(&programs_json) else { return false };
+        if list.len() > bridge_net::MAX_BRIDGES {
+            return false;
+        }
+        let mut programs = Vec::new();
+        for text in &list {
+            match bridge_id(text) {
+                Some(program) if !programs.contains(&program) => programs.push(program),
+                _ => return false,
+            }
+        }
+        self.bridge_programs = programs;
         self.save();
         true
     }
@@ -4172,12 +4233,16 @@ impl NamesModule for Names {
             // One constant names the network; a test or a trial of a new chain may point
             // elsewhere for one run.
             let url = std::env::var("LOGOS_NAMES_BRIDGE_RPC").ok().filter(|url| !url.trim().is_empty()).unwrap_or_else(|| self.lez04_rpc());
-            let program = self.bridge_program_now();
-            let key = format!("bridge-net:{url}:{}:{}", registry::account_text(&program), accounts.iter().map(registry::account_text).collect::<Vec<_>>().join(","));
+            let programs = self.bridge_programs_now();
+            let key = format!(
+                "bridge-net:{url}:{}:{}",
+                programs.iter().map(registry::account_text).collect::<Vec<_>>().join("+"),
+                accounts.iter().map(registry::account_text).collect::<Vec<_>>().join(",")
+            );
             let (fetch_url, fetch_dir) = (url.clone(), dir.clone());
             let marked = watched_now.clone();
             let read = self.read_in_background(key, bridge_net::EVERY, move || {
-                let mut read = bridge_net::read(&fetch_url, &program, &accounts, &fetch_dir, now())?;
+                let mut read = bridge_net::read(&fetch_url, &programs, &accounts, &fetch_dir, now())?;
                 for row in read["accounts"].as_array_mut().into_iter().flatten() {
                     if row["account"].as_str().is_some_and(|account| marked.iter().any(|m| m == account)) {
                         row["watched"] = Value::Bool(true);
@@ -6763,11 +6828,12 @@ impl Names {
         }
         add(self.program.as_ref().map(registry::account_text), "names_registry");
         add(self.parked["registry"].as_str().map(str::to_owned), "names_registry");
-        // The wallet's own token program, except when it is the bridge's: a bridge claim declares
+        // The wallet's own token program, except when it is a bridge's: a bridge claim declares
         // that one as an actor's program, and it is refused as root (`root_only`) instead.
-        let bridged = self.bridge_tokens_program().ok().flatten();
+        let bridged = self.bridge_tokens_programs().unwrap_or_else(|_| self.bridge_tokens_kept());
         for token_program in [self.token_program.as_ref().map(registry::account_text), self.parked["token_program"].as_str().map(str::to_owned)] {
-            if token_program.as_deref() != bridged.as_deref() {
+            let canonical = token_program.as_deref().and_then(|id| registry::parse_account(id).ok()).map(|id| registry::account_text(&id));
+            if !canonical.is_some_and(|id| bridged.contains(&id)) {
                 add(token_program, "token_program");
             }
         }
@@ -6775,16 +6841,20 @@ impl Names {
     }
 
     /// Programs a relayed call may never have as its root (`provider_public::RootOnly`): the
-    /// bridge's token program on LEZ 0.4, where the person's bridged tokens sit, and the wallet's
-    /// token programs. The bridge's is read from the chain (the bridge Config). If that read
-    /// fails, nothing is signed: the error is returned and the caller refuses (fail closed).
-    fn root_only(&self) -> Result<Vec<(String, &'static str)>, String> {
+    /// token programs of the bridges on LEZ 0.4, where the person's bridged tokens sit (built in,
+    /// every one read before, and every configured bridge's read from its Config now), the
+    /// wallet's token programs, and the token programs of the token sources apps added. If one of
+    /// the bridge reads fails, nothing is signed: the error is returned and the caller refuses
+    /// (fail closed).
+    fn root_only(&mut self) -> Result<Vec<(String, &'static str)>, String> {
         let mut list: Vec<(String, &'static str)> = Vec::new();
-        let bridged = self
-            .bridge_tokens_program()
-            .map_err(|why| format!("the wallet can't tell which program holds your bridged tokens ({why}), so it signs nothing now; try again"))?;
-        for id in [bridged, self.token_program.as_ref().map(registry::account_text), self.parked["token_program"].as_str().map(str::to_owned)]
+        let bridged = self.bridge_tokens_programs().map_err(|why| format!("the wallet couldn't check {why} just now, so it signs nothing; try again"))?;
+        let sources = self.known_token_programs();
+        for id in bridged
             .into_iter()
+            .map(Some)
+            .chain([self.token_program.as_ref().map(registry::account_text), self.parked["token_program"].as_str().map(str::to_owned)])
+            .chain(sources.into_iter().map(Some))
             .flatten()
             .filter_map(|id| registry::parse_account(&id).ok().map(|id| registry::account_text(&id)))
         {
@@ -6795,18 +6865,52 @@ impl Names {
         Ok(list)
     }
 
-    /// The token program the configured bridge's Config names on LEZ 0.4 (see `bridge_net`), or
-    /// `None` when there is no such bridge there. An error when the chain can't be read.
-    #[cfg(not(test))]
-    fn bridge_tokens_program(&self) -> Result<Option<String>, String> {
-        let url = std::env::var("LOGOS_NAMES_BRIDGE_RPC").ok().filter(|url| !url.trim().is_empty()).unwrap_or_else(|| self.lez04_rpc());
-        bridge_net::token_program_of(&url, &self.bridge_program_now()).map(|found| found.map(|id| registry::account_text(&id)))
+    /// The bridge token programs known without a read: the built-in ones and every one read before
+    /// (`bridge_net::KNOWN_TOKEN_PROGRAMS`, `SEEN_TOKEN_PROGRAMS`).
+    fn bridge_tokens_kept(&self) -> Vec<String> {
+        let mut out: Vec<String> = bridge_net::KNOWN_TOKEN_PROGRAMS.iter().map(|id| (*id).to_owned()).collect();
+        for id in config_dir().map(|dir| bridge_net::seen_token_programs(&dir)).unwrap_or_default() {
+            if !out.contains(&id) {
+                out.push(id);
+            }
+        }
+        out
     }
 
-    /// Tests set what the chain would say (`BRIDGE_TOKENS`); unset, there is no bridge.
-    #[cfg(test)]
-    fn bridge_tokens_program(&self) -> Result<Option<String>, String> {
-        tests::BRIDGE_TOKENS.with(|answer| answer.borrow().clone())
+    /// The bridge token programs on LEZ 0.4, canonical and once each: the ones known without a read
+    /// (`bridge_tokens_kept`), and the one each configured bridge's Config names now, which is then
+    /// kept for good (a sequencer that later answers "no Config" can't shrink the list). A bridge
+    /// with no Config on that chain adds nothing new. An error, naming the bridge, when any one
+    /// Config can't be read: the caller signs nothing.
+    fn bridge_tokens_programs(&self) -> Result<Vec<String>, String> {
+        #[cfg(not(test))]
+        let url = std::env::var("LOGOS_NAMES_BRIDGE_RPC").ok().filter(|url| !url.trim().is_empty()).unwrap_or_else(|| self.lez04_rpc());
+        #[cfg(not(test))]
+        let read = |program: &AccountId| bridge_net::token_program_of(&url, program);
+        // Tests set what the chain would say for each bridge (`BRIDGE_CONFIGS`); unset, no Config.
+        #[cfg(test)]
+        let read = |program: &AccountId| -> Result<Option<AccountId>, String> {
+            let answer = tests::BRIDGE_CONFIGS.with(|configs| configs.borrow().get(&registry::account_text(program)).cloned()).unwrap_or(Ok(None))?;
+            answer.map(|id| registry::parse_account(&id)).transpose()
+        };
+        let mut read_now: Vec<String> = Vec::new();
+        for program in self.bridge_programs_now() {
+            match read(&program) {
+                Ok(Some(token_program)) => read_now.push(registry::account_text(&token_program)),
+                Ok(None) => {}
+                Err(why) => return Err(format!("the token program of bridge {} ({why})", registry::account_text(&program))),
+            }
+        }
+        if let Some(dir) = config_dir() {
+            bridge_net::keep_token_programs(&dir, &read_now);
+        }
+        let mut out = self.bridge_tokens_kept();
+        for id in read_now {
+            if !out.contains(&id) {
+                out.push(id);
+            }
+        }
+        Ok(out)
     }
 
     /// The approval sheet of a program declaration: each program's full ID and what the Program
@@ -7332,8 +7436,9 @@ mod tests {
     use super::*;
 
     thread_local! {
-        /// What the chain says the configured bridge's token program is (`bridge_tokens_program`).
-        pub(super) static BRIDGE_TOKENS: std::cell::RefCell<Result<Option<String>, String>> = const { std::cell::RefCell::new(Ok(None)) };
+        /// What the chain says each bridge's Config names as its token program, by bridge program
+        /// (`bridge_tokens_programs`): a bridge not listed has no Config there.
+        pub(super) static BRIDGE_CONFIGS: std::cell::RefCell<HashMap<String, Result<Option<String>, String>>> = std::cell::RefCell::new(HashMap::new());
     }
 
     fn parsed(text: &str) -> Value {
@@ -7372,7 +7477,7 @@ mod tests {
             receipt_asks: Default::default(),
             net: Net::Lez03,
             parked: Value::Null,
-            bridge_program: None,
+            bridge_programs: Vec::new(),
             cli_lines: Default::default(),
         }
     }
@@ -9903,7 +10008,7 @@ mod tests {
         assert!(at_resign["error"].as_str().unwrap().contains("Names registry"), "{at_resign}");
         assert!(!dir.join("signed").exists(), "nothing was signed");
         // D2: the bridged tokens' program as the root is refused, even when declared.
-        BRIDGE_TOKENS.with(|answer| *answer.borrow_mut() = Ok(Some(bridged.to_owned())));
+        BRIDGE_CONFIGS.with(|configs| configs.borrow_mut().insert(bridge.to_owned(), Ok(Some(bridged.to_owned()))));
         names.store().private.declare("lez_bridge", &[bridged.to_owned()]).unwrap();
         as_caller(app("lez_bridge"));
         let root = parsed(&names.propose_relayed_call(account.clone(), json!({ "program": bridged, "message": "00ff", "fee": call["fee"] }).to_string(), String::new()));
@@ -9913,10 +10018,10 @@ mod tests {
         let fine = parsed(&names.propose_relayed_call(account.clone(), claim.to_string(), String::new()));
         assert_eq!(fine["value"]["check"], "ready", "{fine}");
         // Fail closed: the chain can't be read, so nothing is proposed.
-        BRIDGE_TOKENS.with(|answer| *answer.borrow_mut() = Err("the bridge test network didn't answer".to_owned()));
+        BRIDGE_CONFIGS.with(|configs| configs.borrow_mut().insert(bridge.to_owned(), Err("the bridge test network didn't answer".to_owned())));
         let closed = parsed(&names.propose_relayed_call(account.clone(), call.to_string(), String::new()));
-        assert!(closed["error"].as_str().unwrap().contains("can't tell which program holds your bridged tokens"), "{closed}");
-        BRIDGE_TOKENS.with(|answer| *answer.borrow_mut() = Ok(None));
+        assert!(closed["error"].as_str().unwrap().contains("couldn't check the token program of bridge"), "{closed}");
+        BRIDGE_CONFIGS.with(|configs| configs.borrow_mut().clear());
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
     }
 
@@ -11225,11 +11330,234 @@ mod tests {
         assert!(!names.set_bridge_program(registry::account_text(&registry::NATIVE_TOKEN)));
         assert_eq!(parsed(&names.set_names_network("lez-0.4".into()))["value"]["bridge_program"], redeployed.as_str());
         assert_eq!(parsed(&names.set_names_network("lez-0.3".into()))["value"]["bridge_program"], redeployed.as_str());
-        assert_eq!(registry::account_text(&Names::default().bridge_program_now()), redeployed, "after a restart");
+        assert_eq!(Names::default().bridge_programs_now().iter().map(registry::account_text).collect::<Vec<_>>(), vec![redeployed.clone()], "after a restart");
         assert!(names.set_bridge_program(String::new()));
         assert_eq!(parsed(&names.get_config())["bridge_program"], bridge_net::DEFAULT_BRIDGE_PROGRAM);
         as_caller(logos_rust_sdk::LogosCaller::Module { name: "evil_ui".into(), instance: None });
         assert!(!names.set_bridge_program(redeployed.clone()), "Names app only");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+    }
+
+    /// The bridges are a list (config.json `lez04.bridge_programs`, at most 4): set whole,
+    /// saved with the first also as `bridge_program` for earlier 0.17 builds; an earlier build's
+    /// single `bridge_program` still reads as a list of one; a bad list changes nothing.
+    #[test]
+    fn the_bridges_are_a_list_and_an_old_single_bridge_still_reads() {
+        let config = config_dir().unwrap();
+        let _ = std::fs::remove_dir_all(&config);
+        std::fs::create_dir_all(&config).unwrap();
+        let mut names = Names::default();
+        assert_eq!(parsed(&names.get_config())["bridge_programs"], json!([bridge_net::DEFAULT_BRIDGE_PROGRAM]));
+        let (a, b) = (registry::account_text(&[5; 32]), registry::account_text(&[6; 32]));
+        assert!(names.set_bridge_programs(json!([format!("Public/{a}"), b]).to_string()));
+        assert_eq!(saved_file()["lez04"]["bridge_programs"], json!([a, b]));
+        assert_eq!(saved_file()["lez04"]["bridge_program"], a.as_str(), "the first, for an earlier 0.17 build");
+        assert_eq!(saved_file()["registry"], DEFAULT_REGISTRY, "LEZ 0.3's flat fields stay as they were");
+        assert_eq!(parsed(&names.get_config())["bridge_programs"], json!([a, b]));
+        assert_eq!(Names::default().bridge_programs_now().iter().map(registry::account_text).collect::<Vec<_>>(), vec![a.clone(), b.clone()], "after a restart");
+        // Refused, and nothing changed: a repeat, the native token, not a program, five, not a list.
+        for bad in [
+            json!([a, a]).to_string(),
+            json!([a, registry::account_text(&registry::NATIVE_TOKEN)]).to_string(),
+            json!(["not a program"]).to_string(),
+            json!((1..=5u8).map(|n| registry::account_text(&[n + 10; 32])).collect::<Vec<_>>()).to_string(),
+            "\"one\"".to_owned(),
+        ] {
+            assert!(!names.set_bridge_programs(bad.clone()), "{bad}");
+        }
+        assert_eq!(saved_file()["lez04"]["bridge_programs"], json!([a, b]));
+        // `set_bridge_program` replaces the list with one; empty goes back to the default.
+        assert!(names.set_bridge_program(b.clone()));
+        assert_eq!(saved_file()["lez04"]["bridge_programs"], json!([b]));
+        assert!(names.set_bridge_programs("[]".into()));
+        assert!(saved_file()["lez04"]["bridge_programs"].is_null() && saved_file()["lez04"]["bridge_program"].is_null());
+        assert_eq!(parsed(&names.get_config())["bridge_programs"], json!([bridge_net::DEFAULT_BRIDGE_PROGRAM]));
+        // An earlier 0.17 build's file: only `bridge_program`.
+        std::fs::write(config.join("config.json"), json!({ "lez04": { "bridge_program": format!("Public/{a}") } }).to_string()).unwrap();
+        assert_eq!(Names::default().bridge_programs_now().iter().map(registry::account_text).collect::<Vec<_>>(), vec![a.clone()]);
+        // A hand-written list: bad ids and repeats dropped, at most four kept.
+        let many: Vec<String> = (1..=6u8).map(|n| registry::account_text(&[n + 20; 32])).collect();
+        let mut written = vec!["junk".to_owned(), many[0].clone()];
+        written.extend(many.iter().cloned());
+        std::fs::write(config.join("config.json"), json!({ "lez04": { "bridge_programs": written } }).to_string()).unwrap();
+        assert_eq!(Names::default().bridge_programs_now().iter().map(registry::account_text).collect::<Vec<_>>(), many[..4].to_vec());
+        as_caller(logos_rust_sdk::LogosCaller::Module { name: "evil_ui".into(), instance: None });
+        assert!(!names.set_bridge_programs(json!([a]).to_string()), "Names app only");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+    }
+
+    /// Two bridges with different token programs: each token program is refused as a relayed
+    /// call's root, a claim to the bridge declaring either still goes, one bridge's Config that
+    /// can't be read refuses every relayed call (at propose and at approval), and a bridge with
+    /// no Config on the chain adds nothing.
+    #[test]
+    fn every_bridge_s_token_program_is_refused_as_root() {
+        use sha2::Digest;
+        let bridge = "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7";
+        let second = registry::account_text(&[7; 32]);
+        let (tokens_a, tokens_b) = (registry::account_text(&[8; 32]), registry::account_text(&[9; 32]));
+        let payer = "Public/DGu98d9jZfTAuJKr9y3vWC1DDAujYUaddb6ugTpgSBNs";
+        let account = format!("Public/{PUBLIC}");
+        let report = json!({
+            "hash": "cd".repeat(32), "account": account, "program": bridge, "payer": payer, "gas_limit": 120000, "tip": "0", "max_fee": "900000",
+            "message_len": 2, "message_sha256": registry::hex(&sha2::Sha256::digest([0u8, 0xff])),
+            "actors": [{ "account": PUBLIC, "program": bridge }], "creates": [], "own_balance": false,
+            "nonces": { PUBLIC: "3", payer.trim_start_matches("Public/"): "41" },
+        });
+        let tail = "case \"$*\" in\n\
+             *--version*) echo 'names 0.17.0 (LEZ v0.4.0-rc3)' ;;\n\
+             *\"public-call plan\"*) cat \"$(dirname \"$0\")/plan-out.json\" ;;\n\
+             *\"public-call sign\"*) echo 'signing-not-expected' > \"$(dirname \"$0\")/signed\"; echo '{}' ;;\n\
+             *) echo 'unexpected'; exit 1 ;;\n\
+             esac";
+        let (mut names, dir) = with_wallet("two-bridges-root", tail);
+        std::fs::write(dir.join("plan-out.json"), report.to_string()).unwrap();
+        names.net = Net::Lez04;
+        names.bridge_programs = vec![registry::parse_account(bridge).unwrap(), registry::parse_account(&second).unwrap()];
+        BRIDGE_CONFIGS.with(|configs| {
+            let mut configs = configs.borrow_mut();
+            configs.insert(bridge.to_owned(), Ok(Some(tokens_a.clone())));
+            configs.insert(second.clone(), Ok(Some(tokens_b.clone())));
+        });
+        connect(&mut names, "lez_bridge", &account);
+        names.store().private.declare("lez_bridge", &[bridge.to_owned(), second.clone(), tokens_a.clone(), tokens_b.clone()]).unwrap();
+        let fee = json!({ "payer": payer, "gas_limit": 120000, "tip": "0", "max_fee": "900000" });
+        // Either bridge's token program as the root: refused.
+        for root in [&tokens_a, &tokens_b] {
+            as_caller(app("lez_bridge"));
+            let refused = parsed(&names.propose_relayed_call(account.clone(), json!({ "program": root, "message": "00ff", "fee": fee }).to_string(), String::new()));
+            assert!(refused["error"].as_str().unwrap().contains("holds tokens your accounts have"), "{root}: {refused}");
+        }
+        // A claim to the bridge declaring either token program: goes.
+        for actor in [&tokens_a, &tokens_b] {
+            as_caller(app("lez_bridge"));
+            let claim = json!({ "program": bridge, "message": "00ff", "accounts": [{ "account": PUBLIC, "program": actor }], "fee": fee });
+            let fine = parsed(&names.propose_relayed_call(account.clone(), claim.to_string(), String::new()));
+            assert_eq!(fine["value"]["check"], "ready", "{actor}: {fine}");
+        }
+        // A request proposed while both Configs read, then the second can't be read: approval refused.
+        as_caller(app("lez_bridge"));
+        let call = json!({ "program": bridge, "message": "00ff", "fee": fee });
+        let asked = parsed(&names.propose_relayed_call(account.clone(), call.to_string(), String::new()));
+        let id = asked["value"]["request"].as_str().unwrap_or_else(|| panic!("{asked}")).to_owned();
+        BRIDGE_CONFIGS.with(|configs| configs.borrow_mut().insert(second.clone(), Err("timed out".to_owned())));
+        let at_approval = approve(&mut names, &id, &account);
+        assert!(at_approval["error"].is_string(), "{at_approval}");
+        assert!(!dir.join("signed").exists(), "nothing was signed");
+        // ... and at propose, naming the bridge it couldn't check.
+        as_caller(app("lez_bridge"));
+        let closed = parsed(&names.propose_relayed_call(account.clone(), call.to_string(), String::new()));
+        let why = closed["error"].as_str().unwrap_or_else(|| panic!("{closed}"));
+        assert!(why.contains("couldn't check the token program of bridge") && why.contains(&second), "{closed}");
+        // A bridge with no Config on this chain adds nothing new, and takes nothing away: the token
+        // program read from it before stays refused as root (S-1).
+        BRIDGE_CONFIGS.with(|configs| configs.borrow_mut().insert(second.clone(), Ok(None)));
+        for root in [&tokens_a, &tokens_b] {
+            as_caller(app("lez_bridge"));
+            let refused = parsed(&names.propose_relayed_call(account.clone(), json!({ "program": root, "message": "00ff", "fee": fee }).to_string(), String::new()));
+            assert!(refused["error"].as_str().unwrap().contains("holds tokens your accounts have"), "{root}: {refused}");
+        }
+        let fine = parsed(&names.propose_relayed_call(account.clone(), call.to_string(), String::new()));
+        assert_eq!(fine["value"]["check"], "ready", "{fine}");
+        BRIDGE_CONFIGS.with(|configs| configs.borrow_mut().clear());
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+    }
+
+    /// Three checks that only a stored request reaches (S-2): the root-only list passed into the
+    /// sheet a request is approved from, the root-only check at re-sign, and the own-program check
+    /// when a stored declaration is approved. Each request is changed in the store, as if an
+    /// earlier build had kept it, so nothing at propose or declare time stops it first. Also S-1
+    /// and S-4: the default bridge's token program is refused as root with no Config read at all,
+    /// a token program read once stays refused after the sequencer stops naming it, and a token
+    /// source's program is refused as root.
+    #[test]
+    fn stored_requests_meet_every_check_again() {
+        use sha2::Digest;
+        let bridge = "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7";
+        let bridged = registry::account_text(&[11; 32]);
+        let payer = "Public/DGu98d9jZfTAuJKr9y3vWC1DDAujYUaddb6ugTpgSBNs";
+        let account = format!("Public/{PUBLIC}");
+        let report = json!({
+            "hash": "cd".repeat(32), "account": account, "program": bridge, "payer": payer, "gas_limit": 120000, "tip": "0", "max_fee": "900000",
+            "message_len": 2, "message_sha256": registry::hex(&sha2::Sha256::digest([0u8, 0xff])),
+            "actors": [{ "account": PUBLIC, "program": bridge }], "creates": [], "own_balance": false,
+            "nonces": { PUBLIC: "3", payer.trim_start_matches("Public/"): "41" },
+        });
+        let tail = "case \"$*\" in\n\
+             *--version*) echo 'names 0.17.0 (LEZ v0.4.0-rc3)' ;;\n\
+             *\"public-call plan\"*) cat \"$(dirname \"$0\")/plan-out.json\" ;;\n\
+             *\"public-call sign\"*) echo 'signing-not-expected' > \"$(dirname \"$0\")/signed\"; echo '{}' ;;\n\
+             *) echo 'unexpected'; exit 1 ;;\n\
+             esac";
+        let (mut names, dir) = with_wallet("stored-requests-checked", tail);
+        std::fs::write(dir.join("plan-out.json"), report.to_string()).unwrap();
+        names.net = Net::Lez04;
+        BRIDGE_CONFIGS.with(|configs| configs.borrow_mut().insert(bridge.to_owned(), Ok(Some(bridged.clone()))));
+        connect(&mut names, "lez_bridge", &account);
+        let fee = json!({ "payer": payer, "gas_limit": 120000, "tip": "0", "max_fee": "900000" });
+        names.store().private.declare("lez_bridge", &[bridge.to_owned(), bridged.clone()]).unwrap();
+
+        // (1) The sheet a stored call is approved from carries the root-only list.
+        as_caller(app("lez_bridge"));
+        let asked = parsed(&names.propose_relayed_call(account.clone(), json!({ "program": bridge, "message": "00ff", "fee": fee }).to_string(), String::new()));
+        let id = asked["value"]["request"].as_str().unwrap_or_else(|| panic!("{asked}")).to_owned();
+        {
+            let stored = names.store().get_mut(&id).unwrap();
+            stored["program"] = json!(bridged);
+            stored["report"]["program"] = json!(bridged);
+        }
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let pending = parsed(&names.pending_requests());
+        let shown = pending["value"].as_array().unwrap().iter().find(|r| r["id"] == id.as_str()).cloned().unwrap_or_else(|| panic!("{pending}"));
+        assert_eq!(shown["sheet"]["refused"], true, "{shown}");
+        assert!(shown["sheet"]["why"].to_string().contains("holds tokens your accounts have"), "{shown}");
+        let at_approval = approve(&mut names, &id, &account);
+        assert!(at_approval["error"].as_str().unwrap().contains("refuses"), "{at_approval}");
+        assert!(!dir.join("signed").exists(), "nothing was signed");
+
+        // (2) Re-sign: the same stored call, as if approved and signed by an earlier build.
+        {
+            let stored = names.store().get_mut(&id).unwrap();
+            stored["state"] = json!("done");
+            stored["decided"] = json!(provider::now_ms());
+            stored["resigns"] = json!(0);
+            stored["approved_report"] = stored["report"].clone();
+            stored["signed_payer_nonce"] = json!("41");
+        }
+        as_caller(app("lez_bridge"));
+        let at_resign = parsed(&names.resign_relayed_call(id.clone()));
+        assert_eq!(at_resign["code"], "refused", "{at_resign}");
+        assert!(at_resign["error"].as_str().unwrap().contains("holds tokens your accounts have"), "{at_resign}");
+        assert!(!dir.join("signed").exists(), "nothing was signed");
+
+        // (3) A stored declaration that names the wallet's own registry can't be approved.
+        as_caller(app("lez_bridge"));
+        let declared = parsed(&names.declare_programs(json!([bridge]).to_string(), "".into()))["value"]["request"].as_str().unwrap().to_owned();
+        names.store().get_mut(&declared).unwrap()["programs"] = json!([bridge, LEZ04_REGISTRY]);
+        let refused = approve(&mut names, &declared, "");
+        assert!(refused["error"].as_str().unwrap_or_else(|| panic!("{refused}")).contains("one of the wallet's own programs"), "{refused}");
+        assert!(!names.store().private.declared_of("lez_bridge").contains(&LEZ04_REGISTRY.to_owned()));
+
+        // S-1: the sequencer stops naming the token program read above; it stays refused. And the
+        // default bridge's token program is refused with no Config read at all.
+        BRIDGE_CONFIGS.with(|configs| configs.borrow_mut().insert(bridge.to_owned(), Ok(None)));
+        let built_in = bridge_net::KNOWN_TOKEN_PROGRAMS[0].to_owned();
+        names.store().private.declare("lez_bridge", &[built_in.clone()]).unwrap();
+        for root in [&bridged, &built_in] {
+            as_caller(app("lez_bridge"));
+            let refused = parsed(&names.propose_relayed_call(account.clone(), json!({ "program": root, "message": "00ff", "fee": fee }).to_string(), String::new()));
+            assert!(refused["error"].as_str().unwrap_or_else(|| panic!("{refused}")).contains("holds tokens your accounts have"), "{root}: {refused}");
+        }
+        assert!(bridge_net::seen_token_programs(&config_dir().unwrap()).contains(&bridged), "kept on disk");
+
+        // S-4: a token source's program is refused as root.
+        let source_program = registry::account_text(&[12; 32]);
+        names.store().private.token_sources.push(json!({ "app": "lez_bridge", "token_program": source_program }));
+        names.store().private.declare("lez_bridge", &[source_program.clone()]).unwrap();
+        as_caller(app("lez_bridge"));
+        let refused = parsed(&names.propose_relayed_call(account.clone(), json!({ "program": source_program, "message": "00ff", "fee": fee }).to_string(), String::new()));
+        assert!(refused["error"].as_str().unwrap_or_else(|| panic!("{refused}")).contains("holds tokens your accounts have"), "{refused}");
+        BRIDGE_CONFIGS.with(|configs| configs.borrow_mut().clear());
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
     }
 

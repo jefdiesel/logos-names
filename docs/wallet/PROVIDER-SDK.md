@@ -429,10 +429,12 @@ afterwards.
      accept an address beside a seed when it matches.)
    - Every program named must be one you declared. The wallet's own Names registry (either
      network's) and its token program are refused, at declaration and in a call, as the root, as
-     a declared actor's program or as a program account's owner. The program that holds the
-     person's bridged tokens on LEZ 0.4 (the bridge Config's token program) is refused as the
-     root only: a call to the bridge may still declare it. The wallet reads that program from the
-     chain; if it can't, it signs nothing. Each rule is applied again at approval and at re-sign.
+     a declared actor's program or as a program account's owner. The programs that hold the
+     person's bridged tokens on LEZ 0.4 (the token program each configured bridge's Config names;
+     the wallet knows up to 4 bridges) are refused as the root only: a call to a bridge may still
+     declare them. The wallet reads them from the chain, also keeps every one it has read and
+     knows the default bridge's built in; if it can't read any one bridge's Config, it signs
+     nothing. The token program of a token source an app added is refused as the root too. Each rule is applied again at approval and at re-sign.
    - `fee` is the fee declaration exactly as signed: the payer, the gas limit, the tip and the
      max fee. The payer must not be the signing account, nor any account of the person's wallet
      (that is an ordinary call, `propose_call`), and the call must not declare an actor of the

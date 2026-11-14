@@ -811,14 +811,29 @@ export function bridgeNetShown(rows, showEmpty) {
 /// One block per public account of a `bridge_net_balances` read: `{account, title, found,
 /// assets: [{symbol, name, amount}]}`, native LEZ first, then each bridged token with its
 /// decimals. An account the network has never seen has no assets (`found` false).
+/// What the Welcome says when the names tool for `net` ("0.3" or "0.4") is too old for the
+/// module (it has no `module` command). `line` is what the tool says its version is, or "".
+/// It names the network, offers no install (none is published that would fix it), and says that
+/// the other network is unaffected.
+export function cliOutdatedLine(net, line) {
+    var tool = line !== "" ? " (" + line + ")" : ""
+    if (net === "0.4")
+        return "The names tool set for LEZ 0.4" + tool + " is too old for it. Give the path of a LEZ 0.4 names tool in Settings, App settings. LEZ 0.3 is unaffected."
+    return "The names tool this app uses for LEZ 0.3" + tool + " is too old for that network as it is now, so creating a wallet there doesn't work with it. LEZ 0.4 is unaffected: switch to it above."
+}
+
 export function bridgeNetRows(read) {
     if (!read || !Array.isArray(read.accounts)) return []
+    // With more than one bridge, each token row says which bridge listed it.
+    var many = Array.isArray(read.bridges) && read.bridges.length > 1
     return read.accounts.map(function(a) {
         var assets = []
         if (a.found) {
             assets.push({ symbol: "LEZ", name: "Native", amount: grouped(a.native) })
             ;(a.tokens || []).forEach(function(t) {
-                assets.push({ symbol: String(t.symbol || ""), name: t.name ? String(t.name) : "Bridged token", amount: decimalShown(t.amount, t.decimals) })
+                var name = t.name ? String(t.name) : "Bridged token"
+                if (many && t.bridge) name += " · bridge " + keyShown(String(t.bridge))
+                assets.push({ symbol: String(t.symbol || ""), name: name, amount: decimalShown(t.amount, t.decimals) })
             })
         }
         var id = keyShown(String(a.account || "").replace(/^Public\//, ""))

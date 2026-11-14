@@ -5157,17 +5157,24 @@ Item {
                 spacing: 18
                 Text { text: "Welcome"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(36); font.weight: Font.DemiBold }
                 Hint { font.pixelSize: root.px(18); text: "Get a name, then post, pay and be paid as it. Four steps, all here." }
+                // Which network these steps are for: switchable here, before anything else, so a
+                // wallet-less start on LEZ 0.3 never hides LEZ 0.4.
+                NetSwitch {}
 
                 // 1. Install the names program.
                 Card {
                     Layout.fillWidth: true
                     StepHead { number: 1; done: root.cliPath !== ""; title: "Install" }
                     Hint {
-                        visible: root.cliPath === ""
+                        visible: root.cliPath === "" && root.namesNet === "0.3"
                         text: "Names needs a small program that proves your changes on this computer, so the chain never learns your account. About 90 MB, checked against the release signature before it's used."
                     }
+                    Hint {
+                        visible: root.cliPath === "" && root.namesNet === "0.4"
+                        text: "LEZ 0.4 needs its own names tool, which this app doesn't install. Give its path in Settings, App settings (names CLI)."
+                    }
                     RowLayout {
-                        visible: root.cliPath === ""
+                        visible: root.cliPath === "" && root.namesNet === "0.3"
                         spacing: 12
                         Action {
                             label: root.installJob !== null ? "Installing…" : "Install"
@@ -5199,7 +5206,7 @@ Item {
                     }
                     // For people who already have the CLI, or want it in Terminal too.
                     Link {
-                        visible: root.cliPath === "" && !root.terminalNoteOpen
+                        visible: root.cliPath === "" && root.namesNet === "0.3" && !root.terminalNoteOpen
                         Layout.topMargin: 4
                         text: "Already use the command line?"
                         color: root.dim
@@ -5207,7 +5214,7 @@ Item {
                         onPressed: root.terminalNoteOpen = true
                     }
                     ColumnLayout {
-                        visible: root.cliPath === "" && root.terminalNoteOpen
+                        visible: root.cliPath === "" && root.namesNet === "0.3" && root.terminalNoteOpen
                         Layout.fillWidth: true
                         spacing: 6
                         Hint { font.pixelSize: root.px(14); text: "Install it from Terminal instead, then come back:" }
@@ -5236,12 +5243,12 @@ Item {
                     Hint {
                         visible: root.cliOutdated
                         color: root.alarm
-                        text: "This names program is from before the chain's reset. Install the new one to go on."
+                        text: Logic.cliOutdatedLine(root.namesNet, root.cliStatus !== null && root.cliStatus.cli_line ? String(root.cliStatus.cli_line) : "")
                     }
                     Hint {
                         visible: root.oldWallet
                         color: root.alarm
-                        text: "Your wallet is from before the chain's reset and no longer opens. Enter its recovery phrase to bring its accounts back. The old files are kept. Tokens don't carry over."
+                        text: "Your " + (root.namesNet === "0.4" ? "LEZ 0.4" : "LEZ 0.3") + " wallet was made for an earlier version of that network and no longer opens. Enter its recovery phrase to bring its accounts back. The old files are kept. Tokens don't carry over."
                     }
                     Field {
                         id: restorePhraseField
@@ -5283,12 +5290,19 @@ Item {
                         value: root.cliPublic !== null ? root.grouped(root.cliPublic.balance) : ""
                     }
                     Hint {
-                        visible: root.hasCliWallet && !root.canShield && !root.hasPrivateFunds
+                        visible: root.namesNet === "0.3" && root.hasCliWallet && !root.canShield && !root.hasPrivateFunds
                         font.pixelSize: root.px(16)
                         text: "Get " + root.grouped(root.faucetAmount) + " free test tokens to start: your name's deposit, and the fees to hold it privately."
                     }
+                    // LEZ 0.4 has no faucet in the app (cli_faucet refuses there), and the Logos node
+                    // bridge below deposits on LEZ 0.3's terms: neither is offered on LEZ 0.4.
+                    Hint {
+                        visible: root.namesNet === "0.4" && root.hasCliWallet
+                        font.pixelSize: root.px(16)
+                        text: "LEZ 0.4 has no faucet. Coins come from the network's operator, and bridged Sepolia tokens arrive through the LEZ Bridge app. Your public account above is where to have them sent."
+                    }
                     Action {
-                        visible: root.hasCliWallet && !root.canShield && !root.hasPrivateFunds && !root.faucetSent
+                        visible: root.namesNet === "0.3" && root.hasCliWallet && !root.canShield && !root.hasPrivateFunds && !root.faucetSent
                         label: root.faucetBusy ? "Asking…" : "Get free tokens"
                         strong: true
                         enabledNow: !root.faucetBusy
@@ -5304,7 +5318,7 @@ Item {
                     RowLayout {
                         visible: root.hasCliWallet
                         spacing: 18
-                        Link { text: "Or bridge from my Logos node"; font.pixelSize: root.px(16); onPressed: root.openGetTokens() }
+                        Link { visible: root.namesNet === "0.3"; text: "Or bridge from my Logos node"; font.pixelSize: root.px(16); onPressed: root.openGetTokens() }
                         Link { text: "Check again"; color: root.dim; font.pixelSize: root.px(16); onPressed: root.loadCliBalance() }
                     }
                 }
@@ -7516,8 +7530,9 @@ Item {
                 width: Math.min(parent.width - 112, root.tool === "settings" ? 1040 : 820)
                 spacing: 22
 
-                // Names and profiles are kept on LEZ 0.3.
-                NetSwitch { visible: root.section === "search" && root.record === null }
+                // Which network names are looked up on: always reachable on Search, a result shown
+                // or not (switching clears the result).
+                NetSwitch { visible: root.section === "search" }
                 RunsOn { visible: root.section === "search" || root.section === "profile"; prefix: "LNS names and profiles: looked up on" }
 
                 // Search: look up any name.
