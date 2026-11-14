@@ -43,8 +43,10 @@ mod changes;
 mod cli;
 mod deposit;
 mod page_view;
+mod app_secret;
 mod provider;
 mod provider_inscribe;
+mod provider_private;
 mod spell;
 mod text;
 mod registry;
@@ -922,6 +924,59 @@ pub trait NamesModule: Send + 'static {
     /// Takes back all access `app` was given. Names app only.
     fn revoke_app(&mut self, app: String) -> String;
 
+    // ── Wallet Provider SDK: private calls, app secrets, token sources ──
+    // (docs/wallet/PROVIDER-SDK.md, "Private calls"; docs/wallet/BRIDGE-SDK.md)
+
+    /// Values derived for the calling app from `account` (one of the accounts it was given):
+    /// `SHA256(tag | m_i)` for `i` in `first..first + count` (1 to 64), where `m_i` is a
+    /// master value the wallet makes from the account's own key, the app's name as Basecamp
+    /// gives it, `scope` (1-64 printable ASCII) and `context_hex` (up to 256 bytes) and never
+    /// gives out. The same call gives the same values after the wallet is restored from its
+    /// recovery phrase. The first call for an (app, account, scope) asks the person: the value
+    /// is then `{granted: false, request}`; once they approve, `{granted: true, account, scope,
+    /// tag, first, values: [hex]}`. `tag` is 1-32 printable ASCII.
+    fn app_secret(&mut self, account: String, scope: String, context_hex: String, tag: String, first: i64, count: i64) -> String;
+
+    /// Asks the wallet to build, prove and send a privacy-preserving transaction from the
+    /// private `account` (one this app was given) across up to 4 programs. `call_json` is
+    /// `{programs, accounts, message, openings, fee_payer, declared, reveal_account}`
+    /// (PROVIDER-SDK.md). The wallet simulates it against the chain first and shows the person
+    /// what it really changes; `request_status` gives `check` (`running`, `ready` or
+    /// `failed`; a call the wallet refuses is `ready` with `sheet.refused` true and can't be
+    /// approved) and, once approved, `phase`. `summary` (280 characters) is shown as the app's words.
+    fn propose_private_call(&mut self, account: String, call_json: String, summary: String) -> String;
+
+    /// Asks the person to list a token program's definitions in their holdings, with the
+    /// names, symbols and decimals given: `definitions_json` is `[{definition, name, symbol,
+    /// decimals, origin}]` (up to 16).
+    fn propose_token_source(&mut self, token_program: String, definitions_json: String) -> String;
+
+    /// The token sources the person accepted: `[{token_program, definitions, app, since}]`.
+    fn token_sources(&mut self) -> String;
+
+    /// The secret grants: `[{app, account, scope, since}]`. Names app only.
+    fn secret_grants(&mut self) -> String;
+
+    /// Takes back one secret grant. `{revoked}`. Names app only.
+    fn revoke_secret(&mut self, app: String, account: String, scope: String) -> String;
+
+    /// Pauses, resumes or cancels an approved private call while it is still being planned
+    /// or proven: `action` is `pause`, `resume` or `cancel`. Refused once it is being sent.
+    /// Names app only.
+    fn private_call_control(&mut self, request_id: String, action: String) -> String;
+
+    /// What the wallet's accounts hold of every token source's definitions: `[{token_program,
+    /// holdings: [{account, account_kind, definition, name, symbol, decimals, origin,
+    /// balance}], updating, error}]`. Read in the background. Names app only.
+    fn token_source_holdings(&mut self) -> String;
+
+    /// Sends a token of a registered token source, as `cli_token_send` does for the wallet's
+    /// own token program. Names app only.
+    fn cli_token_send_source(&mut self, token_program: String, definition: String, amount: String, to: String, from_private: bool, to_public: bool) -> String;
+
+    /// Forgets a token source. `{removed}`. Names app only.
+    fn remove_token_source(&mut self, token_program: String) -> String;
+
     /// Inscribes a testimonial (`{"submission": "lp-0022:names-wallet", "text"}`, text
     /// 1-1024 bytes) on the Logos Blockchain from the node key `from_key`, which pays the
     /// fee. Each key has its own Ed25519 inscription key, made here once and kept 0600,
@@ -1012,6 +1067,10 @@ struct Names {
     /// Board reads, by what was asked: they take the CLI many seconds, so they
     /// run on their own thread and every call answers at once with the last result.
     board_reads: std::sync::Arc<std::sync::Mutex<HashMap<String, BoardRead>>>,
+    /// Private calls' simulations that ended, by request, until the store takes them.
+    private_checks: std::sync::Arc<std::sync::Mutex<HashMap<String, Result<Value, String>>>>,
+    /// When each app last asked for secrets, for the hourly bound.
+    secret_calls: HashMap<String, Vec<u64>>,
     /// Recent answers to reads about a name (resolve, page, avatar), by kind and
     /// name, so screens that ask again don't wait on the network. A change to
     /// the name drops them.
@@ -1115,6 +1174,8 @@ impl Default for Names {
             dm_names: Default::default(),
             chat_names: Default::default(),
             board_reads: Default::default(),
+            private_checks: Default::default(),
+            secret_calls: HashMap::new(),
             read_cache: HashMap::new(),
             provider: None,
             provider_path: None,
@@ -5101,6 +5162,14 @@ impl NamesModule for Names {
         reply((|| {
             let app = asking_app()?;
             let now = provider::now_ms();
+            let running_call = self
+                .store()
+                .get(request_id.trim())
+                .is_some_and(|r| r["app"] == app.as_str() && r["kind"] == provider::PRIVATE_CALL && r["state"] == "running");
+            if running_call {
+                // An app may stop its own private call while it is still being proven.
+                return self.control_private_call(request_id.trim(), "cancel");
+            }
             let store = self.store();
             let request = store.get_mut(request_id.trim()).filter(|request| request["app"] == app.as_str()).ok_or("there is no such request")?;
             if request["state"] != "pending" {
@@ -5154,7 +5223,7 @@ impl NamesModule for Names {
                 let app = request["app"].as_str().unwrap_or_default().to_owned();
                 let granted = store.granted(&app);
                 let kind = request["kind"].as_str().unwrap_or_default().to_owned();
-                if kind == provider::TRANSFER || kind == provider::CALL {
+                if kind == provider::TRANSFER || kind == provider::CALL || kind == provider::PRIVATE_CALL {
                     // Which zone it was asked for, as it is called now, and whether that
                     // is the one in use (it can only be approved there).
                     let asked = request["zone"].as_str().unwrap_or(zones::HOME).to_owned();
@@ -5173,9 +5242,27 @@ impl NamesModule for Names {
                 );
                 request["granted"] = json!(granted);
                 request["publisher"] = publishers.get(&app).cloned().unwrap_or(Value::Null);
+                if kind == provider::PRIVATE_CALL || kind == provider::SECRET {
+                    let account = request["account"].clone();
+                    request["choices"] = json!([{ "account": account, "account_kind": "private", "pays": false, "label": "the account the app asked for", "granted": true }]);
+                }
                 request
             })
             .collect();
+        let mut views = views;
+        for view in &mut views {
+            if view["kind"] == provider::PRIVATE_CALL {
+                if view["check"] == "ready" {
+                    let sheet = self.private_sheet(view);
+                    view["sheet"] = sheet;
+                }
+                // The raw report and message stay in the wallet.
+                if let Some(fields) = view.as_object_mut() {
+                    fields.remove("report");
+                    fields.remove("message");
+                }
+            }
+        }
         reply(Ok(Value::from(views)))
     }
 
@@ -5226,6 +5313,129 @@ impl NamesModule for Names {
         let revoked = store.revoke(app.trim());
         store.save();
         reply(Ok(json!({ "revoked": revoked })))
+    }
+
+    fn app_secret(&mut self, account: String, scope: String, context_hex: String, tag: String, first: i64, count: i64) -> String {
+        reply(self.secret_values(&account, &scope, &context_hex, &tag, first, count))
+    }
+
+    fn propose_private_call(&mut self, account: String, call_json: String, summary: String) -> String {
+        reply((|| {
+            let app = asking_app()?;
+            let now = provider::now_ms();
+            let mut request = provider_private::private_call_request(&app, &account, &call_json, &summary, now)?;
+            let store = self.store();
+            let written = request["account"].as_str().unwrap_or_default().to_owned();
+            if !store.granted(&app).contains(&written) {
+                return Err(format!("{written} wasn't given to this app; ask for it with request_access"));
+            }
+            store.room_for(&app, now)?;
+            let zones = self.zones_now();
+            request["zone"] = json!(zones.current_id());
+            request["zone_name"] = json!(zones.zone().name);
+            request["zone_channel"] = json!(zones.zone().channel);
+            let id = request["id"].as_str().unwrap_or_default().to_owned();
+            let input = provider_private::cli_input(&request, None, &self.known_token_programs());
+            let view = self.queue_any(&app, request, now)?;
+            self.start_private_check(&id, input);
+            Ok(view)
+        })())
+    }
+
+    fn propose_token_source(&mut self, token_program: String, definitions_json: String) -> String {
+        reply((|| {
+            let app = asking_app()?;
+            let now = provider::now_ms();
+            let request = provider_private::token_source_request(&app, &token_program, &definitions_json, now)?;
+            self.queue_any(&app, request, now)
+        })())
+    }
+
+    fn token_sources(&mut self) -> String {
+        reply((|| {
+            asking_app()?;
+            Ok(Value::from(self.store().private.token_sources.clone()))
+        })())
+    }
+
+    fn secret_grants(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let mut list = Vec::new();
+        for (app, grants) in &self.store().private.secrets {
+            for grant in grants.as_array().map(Vec::as_slice).unwrap_or_default() {
+                list.push(json!({ "app": app, "account": grant["account"], "scope": grant["scope"], "since": grant["since"] }));
+            }
+        }
+        reply(Ok(Value::from(list)))
+    }
+
+    fn revoke_secret(&mut self, app: String, account: String, scope: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let store = self.store();
+        let revoked = store.private.revoke_secret(app.trim(), account.trim(), scope.trim());
+        store.save();
+        reply(Ok(json!({ "revoked": revoked })))
+    }
+
+    fn private_call_control(&mut self, request_id: String, action: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(self.control_private_call(request_id.trim(), action.trim()))
+    }
+
+    fn token_source_holdings(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(self.source_holdings())
+    }
+
+    fn cli_token_send_source(&mut self, token_program: String, definition: String, amount: String, to: String, from_private: bool, to_public: bool) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let out = reply((|| {
+            let program = registry::parse_account(token_program.trim())?;
+            let program_text = registry::account_text(&program);
+            let known = self.store().private.token_sources.iter().any(|source| {
+                source["token_program"] == program_text.as_str()
+                    && source["definitions"].as_array().is_some_and(|defs| defs.iter().any(|d| d["definition"] == definition.trim()))
+            });
+            if !known {
+                return Err("that token isn't one of a token source you accepted".to_owned());
+            }
+            // The two token programs speak the same messages (docs/wallet/BRIDGE-SDK.md,
+            // "Token programs"), so the wallet's own send path moves it.
+            let command = cli::token_send_args(&program, &definition, &amount, &to, from_private, to_public)?;
+            self.wallet_job("token_send", |setup| {
+                if from_private {
+                    cli::default_private(setup)?;
+                } else {
+                    cli::default_public(setup)?;
+                }
+                Ok(command)
+            })
+        })());
+        self.log_started(&out, json!({ "kind": "token_send", "chain": "lez", "to": to.trim(), "amount": cli::amount_text(&amount).ok(), "token": definition.trim() }));
+        out
+    }
+
+    fn remove_token_source(&mut self, token_program: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let store = self.store();
+        let before = store.private.token_sources.len();
+        store.private.token_sources.retain(|source| source["token_program"] != token_program.trim());
+        let removed = store.private.token_sources.len() != before;
+        store.save();
+        self.forget_tokens();
+        reply(Ok(json!({ "removed": removed })))
     }
 
     fn chain_inscribe(&mut self, from_key: String, text: String, send: bool) -> String {
@@ -5398,6 +5608,9 @@ impl Names {
         }
         let kind = request["kind"].as_str().unwrap_or_default().to_owned();
         let app = request["app"].as_str().unwrap_or_default().to_owned();
+        if matches!(kind.as_str(), provider::PRIVATE_CALL | provider::SECRET | provider::TOKEN_SOURCE) {
+            return self.approve_private(id, &request, account);
+        }
         if kind == provider::TRANSFER || kind == provider::CALL {
             // Stays pending: the person can switch zones and approve it, or reject it.
             self.asked_here(&request)?;
@@ -5544,10 +5757,11 @@ impl Names {
     /// told only whether it went through; the CLI's own words, which may name
     /// the person's accounts and balances, go only to the Names app.
     fn provider_refresh(&mut self) {
+        let private_changed = self.private_refresh();
         let jobs = self.jobs().ok();
         let now = provider::now_ms();
         let store = self.store();
-        let mut changed = false;
+        let mut changed = private_changed;
         let mut tokens_moved = false;
         for request in store.requests.iter_mut().filter(|request| request["state"] == "running") {
             let state = request["job"].as_str().and_then(|job| jobs.as_ref()?.state(job).ok());
@@ -5564,8 +5778,18 @@ impl Names {
                 request["state"] = json!(if done { "done" } else { "failed" });
                 request["finished"] = json!(now);
                 if !done {
-                    request["error"] = json!("the payment didn't go through");
+                    request["error"] = json!(if request["kind"] == provider::PRIVATE_CALL {
+                        "the private call didn't go through"
+                    } else {
+                        "the payment didn't go through"
+                    });
                     request["problem"] = json!(problem);
+                }
+                if request["kind"] == provider::PRIVATE_CALL {
+                    // The message and the simulation were only kept to be sent and shown.
+                    if let Some(fields) = request.as_object_mut() {
+                        fields.remove("message");
+                    }
                 }
                 tokens_moved |= request["asset_kind"] == provider::TOKEN;
                 changed = true;
@@ -5681,6 +5905,331 @@ impl Names {
         }
         self.token_info.insert(key, (info.clone(), std::time::Instant::now()));
         Ok(info)
+    }
+}
+
+/// How long a private call's plan (the CLI's simulation) may take: it reads the programs'
+/// bytecode and catches the wallet up with the chain.
+const PRIVATE_PLAN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(240);
+/// How long `app_secret` waits for the CLI.
+const SECRET_PATIENCE: std::time::Duration = std::time::Duration::from_secs(60);
+
+impl Names {
+    /// The token programs the wallet reads holdings of: its own and the token sources'.
+    fn known_token_programs(&mut self) -> Vec<String> {
+        let mut programs: Vec<String> = self.token_program.iter().map(registry::account_text).collect();
+        for source in &self.store().private.token_sources {
+            if let Some(program) = source["token_program"].as_str() {
+                if !programs.iter().any(|known| known == program) {
+                    programs.push(program.to_owned());
+                }
+            }
+        }
+        programs
+    }
+
+    /// Adds a request of any kind from `app`, which must have been given access.
+    fn queue_any(&mut self, app: &str, request: Value, now: u64) -> Result<Value, String> {
+        let store = self.store();
+        if store.granted(app).is_empty() && request["kind"] != provider::TOKEN_SOURCE {
+            return Err(NOT_CONNECTED.to_owned());
+        }
+        let view = provider::app_view(&request);
+        store.add(request, now)?;
+        store.save();
+        Ok(view)
+    }
+
+    /// `app_secret`: the values, or the request that asks the person first.
+    fn secret_values(&mut self, account: &str, scope: &str, context_hex: &str, tag: &str, first: i64, count: i64) -> Result<Value, String> {
+        let app = asking_app()?;
+        let (private, id) = provider::account_ref(account)?;
+        let account = provider::account_written(private, &id);
+        let context = if context_hex.trim().is_empty() { Vec::new() } else { registry::unhex(context_hex.trim()).map_err(|_| "the context is hex".to_owned())? };
+        let first = u64::try_from(first).map_err(|_| "the first index is 0 or more".to_owned())?;
+        let count = u64::try_from(count).map_err(|_| "the count is 1 to 64".to_owned())?;
+        let ask = app_secret::Ask::new(&app, scope.trim(), context, tag.trim(), first, count)?;
+        let now = provider::now_ms();
+        let store = self.store();
+        if !store.granted(&app).contains(&account) {
+            return Err(format!("{account} wasn't given to this app; ask for it with request_access"));
+        }
+        if !store.private.has_secret(&app, &account, &ask.scope) {
+            let waiting = store.requests.iter().find(|r| {
+                r["kind"] == provider::SECRET && r["state"] == "pending" && r["app"] == app.as_str() && r["account"] == account.as_str() && r["scope"] == ask.scope.as_str()
+            });
+            if let Some(waiting) = waiting {
+                return Ok(json!({ "granted": false, "request": provider::app_view(waiting) }));
+            }
+            let request = provider_private::secret_request(&app, &account, &ask.scope, "", now)?;
+            let view = provider::app_view(&request);
+            store.add(request, now)?;
+            store.save();
+            return Ok(json!({ "granted": false, "request": view }));
+        }
+        // Each call runs the CLI, so an app is bounded per hour.
+        let calls = self.secret_calls.entry(app.clone()).or_default();
+        calls.retain(|at| now.saturating_sub(*at) < 60 * 60 * 1000);
+        if calls.len() >= provider_private::MAX_SECRET_CALLS_PER_HOUR {
+            return Err("this app has asked for secrets too often in the last hour; try again later".to_owned());
+        }
+        calls.push(now);
+        let setup = self.cli_setup()?;
+        setup.wallet_ready()?;
+        let input = json!({
+            "app": ask.app, "account": account, "scope": ask.scope, "context": registry::hex(&ask.context),
+            "tag": ask.tag, "first": ask.first, "count": ask.count,
+        });
+        let output = cli::run_with_input(&setup, vec!["module".into(), "app-secret".into()], &input.to_string(), SECRET_PATIENCE)
+            .map_err(|_| "the wallet couldn't make the values (is this account in the names wallet?)".to_owned())?;
+        let answer: Value = serde_json::from_str(cli::last_line(&output)).map_err(|_| "the names CLI gave no values".to_owned())?;
+        let values: Vec<String> = answer["values"].as_array().map(Vec::as_slice).unwrap_or_default().iter().filter_map(|v| v.as_str().map(str::to_owned)).collect();
+        if values.len() as u64 != ask.count || answer["account"] != account.as_str() || values.iter().any(|v| v.len() != 64) {
+            return Err("the names CLI gave the wrong values".to_owned());
+        }
+        Ok(json!({ "granted": true, "account": account, "scope": ask.scope, "tag": ask.tag, "first": ask.first, "values": values }))
+    }
+
+    /// Runs the CLI's simulation of a private call on its own thread; the request learns the
+    /// outcome on its next refresh.
+    fn start_private_check(&self, id: &str, input: Value) {
+        let setup = self.cli_setup().and_then(|setup| setup.wallet_ready().map(|()| setup));
+        let checks = std::sync::Arc::clone(&self.private_checks);
+        let id = id.to_owned();
+        let setup = match setup {
+            Ok(setup) => setup,
+            Err(why) => {
+                checks.lock().expect("the private checks lock").insert(id, Err(why));
+                return;
+            }
+        };
+        std::thread::spawn(move || {
+            let command = vec!["module".to_owned(), "private-call".to_owned(), "plan".to_owned()];
+            let result = cli::run_with_input(&setup, command, &input.to_string(), PRIVATE_PLAN_PATIENCE)
+                .and_then(|output| provider_private::report_of(&output).ok_or_else(|| cli::failure_cause(&output)));
+            checks.lock().expect("the private checks lock").insert(id, result);
+        });
+    }
+
+    /// Moves finished simulations into their requests, and follows running private calls'
+    /// phases. Returns whether anything changed.
+    fn private_refresh(&mut self) -> bool {
+        let done: Vec<(String, Result<Value, String>)> = self.private_checks.lock().expect("the private checks lock").drain().collect();
+        let jobs = self.jobs().ok();
+        let store = self.store();
+        let mut changed = false;
+        for (id, result) in done {
+            let Some(request) = store.get_mut(&id) else { continue };
+            match result {
+                Ok(report) => {
+                    request["report"] = report;
+                    request["check"] = json!("ready");
+                }
+                Err(why) => {
+                    request["check"] = json!("failed");
+                    request["check_problem"] = json!(provider::clean_text(&why, 400));
+                }
+            }
+            changed = true;
+        }
+        for request in store.requests.iter_mut().filter(|r| r["kind"] == provider::PRIVATE_CALL && r["state"] == "running") {
+            let Some(job) = request["job"].as_str() else { continue };
+            if let Some(jobs) = &jobs {
+                let log = jobs.whole_log(job);
+                let phase = provider_private::phase_of(&log).map(str::to_owned);
+                if phase.is_some() && request["phase"].as_str() != phase.as_deref() {
+                    request["phase"] = json!(phase);
+                    changed = true;
+                }
+                if let Some(tx) = log.lines().find_map(|line| line.trim().strip_prefix("submitted ")) {
+                    if request["tx"].as_str() != Some(tx.trim()) {
+                        request["tx"] = json!(tx.trim());
+                        changed = true;
+                    }
+                }
+            }
+        }
+        changed
+    }
+
+    /// Approves a private call, a secret grant or a token source. `account` must be the one
+    /// the request names.
+    fn approve_private(&mut self, id: &str, request: &Value, account: &str) -> Result<Value, String> {
+        let now = provider::now_ms();
+        let kind = request["kind"].as_str().unwrap_or_default().to_owned();
+        let app = request["app"].as_str().unwrap_or_default().to_owned();
+        if kind != provider::TOKEN_SOURCE {
+            let (private, chosen) = provider::account_ref(account)?;
+            if request["account"] != provider::account_written(private, &chosen).as_str() {
+                return Err("approve it with the account it names".to_owned());
+            }
+        }
+        let mut outcome = json!({ "decided": now });
+        match kind.as_str() {
+            provider::SECRET => {
+                let scope = request["scope"].as_str().unwrap_or_default().to_owned();
+                let account = request["account"].as_str().unwrap_or_default().to_owned();
+                self.store().private.grant_secret(&app, &account, &scope, now)?;
+                outcome["state"] = json!("approved");
+            }
+            provider::TOKEN_SOURCE => {
+                self.store().private.add_token_source(request, now)?;
+                self.forget_tokens();
+                outcome["state"] = json!("approved");
+            }
+            provider::PRIVATE_CALL => {
+                self.asked_here(request)?;
+                if request["check"] != "ready" {
+                    return Err("the wallet hasn't finished checking this call; wait for its summary".to_owned());
+                }
+                let sheet = self.private_sheet(request);
+                if sheet["refused"] == true {
+                    return Err("the wallet refuses this call (see why on the sheet); reject it".to_owned());
+                }
+                let digest = sheet["digest"].as_str().ok_or("the simulation gave no digest")?.to_owned();
+                let job = self.private_call_job(request, &digest)?;
+                let programs: Vec<String> = request["programs"].as_array().map(Vec::as_slice).unwrap_or_default().iter().filter_map(|p| p.as_str().map(str::to_owned)).collect();
+                self.store().private.remember_programs(&app, &programs);
+                outcome["state"] = json!("running");
+                outcome["phase"] = json!("plan");
+                outcome["job"] = job["id"].clone();
+                outcome["approved_digest"] = json!(digest);
+            }
+            _ => return Err("this request can't be approved".to_owned()),
+        }
+        let store = self.store();
+        let view = match store.get_mut(id) {
+            Some(stored) => {
+                for (key, value) in outcome.as_object().into_iter().flatten() {
+                    stored[key.as_str()] = value.clone();
+                }
+                merged(provider::app_view(stored), &json!({ "job": stored["job"] }))
+            }
+            None => outcome,
+        };
+        store.save();
+        Ok(view)
+    }
+
+    /// The approval sheet of a private call (see `provider_private::review`), with the
+    /// Program Registry's labels, the token sources' names and the programs this app used before.
+    fn private_sheet(&mut self, request: &Value) -> Value {
+        let mut labels = Map::new();
+        for program in request["programs"].as_array().map(Vec::as_slice).unwrap_or_default() {
+            if let Some(program) = program.as_str() {
+                if let Some(label) = program_registry::label(program) {
+                    labels.insert(program.to_owned(), label);
+                }
+            }
+        }
+        let app = request["app"].as_str().unwrap_or_default().to_owned();
+        let store = self.store();
+        let names = store.private.token_names();
+        let remembered = store.private.programs_of(&app);
+        provider_private::review(request, &request["report"], &labels, &names, &remembered)
+    }
+
+    /// Starts `names module private-call send` for an approved call: the CLI simulates it
+    /// again, refuses unless what it does still matches `digest` (what the person saw), then
+    /// proves and sends it. The call goes in a 0600 file the job removes when it ends.
+    fn private_call_job(&mut self, request: &Value, digest: &str) -> Result<Value, String> {
+        let setup = self.cli_setup()?;
+        setup.wallet_ready()?;
+        self.no_background_job()?;
+        let jobs = self.jobs()?;
+        let id = jobs.prepare(cli::WALLET_JOB)?;
+        let file = jobs.scratch(&id, "call");
+        let input = provider_private::cli_input(request, Some(digest), &self.known_token_programs());
+        cli::write_private(&file, input.to_string().as_bytes()).map_err(|error| format!("cannot keep the call: {error}"))?;
+        let command = vec!["module".to_owned(), "private-call".to_owned(), "send".to_owned(), format!("--input={}", file.display())];
+        jobs.start(&setup, &id, cli::WALLET_JOB, "private_call", command, Some(file))
+    }
+
+    /// Pauses (SIGSTOP), resumes (SIGCONT) or cancels (SIGTERM, then SIGKILL) a private call's
+    /// job, which runs in its own process group, while it hasn't started sending.
+    fn control_private_call(&mut self, id: &str, action: &str) -> Result<Value, String> {
+        self.provider_refresh();
+        let request = self.store().get(id).cloned().ok_or("there is no such request")?;
+        if request["kind"] != provider::PRIVATE_CALL || request["state"] != "running" {
+            return Err("only a private call that is running can be paused or cancelled".to_owned());
+        }
+        if !provider_private::may_stop(request["phase"].as_str()) && action != "resume" {
+            return Err("it is being sent; it can't be stopped now".to_owned());
+        }
+        let job = request["job"].as_str().ok_or("this call has no job")?.to_owned();
+        let state = self.jobs()?.state(&job)?;
+        let pid = state["pid"].as_u64().ok_or("the job's process is unknown")?;
+        let group = format!("-{pid}");
+        let signal = |name: &str| {
+            std::process::Command::new("/bin/kill")
+                .args([name, "--", &group])
+                .status()
+                .map_err(|error| format!("could not signal the job: {error}"))
+                .and_then(|status| if status.success() { Ok(()) } else { Err("the job has ended".to_owned()) })
+        };
+        let now = provider::now_ms();
+        let store = self.store();
+        let stored = store.get_mut(id).ok_or("there is no such request")?;
+        match action {
+            "pause" => {
+                signal("-STOP")?;
+                stored["paused"] = json!(true);
+            }
+            "resume" => {
+                signal("-CONT")?;
+                stored["paused"] = json!(false);
+            }
+            "cancel" => {
+                // A stopped group must run again to take the TERM.
+                let _ = signal("-CONT");
+                signal("-TERM")?;
+                let group = group.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    let _ = std::process::Command::new("/bin/kill").args(["-KILL", "--", &group]).status();
+                });
+                stored["state"] = json!("cancelled");
+                stored["decided"] = json!(now);
+                // `submit` is printed only once the wallet has proven and handed it over, so a
+                // cancel late in proving may come after it went: never say nothing was sent.
+                stored["error"] = json!("cancelled while it was being proven; if the proof had just finished it may still have been sent, so check the account before asking again");
+            }
+            _ => return Err("the action is pause, resume or cancel".to_owned()),
+        }
+        let view = provider::app_view(stored);
+        store.save();
+        Ok(view)
+    }
+
+    /// `token_source_holdings`.
+    fn source_holdings(&mut self) -> Result<Value, String> {
+        let sources = self.store().private.token_sources.clone();
+        let names = self.store().private.token_names();
+        let setup = self.cli_setup()?;
+        setup.wallet_ready()?;
+        let mut out = Vec::new();
+        for source in sources {
+            let Some(program) = source["token_program"].as_str().and_then(|text| registry::parse_account(text).ok()) else { continue };
+            let reader = setup.clone();
+            let key = format!("{TOKENS_KEY}{}:{}", registry::account_text(&program), setup.wallet.display());
+            let read = self.read_in_background(key, TOKENS_EVERY, move || cli::run_token_list(&reader, &program));
+            let holdings: Vec<Value> = read["value"]["holdings"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|row| {
+                    let definition = row["definition"].as_str()?;
+                    let named = names.get(definition)?;
+                    if named["token_program"] != registry::account_text(&program).as_str() {
+                        return None;
+                    }
+                    Some(merged(row.clone(), &json!({ "name": named["name"], "symbol": named["symbol"], "decimals": named["decimals"], "origin": named["origin"], "chain_name": row["name"] })))
+                })
+                .collect();
+            out.push(json!({ "token_program": source["token_program"], "app": source["app"], "holdings": holdings, "updating": read["updating"], "error": read["error"] }));
+        }
+        Ok(Value::from(out))
     }
 }
 
@@ -6068,6 +6617,8 @@ mod tests {
             dm_names: Default::default(),
             chat_names: Default::default(),
             board_reads: Default::default(),
+            private_checks: Default::default(),
+            secret_calls: HashMap::new(),
             read_cache: HashMap::new(),
             provider: None,
             provider_path: None,
@@ -8472,6 +9023,179 @@ mod tests {
         assert_eq!((status["state"].as_str(), status["error"].as_str()), (Some("failed"), Some("the wallet couldn't send it")), "{status}");
         assert!(approve(&mut names, &id, &format!("Public/{PUBLIC}"))["error"].as_str().unwrap().contains("failed already"));
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ── Private calls and app secrets (provider_private.rs) ─────────────
+
+    /// Asks `ask` until `done` holds of its value.
+    fn waited(names: &mut Names, ask: impl Fn(&mut Names) -> String, done: impl Fn(&Value) -> bool) -> Value {
+        for _ in 0..200 {
+            let answer = parsed(&ask(names));
+            if done(&answer["value"]) {
+                return answer["value"].clone();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("it never got there");
+    }
+
+    #[test]
+    fn an_app_gets_its_secrets_only_after_the_person_approves_and_only_its_own() {
+        let values = format!("[\"{}\",\"{}\"]", "ab".repeat(32), "cd".repeat(32));
+        let tail = format!(
+            "case \"$*\" in\n\
+             *\"module app-secret\"*) cat > \"$(dirname \"$0\")/secret-in.json\"; echo '{{\"account\":\"Private/{PRIVATE}\",\"values\":{values}}}' ;;\n\
+             esac"
+        );
+        let (mut names, dir) = with_wallet("provider-secret", &tail);
+        let account = format!("Private/{PRIVATE}");
+        connect(&mut names, "lez_bridge", &account);
+        as_caller(app("lez_bridge"));
+        let ask = |names: &mut Names| names.app_secret(account.clone(), "RFP022/deposit".into(), "abcd".into(), "RFP022/ck".into(), 0, 2);
+        let first = parsed(&ask(&mut names))["value"].clone();
+        assert_eq!(first["granted"], false, "{first}");
+        assert_eq!(first["request"]["kind"], "secret");
+        assert!(!dir.join("secret-in.json").exists(), "nothing is derived before the person approves");
+        // Asking again gives the same request, not a second prompt.
+        assert_eq!(parsed(&ask(&mut names))["value"]["request"]["request"], first["request"]["request"]);
+        let id = first["request"]["request"].as_str().unwrap().to_owned();
+        // The Names app sees what the app gets, and approves it with the account it names.
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let pending = parsed(&names.pending_requests())["value"].clone();
+        let shown = pending.as_array().unwrap().iter().find(|r| r["id"] == id.as_str()).unwrap().clone();
+        assert!(shown["explanation"].as_str().unwrap().contains("never the account's key"), "{shown}");
+        assert_eq!(shown["choices"], json!([{ "account": account, "account_kind": "private", "pays": false, "label": "the account the app asked for", "granted": true }]));
+        assert!(approve(&mut names, &id, &format!("Public/{PUBLIC}"))["error"].as_str().unwrap().contains("the account it names"));
+        assert_eq!(approve(&mut names, &id, &account)["value"]["state"], "approved");
+        as_caller(app("lez_bridge"));
+        let got = parsed(&ask(&mut names))["value"].clone();
+        assert_eq!(got["granted"], true, "{got}");
+        assert_eq!(got["values"], json!(["ab".repeat(32), "cd".repeat(32)]));
+        // The CLI was told the caller's name, not anything the app passed.
+        let sent: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("secret-in.json")).unwrap()).unwrap();
+        assert_eq!((sent["app"].as_str(), sent["scope"].as_str(), sent["context"].as_str(), sent["count"].as_u64()), (Some("lez_bridge"), Some("RFP022/deposit"), Some("abcd"), Some(2)));
+        // Another app, even one given the same account, must ask for its own.
+        connect(&mut names, "other_ui", &account);
+        as_caller(app("other_ui"));
+        assert_eq!(parsed(&names.app_secret(account.clone(), "RFP022/deposit".into(), "abcd".into(), "RFP022/ck".into(), 0, 2))["value"]["granted"], false);
+        // An account the app wasn't given is refused; a taken-back grant asks again.
+        as_caller(app("lez_bridge"));
+        assert!(parsed(&names.app_secret(format!("Public/{PUBLIC}"), "RFP022/deposit".into(), "".into(), "t".into(), 0, 1))["error"].as_str().unwrap().contains("wasn't given"));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert_eq!(parsed(&names.revoke_secret("lez_bridge".into(), account.clone(), "RFP022/deposit".into()))["value"]["revoked"], true);
+        as_caller(app("lez_bridge"));
+        assert_eq!(parsed(&ask(&mut names))["value"]["granted"], false);
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_private_call_is_simulated_shown_and_sent_only_as_approved() {
+        let report = include_str!("../testdata/bridge-claim-leaf1.report.json").replace("2if1EJVcZwFT3oXxF4uewB2mk2XDXpmCWwTtBwUQ6HUC", PRIVATE);
+        let report: Value = serde_json::from_str(&report).unwrap();
+        let digest = report["digest"].as_str().unwrap().to_owned();
+        let tail = format!(
+            "case \"$*\" in\n\
+             *\"private-call plan\"*) cat > \"$(dirname \"$0\")/plan-in.json\"; echo 'phase: simulate'; echo '{}' ;;\n\
+             *\"private-call send\"*) for a in \"$@\"; do case \"$a\" in --input=*) cp \"${{a#--input=}}\" \"$(dirname \"$0\")/sent.json\" ;; esac; done; echo 'phase: prove'; echo 'phase: submit'; echo 'submitted feedbeef'; echo 'applied in block 9' ;;\n\
+             esac",
+            json!({ "report": report })
+        );
+        let (mut names, dir) = with_wallet("provider-private-call", &tail);
+        let account = format!("Private/{PRIVATE}");
+        let (bridge, token, attest, dusdc) = (
+            "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7",
+            "4VScJ7mtwaanQ5gcSZZw2iAMHYAbLrVmbYKwEGx2eSex",
+            "4VhxvwLN5n3u3rZbsz2VNFVavLwc1niNvgxq8JJ15veK",
+            "FBqNAwJs9T4eNDw9pQXxXrLZNcnR1sTnnBEYzhudLQZJ",
+        );
+        let call = json!({
+            "programs": [bridge, token, attest],
+            "accounts": [
+                { "seed": "11".repeat(32), "of": attest, "program": attest },
+                { "seed": "22".repeat(32), "of": bridge },
+                { "account": dusdc, "program": token },
+                { "actor": "account", "program": token, "openings": true },
+                { "actor": "account", "program": "native", "openings": true },
+            ],
+            "message": "07".repeat(6595),
+            "openings": ["33".repeat(32)],
+            "fee_payer": "account",
+            "declared": { "credits": [{ "asset": dusdc, "amount": "100000000" }], "max_fee": "20000000" },
+        });
+        // Not before access, and only from an account the app was given.
+        as_caller(app("lez_bridge"));
+        assert!(parsed(&names.propose_private_call(account.clone(), call.to_string(), String::new()))["error"].as_str().unwrap().contains("request_access"));
+        connect(&mut names, "lez_bridge", &format!("Public/{PUBLIC}"));
+        as_caller(app("lez_bridge"));
+        assert!(parsed(&names.propose_private_call(account.clone(), call.to_string(), String::new()))["error"].as_str().unwrap().contains("wasn't given"));
+        // An app with access asking again isn't prompted, so the private account is added here.
+        names.store().grant("lez_bridge", &[account.clone()], 0).unwrap();
+        as_caller(app("lez_bridge"));
+        let asked = parsed(&names.propose_private_call(account.clone(), call.to_string(), "Claim 100 dUSDC".into()))["value"].clone();
+        let id = asked["request"].as_str().unwrap().to_owned();
+        assert_eq!(asked["check"], "running", "{asked}");
+        // The simulation ends; the app sees only that it is ready, never what it found.
+        let status = waited(&mut names, |names| names.request_status(id.clone()), |v| v["check"] == "ready");
+        assert!(status.get("report").is_none() && status.get("sheet").is_none() && status.get("message").is_none(), "{status}");
+        // The CLI got the call as the module keeps it: every entry names its program, and the
+        // token programs the wallet reads.
+        let plan_in: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("plan-in.json")).unwrap()).unwrap();
+        assert_eq!(plan_in["account"], account.as_str());
+        assert!(plan_in["accounts"].as_array().unwrap().iter().all(|entry| entry["program"].is_string()), "{plan_in}");
+        assert_eq!(plan_in["accounts"][1]["program"], bridge);
+        assert!(plan_in["expect_digest"].is_null());
+        // The Names app sees the sheet, and no raw report or message.
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let pending = parsed(&names.pending_requests())["value"].clone();
+        let shown = pending.as_array().unwrap().iter().find(|r| r["id"] == id.as_str()).unwrap().clone();
+        assert_eq!(shown["sheet"]["refused"], false, "{shown}");
+        assert!(shown["sheet"]["lines"][1].as_str().unwrap().contains("receives 100,000,000"), "{}", shown["sheet"]);
+        assert!(shown.get("report").is_none() && shown.get("message").is_none());
+        // Approved: a wallet job proves and sends exactly what was shown.
+        let approved = approve(&mut names, &id, &account)["value"].clone();
+        assert_eq!(approved["state"], "running", "{approved}");
+        let done = waited(&mut names, |names| names.request_status(id.clone()), |v| v["state"] == "done");
+        assert_eq!(done["tx"], "feedbeef", "{done}");
+        let sent: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("sent.json")).unwrap()).unwrap();
+        assert_eq!(sent["expect_digest"], digest.as_str());
+        assert_eq!(sent["message"], "07".repeat(6595));
+        // The message (which may carry an app's secret) is not kept once it is sent.
+        let kept = std::fs::read_to_string(dir.join("provider.json")).unwrap();
+        assert!(!kept.contains(&"07".repeat(64)), "the message stays out of provider.json");
+        // The programs are remembered for the app: the next call's sheet doesn't flag them as new.
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert_eq!(names.store().private.programs_of("lez_bridge").len(), 3);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_refused_or_unchecked_private_call_cant_be_approved_and_forgets_its_message() {
+        let mut report: Value = serde_json::from_str(&include_str!("../testdata/bridge-drain.report.json").replace("2if1EJVcZwFT3oXxF4uewB2mk2XDXpmCWwTtBwUQ6HUC", PRIVATE)).unwrap();
+        report["fee"]["payer"] = json!(format!("Private/{PRIVATE}"));
+        let tail = format!("case \"$*\" in\n*\"private-call plan\"*) cat > /dev/null; sleep 1; echo '{}' ;;\nesac", json!({ "report": report }));
+        let (mut names, dir) = with_wallet("provider-private-refused", &tail);
+        let account = format!("Private/{PRIVATE}");
+        connect(&mut names, "evil_ui", &account);
+        as_caller(app("evil_ui"));
+        let token = "4VScJ7mtwaanQ5gcSZZw2iAMHYAbLrVmbYKwEGx2eSex";
+        let call = json!({ "programs": [token], "accounts": [], "message": "05".repeat(80) });
+        let id = parsed(&names.propose_private_call(account.clone(), call.to_string(), "Free airdrop!".into()))["value"]["request"].as_str().unwrap().to_owned();
+        // While it is still being checked, nothing can approve it.
+        assert!(approve(&mut names, &id, &account)["error"].as_str().unwrap().contains("hasn't finished checking"));
+        as_caller(app("evil_ui"));
+        waited(&mut names, |names| names.request_status(id.clone()), |v| v["check"] == "ready");
+        assert!(approve(&mut names, &id, &account)["error"].as_str().unwrap().contains("refuses this call"));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let pending = parsed(&names.pending_requests())["value"].clone();
+        let shown = pending.as_array().unwrap().iter().find(|r| r["id"] == id.as_str()).unwrap().clone();
+        assert_eq!(shown["sheet"]["refused"], true);
+        assert!(shown["sheet"]["lines"].to_string().contains("pays 100,000,000"), "{shown}");
+        // Rejected: its message and the simulation are dropped from the store.
+        assert_eq!(parsed(&names.reject_request(id.clone()))["value"]["state"], "rejected");
+        let kept = std::fs::read_to_string(dir.join("provider.json")).unwrap();
+        assert!(!kept.contains(&"05".repeat(80)) && !kept.contains("\"report\""), "{kept}");
         let _ = std::fs::remove_dir_all(dir);
     }
 

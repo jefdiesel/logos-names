@@ -1,0 +1,36 @@
+{
+ "account": "Private/2if1EJVcZwFT3oXxF4uewB2mk2XDXpmCWwTtBwUQ6HUC",
+ "account_public": false,
+ "aliases": [],
+ "digest": "3cc3a9efee9d609bff2ef859ab7f0a414c1ca45836ff3ca2a3d1bd18c4f6b1a5",
+ "events": 0,
+ "fee": {
+  "about": "5174088",
+  "at_most": "8407893",
+  "headroom": "8407893",
+  "payer": "Private/2if1EJVcZwFT3oXxF4uewB2mk2XDXpmCWwTtBwUQ6HUC"
+ },
+ "message_len": 81,
+ "own": [
+  {
+   "after": "0",
+   "asset": "token",
+   "before": "100000000",
+   "definition": "FBqNAwJs9T4eNDw9pQXxXrLZNcnR1sTnnBEYzhudLQZJ",
+   "name": "Wrapped dUSDC (Sepolia demo v2)",
+   "program": "4VScJ7mtwaanQ5gcSZZw2iAMHYAbLrVmbYKwEGx2eSex"
+  }
+ ],
+ "public": [
+  {
+   "account": "6NAoZKXE14LJGeeASmpzpwvsuDLUDB2r6v2a2dXa4f4f",
+   "after": "200000000",
+   "before": "100000000",
+   "definition": "FBqNAwJs9T4eNDw9pQXxXrLZNcnR1sTnnBEYzhudLQZJ",
+   "kind": "token_holding",
+   "program": "4VScJ7mtwaanQ5gcSZZw2iAMHYAbLrVmbYKwEGx2eSex"
+  }
+ ],
+ "public_cycles": 12934,
+ "waiting_credits": "0"
+}

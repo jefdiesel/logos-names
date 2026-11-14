@@ -815,3 +815,40 @@ export function bridgeNetRows(read) {
         return { account: a.account, title: (a.watched ? "Watched account " : "Public account ") + id, found: !!a.found, watched: !!a.watched, other: Number(a.other_tokens) || 0, assets: assets }
     })
 }
+
+/// A token amount in base units shown with its decimals: ("100000000", 6) → "100".
+export function withDecimals(base, decimals) {
+    var digits = String(base === null || base === undefined ? "" : base)
+    var places = Number(decimals) || 0
+    if (!/^[0-9]+$/.test(digits) || places <= 0)
+        return digits === "" ? digits : grouped(digits)
+    while (digits.length <= places)
+        digits = "0" + digits
+    var whole = digits.substr(0, digits.length - places)
+    var fraction = digits.substr(digits.length - places).replace(/0+$/, "")
+    return grouped(whole) + (fraction === "" ? "" : "." + fraction)
+}
+
+/// The holdings of the token sources the person accepted (`token_source_holdings`), as wallet
+/// groups: one per token program, a row per account and token. The names, symbols and
+/// decimals are the app's words; the definition ID is always shown with them.
+export function bridgedGroups(sources) {
+    if (!Array.isArray(sources))
+        return []
+    var groups = []
+    sources.forEach(function(source) {
+        var rows = (source.holdings || []).map(function(h) {
+            var label = String(h.symbol || h.name || h.chain_name || "Token")
+            return { id: "bridged-" + h.account + "-" + h.definition, kind: "token", title: label,
+                     sub: withDecimals(h.balance, h.decimals) + " " + label + " · " + (h.account_kind === "private" ? "Private" : "Public") + " · " + (h.origin ? h.origin + " · " : "") + keyShown(h.definition),
+                     address: h.definition, balance: String(h.balance), shown: withDecimals(h.balance, h.decimals) + " " + label,
+                     fromPrivate: h.account_kind === "private", definition: h.definition, key: "", canSend: false, account: h.account,
+                     tokenProgram: source.token_program }
+        })
+        if (rows.length > 0 || source.error)
+            groups.push({ id: "bridged-" + source.token_program, title: "Bridged tokens", letter: "E", total: null, tone: source.error ? "alarm" : "plain",
+                          note: (source.app ? "from " + source.app + " · " : "") + keyShown(source.token_program) + (source.error ? " · " + source.error : ""), rows: rows })
+    })
+    return groups
+}
+

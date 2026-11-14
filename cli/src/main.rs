@@ -811,7 +811,11 @@ mod deposit;
 mod fees;
 mod plan;
 mod module;
+mod private_call;
 mod prover;
+/// App secrets' derivation, one file shared with the Basecamp module (which checks the asks).
+#[path = "../../basecamp-module/rust-lib/src/app_secret.rs"]
+mod app_secret;
 /// The text checks and the zones' rules, two files shared with the Basecamp module so the
 /// CLI's zones and the Names app's follow the same ones.
 #[path = "../../basecamp-module/rust-lib/src/text.rs"]
@@ -3945,6 +3949,10 @@ async fn main() -> Result<()> {
                             | module::Request::AccountLabel { .. }
                             | module::Request::AccountUse { .. }
                             | module::Request::Fee
+                            // Reads only: a private call's plan and an app's secrets may run
+                            // while a job that saves the wallet does.
+                            | module::Request::AppSecret
+                            | module::Request::PrivateCall(module::CallRequest::Plan)
                     )
             ),
             matches!(cli.command, Command::Setup { .. }),

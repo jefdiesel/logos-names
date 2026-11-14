@@ -77,10 +77,30 @@ pub enum Request {
     /// The chain's fee market and what a native transfer costs at it, as JSON: `{height,
     /// base_fee_exec, base_fee_stor, public_transfer: {about, at_most}, private_transfer}`.
     Fee,
+    /// The values an app asked for with `app_secret` (Wallet Provider SDK), from the JSON on
+    /// standard input: `{app, account, scope, context, tag, first, count}`; prints `{account,
+    /// values}`. The Basecamp module checks the app and its grant first; see `app_secret.rs`.
+    AppSecret,
+    /// A mini-app's privacy-preserving call (`propose_private_call`; `private_call.rs`).
+    #[command(subcommand)]
+    PrivateCall(CallRequest),
     /// Where the name identifier ID (64 hex) sits relative to the locked-name list, as JSON
     /// (`length_proof_json`). Needs no wallet. The Basecamp module asks here instead of
     /// carrying the 61 MB list, and checks the proof against the root itself.
     LengthProof { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum CallRequest {
+    /// Simulates the call given as JSON on standard input and prints `{"report": …}`: what it
+    /// changes, worked out by the wallet (nothing is proven or sent).
+    Plan,
+    /// Plans the call in `--input` again, refuses unless its effects still have the digest
+    /// the person approved (`expect_digest`), then proves and sends it.
+    Send {
+        #[arg(long)]
+        input: PathBuf,
+    },
 }
 
 /// A length proof as JSON: `{tier, kind: "member", index, path}` or `{tier, kind:
@@ -133,6 +153,23 @@ impl Client {
             Request::AccountNew { kind, label } => self.module_account_new(&kind, &label).await,
             Request::AccountLabel { account, label } => self.module_account_label(&account, &label),
             Request::AccountUse { account } => self.module_account_use(&account).await,
+            Request::AppSecret => {
+                let mut input = Vec::new();
+                std::io::Read::read_to_end(&mut std::io::stdin(), &mut input).context("cannot read the request")?;
+                let request: serde_json::Value = serde_json::from_slice(&input).context("not a request")?;
+                self.app_secret(&request)
+            }
+            Request::PrivateCall(CallRequest::Plan) => {
+                let mut input = Vec::new();
+                std::io::Read::read_to_end(&mut std::io::stdin(), &mut input).context("cannot read the call")?;
+                let call: crate::private_call::CallInput = serde_json::from_slice(&input).context("not a call")?;
+                self.private_call_plan(&call).await
+            }
+            Request::PrivateCall(CallRequest::Send { input }) => {
+                let text = std::fs::read(&input).with_context(|| format!("cannot read {}", input.display()))?;
+                let call: crate::private_call::CallInput = serde_json::from_slice(&text).context("not a call")?;
+                self.private_call_send(&call).await
+            }
             Request::Fee => {
                 let quote = self.wallet.client().get_fee_state().await?;
                 let headroom = self.wallet.config().fee_headroom_blocks;
