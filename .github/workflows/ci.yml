@@ -4,6 +4,10 @@ on:
   push:            # every branch, so tests don't have to queue on the Mini's build lock
   pull_request:
 
+# Read the code, nothing else; no job here needs a secret beyond GITHUB_TOKEN for rzup.
+permissions:
+  contents: read
+
 # A newer push to the same branch cancels the older run.
 concurrency:
   group: ci-${{ github.ref }}
@@ -14,10 +18,10 @@ jobs:
     name: Program logic tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the pinned Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo test --locked -p names_core
       - run: cargo test --locked -p names_seal
 
@@ -25,8 +29,8 @@ jobs:
     name: Resolver tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
       - run: npm ci
@@ -42,7 +46,7 @@ jobs:
       # Same builder image LEZ v0.3.0 uses for its own programs.
       RISC0_DOCKER_CONTAINER_TAG: r0.1.91.1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the pinned Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - name: Install cargo-risczero
@@ -63,9 +67,103 @@ jobs:
           ls -l "$bin"
           sha256sum "$bin" | tee logos_names.bin.sha256
           cp "$bin" logos_names.bin
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: logos_names-guest
           path: |
             logos_names.bin
             logos_names.bin.sha256
+
+  # The wallet, without the Mini: the CLI and every workspace crate, the prototype token
+  # program (wallet-tokens/, its own workspace, built into the same target directory), then the
+  # relayed-call end to end on a standalone rc3 sequencer (scripts/relayed-call-e2e.sh). One job,
+  # so LEZ is compiled once. No proving: the e2e makes public transactions only.
+  wallet:
+    name: Workspace, wallet-tokens and relayed-call e2e (LEZ v0.4.0-rc3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      LEZ_TAG: v0.4.0-rc3
+      LEZ_COMMIT: "bafd07be"
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: System libraries (PC/SC for the wallet's Keycard support)
+        run: sudo apt-get update -q && sudo apt-get install -y -q libpcsclite-dev pkg-config
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Install rzup (risc0 toolchain, for the guests the workspace builds)
+        env:
+          # rzup looks releases up through the GitHub API; authenticate to avoid rate limits.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -L https://risczero.com/install | bash
+          echo "$HOME/.risc0/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.risc0/bin:$PATH"
+          rzup install cargo-risczero 3.0.5
+          rzup install rust
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Workspace tests (names CLI included; as on the Mac mini, with the in-process prover built in)
+        run: cargo test --release --locked --workspace --features names_cli/local-prove
+      - name: wallet-tokens tests
+        run: CARGO_TARGET_DIR="$PWD/target" cargo test --release --locked --manifest-path wallet-tokens/Cargo.toml
+
+      - name: Restore the standalone sequencer (per LEZ commit; shared with wallet-e2e.yml)
+        id: seqcache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/lez-seq
+          key: lez-seq-standalone-${{ env.LEZ_COMMIT }}
+      - name: Build sequencer_service --features standalone at ${{ env.LEZ_TAG }}
+        if: steps.seqcache.outputs.cache-hit != 'true'
+        run: |
+          git clone --quiet --depth 1 --branch "$LEZ_TAG" https://github.com/logos-blockchain/logos-execution-zone.git "$RUNNER_TEMP/lez"
+          test "$(git -C "$RUNNER_TEMP/lez" rev-parse --short=8 HEAD)" = "$LEZ_COMMIT"
+          (cd "$RUNNER_TEMP/lez" && cargo build --release --features standalone -p sequencer_service)
+          mkdir -p ~/lez-seq
+          cp "$RUNNER_TEMP/lez/target/release/sequencer_service" ~/lez-seq/
+          cp "$RUNNER_TEMP/lez/lez/sequencer/service/networks/local.json" ~/lez-seq/
+          rm -rf "$RUNNER_TEMP/lez"
+      - name: Save the standalone sequencer
+        if: steps.seqcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/lez-seq
+          key: lez-seq-standalone-${{ env.LEZ_COMMIT }}
+      - name: Relayed call end to end (scripts/relayed-call-e2e.sh)
+        run: |
+          cargo build --release --locked -p names_cli -p names_methods --features names_cli/local-prove
+          elf=$(find target/riscv-guest -path '*names_methods*' -name logos_names.bin | head -1)
+          test -n "$elf"
+          SEQ_BIN="$HOME/lez-seq/sequencer_service" SEQ_CONFIG="$HOME/lez-seq/local.json" \
+            NAMES="$PWD/target/release/names" NAMES_ELF="$elf" WORK="$RUNNER_TEMP/relayed-call-e2e" \
+            scripts/relayed-call-e2e.sh
+      - name: Sequencer log
+        if: always()
+        run: tail -60 "$RUNNER_TEMP/relayed-call-e2e/sequencer.log" || true
+
+  # The Basecamp module's own tests, against the logos-rust-sdk source staged by the
+  # logos-module-builder revision basecamp-module/flake.nix pins (the one step that needs nix).
+  module:
+    name: Basecamp module tests (cargo test --lib)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Stage logos-rust-sdk (the builder revision basecamp-module/flake.nix pins)
+        run: |
+          rev=$(sed -n 's|.*logos-module-builder.url = "github:logos-co/logos-module-builder/\([0-9a-f]*\)".*|\1|p' basecamp-module/flake.nix)
+          test -n "$rev"
+          nix build "github:logos-co/logos-module-builder/$rev#rust-sdk-src" -o basecamp-module/logos-rust-sdk-src
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: basecamp-module/rust-lib -> target
+      - name: Module tests
+        working-directory: basecamp-module/rust-lib
+        run: cargo test --lib --locked
