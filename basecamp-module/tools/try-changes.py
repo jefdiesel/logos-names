@@ -17,12 +17,21 @@ NAME = "trial-%d" % (time.time() % 100000)
 failures = 0
 
 
+class NoReply(RuntimeError):
+    """logosctl answered without a result: the change may still have been sent."""
+
+
 def call(method, *args):
     """One module call; returns the value, or raises the module's error."""
     typed = ["str:" + arg if isinstance(arg, str) else str(arg).lower() for arg in args]
-    out = subprocess.run([LOGOSCTL, "--config-dir", SESSION, "call", "names", method, *typed],
-                         capture_output=True, text=True).stdout
-    reply = json.loads(out)["result"]
+    run = subprocess.run([LOGOSCTL, "--config-dir", SESSION, "call", "names", method, *typed],
+                         capture_output=True, text=True)
+    try:
+        reply = json.loads(run.stdout)["result"]
+    except (ValueError, KeyError):
+        # logosctl gave no result (a timeout on a slow call, say): show what it did say.
+        raise NoReply("%s: no result from logosctl (exit %s): %s %s" % (
+            method, run.returncode, run.stdout.strip()[:400], run.stderr.strip()[:400]))
     if isinstance(reply, str):
         reply = json.loads(reply)
     if not reply["success"]:
@@ -34,13 +43,18 @@ def change(label, method, args, settled):
     """Sends a change and waits until `settled()` reads it back from the chain."""
     global failures
     started = time.time()
+    lost = None
     try:
-        call(method, *args)
+        try:
+            call(method, *args)
+        except NoReply as error:
+            lost = error  # it may have landed: the chain says
+            print("     %-34s %s" % (label, error))
         while not settled():
             if time.time() - started > 60:
-                raise RuntimeError("sent, but it never showed on the chain")
+                raise RuntimeError("never showed on the chain" + (" (and logosctl gave no reply)" if lost else ", though it was sent"))
             time.sleep(2)
-        print("ok   %-34s %4.0fs" % (label, time.time() - started))
+        print("ok   %-34s %4.0fs%s" % (label, time.time() - started, "  (no reply from logosctl, but it landed)" if lost else ""))
     except Exception as error:
         failures += 1
         print("FAIL %-34s %s" % (label, error))
@@ -107,7 +121,9 @@ check("the registry takes deposits", settings is not None and settings["mode"] =
 quote = call("deposit", NAME)
 check("a normal name takes the normal deposit", quote["tier"] == "normal" and quote["deposit"] == settings["deposits"]["normal"])
 check("a two-character name is locked", call("deposit", "ab")["tier"] == "locked")
-check("a three-character name takes the higher deposit", call("deposit", "qkz")["deposit"] == settings["deposits"]["three"])
+# Every name of 1 to 4 characters is on the locked list (root 9778bed4…), so a
+# three-character one is locked like a two-character one.
+check("a three-character name is locked", call("deposit", "qkz")["tier"] == "locked")
 register("register, paid privately", A, "auto")
 check("it never expires and holds its deposit",
       record()["never"] and record()["expires"] is None and not record()["lapsed"] and record()["deposit"] == quote["deposit"])
