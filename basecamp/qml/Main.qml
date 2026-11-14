@@ -916,8 +916,10 @@ Item {
                 })
         }
         var refused = function(message, kind) {
-            if (kind === "missing" && withOptions) {
-                // No relayed_claim_check_with in this package: the older call, from now on.
+            if (withOptions && kind !== "busy") {
+                // relayed_claim_check_with failed as a call (an older package hasn't it, whatever
+                // words the host uses for that): the older call, from now on. A check's own
+                // refusal is an answer, not a failure, so it never comes here.
                 claimCheckWith = false
                 withOptions = false
                 bridgeCall("relayed_claim_check", [source], checked, refused, 90000)
