@@ -117,6 +117,7 @@ Item {
     readonly property string neededModule: "0.17.0"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
     readonly property string appVersion: "0.17.0"
+    property string buildCommit: ""   // the module's build commit (get_config build_commit), "" for a dev build
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -351,6 +352,7 @@ Item {
             if (!config || typeof config !== "object" || !("sequencer" in config))
                 return false
             var loaded = config.module_version ? String(config.module_version) : ""
+            buildCommit = config.build_commit && config.build_commit !== "dev" ? String(config.build_commit) : ""
             if (!versionAtLeast(loaded, neededModule)) {
                 moduleOutdated = loaded === "" ? "older than 0.11" : loaded
                 say("The names module is out of date (" + moduleOutdated + "; this app needs " + neededModule + " or newer). In Basecamp, open Applications, click Names and press Install.", true)
@@ -9372,7 +9374,7 @@ Item {
         anchors.bottom: parent.bottom
         anchors.rightMargin: root.px(16)
         anchors.bottomMargin: root.px(12)
-        text: "Names " + root.appVersion
+        text: "Names " + root.appVersion + (root.buildCommit !== "" ? " (" + root.buildCommit + ")" : "")
         color: root.dim
         font.family: root.sans
         font.pixelSize: root.px(15)

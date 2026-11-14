@@ -1353,6 +1353,16 @@ const NAMES_APP: &str = "names_ui";
 /// older module can still be the one loaded).
 const MODULE_VERSION: &str = "0.17.0";
 
+/// The commit this module was built from, so builds of one version tell apart (every 0.17.0
+/// build says 0.17.0). The package build writes `names-build-commit=<commit>` into
+/// `build_commit.txt` in its copy of the source; a source checkout says `dev`. The line is kept
+/// whole in the library, so the install scripts can read it from the installed file.
+const BUILD_COMMIT_LINE: &str = include_str!("build_commit.txt");
+
+fn build_commit() -> &'static str {
+    BUILD_COMMIT_LINE.trim().strip_prefix("names-build-commit=").unwrap_or("dev")
+}
+
 /// Whether `caller` may use those methods. Basecamp gives each app its own
 /// credential, named after the app, so the module knows which app is calling.
 /// Any other app that lists `names` as a dependency can still read names, but not
@@ -2110,6 +2120,7 @@ impl Names {
         config["cli"] = json!(cli::find_program(self.cli.as_deref()).map(|path| path.to_string_lossy().into_owned()));
         config["cli_wallet"] = json!(self.resolve_wallet(self.cli_wallet.as_deref()).map(|dir| dir.to_string_lossy().into_owned()));
         config["module_version"] = json!(MODULE_VERSION);
+        config["build_commit"] = json!(build_commit());
         config["names_network"] = self.net.shown();
         let bridges = self.bridge_programs_now();
         config["bridge_program"] = json!(registry::account_text(&bridges[0]));
@@ -9572,6 +9583,9 @@ mod tests {
         let shown = format!("readonly property string appVersion: \"{}\"", app["version"].as_str().expect("the app's version"));
         assert!(include_str!("../../../basecamp/qml/Main.qml").contains(&shown), "Main.qml must have {shown}");
         assert_eq!(fresh().shown_config()["module_version"], MODULE_VERSION);
+        // A source checkout says "dev"; the package build writes the commit (build-lgx).
+        assert_eq!(fresh().shown_config()["build_commit"], "dev");
+        assert!(BUILD_COMMIT_LINE.starts_with("names-build-commit="), "the line the install scripts look for");
     }
 
     // ── Wallet Provider SDK ─────────────────────────────────────────────
