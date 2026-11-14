@@ -546,5 +546,46 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     ["Signed again for lez_bridge", "on LEZ 0.4, without asking: only the payer's nonce had moved (payer nonce 42, re-sign 1 of 3)"]);
 }
 
+{
+  // The LEZ Bridge, installed from inside Names.
+  const { BUNDLED_BRIDGE, installedPackages, installedEntry, bundledPath, bridgeSetup, bridgeDiffers, installReply, intentAnswer, publisherWaitLine } = await import("./qml/logic.mjs");
+  const me = { name: "names_ui", version: "0.17.0", installDir: "/Users/you/Library/Application Support/Logos/LogosBasecamp/plugins/names_ui" };
+  const oldMod = { name: "lez_bridge", version: "0.1.0", hashes: { root: "a2c6c3117443a92f2a5b2a1a2267175f4f82ed209a3dae8e554461bd09df0d18" } };
+  const oldUi = { name: "lez_bridge_ui", version: "0.1.0", hashes: { root: "788f2f0dde4bd7ae" } };
+  const newMod = { name: "lez_bridge", version: "0.1.0", hashes: { root: BUNDLED_BRIDGE[0].root } };
+  const newUi = { name: "lez_bridge_ui", version: "0.1.0", hashes: { root: BUNDLED_BRIDGE[1].root } };
+  const list = [{ name: "package_manager" }, me];
+  check("installedPackages: the list, as text, twice, in {success, value}",
+    [installedPackages(list), installedPackages(JSON.stringify(list)), installedPackages(JSON.stringify(JSON.stringify(list))), installedPackages({ success: true, value: list })].map((l) => l && l.length),
+    [2, 2, 2, 2]);
+  check("installedPackages: anything not surely the list is null (never an install from it)",
+    [installedPackages([]), installedPackages([{ name: "chat_ui" }]), installedPackages(""), installedPackages("x"), installedPackages(null), installedPackages({ error: "timeout" })],
+    [null, null, null, null, null, null]);
+  check("bundledPath beside the app's view", bundledPath(list, "lez_bridge.lgx"), me.installDir + "/qml/bundled/lez_bridge.lgx");
+  check("bundledPath unknown folder", [bundledPath([{ name: "names_ui" }], "x.lgx"), bundledPath([{ name: "names_ui", installDir: "rel/dir" }], "x.lgx")], ["", ""]);
+  check("bridgeSetup: list unread → unknown (manual line), unless the module answers",
+    [bridgeSetup({ list: null }), bridgeSetup({ list: null, answers: false }), bridgeSetup({ list: null, answers: true })], ["unknown", "unknown", "ready"]);
+  check("bridgeSetup: a package missing → absent", [bridgeSetup({ list }), bridgeSetup({ list: list.concat([newMod]) }), bridgeSetup({ list: list.concat([newUi]), answers: true })], ["absent", "absent", "absent"]);
+  check("bridgeSetup: installed, not answering → idle; not asked yet → unknown",
+    [bridgeSetup({ list: list.concat([newMod, newUi]), answers: false }), bridgeSetup({ list: list.concat([newMod, newUi]) })], ["idle", "unknown"]);
+  check("bridgeSetup: running", bridgeSetup({ list: list.concat([newMod, newUi]), answers: true, checkWith: true }), "ready");
+  check("bridgeSetup: older only when it lacks the new call AND is another build",
+    [bridgeSetup({ list: list.concat([oldMod, oldUi]), answers: true, checkWith: false }),
+     bridgeSetup({ list: list.concat([oldMod, oldUi]), answers: true, checkWith: true }),
+     bridgeSetup({ list: list.concat([newMod, newUi]), answers: true, checkWith: false })],
+    ["older", "ready", "ready"]);
+  check("bridgeDiffers", [bridgeDiffers(list.concat([oldMod, newUi])), bridgeDiffers(list.concat([newMod, newUi])), bridgeDiffers(list)], [true, false, false]);
+  check("installReply: success has a path and no error",
+    installReply(JSON.stringify({ name: "lez_bridge", path: "/x/modules/lez_bridge", isCoreModule: true, signatureStatus: "unsigned" })),
+    { ok: true, timeout: false, path: "/x/modules/lez_bridge", error: "" });
+  check("installReply: an error", installReply({ name: "lez_bridge", path: "", error: "Only LGX packages are supported" }).ok, false);
+  check("installReply: no reply is a timeout, not a failure", [installReply(undefined).timeout, installReply("").timeout, installReply({ error: "Timed out waiting" }).timeout], [true, true, true]);
+  check("installReply: in {success, value}", installReply({ success: true, value: { path: "/p" } }).ok, true);
+  check("intentAnswer", [intentAnswer({ ok: true }), intentAnswer({ ok: false, error: "cancelled" }), intentAnswer({ ok: false, error: "not_declared" }), intentAnswer(null)], ["ok", "cancelled", "not_declared", "other"]);
+  check("publisherWaitLine counts down",
+    [publisherWaitLine(1000, 1000, 15000), publisherWaitLine(1000, 9500, 15000), publisherWaitLine(1000, 16500, 15000)],
+    ["Checking who publishes this app… about 15 s", "Checking who publishes this app… about 7 s", "Checking who publishes this app… a few more seconds"]);
+}
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);

@@ -118,6 +118,7 @@ Item {
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
     readonly property string appVersion: "0.17.0"
     property string buildCommit: ""   // the module's build commit (get_config build_commit), "" for a dev build
+    property var moduleFeatures: []    // get_config features: what this build of the names module can do
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -273,6 +274,35 @@ Item {
     function waitAgain(message) {
         return message === moduleBusy || message === moduleNoAnswer
     }
+
+    // The first half minute after Names opens, the names module may still be waiting for the
+    // blockchain module: a READ that gets no answer then says "Starting…", plainly, not the red
+    // no-answer line. A change never does (its no-answer means "look before trying again").
+    // When the half minute is over, the reads that said so are asked again.
+    readonly property string moduleStarting: "Starting… the wallet is still loading (up to half a minute after Basecamp opens)."
+    property bool namesStarting: true
+    Timer {
+        interval: 30000
+        running: root.bridgeReady && root.namesStarting
+        onTriggered: {
+            root.namesStarting = false
+            if (root.notice === root.moduleStarting)
+                root.notice = ""
+            if (root.bridgeNetProblem === root.moduleStarting)
+                root.loadBridgeNet()
+            if (root.tokenError === root.moduleStarting)
+                root.loadTokens()
+        }
+    }
+    /// A read's failure, as shown: "Starting…" in the first half minute when it got no answer.
+    function readFailed(message) {
+        return namesStarting && waitAgain(message) ? moduleStarting : message
+    }
+    /// A read's failure, said: plainly while starting, else as an error.
+    function sayRead(message) {
+        var shown = readFailed(message)
+        say(shown, shown !== moduleStarting)
+    }
     // One-shot reads that met a busy module, asked again in 5 s (busy means the call wasn't taken:
     // the module was on another call that waits on the node or the Program Registry).
     property var busyAgain: ({})
@@ -408,6 +438,7 @@ Item {
                 return false
             var loaded = config.module_version ? String(config.module_version) : ""
             buildCommit = config.build_commit && config.build_commit !== "dev" ? String(config.build_commit) : ""
+            moduleFeatures = Array.isArray(config.features) ? config.features : []
             // Every 0.17.0 says 0.17.0: the reveal driver needs a build that has `reveal_name`.
             if (versionAtLeast(loaded, neededModule) && !(Array.isArray(config.features) && config.features.indexOf("reveal_name") >= 0))
                 loaded = loaded + " (an earlier build)"
@@ -760,7 +791,7 @@ Item {
             if (value && value.updating)
                 bridgeNetSoon.restart()
         }), function(message) {
-            bridgeNetProblem = sentence(message)
+            bridgeNetProblem = sentence(readFailed(message))
         })
     }
 
@@ -787,6 +818,14 @@ Item {
     property bool claimNeedsPolling: false
     property bool claimCheckWith: true     // the installed lez_bridge has relayed_claim_check_with (probed)
     property var bridgePrograms: []        // get_config bridge_programs: the bridges this wallet reads
+    // The LEZ Bridge package, installed from here: what Basecamp has installed (package_manager,
+    // read only; null until read for sure), whether the bridge module answered, whether the copy
+    // shipped inside Names checked out ("ok" | "bad" | "" unchecked), and the install on its way.
+    property var installedList: null
+    property var claimBridgeAnswers: null
+    property string bridgeBundle: ""
+    property var bridgeInstall: null       // {phase: "asking"|"installing"|"slow"|"starting"|"failed"|"updated", line}
+    readonly property string bridgeSetupNow: Logic.bridgeSetup({ list: installedList, answers: claimBridgeAnswers, checkWith: claimCheckWith })
     readonly property var bridgeLabels: [["JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", "bridge v2"], ["4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr", "bridge v3"]]
     readonly property string claimAccount: claimCheck !== null && claimCheck.ok && claimCheck.deposit ? String(claimCheck.deposit.account || "") : ""
     readonly property string claimAccountProblemNow: cliAccounts === null ? "" : Logic.claimAccountProblem(claimAccount, cliAccounts)
@@ -829,19 +868,166 @@ Item {
         claimError = ""
         claimNote = ""
         claimMissing = false
+        claimBridgeAnswers = null
+        loadInstalled(function() {
+            // Not installed: said at once, not after the module call gives up.
+            if (Logic.bridgeSetup({ list: installedList }) === "absent")
+                claimMissing = true
+            checkBundle()
+        })
         bridgeCall("config", [], function(value) {
+            claimBridgeAnswers = true
             claimDeployment = value && value.deployment ? value.deployment : null
             bridgeCall("relayed_claims", [], function(value) {
                 var job = Logic.runningClaimJob(Array.isArray(value) ? value : value && value.jobs ? value.jobs : [])
                 if (job !== null && depositClaimJob === null)
                     depositClaimJob = job
+                // Does this build have relayed_claim_check_with? An empty file asks nothing of anyone
+                // (its answer is "bad_file"); an older build hasn't the method at all.
+                bridgeCall("relayed_claim_check_with", ["", JSON.stringify({ wallet_hint: false })], function() { claimCheckWith = true },
+                    function(message, kind) { if (kind !== "busy" && kind !== "starting") claimCheckWith = false }, 15000, false)
             })
         }, function(message, kind) {
-            // Not installed (or too old, or never answering): one plain line, nothing else.
+            // Not installed, not started, or never answering: Install / Start, or one plain line.
+            claimBridgeAnswers = false
             claimMissing = kind === "missing" || kind === "starting" || kind === "busy"
             if (!claimMissing)
                 claimError = sentence(message)
-        }, 20000)
+        }, 10000, false)
+    }
+
+    /// What Basecamp has installed, from its package manager (read only). `done` runs after.
+    function loadInstalled(done) {
+        if (!(bridgeReady && logos.callModuleAsync)) {
+            if (done) done()
+            return
+        }
+        logos.callModuleAsync("package_manager", "getInstalledPackages", [], function(reply) {
+            installedList = Logic.installedPackages(reply)
+            if (installedList === null)
+                console.log("names_ui: the installed packages couldn't be read:", String(reply).slice(0, 200))
+            if (done) done()
+        }, 15000)
+    }
+
+    /// Checks the LEZ Bridge files shipped inside Names against the hashes built into this app,
+    /// before anything offers to install them (the names module reads the files).
+    function checkBundle() {
+        if (bridgeBundle !== "" || installedList === null)
+            return
+        if (moduleFeatures.indexOf("file_sha256") < 0) {
+            bridgeBundle = "bad"
+            return
+        }
+        var left = Logic.BUNDLED_BRIDGE.length, good = true
+        Logic.BUNDLED_BRIDGE.forEach(function(b) {
+            var path = Logic.bundledPath(installedList, b.file)
+            var settle = function(ok) {
+                good = good && ok
+                if (--left === 0)
+                    bridgeBundle = good ? "ok" : "bad"
+            }
+            if (path === "")
+                return settle(false)
+            askLater("file_sha256", [path], function(sha) { settle(sha === b.sha256) }, function(message) {
+                console.log("names_ui: the shipped", b.file, "can't be checked:", message)
+                settle(false)
+            }, 30000)
+        })
+    }
+
+    /// Installs the LEZ Bridge shipped inside Names: Basecamp's own install question first (it
+    /// names Names as the app asking, and says the package isn't signed); only on its OK, the
+    /// module, then the app; then starts it. `update`: over an older build of the same version,
+    /// which "only if newer" would skip.
+    function installBridge(update) {
+        if (bridgeInstall !== null && bridgeInstall.phase !== "failed" && bridgeInstall.phase !== "updated")
+            return
+        if (bridgeBundle !== "ok" || installedList === null || !logos.request)
+            return
+        bridgeInstall = { phase: "asking", update: !!update, line: "Basecamp asks you to confirm the install…" }
+        logos.request("basecamp.packages.confirm_install", { name: "lez_bridge_ui", version: "0.1.0", repositoryUrl: "" }, function(res) {
+            var answer = Logic.intentAnswer(res)
+            if (answer === "cancelled") {
+                bridgeInstall = null
+                return
+            }
+            if (answer !== "ok") {
+                console.log("names_ui: confirm_install:", JSON.stringify(res))
+                var file = Logic.bundledPath(installedList, Logic.BUNDLED_BRIDGE[0].file)
+                bridgeInstall = { phase: "failed", line: (answer === "not_declared"
+                    ? "Basecamp hasn't learnt yet that Names may ask this (it does at its next start), so nothing was installed."
+                    : "Basecamp didn't ask to confirm, so nothing was installed.")
+                    + " Or install it yourself: Package Manager (the cube icon) → Install Local Package, the file " + file + ", then " + file.replace(/lez_bridge\.lgx$/, "lez_bridge_ui.lgx") + "." }
+                return
+            }
+            installBridgePart(0, !!update)
+        })
+    }
+    function installBridgePart(i, update) {
+        var b = Logic.BUNDLED_BRIDGE[i]
+        var path = Logic.bundledPath(installedList, b.file)
+        bridgeInstall = { phase: "installing", update: update, line: "Installing the " + b.label + "…" }
+        logos.callModuleAsync("package_manager", "installPlugin", [path, !update, "file://" + path], function(reply) {
+            var r = Logic.installReply(reply)
+            if (r.timeout) {
+                // Not a failure: Basecamp may still be installing. Look at what is installed.
+                bridgeInstall = { phase: "slow", update: update, line: "Still installing the " + b.label + "…" }
+                againAfter(10000, function() { afterBridgeInstall(update, 0) })
+                return
+            }
+            if (!r.ok) {
+                bridgeInstall = { phase: "failed", line: "The " + b.label + " didn't install: " + sentence(r.error || "Basecamp didn't say why") }
+                return
+            }
+            if (i + 1 < Logic.BUNDLED_BRIDGE.length)
+                installBridgePart(i + 1, update)
+            else
+                afterBridgeInstall(update, 0)
+        }, 300000)
+    }
+    /// After the install: both packages listed (Basecamp rescans by itself), then the module starts.
+    function afterBridgeInstall(update, tries) {
+        loadInstalled(function() {
+            var both = installedList !== null && Logic.BUNDLED_BRIDGE.every(function(b) { return Logic.installedEntry(installedList, b.name) !== null })
+            var fresh = both && !Logic.bridgeDiffers(installedList)
+            if (!(update ? fresh : both)) {
+                if (tries < 30) {
+                    againAfter(10000, function() { afterBridgeInstall(update, tries + 1) })
+                    return
+                }
+                bridgeInstall = { phase: "failed", line: "The install didn't finish. Look in Package Manager (the cube icon), then come back here." }
+                return
+            }
+            if (update) {
+                bridgeInstall = { phase: "updated", line: "Updated. The LEZ Bridge already running keeps its old version until it starts again: the next time Basecamp starts." }
+                return
+            }
+            againAfter(1500, startBridge)
+        })
+    }
+
+    /// Starts the LEZ Bridge module: Basecamp starts it when its app opens (closing that app later
+    /// leaves it running). Names comes back to the front once the module answers.
+    function startBridge() {
+        if (!logos.request)
+            return
+        bridgeInstall = { phase: "starting", line: "Starting the LEZ Bridge: Basecamp opens its app for a moment, then Names comes back." }
+        logos.request("basecamp.apps.launch", { app: "lez_bridge_ui" }, function() {})
+        waitForBridge(0)
+    }
+    function waitForBridge(tries) {
+        bridgeCall("config", [], function() {
+            bridgeInstall = null
+            logos.request("basecamp.apps.launch", { app: "names_ui" }, function() {})
+            openClaim()
+        }, function() {
+            if (tries < 20) {
+                againAfter(3000, function() { waitForBridge(tries + 1) })
+                return
+            }
+            bridgeInstall = { phase: "failed", line: "The LEZ Bridge didn't start. Open the LEZ Bridge app once, then come back here." }
+        }, 5000, false)
     }
 
     /// Back to the Wallet. A file checked and not claimed is forgotten by the module (its key leaves
@@ -2577,7 +2763,7 @@ Item {
             }
             show(text)
         } catch (error) {
-            say(error.message, true)
+            sayRead(error.message)
         }
     }
 
@@ -2617,7 +2803,7 @@ Item {
             }
             show(name)
         } catch (error) {
-            say(error.message, true)
+            sayRead(error.message)
         }
     }
 
@@ -2704,7 +2890,7 @@ Item {
             if (wallet.length > 0 && !remembers(found.name))
                 askLater("keep", [found.name], function() { root.loadMine() }, function() {})
         } catch (error) {
-            say(error.message, true)
+            sayRead(error.message)
         }
     }
 
@@ -4089,7 +4275,7 @@ Item {
             tokenError = value.error ? sentence(value.error) : ""
         }), function(message) {
             tokenUpdating = false
-            tokenError = sentence(message)
+            tokenError = sentence(readFailed(message))
         })
         askLater("cli_token_pending", [], function(value) {
             tokenPending = Array.isArray(value.pending) ? value.pending : []
@@ -4239,6 +4425,40 @@ Item {
     property string appError: ""
     property var appGrants: []            // [{app, accounts, since}]
     readonly property var appRequest: appRequests.length > 0 ? appRequests[0] : null
+
+    // "Checking who publishes this app… about N s": when each sheet's publisher check was first
+    // seen still going (by request id), and a clock that moves only while one is.
+    property var publisherSince: ({})
+    property double publisherNow: Date.now()
+    function publisherChecking(request) {
+        return request !== null && request !== undefined && request.publisher && typeof request.publisher === "object" && request.publisher.status === "checking"
+    }
+    Timer {
+        interval: 1000
+        repeat: true
+        triggeredOnStart: true
+        running: root.publisherChecking(root.appRequest) || root.publisherChecking(root.inscribeRequest)
+        onTriggered: {
+            var since = root.publisherSince, changed = false
+            ;[root.appRequest, root.inscribeRequest].forEach(function(request) {
+                if (root.publisherChecking(request) && since[request.id] === undefined) {
+                    since[request.id] = Date.now()
+                    changed = true
+                }
+            })
+            if (changed)
+                root.publisherSince = since
+            root.publisherNow = Date.now()
+        }
+    }
+    /// The sheet's publisher line: the countdown while it is checked, else Logic.publisherLine.
+    function publisherShown(request) {
+        if (request === null)
+            return null
+        if (publisherChecking(request))
+            return { text: Logic.publisherWaitLine(publisherSince[request.id], publisherNow, 15000), tone: "plain" }
+        return Logic.publisherLine(request.publisher)
+    }
 
     /// Reads the requests waiting for the person. On the first sight of a
     /// request, the account it already has (or the first offered) is ticked.
@@ -7258,8 +7478,35 @@ Item {
                     Text { text: "Claim a bridge deposit"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
                     RunsOn { net: "0.4" }
 
-                    // No LEZ Bridge package: one plain line.
-                    Hint { visible: root.claimStageNow === "missing"; color: root.ink; text: "Install the LEZ Bridge package: Package Manager (the cube icon) → Install Local Package" }
+                    // No LEZ Bridge package, or not started: one button (the copy shipped inside Names), else
+                    // one plain line.
+                    Hint {
+                        visible: root.claimStageNow === "missing" && root.bridgeInstall === null
+                        color: root.ink
+                        text: root.bridgeSetupNow === "absent" && root.bridgeBundle === "ok" ? "Claims go through the LEZ Bridge package, which isn't installed. It comes with Names: one click installs it. Basecamp asks you to confirm, and says it isn't signed yet."
+                            : root.bridgeSetupNow === "idle" ? "The LEZ Bridge is installed but not running. Basecamp starts it when its app opens: Names opens it for a moment, then comes back."
+                            : root.bridgeSetupNow === "absent" && root.bridgeBundle === "" ? "Looking for the LEZ Bridge package…"
+                            : "Install the LEZ Bridge package: Package Manager (the cube icon) → Install Local Package"
+                    }
+                    RowLayout {
+                        visible: root.claimStageNow === "missing" && (root.bridgeInstall === null || root.bridgeInstall.phase === "failed")
+                        spacing: 12
+                        Action { visible: root.bridgeSetupNow === "absent" && root.bridgeBundle === "ok"; label: "Install the LEZ Bridge package"; strong: true; onPressed: root.installBridge(false) }
+                        Action { visible: root.bridgeSetupNow === "idle"; label: "Start the LEZ Bridge"; strong: true; onPressed: root.startBridge() }
+                        Link { visible: root.bridgeSetupNow === "idle" || root.bridgeSetupNow === "unknown"; text: "Look again"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.openClaim() }
+                    }
+                    Hint {
+                        visible: root.bridgeInstall !== null
+                        color: root.bridgeInstall !== null && root.bridgeInstall.phase === "failed" ? root.alarm : root.bridgeInstall !== null && root.bridgeInstall.phase === "updated" ? root.good : root.brass
+                        text: root.bridgeInstall === null ? "" : root.bridgeInstall.line
+                    }
+                    // An older build of the LEZ Bridge than the one Names ships: the claim works as it is.
+                    RowLayout {
+                        visible: !root.claimMissing && root.bridgeSetupNow === "older" && root.bridgeBundle === "ok" && (root.bridgeInstall === null || root.bridgeInstall.phase === "failed")
+                        spacing: 10
+                        Hint { Layout.fillWidth: false; font.pixelSize: root.px(15); text: "A newer LEZ Bridge comes with Names." }
+                        Link { text: "Update the LEZ Bridge package"; color: root.brass; font.pixelSize: root.px(15); onPressed: root.installBridge(true) }
+                    }
 
                     // The file.
                     Hint { visible: root.claimStageNow === "start"; text: "Choose the claim file the deposit page gave you, or paste its text. The first claim asks two extra questions; later ones don't." }
@@ -10041,7 +10288,7 @@ Item {
                 }
                 // Who publishes the app, checked against its LNS name by the Program Registry.
                 Text {
-                    readonly property var line: appSheet.request === null ? null : Logic.publisherLine(appSheet.request.publisher)
+                    readonly property var line: root.publisherShown(appSheet.request)
                     visible: line !== null
                     Layout.fillWidth: true
                     text: line === null ? "" : line.text
@@ -10422,7 +10669,7 @@ Item {
                     Layout.topMargin: 8
                     spacing: 10
                     Action {
-                        label: appSheet.kind === "connect" ? "Share" : appSheet.kind === "call" ? "Approve and sign" : appSheet.kind === "private_call" ? "Approve, prove and send" : appSheet.kind === "secret" ? "Allow" : appSheet.kind === "token_source" ? "Show these tokens" : appSheet.kind === "relayed_call" ? "Sign, send nothing" : appSheet.kind === "programs" ? "Allow these programs" : "Approve and send"
+                        label: appSheet.request !== null && appSheet.request.checking === true ? "Waiting for the check…" : appSheet.kind === "connect" ? "Share" : appSheet.kind === "call" ? "Approve and sign" : appSheet.kind === "private_call" ? "Approve, prove and send" : appSheet.kind === "secret" ? "Allow" : appSheet.kind === "token_source" ? "Show these tokens" : appSheet.kind === "relayed_call" ? "Sign, send nothing" : appSheet.kind === "programs" ? "Allow these programs" : "Approve and send"
                         strong: true
                         enabledNow: root.appCanApprove()
                         onPressed: root.answerAppRequest(true)
@@ -10482,7 +10729,7 @@ Item {
                 }
                 // Who publishes the app, checked against its LNS name by the Program Registry.
                 Text {
-                    readonly property var line: inscribeSheet.request === null ? null : Logic.publisherLine(inscribeSheet.request.publisher)
+                    readonly property var line: root.publisherShown(inscribeSheet.request)
                     visible: line !== null
                     Layout.fillWidth: true
                     text: line === null ? "" : line.text
@@ -10618,7 +10865,7 @@ Item {
                     Layout.topMargin: 8
                     spacing: 10
                     Action {
-                        label: "Approve and inscribe"
+                        label: root.publisherChecking(root.inscribeRequest) ? "Waiting for the check…" : "Approve and inscribe"
                         strong: true
                         enabledNow: root.inscribeCanApprove()
                         onPressed: root.answerInscribeRequest(true)

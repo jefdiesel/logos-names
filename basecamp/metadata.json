@@ -30,6 +30,9 @@
   "uses": [
     {
       "intent": "basecamp.apps.launch"
+    },
+    {
+      "intent": "basecamp.packages.confirm_install"
     }
   ],
   "nix": {

@@ -1229,3 +1229,120 @@ export function claimInput(text) {
 export function otherDeployment(name) {
     return name === "bridge-test-network" ? "bridge-test-network-v3" : "bridge-test-network"
 }
+
+// ── The LEZ Bridge package, installed from inside Names (one click) ──
+
+/// The LEZ Bridge pair this app ships in qml/bundled/, and what Names checks before offering
+/// it: each file's SHA-256 (the names module's file_sha256), and each package's manifest root
+/// (what package_manager reports for an installed copy, to tell another build apart). Core
+/// module first: the app depends on it.
+export const BUNDLED_BRIDGE = [
+    { name: "lez_bridge", file: "lez_bridge.lgx", label: "LEZ Bridge module",
+      sha256: "bdaff1d82bbb95caeaf1399192a920e895527e8e185fa4dae380b86a21a3fb96",
+      root: "13025b09ca142a2dc24ca01ee94805eb75af8a2161c05c8f2eb480addc5b809c" },
+    { name: "lez_bridge_ui", file: "lez_bridge_ui.lgx", label: "LEZ Bridge app",
+      sha256: "8bba2edab1d5a638c37540a21d7fab2202ec7d6f91498bbbfa25706ab245bf42",
+      root: "c391b90698b2a26bb71faa996ca96f3809da3413ba61d0cbcb9616b5eca9109a" }
+]
+
+/// package_manager.getInstalledPackages' list, out of whatever the host wrapped it in (JSON text,
+/// perhaps twice; `{success, value}`). null unless it is surely the list: it must hold this
+/// app (names_ui). Nothing is ever offered for install from a list that couldn't be read.
+export function installedPackages(reply) {
+    var r = reply
+    for (var depth = 0; depth < 4; depth++) {
+        if (typeof r === "string") {
+            try { r = JSON.parse(r) } catch (e) { return null }
+        } else if (r && typeof r === "object" && !Array.isArray(r) && "value" in r) {
+            r = r.value
+        } else
+            break
+    }
+    if (!Array.isArray(r))
+        return null
+    var named = function(name) { return r.some(function(p) { return p && p.name === name }) }
+    return named("names_ui") ? r : null
+}
+
+/// The installed entry named `name` in `list`, or null.
+export function installedEntry(list, name) {
+    var found = (list || []).filter(function(p) { return p && p.name === name })
+    return found.length ? found[0] : null
+}
+
+/// Where the shipped bridge files are: beside this app's view, `<installDir>/qml/bundled/`.
+/// "" when the app's own folder isn't known.
+export function bundledPath(list, file) {
+    var me = installedEntry(list, "names_ui")
+    var dir = me && typeof me.installDir === "string" ? me.installDir.replace(/\/+$/, "") : ""
+    return dir && dir.charAt(0) === "/" ? dir + "/qml/bundled/" + file : ""
+}
+
+/// What the claim screen does about the LEZ Bridge package. `s`: {list (installedPackages or
+/// null), answers (the module answered config: true, false, or null not asked yet), checkWith
+/// (it has relayed_claim_check_with), bundle ("ok" | "bad" | "" unchecked)}. One of:
+///   "unknown"  the list couldn't be read: the plain manual line, never an install;
+///   "absent"   a package is missing: Install (bundle ok) or the manual line;
+///   "idle"     installed, the module not running: Start (opens the LEZ Bridge app once);
+///   "older"    running, but an older build than the one shipped: the claim works, and a small
+///              Update line (bundle ok);
+///   "ready"    running.
+export function bridgeSetup(s) {
+    var st = s || {}
+    if (!Array.isArray(st.list))
+        return st.answers === true ? "ready" : "unknown"
+    var mod = installedEntry(st.list, "lez_bridge"), ui = installedEntry(st.list, "lez_bridge_ui")
+    if (!mod || !ui)
+        return "absent"
+    if (st.answers !== true)
+        return st.answers === false ? "idle" : "unknown"
+    if (st.checkWith === false && bridgeDiffers(st.list))
+        return "older"
+    return "ready"
+}
+
+/// Whether an installed bridge package is another build than the shipped one (its manifest root).
+export function bridgeDiffers(list) {
+    return BUNDLED_BRIDGE.some(function(b) {
+        var e = installedEntry(list, b.name)
+        var root = e && e.hashes && typeof e.hashes === "object" ? String(e.hashes.root || "") : ""
+        return !!e && root !== b.root
+    })
+}
+
+/// package_manager.installPlugin's reply: `{ok, path, error, timeout}`. A success has `path` and
+/// no `error` (what the Package Manager itself counts). No reply is a timeout: the install may
+/// still be going, so it is looked at again, never called a failure.
+export function installReply(reply) {
+    if (reply === undefined || reply === null || String(reply) === "")
+        return { ok: false, timeout: true, path: "", error: "" }
+    var r = reply
+    for (var depth = 0; depth < 3 && typeof r === "string"; depth++) {
+        try { r = JSON.parse(r) } catch (e) { return { ok: false, timeout: /timed? ?out/i.test(String(r)), path: "", error: String(r) } }
+    }
+    if (r && typeof r === "object" && !Array.isArray(r) && "success" in r && "value" in r && typeof r.value === "object")
+        r = r.value
+    if (!r || typeof r !== "object")
+        return { ok: false, timeout: false, path: "", error: "Basecamp's package manager gave an answer that isn't one." }
+    var error = r.error ? String(r.error) : ""
+    if (/timed? ?out/i.test(error) && !r.path)
+        return { ok: false, timeout: true, path: "", error: "" }
+    return { ok: !!r.path && error === "", timeout: false, path: r.path ? String(r.path) : "", error: error }
+}
+
+/// The answer to an intent (`logos.request`'s `res`: {ok, data, error}): "ok", "cancelled",
+/// "not_declared" (Basecamp hasn't read this app's `uses` since it was copied in: it does at its
+/// next start or package install), or "other" (refused, unavailable: the plain manual line).
+export function intentAnswer(res) {
+    if (res && res.ok === true)
+        return "ok"
+    var error = res && typeof res === "object" ? String(res.error || "") : ""
+    return error === "cancelled" || error === "not_declared" ? error : "other"
+}
+
+/// The line under "Checking who publishes this app…" on a sheet, counting down from when the
+/// sheet first saw the check (`since`, ms) for the host's longest wait (`total`, ms).
+export function publisherWaitLine(since, now, total) {
+    var left = Math.ceil(((since || now) + (total || 15000) - now) / 1000)
+    return left >= 1 ? "Checking who publishes this app… about " + left + " s" : "Checking who publishes this app… a few more seconds"
+}

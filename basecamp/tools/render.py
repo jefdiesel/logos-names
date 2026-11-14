@@ -53,6 +53,15 @@ BRIDGE = r"""
             Qt.callLater(function() { callback(reply) })
         }
         function callModule(module, method, args) {
+            // Basecamp's package manager: what is installed (the mock's `packages`, else this app and
+            // the LEZ Bridge pair Names ships, already in).
+            if (module === "package_manager" && method === "getInstalledPackages") {
+                var me = { name: "names_ui", version: "0.17.0", installDir: "/Users/you/Library/Application Support/Logos/LogosBasecamp/plugins/names_ui" }
+                var pk = (%(mock)s).packages
+                return JSON.stringify(pk ? [me].concat(pk) : [me, { name: "lez_bridge", version: "0.1.0", hashes: { root: "13025b09ca142a2dc24ca01ee94805eb75af8a2161c05c8f2eb480addc5b809c" } }, { name: "lez_bridge_ui", version: "0.1.0", hashes: { root: "c391b90698b2a26bb71faa996ca96f3809da3413ba61d0cbcb9616b5eca9109a" } }])
+            }
+            if (module === "names" && method === "file_sha256")
+                return ok(String(args[0]).indexOf("lez_bridge_ui") >= 0 ? "8bba2edab1d5a638c37540a21d7fab2202ec7d6f91498bbbfa25706ab245bf42" : "bdaff1d82bbb95caeaf1399192a920e895527e8e185fa4dae380b86a21a3fb96")
             if (module === "lez_bridge") {
                 var lb = (%(mock)s).bridge
                 if (!lb) return JSON.stringify({ error: "Method not found" })
@@ -86,7 +95,7 @@ BRIDGE = r"""
             }
             // The names network: set_names_network moves it, get_config says it.
             if (method === "set_names_network") { root.mockNet = String(args[0]); method = "get_config"; var wrapNet = true }
-            if (method === "get_config") return (function(c) { return wrapNet ? ok(c) : JSON.stringify(c) })({ features: ["reveal_name"], bridge_programs: ["JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr"], names_network: { id: root.mockNet || "lez-0.3" }, zone: (%(mock)s).zone || { id: "home", name: "Home", channel: "%(home_channel)s", home: true }, names_sequencer: "http://127.0.0.1:3040", registry: %(registry)s, sequencer: (%(mock)s).zone ? "http://127.0.0.1:3041" : "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json", cli: "/Users/you/.local/bin/names", cli_wallet: "/Users/you/.lee/wallet", bridge_key: "%(bridge_key)s", bridge_node: null, module_version: root.neededModule })
+            if (method === "get_config") return (function(c) { return wrapNet ? ok(c) : JSON.stringify(c) })({ features: ["reveal_name", "request_access_with", "file_sha256"], bridge_programs: ["JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr"], names_network: { id: root.mockNet || "lez-0.3" }, zone: (%(mock)s).zone || { id: "home", name: "Home", channel: "%(home_channel)s", home: true }, names_sequencer: "http://127.0.0.1:3040", registry: %(registry)s, sequencer: (%(mock)s).zone ? "http://127.0.0.1:3041" : "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json", cli: "/Users/you/.local/bin/names", cli_wallet: "/Users/you/.lee/wallet", bridge_key: "%(bridge_key)s", bridge_node: null, module_version: root.neededModule })
             if (method === "normalize") return String(args[0]).toLowerCase().replace(/\.lez$/, "")
             if (method === "mine") return ok({ names: names.filter(function(entry) { return !(%(mock)s).noNames && entry.owner === "%(alice)s" }).map(function(entry) {
                 return { name: entry.name, display: entry.name + ".lez", owner: entry.owner, expires: null, never: true, lapsed: false } }), pending: ((%(mock)s).pending || []).map(function(p) {
@@ -276,6 +285,17 @@ def zone_request(in_use, removed=False):
             % (ZONE_B, ZONE_B, "null" if removed else '"Games zone"', "true" if in_use else "false", "true" if removed else "false"))
 
 SCENARIOS = {
+    'claim-install': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openClaim();  }) })',
+    'claim-install-asking': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openClaim(); Qt.callLater(function() { Qt.callLater(function() { root.bridgeInstall = { phase: "asking", line: "Basecamp asks you to confirm the install…" } }) }) }) })',
+    'claim-installing': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openClaim(); Qt.callLater(function() { Qt.callLater(function() { root.bridgeInstall = { phase: "installing", line: "Installing the LEZ Bridge module…" } }) }) }) })',
+    'claim-install-slow': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openClaim(); Qt.callLater(function() { Qt.callLater(function() { root.bridgeInstall = { phase: "slow", line: "Still installing the LEZ Bridge app…" } }) }) }) })',
+    'claim-install-failed': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openClaim(); Qt.callLater(function() { Qt.callLater(function() { root.bridgeInstall = { phase: "failed", line: "Basecamp hasn\'t learnt yet that Names may ask this (it does at its next start), so nothing was installed. Or install it yourself: Package Manager (the cube icon) → Install Local Package, the file /Users/you/Library/Application Support/Logos/LogosBasecamp/plugins/names_ui/qml/bundled/lez_bridge.lgx, then /Users/you/Library/Application Support/Logos/LogosBasecamp/plugins/names_ui/qml/bundled/lez_bridge_ui.lgx." } }) }) }) })',
+    'claim-idle': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openClaim();  }) })',
+    'claim-starting': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openClaim(); Qt.callLater(function() { Qt.callLater(function() { root.bridgeInstall = { phase: "starting", line: "Starting the LEZ Bridge: Basecamp opens its app for a moment, then Names comes back." } }) }) }) })',
+    'claim-older': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openClaim();  }) })',
+    'claim-updated': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openClaim(); Qt.callLater(function() { Qt.callLater(function() { root.claimCheckWith = false; root.bridgeInstall = { phase: "updated", line: "Updated. The LEZ Bridge already running keeps its old version until it starts again: the next time Basecamp starts." } }) }) }) })',
+    'approve-checking-publisher': 'root.appRequests = [{ id: "r7", kind: "connect", app: "lez_bridge", reason: "To claim bridge deposits into your public account", created: Date.now(), expires: Date.now() + 600000, checking: true, checking_what: "who publishes lez_bridge", choices: [{ account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", label: "Names wallet, main public account", granted: false }], publisher: { status: "checking" } }]; root.publisherSince = { r7: Date.now() - 4000 }; root.publisherNow = Date.now()',
+    'wallet-starting': 'root.openWallet("home"); root.sayRead(root.moduleNoAnswer)',
     'claim-card': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4") })',
     'claim-missing': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openClaim();  }) })',
     'claim-start': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openClaim();  }) })',
@@ -490,6 +510,17 @@ ZONE_ACTIVITY = [
     {"id": "z4", "at": 1791970000, "kind": "send", "chain": "logos", "from": "66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b", "to": "73058ad5edb0e72b66c3e05ae90471382c3bb4d61314db995ef40e674dbf591e", "amount": "5000", "fee": "2018", "state": "in_block"},
 ]
 MOCKS = {
+    'claim-install': {'packages': []},
+    'claim-install-asking': {'packages': []},
+    'claim-installing': {'packages': []},
+    'claim-install-slow': {'packages': []},
+    'claim-install-failed': {'packages': []},
+    'claim-idle': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': '13025b09ca142a2dc24ca01ee94805eb75af8a2161c05c8f2eb480addc5b809c'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'c391b90698b2a26bb71faa996ca96f3809da3413ba61d0cbcb9616b5eca9109a'}}]},
+    'claim-starting': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': '13025b09ca142a2dc24ca01ee94805eb75af8a2161c05c8f2eb480addc5b809c'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'c391b90698b2a26bb71faa996ca96f3809da3413ba61d0cbcb9616b5eca9109a'}}]},
+    'claim-older': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'a2c6c3117443a92f2a5b2a1a2267175f4f82ed209a3dae8e554461bd09df0d18'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': '788f2f0dde4bd7ae'}}], 'bridge': {}},
+    'claim-updated': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'a2c6c3117443a92f2a5b2a1a2267175f4f82ed209a3dae8e554461bd09df0d18'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': '788f2f0dde4bd7ae'}}], 'bridge': {}},
+    'approve-checking-publisher': {},
+    'wallet-starting': {},
     "claim-missing": {},
     "claim-start": {'bridge': {}},
     "claim-checking": {'bridge': {}},
