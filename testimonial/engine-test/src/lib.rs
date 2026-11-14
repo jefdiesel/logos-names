@@ -1,4 +1,4 @@
-//! Engine-test harness: the real testimonial guest ELF on LEZ v0.4.0-rc1's real state machine
+//! Engine-test harness: the real testimonial guest ELF on LEZ v0.4.0-rc3's real state machine
 //! (`V03State`, `ValidatedStateDiff`), real signatures and the real timestamp check. No chain,
 //! no network, no fees, and no admission evidence ever: the program admits its own PDAs.
 

@@ -3,7 +3,7 @@
 `lez-tx.js` and `lns-tx.js` are hand-written copies of Rust's borsh layouts, so they are
 checked against the real thing here, not by reading them.
 
-- `src/main.rs` builds on the real LEZ `v0.4.0-rc1` types, `names_core` and the real guest.
+- `src/main.rs` builds on the real LEZ `v0.4.0-rc3` types, `names_core` and the real guest.
   It is its own workspace and is in no build or deployment.
 - `vectors.json` is bytes the Rust types made. `gateway/public/app/lez-tx.test.mjs`
   reproduces them.

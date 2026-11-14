@@ -1,4 +1,4 @@
-//! The real testimonial guest on LEZ v0.4.0-rc1's state machine. Run with
+//! The real testimonial guest on LEZ v0.4.0-rc3's state machine. Run with
 //! `cargo test --release -p testimonial_engine_test -- --nocapture`.
 
 use lee_core::account::{AccountId, Actor};

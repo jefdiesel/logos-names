@@ -2,7 +2,7 @@
 //!
 //! It deploys the program, creates a token, mints, sends (public or private, either side),
 //! lists holdings and receives pending private credits, all through the stock LEZ `wallet`
-//! crate (tag v0.4.0-rc1). The sends reuse the wallet's native-transfer path with the token
+//! crate (tag v0.4.0-rc3). The sends reuse the wallet's native-transfer path with the token
 //! program in place of the native one; see `docs/wallet/TOKENS.md`.
 //!
 //! Safety: the wallet's built-in default sequencer is the public testnet. This tool always
