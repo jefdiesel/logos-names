@@ -425,7 +425,10 @@ afterwards.
      `"new": true`, which adds its admission evidence.
    - Every program named must be one you declared. The wallet's own Names registry (either
      network's) and its token program are refused, at declaration and in a call, as the root, as
-     a declared actor's program or as a program account's owner.
+     a declared actor's program or as a program account's owner. The program that holds the
+     person's bridged tokens on LEZ 0.4 (the bridge Config's token program) is refused as the
+     root only: a call to the bridge may still declare it. The wallet reads that program from the
+     chain; if it can't, it signs nothing. Each rule is applied again at approval and at re-sign.
    - `fee` is the fee declaration exactly as signed: the payer, the gas limit, the tip and the
      max fee. The payer must not be the signing account, nor any account of the person's wallet
      (that is an ordinary call, `propose_call`), and the call must not declare an actor of the
@@ -452,7 +455,8 @@ afterwards.
    then gives `state: "done"`, `transaction` (the half-signed `PublicTransaction`, hex of its borsh
    bytes) and `hash`. The request is used up: approving it again is refused, and the transaction
    can be submitted once on this chain (rc3 binds no chain id: after a reset of the test network,
-   or on another LEZ 0.4 chain where the account is unused, the payer could submit it again).
+   or on another LEZ 0.4 chain where the account's nonce comes back to what it was, the payer
+   could submit it again).
 6. **If the relay says it is busy** (its payer's nonce moved), call `resign_relayed_call(request)`:
    the wallet builds the call again and signs it only if nothing but the payer's nonce changed
    (at most 3 times, within 10 minutes of the approval). A refusal's `code` says what to do:
@@ -464,10 +468,11 @@ afterwards.
 under `/LEE/v0.3/Message/Public/`: the declared actors and signing accounts, the root call and its
 bytes, the fee declaration (payer, gas limit, tip, max fee), both signers' nonces, and the
 admission evidence. So the relay can't give the transaction another payer, other caps, another
-byte or another actor without breaking the account's signature, and it can't replay it: it names
-the account's current nonce. rc3 public transactions carry no validity window: the request
-expires after 10 minutes like every request, and the signed transaction dies with the account's
-next transaction. Checked by the names CLI's test `a_half_signed_call_verifies_and_binds_its_payer`
+byte or another actor without breaking the account's signature. It names the account's current
+nonce, so on this chain it lands at most once and dies with the account's next transaction. rc3
+binds no chain id and carries no validity window: after a reset of the test network, or on another
+LEZ 0.4 chain where the account's nonce comes back to what it was when it signed, the payer could
+submit it again. The request itself expires after 10 minutes like every request. Checked by the names CLI's test `a_half_signed_call_verifies_and_binds_its_payer`
 (vector `cli/tests/vectors/public-call-v1.json`). The full argument, statement by statement with
 its test, is in [basecamp-module/rust-lib/SIGNING.md](../../basecamp-module/rust-lib/SIGNING.md).
 

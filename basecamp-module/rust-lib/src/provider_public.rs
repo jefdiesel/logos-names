@@ -11,7 +11,8 @@
 //! message, payer, fee caps and both signers' nonces included. So the payer can't swap itself
 //! for another, raise the caps or change a byte, and the transaction is good once on this chain.
 //! rc3 binds no chain id: after a reset of the bridge test network, or on another LEZ 0.4 chain
-//! where the account is unused, the payer could submit it again (a known limit, upstream).
+//! where the account's nonce comes back to what it was, the payer could submit it again (a known
+//! limit, upstream).
 
 use crate::provider::{self, account_ref, account_written};
 use crate::registry::{self, AccountId};
@@ -124,7 +125,7 @@ pub fn resign_check(approved: &Value, last_payer_nonce: Option<u128>, now: &Valu
 }
 
 /// What the wallet says about who sees the signed transaction afterwards. Fixed.
-pub const AFTER: &str = "Your wallet sends nothing and pays nothing: it gives the signed transaction back to the app. It can't see what happens to it after that. The payer can only submit exactly these bytes, and only once on this chain: changing the program, an account, the fee or one byte of the message breaks your signature. After a reset of this test network, or on another LEZ 0.4 chain where your account is still unused, the payer could submit it again.";
+pub const AFTER: &str = "Your wallet sends nothing and pays nothing: it gives the signed transaction back to the app. It can't see what happens to it after that. The payer can only submit exactly these bytes, and only once on this chain: changing the program, an account, the fee or one byte of the message breaks your signature. After a reset of this test network, or on another LEZ 0.4 chain where your account's nonce comes back to what it is now, the payer could submit it again.";
 
 fn privacy_line(key: &str) -> Option<&'static str> {
     PRIVACY.iter().find(|(k, _)| *k == key).map(|(_, line)| *line)
@@ -184,6 +185,39 @@ fn not_own(id: &str, own: &OwnPrograms) -> Result<(), String> {
     }
 }
 
+/// Programs a relayed call may never have as its ROOT, though another program may reach them
+/// (as a declared actor's program): where the person's tokens sit (the bridge's token program on
+/// LEZ 0.4, the wallet's own token program). A root call to them, signed by the holder, can move
+/// the tokens; reached from another program they refuse a transfer (it isn't the root signer).
+pub type RootOnly = [(String, &'static str)];
+
+fn not_root(id: &str, root_only: &RootOnly) -> Result<(), String> {
+    match root_only.iter().find(|(program, _)| program == id) {
+        Some(_) => Err(format!(
+            "{id} holds tokens your accounts have (on LEZ 0.4, the bridged tokens): a call made directly to it can move them, so the wallet never signs one an app hands it this way. A call to another program may still reach it (a bridge claim does)."
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Every program a stored relayed call names, checked again as it is shown, approved or signed
+/// again: the root against `own` and `root_only`, each declared actor's program and each program
+/// account's owner against `own`. A request stored by an earlier build, or proposed before the
+/// configuration changed, is held to the same rule as a new one.
+pub fn programs_allowed(request: &Value, own: &OwnPrograms, root_only: &RootOnly) -> Result<(), String> {
+    let root = request["program"].as_str().unwrap_or_default();
+    not_own(root, own)?;
+    not_root(root, root_only)?;
+    for entry in request["accounts"].as_array().map(Vec::as_slice).unwrap_or_default() {
+        for key in ["program", "of"] {
+            if let Some(program) = entry[key].as_str().filter(|program| *program != "native") {
+                not_own(program, own)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `[program, …]` as an app declares them: 1 to `MAX_DECLARED_PROGRAMS` program IDs, none of them
 /// the wallet's own (`own`).
 pub fn programs_request(app: &str, programs_json: &str, reason: &str, own: &OwnPrograms, now: u64) -> Result<Value, String> {
@@ -213,7 +247,16 @@ pub fn programs_request(app: &str, programs_json: &str, reason: &str, own: &OwnP
 /// was given). `call_json`: `{program, message, accounts, fee: {payer, gas_limit, tip, max_fee},
 /// privacy}` (docs/wallet/PROVIDER-SDK.md, "Calls someone else pays for"). `declared` are the
 /// programs the app declared (`declare_programs`). The CLI's build (`report`) is added after.
-pub fn relayed_call_request(app: &str, account: &str, call_json: &str, summary: &str, declared: &[String], own: &OwnPrograms, now: u64) -> Result<Value, String> {
+pub fn relayed_call_request(
+    app: &str,
+    account: &str,
+    call_json: &str,
+    summary: &str,
+    declared: &[String],
+    own: &OwnPrograms,
+    root_only: &RootOnly,
+    now: u64,
+) -> Result<Value, String> {
     let (private, id) = account_ref(account)?;
     if private {
         return Err("a relayed call is signed by a public account (Public/<id>)".to_owned());
@@ -229,8 +272,10 @@ pub fn relayed_call_request(app: &str, account: &str, call_json: &str, summary: 
         }
     }
     let program = registry::account_text(&program_id(call["program"].as_str().ok_or("the call names its program")?)?);
-    // The wallet's own programs are never reached this way, whatever was declared before.
+    // The wallet's own programs are never reached this way, whatever was declared before, and
+    // a program that holds the person's tokens is never the root.
     not_own(&program, own)?;
+    not_root(&program, root_only)?;
     if !declared.contains(&program) {
         return Err(format!("{} is not a program this app declared; ask with declare_programs first", short(&program)));
     }
@@ -335,9 +380,13 @@ pub fn cli_input(request: &Value, expect_hash: Option<&str>) -> Value {
 /// words: `{lines, warnings, privacy, after, hash, refused, why}`. `label` is what the Program
 /// Registry says of the program (`provider::label_fields` input), `network` how the network is
 /// named (the site's rule: version · name). Refused when the build doesn't match the request.
-pub fn sheet(request: &Value, report: &Value, label: Option<&Value>, network: &str) -> Value {
+pub fn sheet(request: &Value, report: &Value, label: Option<&Value>, network: &str, own: &OwnPrograms, root_only: &RootOnly) -> Value {
     let app = clean_text(request["app"].as_str().unwrap_or_default(), 40);
     let mut why: Vec<String> = Vec::new();
+    // The same rule as when it was asked, applied again now: never shown as approvable otherwise.
+    if let Err(refused) = programs_allowed(request, own, root_only) {
+        why.push(refused);
+    }
     for (field, want) in [("account", &request["account"]), ("program", &request["program"]), ("payer", &request["fee"]["payer"])] {
         if report[field] != *want {
             why.push(format!("the wallet's build names another {field} than the request"));
@@ -494,7 +543,7 @@ mod tests {
     #[test]
     fn a_relayed_call_is_built_from_declared_programs_only() {
         let declared = vec![BRIDGE.to_owned()];
-        let request = relayed_call_request("lez_bridge", ACCOUNT, &call(json!({})), "Claim 100 dUSDC", &declared, &own(), 1).unwrap();
+        let request = relayed_call_request("lez_bridge", ACCOUNT, &call(json!({})), "Claim 100 dUSDC", &declared, &own(), &[], 1).unwrap();
         assert_eq!(request["kind"], RELAYED_CALL);
         assert_eq!(request["fee"]["payer"], PAYER);
         assert_eq!(request["accounts"][1]["new"], true);
@@ -502,27 +551,27 @@ mod tests {
         assert_eq!(input["fee"]["max_fee"], "900000");
         assert_eq!(input["expect_hash"], "ab");
         // Refused before anything is built.
-        assert!(relayed_call_request("lez_bridge", ACCOUNT, &call(json!({})), "", &[], &own(), 1).unwrap_err().contains("declare_programs"));
-        assert!(relayed_call_request("lez_bridge", ACCOUNT, &call(json!({ "fee": { "payer": ACCOUNT, "gas_limit": 1, "max_fee": "1" } })), "", &declared, &own(), 1)
+        assert!(relayed_call_request("lez_bridge", ACCOUNT, &call(json!({})), "", &[], &own(), &[], 1).unwrap_err().contains("declare_programs"));
+        assert!(relayed_call_request("lez_bridge", ACCOUNT, &call(json!({ "fee": { "payer": ACCOUNT, "gas_limit": 1, "max_fee": "1" } })), "", &declared, &own(), &[], 1)
             .unwrap_err()
             .contains("ordinary call"));
-        assert!(relayed_call_request("lez_bridge", ACCOUNT, &call(json!({ "accounts": [{ "account": PAYER }] })), "", &declared, &own(), 1)
+        assert!(relayed_call_request("lez_bridge", ACCOUNT, &call(json!({ "accounts": [{ "account": PAYER }] })), "", &declared, &own(), &[], 1)
             .unwrap_err()
             .contains("fee payer"));
-        assert!(relayed_call_request("lez_bridge", ACCOUNT, &call(json!({ "privacy": "say anything" })), "", &declared, &own(), 1).unwrap_err().contains("privacy is one of"));
-        assert!(relayed_call_request("lez_bridge", "Private/7kHXTZHzMCz3PgiQVA9PE5DZLa18xpYvijdPCPK4J6ak", &call(json!({})), "", &declared, &own(), 1).is_err());
-        assert!(relayed_call_request("lez_bridge", ACCOUNT, &call(json!({ "message": "" })), "", &declared, &own(), 1).is_err());
-        assert!(relayed_call_request("lez_bridge", ACCOUNT, &call(json!({ "fee": { "payer": PAYER, "gas_limit": 0, "max_fee": "1" } })), "", &declared, &own(), 1).is_err());
-        assert!(relayed_call_request("lez_bridge", ACCOUNT, &call(json!({ "extra": 1 })), "", &declared, &own(), 1).unwrap_err().contains("no field"));
-        assert!(relayed_call_request("lez_bridge", ACCOUNT, &call(json!({ "accounts": [{ "account": "x", "program": OTHER }] })), "", &declared, &own(), 1).is_err());
+        assert!(relayed_call_request("lez_bridge", ACCOUNT, &call(json!({ "privacy": "say anything" })), "", &declared, &own(), &[], 1).unwrap_err().contains("privacy is one of"));
+        assert!(relayed_call_request("lez_bridge", "Private/7kHXTZHzMCz3PgiQVA9PE5DZLa18xpYvijdPCPK4J6ak", &call(json!({})), "", &declared, &own(), &[], 1).is_err());
+        assert!(relayed_call_request("lez_bridge", ACCOUNT, &call(json!({ "message": "" })), "", &declared, &own(), &[], 1).is_err());
+        assert!(relayed_call_request("lez_bridge", ACCOUNT, &call(json!({ "fee": { "payer": PAYER, "gas_limit": 0, "max_fee": "1" } })), "", &declared, &own(), &[], 1).is_err());
+        assert!(relayed_call_request("lez_bridge", ACCOUNT, &call(json!({ "extra": 1 })), "", &declared, &own(), &[], 1).unwrap_err().contains("no field"));
+        assert!(relayed_call_request("lez_bridge", ACCOUNT, &call(json!({ "accounts": [{ "account": "x", "program": OTHER }] })), "", &declared, &own(), &[], 1).is_err());
     }
 
     #[test]
     fn the_sheet_says_what_the_wallet_built_in_plain_words() {
         let declared = vec![BRIDGE.to_owned()];
         let summary = "Claim \u{202E}CDSUd 001\u{202C} for you\u{200B}\nnow";
-        let request = relayed_call_request("lez_bridge", ACCOUNT, &call(json!({})), summary, &declared, &own(), 1).unwrap();
-        let sheet = sheet(&request, &report_for(&request), Some(&json!({ "text": "RFP-022 bridge", "verified": true })), "LEZ 0.4 · bridge test network");
+        let request = relayed_call_request("lez_bridge", ACCOUNT, &call(json!({})), summary, &declared, &own(), &[], 1).unwrap();
+        let sheet = sheet(&request, &report_for(&request), Some(&json!({ "text": "RFP-022 bridge", "verified": true })), "LEZ 0.4 · bridge test network", &own(), &[]);
         assert_eq!(sheet["refused"], false, "{sheet}");
         let lines: Vec<&str> = sheet["lines"].as_array().unwrap().iter().map(|l| l.as_str().unwrap()).collect();
         assert_eq!(lines[0], "lez_bridge asks your wallet to sign a call that another account pays for.");
@@ -544,14 +593,14 @@ mod tests {
         let mut report = report_for(&request);
         report["payer"] = json!(ACCOUNT);
         report["max_fee"] = json!("1");
-        let refused = super::sheet(&request, &report, None, "LEZ 0.4 · bridge test network");
+        let refused = super::sheet(&request, &report, None, "LEZ 0.4 · bridge test network", &own(), &[]);
         assert_eq!(refused["refused"], true);
         assert_eq!(refused["why"].as_array().unwrap().len(), 2, "{refused}");
         assert!(refused["lines"][2].as_str().unwrap().contains("the Program Registry isn't installed"));
         // Its own balance given to the program is a warning.
         let mut report = report_for(&request);
         report["own_balance"] = json!(true);
-        let warned = super::sheet(&request, &report, None, "LEZ 0.4 · bridge test network");
+        let warned = super::sheet(&request, &report, None, "LEZ 0.4 · bridge test network", &own(), &[]);
         assert!(warned["warnings"][1].as_str().unwrap().contains("can move LEZ out of"), "{warned}");
     }
 
@@ -572,7 +621,7 @@ mod tests {
     #[test]
     fn a_build_that_differs_from_the_request_is_refused_never_shown_as_the_request() {
         let declared = vec![BRIDGE.to_owned()];
-        let request = relayed_call_request("lez_bridge", ACCOUNT, &call(json!({})), "", &declared, &own(), 1).unwrap();
+        let request = relayed_call_request("lez_bridge", ACCOUNT, &call(json!({})), "", &declared, &own(), &[], 1).unwrap();
         for (field, value) in [
             ("account", json!(PAYER)),
             ("program", json!(OTHER)),
@@ -586,7 +635,7 @@ mod tests {
         ] {
             let mut report = report_for(&request);
             report[field] = value;
-            let shown = sheet(&request, &report, None, "LEZ 0.4 · bridge test network");
+            let shown = sheet(&request, &report, None, "LEZ 0.4 · bridge test network", &own(), &[]);
             assert_eq!(shown["refused"], true, "{field}: {shown}");
         }
     }
@@ -598,7 +647,7 @@ mod tests {
     fn the_cli_input_is_the_shared_fixture() {
         let declared = vec![BRIDGE.to_owned()];
         let accounts = json!([{ "account": OTHER }, { "account": OTHER, "program": "native" }, { "seed": "22".repeat(32), "new": true }]);
-        let request = relayed_call_request("lez_bridge", ACCOUNT, &call(json!({ "accounts": accounts })), "", &declared, &own(), 1).unwrap();
+        let request = relayed_call_request("lez_bridge", ACCOUNT, &call(json!({ "accounts": accounts })), "", &declared, &own(), &[], 1).unwrap();
         let fixture: Value = serde_json::from_str(include_str!("../testdata/relayed-call-input.json")).unwrap();
         assert_eq!(cli_input(&request, None), fixture);
     }
@@ -660,15 +709,15 @@ mod tests {
             assert!(declared.contains(words) && declared.contains("never signs"), "{declared}");
             // Even if an older wallet had let the app declare it.
             let both = vec![BRIDGE.to_owned(), own_id.to_owned()];
-            let root = relayed_call_request("lez_bridge", ACCOUNT, &call(json!({ "program": own_id, "accounts": [] })), "", &both, &own(), 1).unwrap_err();
+            let root = relayed_call_request("lez_bridge", ACCOUNT, &call(json!({ "program": own_id, "accounts": [] })), "", &both, &own(), &[], 1).unwrap_err();
             assert!(root.contains(words), "{root}");
-            let actor = relayed_call_request("lez_bridge", ACCOUNT, &call(json!({ "accounts": [{ "account": OTHER, "program": own_id }] })), "", &both, &own(), 1).unwrap_err();
+            let actor = relayed_call_request("lez_bridge", ACCOUNT, &call(json!({ "accounts": [{ "account": OTHER, "program": own_id }] })), "", &both, &own(), &[], 1).unwrap_err();
             assert!(actor.contains(words), "{actor}");
-            let pda = relayed_call_request("lez_bridge", ACCOUNT, &call(json!({ "accounts": [{ "seed": "33".repeat(32), "of": own_id }] })), "", &both, &own(), 1).unwrap_err();
+            let pda = relayed_call_request("lez_bridge", ACCOUNT, &call(json!({ "accounts": [{ "seed": "33".repeat(32), "of": own_id }] })), "", &both, &own(), &[], 1).unwrap_err();
             assert!(pda.contains(words), "{pda}");
         }
         assert!(programs_request("lez_bridge", &json!([BRIDGE]).to_string(), "", &own(), 1).is_ok(), "the bridge still passes");
-        assert!(relayed_call_request("lez_bridge", ACCOUNT, &call(json!({})), "", &[BRIDGE.to_owned()], &own(), 1).is_ok());
+        assert!(relayed_call_request("lez_bridge", ACCOUNT, &call(json!({})), "", &[BRIDGE.to_owned()], &own(), &[], 1).is_ok());
     }
 
     /// S1: an actor of the person's own account under another program is the account acting, a
@@ -676,11 +725,60 @@ mod tests {
     #[test]
     fn an_own_actor_under_another_program_is_a_warning() {
         let declared = vec![BRIDGE.to_owned()];
-        let request = relayed_call_request("lez_bridge", ACCOUNT, &call(json!({})), "", &declared, &own(), 1).unwrap();
+        let request = relayed_call_request("lez_bridge", ACCOUNT, &call(json!({})), "", &declared, &own(), &[], 1).unwrap();
         let mut report = report_for(&request);
         report["actors"] = json!([{ "account": ACCOUNT.trim_start_matches("Public/"), "program": BRIDGE }, { "account": ACCOUNT.trim_start_matches("Public/"), "program": TOKENS }]);
-        let shown = sheet(&request, &report, None, "LEZ 0.4 · bridge test network");
+        let shown = sheet(&request, &report, None, "LEZ 0.4 · bridge test network", &own(), &[]);
         assert!(shown["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().starts_with("The call acts as your account toward 3gF78H")), "{shown}");
         assert!(!shown["lines"].as_array().unwrap().iter().any(|l| l.as_str().unwrap().contains("data for 3gF78H")));
+    }
+
+    /// D2: the program holding the person's bridged tokens is never the root of a relayed call,
+    /// but a call to the bridge may still declare it (every bridge claim does).
+    #[test]
+    fn the_bridged_tokens_program_is_refused_as_root_only() {
+        let bridged = "4VScJ7mtwaanQ5gcSZZw2iAMHYAbLrVmbYKwEGx2eSex";
+        let root_only = vec![(bridged.to_owned(), "bridged_tokens")];
+        let declared = vec![BRIDGE.to_owned(), bridged.to_owned()];
+        assert!(programs_request("lez_bridge", &json!([BRIDGE, bridged]).to_string(), "", &own(), 1).is_ok(), "declaring it is fine");
+        let root = relayed_call_request("lez_bridge", ACCOUNT, &call(json!({ "program": bridged, "accounts": [] })), "", &declared, &own(), &root_only, 1).unwrap_err();
+        assert!(root.contains("holds tokens your accounts have"), "{root}");
+        let claim = relayed_call_request(
+            "lez_bridge",
+            ACCOUNT,
+            &call(json!({ "accounts": [{ "account": ACCOUNT, "program": bridged }, { "account": OTHER, "program": bridged }] })),
+            "",
+            &declared,
+            &own(),
+            &root_only,
+            1,
+        );
+        assert!(claim.is_ok(), "a claim that declares it passes: {claim:?}");
+    }
+
+    /// D1: the rule holds at approval time too. A request stored by an earlier build (here, made
+    /// by hand) to the Names registry, or to the bridged tokens' program as root, is refused on its
+    /// sheet; a fine one stays approvable.
+    #[test]
+    fn a_stored_request_is_checked_again_on_its_sheet() {
+        let declared = vec![BRIDGE.to_owned()];
+        let fine = relayed_call_request("lez_bridge", ACCOUNT, &call(json!({})), "", &declared, &own(), &[], 1).unwrap();
+        assert_eq!(sheet(&fine, &report_for(&fine), None, "LEZ 0.4", &own(), &[])["refused"], false);
+        let mut to_registry = fine.clone();
+        to_registry["program"] = json!(REGISTRY_04);
+        let mut report = report_for(&to_registry);
+        report["program"] = json!(REGISTRY_04);
+        let shown = sheet(&to_registry, &report, None, "LEZ 0.4", &own(), &[]);
+        assert_eq!(shown["refused"], true, "{shown}");
+        assert!(shown["why"][0].as_str().unwrap().contains("Names registry"), "{shown}");
+        let mut actor = fine.clone();
+        actor["accounts"] = json!([{ "account": OTHER, "program": TOKENS }]);
+        assert_eq!(sheet(&actor, &report_for(&actor), None, "LEZ 0.4", &own(), &[])["refused"], true);
+        let bridged = "4VScJ7mtwaanQ5gcSZZw2iAMHYAbLrVmbYKwEGx2eSex";
+        let mut tokens_root = fine.clone();
+        tokens_root["program"] = json!(bridged);
+        let mut report = report_for(&tokens_root);
+        report["program"] = json!(bridged);
+        assert_eq!(sheet(&tokens_root, &report, None, "LEZ 0.4", &own(), &[(bridged.to_owned(), "bridged_tokens")])["refused"], true);
     }
 }

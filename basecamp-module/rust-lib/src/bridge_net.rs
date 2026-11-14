@@ -342,6 +342,23 @@ fn call(url: &str, method: &str, params: Value, deadline: Deadline) -> Result<Va
     registry::rpc(url, method, params, deadline).map_err(problem)
 }
 
+/// The token program the bridge `program`'s Config names on the chain at `url`: where the
+/// person's bridged tokens sit. `None` when the chain has no Config for that bridge (then it
+/// holds no bridged tokens). Any failed read is an error, never `None`: a caller that must not
+/// sign a call to it can't take "unknown" for "none" (fail closed).
+pub fn token_program_of(url: &str, program: &AccountId) -> Result<Option<AccountId>, String> {
+    let deadline = Deadline::after(Duration::from_secs(8));
+    let config = call(url, "getAccount", json!([registry::account_text(&config_address(program))]), deadline)?;
+    if config.is_null() {
+        return Ok(None);
+    }
+    let bytes = state_under(&config, program)?;
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    decode_config(&bytes).map(|(token_program, _)| Some(token_program))
+}
+
 /// What the state file says, or an empty object.
 fn load_state(dir: &Path) -> Value {
     std::fs::read_to_string(dir.join(STATE_FILE)).ok().and_then(|text| serde_json::from_str(&text).ok()).filter(Value::is_object).unwrap_or_else(|| json!({}))

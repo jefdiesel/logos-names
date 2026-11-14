@@ -5786,7 +5786,8 @@ impl NamesModule for Names {
             }
             let declared = self.store().private.declared_of(&app);
             let own = self.own_programs();
-            let mut request = provider_public::relayed_call_request(&app, &account, &call_json, &summary, &declared, &own, now)?;
+            let root_only = self.root_only()?;
+            let mut request = provider_public::relayed_call_request(&app, &account, &call_json, &summary, &declared, &own, &root_only, now)?;
             let store = self.store();
             let written = request["account"].as_str().unwrap_or_default().to_owned();
             if !store.granted(&app).contains(&written) {
@@ -6593,6 +6594,12 @@ impl Names {
         let mut outcome = json!({ "decided": now });
         if request["kind"] == provider_public::PROGRAMS {
             let programs: Vec<String> = request["programs"].as_array().map(Vec::as_slice).unwrap_or_default().iter().filter_map(|p| p.as_str().map(str::to_owned)).collect();
+            // The same rule as when it was asked: a declaration stored by an earlier build, or
+            // asked before the configuration changed, never adds one of the wallet's own programs.
+            let own = self.own_programs();
+            if let Some((program, _)) = own.iter().find(|(known, _)| programs.contains(known)) {
+                return Err(format!("{program} is one of the wallet's own programs (its Names registry or token program); the wallet doesn't let an app ask to sign calls to it. Reject this."));
+            }
             self.store().private.declare(&app, &programs)?;
             outcome["state"] = json!("approved");
         } else {
@@ -6698,6 +6705,10 @@ impl Names {
         if !self.store().private.declared_of(&app).contains(&program) {
             return Err(again("this app no longer has that program declared".to_owned()));
         }
+        // The rule about the wallet's own programs and the person's tokens, applied again.
+        let own = self.own_programs();
+        let root_only = self.root_only().map_err(refused)?;
+        provider_public::programs_allowed(&request, &own, &root_only).map_err(refused)?;
         // The kept bytes are still the approved ones.
         let message = registry::unhex(request["message"].as_str().unwrap_or_default()).unwrap_or_default();
         if registry::hex(&<sha2::Sha256 as sha2::Digest>::digest(&message)) != request["approved_report"]["message_sha256"].as_str().unwrap_or_default() {
@@ -6737,8 +6748,9 @@ impl Names {
     /// networks (built-in and configured) and the token program its token methods use.
     fn own_programs(&self) -> Vec<(String, &'static str)> {
         let mut own: Vec<(String, &'static str)> = Vec::new();
+        // Compared as canonical IDs: a stored `Public/<id>` or one with spaces is the same program.
         let mut add = |id: Option<String>, kind: &'static str| {
-            if let Some(id) = id.filter(|id| registry::parse_account(id).is_ok()) {
+            if let Some(id) = id.and_then(|id| registry::parse_account(&id).ok()).map(|id| registry::account_text(&id)) {
                 if !own.iter().any(|(known, _)| *known == id) {
                     own.push((id, kind));
                 }
@@ -6746,11 +6758,55 @@ impl Names {
         };
         add(Some(DEFAULT_REGISTRY.to_owned()), "names_registry");
         add(Some(LEZ04_REGISTRY.to_owned()), "names_registry");
+        for retired in RETIRED_REGISTRIES {
+            add(Some(retired.to_owned()), "names_registry");
+        }
         add(self.program.as_ref().map(registry::account_text), "names_registry");
         add(self.parked["registry"].as_str().map(str::to_owned), "names_registry");
-        add(self.token_program.as_ref().map(registry::account_text), "token_program");
-        add(self.parked["token_program"].as_str().map(str::to_owned), "token_program");
+        // The wallet's own token program, except when it is the bridge's: a bridge claim declares
+        // that one as an actor's program, and it is refused as root (`root_only`) instead.
+        let bridged = self.bridge_tokens_program().ok().flatten();
+        for token_program in [self.token_program.as_ref().map(registry::account_text), self.parked["token_program"].as_str().map(str::to_owned)] {
+            if token_program.as_deref() != bridged.as_deref() {
+                add(token_program, "token_program");
+            }
+        }
         own
+    }
+
+    /// Programs a relayed call may never have as its root (`provider_public::RootOnly`): the
+    /// bridge's token program on LEZ 0.4, where the person's bridged tokens sit, and the wallet's
+    /// token programs. The bridge's is read from the chain (the bridge Config). If that read
+    /// fails, nothing is signed: the error is returned and the caller refuses (fail closed).
+    fn root_only(&self) -> Result<Vec<(String, &'static str)>, String> {
+        let mut list: Vec<(String, &'static str)> = Vec::new();
+        let bridged = self
+            .bridge_tokens_program()
+            .map_err(|why| format!("the wallet can't tell which program holds your bridged tokens ({why}), so it signs nothing now; try again"))?;
+        for id in [bridged, self.token_program.as_ref().map(registry::account_text), self.parked["token_program"].as_str().map(str::to_owned)]
+            .into_iter()
+            .flatten()
+            .filter_map(|id| registry::parse_account(&id).ok().map(|id| registry::account_text(&id)))
+        {
+            if !list.iter().any(|(known, _)| *known == id) {
+                list.push((id, "bridged_tokens"));
+            }
+        }
+        Ok(list)
+    }
+
+    /// The token program the configured bridge's Config names on LEZ 0.4 (see `bridge_net`), or
+    /// `None` when there is no such bridge there. An error when the chain can't be read.
+    #[cfg(not(test))]
+    fn bridge_tokens_program(&self) -> Result<Option<String>, String> {
+        let url = std::env::var("LOGOS_NAMES_BRIDGE_RPC").ok().filter(|url| !url.trim().is_empty()).unwrap_or_else(|| self.lez04_rpc());
+        bridge_net::token_program_of(&url, &self.bridge_program_now()).map(|found| found.map(|id| registry::account_text(&id)))
+    }
+
+    /// Tests set what the chain would say (`BRIDGE_TOKENS`); unset, there is no bridge.
+    #[cfg(test)]
+    fn bridge_tokens_program(&self) -> Result<Option<String>, String> {
+        tests::BRIDGE_TOKENS.with(|answer| answer.borrow().clone())
     }
 
     /// The approval sheet of a program declaration: each program's full ID and what the Program
@@ -6776,7 +6832,20 @@ impl Names {
         // The network the call was asked for, not the one in use now.
         let shown = request["network"].as_str().and_then(Net::parse).unwrap_or(self.net).shown();
         let network = format!("{} · {}", shown["version"].as_str().unwrap_or_default(), shown["name"].as_str().unwrap_or_default());
-        provider_public::sheet(request, &request["report"], label.as_ref(), &network)
+        let own = self.own_programs();
+        match self.root_only() {
+            Ok(root_only) => provider_public::sheet(request, &request["report"], label.as_ref(), &network, &own, &root_only),
+            Err(why) => {
+                // Fail closed: shown, but refused, until the wallet can read which program holds
+                // the person's bridged tokens.
+                let mut sheet = provider_public::sheet(request, &request["report"], label.as_ref(), &network, &own, &[]);
+                sheet["refused"] = json!(true);
+                if let Some(list) = sheet["why"].as_array_mut() {
+                    list.push(json!(why));
+                }
+                sheet
+            }
+        }
     }
 
     /// The approval sheet of a private call (see `provider_private::review`), with the
@@ -7261,6 +7330,11 @@ pub extern "Rust" fn logos_module_install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        /// What the chain says the configured bridge's token program is (`bridge_tokens_program`).
+        pub(super) static BRIDGE_TOKENS: std::cell::RefCell<Result<Option<String>, String>> = const { std::cell::RefCell::new(Ok(None)) };
+    }
 
     fn parsed(text: &str) -> Value {
         serde_json::from_str(text).expect("the module answers in JSON")
@@ -9762,6 +9836,88 @@ mod tests {
         assert_eq!(parsed(&ask(&mut names))["value"]["granted"], false);
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// D1, D2, D4 through the module itself: the wallet's own Names registry is refused at
+    /// declaration, and a request stored by an earlier build that names it is refused at approval
+    /// and at re-sign; the program holding the bridged tokens is refused as a root; and when the
+    /// wallet can't read which program that is, it signs nothing (fail closed).
+    #[test]
+    fn the_module_holds_its_own_programs_and_the_bridged_tokens_at_every_step() {
+        use sha2::Digest;
+        let bridge = "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7";
+        let bridged = "4VScJ7mtwaanQ5gcSZZw2iAMHYAbLrVmbYKwEGx2eSex";
+        let payer = "Public/DGu98d9jZfTAuJKr9y3vWC1DDAujYUaddb6ugTpgSBNs";
+        let account = format!("Public/{PUBLIC}");
+        let report = json!({
+            "hash": "cd".repeat(32), "account": account, "program": bridge, "payer": payer, "gas_limit": 120000, "tip": "0", "max_fee": "900000",
+            "message_len": 2, "message_sha256": registry::hex(&sha2::Sha256::digest([0u8, 0xff])),
+            "actors": [{ "account": PUBLIC, "program": bridge }], "creates": [], "own_balance": false,
+            "nonces": { PUBLIC: "3", payer.trim_start_matches("Public/"): "41" },
+        });
+        let tail = "case \"$*\" in\n\
+             *--version*) echo 'names 0.17.0 (LEZ v0.4.0-rc3)' ;;\n\
+             *\"public-call plan\"*) cat \"$(dirname \"$0\")/plan-out.json\" ;;\n\
+             *\"public-call sign\"*) echo 'signing-not-expected' > \"$(dirname \"$0\")/signed\"; echo '{}' ;;\n\
+             *) echo 'unexpected'; exit 1 ;;\n\
+             esac";
+        let (mut names, dir) = with_wallet("own-programs-every-step", tail);
+        std::fs::write(dir.join("plan-out.json"), report.to_string()).unwrap();
+        names.net = Net::Lez04;
+        connect(&mut names, "lez_bridge", &account);
+        // D4: the registry can't be declared through the module.
+        as_caller(app("lez_bridge"));
+        let refused = parsed(&names.declare_programs(json!([bridge, LEZ04_REGISTRY]).to_string(), "".into()));
+        assert!(refused["error"].as_str().unwrap().contains("Names registry"), "{refused}");
+        let refused = parsed(&names.declare_programs(json!([DEFAULT_REGISTRY]).to_string(), "".into()));
+        assert!(refused["error"].as_str().unwrap().contains("Names registry"), "{refused}");
+        let declared = parsed(&names.declare_programs(json!([bridge]).to_string(), "".into()))["value"]["request"].as_str().unwrap().to_owned();
+        assert_eq!(approve(&mut names, &declared, "")["value"]["state"], "approved");
+        // A fine call is proposed.
+        as_caller(app("lez_bridge"));
+        let call = json!({ "program": bridge, "message": "00ff", "fee": { "payer": payer, "gas_limit": 120000, "tip": "0", "max_fee": "900000" } });
+        let asked = parsed(&names.propose_relayed_call(account.clone(), call.to_string(), String::new()));
+        let id = asked["value"]["request"].as_str().unwrap_or_else(|| panic!("{asked}")).to_owned();
+        // D1: as if an earlier build had stored it to the registry (and let it be declared).
+        names.store().private.declare("lez_bridge", &[LEZ04_REGISTRY.to_owned()]).unwrap();
+        {
+            let stored = names.store().get_mut(&id).unwrap();
+            stored["program"] = json!(LEZ04_REGISTRY);
+            stored["report"]["program"] = json!(LEZ04_REGISTRY);
+        }
+        let at_approval = approve(&mut names, &id, &account);
+        assert!(at_approval["error"].as_str().unwrap().contains("refuses"), "{at_approval}");
+        assert!(!dir.join("signed").exists(), "nothing was signed");
+        // D1 at re-sign: the same request, as if approved and signed by an earlier build.
+        {
+            let stored = names.store().get_mut(&id).unwrap();
+            stored["state"] = json!("done");
+            stored["decided"] = json!(provider::now_ms());
+            stored["resigns"] = json!(0);
+            stored["approved_report"] = stored["report"].clone();
+            stored["signed_payer_nonce"] = json!("41");
+        }
+        as_caller(app("lez_bridge"));
+        let at_resign = parsed(&names.resign_relayed_call(id.clone()));
+        assert_eq!(at_resign["code"], "refused", "{at_resign}");
+        assert!(at_resign["error"].as_str().unwrap().contains("Names registry"), "{at_resign}");
+        assert!(!dir.join("signed").exists(), "nothing was signed");
+        // D2: the bridged tokens' program as the root is refused, even when declared.
+        BRIDGE_TOKENS.with(|answer| *answer.borrow_mut() = Ok(Some(bridged.to_owned())));
+        names.store().private.declare("lez_bridge", &[bridged.to_owned()]).unwrap();
+        as_caller(app("lez_bridge"));
+        let root = parsed(&names.propose_relayed_call(account.clone(), json!({ "program": bridged, "message": "00ff", "fee": call["fee"] }).to_string(), String::new()));
+        assert!(root["error"].as_str().unwrap().contains("holds tokens your accounts have"), "{root}");
+        // ... and a call to the bridge that declares it still goes.
+        let claim = json!({ "program": bridge, "message": "00ff", "accounts": [{ "account": PUBLIC, "program": bridged }], "fee": call["fee"] });
+        let fine = parsed(&names.propose_relayed_call(account.clone(), claim.to_string(), String::new()));
+        assert_eq!(fine["value"]["check"], "ready", "{fine}");
+        // Fail closed: the chain can't be read, so nothing is proposed.
+        BRIDGE_TOKENS.with(|answer| *answer.borrow_mut() = Err("the bridge test network didn't answer".to_owned()));
+        let closed = parsed(&names.propose_relayed_call(account.clone(), call.to_string(), String::new()));
+        assert!(closed["error"].as_str().unwrap().contains("can't tell which program holds your bridged tokens"), "{closed}");
+        BRIDGE_TOKENS.with(|answer| *answer.borrow_mut() = Ok(None));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
     }
 
     /// A call someone else pays for (LEZ 0.4): only to a program the app declared, built by the

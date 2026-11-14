@@ -119,7 +119,8 @@ the plain object must read `value` now. The Names app itself still gets the plai
 
 - rc3 binds no chain id and carries no validity window. A half-signed relayed call is good once
   on its chain, but after a reset of the test network, or on another LEZ 0.4 chain where the
-  account is unused, the payer could submit it again (it must co-sign). Raise a chain id or a
+  account's nonce comes back to what it was when it signed, the payer could submit it again (it
+  must co-sign). Raise a chain id or a
   distinct domain prefix upstream.
 - rc3 public messages share their hash prefix with v0.3.1 (theoretical cross-version confusion,
   upstream).

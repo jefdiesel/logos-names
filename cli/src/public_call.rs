@@ -11,9 +11,11 @@
 //! (declared actors and the accounts that sign), the root call (actor and message bytes), the fee
 //! declaration (payer, gas limit, tip, max fee), the nonces of BOTH signers, and the admission
 //! evidence. So the signed transaction can't be given another payer, other fee caps, other bytes
-//! or other actors (each changes the hash, and the account's signature no longer verifies), and it
-//! is good once: it names the account's and the payer's current nonces. rc3 public transactions
-//! carry no validity window; the account's next transaction (any) makes this one dead.
+//! or other actors (each changes the hash, and the account's signature no longer verifies). It names
+//! the account's and the payer's current nonces, so on this chain it lands at most once, and the
+//! account's next transaction (any) makes it dead. rc3 binds no chain id and carries no validity
+//! window: after a reset of the test network, or on another LEZ 0.4 chain where both nonces come
+//! back to these values, the payer could submit it again (a known limit, upstream).
 //!
 //! `plan` builds the message and says what it is (the hash the person approves); `sign` builds it
 //! again, refuses unless the hash is the approved one (an account used since, or a payer whose

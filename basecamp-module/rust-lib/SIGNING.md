@@ -71,6 +71,23 @@ Test: `the_wallet_s_own_programs_are_never_signed_for_this_way` (0.3 and 0.4 reg
 token program, each refused at declaration, as root, as an actor's program and as a PDA's owner;
 the bridge still passes).
 
+**The program that holds the person's bridged tokens is never the root.** On LEZ 0.4 the
+bridge's token program (named in the bridge Config) holds the dUSDC and wETH the wallet shows. A
+root call to it, signed by the holder, can move them; reached from another program (a bridge
+claim declares it), a transfer refuses, because it isn't the root signer. So it is refused as the
+root only (`not_root`), together with the wallet's own token programs.
+- The wallet reads the bridge's token program from the chain each time it checks (`bridge_net::token_program_of`).
+- If that read fails, the wallet signs nothing: proposing is refused, and a stored call's sheet is
+  refused (fail closed).
+- Tests: `the_bridged_tokens_program_is_refused_as_root_only` and the module test
+  `the_module_holds_its_own_programs_and_the_bridged_tokens_at_every_step`.
+
+**Every rule is applied again at approval and at re-sign** (`programs_allowed`). This covers a
+relayed call stored by an earlier build, or proposed before the configuration changed: its sheet
+is refused, it can't be approved, and it can't be re-signed. A program declaration naming one of
+the wallet's own programs can't be approved either. Tests:
+`a_stored_request_is_checked_again_on_its_sheet` and the module test above.
+
 **The person's own account under another program is a warning, not a data line:** "The call acts
 as your account toward X: it may move what your account holds there." Test:
 `an_own_actor_under_another_program_is_a_warning`.
@@ -94,9 +111,11 @@ So:
   longer verifies. The account's nonce moves when the call lands, so the same transaction can't
   land twice on the chain it landed on.
 - **Known limit, upstream: rc3 binds no chain id.** After a reset of this test network, or on
-  another LEZ 0.4 chain where the account is still unused, both nonces can match again. The
-  payer could then submit the same transaction there, with its own co-signature. The sheet says
-  so in its fixed text. The person's first own transaction on that chain kills it. The wallet
+  another LEZ 0.4 chain, the account's nonce can come back to what it was when it signed (for a
+  call signed at nonce 0: while the account is unused there; at nonce n, after its n-th
+  transaction there), and the payer's too. The payer could then submit the same transaction
+  there, with its own co-signature. The sheet says so in its fixed text. The person's own
+  transactions on that chain end it only once they take the nonce past that value. The wallet
   can't bind a chain without protocol support: ask upstream for a chain id or a distinct domain
   prefix.
 - **The payer and the fee fields ARE covered.** No finding there.
