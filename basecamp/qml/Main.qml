@@ -8236,7 +8236,7 @@ Item {
                     Hint {
                         visible: root.namesNet === "0.4"
                         color: root.brass
-                        text: "Registering privately isn't offered on LEZ 0.4 yet: its proofs are untested there. Register from a public account below, or switch to LEZ 0.3."
+                        text: "Registering privately isn't offered on LEZ 0.4 yet: it is proven on this computer, which the wallet doesn't do there yet. Register from a public account below (the name is still paid into a private account of its own), or switch to LEZ 0.3."
                     }
                     Card {
                         visible: root.namesNet === "0.3" && root.cliPath !== "" && !(root.deposit !== null && root.deposit.tier === "locked")

@@ -45,6 +45,7 @@ PAGES = {
 
 BRIDGE = r"""
     width: 1180; height: %(height)s
+    property string mockNet: ""
     property var logos: QtObject {
         function ok(value) { return JSON.stringify({ success: true, value: value, error: null }) }
         function callModuleAsync(module, method, args, callback, timeout) {
@@ -73,7 +74,9 @@ BRIDGE = r"""
                         private_accounts: [{ account: "%(carol)s", balance: "2999000", funded: true }] })
                 return JSON.stringify({ success: false, value: null, error: "the LEZ wallet is not running; install LEZ Wallet and open it" })
             }
-            if (method === "get_config") return JSON.stringify({ zone: (%(mock)s).zone || { id: "home", name: "Home", channel: "%(home_channel)s", home: true }, names_sequencer: "http://127.0.0.1:3040", registry: %(registry)s, sequencer: (%(mock)s).zone ? "http://127.0.0.1:3041" : "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json", cli: "/Users/you/.local/bin/names", cli_wallet: "/Users/you/.lee/wallet", bridge_key: "%(bridge_key)s", bridge_node: null, module_version: root.neededModule })
+            // The names network: set_names_network moves it, get_config says it.
+            if (method === "set_names_network") { root.mockNet = String(args[0]); method = "get_config"; var wrapNet = true }
+            if (method === "get_config") return (function(c) { return wrapNet ? ok(c) : JSON.stringify(c) })({ names_network: { id: root.mockNet || "lez-0.3" }, zone: (%(mock)s).zone || { id: "home", name: "Home", channel: "%(home_channel)s", home: true }, names_sequencer: "http://127.0.0.1:3040", registry: %(registry)s, sequencer: (%(mock)s).zone ? "http://127.0.0.1:3041" : "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json", cli: "/Users/you/.local/bin/names", cli_wallet: "/Users/you/.lee/wallet", bridge_key: "%(bridge_key)s", bridge_node: null, module_version: root.neededModule })
             if (method === "normalize") return String(args[0]).toLowerCase().replace(/\.lez$/, "")
             if (method === "mine") return ok({ names: names.filter(function(entry) { return entry.owner === "%(alice)s" }).map(function(entry) {
                 return { name: entry.name, display: entry.name + ".lez", owner: entry.owner, expires: null, never: true, lapsed: false } }), pending: [] })
@@ -346,6 +349,10 @@ SCENARIOS = {
     "name": 'root.show("jef")',
     "plain": 'root.show("linus")',
     "register": 'root.show("satoshi")',
+    # The names network on LEZ 0.4: register from a public account only; the Names view and Send say so.
+    "register-net04": 'root.setWalletNet("0.4"); Qt.callLater(function() { Qt.callLater(function() { root.show("satoshi") }) })',
+    "wallet-names-net04": 'root.openWallet("names"); Qt.callLater(function() { root.setWalletNet("0.4") })',
+    "send-net04": 'root.setWalletNet("0.4"); Qt.callLater(function() { root.payTo("ada") })',
     "register-pending": 'root.show("knuth")',
     "register-nocli": 'root.show("satoshi"); root.cliPath = ""',
     "three": 'root.show("qkz")',
@@ -528,7 +535,7 @@ def main():
             "bridge_key": "" if scenario == "get-tokens" else "8e3b0f4a2c71d95e6a0b4c8d2f1e7a3954c6b0d8e2f4a6c8b0d2e4f6a8c0b2d4",
             "home_channel": HOME_CHANNEL,
             "bridge_net": json.dumps(NET04),
-            "scenario": (SCENARIOS[scenario] % dict(filled, zone_request=zone_request(scenario == "approve-zone"))) if "%(zone" in SCENARIOS[scenario] else SCENARIOS[scenario], "out": out, "height": 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "name", "settings-accounts", "settings-oldcli", "settings-account-new", "settings-network") or scenario.startswith("settings-zones") else 2000 if scenario.startswith("approve-private") else 1100 if scenario.startswith("approve-") and "zone" in scenario else 1500 if scenario.startswith("get-tokens") or scenario.startswith("wallet") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1100 if scenario.startswith("inscribe") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
+            "scenario": (SCENARIOS[scenario] % dict(filled, zone_request=zone_request(scenario == "approve-zone"))) if "%(zone" in SCENARIOS[scenario] else SCENARIOS[scenario], "out": out, "height": 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "register-net04", "wallet-names-net04", "send-net04", "name", "settings-accounts", "settings-oldcli", "settings-account-new", "settings-network") or scenario.startswith("settings-zones") else 2000 if scenario.startswith("approve-private") else 1100 if scenario.startswith("approve-") and "zone" in scenario else 1500 if scenario.startswith("get-tokens") or scenario.startswith("wallet") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1100 if scenario.startswith("inscribe") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
         }
         # Beside Main.qml, so its relative imports (logic.mjs) resolve.
         with tempfile.NamedTemporaryFile("w", suffix=".qml", delete=False, dir=os.path.join(HERE, "..", "qml")) as handle:
