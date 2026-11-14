@@ -869,6 +869,9 @@ Item {
         claimNote = ""
         claimMissing = false
         claimBridgeAnswers = null
+        // What an earlier install said is over; one still on its way keeps its line.
+        if (bridgeInstall !== null && (bridgeInstall.phase === "failed" || bridgeInstall.phase === "updated"))
+            bridgeInstall = null
         loadInstalled(function() {
             // Not installed: said at once, not after the module call gives up.
             if (Logic.bridgeSetup({ list: installedList }) === "absent")
@@ -1000,7 +1003,7 @@ Item {
                 return
             }
             if (update) {
-                bridgeInstall = { phase: "updated", line: "Updated. The LEZ Bridge already running keeps its old version until it starts again: the next time Basecamp starts." }
+                bridgeInstall = { phase: "updated", line: "Updated. The LEZ Bridge running now keeps its old version until it restarts: in Basecamp, Settings (the gear) → Module Inspector → LEZ Bridge → Unload, then come back here and press Start the LEZ Bridge. Or restart Basecamp." }
                 return
             }
             againAfter(1500, startBridge)
@@ -1019,8 +1022,10 @@ Item {
     function waitForBridge(tries) {
         bridgeCall("config", [], function() {
             bridgeInstall = null
-            logos.request("basecamp.apps.launch", { app: "names_ui" }, function() {})
             openClaim()
+            // Back to Names once the bridge app's tab is up (it can take the front after the
+            // module answers, so asked again a moment later).
+            againAfter(2500, function() { logos.request("basecamp.apps.launch", { app: "names_ui" }, function() {}) })
         }, function() {
             if (tries < 20) {
                 againAfter(3000, function() { waitForBridge(tries + 1) })
