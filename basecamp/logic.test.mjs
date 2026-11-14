@@ -2,7 +2,7 @@
 // engine cannot run in CI. Run with: node basecamp/logic.test.mjs
 import { atLeast, someAmount, entryShown, amountRead, amountProblem, amountDigits, AMOUNT_MAX, CHAIN_AMOUNT_MAX, jobProblem, tokenToProblem, tokenSendProves, tokenShown, feeEstimate, feePaid, accountTitle, accountsShown, publisherLine, durationWords, keyShown, chainToProblem, stakeLines, rewardsLine, grouped, addDigits, walletAssets, subDigits, walletGroups, stakeTable, activityLine, activityFor, agoShown, readNote, chainKeyTitle, chainKeySub, chainUsable, chainLaterNote } from "./qml/logic.mjs";
 import { readFileSync } from "node:fs";
-import { cliOutdatedLine, replyKind, revealNext, revealLine, mergeCliStatus, requestTickKey, normalizedReply, noWalletSaid, onNet, preTicked, sameNetAnswer } from "./qml/logic.mjs";
+import { cliOutdatedLine, replyKind, revealNext, revealLine, mergeCliStatus, requestTickKey, normalizedReply, noWalletSaid, onNet, preTicked, sameNetAnswer, askAgainAfter, REVEAL_REFUSED_RETRY_MS } from "./qml/logic.mjs";
 import { publicAccounts, decimalShown, bridgeNetStatus, bridgeNetRows, bridgeNetShown, publicIdProblem, NET_03, NET_04, mergedAccounts } from "./qml/logic.mjs";
 
 let failures = 0;
@@ -145,6 +145,16 @@ check("cli status same network", mergeCliStatus(onNet({ wallet: true, public: "P
   check("0.4 card own once", rows.filter((r) => r.account === C).length, 1);
   check("0.4 card no wallet yet: all view only", bridgeNetRows(read, []).map((r) => r.viewOnly), [true, true, true]);
   check("0.3 card unchanged", bridgeNetRows(read).map((r) => r.copyable), [true, true, true]);
+}
+{
+  // SF-A: a refused reveal (alice's commitment never landed) doesn't block bob's behind it.
+  const pending = [{ name: "alice", ready_at: 1000 }, { name: "bob", ready_at: 1000 }];
+  check("first due", revealNext(pending, 5000, 0, 200000, {}).name, "alice");
+  const refused = { alice: 5000 + REVEAL_REFUSED_RETRY_MS };
+  check("refused one waits, the next goes", revealNext(pending, 5000, 0, 200000, refused).name, "bob");
+  check("asked again after its wait", revealNext(pending, 5001 + REVEAL_REFUSED_RETRY_MS, 0, 200000, refused).name, "alice");
+  // SF-D: a busy or unanswered `mine` is asked again; a refusal isn't.
+  check("mine asked again", ["busy", "none", "refused"].map((m) => askAgainAfter(m, "busy", "none")), [true, true, false]);
 }
 check("publisher checking", publisherLine({ status: "checking" }), { text: "Checking who publishes it…", tone: "plain" });
 {

@@ -1041,6 +1041,25 @@ pub fn stub_rpc(answer: impl Fn(&Value) -> (u16, String) + Send + Sync + 'static
 }
 
 /// A JSON-RPC reply carrying `result`, for `stub_rpc`.
+/// A chain whose clock reads `now` (chain time, ms) and where every other account is empty
+/// (no record, no commitment): for tests of what a call does before anything is sent.
+#[cfg(test)]
+pub fn stub_chain_at(now: u64) -> String {
+    stub_rpc(move |request| {
+        let account = request["params"][0]["account_id"].as_str().unwrap_or_default().to_owned();
+        if request["method"] == "getLastBlockId" {
+            return rpc_ok(json!(7));
+        }
+        let mut data = vec![64_u8, 65, 1, 0, 0, 0, 0, 0];
+        data.extend_from_slice(&now.to_le_bytes());
+        rpc_ok(if account == account_text(CLOCK_ACCOUNT) || account == account_text(CLOCK_ACCOUNT_03) {
+            json!({ "nonce": 0, "data": { "shards": { account_text(&clock_program()): data } } })
+        } else {
+            json!({ "nonce": 0, "data": { "shards": {} } })
+        })
+    })
+}
+
 #[cfg(test)]
 pub fn rpc_ok(result: Value) -> (u16, String) {
     (200, json!({ "jsonrpc": "2.0", "id": 1, "result": result }).to_string())

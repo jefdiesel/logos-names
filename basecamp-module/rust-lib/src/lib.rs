@@ -215,8 +215,8 @@ pub trait NamesModule: Send + 'static {
     /// registrations it has under way: `{names: [{name, display, owner,
     /// expires, never, lapsed}], pending: [{name, display, owner, stage,
     /// ready_at, tx}]}`. `owner` is the wallet's account that holds the name.
-    /// A pending `stage` is `committed` (call `register_name` again from
-    /// `ready_at`, in milliseconds) or `revealed` (sent; it shows in `names`
+    /// A pending `stage` is `committed` (call `reveal_name` from `ready_at`, in
+    /// milliseconds; it never starts a new registration) or `revealed` (sent; it shows in `names`
     /// once it lands). The chain keeps no list of names, so this is the
     /// device's own memory: every name registered from here, and every name
     /// passed to `keep`.
@@ -1371,6 +1371,8 @@ const NAMES_APP: &str = "names_ui";
 /// release (the app's own metadata asks for at least this at install, but an
 /// older module can still be the one loaded).
 const MODULE_VERSION: &str = "0.17.0";
+/// get_config's `features`: what an app may need beyond the version (`reveal_name`).
+const MODULE_FEATURES: [&str; 1] = ["reveal_name"];
 
 /// What a private-name action answers on LEZ 0.4, where names are public only (S-B).
 const PRIVATE_OFF_04: &str = "on LEZ 0.4 names are public only: private payments and private holders are off there, so nothing was done";
@@ -1988,10 +1990,16 @@ impl Names {
                     view[key] = block[key].clone();
                 }
                 // A folder of LEZ 0.4's own, unless one was chosen.
-                if view["cli_wallet"].as_str().is_none() {
+                let chosen_wallet = view["cli_wallet"].as_str().is_some();
+                if !chosen_wallet {
                     view["cli_wallet"] = json!(config_dir().map(|dir| lez04_wallet_dir(&dir)));
                 }
                 self.apply_saved(&view);
+                // The default folder not made yet is not a configured folder that is missing: it
+                // is where "Create my wallet" makes the wallet (SF-B applies to a chosen one only).
+                if !chosen_wallet {
+                    self.rejected.remove("cli_wallet");
+                }
                 // The registry is LEZ 0.4's unless one was set there.
                 if block["registry"].as_str().is_none() {
                     self.program = registry::parse_account(LEZ04_REGISTRY).ok();
@@ -2194,6 +2202,9 @@ impl Names {
         config["module_version"] = json!(MODULE_VERSION);
         config["build_commit"] = json!(build_commit());
         config["scaffold"] = json!(SCAFFOLD_LINE);
+        // What this build can do that an earlier 0.17.0 can't, for an app to check (every 0.17.0
+        // says 0.17.0): `reveal_name` (the reveal driver's reveal-only call).
+        config["features"] = json!(MODULE_FEATURES);
         config["names_network"] = self.net.shown();
         let bridges = self.bridge_programs_now();
         config["bridge_program"] = json!(registry::account_text(&bridges[0]));
@@ -2641,7 +2652,21 @@ impl Names {
         }
     }
 
+    /// Why the names CLI can't run now, when the CLI or the wallet folder configured for the
+    /// network in use fails its check (a drive that isn't connected): then nothing that needs
+    /// them runs, and no other CLI or wallet (the defaults) is ever used in their place (SF-B).
+    fn unavailable(&self) -> Option<String> {
+        let raw = |key: &str| self.rejected.get(key).and_then(Value::as_str).map(str::to_owned);
+        if let Some(dir) = raw("cli_wallet") {
+            return Some(format!("the wallet folder {dir} isn't available now (is the drive connected?), so nothing was done; no other wallet is used meanwhile"));
+        }
+        raw("cli").map(|path| format!("the names CLI {path} isn't available now (is the drive connected?), so nothing was done; no other CLI is used meanwhile"))
+    }
+
     fn cli_setup(&self) -> Result<cli::Setup, String> {
+        if let Some(why) = self.unavailable() {
+            return Err(why);
+        }
         let program = match self.net {
             Net::Lez03 => cli::find_program(self.cli.as_deref()).ok_or(
                 "no names CLI found at ~/.local/bin/names or on PATH; install it, or give its path in App settings",
@@ -4311,6 +4336,12 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         reply((|| {
+            // A configured CLI or wallet folder that isn't reachable: said plainly, and never "no
+            // wallet" (that would offer Welcome and "Create my wallet" over it).
+            if let Some(why) = self.unavailable() {
+                return Ok(json!({ "unavailable": why, "names_network": self.net.shown(), "wallet": Value::Null, "public": Value::Null,
+                                   "private": Value::Null, "cli": Value::Null, "busy": Value::Null, "installing": Value::Null, "old_wallet": false }));
+            }
             let program = cli::find_program(self.cli.as_deref()).filter(|path| cli::is_executable(path));
             let wallet = self.resolve_wallet(self.cli_wallet.as_deref());
             let has_wallet = wallet.as_ref().is_some_and(|dir| dir.join(cli::STORAGE_FILE).is_file());
@@ -4914,7 +4945,6 @@ impl NamesModule for Names {
         if only_the_names_app().is_err() {
             return false;
         }
-        self.rejected.remove("cli");
         let path = path.trim();
         if path.is_empty() {
             self.cli = None;
@@ -4923,6 +4953,8 @@ impl NamesModule for Names {
         } else {
             return false;
         }
+        // Set: the value kept from a failed check is replaced (SF-C: only on success).
+        self.rejected.remove("cli");
         self.save();
         true
     }
@@ -4931,7 +4963,6 @@ impl NamesModule for Names {
         if only_the_names_app().is_err() {
             return false;
         }
-        self.rejected.remove("cli_wallet");
         let dir = dir.trim();
         let chosen = if dir.is_empty() {
             if self.on_home() {
@@ -4955,6 +4986,10 @@ impl NamesModule for Names {
             return false;
         }
         self.cli_wallet = chosen;
+        // Home's kept value goes only when home's own folder was set (an added zone's set leaves it).
+        if self.on_home() {
+            self.rejected.remove("cli_wallet");
+        }
         self.save();
         true
     }
@@ -4963,10 +4998,10 @@ impl NamesModule for Names {
         if only_the_names_app().is_err() {
             return false;
         }
-        self.rejected.remove("registry");
         match registry::parse_account(&program_id) {
             Ok(program) => {
                 self.program = Some(program);
+                self.rejected.remove("registry");
                 self.forget_all_reads();
                 self.save();
                 true
@@ -4979,8 +5014,6 @@ impl NamesModule for Names {
         if only_the_names_app().is_err() {
             return false;
         }
-        self.rejected.remove("wallet_config");
-        self.rejected.remove("wallet_storage");
         let (config, storage) = (config_path.trim(), storage_path.trim());
         if config.is_empty() && storage.is_empty() {
             self.wallet_files = None;
@@ -4989,6 +5022,8 @@ impl NamesModule for Names {
         } else {
             return false;
         }
+        self.rejected.remove("wallet_config");
+        self.rejected.remove("wallet_storage");
         self.save();
         true
     }
@@ -4997,8 +5032,13 @@ impl NamesModule for Names {
         if only_the_names_app().is_err() {
             return false;
         }
-        self.rejected.remove("sequencer");
-        self.change_sequencer(self.zones.current(), &url, false).is_ok()
+        let home = self.on_home();
+        let done = self.change_sequencer(self.zones.current(), &url, false).is_ok();
+        if done && home {
+            self.rejected.remove("sequencer");
+            self.save();
+        }
+        done
     }
 
     // ── Zones ───────────────────────────────────────────────────────────
@@ -5125,7 +5165,6 @@ impl NamesModule for Names {
         if only_the_names_app().is_err() {
             return false;
         }
-        self.rejected.remove("token_program");
         let program_id = program_id.trim();
         if program_id.is_empty() {
             self.token_program = None;
@@ -5134,6 +5173,9 @@ impl NamesModule for Names {
                 Ok(program) if program != registry::NATIVE_TOKEN => self.token_program = Some(program),
                 _ => return false,
             }
+        }
+        if self.on_home() {
+            self.rejected.remove("token_program");
         }
         self.forget_tokens();
         self.token_info.clear();
@@ -7942,6 +7984,32 @@ mod tests {
         other.save();
         let refused = parsed(&names.reveal_name("alice".into(), "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk".into(), "auto".into()));
         assert!(refused["error"].as_str().unwrap_or_default().contains("is waiting to be revealed"), "{refused}");
+    }
+
+    /// MF-2's other two refusals: a commitment too old to reveal, and one that never landed, are
+    /// never replaced by a new one from the reveal driver; nothing is sent (SF-C).
+    #[test]
+    fn the_reveal_driver_never_recommits_an_expired_or_lost_commitment() {
+        let tail = format!("case \"$*\" in *\"module accounts\"*) echo '{{\"public\":[\"{PUBLIC}\"],\"private\":[]}}' ;; *) echo 'unexpected' > \"$(dirname \"$0\")/sent\" ;; esac");
+        let (mut names, dir) = with_fake_cli("reveal-only-old", &tail);
+        let now: u64 = 1_800_000_000_000;
+        names.sequencer = registry::stub_chain_at(now);
+        let owner = registry::parse_account(PUBLIC).unwrap();
+        let keep = |made: u64| {
+            let mut kept = pending().unwrap();
+            kept.put(&[7; 32], "alice", &Commitment { owner, secret: [1; 32], made, private_account: String::new(), auto_account: None, accounts_made: 0, revealed: None, revealed_at: None });
+            kept.save();
+        };
+        // Too old to reveal.
+        keep(now - registry::MAX_COMMIT_AGE_MS);
+        let refused = parsed(&names.reveal_name("alice".into(), PUBLIC.into(), String::new()));
+        assert!(refused["error"].as_str().unwrap_or_else(|| panic!("{refused}")).contains("has a commitment still usable"), "{refused}");
+        // Usable, but it never landed (its time to land has passed).
+        keep(now - registry::TIME_WINDOW_MS - 60_000);
+        let refused = parsed(&names.reveal_name("alice".into(), PUBLIC.into(), String::new()));
+        assert!(refused["error"].as_str().unwrap_or_else(|| panic!("{refused}")).contains("has a commitment that landed"), "{refused}");
+        assert!(!dir.join("sent").exists(), "nothing but the accounts read ran");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -11715,6 +11783,17 @@ mod tests {
         .unwrap();
         let mut names = Names::default();
         assert_eq!(names.cli, None, "not used while it fails its check");
+        // SF-B: meanwhile nothing falls back to another wallet or CLI: create, restore and the
+        // reads refuse, naming the folder, and cli_status says so instead of "no wallet".
+        let refused = parsed(&names.cli_create_wallet());
+        assert!(refused["error"].as_str().unwrap_or_else(|| panic!("{refused}")).contains(&format!("the wallet folder {gone_wallet} isn't available now (is the drive connected?)")), "{refused}");
+        assert!(parsed(&names.cli_restore_wallet("abandon ".repeat(23) + "art"))["error"].as_str().unwrap_or_default().contains("isn't available now"));
+        assert!(parsed(&names.cli_balance())["error"].as_str().unwrap_or_default().contains("isn't available now"));
+        let status = parsed(&names.cli_status())["value"].clone();
+        assert!(status["unavailable"].as_str().unwrap_or_default().contains(gone_wallet) && status["wallet"].is_null(), "{status}");
+        // A set that fails keeps the kept value (SF-C).
+        assert!(!names.set_cli("/Volumes/not-mounted/other/names".into()));
+        assert_eq!(saved_file()["cli"].as_str(), Some(gone_cli), "{}", saved_file());
         assert!(parsed(&names.set_names_network("lez-0.4".into()))["success"] == true);
         assert!(parsed(&names.set_names_network("lez-0.3".into()))["success"] == true);
         let file = saved_file();

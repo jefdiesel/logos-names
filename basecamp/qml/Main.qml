@@ -408,7 +408,10 @@ Item {
                 return false
             var loaded = config.module_version ? String(config.module_version) : ""
             buildCommit = config.build_commit && config.build_commit !== "dev" ? String(config.build_commit) : ""
-            if (!versionAtLeast(loaded, neededModule)) {
+            // Every 0.17.0 says 0.17.0: the reveal driver needs a build that has `reveal_name`.
+            if (versionAtLeast(loaded, neededModule) && !(Array.isArray(config.features) && config.features.indexOf("reveal_name") >= 0))
+                loaded = loaded + " (an earlier build)"
+            if (!versionAtLeast(loaded, neededModule) || loaded.indexOf("earlier build") >= 0) {
                 moduleOutdated = loaded === "" ? "older than 0.11" : loaded
                 say("The names module is out of date (" + moduleOutdated + "; this app needs " + neededModule + " or newer). In Basecamp, open Applications, click Names and press Install.", true)
                 return true
@@ -2158,6 +2161,9 @@ Item {
                 revealTimer.start()
         }), function(message) {
             console.log("names_ui: my names:", message)
+            // Busy or unanswered: asked again, so the reveals don't stop (SF-D).
+            if (Logic.askAgainAfter(message, moduleBusy, moduleNoAnswer))
+                againWhenFree("mine", loadMine)
         })
     }
 
@@ -2181,7 +2187,7 @@ Item {
     function revealDue() {
         if (bridgeReady === false)
             return
-        var item = Logic.revealNext(pendingNames, Date.now(), revealing ? revealAskedAt : 0, 200000)
+        var item = Logic.revealNext(pendingNames, Date.now(), revealing ? revealAskedAt : 0, 200000, revealRefused)
         if (item !== null) {
             revealing = true
             revealAskedAt = Date.now()
@@ -2199,12 +2205,20 @@ Item {
             }, function(message) {
                 revealing = false
                 console.log("names_ui: reveal:", message)
+                // Refused (not busy, not unanswered): this one waits, the others go ahead (SF-A).
+                if (!waitAgain(message)) {
+                    var refused = revealRefused
+                    refused[item.name] = Date.now() + Logic.REVEAL_REFUSED_RETRY_MS
+                    revealRefused = refused
+                }
                 // Read the registrations again: a failed ask never drops one.
                 loadMine()
             }, 180000)
         }
     }
     property real revealAskedAt: 0
+    // Names whose reveal the module refused this session, and when to ask again (SF-A).
+    property var revealRefused: ({})
 
     // A busy wallet read is asked again after a short wait (loadWallet).
     Timer {
@@ -5967,6 +5981,13 @@ Item {
                         color: root.dim
                         text: "Reading your wallet…"
                     }
+                    // A configured wallet folder or CLI that isn't reachable (a drive not
+                    // connected): said plainly; no other wallet is used meanwhile (SF-B).
+                    Hint {
+                        visible: root.cliStatus !== null && typeof root.cliStatus.unavailable === "string"
+                        color: root.alarm
+                        text: root.cliStatus !== null && root.cliStatus.unavailable ? root.sentence(root.cliStatus.unavailable) : ""
+                    }
                     // A wallet with no name yet: a name is offered, never required (the bridge needs none).
                     Card {
                         visible: root.cliKnown && root.allMine.length === 0 && root.cliPending.length === 0 && !root.nameCardAway && root.zoneHome
@@ -6814,7 +6835,7 @@ Item {
                             Layout.fillWidth: true
                             color: root.brass
                             font.pixelSize: root.px(16)
-                            text: Logic.revealLine(modelData, Math.max(root.clockTick, Date.now()), root.clock)
+                            text: root.revealRefused[modelData.name] ? modelData.name + ": this registration didn't land; register it again." : Logic.revealLine(modelData, Math.max(root.clockTick, Date.now()), root.clock)
                         }
                     }
                     Hint { text: "Your wallet can hold many names. Names held privately can't be linked to each other on chain; a name held publicly shows its holder. Each name is paid into its own private account unless it publishes a public one." }

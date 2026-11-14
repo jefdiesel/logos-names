@@ -209,6 +209,17 @@ the plain object must read `value` now. The Names app itself still gets the plai
 - The app's reveal driver only reveals (`reveal_name`): it can't start a registration, and a
   network switch clears the registrations under way (FINAL MF-2). af520ba could, on a switch while
   an app registration was due to reveal, commit the name on the other network.
+- While the CLI or wallet folder configured for the network in use isn't reachable (a drive not
+  connected), the module uses no other: create, restore, signing and the reads refuse with one
+  sentence naming the path, and the app shows it instead of Welcome (FINAL SF-B).
+- A refused reveal (a commitment that never landed, or too old) waits 30 minutes and its row says
+  "this registration didn't land; register it again"; the names behind it are still revealed
+  (SF-A). A busy `mine` is asked again (SF-D).
+- If the zone in use can't be entered when the module starts (its wallet folder is on a drive
+  that isn't connected), home is used and saved as the zone in use: the zone stays set up, and is
+  picked again by hand (SF-C, older than 0.17).
+- The app needs a module build with `reveal_name` (get_config `features`); an earlier 0.17.0
+  module is reported as out of date.
 - A LEZ 0.3 setting that fails its check when read (the CLI or the wallet folder on a drive that
   isn't mounted) is not used, and is written back unchanged rather than as null (FINAL SF-5).
 - LEZ 0.4 is public only: receive_privately, set_private_keys, cli_receive_privately, a private

@@ -863,6 +863,7 @@ module names {
   method deposit(name: tstr) -> tstr
   method settings() -> tstr
   method register_name(name: tstr, owner: tstr, private_account: tstr) -> tstr
+  method reveal_name(name: tstr, owner: tstr, private_account: tstr) -> tstr
   method receive_privately(name: tstr, private_account: tstr) -> tstr
   method set_account(name: tstr, account: tstr) -> tstr
   method set_private_keys(name: tstr, nullifier_public_key: tstr, viewing_public_key: tstr) -> tstr
@@ -1000,7 +1001,7 @@ owner for everything else.
 | Method | `value` |
 |---|---|
 | `wallet()` | `{"accounts": [{"account", "balance", "funded", "name"}], "private_accounts": ["account"]}`: the open wallet's public accounts, funded ones first, and its private accounts. `balance` is decimal text; `name` is the name the account has published, or `null`. Fails if the LEZ wallet is not installed or not open. |
-| `mine()` | `{"names": [{"name", "display", "owner", "expires", "never", "lapsed"}], "pending": [{"name", "display", "owner", "stage", "ready_at", "tx"}]}`: the names this device remembers that the open wallet holds (`owner` is the wallet account that holds the name), and the registrations under way. A pending `stage` is `committed` (call `register_name` again from `ready_at`, in milliseconds) or `revealed` (sent; it shows in `names` once it lands). |
+| `mine()` | `{"names": [{"name", "display", "owner", "expires", "never", "lapsed"}], "pending": [{"name", "display", "owner", "stage", "ready_at", "tx"}]}`: the names this device remembers that the open wallet holds (`owner` is the wallet account that holds the name), and the registrations under way. A pending `stage` is `committed` (call `reveal_name` from `ready_at`, in milliseconds; unlike `register_name` it never sends a new commitment) or `revealed` (sent; it shows in `names` once it lands). |
 | `keep("jef")` | The bare name: remembered on this device if the open wallet holds it, so `mine` keeps returning it. Fails for a name the wallet does not hold. |
 | `set_profile(name, entries_json, replace)` | Writes many text entries in one transaction, as the CLI's `names profile` does. `entries_json` is a JSON object of key to text; an empty value (or null) removes that key. Card keys: `display`, `bio`, `avatar` (a `data:image/...` URL), `theme` (`light`, `dark` or `auto`), `color` (`#rrggbb`), `font` (`sans`, `serif`, `mono` or `rounded`) and `cid` (a Logos Storage content ID); any other key of 1-32 characters of a-z, 0-9, `-`, `_` or `.` works too. With `replace`, every existing entry is dropped first; the account and payment keys stay either way. At most 16 entries and 12 KiB of sealed profile. |
 | `transfer(name, new_owner)` | Hands the name to `new_owner` (base58); only a tag of it reaches the chain. The addresses, entries and page the current owner set are emptied. The deposit stays with the name, for whoever releases it. |

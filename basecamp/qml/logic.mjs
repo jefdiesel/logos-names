@@ -927,16 +927,28 @@ export function mergeCliStatus(previous, next) {
 /// Which public registration to ask about next (`register_name`), or null: the first one whose
 /// reveal is due (`ready_at` passed, by `now`), unless an ask is still out and younger than
 /// `patienceMs`. An ask that never answered stops holding the rest after that.
-export function revealNext(pending, now, askedAt, patienceMs) {
+export function revealNext(pending, now, askedAt, patienceMs, refused) {
     if (askedAt && now - askedAt < patienceMs)
         return null
     for (var i = 0; i < (pending || []).length; i++) {
         var item = pending[i]
         if (item.ready_at !== null && item.ready_at !== undefined && now < item.ready_at)
             continue
+        // One whose reveal was refused (its commitment never landed, or is too old) waits its
+        // retry time, so the names behind it are still revealed (SF-A).
+        if (refused && refused[item.name] && now < refused[item.name])
+            continue
         return item
     }
     return null
+}
+
+/// After the module refused `name`'s reveal (not busy, not no answer): when to ask again for it.
+export const REVEAL_REFUSED_RETRY_MS = 30 * 60 * 1000
+
+/// Whether a failed read is to be asked again soon: the module was busy or didn't answer.
+export function askAgainAfter(message, busy, noAnswer) {
+    return message === busy || message === noAnswer
 }
 
 /// A registration under way as a line: when its reveal goes out and by when it must have.
