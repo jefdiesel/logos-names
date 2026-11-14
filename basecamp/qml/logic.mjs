@@ -196,15 +196,24 @@ export function publisherLine(publisher) {
 // The accounts ticked when a request's sheet opens (or what it knows changes, requestTickKey).
 // Nothing while the Program Registry is still being asked (`checking`) or when the app's publisher
 // check failed (it may be a fake, M-2). A declaration or a token source is ticked only when
-// exactly one account is shared with the app (that one), else nothing; anything else starts from
-// the account shared with it, else the first offered.
+// exactly one account is shared with the app (that one), else nothing; a request naming an account
+// ticks that one; access ticks nothing; anything else starts from the account shared with it, else
+// the first offered.
 export function preTicked(request, publisherFailed) {
     if (!request || request.checking === true || publisherFailed)
         return []
     var choices = request.choices || []
+    var offered = function(account) { return choices.some(function(choice) { return choice.account === account }) }
+    // The account the app asked about, when it named one and it is offered.
+    if (typeof request.account === "string" && offered(request.account))
+        return [request.account]
     var given = choices.filter(function(choice) { return choice.granted })
     if (request.kind === "programs" || request.kind === "token_source")
         return given.length === 1 ? [given[0].account] : []
+    // Access: the person chooses; nothing is ticked for them (the wallet's main account is not
+    // necessarily the one the app is for: an imported account comes after it).
+    if (request.kind === "connect")
+        return []
     return given.length > 0 ? [given[0].account] : choices.length > 0 ? [choices[0].account] : []
 }
 

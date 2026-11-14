@@ -5943,6 +5943,13 @@ Item {
                     // Which network the balances below are on: the names network switch.
                     NetSwitch {}
                     RunsOn { net: root.walletNet === "0.4" ? "0.4" : "0.3+chain"; prefix: "Balances on" }
+                    // Right after a switch (or at start), until the wallet answers: never Welcome or
+                    // "Create my wallet" before the module says plainly there is no wallet.
+                    Hint {
+                        visible: root.cliPath !== "" && root.cliStatus === null
+                        color: root.dim
+                        text: "Reading your wallet…"
+                    }
                     // A wallet with no name yet: a name is offered, never required (the bridge needs none).
                     Card {
                         visible: root.cliKnown && root.allMine.length === 0 && root.cliPending.length === 0 && !root.nameCardAway && root.zoneHome

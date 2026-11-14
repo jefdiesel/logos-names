@@ -129,7 +129,9 @@ check("cli status same network", mergeCliStatus(onNet({ wallet: true, public: "P
     preTicked({ kind: "programs", choices: one }, true),
     preTicked({ kind: "connect", choices: [{ account: "Public/B", granted: false }] }, false),
     preTicked({ kind: "connect", choices: one, checking: true }, false),
-  ], [["Public/A"], [], [], [], [], ["Public/B"], []]);
+    preTicked({ kind: "transfer", account: "Public/B", choices: two }, false),
+    preTicked({ kind: "transfer", choices: one }, false),
+  ], [["Public/A"], [], [], [], [], [], [], ["Public/B"], ["Public/A"]]);
 }
 {
   // The 0.4 card: the wallet's own account first with Copy; a LEZ 0.3 one view only, no Copy; one

@@ -11,6 +11,13 @@ goes onto the user's Mac mini first (install plan below).
   request sheet, and a dismissible "No name yet" card offers a name. On a network with no wallet,
   Welcome offers "Restore from my recovery phrase" beside "Create my wallet": one phrase gives the
   same public accounts on LEZ 0.3 and LEZ 0.4.
+- "Create my wallet" always makes new keys (`names setup`: a fresh random recovery phrase, shown
+  once; the phrase is never stored and can't be shown again). Nothing copies a key from the LEZ
+  0.3 wallet on its own. A LEZ 0.3 account gets into the LEZ 0.4 wallet only by an explicit import
+  (`names wallet account import public`, which `import-account-04.sh` runs: the account's key from
+  the 0.3 store). It then shows as an imported account after the wallet's own, and the new phrase
+  does NOT cover it: back up the LEZ 0.4 wallet folder. A second import of the same account is
+  refused. A restore from a phrase gives the same public accounts as the 0.3 wallet that phrase made.
 - One list of the names this wallet holds, everywhere (Settings, the Names tab, the card): the LEZ
   wallet's and the CLI's. A name registered through the module (a public registration on LEZ 0.4)
   is offered to the CLI's own list too (`names mine --add`, checked on chain); "Add" on the Names
