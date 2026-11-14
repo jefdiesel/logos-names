@@ -131,15 +131,22 @@ impl CallInput {
             let actor_program = program_of(entry["program"].as_str().unwrap_or(&self.program))?;
             let (id, made) = match (entry["account"].as_str(), entry["seed"].as_str()) {
                 (Some(text), None) => (public_id(text, "a declared account")?, None),
-                (None, Some(seed)) => {
+                // A program account: the seed decides it; an address given beside it (the
+                // module writes the one it derived) must be that one.
+                (written, Some(seed)) => {
                     let seed = parse_hex32(seed).ok_or_else(|| anyhow!("a seed is 32 bytes of hex"))?;
                     let of = program_of(entry["of"].as_str().unwrap_or(&self.program))?;
                     let id = AccountId::for_public_pda(&of, &PdaSeed::new(seed));
+                    if let Some(written) = written {
+                        if public_id(written, "a program account")? != id {
+                            bail!("a program account's address isn't the one its seed gives");
+                        }
+                    }
                     // Evidence admits a program account the call creates; only when asked.
                     let made = (entry["new"] == true).then(|| lee::PublicAccountEvidence::Pda { program: of, seed: PdaSeed::new(seed) });
                     (id, made)
                 }
-                _ => bail!("each declared account has \"account\" or \"seed\" (with \"of\")"),
+                (None, None) => bail!("each declared account has \"account\" or \"seed\" (with \"of\")"),
             };
             // The payer signs the transaction too, so a program would be authorized on its
             // accounts: the wallet never declares them (a relay refuses them as well).
@@ -355,5 +362,21 @@ mod tests {
         let mut free = input(account, payer);
         free.fee.max_fee = "0".into();
         assert!(free.build().is_err());
+    }
+
+    /// The module's own input (its pinned fixture) builds: the program account's address the
+    /// module derived is the one the seed gives here, and a wrong one is refused.
+    #[test]
+    fn the_module_s_input_builds() {
+        let text = include_str!("../../basecamp-module/rust-lib/testdata/relayed-call-input.json");
+        let input: CallInput = serde_json::from_str(text).unwrap();
+        let built = input.build().unwrap();
+        assert_eq!(built.actors.len(), 4, "the root and three declared actors");
+        assert!(built.actors.contains(&Actor::native_balance(public_id("CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "x").unwrap())));
+        assert_eq!(built.evidence.len(), 1);
+        assert_eq!(built.evidence[0].account_id().to_string(), "2a8YAE9u9Xb2EjuyGEogYNz6RHYZGeuEemajpcgJUuKY");
+        let mut wrong: CallInput = serde_json::from_str(text).unwrap();
+        wrong.accounts[2]["account"] = json!("CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk");
+        assert!(wrong.build().unwrap_err().to_string().contains("isn't the one its seed gives"));
     }
 }

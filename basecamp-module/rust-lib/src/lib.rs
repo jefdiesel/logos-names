@@ -1868,6 +1868,15 @@ impl Names {
         }
     }
 
+    /// The CLI's wallet folder for `configured`: on LEZ 0.3 the CLI's own default when none is
+    /// set, as before; on LEZ 0.4 never that default (it is LEZ 0.3's), but LEZ 0.4's folder.
+    fn resolve_wallet(&self, configured: Option<&str>) -> Option<std::path::PathBuf> {
+        match (self.net, configured) {
+            (Net::Lez04, None) => config_dir().map(|dir| lez04_wallet_dir(&dir)),
+            _ => cli::find_wallet(configured),
+        }
+    }
+
     /// What the CLI at `program` says its version is (`names --version`), asked once per
     /// build of it.
     fn cli_line(&self, program: &std::path::Path) -> Result<String, String> {
@@ -2032,7 +2041,7 @@ impl Names {
         config["token_program"] = json!(self.token_program.as_ref().map(registry::account_text));
         config["zone"] = json!({ "id": zones.current_id(), "name": zones.zone().name, "channel": zones.zone().channel, "home": zones.current() == 0 });
         config["cli"] = json!(cli::find_program(self.cli.as_deref()).map(|path| path.to_string_lossy().into_owned()));
-        config["cli_wallet"] = json!(cli::find_wallet(self.cli_wallet.as_deref()).map(|dir| dir.to_string_lossy().into_owned()));
+        config["cli_wallet"] = json!(self.resolve_wallet(self.cli_wallet.as_deref()).map(|dir| dir.to_string_lossy().into_owned()));
         config["module_version"] = json!(MODULE_VERSION);
         config["names_network"] = self.net.shown();
         config["names_networks"] = json!([Net::Lez03.shown(), Net::Lez04.shown()]);
@@ -2223,7 +2232,7 @@ impl Names {
 
     /// Whether home has a wallet already: what it holds was read from home's chain.
     fn home_has_wallet(&self) -> bool {
-        cli::find_wallet(self.home_wallet().as_deref()).is_some_and(|dir| dir.join(cli::STORAGE_FILE).is_file())
+        self.resolve_wallet(self.home_wallet().as_deref()).is_some_and(|dir| dir.join(cli::STORAGE_FILE).is_file())
     }
 
     /// The zones, with the one in use as the module's own fields have it now. `sequencer`,
@@ -2405,7 +2414,7 @@ impl Names {
     fn names_setup(&self) -> Result<cli::Setup, String> {
         let mut setup = self.cli_setup()?;
         if !self.on_home() {
-            setup.wallet = cli::find_wallet(self.home_wallet().as_deref()).ok_or("no wallet directory for the names CLI")?;
+            setup.wallet = self.resolve_wallet(self.home_wallet().as_deref()).ok_or("no wallet directory for the names CLI")?;
             setup.sequencer = self.home_sequencer();
         }
         Ok(setup)
@@ -2497,7 +2506,7 @@ impl Names {
                 program
             }
         };
-        let wallet = cli::find_wallet(self.cli_wallet.as_deref()).ok_or("no wallet directory for the names CLI")?;
+        let wallet = self.resolve_wallet(self.cli_wallet.as_deref()).ok_or("no wallet directory for the names CLI")?;
         if self.other_wallet().is_some_and(|other| same_dir(&other, &wallet)) {
             return Err(format!(
                 "the wallet folder set here is the one {} uses; each network keeps its own wallet. Choose another folder in App settings. Nothing was sent.",
@@ -3937,7 +3946,7 @@ impl NamesModule for Names {
                 let home = &self.zones.home().name;
                 return Err(format!("the faucet pays on {home} only. Switch to {home} to ask it."));
             }
-            let wallet = cli::find_wallet(self.cli_wallet.as_deref())
+            let wallet = self.resolve_wallet(self.cli_wallet.as_deref())
                 .ok_or_else(|| "create your wallet first (Welcome, Create my wallet)".to_owned())?;
             let account = cli::saved_account(&wallet, "public")
                 .ok_or_else(|| "your wallet has no public account yet; create your wallet first (Welcome, Create my wallet)".to_owned())?;
@@ -3952,7 +3961,7 @@ impl NamesModule for Names {
         }
         reply((|| {
             let program = cli::find_program(self.cli.as_deref()).filter(|path| cli::is_executable(path));
-            let wallet = cli::find_wallet(self.cli_wallet.as_deref());
+            let wallet = self.resolve_wallet(self.cli_wallet.as_deref());
             let has_wallet = wallet.as_ref().is_some_and(|dir| dir.join(cli::STORAGE_FILE).is_file());
             let account = |which: &str| wallet.as_ref().filter(|_| has_wallet).and_then(|dir| cli::saved_account(dir, which));
             let setup = self.cli_setup().ok().filter(|_| has_wallet);
@@ -4568,7 +4577,7 @@ impl NamesModule for Names {
             return false;
         };
         // One folder holds one chain's wallet: another zone's, or the other network's, is refused.
-        let used = chosen.as_deref().map(std::path::PathBuf::from).or_else(|| cli::find_wallet(None));
+        let used = chosen.as_deref().map(std::path::PathBuf::from).or_else(|| self.resolve_wallet(None));
         if used.as_ref().is_some_and(|dir| self.wallet_taken(dir).is_some() || self.other_wallet().is_some_and(|other| same_dir(&other, dir))) {
             return false;
         }
@@ -5940,7 +5949,7 @@ impl Names {
     /// its other public accounts `others`, which can sign program calls.
     fn wallet_choices(&self, others: &[AccountId]) -> Vec<Value> {
         let mut choices = Vec::new();
-        let wallet = cli::find_wallet(self.cli_wallet.as_deref()).filter(|dir| dir.join(cli::STORAGE_FILE).is_file());
+        let wallet = self.resolve_wallet(self.cli_wallet.as_deref()).filter(|dir| dir.join(cli::STORAGE_FILE).is_file());
         let Some(wallet) = wallet else { return choices };
         for (which, private, label) in [("public", false, "Names wallet, main public account"), ("private", true, "Names wallet, private account")] {
             if let Some(id) = cli::saved_account(&wallet, which).and_then(|id| registry::parse_account(&id).ok()) {
@@ -10786,7 +10795,11 @@ mod tests {
         let new = versioned_cli(&config.join("new"), "names 0.17.0 (LEZ v0.4.0-rc3)");
         assert!(names.set_cli(new.to_string_lossy().into_owned()));
         std::fs::create_dir_all(lez04_wallet_dir(&config)).unwrap();
-        assert!(names.cli_setup().is_ok());
+        assert!(same_dir(&names.cli_setup().ok().unwrap().wallet, &lez04_wallet_dir(&config)), "LEZ 0.4's own folder");
+        // With no folder set at all, LEZ 0.4 still never falls back to the CLI's default one.
+        names.cli_wallet = None;
+        assert!(same_dir(&names.cli_setup().ok().unwrap().wallet, &lez04_wallet_dir(&config)), "never ~/.lee/wallet");
+        names.cli_wallet = Some(lez04_wallet_dir(&config).to_string_lossy().into_owned());
         assert!(!names.set_cli_wallet(wallet03.to_string_lossy().into_owned()), "LEZ 0.3's wallet is refused on LEZ 0.4");
         names.cli_wallet = Some(wallet03.to_string_lossy().into_owned());
         assert!(names.cli_setup().err().unwrap().contains("each network keeps its own wallet"));

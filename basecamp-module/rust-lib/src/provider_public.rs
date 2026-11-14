@@ -283,9 +283,8 @@ pub fn sheet(request: &Value, report: &Value, label: Option<&Value>, network: &s
         let id = actor["account"].as_str().unwrap_or_default();
         let actor_program = actor["program"].as_str().unwrap_or_default();
         if format!("Public/{id}") == account {
-            if actor_program == registry::account_text(&registry::NATIVE_TOKEN) {
-                warnings.push(format!("The program is given your account's LEZ balance: it can move LEZ out of {account}."));
-            } else {
+            // Its LEZ balance is warned about below, from the build's own `own_balance`.
+            if actor_program != registry::account_text(&registry::NATIVE_TOKEN) {
                 lines.push(format!("Also reaches your account's data for {}.", short(actor_program)));
             }
         } else if actor_program == registry::account_text(&registry::NATIVE_TOKEN) {
@@ -293,6 +292,9 @@ pub fn sheet(request: &Value, report: &Value, label: Option<&Value>, network: &s
         } else {
             lines.push(format!("Reaches Public/{id} (data for {}).", short(actor_program)));
         }
+    }
+    if report["own_balance"] == true {
+        warnings.push(format!("The program is given your account's LEZ balance: it can move LEZ out of {account}."));
     }
     for made in report["creates"].as_array().map(Vec::as_slice).unwrap_or_default() {
         lines.push(format!("Creates the program's account Public/{}.", made.as_str().unwrap_or_default()));
@@ -429,7 +431,7 @@ mod tests {
         assert!(refused["lines"][2].as_str().unwrap().contains("the Program Registry isn't installed"));
         // Its own balance given to the program is a warning.
         let mut report = report_for(&request);
-        report["actors"] = json!([{ "account": ACCOUNT.trim_start_matches("Public/"), "program": BRIDGE }, { "account": ACCOUNT.trim_start_matches("Public/"), "program": registry::account_text(&registry::NATIVE_TOKEN) }]);
+        report["own_balance"] = json!(true);
         let warned = super::sheet(&request, &report, None, "LEZ 0.4 · bridge test network");
         assert!(warned["warnings"][1].as_str().unwrap().contains("can move LEZ out of"), "{warned}");
     }
@@ -468,5 +470,17 @@ mod tests {
             let shown = sheet(&request, &report, None, "LEZ 0.4 · bridge test network");
             assert_eq!(shown["refused"], true, "{field}: {shown}");
         }
+    }
+
+    /// What the module hands the CLI, pinned in a file the names CLI's own test builds from
+    /// (`cli/src/public_call.rs`, `the_module_s_input_builds`): a plain account, an account's
+    /// LEZ balance and a program account the call creates.
+    #[test]
+    fn the_cli_input_is_the_shared_fixture() {
+        let declared = vec![BRIDGE.to_owned()];
+        let accounts = json!([{ "account": OTHER }, { "account": OTHER, "program": "native" }, { "seed": "22".repeat(32), "new": true }]);
+        let request = relayed_call_request("lez_bridge", ACCOUNT, &call(json!({ "accounts": accounts })), "", &declared, 1).unwrap();
+        let fixture: Value = serde_json::from_str(include_str!("../testdata/relayed-call-input.json")).unwrap();
+        assert_eq!(cli_input(&request, None), fixture);
     }
 }
