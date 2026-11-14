@@ -444,6 +444,7 @@ impl Store {
                     && matches!(
                         request["kind"].as_str(),
                         Some(CONNECT | TRANSFER | CALL | INSCRIBE | PRIVATE_CALL | SECRET | TOKEN_SOURCE)
+                            | Some(crate::provider_public::RELAYED_CALL | crate::provider_public::PROGRAMS)
                     )
                     && ok_text(&request["state"], 16)
                     && request["created"].is_u64()
@@ -471,7 +472,50 @@ impl Store {
             }
         }
         let private = crate::provider_private::Grants::load(&saved);
-        Self { path, requests, grants, private }
+        let mut store = Self { path, requests, grants, private };
+        // A request left from before a restart keeps call bytes only as long as it may still
+        // use them.
+        store.scrub(now_ms());
+        store
+    }
+
+    /// Whether a relayed call may still need its call bytes: while the person may approve it,
+    /// and once signed, while the app that made it may still have it signed again
+    /// (`resign_relayed_call`: within the window, under the count, still connected).
+    fn keeps_call_bytes(&self, request: &Value, now: u64) -> bool {
+        use crate::provider_public::{MAX_RESIGNS, RESIGN_WINDOW_MS};
+        match request["state"].as_str() {
+            Some("pending") => true,
+            Some("done") => {
+                request["decided"].as_u64().is_some_and(|at| at.saturating_add(RESIGN_WINDOW_MS) > now)
+                    && request["resigns"].as_u64().unwrap_or(0) < MAX_RESIGNS
+                    && request["app"].as_str().is_some_and(|app| self.grants.contains_key(app))
+            }
+            _ => false,
+        }
+    }
+
+    /// Drops the call bytes, and what is made from them, from every request that can no longer
+    /// use them: a relayed call's message and half-signed transaction (a bridge claim's message
+    /// carries its claim secret) once it is rejected, cancelled, expired, failed, past its
+    /// re-sign window or count, or its app was disconnected; a program call's instruction once
+    /// it is decided. Returns whether anything was dropped.
+    pub fn scrub(&mut self, now: u64) -> bool {
+        let keep: Vec<bool> = self.requests.iter().map(|request| self.keeps_call_bytes(request, now)).collect();
+        let mut changed = false;
+        for (request, keep) in self.requests.iter_mut().zip(keep) {
+            let drop: &[&str] = match request["kind"].as_str() {
+                Some(crate::provider_public::RELAYED_CALL) if !keep => &["message", "transaction"],
+                Some(CALL) if request["state"] != "pending" => &["instruction"],
+                _ => &[],
+            };
+            if let Some(fields) = request.as_object_mut() {
+                for key in drop {
+                    changed |= fields.remove(*key).is_some();
+                }
+            }
+        }
+        changed
     }
 
     /// Writes the store, 0600, in one step. Failing to save is not an error
@@ -480,7 +524,10 @@ impl Store {
         if let Some(path) = &self.path {
             // A private call's message (which may carry an app's secret) and its simulation are
             // kept only while the person may still approve it; the job has its own copy.
-            let requests: Vec<Value> = self
+            // The same rule as `scrub`, applied to what is written, whatever is still in memory.
+            let mut written = Store { path: None, requests: self.requests.clone(), grants: self.grants.clone(), private: Default::default() };
+            written.scrub(now_ms());
+            let requests: Vec<Value> = written
                 .requests
                 .iter()
                 .map(|request| {
@@ -511,6 +558,7 @@ impl Store {
                 changed = true;
             }
         }
+        changed |= self.scrub(now);
         let before = self.requests.len();
         self.requests.retain(|request| {
             !decided(request) || request["decided"].as_u64().unwrap_or(0).saturating_add(KEEP_DECIDED_MS) > now
@@ -601,7 +649,10 @@ impl Store {
     /// Takes back everything `app` was given. Returns whether it had anything.
     pub fn revoke(&mut self, app: &str) -> bool {
         let private = self.private.revoke(app);
-        self.grants.remove(app).is_some() || private
+        let revoked = self.grants.remove(app).is_some() || private;
+        // A disconnected app's relayed calls can't be signed again: their bytes go now.
+        self.scrub(now_ms());
+        revoked
     }
 }
 
@@ -860,6 +911,62 @@ mod tests {
         assert_eq!(edited.granted("ok"), vec![one]);
         assert!(edited.requests.is_empty());
         assert_eq!(edited.grants.len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A relayed call's bytes (a bridge claim's message carries its claim secret) and its
+    /// half-signed transaction leave provider.json on every path that ends their use: rejected,
+    /// cancelled, expired, failed, past the re-sign window, at the re-sign count, the app
+    /// disconnected, and a stale request found after a restart. Read back from the file each time.
+    #[test]
+    fn a_relayed_call_s_bytes_leave_the_file_when_its_use_ends() {
+        use crate::provider_public::{MAX_RESIGNS, RELAYED_CALL, RESIGN_WINDOW_MS};
+        let dir = std::env::temp_dir().join(format!("provider-scrub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("provider.json");
+        let now = now_ms();
+        let secret = "5ec2e7".repeat(10);
+        let request = |id: &str, state: &str, decided: u64, resigns: u64| {
+            json!({ "id": id, "app": "lez_bridge", "kind": RELAYED_CALL, "state": state, "created": now, "expires": now + PENDING_FOR_MS,
+                    "decided": decided, "resigns": resigns, "message": secret, "transaction": format!("{secret}aa"), "account": format!("Public/{ONE}") })
+        };
+        let file = || std::fs::read_to_string(&path).unwrap();
+        let kept = |id: &str| -> bool {
+            let saved: Value = serde_json::from_str(&file()).unwrap();
+            saved["requests"].as_array().unwrap().iter().any(|r| r["id"] == id && r.get("message").is_some())
+        };
+        let mut store = Store::load(Some(path.clone()));
+        store.grants.insert("lez_bridge".into(), json!({ "accounts": [format!("Public/{ONE}")], "since": 1 }));
+        for (id, state, decided, resigns) in [
+            ("pending", "pending", 0, 0),
+            ("signed", "done", now, 0),
+            ("rejected", "rejected", now, 0),
+            ("cancelled", "cancelled", now, 0),
+            ("failed", "failed", now, 0),
+            ("old", "done", now - RESIGN_WINDOW_MS - 1, 0),
+            ("spent", "done", now, MAX_RESIGNS),
+        ] {
+            store.requests.push(request(id, state, decided, resigns));
+        }
+        store.save();
+        assert!(kept("pending") && kept("signed"), "{}", file());
+        for gone in ["rejected", "cancelled", "failed", "old", "spent"] {
+            assert!(!kept(gone), "{gone}: {}", file());
+        }
+        assert_eq!(file().matches(&secret).count(), 4, "only the two live ones keep a message and a transaction");
+        // Expiry: the pending one, past its time.
+        store.sweep(now + PENDING_FOR_MS + 1);
+        store.save();
+        assert!(!kept("pending"), "expired");
+        // The app disconnected: the signed one can't be signed again.
+        store.revoke("lez_bridge");
+        store.save();
+        assert!(!kept("signed"), "revoked");
+        // A restart finds a stale request written by an older run: its bytes go at load.
+        std::fs::write(&path, json!({ "requests": [request("stale", "done", now - RESIGN_WINDOW_MS - 1, 0)], "grants": {} }).to_string()).unwrap();
+        Store::load(Some(path.clone())).save();
+        assert!(!kept("stale") && !file().contains(&secret), "{}", file());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

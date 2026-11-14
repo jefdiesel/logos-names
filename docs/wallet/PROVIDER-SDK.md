@@ -91,11 +91,12 @@ balances are 128-bit numbers.
 | `propose_private_call(account, call_json, summary)` | Asks for a privacy-preserving transaction from one of the private accounts you were given, across up to 4 programs (see [Private calls](#private-calls)). | a request |
 | `declare_programs(programs_json, reason)` | Names the programs (1 to 8 IDs, a JSON array) you will ask the person to sign calls to that someone else pays for. The person approves it once (see [Calls someone else pays for](#calls-someone-else-pays-for)). | a request |
 | `propose_relayed_call(account, call_json, summary)` | Asks the wallet to sign, as one of the public accounts you were given, a call whose fee another account pays (a relay's). The wallet hands the signed transaction back to you and sends nothing. LEZ 0.4 only. | a request; once approved, `transaction` and `hash` |
-| `resign_relayed_call(request_id)` | Signs your approved relayed call again, without asking the person, when only the fee payer's nonce has moved (your relay had another transaction in flight). Same account and account nonce, program, bytes, actors, payer, gas limit, tip and max fee; at most 3 times within 10 minutes of the approval. Anything else: propose it again. | the request, with the new `transaction` and `hash` |
+| `resign_relayed_call(request_id)` | Signs your approved relayed call again, without asking the person, when only the fee payer's nonce has moved (your relay had another transaction in flight). Same account and account nonce, program, bytes, actors, payer, gas limit, tip and max fee; at most 3 times within 10 minutes of the approval. A refusal carries `code`: `unchanged` (send what you have), `ask_again` (propose it again) or `refused`. | the request, with the new `transaction` and `hash` |
 | `app_secret(account, scope, context_hex, tag, first, count)` | Values the wallet derives for your app from one of your accounts; the first use of each (account, scope) is approved by the person (see [App secrets](#app-secrets)). | `{granted: false, request}` or `{granted: true, account, scope, tag, first, values}` |
 | `propose_token_source(token_program, definitions_json)` | Asks to list a token program's definitions, with names, symbols and decimals, in the person's holdings (see [Token sources](#token-sources)). Needs no access first. | a request |
 | `token_sources()` | The token sources the person accepted. | `[{token_program, definitions, app, since}]` |
 | `propose_inscription(text)` | Asks to inscribe a testimonial on the Logos Blockchain (not the LEZ zone), paid from one of the person's node's accounts, which they pick. Needs no access first (see [Inscriptions](#inscriptions-on-the-logos-blockchain)). | a request |
+| `get_config()` | The network part of the Names configuration (`sequencer`, `names_sequencer`, `registry`, `token_program`, `zone`, `names_network`, `module_version`). Since 0.17.0 in the usual envelope; earlier versions answered a plain object. | `{sequencer, …}` |
 | `request_status(request_id)` | How your request stands. Only the app that made a request can read it. | a request |
 | `cancel_request(request_id)` | Withdraws your request while it's pending. | a request, `state: "cancelled"` |
 | `drop_access()` | Gives up the access you were given. | `{revoked}` |
@@ -451,7 +452,9 @@ afterwards.
    can be submitted once.
 6. **If the relay says it is busy** (its payer's nonce moved), call `resign_relayed_call(request)`:
    the wallet builds the call again and signs it only if nothing but the payer's nonce changed
-   (at most 3 times, within 10 minutes of the approval). Otherwise propose it again.
+   (at most 3 times, within 10 minutes of the approval). A refusal's `code` says what to do:
+   `unchanged` (the payer's nonce hasn't moved; send what you have), `ask_again` (propose it
+   again) or `refused`.
 
 **What the account's signature covers (LEZ v0.4.0-rc3).** The SHA-256 of the whole borsh message
 under `/LEE/v0.3/Message/Public/`: the declared actors and signing accounts, the root call and its

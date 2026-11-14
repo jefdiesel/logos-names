@@ -130,8 +130,14 @@ approving a second time:** the request ends `done`, approving it again is refuse
   - The payer's nonce must be newer than the last one signed.
   - Only then does the CLI sign the new hash, and it rebuilds and compares the hash once more as
     in §5.
-- **Anything else needs a new approval** ("Propose it again"). That includes an unchanged payer
-  nonce: the transaction already given is still the one to send.
+- **Anything else needs a new approval** ("Propose it again"). An unchanged payer nonce is not
+  signed again either: the transaction already given is still the one to send.
+- **Every refusal carries a `code`** beside `error`, so an app needn't match words:
+  - `unchanged`: the payer's nonce hasn't moved; send what you have;
+  - `ask_again`: something the person saw changed, the account's nonce moved, the program is no
+    longer declared, or the window or the count is used up; propose it again;
+  - `refused`: not this app's request, not a signed relayed call, LEZ 0.3 in use, or the wallet
+    can't build it now.
 
 Tests:
 - `provider_public::tests::a_re_sign_is_allowed_only_for_a_newer_payer_nonce`: each of the 11
@@ -144,6 +150,32 @@ Tests:
   - the account's nonce moved is refused;
   - a newer payer nonce is signed again, 3 times, then refused;
   - past 10 minutes it is refused.
+
+## 7. Where the call bytes are kept, and for how long
+
+A relayed call's message (for a bridge claim it carries the claim secret) and its half-signed
+transaction are kept in `provider.json` (mode 0600) only while they can still be used:
+- while the person may approve the call;
+- once it is signed, for the 10-minute re-sign window, under the count, and while the app is
+  still connected.
+
+They are dropped on every other path, in memory and in the file: rejected, cancelled, expired,
+failed, past the window, at the third re-sign, the app disconnected, and a stale request found
+after a restart (`Store::scrub`, run by `sweep`, `revoke`, `load` and every `save`). Test:
+`provider::tests::a_relayed_call_s_bytes_leave_the_file_when_its_use_ends`, which reads the
+file back on each path.
+
+Before 0.17:
+- A private call's message was already dropped from the file once it was decided.
+- A program call's instruction (`propose_call`) was dropped from memory when approved, but
+  after a rejection or an expiry it stayed in provider.json until the request was forgotten,
+  24 hours after the decision. 0.17 drops it once decided.
+- Relayed calls are new in 0.17.
+
+## Known limit: the wallet doesn't measure the gas
+
+`plan` doesn't simulate the call: the app picks `gas_limit` and `max_fee` (a relay's caps, for
+a bridge claim). The sheet shows them as the payer's, since the person doesn't pay them.
 
 ## What the wallet does not do
 

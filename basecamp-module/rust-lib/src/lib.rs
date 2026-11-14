@@ -322,7 +322,11 @@ pub trait NamesModule: Send + 'static {
     /// a name on the chain in the clear.
     fn set_primary(&mut self, account: String, name: String) -> String;
 
-    /// The sequencer URL, registry program ID and wallet files in use.
+    /// The sequencer URL, registry program ID and wallet files in use. To the Names app, the
+    /// plain object (as every version of the app reads it); to any other app, the network part
+    /// only (`sequencer`, `names_sequencer`, `registry`, `token_program`, `zone`,
+    /// `names_network`, `module_version`) in the usual `{success, value, error}` envelope
+    /// (since 0.17.0; before, it was a plain object for every caller).
     fn get_config(&mut self) -> String;
 
     /// Switches the names network to `network`: `lez-0.3` (the public Logos testnet, the
@@ -1530,6 +1534,15 @@ fn note_balances(chain: &str, scope: &str, balances: &[(String, u128)]) {
     if let Some(dir) = config_dir() {
         activity::note_balances(&dir, now(), chain, scope, balances);
     }
+}
+
+/// `reply` with a machine-readable `code` beside an error, for the methods that say one.
+fn reply_coded(outcome: Result<Value, (String, &str)>) -> String {
+    match outcome {
+        Ok(value) => json!({ "success": true, "value": value, "error": null, "code": null }),
+        Err((error, code)) => json!({ "success": false, "value": null, "error": error, "code": code }),
+    }
+    .to_string()
 }
 
 fn reply(outcome: Result<Value, String>) -> String {
@@ -3764,8 +3777,11 @@ impl NamesModule for Names {
     fn get_config(&mut self) -> String {
         // Another app sees only what any reader of the chain could know: who you follow,
         // like and message, your main name and your files stay with the Names app (AUTH-1).
+        // Other apps get the envelope every other method answers with (`{success, value,
+        // error}`): the testimonial mini-app already read it so. The Names app reads the plain
+        // object, as every version of it has.
         if only_the_names_app().is_err() {
-            return public_config(&self.shown_config()).to_string();
+            return reply(Ok(public_config(&self.shown_config())));
         }
         self.shown_config().to_string()
     }
@@ -5744,7 +5760,7 @@ impl NamesModule for Names {
     }
 
     fn resign_relayed_call(&mut self, request_id: String) -> String {
-        reply(self.resign(request_id.trim()))
+        reply_coded(self.resign(request_id.trim()))
     }
 
     fn declare_programs(&mut self, programs_json: String, reason: String) -> String {
@@ -6650,45 +6666,49 @@ impl Names {
     /// `resign_relayed_call`: signs an approved relayed call again when its payer's nonce has
     /// moved and nothing else has (`provider_public::resign_check`), within the window and the
     /// count the approval allows. Anything else needs the person's approval again.
-    fn resign(&mut self, id: &str) -> Result<Value, String> {
-        let app = asking_app()?;
+    fn resign(&mut self, id: &str) -> Result<Value, (String, &'static str)> {
+        // `refused`: not this app's, not signable here; `ask_again`: propose it again;
+        // `unchanged`: send the transaction already given.
+        let refused = |why: String| (why, "refused");
+        let again = |why: String| (why, "ask_again");
+        let app = asking_app().map_err(refused)?;
         let now = provider::now_ms();
-        let request = self.store().get(id).filter(|r| r["app"] == app.as_str()).cloned().ok_or("there is no such request")?;
+        let request = self.store().get(id).filter(|r| r["app"] == app.as_str()).cloned().ok_or_else(|| refused("there is no such request".to_owned()))?;
         if request["kind"] != provider_public::RELAYED_CALL || request["state"] != "done" || !request["approved_report"].is_object() {
-            return Err("only a relayed call the person approved and the wallet signed can be signed again".to_owned());
+            return Err(refused("only a relayed call the person approved and the wallet signed can be signed again".to_owned()));
         }
         let decided = request["decided"].as_u64().unwrap_or(0);
         if now.saturating_sub(decided) > provider_public::RESIGN_WINDOW_MS {
-            return Err(provider_public::ASK_AGAIN.replace("{why}", "the approval is more than 10 minutes old"));
+            return Err(again(provider_public::ASK_AGAIN.replace("{why}", "the approval is more than 10 minutes old")));
         }
         if request["resigns"].as_u64().unwrap_or(0) >= provider_public::MAX_RESIGNS {
-            return Err(provider_public::ASK_AGAIN.replace("{why}", "it was signed again 3 times already"));
+            return Err(again(provider_public::ASK_AGAIN.replace("{why}", "it was signed again 3 times already")));
         }
-        self.asked_here(&request)?;
+        self.asked_here(&request).map_err(again)?;
         if self.net != Net::Lez04 {
-            return Err("the wallet is on LEZ 0.3 now; it signs relayed calls on LEZ 0.4 only".to_owned());
+            return Err(refused("the wallet is on LEZ 0.3 now; it signs relayed calls on LEZ 0.4 only".to_owned()));
         }
         let program = request["program"].as_str().unwrap_or_default().to_owned();
         if !self.store().private.declared_of(&app).contains(&program) {
-            return Err("this app no longer has that program declared".to_owned());
+            return Err(again("this app no longer has that program declared".to_owned()));
         }
         // The kept bytes are still the approved ones.
         let message = registry::unhex(request["message"].as_str().unwrap_or_default()).unwrap_or_default();
         if registry::hex(&<sha2::Sha256 as sha2::Digest>::digest(&message)) != request["approved_report"]["message_sha256"].as_str().unwrap_or_default() {
-            return Err("the call to sign isn't the one approved; nothing was signed".to_owned());
+            return Err(again("the call to sign isn't the one approved; nothing was signed".to_owned()));
         }
         // The wallet builds it again (nonces from the chain) and compares the build with what
         // the person approved, field by field: only the payer's nonce may have moved.
-        let setup = self.cli_setup()?;
-        setup.wallet_ready()?;
+        let setup = self.cli_setup().map_err(refused)?;
+        setup.wallet_ready().map_err(refused)?;
         let output = cli::run_with_input(&setup, vec!["module".into(), "public-call".into(), "plan".into()], &provider_public::cli_input(&request, None).to_string(), PUBLIC_PLAN_PATIENCE)
-            .map_err(|error| format!("the wallet couldn't build this call again: {error}"))?;
-        let report: Value = serde_json::from_str(cli::last_line(&output)).map_err(|_| "the names CLI gave no build the wallet can read".to_owned())?;
+            .map_err(|error| refused(format!("the wallet couldn't build this call again: {error}")))?;
+        let report: Value = serde_json::from_str(cli::last_line(&output)).map_err(|_| refused("the names CLI gave no build the wallet can read".to_owned()))?;
         let last_payer_nonce = request["signed_payer_nonce"].as_str().and_then(|n| n.parse::<u128>().ok());
-        let hash = provider_public::resign_check(&request["approved_report"], last_payer_nonce, &report)?;
-        let transaction = self.sign_relayed(id, &request, &hash)?;
+        let hash = provider_public::resign_check(&request["approved_report"], last_payer_nonce, &report).map_err(|refusal| (refusal.text().to_owned(), refusal.code()))?;
+        let transaction = self.sign_relayed(id, &request, &hash).map_err(refused)?;
         let store = self.store();
-        let stored = store.get_mut(id).ok_or("there is no such request")?;
+        let stored = store.get_mut(id).ok_or_else(|| refused("there is no such request".to_owned()))?;
         stored["transaction"] = json!(transaction);
         stored["hash"] = json!(hash);
         stored["resigns"] = json!(stored["resigns"].as_u64().unwrap_or(0) + 1);
@@ -9060,8 +9080,10 @@ mod tests {
         let own = parsed(&names.get_config());
         assert_eq!(own["main_name"], "jef", "{own}");
         as_caller(logos_rust_sdk::LogosCaller::Module { name: "evil_ui".into(), instance: None });
-        let other = parsed(&names.get_config());
+        let answered = parsed(&names.get_config());
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert_eq!(answered["success"], true, "the envelope: {answered}");
+        let other = answered["value"].clone();
         let keys: Vec<&String> = other.as_object().unwrap().keys().collect();
         assert_eq!(keys, ["module_version", "names_network", "names_sequencer", "registry", "sequencer", "token_program", "zone"], "{other}");
         let zone: Vec<&String> = other["zone"].as_object().unwrap().keys().collect();
@@ -9099,7 +9121,7 @@ mod tests {
         assert!(!names.set_cli_wallet(dir.to_string_lossy().into_owned()));
         assert!(!names.set_wallet_files(String::new(), String::new()));
         assert!(!names.set_registry(registry::account_text(&[9; 32])));
-        assert_eq!(parsed(&names.get_config())["sequencer"], sequencer.as_str());
+        assert_eq!(parsed(&names.get_config())["value"]["sequencer"], sequencer.as_str());
         assert!(!dir.join("ran").exists(), "the CLI must not have run");
         // Reading stays open to every app.
         assert_eq!(names.normalize("@Jef".into()), "jef");
@@ -9777,14 +9799,16 @@ mod tests {
             std::fs::write(dir.join("sign-out.json"), json!({ "hash": new_hash, "transaction": format!("beef{payer_nonce}") }).to_string()).unwrap();
         };
         as_caller(app("other_app"));
-        assert!(parsed(&names.resign_relayed_call(id.clone()))["error"].as_str().unwrap().contains("no such request"), "another app's");
+        let theirs = parsed(&names.resign_relayed_call(id.clone()));
+        assert_eq!((theirs["code"].as_str(), theirs["error"].as_str().unwrap().contains("no such request")), (Some("refused"), true), "another app's: {theirs}");
         as_caller(app("lez_bridge"));
         rebuilt("41", "3", &hash, &|_| {});
-        assert!(parsed(&names.resign_relayed_call(id.clone()))["error"].as_str().unwrap().contains("hasn't moved"));
+        let same = parsed(&names.resign_relayed_call(id.clone()));
+        assert_eq!((same["code"].as_str(), same["error"].as_str().unwrap().contains("hasn't moved")), (Some("unchanged"), true), "{same}");
         for (field, value) in [("max_fee", json!("900001")), ("payer", json!(account)), ("message_sha256", json!("00".repeat(32)))] {
             rebuilt("42", "3", &"ef".repeat(32), &|again| again[field] = value.clone());
             let refused = parsed(&names.resign_relayed_call(id.clone()));
-            assert!(refused["error"].as_str().unwrap().contains("Propose it again"), "{field}: {refused}");
+            assert!(refused["error"].as_str().unwrap().contains("Propose it again") && refused["code"] == "ask_again", "{field}: {refused}");
         }
         rebuilt("42", "4", &"ef".repeat(32), &|_| {});
         assert!(parsed(&names.resign_relayed_call(id.clone()))["error"].as_str().unwrap().contains("your account was used"));

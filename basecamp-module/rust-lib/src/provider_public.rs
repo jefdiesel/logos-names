@@ -42,6 +42,30 @@ pub const RESIGN_WINDOW_MS: u64 = 10 * 60 * 1000;
 pub const MAX_RESIGNS: u64 = 3;
 /// What a refused re-sign says; `{why}` is filled in.
 pub const ASK_AGAIN: &str = "{why}: the wallet won't sign it again without the person. Propose it again (propose_relayed_call).";
+/// Why a re-sign was refused, as a code an app can act on without reading the words:
+/// `unchanged` (the payer's nonce hasn't moved: send the transaction you already have) or
+/// `ask_again` (anything else changed, or the window or the count is used up: propose it again).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResignRefusal {
+    Unchanged(String),
+    AskAgain(String),
+}
+
+impl ResignRefusal {
+    pub fn code(&self) -> &'static str {
+        match self {
+            ResignRefusal::Unchanged(_) => "unchanged",
+            ResignRefusal::AskAgain(_) => "ask_again",
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        match self {
+            ResignRefusal::Unchanged(text) | ResignRefusal::AskAgain(text) => text,
+        }
+    }
+}
+
 /// What a build must keep from the approved one for a re-sign: everything the person saw.
 const SAME_FOR_RESIGN: [&str; 11] =
     ["account", "program", "payer", "gas_limit", "tip", "max_fee", "actors", "creates", "own_balance", "message_len", "message_sha256"];
@@ -59,8 +83,8 @@ pub fn payer_nonce(report: &Value) -> Option<u128> {
 /// person again, and its hash if so. Only the payer's nonce may differ from `approved`, and it
 /// must be newer than the last one signed (`last_payer_nonce`): every field the sheet showed,
 /// the signing account's nonce and the set of signers must be the same.
-pub fn resign_check(approved: &Value, last_payer_nonce: Option<u128>, now: &Value) -> Result<String, String> {
-    let again = |why: &str| ASK_AGAIN.replace("{why}", why);
+pub fn resign_check(approved: &Value, last_payer_nonce: Option<u128>, now: &Value) -> Result<String, ResignRefusal> {
+    let again = |why: &str| ResignRefusal::AskAgain(ASK_AGAIN.replace("{why}", why));
     for field in SAME_FOR_RESIGN {
         if approved[field] != now[field] || approved[field].is_null() {
             return Err(again(&format!("the call's {field} is not the one approved")));
@@ -78,7 +102,7 @@ pub fn resign_check(approved: &Value, last_payer_nonce: Option<u128>, now: &Valu
     let last = last_payer_nonce.or_else(|| payer_nonce(approved)).ok_or_else(|| again("the approved call has no payer nonce"))?;
     match payer_nonce(now) {
         Some(nonce) if nonce > last => {}
-        Some(_) => return Err("the payer's nonce hasn't moved: the transaction already given is still the one to send".to_owned()),
+        Some(_) => return Err(ResignRefusal::Unchanged("the payer's nonce hasn't moved: the transaction already given is still the one to send".to_owned())),
         None => return Err(again("the new build has no payer nonce")),
     }
     now["hash"]
@@ -552,11 +576,13 @@ mod tests {
         let approved = built("41", "3", &"aa".repeat(32));
         assert_eq!(resign_check(&approved, None, &built("42", "3", &"bb".repeat(32))), Ok("bb".repeat(32)));
         assert_eq!(resign_check(&approved, Some(42), &built("45", "3", &"cc".repeat(32))), Ok("cc".repeat(32)), "after an earlier re-sign");
-        assert!(resign_check(&approved, Some(42), &built("42", "3", &"bb".repeat(32))).unwrap_err().contains("hasn't moved"));
-        assert!(resign_check(&approved, None, &built("41", "3", &"aa".repeat(32))).unwrap_err().contains("hasn't moved"));
+        let same = resign_check(&approved, Some(42), &built("42", "3", &"bb".repeat(32))).unwrap_err();
+        assert_eq!((same.code(), same.text().contains("hasn't moved")), ("unchanged", true));
+        assert!(resign_check(&approved, None, &built("41", "3", &"aa".repeat(32))).unwrap_err().text().contains("hasn't moved"));
         assert!(resign_check(&approved, None, &built("40", "3", &"bb".repeat(32))).is_err(), "an older payer nonce");
-        assert!(resign_check(&approved, None, &built("42", "4", &"bb".repeat(32))).unwrap_err().contains("your account was used"));
-        assert!(resign_check(&approved, None, &built("42", "3", &"aa".repeat(32))).unwrap_err().contains("no new hash"));
+        let moved = resign_check(&approved, None, &built("42", "4", &"bb".repeat(32))).unwrap_err();
+        assert_eq!((moved.code(), moved.text().contains("your account was used")), ("ask_again", true));
+        assert!(resign_check(&approved, None, &built("42", "3", &"aa".repeat(32))).unwrap_err().text().contains("no new hash"));
         for (field, value) in [
             ("account", json!(PAYER)),
             ("program", json!(OTHER)),
@@ -573,10 +599,11 @@ mod tests {
             let mut changed = built("42", "3", &"bb".repeat(32));
             changed[field] = value;
             let refused = resign_check(&approved, None, &changed).unwrap_err();
-            assert!(refused.contains(field) && refused.contains("Propose it again"), "{field}: {refused}");
+            assert_eq!(refused.code(), "ask_again", "{field}");
+            assert!(refused.text().contains(field) && refused.text().contains("Propose it again"), "{field}: {refused:?}");
         }
         let mut third = built("42", "3", &"bb".repeat(32));
         third["nonces"]["x"] = json!("1");
-        assert!(resign_check(&approved, None, &third).unwrap_err().contains("signers"));
+        assert!(resign_check(&approved, None, &third).unwrap_err().text().contains("signers"));
     }
 }
