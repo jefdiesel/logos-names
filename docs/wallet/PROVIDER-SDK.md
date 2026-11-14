@@ -423,6 +423,10 @@ afterwards.
      declares (at most 16), in order; `program` defaults to the root program; `native` is an
      account's LEZ balance. A program account (`seed` + `of`) the call creates is marked
      `"new": true`, which adds its admission evidence.
+   - Each entry has `account` **or** `seed`, never both: the wallet works out a program
+     account's address from its seed and refuses an entry that also gives an address. (Unlike
+     `propose_call` above, and unlike the names CLI's own `module public-call` input, which
+     accept an address beside a seed when it matches.)
    - Every program named must be one you declared. The wallet's own Names registry (either
      network's) and its token program are refused, at declaration and in a call, as the root, as
      a declared actor's program or as a program account's owner. The program that holds the
