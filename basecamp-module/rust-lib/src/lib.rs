@@ -39,6 +39,7 @@ mod chain_keys;
 mod chain_fee;
 mod chain_inscribe;
 mod changes;
+mod messages;
 mod cli;
 mod deposit;
 mod page_view;
