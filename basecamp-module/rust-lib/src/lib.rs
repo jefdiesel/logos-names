@@ -952,6 +952,13 @@ pub trait NamesModule: Send + 'static {
     /// rather than a second one made.
     fn request_access(&mut self, reason: String) -> String;
 
+    /// `request_access` with options, a JSON object: `{"account_hint": "Public/<id>"}` (or
+    /// `Private/<id>`) says which account the sheet ticks first, when the wallet holds it. It
+    /// only pre-ticks: the person still chooses, and nothing is given without their tick; a hint
+    /// the wallet doesn't hold is dropped. `"{}"` is `request_access(reason)`. An unknown field
+    /// or a malformed hint is refused. get_config `features` lists `request_access_with`.
+    fn request_access_with(&mut self, reason: String, options_json: String) -> String;
+
     /// The accounts this app has been given: `{connected, accounts:
     /// [{account, account_kind}]}`, where `account` is `Public/<id>` or
     /// `Private/<id>` and `account_kind` is `public` or `private`. Asks nobody.
@@ -1371,8 +1378,9 @@ const NAMES_APP: &str = "names_ui";
 /// release (the app's own metadata asks for at least this at install, but an
 /// older module can still be the one loaded).
 const MODULE_VERSION: &str = "0.17.0";
-/// get_config's `features`: what an app may need beyond the version (`reveal_name`).
-const MODULE_FEATURES: [&str; 1] = ["reveal_name"];
+/// get_config's `features`: what an app may need beyond the version (`reveal_name`;
+/// `request_access_with` and its `account_hint`).
+const MODULE_FEATURES: [&str; 2] = ["reveal_name", "request_access_with"];
 
 /// What a private-name action answers on LEZ 0.4, where names are public only (S-B).
 const PRIVATE_OFF_04: &str = "on LEZ 0.4 names are public only: private payments and private holders are off there, so nothing was done";
@@ -3608,6 +3616,24 @@ fn settings_json(settings: &Settings, now: u64) -> Value {
     })
 }
 
+/// `request_access_with`'s options: `{"account_hint": "Public/<id>"}` or `{}`. Anything else is
+/// refused, so an app can't pass something it believes does more.
+fn access_options(options_json: &str) -> Result<Option<String>, String> {
+    let options: Value = serde_json::from_str(options_json.trim()).map_err(|_| "the options are not a JSON object".to_owned())?;
+    let fields = options.as_object().ok_or("the options are not a JSON object")?;
+    if let Some(unknown) = fields.keys().find(|key| key.as_str() != "account_hint") {
+        return Err(format!("unknown option {unknown}: request_access_with takes only account_hint"));
+    }
+    match &options["account_hint"] {
+        Value::Null => Ok(None),
+        Value::String(text) => {
+            let (private, id) = provider::account_ref(text).map_err(|_| "account_hint is written Public/<id> or Private/<id>".to_owned())?;
+            Ok(Some(provider::account_written(private, &id)))
+        }
+        _ => Err("account_hint is written Public/<id> or Private/<id>".to_owned()),
+    }
+}
+
 /// The settings in `saved` that the module won't use as they are (see `apply_saved`'s checks),
 /// with their raw values, so a save writes them back instead of null (SF-5).
 fn rejected_settings(saved: &Value) -> HashMap<String, Value> {
@@ -5814,32 +5840,13 @@ impl NamesModule for Names {
     // ── Wallet Provider SDK ─────────────────────────────────────────────
 
     fn request_access(&mut self, reason: String) -> String {
+        reply(self.access_asked(&reason, None))
+    }
+
+    fn request_access_with(&mut self, reason: String, options_json: String) -> String {
         reply((|| {
-            let app = asking_app()?;
-            let now = provider::now_ms();
-            let store = self.store();
-            let granted = store.granted(&app);
-            if !granted.is_empty() {
-                return Ok(json!({ "request": null, "kind": provider::CONNECT, "state": "approved", "accounts": granted }));
-            }
-            if let Some(waiting) = store.requests.iter().find(|r| r["app"] == app.as_str() && r["kind"] == provider::CONNECT && r["state"] == "pending") {
-                return Ok(provider::app_view(waiting));
-            }
-            // With no wallet on this network the person has nothing to give: a plain refusal,
-            // never a request that waits unseen behind the Welcome screen.
-            if !self.home_has_wallet() {
-                let net = self.net.shown();
-                return Err(format!(
-                    "the Names wallet has no wallet on {} yet; the person creates it in the Names app first, then the app asks again",
-                    net["version"].as_str().unwrap_or("this network")
-                ));
-            }
-            let store = self.store();
-            let request = provider::connect_request(&app, &reason, now)?;
-            let view = provider::app_view(&request);
-            store.add(request, now)?;
-            store.save();
-            Ok(view)
+            let hint = access_options(&options_json)?;
+            self.access_asked(&reason, hint)
         })())
     }
 
@@ -6009,6 +6016,13 @@ impl NamesModule for Names {
                         if offered_for(&kind, &candidate) {
                             offered.push(merged(candidate, &json!({ "granted": true })));
                         }
+                    }
+                }
+                // An access request's hint is shown only when the wallet offers that account; it
+                // only says which box is ticked first (the person still chooses).
+                if request["account_hint"].is_string() && !offered.iter().any(|choice| choice["account"] == request["account_hint"]) {
+                    if let Some(fields) = request.as_object_mut() {
+                        fields.remove("account_hint");
                     }
                 }
                 request["choices"] = Value::from(offered);
@@ -6359,6 +6373,39 @@ impl Names {
             store.save();
         }
         store
+    }
+
+    /// `request_access(_with)`: asks for access (or answers the grant or the waiting request),
+    /// with an account the sheet ticks first (`hint`), never one given without the person's tick.
+    fn access_asked(&mut self, reason: &str, hint: Option<String>) -> Result<Value, String> {
+        let app = asking_app()?;
+        let now = provider::now_ms();
+        let store = self.store();
+        let granted = store.granted(&app);
+        if !granted.is_empty() {
+            return Ok(json!({ "request": null, "kind": provider::CONNECT, "state": "approved", "accounts": granted }));
+        }
+        if let Some(waiting) = store.requests.iter().find(|r| r["app"] == app.as_str() && r["kind"] == provider::CONNECT && r["state"] == "pending") {
+            return Ok(provider::app_view(waiting));
+        }
+        // With no wallet on this network the person has nothing to give: a plain refusal,
+        // never a request that waits unseen behind the Welcome screen.
+        if !self.home_has_wallet() {
+            let net = self.net.shown();
+            return Err(format!(
+                "the Names wallet has no wallet on {} yet; the person creates it in the Names app first, then the app asks again",
+                net["version"].as_str().unwrap_or("this network")
+            ));
+        }
+        let store = self.store();
+        let mut request = provider::connect_request(&app, reason, now)?;
+        if let Some(hint) = hint {
+            request["account_hint"] = json!(hint);
+        }
+        let view = provider::app_view(&request);
+        store.add(request, now)?;
+        store.save();
+        Ok(view)
     }
 
     /// Adds a transaction request from `app`, which must have been given access.
@@ -10264,6 +10311,44 @@ mod tests {
         assert_eq!((shown["publisher"].clone(), shown["checking"].clone()), (verified, json!(false)));
         assert_eq!(approve(&mut names, &id, &format!("Public/{PUBLIC}"))["value"]["state"], "approved");
         program_registry::PUBLISHER.with(|p| *p.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `account_hint`: an app may say which account its access is for; the sheet ticks that one
+    /// first when the wallet has it. It grants nothing: approval still takes the person's choice,
+    /// and a hint the wallet doesn't hold is dropped.
+    #[test]
+    fn an_access_hint_only_says_which_account_is_ticked_first() {
+        let (mut names, dir) = with_wallet("provider-hint", "exit 0");
+        as_caller(app("lez_bridge"));
+        let asked = parsed(&names.request_access_with("to claim deposits".into(), json!({ "account_hint": format!("Public/{PUBLIC}") }).to_string()));
+        let id = asked["value"]["request"].as_str().unwrap_or_else(|| panic!("{asked}")).to_owned();
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let shown = parsed(&names.pending_requests())["value"][0].clone();
+        assert_eq!((shown["reason"].as_str(), shown["account_hint"].as_str()), (Some("to claim deposits"), Some(format!("Public/{PUBLIC}").as_str())), "{shown}");
+        assert!(parsed(&names.get_config())["features"].as_array().unwrap().contains(&json!("request_access_with")));
+        // Only account_hint is an option; a malformed hint or another field is refused.
+        as_caller(app("strict_ui"));
+        assert!(parsed(&names.request_access_with("x".into(), r#"{"grant":true}"#.into()))["error"].as_str().unwrap_or_default().contains("unknown option grant"));
+        assert!(parsed(&names.request_access_with("x".into(), r#"{"account_hint":"nope"}"#.into()))["error"].as_str().unwrap_or_default().contains("Public/<id>"));
+        assert!(parsed(&names.request_access_with("x".into(), "[]".into()))["error"].as_str().unwrap_or_default().contains("not a JSON object"));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        // Nothing is given without the person's choice.
+        assert!(approve(&mut names, &id, "")["error"].as_str().unwrap_or_default().contains("choose an account"));
+        assert_eq!(names.store().get(&id).unwrap()["state"], "pending");
+        // A hint for an account the wallet doesn't hold is not shown.
+        as_caller(app("other_ui"));
+        parsed(&names.request_access_with("x".into(), json!({ "account_hint": format!("Public/{OTHER}") }).to_string()));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let views = parsed(&names.pending_requests())["value"].clone();
+        let other = views.as_array().unwrap().iter().find(|v| v["app"] == "other_ui").unwrap().clone();
+        assert!(other.get("account_hint").is_none(), "{other}");
+        // request_access is as before, and the same as options "{}".
+        as_caller(app("plain_ui"));
+        parsed(&names.request_access_with("just text".into(), "{}".into()));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let views = parsed(&names.pending_requests())["value"].clone();
+        assert_eq!(views.as_array().unwrap().iter().find(|v| v["app"] == "plain_ui").unwrap()["reason"], "just text");
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -75,6 +75,14 @@ Provider SDK. Every method returns JSON text:
 { "success": false, "value": null,     "error": "why, in plain words" }
 ```
 
+`request_access_with(reason, options_json)` is `request_access` with options, a JSON object.
+The only option is `{"account_hint": "Public/<id>"}` (or `Private/<id>`): the account the access
+is for, which the sheet ticks first when the wallet holds it. It only pre-ticks: the person still
+chooses, and nothing is given without their tick. A hint the wallet doesn't hold is dropped, and
+an unknown field or a malformed hint is refused. `"{}"` is the same as `request_access(reason)`.
+Check `get_config().features` for `"request_access_with"` first, and fall back to
+`request_access(reason)` on an older Names module.
+
 `request_access` with no wallet on the network in use is refused at once ("the Names wallet has
 no wallet on LEZ 0.4 yet; …"); ask again once the person has created it. A token source
 (`propose_token_source`) naming a bridge program or one of the wallet's own programs is refused.
@@ -104,6 +112,7 @@ balances are 128-bit numbers.
 | Method | What it does | Value |
 |---|---|---|
 | `request_access(reason)` | Asks to see some of the person's accounts. `reason` (up to 280 characters) is shown as your own words. If you already have access, nobody is asked. If a request is already waiting, you get that one back. | a request (below); if you're already connected, `{request: null, state: "approved", accounts}` |
+| `request_access_with(reason, options_json)` | `request_access` with `{"account_hint": "Public/<id>"}`: the account the sheet ticks first (see above). | as `request_access` |
 | `granted_accounts()` | The accounts you were given. Asks nobody. | `{connected, accounts: [{account, account_kind}]}`; `account_kind` is `public` or `private` |
 | `account_balances()` | The LEZ balance of each account you were given. Reads run in the background and the answer comes at once with the last balance read. Ask again for a newer one; the chain is read at most every 15 s. | `[{account, account_kind, balance, updating, error}]`; `balance` is decimal text, or null until first read |
 | `propose_transfer(asset, amount, destination)` | Asks to send `amount` of `asset` to `destination`. `asset` is `LEZ`, the native token (empty also means LEZ), or a token of the wallet's token program, written as its definition's account ID in base58 (see [Token transfers](#token-transfers)). `destination` is a name such as `alice`, or `Public/<id>`. The person picks the account it comes from. Checked when you call it. | a request |
