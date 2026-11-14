@@ -2701,7 +2701,19 @@ impl Jobs {
         let log_err = log.try_clone().map_err(|error| format!("cannot write the job's log: {error}"))?;
         // Its own process group: a signal meant for the host leaves it be.
         process.stdout(log).stderr(log_err).process_group(0);
-        let mut child = match process.spawn() {
+        // "Text file busy" (a program file just written, held for a moment by another thread's
+        // fork) is tried again shortly, as for the CLI's own runs.
+        let mut spawned = process.spawn();
+        for _ in 0..5 {
+            match &spawned {
+                Err(error) if error.raw_os_error() == Some(26) => {
+                    std::thread::sleep(Duration::from_millis(50));
+                    spawned = process.spawn();
+                }
+                _ => break,
+            }
+        }
+        let mut child = match spawned {
             Ok(child) => child,
             Err(error) => {
                 if let Some(scratch) = &scratch {
@@ -3138,7 +3150,17 @@ mod tests {
         let script = dir.join("names");
         std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let mut sleeper = Command::new(&script).args(["register", "racea", "--wait"]).spawn().unwrap();
+        // Retried on "Text file busy": another test thread's fork may hold the just-written script.
+        let mut sleeper = (0..20)
+            .find_map(|_| match Command::new(&script).args(["register", "racea", "--wait"]).spawn() {
+                Err(error) if error.raw_os_error() == Some(26) => {
+                    std::thread::sleep(Duration::from_millis(50));
+                    None
+                }
+                other => Some(other),
+            })
+            .expect("not busy for a second")
+            .unwrap();
         let write = |pid: u32| {
             let saved = json!({ "pending": { "racea": { "made": 7 } }, "background": { "racea": pid, "Bad Name": pid } });
             std::fs::write(dir.join("names.json"), saved.to_string()).unwrap();

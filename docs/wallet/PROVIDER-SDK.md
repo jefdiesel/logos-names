@@ -75,6 +75,10 @@ Provider SDK. Every method returns JSON text:
 { "success": false, "value": null,     "error": "why, in plain words" }
 ```
 
+`request_access` with no wallet on the network in use is refused at once ("the Names wallet has
+no wallet on LEZ 0.4 yet; …"); ask again once the person has created it. A token source
+(`propose_token_source`) naming a bridge program or one of the wallet's own programs is refused.
+
 A call can also answer `{ "success": false, "busy": true, "value": null, "error": "The wallet
 is busy; still working." }`: the module runs one call at a time, and this one waited its turn
 for 15 s (another call was still on a long step, such as a Logos Blockchain node call or a

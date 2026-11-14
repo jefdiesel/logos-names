@@ -87,7 +87,13 @@ the root only (`not_root`), together with the wallet's own token programs.
   append-only). The refused set is the union: built in, kept, read now. A sequencer that
   answers "no Config" can't shrink it.
 - The token programs of the token sources apps added (`token_source`) are refused as the root
-  the same way: they hold tokens the wallet shows.
+  the same way: they hold tokens the wallet shows. A token source may not name a bridge program
+  or one of the wallet's own programs (refused at propose and at approval), so no app can turn
+  a bridge's claims off by making its program a refused root.
+- Every token program a bridge's Config is read to name is kept, wherever it is read: a relayed
+  call's check, the balance view, and a change of the bridge list (the bridges listed before the
+  change are read first). A kept file that can't be read refuses every relayed call and is left
+  as it is; deleting it resets it.
 - If any one bridge's Config can't be read, the wallet signs nothing: proposing is refused
   ("the wallet couldn't check the token program of bridge <id> just now, so it signs nothing; try
   again"), and a stored call's sheet is refused (fail closed). A bridge with no Config on the

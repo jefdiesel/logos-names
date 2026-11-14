@@ -2498,7 +2498,9 @@ fn log_started(out: &str, mut entry: Value) {
 #[cfg(not(test))]
 const START_BUDGET: std::time::Duration = std::time::Duration::from_secs(12);
 #[cfg(test)]
-const START_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+// Tests: long enough that a test's stand-in sequencer, on a loaded machine running the suite's
+// threads, still answers inside it (3 s flaked on a busy 48-thread box).
+const START_BUDGET: std::time::Duration = std::time::Duration::from_secs(6);
 
 /// One call that starts a job: the deadline every one of its checks shares, the sequencer's
 /// health check (on its own thread from the start), and the reads a check already made, so
@@ -3913,7 +3915,7 @@ impl Names {
     /// The bridge programs read on LEZ 0.4 (`set_bridge_programs`): never empty.
     fn bridge_programs_now(&self) -> Vec<AccountId> {
         if self.bridge_programs.is_empty() {
-            vec![registry::parse_account(bridge_net::DEFAULT_BRIDGE_PROGRAM).expect("the default bridge program is an account ID")]
+            bridge_net::DEFAULT_BRIDGE_PROGRAMS.iter().map(|id| registry::parse_account(id).expect("a default bridge program is an account ID")).collect()
         } else {
             self.bridge_programs.clone()
         }
@@ -4108,6 +4110,9 @@ impl Names {
                     return Ok(status("revealed", saved.revealed.as_deref(), Some(saved.ready_at())));
                 }
                 let choice = if private_account.trim().is_empty() { saved.private_account.clone() } else { private_account.to_owned() };
+                // On LEZ 0.4 private payments are off: a name is registered public-only, whatever
+                // was asked, so no private account is made and no receiving keys are published.
+                let choice = if self.net == Net::Lez04 { String::new() } else { choice };
                 let keys = if choice.trim().is_empty() {
                     None
                 } else if choice.trim() == "auto" {
@@ -4140,7 +4145,17 @@ impl Names {
                     Some(wallet::private_keys(&self.cli_setup()?, &choice)?)
                 };
                 let change = registry.reveal(&name, &derived, &owner, &saved.secret, keys)?;
-                let sent = self.send(&registry, &held, &name, &change)?;
+                // Marked as in flight before it is sent, and saved: if the send fails after the
+                // transaction left (a timeout), a second ask within TIME_WINDOW_MS sends nothing
+                // (it answers "revealed" until then) instead of a second, failing, charged reveal.
+                // Calls run one at a time (NamesShell's lock), so two asks never overlap here; the
+                // mark covers a send that failed after its transaction left.
+                saved.revealed_at = Some(chain_now);
+                commitments.put(&registry.program, &name, &saved);
+                commitments.save_checked()?;
+                let sent = self.send(&registry, &held, &name, &change).map_err(|why| {
+                    format!("{why}; the reveal is not sent again for {} minutes, in case it went through", registry::TIME_WINDOW_MS / 60_000)
+                })?;
                 saved.revealed = sent["tx"].as_str().map(str::to_owned);
                 saved.revealed_at = Some(chain_now);
                 commitments.put(&registry.program, &name, &saved);
@@ -4871,6 +4886,7 @@ impl NamesCore for Names {
             return false;
         }
         let text = program_id.trim();
+        self.keep_bridge_tokens_before_change();
         self.bridge_programs = if text.is_empty() {
             Vec::new()
         } else {
@@ -4898,6 +4914,7 @@ impl NamesCore for Names {
                 _ => return false,
             }
         }
+        self.keep_bridge_tokens_before_change();
         self.bridge_programs = programs;
         self.save();
         true
@@ -5238,6 +5255,15 @@ impl NamesCore for Names {
         }
         reply((|| {
             let setup = self.cli_setup()?;
+            // Never over a wallet that is there: "Create my wallet" makes one only where there is
+            // none. (The CLI would open the existing store, not re-make it, but the person asked
+            // for a new wallet and must not get the old one's accounts mixed in.)
+            if setup.wallet_ready().is_ok() {
+                return Err(format!(
+                    "there is a wallet in {} already, so nothing was made or changed. If the app showed no wallet, it couldn't read it just now: wait a moment and open the Wallet again",
+                    setup.wallet.display()
+                ));
+            }
             if let Some(id) = self.jobs().ok().and_then(|jobs| jobs.running_for(cli::WALLET_JOB)) {
                 return Err(format!("your wallet is busy with something else (job {id}); wait for it to finish"));
             }
@@ -6624,6 +6650,16 @@ impl NamesCore for Names {
             if let Some(waiting) = store.requests.iter().find(|r| r["app"] == app.as_str() && r["kind"] == provider::CONNECT && r["state"] == "pending") {
                 return Ok(provider::app_view(waiting));
             }
+            // With no wallet on this network the person has nothing to give: a plain refusal,
+            // never a request that waits unseen behind the Welcome screen.
+            if !self.home_has_wallet() {
+                let net = self.net.shown();
+                return Err(format!(
+                    "the Names wallet has no wallet on {} yet; the person creates it in the Names app first, then the app asks again",
+                    net["version"].as_str().unwrap_or("this network")
+                ));
+            }
+            let store = self.store();
             let request = provider::connect_request(&app, &reason, now)?;
             let view = provider::app_view(&request);
             store.add(request, now)?;
@@ -6784,13 +6820,23 @@ impl NamesCore for Names {
                     request["zone_name"] = json!(name.or_else(|| request["zone_name"].as_str().map(str::to_owned)));
                     request["zone"] = json!(asked);
                 }
-                request["choices"] = Value::from(
-                    choices
-                        .iter()
-                        .filter(|choice| offered_for(&kind, choice))
-                        .map(|choice| merged(choice.clone(), &json!({ "granted": granted.iter().any(|account| choice["account"] == account.as_str()) })))
-                        .collect::<Vec<_>>(),
-                );
+                let mut offered: Vec<Value> = choices
+                    .iter()
+                    .filter(|choice| offered_for(&kind, choice))
+                    .map(|choice| merged(choice.clone(), &json!({ "granted": granted.iter().any(|account| choice["account"] == account.as_str()) })))
+                    .collect();
+                // An account shared with this app at connect is always offered, ticked, even before
+                // the background read of the wallet's other accounts has listed it (the sheet
+                // would otherwise tick the main public account instead).
+                for account in &granted {
+                    if !offered.iter().any(|choice| choice["account"] == account.as_str()) {
+                        let candidate = json!({ "account": account, "account_kind": if account.starts_with("Private/") { "private" } else { "public" }, "pays": false, "label": "shared with this app" });
+                        if offered_for(&kind, &candidate) {
+                            offered.push(merged(candidate, &json!({ "granted": true })));
+                        }
+                    }
+                }
+                request["choices"] = Value::from(offered);
                 request["granted"] = json!(granted);
                 request["publisher"] = publishers.get(&app).cloned().unwrap_or(Value::Null);
                 if kind == provider::PRIVATE_CALL || kind == provider::SECRET {
@@ -6961,6 +7007,7 @@ impl NamesCore for Names {
             let app = asking_app()?;
             let now = provider::now_ms();
             let request = provider_private::token_source_request(&app, &token_program, &definitions_json, now)?;
+            self.token_source_allowed(request["token_program"].as_str().unwrap_or_default())?;
             self.queue_any(&app, request, now)
         })())
     }
@@ -7696,6 +7743,8 @@ impl Names {
                 outcome["state"] = json!("approved");
             }
             provider::TOKEN_SOURCE => {
+                // The same rule as when it was asked, for one stored by an earlier build.
+                self.token_source_allowed(request["token_program"].as_str().unwrap_or_default())?;
                 self.store().private.add_token_source(request, now)?;
                 self.forget_tokens();
                 outcome["state"] = json!("approved");
@@ -7916,7 +7965,8 @@ impl Names {
         // that one as an actor's program, and it is refused as root (`root_only`) instead.
         // What is known without a read (built in and kept): every check reads the bridges once,
         // in `root_only`, and keeps what it read, so a sheet costs one read per bridge.
-        let bridged = self.bridge_tokens_kept();
+        // A kept list that can't be read leaves the built-in ones; `root_only` refuses the call.
+        let bridged = self.bridge_tokens_kept().unwrap_or_else(|_| bridge_net::KNOWN_TOKEN_PROGRAMS.iter().map(|id| (*id).to_owned()).collect());
         for token_program in [self.token_program.as_ref().map(registry::account_text), self.parked["token_program"].as_str().map(str::to_owned)] {
             let canonical = token_program.as_deref().and_then(|id| registry::parse_account(id).ok()).map(|id| registry::account_text(&id));
             if !canonical.is_some_and(|id| bridged.contains(&id)) {
@@ -7924,6 +7974,21 @@ impl Names {
             }
         }
         own
+    }
+
+    /// A token source may not name a bridge program or one of the wallet's own programs (SF-4):
+    /// once approved, its program is refused as a relayed call's root, which would refuse every
+    /// claim to that bridge.
+    fn token_source_allowed(&self, program: &str) -> Result<(), String> {
+        let id = registry::parse_account(program.trim().strip_prefix("Public/").unwrap_or(program.trim()))?;
+        if self.bridge_programs_now().contains(&id) {
+            return Err(format!("{} is a bridge program, not a token program; the wallet doesn't take it as a token source", registry::account_text(&id)));
+        }
+        let text = registry::account_text(&id);
+        if let Some((_, kind)) = self.own_programs().iter().find(|(known, _)| *known == text) {
+            return Err(format!("{text} is one of the wallet's own programs ({}); the wallet doesn't take it as a token source", kind.replace('_', " ")));
+        }
+        Ok(())
     }
 
     /// Programs a relayed call may never have as its root (`provider_public::RootOnly`): the
@@ -7951,16 +8016,28 @@ impl Names {
         Ok(list)
     }
 
+    /// Before the bridge list changes, the token program of each bridge listed now is read and
+    /// kept (SF-2), so a bridge removed before any relayed call was checked stays refused as root.
+    /// Best effort: a read that fails keeps nothing new (the balance view and every check keep
+    /// what they read too).
+    fn keep_bridge_tokens_before_change(&self) {
+        let _ = self.bridge_tokens_programs();
+    }
+
     /// The bridge token programs known without a read: the built-in ones and every one read before
     /// (`bridge_net::KNOWN_TOKEN_PROGRAMS`, `SEEN_TOKEN_PROGRAMS`).
-    fn bridge_tokens_kept(&self) -> Vec<String> {
+    fn bridge_tokens_kept(&self) -> Result<Vec<String>, String> {
         let mut out: Vec<String> = bridge_net::KNOWN_TOKEN_PROGRAMS.iter().map(|id| (*id).to_owned()).collect();
-        for id in config_dir().map(|dir| bridge_net::seen_token_programs(&dir)).unwrap_or_default() {
+        let kept = match config_dir() {
+            Some(dir) => bridge_net::seen_token_programs(&dir).map_err(|why| format!("the list of bridge token programs it keeps ({why}; deleting the file resets it)"))?,
+            None => Vec::new(),
+        };
+        for id in kept {
             if !out.contains(&id) {
                 out.push(id);
             }
         }
-        out
+        Ok(out)
     }
 
     /// The bridge token programs on LEZ 0.4, canonical and once each: the ones known without a read
@@ -7995,7 +8072,7 @@ impl Names {
         if let Some(dir) = config_dir() {
             bridge_net::keep_token_programs(&dir, &read_now);
         }
-        let mut out = self.bridge_tokens_kept();
+        let mut out = self.bridge_tokens_kept()?;
         for id in read_now {
             if !out.contains(&id) {
                 out.push(id);
@@ -8874,7 +8951,7 @@ mod tests {
     fn receiving_privately_is_in_the_history_with_its_fee() {
         let (mut names, dir) = with_fake_cli("privately", "echo 'applied in block 439'; echo 'fee paid: 417376'");
         let started = parsed(&names.cli_receive_privately("XferEcho".into()));
-        let job = started["value"]["id"].as_str().expect("a job").to_owned();
+        let job = started["value"]["id"].as_str().unwrap_or_else(|| panic!("a job: {started}")).to_owned();
         job_end(&mut names, &job);
         let rows = parsed(&names.activity("xferecho".into()));
         let row = rows["value"].as_array().unwrap().iter().find(|e| e["job"] == job.as_str()).cloned().expect("in the history");
@@ -8966,7 +9043,17 @@ mod tests {
         std::fs::create_dir_all(script.parent().unwrap()).unwrap();
         std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut finishing = std::process::Command::new(&script).args(["register", "racea", "--wait"]).spawn().unwrap();
+        // Retried on "Text file busy": another test thread's fork may hold the just-written script.
+        let mut finishing = (0..20)
+            .find_map(|_| match std::process::Command::new(&script).args(["register", "racea", "--wait"]).spawn() {
+                Err(error) if error.raw_os_error() == Some(26) => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    None
+                }
+                other => Some(other),
+            })
+            .expect("not busy for a second")
+            .unwrap();
         let saved = json!({ "pending": { "racea": { "made": 7 } }, "background": { "racea": finishing.id() } });
         std::fs::write(dir.join("wallet").join("names.json"), saved.to_string()).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -9150,8 +9237,8 @@ mod tests {
         let seen = "9Dk3PQD467hXAbsbMzrFYVPu5HFvUqKkU7VdoQD9oirA";
         let derived = registry::derive("xferslow");
         registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner: [3; 32], expires: registry::NEVER, profile: registry::Profile::default(), claimed: false })));
-        // Each read takes 1.6 s: either alone fits the 3 s a job start has, the two together don't.
-        registry::STUB_DELAY.with(|delay| delay.set(std::time::Duration::from_millis(1600)));
+        // Each read takes 3.2 s: either alone fits the 6 s a job start has, the two together don't.
+        registry::STUB_DELAY.with(|delay| delay.set(std::time::Duration::from_millis(3200)));
         let started = std::time::Instant::now();
         let refused = parsed(&names.cli_transfer("xferslow".into(), format!("Public/{seen}")));
         let took = started.elapsed();
@@ -9166,7 +9253,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(no_jobs(&dir), "nothing started, not even after the answer");
         // A sequencer quick enough for every check: the same hand-over starts.
-        registry::STUB_DELAY.with(|delay| delay.set(std::time::Duration::from_millis(400)));
+        registry::STUB_DELAY.with(|delay| delay.set(std::time::Duration::from_millis(800)));
         let started = parsed(&names.cli_transfer("xferslow".into(), format!("Public/{seen}")));
         registry::STUB_DELAY.with(|delay| delay.set(std::time::Duration::ZERO));
         let id = started["value"]["id"].as_str().unwrap_or_else(|| panic!("a job: {started}")).to_owned();
@@ -9975,7 +10062,7 @@ mod tests {
     fn handing_over_a_name_nobody_registered_is_refused_before_any_job() {
         let (mut names, dir) = with_wallet("unregistered-transfer", "exit 0");
         // The registry holds no record for it: the sequencer has no state on its account.
-        names.sequencer = registry::stub_http(registry::json_reply(r#"{"jsonrpc":"2.0","id":1,"result":null}"#), 8);
+        names.sequencer = registry::stub_http(registry::json_reply(r#"{"jsonrpc":"2.0","id":1,"result":null}"#), 64);
         let refused = parsed(&names.cli_transfer("nobodyhere".into(), format!("Private/{PRIVATE}")));
         assert_eq!(refused["error"], "nobodyhere is not registered, so nothing was sent", "{refused}");
         assert!(std::fs::read_dir(dir.join("jobs")).map_or(true, |entries| entries.count() == 0), "no job");
@@ -10620,6 +10707,8 @@ mod tests {
             "create",
             &format!("echo 'Created a new wallet. Write down its recovery phrase and keep it safe;'; echo 'it is the only way to get the wallet back:'; echo; echo '  {phrase}'; echo; echo 'public account   Public/{public}'; echo 'private account  Private/{private}'"),
         );
+        // A folder with no wallet in it yet (the stand-in leaves a store; a new wallet has none).
+        std::fs::remove_file(dir.join("wallet").join(cli::STORAGE_FILE)).unwrap();
         let made = parsed(&names.cli_create_wallet());
         assert_eq!(made["value"], json!({ "public": public, "private": private, "phrase": phrase }), "{made}");
         // Nothing about it went to the jobs folder.
@@ -12476,7 +12565,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&config);
         std::fs::create_dir_all(&config).unwrap();
         let mut names = Names::default();
-        assert_eq!(parsed(&names.get_config())["bridge_programs"], json!([bridge_net::DEFAULT_BRIDGE_PROGRAM]));
+        assert_eq!(parsed(&names.get_config())["bridge_programs"], json!(bridge_net::DEFAULT_BRIDGE_PROGRAMS));
         let (a, b) = (registry::account_text(&[5; 32]), registry::account_text(&[6; 32]));
         assert!(names.set_bridge_programs(json!([format!("Public/{a}"), b]).to_string()));
         assert_eq!(saved_file()["lez04"]["bridge_programs"], json!([a, b]));
@@ -12500,7 +12589,7 @@ mod tests {
         assert_eq!(saved_file()["lez04"]["bridge_programs"], json!([b]));
         assert!(names.set_bridge_programs("[]".into()));
         assert!(saved_file()["lez04"]["bridge_programs"].is_null() && saved_file()["lez04"]["bridge_program"].is_null());
-        assert_eq!(parsed(&names.get_config())["bridge_programs"], json!([bridge_net::DEFAULT_BRIDGE_PROGRAM]));
+        assert_eq!(parsed(&names.get_config())["bridge_programs"], json!(bridge_net::DEFAULT_BRIDGE_PROGRAMS));
         // An earlier 0.17 build's file: only `bridge_program`.
         std::fs::write(config.join("config.json"), json!({ "lez04": { "bridge_program": format!("Public/{a}") } }).to_string()).unwrap();
         assert_eq!(Names::default().bridge_programs_now().iter().map(registry::account_text).collect::<Vec<_>>(), vec![a.clone()]);
@@ -12677,15 +12766,39 @@ mod tests {
             let refused = parsed(&names.propose_relayed_call(account.clone(), json!({ "program": root, "message": "00ff", "fee": fee }).to_string(), String::new()));
             assert!(refused["error"].as_str().unwrap_or_else(|| panic!("{refused}")).contains("holds tokens your accounts have"), "{root}: {refused}");
         }
-        assert!(bridge_net::seen_token_programs(&config_dir().unwrap()).contains(&bridged), "kept on disk");
+        assert!(bridge_net::seen_token_programs(&config_dir().unwrap()).unwrap().contains(&bridged), "kept on disk");
 
         // A Config that names a bridge program as its token program: refused, and not kept.
         BRIDGE_CONFIGS.with(|configs| configs.borrow_mut().insert(bridge.to_owned(), Ok(Some(bridge.to_owned()))));
         as_caller(app("lez_bridge"));
         let odd = parsed(&names.propose_relayed_call(account.clone(), json!({ "program": bridge, "message": "00ff", "fee": fee }).to_string(), String::new()));
         assert!(odd["error"].as_str().unwrap_or_else(|| panic!("{odd}")).contains("names a bridge program as its token program"), "{odd}");
-        assert!(!bridge_net::seen_token_programs(&config_dir().unwrap()).contains(&bridge.to_owned()), "not kept");
+        assert!(!bridge_net::seen_token_programs(&config_dir().unwrap()).unwrap().contains(&bridge.to_owned()), "not kept");
         BRIDGE_CONFIGS.with(|configs| configs.borrow_mut().insert(bridge.to_owned(), Ok(None)));
+
+        // SF-4: a token source may not name a bridge program or one of the wallet's own programs,
+        // at propose or, for one stored by an earlier build, at approval.
+        let definitions = json!([{ "definition": registry::account_text(&[13; 32]), "name": "Wrapped thing" }]).to_string();
+        as_caller(app("lez_bridge"));
+        let refused = parsed(&names.propose_token_source(bridge.to_owned(), definitions.clone()));
+        assert!(refused["error"].as_str().unwrap_or_else(|| panic!("{refused}")).contains("is a bridge program"), "{refused}");
+        let refused = parsed(&names.propose_token_source(LEZ04_REGISTRY.to_owned(), definitions.clone()));
+        assert!(refused["error"].as_str().unwrap_or_else(|| panic!("{refused}")).contains("one of the wallet's own programs"), "{refused}");
+        let fine = parsed(&names.propose_token_source(registry::account_text(&[14; 32]), definitions.clone()));
+        let stored_id = fine["value"]["request"].as_str().or(fine["value"]["id"].as_str()).unwrap_or_else(|| panic!("{fine}")).to_owned();
+        names.store().get_mut(&stored_id).unwrap()["token_program"] = json!(bridge);
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let at_approval = approve(&mut names, &stored_id, "");
+        assert!(at_approval["error"].as_str().unwrap_or_else(|| panic!("{at_approval}")).contains("is a bridge program"), "{at_approval}");
+        // SF-3: a kept list that can't be read refuses every relayed call, and is left as it is.
+        let kept = config_dir().unwrap().join(bridge_net::SEEN_TOKEN_PROGRAMS);
+        let before = std::fs::read(&kept).ok();
+        std::fs::write(&kept, "[not json").unwrap();
+        as_caller(app("lez_bridge"));
+        let closed = parsed(&names.propose_relayed_call(account.clone(), json!({ "program": bridge, "message": "00ff", "fee": fee }).to_string(), String::new()));
+        assert!(closed["error"].as_str().unwrap_or_else(|| panic!("{closed}")).contains("deleting the file resets it"), "{closed}");
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "[not json", "left as it is");
+        match before { Some(bytes) => std::fs::write(&kept, bytes).unwrap(), None => std::fs::remove_file(&kept).unwrap() }
 
         // S-4: a token source's program is refused as root.
         let source_program = registry::account_text(&[12; 32]);
@@ -12777,6 +12890,36 @@ mod tests {
         });
         assert!(a.join().unwrap(), "the Names app's calls all went through");
         assert!(!b.join().unwrap(), "another app's never did, even while the Names app's ran");
+    }
+
+    /// "Create my wallet" never runs over a wallet that is there (a real store, not a guess): it
+    /// refuses in words and the CLI isn't run; the store is left byte for byte.
+    #[test]
+    fn creating_a_wallet_over_an_existing_one_is_refused() {
+        let (mut names, dir) = with_fake_cli("create-over", "echo 'should not run' > \"$(dirname \"$0\")/ran\"");
+        let store = dir.join("wallet").join(cli::STORAGE_FILE);
+        std::fs::write(&store, r#"{"accounts":"a real wallet store"}"#).unwrap();
+        let refused = parsed(&names.cli_create_wallet());
+        assert!(refused["error"].as_str().unwrap_or_else(|| panic!("{refused}")).contains("there is a wallet in"), "{refused}");
+        assert!(!dir.join("ran").exists(), "the CLI was not run");
+        assert_eq!(std::fs::read_to_string(&store).unwrap(), r#"{"accounts":"a real wallet store"}"#);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An app asking for access while the person has no wallet on this network gets a plain
+    /// refusal, not a request left waiting behind the Welcome screen.
+    #[test]
+    fn asking_for_access_with_no_wallet_is_refused_plainly() {
+        let config = config_dir().unwrap();
+        let _ = std::fs::remove_dir_all(&config);
+        std::fs::create_dir_all(&config).unwrap();
+        let mut names = Names::default();
+        names.cli_wallet = Some(config.join("no-wallet-here").to_string_lossy().into_owned());
+        as_caller(app("lez_bridge"));
+        let refused = parsed(&names.request_access("to claim".into()));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert!(refused["error"].as_str().unwrap_or_else(|| panic!("{refused}")).contains("has no wallet on LEZ 0.3 yet"), "{refused}");
+        assert!(names.store().requests.is_empty(), "nothing left waiting");
     }
 
     /// Another app's request is approved only on the network it was asked on.

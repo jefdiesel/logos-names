@@ -40,6 +40,15 @@ Not in: `pressure-fixes` (11 commits on `main`, partly ported to the 0.4 line al
   - its home zone is called `bridge-0.4`, so its history and other apps' requests are never
     LEZ 0.3's.
 - **Requests from other apps carry their network** and can be approved only on it.
+- **The bridges are v2 and v3 by default.** With none set, the Wallet reads both:
+  `JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7` (v2) and
+  `4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr` (v3, the fixed bridge). Their token programs
+  (`3gF78HRJ…`, `5w6nTkft…`) are built in as refused roots. Balance rows say "bridge v2" or
+  "bridge v3" (a label built into the module by program ID); another bridge shows its short ID.
+- **On LEZ 0.4 a name is registered public-only**: no private account is made and no private
+  receiving keys are published (private payments are off there).
+- **An app asking for access with no wallet on the network** gets a plain refusal ("the Names
+  wallet has no wallet on LEZ 0.4 yet…"), never a request left waiting behind the Welcome screen.
 - **The bridges are a setting, not a build constant, and there may be several.** The bridge
   programs the Wallet reads on LEZ 0.4 (each Config lists that bridge's tokens) live in
   config.json under `lez04.bridge_programs`, a list of at most 4. The first is also written as
@@ -126,6 +135,21 @@ means unit or flow tests with stand-ins; "untested" means not run in this releas
 the plain object must read `value` now. The Names app itself still gets the plain object.
 
 ## Known limits
+
+- SF-1: clearing the bridge list (`set_bridge_programs("[]")`) while on LEZ 0.3 doesn't stick after
+  a restart: the stale `lez04.bridge_programs` comes back from the parked LEZ 0.4 settings. It
+  fails safe (the old list is read; its token programs stay refused as root).
+- S-3: a request the wallet refused at approval stays pending, with its bytes, until it is rejected
+  or expires; nothing can sign it while the rule that refused it holds.
+- S-5: every `pending_requests` poll (every 3 s) reads each listed bridge's Config once per pending
+  relayed call. With 4 bridges and 4 such calls that is about 53 reads per 10 s, over the filter
+  proxy's 50: the reads then fail and the sheets show refused (availability only). With the
+  default two bridges it is about 7 per 10 s per pending call.
+- `bridge-token-programs.json` (beside config.json) only grows: every token program read from a
+  bridge's Config (a check, the balance view, a list change) stays refused as a relayed call's
+  root for good. A file that can't be read refuses every relayed call until it can; deleting it is
+  the reset, and gives up the token programs of bridges no longer listed (the built-in v2 and v3
+  ones stay).
 
 - The names module runs one call at a time. Each call now runs on its own worker thread
   (`concurrency: "multi"`, so a call into another module can no longer freeze it, as it froze

@@ -2,7 +2,7 @@
 // engine cannot run in CI. Run with: node basecamp/logic.test.mjs
 import { atLeast, someAmount, entryShown, amountRead, amountProblem, amountDigits, AMOUNT_MAX, CHAIN_AMOUNT_MAX, jobProblem, tokenToProblem, tokenSendProves, tokenShown, feeEstimate, feePaid, accountTitle, accountsShown, publisherLine, durationWords, keyShown, chainToProblem, stakeLines, rewardsLine, grouped, addDigits, walletAssets, subDigits, walletGroups, stakeTable, activityLine, activityFor, agoShown, readNote, chainKeyTitle, chainKeySub, chainUsable, chainLaterNote } from "./qml/logic.mjs";
 import { readFileSync } from "node:fs";
-import { cliOutdatedLine, replyKind, revealNext, revealLine } from "./qml/logic.mjs";
+import { cliOutdatedLine, replyKind, revealNext, revealLine, mergeCliStatus } from "./qml/logic.mjs";
 import { publicAccounts, decimalShown, bridgeNetStatus, bridgeNetRows, bridgeNetShown, publicIdProblem, NET_03, NET_04, mergedAccounts } from "./qml/logic.mjs";
 
 let failures = 0;
@@ -339,7 +339,18 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("replyKind", [undefined, null, "", "Timed out", "{\"error\":\"call timed out\"}", "false",
       JSON.stringify({ success: true, value: 3 }), JSON.stringify(JSON.stringify({ success: false, error: "no" })), "No such method: mine", "module not found: names"].map((r) => replyKind(r).kind),
     ["busy", "busy", "busy", "busy", "busy", "busy", "ok", "error", "missing", "missing"]);
+  // A wallet seen is never lost to a passing read: only a plain "no wallet" (wallet: false) changes it.
+  {
+    const seen = { wallet: true, public: "A", private: "P", cli: "/x" };
+    check("mergeCliStatus keeps the public account a passing read missed", mergeCliStatus(seen, { wallet: true, public: null, private: null, cli: "/x" }).public, "A");
+    check("mergeCliStatus: no answer keeps the last", mergeCliStatus(seen, undefined), seen);
+    check("mergeCliStatus: the module saying no wallet is taken", mergeCliStatus(seen, { wallet: false, public: null }).wallet, false);
+  }
   check("replyKind module busy", replyKind(JSON.stringify({ success: false, busy: true, value: null, error: "The wallet is busy; still working." })).kind, "busy");
+  // The host bridge's own answers (LogosQmlBridge): no client or not reachable is missing; a timeout is busy.
+  check("replyKind host answers", [JSON.stringify({ error: "Module not connected" }), JSON.stringify({ error: "Module not reachable", detail: "x" }),
+      "Module not reachable yet", "Module not connected", JSON.stringify({ error: "timeout" })].map((r) => replyKind(r).kind),
+    ["missing", "missing", "missing", "missing", "busy"]);
   // The reveal driver: a poll that fails (busy) mid-registration doesn't stop the reveal.
   {
     const due = [{ name: "m2-test", owner: "A", ready_at: 1000, stage: "committed" }];
@@ -363,8 +374,8 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("cliOutdatedLine 0.3", cliOutdatedLine("0.3", "names 0.1.0"), "The names tool this app uses for LEZ 0.3 (names 0.1.0) is too old for that network as it is now, so creating a wallet there doesn't work with it. LEZ 0.4 is unaffected: switch to it above.");
   check("cliOutdatedLine no reset, no install", ["0.3", "0.4"].map((n) => /reset|Install/.test(cliOutdatedLine(n, ""))), [false, false]);
   check("bridgeNetRows two bridges", bridgeNetRows({ bridges: [{ program: "A" }, { program: "B" }], accounts: [{ account: "Public/" + OTHER, found: true, native: "0",
-    tokens: [{ bridge: "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", symbol: "wETH", name: "Wrapped ETH", amount: "1", decimals: 0 }, { bridge: "7".repeat(44), symbol: "wETH", amount: "2", decimals: 0 }] }] })[0].assets.map((a) => a.name),
-    ["Native", "Wrapped ETH · bridge JECKBkvo…nUx7", "Bridged token · bridge 77777777…7777"]);
+    tokens: [{ bridge: "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", bridge_label: "bridge v2", symbol: "wETH", name: "Wrapped ETH", amount: "1", decimals: 0 }, { bridge: "7".repeat(44), symbol: "wETH", amount: "2", decimals: 0 }] }] })[0].assets.map((a) => a.name),
+    ["Native", "Wrapped ETH · bridge v2", "Bridged token · bridge 77777777…7777"]);
   check("bridgeNetRows one bridge unchanged", bridgeNetRows({ bridges: [{ program: "A" }], accounts: [{ account: "Public/" + OTHER, found: true, native: "0",
     tokens: [{ bridge: "A", symbol: "wETH", name: "Wrapped ETH", amount: "1", decimals: 0 }] }] })[0].assets.map((a) => a.name), ["Native", "Wrapped ETH"]);
   check("bridgeNetRows watched", bridgeNetRows({ accounts: [{ account: "Public/" + OTHER, found: false, watched: true }] }).map((r) => [r.title, r.watched]), [["Watched account BVDcg8Sb…yBnD", true]]);

@@ -1730,9 +1730,21 @@ Item {
 
     /// Reads where the CLI stands (nothing is run), and picks up an install
     /// or a move to private that was under way.
+    // While Welcome is up, what it shows is read again every 15 s, so a passing busy or failed
+    // read (or a change made elsewhere) never leaves it showing the wrong step.
+    Timer {
+        interval: 15000
+        repeat: true
+        running: root.bridgeReady && root.configKnown && root.needsWelcome
+        onTriggered: { root.loadCliStatus(); root.loadCliMine() }
+    }
+
     function loadCliStatus() {
         askLater("cli_status", [], function(value) {
-            cliStatus = value
+            var before = cliStatus
+            cliStatus = Logic.mergeCliStatus(cliStatus, value)
+            if (before && before.wallet && !(cliStatus && cliStatus.wallet))
+                console.log("names_ui: the module says there is no wallet now:", JSON.stringify(value))
             if (value && value.installing && installJob === null)
                 installJob = { id: value.installing.id, started: value.installing.started || Date.now(), line: installLine(value.installing.log_tail) }
             if (value && value.busy && value.busy.kind === "shield" && shieldJob === null)
@@ -2067,7 +2079,7 @@ Item {
         if (item !== null) {
             revealing = true
             revealAskedAt = Date.now()
-            askLater("register_name", [item.name, item.owner, "auto"], function(value) {
+            askLater("register_name", [item.name, item.owner, root.namesNet === "0.4" ? "" : "auto"], function(value) {
                 revealing = false
                 if (value && value.stage === "registered") {
                     say(item.name + " is yours.", false)
@@ -2544,7 +2556,9 @@ Item {
             return
         pending = { name: name, sent: false }
         say("Asking the wallet to sign.", false)
-        askLater("register_name", [name, owner, "auto"], function(value) {
+        // On LEZ 0.4 private payments are off: a name is registered public-only, with no private
+        // receiving keys ("auto" would make a private account and publish its keys).
+        askLater("register_name", [name, owner, namesNet === "0.4" ? "" : "auto"], function(value) {
             pending = null
             say("Committed. The reveal goes out by itself in about 15 minutes while Names is open; Wallet, Names shows when.", false)
             missing = ""
@@ -3849,7 +3863,10 @@ Item {
                 var choices = request.choices || []
                 var given = choices.filter(function(choice) { return choice.granted })
                 // Nothing is ticked for an app that may be a fake: choosing is deliberate (M-2).
-                appChosen = appPublisherFailed(request) ? [] : given.length > 0 ? [given[0].account] : choices.length > 0 ? [choices[0].account] : []
+                // The accounts shared with this app at connect come first: a declaration or a token
+                // source confirms all of them; anything else starts from the first one.
+                var many = request.kind === "programs" || request.kind === "token_source"
+                appChosen = appPublisherFailed(request) ? [] : given.length > 0 ? (many ? given.map(function(choice) { return choice.account }) : [given[0].account]) : choices.length > 0 ? [choices[0].account] : []
             }
             if (request.kind === "transfer")
                 loadFee()

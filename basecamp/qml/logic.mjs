@@ -812,9 +812,9 @@ export function bridgeNetShown(rows, showEmpty) {
 /// assets: [{symbol, name, amount}]}`, native LEZ first, then each bridged token with its
 /// decimals. An account the network has never seen has no assets (`found` false).
 /// What a module call's raw reply means: `{kind, value, error}`. `kind` is "ok", "error" (the
-/// module answered with an error), "busy" (no answer in time, or an answer that isn't the
-/// module's, as a host gives while the module is still working on another call) or "missing"
-/// (the host says the module or the method isn't there). Only "missing" asks for an install:
+/// module answered with an error), "busy" (no answer in time, or the host's "timeout") or
+/// "missing" (the host says the module or the method isn't there, as "Module not connected" or
+/// "Module not reachable"). Only "missing" asks for an install:
 /// a busy module must never be taken for an absent one.
 export function replyKind(reply) {
     if (reply === undefined || reply === null || String(reply) === "")
@@ -830,9 +830,26 @@ export function replyKind(reply) {
     if (parsed && typeof parsed === "object" && parsed.success !== undefined)
         return parsed.success ? { kind: "ok", value: parsed.value, error: "" } : { kind: "error", value: null, error: String(parsed.error) }
     var said = text !== "" ? text : JSON.stringify(parsed)
-    if (/no such (module|method)|unknown (module|method)|method not found|module not found|not loaded|is not installed/i.test(said))
+    // The host's own words for a module that isn't there (LogosQmlBridge: "Module not connected",
+    // "Module not reachable", "Module not reachable yet"); "timeout" and no answer are busy.
+    if (/module not connected|module not reachable|no such (module|method)|unknown (module|method)|method not found|module not found|not loaded|is not installed/i.test(said))
         return { kind: "missing", value: null, error: said }
     return { kind: "busy", value: null, error: said }
+}
+
+/// A new `cli_status` answer merged with the last one: a wallet seen stays seen unless the module
+/// says plainly there is none (`wallet: false`, its store is gone). An answer that has the store
+/// but couldn't read which account is the public one (its file was being written) keeps the
+/// account last read, so a passing read never sends a person with a wallet back to Welcome.
+export function mergeCliStatus(previous, next) {
+    if (!next || typeof next !== "object")
+        return previous
+    var merged = Object.assign({}, next)
+    if (previous && previous.wallet && merged.wallet && !merged["public"] && previous["public"])
+        merged["public"] = previous["public"]
+    if (previous && previous.wallet && merged.wallet && !merged["private"] && previous["private"])
+        merged["private"] = previous["private"]
+    return merged
 }
 
 /// Which public registration to ask about next (`register_name`), or null: the first one whose
@@ -890,7 +907,8 @@ export function bridgeNetRows(read) {
             assets.push({ symbol: "LEZ", name: "Native", amount: grouped(a.native) })
             ;(a.tokens || []).forEach(function(t) {
                 var name = t.name ? String(t.name) : "Bridged token"
-                if (many && t.bridge) name += " · bridge " + keyShown(String(t.bridge))
+                // "bridge v2" / "bridge v3" from the module (its built-in labels), else the short ID.
+                if (many && t.bridge) name += " · " + (t.bridge_label ? String(t.bridge_label) : "bridge " + keyShown(String(t.bridge)))
                 assets.push({ symbol: String(t.symbol || ""), name: name, amount: decimalShown(t.amount, t.decimals) })
             })
         }

@@ -31,11 +31,28 @@ pub const RPC: &str = "https://lez.nameswallet.app/";
 /// id: the bridges are a setting, config.json `lez04.bridge_programs`, changed with the
 /// module's `set_bridge_programs` (no rebuild).
 pub const DEFAULT_BRIDGE_PROGRAM: &str = "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7";
+/// The fixed bridge (v3), deployed beside v2 on 2026-11-14.
+pub const BRIDGE_V3_PROGRAM: &str = "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr";
+/// The bridges read when none is set: v2 and v3.
+pub const DEFAULT_BRIDGE_PROGRAMS: [&str; 2] = [DEFAULT_BRIDGE_PROGRAM, BRIDGE_V3_PROGRAM];
+/// What each known bridge is called on a balance row, by its program: the names of the
+/// deployments (rfp-022's v2 and its fixed v3). Another bridge shows its short program ID.
+pub const BRIDGE_LABELS: [(&str, &str); 2] = [(DEFAULT_BRIDGE_PROGRAM, "bridge v2"), (BRIDGE_V3_PROGRAM, "bridge v3")];
+
+/// The label of the bridge `program` (`BRIDGE_LABELS`), or None.
+pub fn bridge_label(program: &str) -> Option<&'static str> {
+    BRIDGE_LABELS.iter().find(|(id, _)| *id == program).map(|(_, label)| *label)
+}
 /// Token programs the Wallet always refuses as a relayed call's root, whatever a sequencer says:
 /// the default bridge's (read from its Config on our 0.4 on 2026-11-14), so a sequencer answering
 /// "no Config" can't take it off the list. Every token program read from a bridge's Config since
 /// is kept too (`SEEN_TOKEN_PROGRAMS`, append-only).
-pub const KNOWN_TOKEN_PROGRAMS: [&str; 1] = ["3gF78HRJNCfabkWFiszahVVacq181aU8SSGua8Cj9ZE4"];
+pub const KNOWN_TOKEN_PROGRAMS: [&str; 2] = [
+    // v2's (Config HugSoWM7…, read 2026-11-14)
+    "3gF78HRJNCfabkWFiszahVVacq181aU8SSGua8Cj9ZE4",
+    // v3's (Config 7nQ38yMp…, read 2026-11-14)
+    "5w6nTkftFFDy8mtdpnKpZVetGQJ2WCKdhmpJsAYArbU7",
+];
 /// The file, beside config.json, that keeps every bridge token program ever read (append-only).
 /// To take a wrong one out, delete the file: the next check reads every bridge again.
 pub const SEEN_TOKEN_PROGRAMS: &str = "bridge-token-programs.json";
@@ -43,20 +60,27 @@ pub const SEEN_TOKEN_PROGRAMS: &str = "bridge-token-programs.json";
 /// kept.
 pub const MAX_SEEN_TOKEN_PROGRAMS: usize = 16;
 
-/// The token programs kept in `dir` (`SEEN_TOKEN_PROGRAMS`), canonical.
-pub fn seen_token_programs(dir: &Path) -> Vec<String> {
-    std::fs::read_to_string(dir.join(SEEN_TOKEN_PROGRAMS))
-        .ok()
-        .and_then(|text| serde_json::from_str::<Vec<String>>(&text).ok())
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|id| registry::parse_account(id).ok().map(|id| registry::account_text(&id)))
+/// The token programs kept in `dir` (`SEEN_TOKEN_PROGRAMS`), canonical; none when there is no
+/// file yet. An error when the file is there but can't be read as a list of program IDs: the
+/// caller then signs no relayed call (it can't tell what the file would have refused), and the
+/// file is left as it is for the person to look at; deleting it is the reset.
+pub fn seen_token_programs(dir: &Path) -> Result<Vec<String>, String> {
+    let path = dir.join(SEEN_TOKEN_PROGRAMS);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("can't read {} ({error})", path.display())),
+    };
+    let list = serde_json::from_str::<Vec<String>>(&text).map_err(|_| format!("{} isn't a list of program IDs", path.display()))?;
+    list.iter()
+        .map(|id| registry::parse_account(id).map(|id| registry::account_text(&id)).map_err(|_| format!("{} holds something that isn't a program ID", path.display())))
         .collect()
 }
 
-/// Adds token programs to the ones kept in `dir`; never removes one.
+/// Adds token programs to the ones kept in `dir`; never removes one, and never writes over a
+/// file it can't read.
 pub fn keep_token_programs(dir: &Path, programs: &[String]) {
-    let mut kept = seen_token_programs(dir);
+    let Ok(mut kept) = seen_token_programs(dir) else { return };
     let before = kept.len();
     for program in programs {
         if !kept.contains(program) && kept.len() < MAX_SEEN_TOKEN_PROGRAMS {
@@ -457,6 +481,7 @@ pub fn read(url: &str, programs: &[AccountId], accounts: &[AccountId], dir: &Pat
         saved: Value,
     }
     let mut bridges: Vec<Bridge> = Vec::new();
+    let wanted_all = wanted.clone();
     for program in wanted {
         let text = registry::account_text(&program);
         let cached = kept.iter().find(|entry| entry["program"] == text.as_str()).cloned().unwrap_or(Value::Null);
@@ -472,6 +497,9 @@ pub fn read(url: &str, programs: &[AccountId], accounts: &[AccountId], dir: &Pat
                 .map(|mut token| {
                     if token["bridge"].is_null() {
                         token["bridge"] = json!(text);
+                    }
+                    if token["bridge_label"].is_null() {
+                        token["bridge_label"] = json!(bridge_label(&text));
                     }
                     token
                 })
@@ -489,12 +517,18 @@ pub fn read(url: &str, programs: &[AccountId], accounts: &[AccountId], dir: &Pat
             } else {
                 match state_under(&config, &program).and_then(|bytes| decode_config(&bytes)) {
                     Ok((token_program, listed)) => {
+                        // Kept for good, as a relayed call's check keeps it (S-1): a bridge removed
+                        // before any relayed call was checked stays refused as root. Never a bridge
+                        // program itself.
+                        if !wanted_all.contains(&token_program) {
+                            keep_token_programs(dir, &[registry::account_text(&token_program)]);
+                        }
                         let mut tokens = Vec::new();
                         for token in &listed {
                             let definition = registry::account_text(&token.definition);
                             let name = call(url, "getAccount", json!([definition]), deadline)?;
                             let name = state_under(&name, &token_program).ok().and_then(|bytes| decode_definition_name(&bytes));
-                            tokens.push(json!({ "bridge": text, "definition": definition, "eth_token": token.eth_token, "symbol": token.symbol(), "decimals": token.decimals, "name": name }));
+                            tokens.push(json!({ "bridge": text, "bridge_label": bridge_label(&text), "definition": definition, "eth_token": token.eth_token, "symbol": token.symbol(), "decimals": token.decimals, "name": name }));
                         }
                         let saved = json!({ "read_at": now, "program": text, "bridge": true, "token_program": registry::account_text(&token_program), "list": tokens, "problem": null });
                         Bridge { program, present: true, token_program: Some(token_program), tokens, problem: None, saved }
@@ -565,6 +599,7 @@ pub fn read(url: &str, programs: &[AccountId], accounts: &[AccountId], dir: &Pat
         "bridge": bridges.iter().any(|bridge| bridge.present),
         "bridges": bridges.iter().map(|bridge| json!({
             "program": registry::account_text(&bridge.program),
+            "label": bridge_label(&registry::account_text(&bridge.program)),
             "bridge": bridge.present,
             "token_program": bridge.token_program.map(|id| registry::account_text(&id)),
             "token_problem": bridge.problem,
@@ -577,7 +612,7 @@ pub fn read(url: &str, programs: &[AccountId], accounts: &[AccountId], dir: &Pat
 }
 
 fn held_row(token: &Value, amount: u128) -> Value {
-    json!({ "bridge": token["bridge"], "definition": token["definition"], "symbol": token["symbol"], "decimals": token["decimals"], "name": token["name"], "amount": amount.to_string() })
+    json!({ "bridge": token["bridge"], "bridge_label": token["bridge_label"], "definition": token["definition"], "symbol": token["symbol"], "decimals": token["decimals"], "name": token["name"], "amount": amount.to_string() })
 }
 
 /// The balances a read gives, for the History's balance marks: `(scope, [(account, amount)])`
@@ -669,6 +704,29 @@ mod tests {
         assert_eq!(registry::account_text(&program), TOKEN_PROGRAM);
         let shown: Vec<(String, String, u8)> = tokens.iter().map(|t| (t.symbol(), registry::account_text(&t.definition), t.decimals)).collect();
         assert_eq!(shown, vec![("dUSDC".to_owned(), DUSDC.to_owned(), 6), ("wETH".to_owned(), WETH.to_owned(), 18)]);
+    }
+
+    /// The fixed bridge (v3) as our 0.4 holds it (Config 7nQ38yMp…, read 2026-11-14): its token
+    /// program, both tokens with their decimals, and the definitions' names. The definition's
+    /// bytes after its name differ from v2's (the mint authority is a typed value now); the
+    /// wallet reads only the name there, so it reads both.
+    #[test]
+    fn the_v3_config_and_definitions_read() {
+        assert_eq!(registry::account_text(&config_address(&id(BRIDGE_V3_PROGRAM))), "7nQ38yMpJFvWY3tzMGUv4pJyqy5AfFJTHVpN75Yj9b4G");
+        let bytes = bytes_of(&fixture("config-v3.json")["result"]["data"]["actor_states"][BRIDGE_V3_PROGRAM]).expect("bytes");
+        let (program, tokens) = decode_config(&bytes).expect("decodes");
+        assert_eq!(registry::account_text(&program), "5w6nTkftFFDy8mtdpnKpZVetGQJ2WCKdhmpJsAYArbU7");
+        assert!(KNOWN_TOKEN_PROGRAMS.contains(&registry::account_text(&program).as_str()), "built in");
+        let mut shown: Vec<(String, String, u8)> = tokens.iter().map(|t| (t.symbol(), registry::account_text(&t.definition), t.decimals)).collect();
+        shown.sort();
+        assert_eq!(shown, vec![
+            ("dUSDC".to_owned(), "2MjYbRMi9VW81HGM5o6yptnCwvnY9NXfLLtFeqELkNXy".to_owned(), 6),
+            ("wETH".to_owned(), "CUsiaS9iH4MYtbHbp6mpfqAPaHCa1py5UT5GN8vQYXzM".to_owned(), 18),
+        ]);
+        let name = |file: &str| decode_definition_name(&bytes_of(&fixture(file)["result"]["data"]["actor_states"]["5w6nTkftFFDy8mtdpnKpZVetGQJ2WCKdhmpJsAYArbU7"]).unwrap());
+        assert_eq!(name("def-weth-v3.json").as_deref(), Some("Wrapped Sepolia ETH (demo v3)"));
+        assert_eq!(name("def-dusdc-v3.json").as_deref(), Some("Wrapped dUSDC (demo v3)"));
+        assert_eq!((bridge_label(DEFAULT_BRIDGE_PROGRAM), bridge_label(BRIDGE_V3_PROGRAM), bridge_label("x")), (Some("bridge v2"), Some("bridge v3"), None));
     }
 
     #[test]
@@ -882,6 +940,9 @@ mod tests {
             (second_text.clone(), "dUSDC", "0"), (second_text.clone(), "wETH", "100000000000000000"),
         ]);
         assert_eq!(later["accounts"][0]["other_tokens"], 0);
+        // SF-2: every Config read keeps its token program for good, as a relayed call's check does.
+        let kept = seen_token_programs(&dir).unwrap();
+        assert!(kept.contains(&TOKEN_PROGRAM.to_owned()) && kept.contains(&second_tokens_text), "{kept:?}");
         assert!(later["token_problem"].is_null());
         // At most MAX_BRIDGES are read.
         let many: Vec<AccountId> = (0..6u8).map(|n| [n + 30; 32]).collect();
@@ -892,14 +953,20 @@ mod tests {
     #[test]
     fn the_kept_token_programs_only_grow_and_are_capped() {
         let dir = scratch("kept");
+        assert_eq!(seen_token_programs(&dir), Ok(Vec::new()), "no file: none");
         keep_token_programs(&dir, &[registry::account_text(&[1; 32])]);
         keep_token_programs(&dir, &[]);
-        assert_eq!(seen_token_programs(&dir), vec![registry::account_text(&[1; 32])]);
+        assert_eq!(seen_token_programs(&dir).unwrap(), vec![registry::account_text(&[1; 32])]);
         let many: Vec<String> = (2..40u8).map(|n| registry::account_text(&[n; 32])).collect();
         keep_token_programs(&dir, &many);
-        let kept = seen_token_programs(&dir);
+        let kept = seen_token_programs(&dir).unwrap();
         assert_eq!(kept.len(), MAX_SEEN_TOKEN_PROGRAMS);
         assert_eq!(kept[0], registry::account_text(&[1; 32]), "never removes one");
+        // SF-3: a file that can't be read is an error, and is never written over.
+        std::fs::write(dir.join(SEEN_TOKEN_PROGRAMS), "{ not a list").unwrap();
+        assert!(seen_token_programs(&dir).is_err());
+        keep_token_programs(&dir, &[registry::account_text(&[2; 32])]);
+        assert_eq!(std::fs::read_to_string(dir.join(SEEN_TOKEN_PROGRAMS)).unwrap(), "{ not a list", "left as it is");
         let _ = std::fs::remove_dir_all(dir);
     }
 
