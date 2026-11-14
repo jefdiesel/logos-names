@@ -202,6 +202,15 @@ the plain object must read `value` now. The Names app itself still gets the plai
   is QML only). On the same Mac the text pastes anywhere. Through Screen Sharing's shared
   clipboard it may not arrive, probably because Qt gives macOS the text lazily. As a workaround,
   paste on the Mac itself, or copy the text again from there.
+- Some reads still carry no network tag (FINAL SF-2): pending_requests, activity, app_grants,
+  cli_token_pending and anon_name. A late answer from before a network switch can show the other
+  network's request choices or activity for one poll. This is display only: approval checks every
+  chosen account against the wallet in use, and each request against its own network.
+- The app's reveal driver only reveals (`reveal_name`): it can't start a registration, and a
+  network switch clears the registrations under way (FINAL MF-2). af520ba could, on a switch while
+  an app registration was due to reveal, commit the name on the other network.
+- A LEZ 0.3 setting that fails its check when read (the CLI or the wallet folder on a drive that
+  isn't mounted) is not used, and is written back unchanged rather than as null (FINAL SF-5).
 - LEZ 0.4 is public only: receive_privately, set_private_keys, cli_receive_privately, a private
   anon name and a private cli_register are refused there, and their buttons hidden.
 
@@ -218,6 +227,12 @@ the plain object must read `value` now. The Names app itself still gets the plai
   end it.
 
 ## Later (not in 0.17.0)
+
+- Any future key import passes the key on standard input, never on a command line.
+  `import-account-04.sh` had to use `--private-key`: the rc3 CLI's `wallet account import public`
+  has no stdin form. That form is upstream work, or an in-module import.
+- "Add" for a name held but not listed needs the LEZ 0.4 names CLI (`mine --add`). The October
+  LEZ 0.3 CLI (names 0.1.0) has no `--add`, so the app hides Add there and says why.
 
 - An in-app "Import an account from my LEZ 0.3 wallet" on LEZ 0.4. On 2026-11-14 the Mini did it
   in Terminal (`import-account-04.sh`: the 0.3 store's signing key, through the LEZ 0.4 CLI's

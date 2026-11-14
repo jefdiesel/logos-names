@@ -273,6 +273,12 @@ pub trait NamesModule: Send + 'static {
     /// `auto` makes is remembered too, so a retried reveal reuses it.
     fn register_name(&mut self, name: String, owner: String, private_account: String) -> String;
 
+    /// `register_name`'s later steps only: reveals the commitment kept for `name` and `owner`
+    /// on the network in use, or answers its stage. It never sends a new commitment: with none
+    /// kept here, or one that never landed, it refuses and sends nothing. The app's reveal driver
+    /// calls this, so a network switch can never start a registration (MF-2). Names app only.
+    fn reveal_name(&mut self, name: String, owner: String, private_account: String) -> String;
+
     /// Makes `name` payable privately and only privately: publishes the
     /// receiving keys of `private_account` (as for `register_name`; `auto` makes a
     /// new private account each time) and removes any public account from the name.
@@ -1226,6 +1232,11 @@ struct Names {
     net: Net,
     /// The other names network's settings as saved (`NET_KEYS`), kept as they are.
     parked: Value,
+    /// Settings of the network in use that were in config.json but failed their check when it
+    /// was read (a CLI not executable, a wallet folder on a drive not mounted, a retired
+    /// registry): not used, but written back as they were, never as null (SF-5). Setting one
+    /// again drops it from here.
+    rejected: HashMap<String, Value>,
     /// The bridge programs on LEZ 0.4, if set (config.json `lez04.bridge_programs`, or an
     /// earlier build's single `lez04.bridge_program`); empty means
     /// `bridge_net::DEFAULT_BRIDGE_PROGRAM`. At most `bridge_net::MAX_BRIDGES`. A redeployed or
@@ -1331,6 +1342,7 @@ impl Default for Names {
             receipt_asks: Default::default(),
             net: Net::Lez03,
             parked: Value::Null,
+            rejected: HashMap::new(),
             bridge_programs: Vec::new(),
             cli_lines: Default::default(),
         };
@@ -2073,6 +2085,7 @@ impl Names {
     /// Applies a saved configuration. A registry that this version can't read
     /// is ignored, so the default stands.
     fn apply_saved(&mut self, saved: &Value) {
+        self.rejected = rejected_settings(saved);
         if let Some(url) = saved["sequencer"].as_str().filter(|url| is_http_url(url)) {
             self.sequencer = url.to_owned();
         }
@@ -2890,6 +2903,12 @@ impl Names {
     /// is in use.
     fn saved_config(&self) -> Value {
         let mut out = self.config();
+        // SF-5: a setting that failed its check when read is written back as it was, not as null.
+        for (key, raw) in &self.rejected {
+            if out[key.as_str()].is_null() {
+                out[key.as_str()] = raw.clone();
+            }
+        }
         match self.net {
             Net::Lez03 => {
                 if self.parked.is_object() {
@@ -3057,12 +3076,20 @@ impl Names {
 
     /// One step of registering `name` for `owner`: commit, wait, reveal, or
     /// report that it is done. See [`NamesModule::register`].
-    fn register_step(&mut self, typed: &str, owner: &str, private_account: &str) -> Result<Value, String> {
+    fn register_step(&mut self, typed: &str, owner: &str, private_account: &str, may_commit: bool) -> Result<Value, String> {
         let name = registry::parse_name(typed)?;
         self.names_here()?;
         let registry = self.registry()?;
-        let held = self.held()?;
         let owner = registry::parse_account(owner)?;
+        let mut commitments = pending()?;
+        let saved = commitments.get(&registry.program, &name).filter(|saved| saved.owner == owner);
+        // The reveal driver (`reveal_name`) only ever finishes a registration made here, on this
+        // network's registry: with no commitment kept for it, nothing is read or sent.
+        let no_new = |why: &str| format!("no registration of {name} {why} on this network, so nothing was sent (only Register starts one)");
+        if !may_commit && saved.is_none() {
+            return Err(no_new("is waiting to be revealed"));
+        }
+        let held = self.held()?;
         if !held.public.contains(&owner) {
             return Err(format!(
                 "the open wallet does not hold {} as a public account; this module registers names only to public accounts",
@@ -3070,8 +3097,6 @@ impl Names {
             ));
         }
         let derived = self.derived(&name);
-        let mut commitments = pending()?;
-        let saved = commitments.get(&registry.program, &name).filter(|saved| saved.owner == owner);
         // What `auto` already made for this name, kept if a new commitment
         // replaces this one, so it isn't left unused.
         let carried = saved.as_ref().and_then(|saved| saved.auto_account.clone());
@@ -3099,6 +3124,9 @@ impl Names {
         }
 
         let chain_now = registry.now()?;
+        if !may_commit && !saved.as_ref().is_some_and(|saved| saved.usable_at(chain_now)) {
+            return Err(no_new("has a commitment still usable"));
+        }
         if let Some(mut saved) = saved.filter(|saved| saved.usable_at(chain_now)) {
             let promised = registry::commitment(&derived.id, &registry::owner_tag(&derived.id, &owner), &saved.secret);
             let landed = registry.commitment_made(&promised)?.is_some();
@@ -3169,7 +3197,10 @@ impl Names {
                 self.remember(&registry.program, &name);
                 return Ok(merged(sent, &json!({ "stage": "revealed", "ready_at": saved.ready_at() })));
             }
-            // The commitment never landed: make a new one.
+            // The commitment never landed: make a new one (only when the person asked).
+            if !may_commit {
+                return Err(no_new("has a commitment that landed"));
+            }
         }
 
         let secret: [u8; 32] = registry::fresh_bytes()?;
@@ -3552,6 +3583,28 @@ fn settings_json(settings: &Settings, now: u64) -> Value {
     })
 }
 
+/// The settings in `saved` that the module won't use as they are (see `apply_saved`'s checks),
+/// with their raw values, so a save writes them back instead of null (SF-5).
+fn rejected_settings(saved: &Value) -> HashMap<String, Value> {
+    let own = |path: &str, dir: bool, root_ok: bool| cli::is_owned_safely(std::path::Path::new(path), dir, root_ok);
+    let mut out = HashMap::new();
+    let mut keep = |key: &str, ok: bool| {
+        if !saved[key].is_null() && !ok {
+            out.insert(key.to_owned(), saved[key].clone());
+        }
+    };
+    keep("sequencer", saved["sequencer"].as_str().is_some_and(is_http_url));
+    keep("registry", saved["registry"].as_str().is_some_and(|program| !RETIRED_REGISTRIES.contains(&program) && registry::parse_account(program).is_ok()));
+    keep("cli", saved["cli"].as_str().is_some_and(|path| !path.is_empty() && cli::is_executable(std::path::Path::new(path)) && own(path, false, true)));
+    keep("cli_wallet", saved["cli_wallet"].as_str().is_some_and(|dir| !dir.is_empty() && own(dir, true, false)));
+    let files_ok = matches!((saved["wallet_config"].as_str(), saved["wallet_storage"].as_str()), (Some(config), Some(storage)) if own(config, false, false) && own(storage, false, false));
+    keep("wallet_config", files_ok);
+    keep("wallet_storage", files_ok);
+    keep("main_name", saved["main_name"].as_str().is_some_and(|name| registry::parse_name(name).is_ok()));
+    keep("token_program", saved["token_program"].as_str().is_some_and(|program| registry::parse_account(program).is_ok()));
+    out
+}
+
 impl NamesModule for Names {
     fn recipient(&mut self, name: String) -> String {
         reply((|| {
@@ -3799,7 +3852,15 @@ impl NamesModule for Names {
         }
         // The proof a registration carries comes from the names CLI, which holds the list.
         shortlist::use_cli(self.names_setup().ok());
-        reply(self.register_step(&name, &owner, &private_account))
+        reply(self.register_step(&name, &owner, &private_account, true))
+    }
+
+    fn reveal_name(&mut self, name: String, owner: String, private_account: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        shortlist::use_cli(self.names_setup().ok());
+        reply(self.register_step(&name, &owner, &private_account, false))
     }
 
     fn receive_privately(&mut self, name: String, private_account: String) -> String {
@@ -4004,9 +4065,10 @@ impl NamesModule for Names {
         }
         reply((|| {
             let setup = self.cli_setup()?;
-            // As for "Create my wallet": never over a wallet that opens (a restore is for one made
-            // for an earlier network that no longer does).
-            if setup.wallet_ready().is_ok() {
+            // As for "Create my wallet": never over a wallet that opens. A store from an earlier
+            // network that no longer opens (`old_wallet`) is what a restore is for: the CLI moves
+            // it aside (SF-1).
+            if setup.wallet_ready().is_ok() && !cli::wallet_is_old(&setup) {
                 return Err(format!(
                     "there is a wallet in {} that opens already, so nothing was restored or changed. A restore is for a wallet made for an earlier version of the network",
                     setup.wallet.display()
@@ -4852,6 +4914,7 @@ impl NamesModule for Names {
         if only_the_names_app().is_err() {
             return false;
         }
+        self.rejected.remove("cli");
         let path = path.trim();
         if path.is_empty() {
             self.cli = None;
@@ -4868,6 +4931,7 @@ impl NamesModule for Names {
         if only_the_names_app().is_err() {
             return false;
         }
+        self.rejected.remove("cli_wallet");
         let dir = dir.trim();
         let chosen = if dir.is_empty() {
             if self.on_home() {
@@ -4899,6 +4963,7 @@ impl NamesModule for Names {
         if only_the_names_app().is_err() {
             return false;
         }
+        self.rejected.remove("registry");
         match registry::parse_account(&program_id) {
             Ok(program) => {
                 self.program = Some(program);
@@ -4914,6 +4979,8 @@ impl NamesModule for Names {
         if only_the_names_app().is_err() {
             return false;
         }
+        self.rejected.remove("wallet_config");
+        self.rejected.remove("wallet_storage");
         let (config, storage) = (config_path.trim(), storage_path.trim());
         if config.is_empty() && storage.is_empty() {
             self.wallet_files = None;
@@ -4930,6 +4997,7 @@ impl NamesModule for Names {
         if only_the_names_app().is_err() {
             return false;
         }
+        self.rejected.remove("sequencer");
         self.change_sequencer(self.zones.current(), &url, false).is_ok()
     }
 
@@ -5057,6 +5125,7 @@ impl NamesModule for Names {
         if only_the_names_app().is_err() {
             return false;
         }
+        self.rejected.remove("token_program");
         let program_id = program_id.trim();
         if program_id.is_empty() {
             self.token_program = None;
@@ -7812,6 +7881,7 @@ mod tests {
             receipt_asks: Default::default(),
             net: Net::Lez03,
             parked: Value::Null,
+            rejected: HashMap::new(),
             bridge_programs: Vec::new(),
             cli_lines: Default::default(),
         }
@@ -7848,6 +7918,30 @@ mod tests {
         assert_eq!(answer["success"], false);
         assert_eq!(names.normalize("Jef.LEZ".into()), "jef");
         assert_eq!(names.normalize("jef.eth".into()), "");
+    }
+
+    /// MF-2: the reveal driver's call can only finish a registration whose commitment is kept on
+    /// the network in use. With none (a switch: the pending name is the other network's), it
+    /// refuses before reading or sending anything, and never commits.
+    #[test]
+    fn the_reveal_driver_never_starts_a_registration() {
+        let config = config_dir().unwrap();
+        let _ = std::fs::remove_dir_all(&config);
+        std::fs::create_dir_all(&config).unwrap();
+        let mut names = fresh();
+        names.program = Some([7; 32]);
+        // Nobody answers there: any read or send would fail with "could not reach".
+        names.sequencer = "http://127.0.0.1:9".into();
+        let refused = parsed(&names.reveal_name("alice".into(), "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk".into(), "auto".into()));
+        let why = refused["error"].as_str().unwrap_or_else(|| panic!("{refused}"));
+        assert!(why.contains("no registration of alice is waiting to be revealed on this network, so nothing was sent"), "{why}");
+        assert!(!config.join("pending.json").exists() && pending().unwrap().all(&[7; 32]).is_empty(), "no commitment kept");
+        // The commitment of the OTHER network (another registry) doesn't make it revealable here.
+        let mut other = pending().unwrap();
+        other.put(&[8; 32], "alice", &Commitment { owner: registry::parse_account("CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk").unwrap(), secret: [1; 32], made: 1, private_account: String::new(), auto_account: None, accounts_made: 0, revealed: None, revealed_at: None });
+        other.save();
+        let refused = parsed(&names.reveal_name("alice".into(), "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk".into(), "auto".into()));
+        assert!(refused["error"].as_str().unwrap_or_default().contains("is waiting to be revealed"), "{refused}");
     }
 
     #[test]
@@ -11604,6 +11698,32 @@ mod tests {
         serde_json::from_str(&std::fs::read_to_string(config_dir().unwrap().join("config.json")).unwrap()).unwrap()
     }
 
+    /// SF-5: a LEZ 0.3 setting that fails its check when read (the CLI or the wallet folder on a
+    /// drive not mounted) isn't used, but it is written back as it was across a switch to LEZ 0.4
+    /// and back, never as null. Setting it again replaces it.
+    #[test]
+    fn a_setting_that_fails_its_check_is_kept_not_nulled() {
+        let config = config_dir().unwrap();
+        let _ = std::fs::remove_dir_all(&config);
+        std::fs::create_dir_all(&config).unwrap();
+        let gone_cli = "/Volumes/not-mounted/user-test/bin/names";
+        let gone_wallet = "/Volumes/not-mounted/user-test/wallet";
+        std::fs::write(
+            config.join("config.json"),
+            json!({ "sequencer": DEFAULT_SEQUENCER, "registry": DEFAULT_REGISTRY, "cli": gone_cli, "cli_wallet": gone_wallet, "main_name": "jefdiesel" }).to_string(),
+        )
+        .unwrap();
+        let mut names = Names::default();
+        assert_eq!(names.cli, None, "not used while it fails its check");
+        assert!(parsed(&names.set_names_network("lez-0.4".into()))["success"] == true);
+        assert!(parsed(&names.set_names_network("lez-0.3".into()))["success"] == true);
+        let file = saved_file();
+        assert_eq!((file["cli"].as_str(), file["cli_wallet"].as_str(), file["main_name"].as_str()), (Some(gone_cli), Some(gone_wallet), Some("jefdiesel")), "{file}");
+        // Cleared on purpose: then it is gone.
+        names.set_cli(String::new());
+        assert!(saved_file()["cli"].is_null(), "{}", saved_file());
+    }
+
     /// Switching keeps LEZ 0.3's settings in the flat fields (what an older version reads),
     /// LEZ 0.4's under `lez04`, and each network's registry, sequencer, CLI and wallet apart.
     #[test]
@@ -11982,11 +12102,28 @@ mod tests {
         assert!(refused["error"].as_str().unwrap_or_else(|| panic!("{refused}")).contains("there is a wallet in"), "{refused}");
         assert!(!dir.join("ran").exists(), "the CLI was not run");
         assert_eq!(std::fs::read_to_string(&store).unwrap(), r#"{"accounts":"a real wallet store"}"#);
-        // A restore over it is refused the same way.
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A restore is refused over a wallet that OPENS, and goes ahead over one from an earlier
+    /// network that no longer opens (`old_wallet`: "Bring my wallet back", SF-1).
+    #[test]
+    fn a_restore_is_refused_over_a_wallet_that_opens_only() {
+        let opens = "case \"$*\" in *restore*) echo restored > \"$(dirname \"$0\")/ran\"; echo '{\"moved\":[],\"public\":[],\"private\":null}' ;; *) echo '[]' ;; esac";
+        let (mut names, dir) = with_fake_cli("restore-opens", opens);
+        let store = dir.join("wallet").join(cli::STORAGE_FILE);
+        std::fs::write(&store, r#"{"accounts":"a real wallet store"}"#).unwrap();
         let refused = parsed(&names.cli_restore_wallet("abandon ".repeat(23) + "art"));
         assert!(refused["error"].as_str().unwrap_or_else(|| panic!("{refused}")).contains("that opens already"), "{refused}");
-        assert!(!dir.join("ran").exists(), "the CLI was not run");
+        assert!(!dir.join("ran").exists(), "nothing was restored");
         assert_eq!(std::fs::read_to_string(&store).unwrap(), r#"{"accounts":"a real wallet store"}"#);
+        let _ = std::fs::remove_dir_all(dir);
+        let old = format!("case \"$*\" in *restore*) echo restored > \"$(dirname \"$0\")/ran\"; echo '{{\"moved\":[],\"public\":[],\"private\":null}}' ;; *) echo 'Error: {}' >&2; exit 1 ;; esac", cli::OLD_WALLET);
+        let (mut names, dir) = with_fake_cli("restore-old", &old);
+        std::fs::write(dir.join("wallet").join(cli::STORAGE_FILE), r#"{"an":"old store"}"#).unwrap();
+        let restored = parsed(&names.cli_restore_wallet("abandon ".repeat(23) + "art"));
+        assert_eq!(restored["success"], true, "{restored}");
+        assert!(dir.join("ran").exists(), "the old wallet was restored");
         let _ = std::fs::remove_dir_all(dir);
     }
 

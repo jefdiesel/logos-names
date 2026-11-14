@@ -684,7 +684,7 @@ pub fn fetch_snapshot(url: &str, wait: Duration) -> Result<Vec<u8>, String> {
 }
 
 /// Words that say a wallet could not be read, as the CLI puts it (`OLD_WALLET`).
-const OLD_WALLET: &str = "does not load on 0.4";
+pub(crate) const OLD_WALLET: &str = "does not load on 0.4";
 
 /// Whether the wallet is one from before LEZ 0.4, which the CLI can't open.
 pub fn wallet_is_old(setup: &Setup) -> bool {

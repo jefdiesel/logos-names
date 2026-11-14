@@ -79,6 +79,12 @@ impl Names {
         if request["state"] != "pending" {
             return Err(format!("that request is {} already", request["state"].as_str().unwrap_or("decided")));
         }
+        // M-2 for inscriptions too (MF-1): nothing is signed while the Program Registry is still
+        // being asked who publishes the app; the answer may be a warning the sheet doesn't show yet.
+        let app = request["app"].as_str().unwrap_or_default().to_owned();
+        if self.publisher_of(&app)["status"] == "checking" {
+            return Err(format!("still checking who publishes {app} with the Program Registry; try again in a few seconds"));
+        }
         let from = chain::parse_key(from_key).ok_or("choose the chain account that inscribes it")?;
         // Checked against the node now, not a list read earlier.
         if !chain_choices()?.as_array().into_iter().flatten().any(|choice| choice["key"] == from.as_str()) {
@@ -203,6 +209,13 @@ mod tests {
         // A key the node doesn't hold is refused and the request stays pending.
         let stray = parsed(&names.approve_inscription(id.clone(), "cd".repeat(32)));
         assert!(stray["error"].as_str().unwrap().contains("isn't an account your node's wallet holds"), "{stray}");
+        // MF-1: while the Program Registry is still being asked who publishes the app, nothing is
+        // inscribed; the request stays pending.
+        crate::program_registry::CHECKING.with(|c| c.set(true));
+        let waiting = parsed(&names.approve_inscription(id.clone(), FROM.into()));
+        crate::program_registry::CHECKING.with(|c| c.set(false));
+        assert!(waiting["error"].as_str().unwrap_or_else(|| panic!("{waiting}")).contains("still checking who publishes testimonial_ui"), "{waiting}");
+        assert_eq!(names.store().get(&id).unwrap()["state"], "pending");
         let done = parsed(&names.approve_inscription(id.clone(), FROM.into()));
         let hash = chain_inscribe::hex(&chain_inscribe::tx_hash(&ops).unwrap());
         assert_eq!(done["value"]["state"], "done", "{done}");

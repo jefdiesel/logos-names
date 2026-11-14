@@ -207,8 +207,8 @@ Item {
     /// A reply as Advanced shows it, for finding out why something failed.
     /// A new wallet's reply holds its recovery phrase, so it is never kept.
     function shownReply(what, reply) {
-        if (what === "names.cli_create_wallet")
-            return what + " → (not shown: it holds your recovery phrase)"
+        if (what === "names.cli_create_wallet" || what === "names.cli_restore_wallet")
+            return what + " → (not shown: it may hold your recovery phrase)"
         return what + " → " + String(reply).substr(0, 400)
     }
 
@@ -801,6 +801,11 @@ Item {
             cliNames = []
             cliPending = []
             cliKnown = false
+            // The registrations under way are the network's own: the reveal driver never sees the
+            // other network's (MF-2), and the module's reveal_name can't start one anyway.
+            myNames = []
+            pendingNames = []
+            revealing = false
             tokenHoldings = null
             walletAccount = null
             if (walletView === "account")
@@ -2146,12 +2151,12 @@ Item {
         }
         // Asked even while the wallet read is failing: the registrations under way are the
         // module's own (pending.json), and their reveals must go out whatever else is slow.
-        askLater("mine", [], function(value) {
+        askLater("mine", [], onNet(function(value) {
             myNames = value.names
             pendingNames = value.pending ? value.pending : []
             if (pendingNames.length > 0)
                 revealTimer.start()
-        }, function(message) {
+        }), function(message) {
             console.log("names_ui: my names:", message)
         })
     }
@@ -2180,7 +2185,8 @@ Item {
         if (item !== null) {
             revealing = true
             revealAskedAt = Date.now()
-            askLater("register_name", [item.name, item.owner, root.namesNet === "0.4" ? "" : "auto"], function(value) {
+            // Reveal only: never a new commitment (the module refuses one that isn't kept here).
+            askLater("reveal_name", [item.name, item.owner, root.namesNet === "0.4" ? "" : "auto"], function(value) {
                 revealing = false
                 if (value && value.stage === "registered") {
                     say(item.name + " is yours.", false)
@@ -4212,12 +4218,16 @@ Item {
                 return
             }
             var choices = request.choices || []
-            if (inscribeFor !== request.id) {
-                inscribeFor = request.id
+            // Picked again (and the warning's tick undone) on a new request and whenever its
+            // publisher check changes: nothing is ticked while it is "checking" or failed (MF-1).
+            var inscribeKey = Logic.requestTickKey(request)
+            if (inscribeFor !== inscribeKey) {
+                inscribeFor = inscribeKey
                 inscribeUnderstood = false
                 inscribeError = ""
                 // Nothing is ticked for an app that may be a fake: choosing is deliberate (M-2).
-                inscribeFrom = appPublisherFailed(request) ? "" : Logic.inscribeFirstChoice(choices)
+                var publisherStatus = request.publisher && typeof request.publisher === "object" ? request.publisher.status : ""
+                inscribeFrom = appPublisherFailed(request) || publisherStatus === "checking" ? "" : Logic.inscribeFirstChoice(choices)
             } else if (inscribeFrom !== "" && !request.node
                        && !choices.some(function(choice) { return choice.key === inscribeFrom })) {
                 // The account left the node's wallet since it was ticked.
@@ -4272,6 +4282,9 @@ Item {
     }
 
     function inscribeCanApprove() {
+        // Not while the Program Registry is still asked who publishes the app (the module refuses too).
+        if (inscribeRequest !== null && inscribeRequest.publisher && inscribeRequest.publisher.status === "checking")
+            return false
         return Logic.inscribeCanApprove({
             request: inscribeRequest, chosen: inscribeFrom, busy: inscribeBusy,
             plan: inscribePlanFor === (inscribeRequest ? inscribeRequest.id + " " + inscribeFrom : "") ? inscribePlan : null,
@@ -4580,6 +4593,8 @@ Item {
         /// Up to 39 digits rather than 15, for token amounts (128 bits).
         property bool longNumbers: false
         property bool code: false
+        /// Shown as dots while typed (a recovery phrase).
+        property bool secret: false
         property int size: 18
         signal accepted()
         signal edited()
@@ -4602,6 +4617,7 @@ Item {
             clip: true
             selectByMouse: true
             validator: field.numbersOnly ? (field.longNumbers ? longDigits : digits) : null
+            echoMode: field.secret ? TextInput.Password : TextInput.Normal
             onAccepted: field.accepted()
             onEditingFinished: field.edited()
             // A long value set from outside shows its start, not its end.
@@ -5470,6 +5486,7 @@ Item {
                         id: restorePhraseField
                         visible: root.oldWallet || (root.restoreOpen && !root.hasCliWallet)
                         Layout.fillWidth: true
+                        secret: true
                         hint: "Your recovery phrase"
                     }
                     Action {
@@ -6865,14 +6882,15 @@ Item {
                         // A name this wallet holds that isn't listed (handed to it, or registered
                         // before public registrations were listed): the CLI checks the chain first.
                         // The chain can't list a wallet's names by account, so it is typed.
-                        Hint { font.pixelSize: root.px(15); text: "Hold a name that isn't listed? Type it: the wallet checks on chain that it holds it, then lists it." }
+                        Hint { font.pixelSize: root.px(15); text: root.cliOutdated ? "Hold a name that isn't listed? The names program set for this network is too old to add one; LEZ 0.4's can." : "Hold a name that isn't listed? Type it: the wallet checks on chain that it holds it, then lists it." }
                         RowLayout {
+                            visible: !root.cliOutdated
                             Layout.fillWidth: true
                             spacing: 10
                             Field { id: addNameField; Layout.fillWidth: true; hint: "Name you hold" }
                             Action {
                                 label: "Add"
-                                enabledNow: root.pending === null && addNameField.text.trim() !== "" && root.zoneHome
+                                enabledNow: root.pending === null && addNameField.text.trim() !== "" && root.zoneHome && !root.cliOutdated
                                 onPressed: {
                                     var typed = addNameField.text.trim().toLowerCase().replace(/\.lez$/, "")
                                     root.cliChange("add_name", [typed], typed, function() { return true }, "Added " + typed + ": this wallet holds it.")
