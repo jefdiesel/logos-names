@@ -3856,7 +3856,8 @@ Item {
         // An app whose publisher check failed may be a fake, whatever it asks (M-2).
         if (appPublisherFailed(request))
             return true
-        if (request.kind === "private_call" || request.kind === "relayed_call")
+        // A declaration of a program the Program Registry doesn't vouch for needs the tick too.
+        if (request.kind === "private_call" || request.kind === "relayed_call" || request.kind === "programs")
             return !!request.sheet && (request.sheet.warnings || []).length > 0
         return (request.kind === "call" || appIsToken(request)) && ((request.warnings || []).length > 0)
     }
@@ -9570,9 +9571,24 @@ Item {
                     visible: appSheet.kind === "programs"
                     Layout.fillWidth: true
                     spacing: 6
+                    // Each program in full, with what the Program Registry says of it.
                     Repeater {
-                        model: appSheet.kind === "programs" ? appSheet.request.programs : []
-                        Fact { required property var modelData; label: "Program"; code: true; value: root.shorten(modelData); full: modelData }
+                        model: appSheet.kind === "programs" && appSheet.request.sheet ? appSheet.request.sheet.programs : []
+                        ColumnLayout {
+                            required property var modelData
+                            Layout.fillWidth: true
+                            spacing: 2
+                            Hint { textFormat: Text.PlainText; color: root.ink; font.family: root.mono; text: modelData.program }
+                            Hint {
+                                textFormat: Text.PlainText
+                                text: modelData.label && modelData.label.text ? "Program Registry: " + Logic.clean(modelData.label.text) + (modelData.label.verified ? " (source verified)" : " (source not verified)")
+                                    : modelData.label && modelData.label.registry ? "Not in the Program Registry." : "The Program Registry isn't installed, so this program has no label."
+                            }
+                        }
+                    }
+                    Repeater {
+                        model: appSheet.kind === "programs" && appSheet.request.sheet ? appSheet.request.sheet.warnings : []
+                        Hint { required property var modelData; textFormat: Text.PlainText; color: root.brass; text: Logic.clean(modelData) }
                     }
                     Hint { visible: appSheet.kind === "programs" && appSheet.request.app_summary !== ""; textFormat: Text.PlainText; text: appSheet.kind === "programs" ? "The app says why: “" + Logic.clean(appSheet.request.app_summary) + "” (its own words, not checked)" : "" }
                     Hint { visible: appSheet.kind === "programs"; textFormat: Text.PlainText; color: root.ink; text: "Approving signs nothing. It lets this app ask you to sign calls to these programs only, each of them shown to you first. Settings → Connected apps takes it back." }

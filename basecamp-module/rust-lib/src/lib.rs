@@ -5658,6 +5658,10 @@ impl NamesModule for Names {
             .collect();
         let mut views = views;
         for view in &mut views {
+            if view["kind"] == provider_public::PROGRAMS {
+                let sheet = self.programs_sheet(view);
+                view["sheet"] = sheet;
+            }
             if view["kind"] == provider_public::RELAYED_CALL {
                 let sheet = self.relayed_sheet(view);
                 view["sheet"] = sheet;
@@ -5767,7 +5771,8 @@ impl NamesModule for Names {
         reply((|| {
             let app = asking_app()?;
             let now = provider::now_ms();
-            let request = provider_public::programs_request(&app, &programs_json, &reason, now)?;
+            let own = self.own_programs();
+            let request = provider_public::programs_request(&app, &programs_json, &reason, &own, now)?;
             self.queue_any(&app, request, now)
         })())
     }
@@ -5780,7 +5785,8 @@ impl NamesModule for Names {
                 return Err("calls someone else pays for are signed on LEZ 0.4 (the bridge test network) only; the wallet is on LEZ 0.3 now".to_owned());
             }
             let declared = self.store().private.declared_of(&app);
-            let mut request = provider_public::relayed_call_request(&app, &account, &call_json, &summary, &declared, now)?;
+            let own = self.own_programs();
+            let mut request = provider_public::relayed_call_request(&app, &account, &call_json, &summary, &declared, &own, now)?;
             let store = self.store();
             let written = request["account"].as_str().unwrap_or_default().to_owned();
             if !store.granted(&app).contains(&written) {
@@ -6715,15 +6721,60 @@ impl Names {
         stored["signed_payer_nonce"] = provider_public::payer_nonce(&report).map_or(Value::Null, |n| json!(n.to_string()));
         stored["resigned"] = json!(now);
         let view = provider::app_view(stored);
+        let line = json!({
+            "kind": "resign", "chain": "lez", "app": app, "from": stored["account"], "program": stored["program"],
+            "payer_nonce": stored["signed_payer_nonce"], "resigns": stored["resigns"], "state": "done",
+        });
         store.save();
+        // The person sees in the History each time the wallet signed again without asking.
+        if let Some(dir) = config_dir() {
+            activity::add(&dir, now, activity::in_zone(line, &self.zones.current_id()));
+        }
         Ok(view)
+    }
+
+    /// The wallet's own programs, never reached by a relayed call: the Names registry of both
+    /// networks (built-in and configured) and the token program its token methods use.
+    fn own_programs(&self) -> Vec<(String, &'static str)> {
+        let mut own: Vec<(String, &'static str)> = Vec::new();
+        let mut add = |id: Option<String>, kind: &'static str| {
+            if let Some(id) = id.filter(|id| registry::parse_account(id).is_ok()) {
+                if !own.iter().any(|(known, _)| *known == id) {
+                    own.push((id, kind));
+                }
+            }
+        };
+        add(Some(DEFAULT_REGISTRY.to_owned()), "names_registry");
+        add(Some(LEZ04_REGISTRY.to_owned()), "names_registry");
+        add(self.program.as_ref().map(registry::account_text), "names_registry");
+        add(self.parked["registry"].as_str().map(str::to_owned), "names_registry");
+        add(self.token_program.as_ref().map(registry::account_text), "token_program");
+        add(self.parked["token_program"].as_str().map(str::to_owned), "token_program");
+        own
+    }
+
+    /// The approval sheet of a program declaration: each program's full ID and what the Program
+    /// Registry says of it, with its warnings (an unregistered or unverified program needs the tick).
+    fn programs_sheet(&self, request: &Value) -> Value {
+        let mut programs = Vec::new();
+        let mut warnings: Vec<Value> = Vec::new();
+        for program in request["programs"].as_array().map(Vec::as_slice).unwrap_or_default() {
+            let id = program.as_str().unwrap_or_default();
+            let label = provider::label_fields(program_registry::label(id).as_ref());
+            for warning in provider::label_warnings(&label, "program") {
+                warnings.push(json!(format!("{}: {warning}", id)));
+            }
+            programs.push(json!({ "program": id, "label": label }));
+        }
+        json!({ "programs": programs, "warnings": warnings })
     }
 
     /// The approval sheet of a relayed call (`provider_public::sheet`), with the program's
     /// Program Registry label and the network as the site names it.
     fn relayed_sheet(&mut self, request: &Value) -> Value {
         let label = request["program"].as_str().and_then(program_registry::label);
-        let shown = self.net.shown();
+        // The network the call was asked for, not the one in use now.
+        let shown = request["network"].as_str().and_then(Net::parse).unwrap_or(self.net).shown();
         let network = format!("{} · {}", shown["version"].as_str().unwrap_or_default(), shown["name"].as_str().unwrap_or_default());
         provider_public::sheet(request, &request["report"], label.as_ref(), &network)
     }
@@ -9811,10 +9862,14 @@ mod tests {
             assert!(refused["error"].as_str().unwrap().contains("Propose it again") && refused["code"] == "ask_again", "{field}: {refused}");
         }
         rebuilt("42", "4", &"ef".repeat(32), &|_| {});
-        assert!(parsed(&names.resign_relayed_call(id.clone()))["error"].as_str().unwrap().contains("your account was used"));
+        let used = parsed(&names.resign_relayed_call(id.clone()));
+        assert_eq!((used["code"].as_str(), used["error"].as_str().unwrap().contains("your account was used")), (Some("landed_or_used"), true), "{used}");
         rebuilt("42", "3", &"ef".repeat(32), &|_| {});
         let resigned = parsed(&names.resign_relayed_call(id.clone()))["value"].clone();
         assert_eq!((resigned["transaction"].as_str(), resigned["hash"].as_str(), resigned["resigns"].as_u64()), (Some("beef42"), Some("ef".repeat(32).as_str()), Some(1)), "{resigned}");
+        // One line in the History for it.
+        let lines: Vec<Value> = activity::all(&config_dir().unwrap()).into_iter().filter(|e| e["kind"] == "resign").collect();
+        assert_eq!((lines.len(), lines[0]["app"].as_str(), lines[0]["payer_nonce"].as_str()), (1, Some("lez_bridge"), Some("42")), "{lines:?}");
         rebuilt("43", "3", &"e0".repeat(32), &|_| {});
         assert_eq!(parsed(&names.resign_relayed_call(id.clone()))["value"]["resigns"], 2);
         rebuilt("44", "3", &"e1".repeat(32), &|_| {});

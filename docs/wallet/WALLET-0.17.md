@@ -66,6 +66,7 @@ means unit or flow tests with stand-ins; "untested" means not run in this releas
 | Tokens (the wallet's token program) | not on this network (no token program) | bridged tokens show (run); `names token` on our 0.4 untested |
 | Bridge deposits | not on this network | view: works (run); public relayed claim: wallet method ready (`propose_relayed_call`, run on a throwaway rc3 chain), bridge side by its owner; private claim: proposes a private call, proof about 11 min and 9.5 GB on the claimer's machine, measured on rc1, not proved on rc3 |
 | Messages | today: Logos chat module (address changes on every Basecamp start); Names Messages comes in 0.18.0 | same |
+| Relayed calls (`propose_relayed_call`, `resign_relayed_call`) | not on this network | wallet method: unit and module flow tests (stand-in CLI), and the CLI's plan, sign, co-sign and busy/re-sign path run on a throwaway rc3 chain. The generated C++/QML interface of these two methods has not been driven through an lgx and logosctl. |
 | Mini-apps (provider calls) | access, transfers: unchanged; public calls need `names module`, not with the October CLI | module flow tests (stand-in CLI); relayed calls run on a throwaway rc3 chain |
 
 ## Install
@@ -107,3 +108,22 @@ means unit or flow tests with stand-ins; "untested" means not run in this releas
 | Token sources are keyed by token program, and the bridge read takes one bridge program. A second bridge on the same token program would replace the first's entry. | a second bridge instance (light-client attested) |
 | rc3 public transactions carry no validity window, so a half-signed relayed call stays valid until the account's next transaction. The wallet can't revoke it, only refuse new signatures. | the bridge relay and mini-app |
 | The wallet decodes no program's message bytes. A claim shows as "unknown program" with the bytes' hash, not as "claim N dUSDC from deposit i". | `lez_bridge` claims, for the person approving |
+
+## Breaking change for other apps
+
+`get_config` answers other apps in the usual `{success, value, error}` envelope since 0.17.0
+(the network part only). From 0.16 it was a plain object for every caller. An app that parsed
+the plain object must read `value` now. The Names app itself still gets the plain object.
+
+## Known limits
+
+- rc3 binds no chain id and carries no validity window. A half-signed relayed call is good once
+  on its chain, but after a reset of the test network, or on another LEZ 0.4 chain where the
+  account is unused, the payer could submit it again (it must co-sign). Raise a chain id or a
+  distinct domain prefix upstream.
+- rc3 public messages share their hash prefix with v0.3.1 (theoretical cross-version confusion,
+  upstream).
+- The wallet decodes no message bytes on the relayed path: the person trusts the app and the
+  program, which the sheet says.
+- The re-sign window uses the wall clock (bounded by the count of 3). A module restart doesn't
+  end it.

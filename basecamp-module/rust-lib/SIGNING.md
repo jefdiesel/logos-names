@@ -58,6 +58,27 @@ call tells the program to do and shows only the exact bytes' hash. Warnings need
 before Approve. Nothing is hidden, and nothing is refused silently for being undecodable. Test:
 `the_sheet_says_what_the_wallet_built_in_plain_words` (line and warning).
 
+**The wallet's own programs are never reached this way.** rc3 authorizes every declared actor of
+a signing account (`execution_state.rs:1028`), so a relayed call to the Names registry could
+give a name away under "unknown program". `programs_request` and `relayed_call_request`
+therefore refuse:
+- the Names registry of either network (built-in and configured);
+- the wallet's token program;
+
+as the root program, as a declared actor's program, and as a program account's owner. The
+refusal says why in plain words. Names are changed in the Names app, tokens sent from the Wallet.
+Test: `the_wallet_s_own_programs_are_never_signed_for_this_way` (0.3 and 0.4 registry ids and the
+token program, each refused at declaration, as root, as an actor's program and as a PDA's owner;
+the bridge still passes).
+
+**The person's own account under another program is a warning, not a data line:** "The call acts
+as your account toward X: it may move what your account holds there." Test:
+`an_own_actor_under_another_program_is_a_warning`.
+
+**A program declaration** (`declare_programs`) shows each program's full ID and what the Program
+Registry says of it. An unregistered or unverified program is a warning, and the person ticks it
+before approving.
+
 ## 4. What the half-signed transaction is good for
 
 The account's signature covers the hash of the whole message:
@@ -68,9 +89,16 @@ The account's signature covers the hash of the whole message:
 - the admission evidence.
 
 So:
-- **It is good for exactly that message, once.** Another payer, other caps, another nonce, or
-  any other byte or actor gives another hash, and the account's signature no longer verifies.
-  The account's nonce moves when the call lands, so the same transaction can't land twice.
+- **It is good for exactly that message, once on this chain.** Another payer, other caps,
+  another nonce, or any other byte or actor gives another hash, and the account's signature no
+  longer verifies. The account's nonce moves when the call lands, so the same transaction can't
+  land twice on the chain it landed on.
+- **Known limit, upstream: rc3 binds no chain id.** After a reset of this test network, or on
+  another LEZ 0.4 chain where the account is still unused, both nonces can match again. The
+  payer could then submit the same transaction there, with its own co-signature. The sheet says
+  so in its fixed text. The person's first own transaction on that chain kills it. The wallet
+  can't bind a chain without protocol support: ask upstream for a chain id or a distinct domain
+  prefix.
 - **The payer and the fee fields ARE covered.** No finding there.
 - **rc3 public transactions carry no validity window.** An unused half-signed transaction stays
   valid until the account's next transaction. The request itself expires after 10 minutes, like
@@ -134,10 +162,18 @@ approving a second time:** the request ends `done`, approving it again is refuse
   signed again either: the transaction already given is still the one to send.
 - **Every refusal carries a `code`** beside `error`, so an app needn't match words:
   - `unchanged`: the payer's nonce hasn't moved; send what you have;
-  - `ask_again`: something the person saw changed, the account's nonce moved, the program is no
-    longer declared, or the window or the count is used up; propose it again;
+  - `landed_or_used`: the signing account's nonce moved, so the approved call may have landed,
+    or the account was used otherwise; check the chain before proposing it again;
+  - `ask_again`: something the person saw changed, the program is no longer declared, or the
+    window or the count is used up; propose it again;
   - `refused`: not this app's request, not a signed relayed call, LEZ 0.3 in use, or the wallet
     can't build it now.
+
+- **A restart of the names module doesn't end the window.** A signed relayed call keeps its
+  bytes through a restart while the window and the count last. The person approved exactly that
+  window. A moved clock can stretch it, but the count of 3 still bounds it.
+- **Each re-sign leaves one line in the History:** "Signed again for <app>", with the payer
+  nonce and the count.
 
 Tests:
 - `provider_public::tests::a_re_sign_is_allowed_only_for_a_newer_payer_nonce`: each of the 11

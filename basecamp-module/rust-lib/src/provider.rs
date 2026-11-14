@@ -484,12 +484,14 @@ impl Store {
     /// (`resign_relayed_call`: within the window, under the count, still connected).
     fn keeps_call_bytes(&self, request: &Value, now: u64) -> bool {
         use crate::provider_public::{MAX_RESIGNS, RESIGN_WINDOW_MS};
+        let connected = request["app"].as_str().is_some_and(|app| self.grants.contains_key(app));
         match request["state"].as_str() {
-            Some("pending") => true,
+            // A pending call of an app that was disconnected can never be approved now.
+            Some("pending") => connected,
             Some("done") => {
                 request["decided"].as_u64().is_some_and(|at| at.saturating_add(RESIGN_WINDOW_MS) > now)
                     && request["resigns"].as_u64().unwrap_or(0) < MAX_RESIGNS
-                    && request["app"].as_str().is_some_and(|app| self.grants.contains_key(app))
+                    && connected
             }
             _ => false,
         }
@@ -959,10 +961,14 @@ mod tests {
         store.sweep(now + PENDING_FOR_MS + 1);
         store.save();
         assert!(!kept("pending"), "expired");
-        // The app disconnected: the signed one can't be signed again.
+        // The app disconnected: the signed one can't be signed again, a pending one can't be
+        // approved.
+        store.requests.push(request("pending2", "pending", 0, 0));
+        store.save();
+        assert!(kept("pending2"));
         store.revoke("lez_bridge");
         store.save();
-        assert!(!kept("signed"), "revoked");
+        assert!(!kept("signed") && !kept("pending2"), "revoked");
         // A restart finds a stale request written by an older run: its bytes go at load.
         std::fs::write(&path, json!({ "requests": [request("stale", "done", now - RESIGN_WINDOW_MS - 1, 0)], "grants": {} }).to_string()).unwrap();
         Store::load(Some(path.clone())).save();
