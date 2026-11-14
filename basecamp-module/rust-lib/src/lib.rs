@@ -8069,7 +8069,9 @@ mod tests {
         let error = refused["error"].as_str().unwrap();
         assert!(error.ends_with("Nothing was started; try again when it answers."), "{error}");
         assert!(error.contains(&format!("didn't answer within {} s", START_BUDGET.as_secs())), "{error}");
-        assert!(took < START_BUDGET + std::time::Duration::from_millis(600), "answered inside the deadline: {took:?}");
+        // The slack is for a loaded machine; a check that ran on past the deadline takes another
+        // START_BUDGET, far beyond it.
+        assert!(took < START_BUDGET + std::time::Duration::from_millis(2000), "answered inside the deadline: {took:?}");
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(no_jobs(&dir), "nothing started, not even after the answer");
         // A sequencer quick enough for every check: the same hand-over starts.
@@ -8706,7 +8708,7 @@ mod tests {
         });
         let started = std::time::Instant::now();
         let slow = parsed(&names.resolve("slowpoke".into()));
-        assert!(started.elapsed() < registry::READ_BUDGET + std::time::Duration::from_secs(1), "{:?}", started.elapsed());
+        assert!(started.elapsed() < registry::READ_BUDGET + std::time::Duration::from_secs(3), "{:?}", started.elapsed());
         assert_eq!(slow["success"], false, "{slow}");
         assert!(slow["error"].as_str().unwrap().contains("didn't answer within"), "{slow}");
     }

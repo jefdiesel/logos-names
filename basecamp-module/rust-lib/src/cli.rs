@@ -2306,11 +2306,20 @@ fn feed(mut process: Command, program: &Path, input: &str, patience: Duration, s
     if !input.is_empty() {
         process.stdin(Stdio::piped());
     }
-    let mut child = process
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("could not run the names CLI at {}: {error}", program.display()))?;
+    process.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // A program file another thread has just written can be held open for a moment by a fork
+    // made at that instant ("Text file busy"): tried again shortly, a few times.
+    let mut tries = 0;
+    let mut child = loop {
+        match process.spawn() {
+            Ok(child) => break child,
+            Err(error) if error.raw_os_error() == Some(26) && tries < 5 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => return Err(format!("could not run the names CLI at {}: {error}", program.display())),
+        }
+    };
     // Written from a thread: a large page can fill the pipe before the CLI reads it.
     if let Some(mut stdin) = child.stdin.take() {
         let input = input.to_owned();
