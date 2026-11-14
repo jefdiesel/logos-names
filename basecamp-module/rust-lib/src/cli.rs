@@ -1516,6 +1516,28 @@ pub fn mine_args() -> Vec<String> {
     vec!["mine".to_owned()]
 }
 
+/// `names mine --add=<name>`: the CLI lists a name this wallet holds but doesn't list yet, once
+/// it has checked on chain that the wallet holds it (one it doesn't hold is refused, not added).
+pub fn add_name_args(name: &str) -> Vec<String> {
+    vec!["mine".to_owned(), format!("--add={name}")]
+}
+
+/// Adds each of `names` to the CLI's own list (`add_name_args`), at most 8, each bounded like a
+/// `mine` read. Best effort: one the wallet doesn't hold, or a read that fails, is left out.
+pub fn add_held(setup: &Setup, names: &[String]) {
+    for name in names.iter().take(8) {
+        let deadline = registry::Deadline::after(CALL_BUDGET);
+        let probe = Probe::start(&setup.sequencer);
+        let _ = run_bounded(setup, add_name_args(name), MINE_PATIENCE, deadline, &probe);
+    }
+}
+
+/// The names the CLI's own list (`names.json` beside its wallet) holds.
+pub fn listed_names(setup: &Setup) -> Vec<String> {
+    let saved: Value = std::fs::read_to_string(setup.wallet.join("names.json")).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or(Value::Null);
+    saved["names"].as_array().map(|names| names.iter().filter_map(|name| name.as_str().map(str::to_owned)).collect()).unwrap_or_default()
+}
+
 /// `names transfer <name> <new holder>`: the new holder is a LEZ account, `Public/…` or
 /// `Private/…` and its ID, written once. Only a tag of it reaches the chain, and a
 /// hand-over can't be undone, so a bare ID (public or private?), the empty account and
@@ -1755,6 +1777,7 @@ pub fn job_problem(kind: &str, log: &str) -> String {
         "receive_privately" => "Setting up private payments didn't finish",
         "profile" | "set_text" => "Saving the profile didn't finish",
         "set_page" => "Publishing the page didn't finish",
+        "add_name" => "Adding the name didn't finish",
         "make_public" => "Making it public didn't finish",
         "post" => "Posting didn't go through",
         "like" | "hide" => "It didn't go through",

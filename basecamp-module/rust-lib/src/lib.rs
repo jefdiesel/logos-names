@@ -439,6 +439,12 @@ pub trait NamesModule: Send + 'static {
     /// it makes none). Waits for the CLI, at most 15 seconds.
     fn cli_mine(&mut self) -> String;
 
+    /// Lists `name` among the names the CLI's wallet holds, as a job: `names mine --add`, which
+    /// checks on chain that this wallet holds it first (one it doesn't hold is refused, nothing
+    /// added). For a name held but not listed: one handed to this wallet, or registered here
+    /// before 0.17 listed public registrations. Names app only.
+    fn cli_add_name(&mut self, name: String) -> String;
+
     /// Starts `names profile` for `name`: `entries_json` is a JSON object of
     /// key to text, as for `set_profile`. `display`, `bio`, `theme`, `color`,
     /// `font` and `cid` go to their own options, any other key to `--set`, and
@@ -1353,6 +1359,9 @@ const NAMES_APP: &str = "names_ui";
 /// release (the app's own metadata asks for at least this at install, but an
 /// older module can still be the one loaded).
 const MODULE_VERSION: &str = "0.17.0";
+
+/// What a private-name action answers on LEZ 0.4, where names are public only (S-B).
+const PRIVATE_OFF_04: &str = "on LEZ 0.4 names are public only: private payments and private holders are off there, so nothing was done";
 
 /// The commit this module was built from, so builds of one version tell apart (every 0.17.0
 /// build says 0.17.0). The package build writes `names-build-commit=<commit>` into
@@ -3183,6 +3192,27 @@ impl Names {
         Ok(merged(sent, &json!({ "stage": "committed", "ready_at": saved.ready_at() })))
     }
 
+    /// The names remembered for this registry (`mine`'s list: registrations made through the
+    /// module) that the CLI's own list doesn't have, each offered to the CLI once per run of the
+    /// module and wallet (`cli::add_held`, which keeps only those the wallet holds).
+    fn unlisted_names(&self, setup: &cli::Setup) -> Vec<String> {
+        static OFFERED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let (Ok(registry), Ok(memory)) = (self.registry(), memory()) else {
+            return Vec::new();
+        };
+        let listed = cli::listed_names(setup);
+        let mut offered = OFFERED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut unlisted = Vec::new();
+        for (name, _) in memory.names(&registry.program) {
+            let slot = format!("{}\u{0}{name}", setup.wallet.display());
+            if !listed.contains(&name) && !offered.contains(&slot) {
+                offered.push(slot);
+                unlisted.push(name);
+            }
+        }
+        unlisted
+    }
+
     /// Remembers `name` for `program`, for `mine`.
     fn remember(&self, program: &AccountId, name: &str) {
         if let Ok(mut memory) = memory() {
@@ -3776,6 +3806,9 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
+        if self.net == Net::Lez04 {
+            return reply(Err(PRIVATE_OFF_04.to_owned()));
+        }
         let setup = self.cli_setup();
         self.change_name(&name, |registry, name, derived, held| {
             // Refuse a name this wallet doesn't hold before an account is made for it.
@@ -3797,6 +3830,9 @@ impl NamesModule for Names {
     fn set_private_keys(&mut self, name: String, nullifier_public_key: String, viewing_public_key: String) -> String {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
+        }
+        if self.net == Net::Lez04 {
+            return reply(Err(PRIVATE_OFF_04.to_owned()));
         }
         self.change_name(&name, |registry, name, derived, held| {
             let npk = registry::unhex(&nullifier_public_key)?;
@@ -3968,6 +4004,14 @@ impl NamesModule for Names {
         }
         reply((|| {
             let setup = self.cli_setup()?;
+            // As for "Create my wallet": never over a wallet that opens (a restore is for one made
+            // for an earlier network that no longer does).
+            if setup.wallet_ready().is_ok() {
+                return Err(format!(
+                    "there is a wallet in {} that opens already, so nothing was restored or changed. A restore is for a wallet made for an earlier version of the network",
+                    setup.wallet.display()
+                ));
+            }
             let restored = cli::run_restore_wallet(&setup, &phrase)?;
             self.forget_mine();
             Ok(restored)
@@ -3980,20 +4024,34 @@ impl NamesModule for Names {
         }
         reply_marked((|| {
             let setup = self.names_setup()?;
+            // Names this wallet registered through the module (a public registration on LEZ 0.4)
+            // and the CLI doesn't list yet: the CLI is asked to add each (it checks the chain).
+            let unlisted = self.unlisted_names(&setup);
             // The CLI reads every name it holds from the chain, which takes seconds:
             // answer with the last list and refresh it on its own thread.
             // Kept per wallet: another wallet holds other names.
             let key = format!("cli_mine:{}", setup.wallet.display());
             if self.mine_known(&key) {
-                let cached = self.board_read(key.clone(), move || cli::run_mine(&setup).map(Value::from));
+                let cached = self.board_read(key.clone(), move || {
+                    cli::add_held(&setup, &unlisted);
+                    cli::run_mine(&setup).map(Value::from)
+                });
                 // A refresh that failed leaves the last list, said to be from then.
                 let marks = cached["error"].as_str().map_or(Value::Null, |why| stale_marks(why, self.read_age_ms(&key), "Your names"));
                 return Ok((cached["posts"].clone(), marks));
             }
+            cli::add_held(&setup, &unlisted);
             let fresh = Value::from(cli::run_mine(&setup)?);
             self.remember_mine(&key, fresh.clone());
             Ok((fresh, Value::Null))
         })())
+    }
+
+    fn cli_add_name(&mut self, name: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        self.cli_job(&name, "add_name", |_, name, _| Ok((cli::add_name_args(name), None, Value::Null)))
     }
 
     fn cli_profile(&mut self, name: String, entries_json: String, replace: bool) -> String {
@@ -4068,6 +4126,9 @@ impl NamesModule for Names {
     fn cli_receive_privately(&mut self, name: String) -> String {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
+        }
+        if self.net == Net::Lez04 {
+            return reply(Err(PRIVATE_OFF_04.to_owned()));
         }
         let command = match cli::receive_privately_args(&name) {
             Ok(command) => command,
@@ -4478,6 +4539,9 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
+        if !as_public && self.net == Net::Lez04 {
+            return reply(Err(PRIVATE_OFF_04.to_owned()));
+        }
         let command = match cli::register_args(&name, as_public) {
             Ok(command) => command,
             Err(error) => return reply(Err(error)),
@@ -4600,6 +4664,9 @@ impl NamesModule for Names {
     fn make_anon(&mut self, as_public: bool) -> String {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
+        }
+        if !as_public && self.net == Net::Lez04 {
+            return reply(Err(PRIVATE_OFF_04.to_owned()));
         }
         let mut command = vec!["anon".to_owned()];
         if as_public {
@@ -5845,6 +5912,12 @@ impl NamesModule for Names {
             .collect();
         let mut views = views;
         for view in &mut views {
+            // M-2: while the Program Registry is still being asked about this request (its app's
+            // publisher, a program), it can't be approved; the sheet says so and the next poll
+            // shows the answer.
+            let checking = self.still_checking(view);
+            view["checking"] = json!(checking.is_some());
+            view["checking_what"] = json!(checking);
             if view["kind"] == provider_public::PROGRAMS {
                 let sheet = self.programs_sheet(view);
                 view["sheet"] = sheet;
@@ -6181,8 +6254,8 @@ impl Names {
     /// Whether the asking app is really published by the LNS name its package names, as the
     /// Program Registry checks it (`verify_app`, docs/APPS.md in lez-program-registry):
     /// `{status, publisher, module, version, record}`, `{status: "unavailable"}` when the
-    /// registry module isn't installed or couldn't say, or null for Basecamp itself. Kept for
-    /// a minute per app.
+    /// registry module isn't installed or couldn't say, `{status: "checking"}` while it is being
+    /// asked, or null for Basecamp itself. An answer is kept for a minute per app.
     fn publisher_of(&mut self, app: &str) -> Value {
         if app == "host" {
             return Value::Null;
@@ -6193,14 +6266,29 @@ impl Names {
                 return answer.clone();
             }
         }
-        match program_registry::publisher(app) {
-            Some(answer) => {
+        match program_registry::publisher_state(app) {
+            Looked::Known(answer) => {
                 self.publishers.insert(app.to_owned(), (answer.clone(), now));
                 answer
             }
-            // Not known yet, or the registry isn't installed: said as such, asked again later.
-            None => json!({ "status": "unavailable" }),
+            // Asked, no answer yet (a few seconds): the sheet can't be approved until it is back.
+            Looked::Checking => json!({ "status": "checking" }),
+            // The registry isn't installed or couldn't say: said as such, asked again later.
+            Looked::Missing => json!({ "status": "unavailable" }),
         }
+    }
+
+    /// What the Program Registry is still being asked about for `request`: who publishes its app,
+    /// or a program it names (its call's, its declaration's, its token's). Nothing is approved
+    /// until those answers are back (M-2): one may be a warning the sheet doesn't show yet.
+    fn still_checking(&mut self, request: &Value) -> Option<String> {
+        let app = request["app"].as_str().unwrap_or_default().to_owned();
+        if self.publisher_of(&app)["status"] == "checking" {
+            return Some(format!("who publishes {app}"));
+        }
+        let mut programs: Vec<&str> = request["programs"].as_array().map(Vec::as_slice).unwrap_or_default().iter().filter_map(Value::as_str).collect();
+        programs.extend(["program", "token_program"].iter().filter_map(|key| request[*key].as_str()));
+        programs.into_iter().find(|program| program_registry::label_state(program) == Looked::Checking).map(|program| format!("program {program}"))
     }
 
     fn queue(&mut self, app: &str, mut request: Value, now: u64) -> Result<Value, String> {
@@ -6269,6 +6357,9 @@ impl Names {
         let request = self.store().get(id).cloned().ok_or("there is no such request")?;
         if request["state"] != "pending" {
             return Err(format!("that request is {} already", request["state"].as_str().unwrap_or("decided")));
+        }
+        if let Some(what) = self.still_checking(&request) {
+            return Err(format!("still checking {what} with the Program Registry; try again in a few seconds"));
         }
         let kind = request["kind"].as_str().unwrap_or_default().to_owned();
         let app = request["app"].as_str().unwrap_or_default().to_owned();
@@ -7263,9 +7354,30 @@ const MAX_WALLET_ACCOUNTS: usize = 64;
 /// The Program Registry module (`program_registry`, LP-0023), asked what a
 /// program is and whether its source is verified, for a program call's
 /// prompt. It is optional: without it the prompt says so.
+/// What the Program Registry said about a program or an app, as far as is known now.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Looked {
+    /// Its answer.
+    Known(Value),
+    /// Asked, no answer yet: nothing that depends on it may be approved until it answers
+    /// (it may be a warning). Lasts a few seconds.
+    Checking,
+    /// The registry isn't installed, didn't answer, or couldn't say (the sheet warns).
+    Missing,
+}
+
+impl Looked {
+    pub(crate) fn known(self) -> Option<Value> {
+        match self {
+            Looked::Known(value) => Some(value),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(not(test))]
 mod program_registry {
-    use super::{json, Value};
+    use super::{json, Looked, Value};
     use logos_rust_sdk::LogosModuleSDK;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -7276,41 +7388,46 @@ mod program_registry {
     /// How long an answer is kept: a sheet asks again on every poll, and must show (and approval
     /// must see) the same thing for its life.
     const KEEP_S: u64 = 30 * 60;
-    /// How long "not installed" (an ask that failed) is kept before asking again.
-    const ABSENT_S: u64 = 5 * 60;
+    /// How long a failed ask (no answer, or an error) is kept before asking again; and, per kind,
+    /// how long the module counts as absent after an ask found it missing.
+    const FAILED_S: u64 = 60;
 
-    /// What was learned, by `kind:key`: the value (None: nothing to say) and when.
+    /// What was learned, by `kind:key`: the value (None: the ask failed) and when.
     static KNOWN: Mutex<Option<HashMap<String, (Option<Value>, u64)>>> = Mutex::new(None);
-    /// Asks on their way, by `kind:key`; and when the module was last found absent.
+    /// Asks on their way, by `kind:key`.
     static ASKING: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
-    static ABSENT_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    /// When the module was last found absent, by kind: a slow label never hides publisher checks.
+    static ABSENT_AT: Mutex<Option<HashMap<&'static str, u64>>> = Mutex::new(None);
 
     /// The kept answer for `key`, never waiting: when none is kept, an ask starts on its own thread
-    /// (one per key at a time) and this answers None now, as "the registry isn't installed or
-    /// couldn't say", which the sheet shows with its warning. A call never blocks on the
-    /// registry, so a poll costs nothing when the module is absent (the M2 freeze).
-    fn kept_or_ask(kind: &'static str, key: &str, method: &'static str, wait: Duration) -> Option<Value> {
+    /// (one per key at a time) and this answers Checking until it is back. A call never blocks on
+    /// the registry. The ask's thread holds no lock across the call; the host carries the call to
+    /// its main thread, which serves it when it is free or inside a names call's nested event
+    /// loop, and the answer is only stored for a later call to read.
+    fn kept_or_ask(kind: &'static str, key: &str, method: &'static str, wait: Duration) -> Looked {
         let now = super::now();
         let slot = format!("{kind}:{key}");
         if let Some((value, at)) = KNOWN.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).get(&slot) {
-            if now.saturating_sub(*at) < KEEP_S {
-                return value.clone();
+            match value {
+                Some(value) if now.saturating_sub(*at) < KEEP_S => return Looked::Known(value.clone()),
+                None if now.saturating_sub(*at) < FAILED_S => return Looked::Missing,
+                _ => {}
             }
         }
-        if now.saturating_sub(ABSENT_AT.load(std::sync::atomic::Ordering::Relaxed)) < ABSENT_S {
-            return None;
+        let absent_at = ABSENT_AT.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).get(kind).copied().unwrap_or(0);
+        if now.saturating_sub(absent_at) < FAILED_S {
+            return Looked::Missing;
         }
         {
             let mut asking = ASKING.lock().unwrap_or_else(|e| e.into_inner());
             let asking = asking.get_or_insert_with(HashMap::new);
             if asking.get(&slot).is_some_and(|at| now.saturating_sub(*at) < 60) {
-                return None;
+                return Looked::Checking;
             }
             asking.insert(slot.clone(), now);
         }
         let key = key.to_owned();
         std::thread::spawn(move || {
-            // No lock is held across the call: the host carries it to its main thread.
             let answer = LogosModuleSDK::new().plugin("program_registry").call_json_with_timeout(method, &json!([key]), wait);
             let now = super::now();
             let value = match answer {
@@ -7323,27 +7440,30 @@ mod program_registry {
                     (answer["success"] == true).then(|| answer["value"].clone()).filter(Value::is_object)
                 }
                 Err(_) => {
-                    ABSENT_AT.store(now, std::sync::atomic::Ordering::Relaxed);
+                    ABSENT_AT.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(kind, now);
                     None
                 }
             };
             KNOWN.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(slot.clone(), (value, now));
             ASKING.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).remove(&slot);
         });
-        None
+        Looked::Checking
     }
 
-    /// `program_label`'s value for `program` (base58), or None when the module isn't there,
-    /// couldn't say, or hasn't answered yet (`kept_or_ask`).
-    pub fn label(program: &str) -> Option<Value> {
+    /// `program_label`'s value for `program` (base58), as far as is known now (`kept_or_ask`).
+    pub fn label_state(program: &str) -> Looked {
         kept_or_ask("label", program, "program_label", LOOK)
+    }
+
+    /// `label_state`'s answer, or None while checking or when the registry can't say.
+    pub fn label(program: &str) -> Option<Value> {
+        label_state(program).known()
     }
 
     /// `verify_app`'s value for the Basecamp module `app`: whether its package is really
     /// published by the LNS name it names. The first check of a name derives it (Argon2, about
-    /// a second) and reads its record, so it may take a few seconds; until it answers this is
-    /// None (`kept_or_ask`).
-    pub fn publisher(app: &str) -> Option<Value> {
+    /// a second) and reads its record, so it is Checking for a few seconds (`kept_or_ask`).
+    pub fn publisher_state(app: &str) -> Looked {
         kept_or_ask("publisher", app, "verify_app", Duration::from_secs(15))
     }
 }
@@ -7604,22 +7724,39 @@ mod node {
 /// Stands in for the Program Registry in unit tests: a test sets the label.
 #[cfg(test)]
 mod program_registry {
-    use super::Value;
+    use super::{Looked, Value};
 
     thread_local! {
         pub static LABEL: std::cell::RefCell<Option<Value>> = const { std::cell::RefCell::new(None) };
     }
 
-    pub fn label(_program: &str) -> Option<Value> {
-        LABEL.with(|label| label.borrow().clone())
+    thread_local! {
+        /// Set: every ask is still on its way (Checking).
+        pub static CHECKING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    fn looked(value: Option<Value>) -> Looked {
+        match value {
+            _ if CHECKING.with(std::cell::Cell::get) => Looked::Checking,
+            Some(value) => Looked::Known(value),
+            None => Looked::Missing,
+        }
+    }
+
+    pub fn label_state(_program: &str) -> Looked {
+        looked(LABEL.with(|label| label.borrow().clone()))
+    }
+
+    pub fn label(program: &str) -> Option<Value> {
+        label_state(program).known()
     }
 
     thread_local! {
         pub static PUBLISHER: std::cell::RefCell<Option<Value>> = const { std::cell::RefCell::new(None) };
     }
 
-    pub fn publisher(_app: &str) -> Option<Value> {
-        PUBLISHER.with(|publisher| publisher.borrow().clone())
+    pub fn publisher_state(_app: &str) -> Looked {
+        looked(PUBLISHER.with(|publisher| publisher.borrow().clone()))
     }
 }
 
@@ -9942,6 +10079,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// M-2: while the Program Registry is still being asked (who publishes the app, what a program
+    /// is), the request says "checking" and can't be approved; once the answer is back it can.
+    #[test]
+    fn nothing_is_approved_while_the_registry_is_still_checking() {
+        let (mut names, dir) = with_wallet("provider-checking", "exit 0");
+        program_registry::CHECKING.with(|c| c.set(true));
+        as_caller(app("forumer_ui"));
+        let id = parsed(&names.request_access("to post as you".into()))["value"]["request"].as_str().unwrap().to_owned();
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let shown = parsed(&names.pending_requests())["value"][0].clone();
+        assert_eq!((shown["publisher"].clone(), shown["checking"].clone()), (json!({ "status": "checking" }), json!(true)), "{shown}");
+        assert!(shown["checking_what"].as_str().unwrap().contains("who publishes forumer_ui"), "{shown}");
+        let refused = approve(&mut names, &id, &format!("Public/{PUBLIC}"));
+        assert!(refused["error"].as_str().unwrap_or_else(|| panic!("{refused}")).contains("still checking who publishes forumer_ui"), "{refused}");
+        assert_eq!(names.store().get(&id).unwrap()["state"], "pending");
+        // The answer is back: shown, and the request can be approved.
+        program_registry::CHECKING.with(|c| c.set(false));
+        let verified = json!({ "status": "verified", "publisher": "forumer", "module": "forumer_ui", "version": "1.2.0", "root": "ab".repeat(32), "record": null });
+        program_registry::PUBLISHER.with(|p| *p.borrow_mut() = Some(verified.clone()));
+        let shown = parsed(&names.pending_requests())["value"][0].clone();
+        assert_eq!((shown["publisher"].clone(), shown["checking"].clone()), (verified, json!(false)));
+        assert_eq!(approve(&mut names, &id, &format!("Public/{PUBLIC}"))["value"]["state"], "approved");
+        program_registry::PUBLISHER.with(|p| *p.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn the_prompt_says_who_publishes_the_asking_app() {
         let (mut names, dir) = with_wallet("provider-publisher", "exit 0");
@@ -11819,6 +11982,31 @@ mod tests {
         assert!(refused["error"].as_str().unwrap_or_else(|| panic!("{refused}")).contains("there is a wallet in"), "{refused}");
         assert!(!dir.join("ran").exists(), "the CLI was not run");
         assert_eq!(std::fs::read_to_string(&store).unwrap(), r#"{"accounts":"a real wallet store"}"#);
+        // A restore over it is refused the same way.
+        let refused = parsed(&names.cli_restore_wallet("abandon ".repeat(23) + "art"));
+        assert!(refused["error"].as_str().unwrap_or_else(|| panic!("{refused}")).contains("that opens already"), "{refused}");
+        assert!(!dir.join("ran").exists(), "the CLI was not run");
+        assert_eq!(std::fs::read_to_string(&store).unwrap(), r#"{"accounts":"a real wallet store"}"#);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// S-B: on LEZ 0.4 names are public only, so the private-name actions are refused plainly
+    /// before anything runs.
+    #[test]
+    fn private_name_actions_are_refused_on_lez_04() {
+        let (mut names, dir) = with_fake_cli("private-off-04", "echo 'should not run' > \"$(dirname \"$0\")/ran\"");
+        names.net = Net::Lez04;
+        let answers = [
+            names.receive_privately("jef".into(), "auto".into()),
+            names.set_private_keys("jef".into(), "00".repeat(32), "00".repeat(33)),
+            names.cli_receive_privately("jef".into()),
+            names.make_anon(false),
+            names.cli_register("jef".into(), false),
+        ];
+        for answer in answers {
+            assert_eq!(parsed(&answer)["error"], PRIVATE_OFF_04, "{answer}");
+        }
+        assert!(!dir.join("ran").exists(), "the CLI was not run");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -11936,6 +12124,16 @@ mod tests {
         // Only the scaffold's answer says busy at the top: no module code builds that envelope.
         let module_code = &source[..source.find("#[cfg(test)]\nmod tests {").unwrap()];
         assert_eq!(module_code.matches("\"busy\": true").count(), 1, "only scaffold_busy::answer");
+    }
+
+    /// The module is never built in multi mode: there the host sends each answer to every process
+    /// holding a names replica, whoever called (logos-d1 M-1, seen on the M2): app_secret values,
+    /// half-signed relayed calls, a new wallet's recovery phrase. Single mode (with the scaffold's
+    /// try_lock, scaffold_patch.rs) answers the caller only.
+    #[test]
+    fn metadata_never_sets_concurrency_multi() {
+        let metadata: Value = serde_json::from_str(include_str!("../../metadata.json")).unwrap();
+        assert!(matches!(metadata.get("concurrency"), None) || metadata["concurrency"] == "single", "metadata.json concurrency: {}", metadata["concurrency"]);
     }
 
     /// Every file under `dir`, with its bytes.

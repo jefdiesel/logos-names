@@ -187,8 +187,37 @@ export function publisherLine(publisher) {
         return { text: "Not published under any LNS name, so who made it can't be checked.", tone: "plain" }
     case "unavailable":
         return { text: "Couldn't check who publishes it (the Program Registry module isn't installed or didn't answer).", tone: "plain" }
+    case "checking":
+        return { text: "Checking who publishes it…", tone: "plain" }
     }
     return null
+}
+
+// The accounts ticked when a request's sheet opens (or what it knows changes, requestTickKey).
+// Nothing while the Program Registry is still being asked (`checking`) or when the app's publisher
+// check failed (it may be a fake, M-2). A declaration or a token source is ticked only when
+// exactly one account is shared with the app (that one), else nothing; anything else starts from
+// the account shared with it, else the first offered.
+export function preTicked(request, publisherFailed) {
+    if (!request || request.checking === true || publisherFailed)
+        return []
+    var choices = request.choices || []
+    var given = choices.filter(function(choice) { return choice.granted })
+    if (request.kind === "programs" || request.kind === "token_source")
+        return given.length === 1 ? [given[0].account] : []
+    return given.length > 0 ? [given[0].account] : choices.length > 0 ? [choices[0].account] : []
+}
+
+// What the request sheet's ticks were set for: the request, and what the wallet knows about it
+// (the publisher check, whether the Program Registry is still being asked, how many warnings).
+// When any of it changes the ticks are set again, so an account ticked while "checking" is
+// unticked when the answer is a warning (M-2).
+export function requestTickKey(request) {
+    if (!request)
+        return ""
+    var publisher = request.publisher && typeof request.publisher === "object" ? String(request.publisher.status || "") : ""
+    var warnings = (request.sheet && request.sheet.warnings ? request.sheet.warnings.length : 0) + (request.warnings ? request.warnings.length : 0)
+    return [request.id, publisher, request.checking === true ? "checking" : "", warnings].join("|")
 }
 
 // ── The Logos Blockchain (chain_* in the names module) ─────────────────
@@ -824,9 +853,11 @@ export function replyKind(reply) {
     for (var depth = 0; depth < 2 && typeof parsed === "string"; depth++) {
         try { parsed = JSON.parse(parsed) } catch (error) { break }
     }
-    // The module's own busy answer (its call waited its turn too long): busy, not an error.
+    // The module's own busy answer: the call came while another was waiting on the node or the
+    // Program Registry, and was NOT taken (nothing happened; ask again). `notTaken` tells it from
+    // no answer at all (a timeout), after which the call may have been taken.
     if (parsed && typeof parsed === "object" && parsed.busy === true)
-        return { kind: "busy", value: null, error: String(parsed.error || "") }
+        return { kind: "busy", value: null, error: String(parsed.error || ""), notTaken: true }
     if (parsed && typeof parsed === "object" && parsed.success !== undefined)
         return parsed.success ? { kind: "ok", value: parsed.value, error: "" } : { kind: "error", value: null, error: String(parsed.error) }
     var said = text !== "" ? text : JSON.stringify(parsed)
@@ -837,6 +868,36 @@ export function replyKind(reply) {
     return { kind: "busy", value: null, error: said }
 }
 
+/// What `normalize`'s raw reply means: it answers the name as plain text ("" for text that isn't
+/// a name), not an envelope, so it is sorted here: `{kind: "ok", value: name}`, or "busy" (the
+/// module's busy answer, or no answer) or "missing" as replyKind says. Never "[object Object]".
+export function normalizedReply(reply) {
+    if (reply === "")
+        return { kind: "ok", value: "", error: "" }
+    if (typeof reply === "string" && /^[a-z0-9-]{1,32}$/.test(reply))
+        return { kind: "ok", value: reply, error: "" }
+    var answer = replyKind(reply)
+    return answer.kind === "ok" && typeof answer.value === "string" ? answer : { kind: answer.kind === "missing" ? "missing" : "busy", value: null, error: answer.error, notTaken: answer.notTaken === true }
+}
+
+/// Whether `cli_status` says plainly that there is no wallet on this network (the only thing that
+/// opens Welcome): `wallet: false`. Not yet read (null), a busy or failed read, or a wallet with
+/// no name never does.
+export function noWalletSaid(status) {
+    return !!status && typeof status === "object" && status.wallet === false
+}
+
+/// Whether an answer to a read asked on network `askedOn` may be shown now that `nowOn` is in
+/// use: only on the same network. A late answer to an ask made before a switch is dropped (S-A).
+export function sameNetAnswer(askedOn, nowOn) {
+    return String(askedOn || "") === String(nowOn || "")
+}
+
+/// `status` marked with the network it was read on ("0.3" or "0.4"), for mergeCliStatus.
+export function onNet(status, net) {
+    return status && typeof status === "object" ? Object.assign({}, status, { net: net }) : status
+}
+
 /// A new `cli_status` answer merged with the last one: a wallet seen stays seen unless the module
 /// says plainly there is none (`wallet: false`, its store is gone). An answer that has the store
 /// but couldn't read which account is the public one (its file was being written) keeps the
@@ -845,6 +906,10 @@ export function mergeCliStatus(previous, next) {
     if (!next || typeof next !== "object")
         return previous
     var merged = Object.assign({}, next)
+    // Only an answer read on the same network carries anything over (S-A): a 0.3 public account
+    // is never shown as the 0.4 one.
+    if (previous && (previous.net || "") !== (merged.net || ""))
+        return merged
     if (previous && previous.wallet && merged.wallet && !merged["public"] && previous["public"])
         merged["public"] = previous["public"]
     if (previous && previous.wallet && merged.wallet && !merged["private"] && previous["private"])
@@ -897,11 +962,16 @@ export function cliOutdatedLine(net, line) {
     return "The names tool this app uses for LEZ 0.3" + tool + " is too old for that network as it is now, so creating a wallet there doesn't work with it. LEZ 0.4 is unaffected: switch to it above."
 }
 
-export function bridgeNetRows(read) {
+export function bridgeNetRows(read, own) {
     if (!read || !Array.isArray(read.accounts)) return []
     // With more than one bridge, each token row says which bridge listed it.
     var many = Array.isArray(read.bridges) && read.bridges.length > 1
-    return read.accounts.map(function(a) {
+    // `own`: the LEZ 0.4 wallet's own public accounts (given on LEZ 0.4). An account read here
+    // that isn't one of them and isn't watched is a LEZ 0.3 account this wallet can't sign for:
+    // shown as view only, with no Copy, after the wallet's own (it nearly took a deposit once).
+    // One the 0.4 wallet holds too (a restored phrase) is shown once, as its own.
+    var mine = Array.isArray(own) ? own : null
+    var rows = read.accounts.map(function(a) {
         var assets = []
         if (a.found) {
             assets.push({ symbol: "LEZ", name: "Native", amount: grouped(a.native) })
@@ -913,8 +983,17 @@ export function bridgeNetRows(read) {
             })
         }
         var id = keyShown(String(a.account || "").replace(/^Public\//, ""))
-        return { account: a.account, title: (a.watched ? "Watched account " : "Public account ") + id, found: !!a.found, watched: !!a.watched, other: Number(a.other_tokens) || 0, assets: assets }
+        var written = "Public/" + String(a.account || "").replace(/^Public\//, "")
+        var viewOnly = mine !== null && !a.watched && mine.indexOf(written) < 0
+        var title = viewOnly ? "LEZ 0.3 account " + id + ", view only: your LEZ 0.4 wallet can't sign for it" : (a.watched ? "Watched account " : "Public account ") + id
+        return { account: a.account, title: title, found: !!a.found, watched: !!a.watched, viewOnly: viewOnly, copyable: !viewOnly, other: Number(a.other_tokens) || 0, assets: assets }
     })
+    if (mine === null)
+        return rows
+    var rank = function(row) { return row.viewOnly ? 2 : row.watched ? 1 : 0 }
+    return rows.map(function(row, at) { return { row: row, at: at } })
+        .sort(function(x, y) { return rank(x.row) - rank(y.row) || x.at - y.at })
+        .map(function(entry) { return entry.row })
 }
 
 /// A token amount in base units shown with its decimals: ("100000000", 6) → "100".

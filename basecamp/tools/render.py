@@ -80,7 +80,7 @@ BRIDGE = r"""
             if (method === "set_names_network") { root.mockNet = String(args[0]); method = "get_config"; var wrapNet = true }
             if (method === "get_config") return (function(c) { return wrapNet ? ok(c) : JSON.stringify(c) })({ names_network: { id: root.mockNet || "lez-0.3" }, zone: (%(mock)s).zone || { id: "home", name: "Home", channel: "%(home_channel)s", home: true }, names_sequencer: "http://127.0.0.1:3040", registry: %(registry)s, sequencer: (%(mock)s).zone ? "http://127.0.0.1:3041" : "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json", cli: "/Users/you/.local/bin/names", cli_wallet: "/Users/you/.lee/wallet", bridge_key: "%(bridge_key)s", bridge_node: null, module_version: root.neededModule })
             if (method === "normalize") return String(args[0]).toLowerCase().replace(/\.lez$/, "")
-            if (method === "mine") return ok({ names: names.filter(function(entry) { return entry.owner === "%(alice)s" }).map(function(entry) {
+            if (method === "mine") return ok({ names: names.filter(function(entry) { return !(%(mock)s).noNames && entry.owner === "%(alice)s" }).map(function(entry) {
                 return { name: entry.name, display: entry.name + ".lez", owner: entry.owner, expires: null, never: true, lapsed: false } }), pending: ((%(mock)s).pending || []).map(function(p) {
                     return Object.assign({}, p, { ready_at: Date.now() + p.ready_in * 60000, reveal_by: Date.now() + p.by_in * 60000 }) }) })
             if (method === "keep") return ok(String(args[0]))
@@ -347,6 +347,13 @@ SCENARIOS = {
     "settings-tab": 'root.section = "settings"',
     "search-tab": 'root.section = "search"',
     "welcome": 'root.cliPath = ""',
+    # 0.17 final: a wallet with no name on LEZ 0.4 opens to the Wallet (a "No name yet" card), not Welcome.
+    "noname-net04-wallet": 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4") })',
+    # No wallet on LEZ 0.4: Welcome, with the network switch and "Restore from my recovery phrase".
+    "nowallet-net04-welcome": 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4") })',
+    # An app's connect request opens over both.
+    "noname-net04-request": 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); root.appRequests = [{ id: "r9", kind: "connect", app: "lez_bridge", reason: "to claim your bridge deposits", created: Date.now(), expires: Date.now() + 600000, choices: [{ account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", label: "Names wallet, main public account", granted: false }], granted: [], publisher: { status: "unavailable" }, checking: false }] })',
+    "nowallet-net04-request": 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); root.appRequests = [{ id: "r9", kind: "connect", app: "lez_bridge", reason: "to claim your bridge deposits", created: Date.now(), expires: Date.now() + 600000, choices: [{ account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", label: "Names wallet, main public account", granted: false }], granted: [], publisher: { status: "unavailable" }, checking: false }] })',
     # The October CLI on LEZ 0.3 (no `module` command), no wallet yet: the outdated line, and the switch.
     "welcome-outdated-03": 'root.cliNames = []; root.cliPending = []',
     # LEZ 0.4 with no names tool set: no Install offered, the path is asked for in Settings.
@@ -486,6 +493,10 @@ MOCKS = {
     "welcome-outdated-03": {"status": {"outdated": True, "cli_line": "names 0.1.0", "wallet": False, "public": None, "private": None}, "balance": None},
     "welcome-net04-nocli": {"noNames": True, "status": {"cli": None, "wallet": False, "public": None, "private": None}, "balance": None},
     "welcome-net04-funding": {"noNames": True, "private": "0", "public": "0"},
+    "noname-net04-wallet": {"noNames": True},
+    "noname-net04-request": {"noNames": True},
+    "nowallet-net04-welcome": {"noNames": True, "status": {"wallet": False, "public": None, "private": None}, "balance": None},
+    "nowallet-net04-request": {"noNames": True, "status": {"wallet": False, "public": None, "private": None}, "balance": None},
     "welcome-phrase": NO_WALLET,
     "welcome-wallet-error": NO_WALLET,
     "get-tokens-nowallet": NO_WALLET,

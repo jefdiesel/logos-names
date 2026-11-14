@@ -6,6 +6,20 @@ goes onto the user's Mac mini first (install plan below).
 
 ## What is in it
 
+- Welcome is only for a network with no wallet: the module must say plainly there is none
+  (`cli_status.wallet` false). A wallet with no name reaches Wallet, Activity, Settings and every
+  request sheet, and a dismissible "No name yet" card offers a name. On a network with no wallet,
+  Welcome offers "Restore from my recovery phrase" beside "Create my wallet": one phrase gives the
+  same public accounts on LEZ 0.3 and LEZ 0.4.
+- One list of the names this wallet holds, everywhere (Settings, the Names tab, the card): the LEZ
+  wallet's and the CLI's. A name registered through the module (a public registration on LEZ 0.4)
+  is offered to the CLI's own list too (`names mine --add`, checked on chain); "Add" on the Names
+  tab lists a name typed in, also checked on chain (`cli_add_name`).
+- Nothing read on one network is shown, or copyable, under the other: every switch clears what was
+  read, and a late answer to an ask made before the switch is dropped. On LEZ 0.4 the bridge card
+  shows the 0.4 wallet's own accounts first; a LEZ 0.3 account it can't sign for is "view only",
+  with no Copy. Settings, Accounts says which network it lists and copies full IDs.
+
 | Piece | How it came in |
 |---|---|
 | `rc3-port` fcc7486: LNS names on LEZ v0.4.0-rc3, reviewed; the eta icon | the base |
@@ -161,6 +175,29 @@ the plain object must read `value` now. The Names app itself still gets the plai
   the caller. (0.17's first fix ran calls on worker threads, `concurrency: "multi"`; it was
   dropped because in that mode the host sends each answer to every process holding the module.)
 
+- Program Registry answers (labels, publishers) are kept 30 minutes once known (THREADS S-2): a
+  program re-deployed in that time still shows its old label until then. A failed or absent
+  lookup is kept 60 s; while one is on its way the request says "checking" and can't be approved.
+- Each new program or app asked about starts its own lookup thread (THREADS S-3): no global cap
+  yet, and the kept answers aren't capped. An app that floods distinct program IDs costs threads
+  and latency, never an approval.
+- The unit tests don't run the generated scaffold or the host's caller hand-off (THREADS S-5):
+  those are checked by reading the sources, by the build's printed try_lock lines and by the
+  live freeze triggers on the M2.
+- The build check (build.rs) finds the scaffold's three instance-lock lines as lidl-gen b572e81
+  writes them; a generator that took the instance lock spelled another way would not be caught by
+  it. The proof that a build has the change stays the three `names scaffold patch` warning lines
+  in its build log and `names-scaffold-try-lock=3` in its library (get_config `scaffold`).
+- A busy answer to a bool setter (set_registry, set_sequencer, set_wallet_files, set_cli,
+  set_cli_wallet, set_token_program, set_bridge_program, set_bridge_programs) is `false`, the same
+  as a refusal: the app keeps the old setting and says it wasn't saved; pressing again works.
+- Copy in the Names app goes through a hidden QML TextEdit (QML has no clipboard API, and the app
+  is QML only). On the same Mac the text pastes anywhere. Through Screen Sharing's shared
+  clipboard it may not arrive, probably because Qt gives macOS the text lazily. As a workaround,
+  paste on the Mac itself, or copy the text again from there.
+- LEZ 0.4 is public only: receive_privately, set_private_keys, cli_receive_privately, a private
+  anon name and a private cli_register are refused there, and their buttons hidden.
+
 - rc3 binds no chain id and carries no validity window. A half-signed relayed call is good once
   on its chain, but after a reset of the test network, or on another LEZ 0.4 chain where the
   account's nonce comes back to what it was when it signed, the payer could submit it again (it
@@ -172,3 +209,15 @@ the plain object must read `value` now. The Names app itself still gets the plai
   program, which the sheet says.
 - The re-sign window uses the wall clock (bounded by the count of 3). A module restart doesn't
   end it.
+
+## Later (not in 0.17.0)
+
+- An in-app "Import an account from my LEZ 0.3 wallet" on LEZ 0.4. On 2026-11-14 the Mini did it
+  in Terminal (`import-account-04.sh`: the 0.3 store's signing key, through the LEZ 0.4 CLI's
+  `wallet account import public`).
+
+- A method for an app to list its own pending requests, so an app whose propose got no answer
+  (a timeout) can see whether the request was made before proposing again (logos-ad's bridge
+  module would use it). Today: `request_status` for a request id it has.
+- A cap on Program Registry lookup threads and kept answers (THREADS S-3), and a shorter life for
+  kept labels (THREADS S-2).

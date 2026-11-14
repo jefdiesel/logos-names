@@ -2,7 +2,7 @@
 // engine cannot run in CI. Run with: node basecamp/logic.test.mjs
 import { atLeast, someAmount, entryShown, amountRead, amountProblem, amountDigits, AMOUNT_MAX, CHAIN_AMOUNT_MAX, jobProblem, tokenToProblem, tokenSendProves, tokenShown, feeEstimate, feePaid, accountTitle, accountsShown, publisherLine, durationWords, keyShown, chainToProblem, stakeLines, rewardsLine, grouped, addDigits, walletAssets, subDigits, walletGroups, stakeTable, activityLine, activityFor, agoShown, readNote, chainKeyTitle, chainKeySub, chainUsable, chainLaterNote } from "./qml/logic.mjs";
 import { readFileSync } from "node:fs";
-import { cliOutdatedLine, replyKind, revealNext, revealLine, mergeCliStatus } from "./qml/logic.mjs";
+import { cliOutdatedLine, replyKind, revealNext, revealLine, mergeCliStatus, requestTickKey, normalizedReply, noWalletSaid, onNet, preTicked, sameNetAnswer } from "./qml/logic.mjs";
 import { publicAccounts, decimalShown, bridgeNetStatus, bridgeNetRows, bridgeNetShown, publicIdProblem, NET_03, NET_04, mergedAccounts } from "./qml/logic.mjs";
 
 let failures = 0;
@@ -96,6 +96,63 @@ check("accountTitle", rows.map(accountTitle), ["Public account", "Private accoun
 check("accountsShown not a list", accountsShown(null), []);
 // The approval sheet's publisher line (the Program Registry's verify_app).
 check("publisher verified", publisherLine({ status: "verified", publisher: "forumer" }), { text: "forumer ✓ verified publisher", tone: "good" });
+// S-4: normalize answers plain text; a busy answer is never a name ("[object Object]").
+check("normalize replies", ["jef", "", JSON.stringify({ success: false, busy: true, value: null, error: "The wallet is busy; still working." }), undefined, "Module not connected", "{\"error\":\"timeout\"}"].map((r) => { const a = normalizedReply(r); return a.kind + ":" + a.value; }),
+  ["ok:jef", "ok:", "busy:null", "busy:null", "missing:null", "busy:null"]);
+// Busy (not taken) is told apart from no answer (may have been taken).
+check("busy not taken vs no answer", [JSON.stringify({ success: false, busy: true, value: null, error: "The wallet is busy; still working." }), "{\"error\":\"timeout\"}", undefined].map((r) => replyKind(r).kind + ":" + (replyKind(r).notTaken === true)),
+  ["busy:true", "busy:false", "busy:false"]);
+// Welcome only when the module says there is no wallet; a wallet with no name reaches the Wallet.
+check("no wallet said", [null, undefined, {}, { wallet: true, public: "A" }, { wallet: true }, { wallet: false }, { wallet: false, old_wallet: true }].map(noWalletSaid),
+  [false, false, false, false, false, true, true]);
+// S-A: a public account read on LEZ 0.3 is never carried into a LEZ 0.4 answer, which can't read its own.
+check("cli status across networks", mergeCliStatus(onNet({ wallet: true, public: "Public/A03" }, "0.3"), onNet({ wallet: true, public: null }, "0.4"))["public"], null);
+{
+  // A late answer: asked on LEZ 0.4, the person switched to LEZ 0.3, then the 0.4 answer arrives.
+  let shown = null, net = "0.4";
+  const askedOn = net;
+  const done = (value) => { if (sameNetAnswer(askedOn, net)) shown = value; };
+  net = "0.3";
+  done({ wallet: true, public: "Public/A04" });
+  check("late answer after a switch is dropped", shown, null);
+  check("an answer on the same network is shown", sameNetAnswer("0.3", "0.3"), true);
+}
+check("cli status same network", mergeCliStatus(onNet({ wallet: true, public: "Public/A04" }, "0.4"), onNet({ wallet: true, public: null }, "0.4"))["public"], "Public/A04");
+{
+  const one = [{ account: "Public/A", granted: true }, { account: "Public/B", granted: false }];
+  const two = [{ account: "Public/A", granted: true }, { account: "Public/B", granted: true }];
+  check("pre-ticks", [
+    preTicked({ kind: "programs", choices: one }, false),
+    preTicked({ kind: "programs", choices: two }, false),
+    preTicked({ kind: "token_source", choices: two }, false),
+    preTicked({ kind: "programs", choices: one, checking: true }, false),
+    preTicked({ kind: "programs", choices: one }, true),
+    preTicked({ kind: "connect", choices: [{ account: "Public/B", granted: false }] }, false),
+    preTicked({ kind: "connect", choices: one, checking: true }, false),
+  ], [["Public/A"], [], [], [], [], ["Public/B"], []]);
+}
+{
+  // The 0.4 card: the wallet's own account first with Copy; a LEZ 0.3 one view only, no Copy; one
+  // the 0.4 wallet also holds (a restored phrase) once, as its own.
+  const A04 = "Public/" + "A".repeat(43), B03 = "Public/" + "B".repeat(43), C = "Public/" + "C".repeat(43);
+  const read = { accounts: [{ account: B03, found: true, native: "5" }, { account: C, found: true, native: "7" }, { account: A04, found: false }] };
+  const rows = bridgeNetRows(read, [A04, C]);
+  check("0.4 card order", rows.map((r) => r.account), [C, A04, B03]);
+  check("0.4 card copy", rows.map((r) => r.copyable), [true, true, false]);
+  check("0.4 card view only title", rows[2].title.startsWith("LEZ 0.3 account ") && rows[2].title.endsWith("view only: your LEZ 0.4 wallet can't sign for it"), true);
+  check("0.4 card own once", rows.filter((r) => r.account === C).length, 1);
+  check("0.4 card no wallet yet: all view only", bridgeNetRows(read, []).map((r) => r.viewOnly), [true, true, true]);
+  check("0.3 card unchanged", bridgeNetRows(read).map((r) => r.copyable), [true, true, true]);
+}
+check("publisher checking", publisherLine({ status: "checking" }), { text: "Checking who publishes it…", tone: "plain" });
+{
+  // M-2: the ticks are set again whenever what the sheet knows changes, not only per request.
+  const checking = { id: "r1", publisher: { status: "checking" }, checking: true };
+  const fake = { id: "r1", publisher: { status: "mismatch" }, checking: false };
+  const warned = { id: "r1", publisher: { status: "verified" }, checking: false, sheet: { warnings: ["unverified"] } };
+  check("tick key changes on status", [requestTickKey(checking) !== requestTickKey(fake), requestTickKey(fake) !== requestTickKey(warned), requestTickKey(fake) === requestTickKey({ ...fake })], [true, true, true]);
+  check("tick key of nothing", requestTickKey(null), "");
+}
 check("publisher copy", publisherLine({ status: "mismatch", publisher: "forumer" }).tone, "warn");
 check("publisher unknown name", publisherLine({ status: "no_such_name", publisher: "x" }).text, "Claims x, which isn't a registered name.");
 check("publisher unclaimed", publisherLine({ status: "unclaimed" }).tone, "plain");

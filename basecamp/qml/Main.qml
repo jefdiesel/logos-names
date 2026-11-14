@@ -128,9 +128,11 @@ Item {
     // Held by the CLI's wallet and not by the open LEZ wallet: changed through the CLI.
     readonly property bool cliHeld: record !== null && holder === "" && cliHolds(record.name)
     readonly property bool mine: holder !== "" || cliHeld
-    // "My names": the LEZ wallet's, then the CLI's, each with the signer that applies.
+    // "My names": the LEZ wallet's, then the CLI's, each with the signer that applies. The one
+    // list of the names this wallet holds, wherever they are shown (Settings, the Names tab, the
+    // "No name yet" card). A name the LEZ wallet holds is held by one of its public accounts.
     readonly property var allMine: {
-        var all = myNames.map(function(entry) { return Object.assign({ signer: "wallet" }, entry) })
+        var all = myNames.map(function(entry) { return Object.assign({ signer: "wallet", "private": false }, entry) })
         for (var i = 0; i < cliNames.length; i++)
             if (!remembers(cliNames[i].name))
                 all.push(cliNames[i])
@@ -230,13 +232,66 @@ Item {
         if (answer.kind === "missing")
             throw new Error(moduleMissing)
         if (answer.kind === "busy")
-            throw new Error(moduleBusy)
+            throw new Error(answer.notTaken ? moduleBusy : moduleNoAnswer)
         if (answer.kind === "error")
             throw new Error(answer.error)
         return answer.value
     }
 
+    /// The name `text` writes ("" when it isn't a name), from the module's `normalize`. Throws, as
+    /// `ask` does, when the module is busy or missing: a busy answer is never taken as a name.
+    function normalized(text) {
+        if (!bridgeReady)
+            throw new Error("This screen needs to run inside Basecamp.")
+        var raw = logos.callModule("names", "normalize", [text])
+        lastReply = shownReply("names.normalize", raw)
+        var answer = Logic.normalizedReply(raw)
+        if (answer.kind === "missing")
+            throw new Error(moduleMissing)
+        if (answer.kind !== "ok")
+            throw new Error(answer.notTaken ? moduleBusy : moduleNoAnswer)
+        return answer.value
+    }
+
+    // Two kinds of "not now", told apart (PROVIDER-SDK.md): busy is the module's own answer and
+    // means the call was NOT taken, so pressing again is safe; no answer (a timeout) means it may
+    // have been taken and may still be working, so look before doing it again. Polls ask again
+    // after either (waitAgain).
+    /// `done` for the answer to a read of the names network in use: dropped when the network
+    /// changed since it was asked (S-A), so an account or balance read on one network is never
+    /// shown, or copyable, under the other.
+    function onNet(done) {
+        var net = namesNet
+        return function(value, reply) {
+            if (Logic.sameNetAnswer(net, namesNet))
+                done(value, reply)
+        }
+    }
+
     readonly property string moduleBusy: "The wallet is busy; still working."
+    readonly property string moduleNoAnswer: "No answer from the wallet yet: it may still be working on it. Look before trying again."
+    function waitAgain(message) {
+        return message === moduleBusy || message === moduleNoAnswer
+    }
+    // One-shot reads that met a busy module, asked again in 5 s (busy means the call wasn't taken:
+    // the module was on another call that waits on the node or the Program Registry).
+    property var busyAgain: ({})
+    function againWhenFree(key, load) {
+        var due = busyAgain
+        due[key] = load
+        busyAgain = due
+        busyRetry.restart()
+    }
+    Timer {
+        id: busyRetry
+        interval: 5000
+        onTriggered: {
+            var due = root.busyAgain
+            root.busyAgain = ({})
+            for (var key in due)
+                due[key]()
+        }
+    }
     readonly property string moduleMissing: "The names module is missing or out of date. In Basecamp, open Applications, click Names and press Install."
     // Asks still out, by number: one the host never answers is settled as busy after its
     // patience, so nothing that waits on it (the reveal, a refresh) stops for good.
@@ -267,7 +322,7 @@ Item {
             delete asksOut[id]
             return true
         }
-        asksOut[id] = { deadline: Date.now() + (patience || 30000) + 5000, expire: function() { if (finish()) failed(moduleBusy) } }
+        asksOut[id] = { deadline: Date.now() + (patience || 30000) + 5000, expire: function() { if (finish()) failed(moduleNoAnswer) } }
         function settle(reply) {
             if (!finish())
                 return
@@ -281,7 +336,7 @@ Item {
             else if (answer.kind === "error")
                 failed(answer.error)
             else
-                failed(answer.kind === "missing" ? moduleMissing : moduleBusy)
+                failed(answer.kind === "missing" ? moduleMissing : answer.notTaken ? moduleBusy : moduleNoAnswer)
         }
         if (bridgeReady && logos.callModuleAsync)
             logos.callModuleAsync("names", method, args, settle, patience || 30000)
@@ -457,6 +512,8 @@ Item {
     function loadZones() {
         askLater("zone_list", [], takeZones, function(message) {
             console.log("names_ui: zone_list:", message)
+            if (waitAgain(message))
+                againWhenFree("zones", loadZones)
         }, 20000)
     }
 
@@ -559,6 +616,8 @@ Item {
                 deposit = value
         }, function(message) {
             console.log("names_ui: deposit:", message)
+            if (waitAgain(message) && missing === name)
+                againWhenFree("deposit", function() { if (missing === name) loadDeposit(name) })
         })
     }
 
@@ -614,7 +673,7 @@ Item {
             cliPending = []
             return
         }
-        askLater("cli_mine", [], function(value, reply) {
+        askLater("cli_mine", [], onNet(function(value, reply) {
             value = value || []
             // The last list kept while reading it again fails says so (cli-mine-stale-list-unmarked-during-outage).
             namesNote = Logic.readNote(reply)
@@ -625,7 +684,7 @@ Item {
             cliNames.forEach(function(entry) { boardLookUp(entry.name) })
             if (savedMain === "" && mainName !== "")
                 setMain(mainName)
-        }, function(message) {
+        }), function(message) {
             console.log("names_ui: CLI names:", message)
             cliRetry.start()
         })
@@ -637,16 +696,22 @@ Item {
     function loadCliBalance() {
         if (cliPath === "")
             return
+        var shown = cliBalance
         cliBalance = undefined
-        askLater("cli_balance", [], function(value, reply) {
+        askLater("cli_balance", [], onNet(function(value, reply) {
             cliBalance = value
             // Balances the sequencer didn't give show as unknown, and this says which.
             balanceNote = Logic.readNote(reply)
             loadActivity()
-        }, function(message) {
+        }), function(message) {
+            console.log("names_ui: CLI balance:", message)
+            // Busy keeps the balance shown (the 15 s poll asks again); anything else is said.
+            if (waitAgain(message)) {
+                cliBalance = shown === undefined ? null : shown
+                return
+            }
             cliBalance = null
             balanceNote = sentence(message)
-            console.log("names_ui: CLI balance:", message)
         }, 120000)
     }
 
@@ -672,7 +737,8 @@ Item {
     // A newly read account list is asked about at once (the module answers from memory).
     onBridgeNetAccountsChanged: if (walletNet === "0.4") loadBridgeNet()
     readonly property var bridgeNetStatusNow: Logic.bridgeNetStatus(bridgeNet, clockShown)
-    readonly property var bridgeNetBlocks: Logic.bridgeNetRows(bridgeNet ? bridgeNet.read : null)
+    // On LEZ 0.4 the rows know which accounts are the 0.4 wallet's own: a LEZ 0.3 one is view only.
+    readonly property var bridgeNetBlocks: Logic.bridgeNetRows(bridgeNet ? bridgeNet.read : null, namesNet === "0.4" ? Logic.publicAccounts(cliBalance, cliAccounts) : null)
     property bool bridgeNetShowEmpty: false   // the wallet's accounts with nothing there, shown one by one
     readonly property var bridgeNetView: Logic.bridgeNetShown(bridgeNetBlocks, bridgeNetShowEmpty)
 
@@ -684,12 +750,12 @@ Item {
     /// Asks the module what the public accounts hold on the bridge test network. It answers
     /// at once with its last read and reads again itself, at most every 30 s.
     function loadBridgeNet() {
-        askLater("bridge_net_balances", [JSON.stringify(bridgeNetAccounts)], function(value) {
+        askLater("bridge_net_balances", [JSON.stringify(bridgeNetAccounts)], onNet(function(value) {
             bridgeNet = value
             bridgeNetProblem = ""
             if (value && value.updating)
                 bridgeNetSoon.restart()
-        }, function(message) {
+        }), function(message) {
             bridgeNetProblem = sentence(message)
         })
     }
@@ -728,6 +794,17 @@ Item {
             record = null
             missing = ""
             bridgeNet = null
+            // Nothing read on the network left is shown, or copyable, as this one's (S-A).
+            cliBalance = undefined
+            cliAccounts = null
+            cliStatus = null
+            cliNames = []
+            cliPending = []
+            cliKnown = false
+            tokenHoldings = null
+            walletAccount = null
+            if (walletView === "account")
+                walletView = "home"
             namesNet = net
             loadConfig()
             if (net === "0.4")
@@ -767,13 +844,18 @@ Item {
     function loadAccounts() {
         if (cliPath === "")
             return
-        askLater("cli_accounts", [], function(value, reply) {
+        askLater("cli_accounts", [], onNet(function(value, reply) {
             cliAccounts = Logic.accountsShown(value)
             accountsNote = Logic.readNote(reply)
             accountsError = ""
-        }, function(message) {
-            accountsError = sentence(message)
+        }), function(message) {
             console.log("names_ui: accounts:", message)
+            // Busy keeps the accounts shown and asks again; anything else is said.
+            if (waitAgain(message)) {
+                againWhenFree("accounts", loadAccounts)
+                return
+            }
+            accountsError = sentence(message)
         }, 180000)
     }
 
@@ -898,14 +980,22 @@ Item {
                     chainReading = false
                     // What one claim would cost, asked of the node before Claim is pressed.
                     if (stake && stake.vouchers > 0)
-                        askLater("chain_claim", [false], function(plan) { chainClaimPlan = plan }, function(message) { chainClaimPlan = null }, 30000)
+                        askLater("chain_claim", [false], function(plan) { chainClaimPlan = plan }, function(message) {
+                            // Busy keeps the plan shown and reads the node again.
+                            if (waitAgain(message))
+                                chainRetry.start()
+                            else
+                                chainClaimPlan = null
+                        }, 30000)
                 }, function(message) {
                     chainReading = false
                     console.log("names_ui: stake:", message)
+                    if (waitAgain(message))
+                        chainRetry.start()
                 }, 30000)
             }, function(message) {
                 chainReading = false
-                if (message === moduleBusy) {
+                if (waitAgain(message)) {
                     chainRetry.start()
                     return
                 }
@@ -913,7 +1003,7 @@ Item {
             }, 60000)
         }, function(message) {
             chainReading = false
-            if (message === moduleBusy) {
+            if (waitAgain(message)) {
                 chainRetry.start()
                 return
             }
@@ -1379,6 +1469,8 @@ Item {
             watchedNames = names
         }, function(message) {
             console.log("names_ui: watched tokens:", message)
+            if (waitAgain(message))
+                againWhenFree("watched", loadWatched)
         })
     }
 
@@ -1716,6 +1808,7 @@ Item {
     readonly property bool canShield: cliPublic !== null && Logic.atLeast(cliPublic.balance, shieldMinimum)
     /// A wallet from before LEZ 0.4, which no longer opens.
     readonly property bool oldWallet: cliStatus !== null && !!cliStatus.old_wallet
+    property bool restoreOpen: false    // Welcome: "Restore from my recovery phrase" was chosen
     /// A names program from before LEZ 0.4, which can't sign for this app.
     readonly property bool cliOutdated: cliStatus !== null && !!cliStatus.outdated
     property bool restoreBusy: false
@@ -1740,9 +1833,14 @@ Item {
     }
 
     function loadCliStatus() {
+        // The network it was asked on: an answer that comes back after a switch is dropped, and
+        // nothing read on one network (its public account) is kept under the other (S-A).
+        var net = namesNet
         askLater("cli_status", [], function(value) {
+            if (net !== namesNet)
+                return
             var before = cliStatus
-            cliStatus = Logic.mergeCliStatus(cliStatus, value)
+            cliStatus = Logic.mergeCliStatus(cliStatus, Logic.onNet(value, net))
             if (before && before.wallet && !(cliStatus && cliStatus.wallet))
                 console.log("names_ui: the module says there is no wallet now:", JSON.stringify(value))
             if (value && value.installing && installJob === null)
@@ -1841,7 +1939,8 @@ Item {
         restoreError = ""
         askLater("cli_restore_wallet", [phrase], function(value) {
             restoreBusy = false
-            restoreDone = "Your wallet is back. The old files were kept beside it."
+            restoreOpen = false
+            restoreDone = oldWallet ? "Your wallet is back. The old files were kept beside it." : "Your wallet is restored: the same public accounts as the wallet this phrase made."
             loadCliStatus()
             loadCliBalance()
             loadCliMine()
@@ -1858,6 +1957,8 @@ Item {
             lockedUpTo = value && value.locked_up_to ? Number(value.locked_up_to) : 0
         }, function(message) {
             console.log("names_ui: settings:", message)
+            if (waitAgain(message))
+                againWhenFree("settings", loadClaims)
         })
     }
 
@@ -2148,7 +2249,7 @@ Item {
     function loadWallet(announce) {
         if (registry === "")
             return
-        askLater("wallet", [], function(value) {
+        askLater("wallet", [], onNet(function(value) {
             var funded = value.accounts.filter(function(account) { return account.funded })
             wallet = funded
             privateWallet = (value.private_accounts || []).filter(function(account) { return account.funded })
@@ -2161,8 +2262,8 @@ Item {
             loadMine()
             if (announce)
                 say(funded.length > 0 ? "Wallet connected." : walletProblem, funded.length === 0)
-        }, function(message) {
-            if (message === moduleBusy) {
+        }), function(message) {
+            if (waitAgain(message)) {
                 // Busy is not "no wallet": keep what was read, and ask again soon.
                 console.log("names_ui: wallet read waits:", message)
                 walletRetry.restart()
@@ -2236,7 +2337,7 @@ Item {
             return
         say("", false)
         try {
-            var name = String(call("names", "normalize", [text]))
+            var name = normalized(text)
             if (name === "") {
                 say("A name is 1 to 32 characters of a-z, 0-9 or a hyphen, such as jef.", true)
                 return
@@ -2312,7 +2413,7 @@ Item {
                 record = null
                 page = null
                 tool = ""
-                missing = String(call("names", "normalize", [name]))
+                missing = normalized(name)
                 deposit = null
                 if (missing !== "") {
                     loadDeposit(missing)
@@ -2366,7 +2467,7 @@ Item {
     /// The same change for a name the names CLI holds: the module starts the
     /// CLI, which proves the change on this machine (minutes), and this polls
     /// the job until it ends, then reads the name back.
-    readonly property var cliMethods: ({ set_text: "cli_set_text", set_profile: "cli_profile", set_page: "cli_set_page", register: "cli_register", transfer: "cli_transfer" })
+    readonly property var cliMethods: ({ add_name: "cli_add_name", set_text: "cli_set_text", set_profile: "cli_profile", set_page: "cli_set_page", register: "cli_register", transfer: "cli_transfer" })
 
     // ── Handing names on (names transfer / receive-privately) ───────────
     property string transferTarget: ""   // the name whose Transfer card is open
@@ -2438,6 +2539,8 @@ Item {
         var sofar = minutes > 0 ? ", " + minutes + " min so far" : ""
         if (job.kind === "register")
             return "Step 1 of 3: proving the commitment on this computer. Usually 5–12 min" + sofar + "."
+        if (job.kind === "add_name")
+            return "Checking on chain that this wallet holds " + job.name + "…"
         return "Proving the change on this computer, so the chain never learns your account. Usually 5–12 min" + sofar + "."
     }
 
@@ -2520,7 +2623,10 @@ Item {
         try {
             settled = job.settled()
         } catch (error) {
-            // A failed read is not an answer; the next tick asks again.
+            // A failed read is not an answer; the next tick asks again. A busy one doesn't count
+            // against the tries: the module was on another call, nothing was read.
+            if (waitAgain(error.message))
+                return
         }
         job.tries += 1
         if (!settled && job.tries < 40)
@@ -2771,7 +2877,11 @@ Item {
             if (pageArea.text === body)
                 pagePreview = value
         }, function(message) {
-            pagePreview = null
+            // Busy keeps the last preview and asks again; a refusal clears it.
+            if (waitAgain(message))
+                againWhenFree("preview", function() { if (pageArea.text === body) previewPage() })
+            else
+                pagePreview = null
         })
     }
 
@@ -2828,8 +2938,10 @@ Item {
             var ok = value && value.width > 0 && value.height > 0 && value.width <= 128 && value.height <= 128
                 && typeof value.pixels === "string"
             avatarPixels = ok ? { name: name, width: value.width, height: value.height, pixels: value.pixels } : null
-        }, function() {
-            if (record !== null && record.name === name)
+        }, function(message) {
+            if (waitAgain(message))
+                againWhenFree("avatar", function() { if (record !== null && record.name === name) loadAvatar(record) })
+            else if (record !== null && record.name === name)
                 avatarPixels = null
         })
     }
@@ -2969,8 +3081,13 @@ Item {
     /// The posting name is being made public: its holder changes and its profile
     /// is put back, so it can't post until that's done.
     readonly property bool boardAsMoving: boardJob !== null && boardJob.kind === "make_public" && boardJob.name === boardAs
-    /// First run: no names CLI yet, or no name to post as.
-    readonly property bool needsWelcome: configKnown && registry !== "" && (cliPath === "" || (cliKnown && mainName === "" && cliPending.length === 0))
+    /// First run: no names CLI yet, or the module says plainly there is no wallet on this network
+    /// (`cli_status.wallet` false; a busy or failed read never says so). A wallet with no name
+    /// is not a first run: it reaches the Wallet, Activity, Settings and request sheets, and the
+    /// Names tab (and a card on the Wallet) offers a name. A bridge-only person never needs one.
+    readonly property bool needsWelcome: configKnown && registry !== "" && (cliPath === "" || Logic.noWalletSaid(cliStatus))
+    /// The "pick a name" card on the Wallet was put away for this run.
+    property bool nameCardAway: false
     // The Welcome screen stands in for every section but Settings (where
     // Register is) and Search (where a name checked there opens to register).
     readonly property bool welcomeCovers: needsWelcome && section !== "settings" && section !== "search" && !(section === "wallet" && walletView === "bridge")
@@ -2999,7 +3116,7 @@ Item {
 
     /// Makes the anon name (once): a CLI job, then a registration the CLI finishes.
     function makeAnon() {
-        boardStart("make_anon", [anonPublic], "Setting up your anon name", function() {
+        boardStart("make_anon", [anonPublic || namesNet === "0.4"], "Setting up your anon name", function() {
             askLater("anon_name", [], function(value) { anonName = value || "" }, function() {})
             loadCliMine()
         })
@@ -3067,7 +3184,13 @@ Item {
             return
         }
         var bare = ""
-        try { bare = String(call("names", "normalize", [to])) } catch (error) {}
+        // The "your own name" check needs the module's answer: busy stops here, never skips it.
+        try {
+            bare = normalized(to)
+        } catch (error) {
+            say(error.message, true)
+            return
+        }
         if (bare !== "" && cliHolds(bare)) {
             say(bare + " is your own name: the payment would come back to you.", true)
             return
@@ -3371,8 +3494,11 @@ Item {
     function chatAddressOf(typed, done) {
         var name = ""
         try {
-            name = String(call("names", "normalize", [typed]))
-        } catch (error) {}
+            name = normalized(typed)
+        } catch (error) {
+            say(error.message, true)
+            return
+        }
         if (name === "") {
             say("That isn't a name.", true)
             return
@@ -3681,18 +3807,18 @@ Item {
     /// what it last read, and reads again in the background).
     function loadTokens() {
         // Tokens of the token sources apps registered (bridged tokens), whatever the wallet's own program.
-        askLater("token_source_holdings", [], function(value) {
+        askLater("token_source_holdings", [], onNet(function(value) {
             bridgedHoldings = Array.isArray(value) ? value : []
-        }, function(message) {
+        }), function(message) {
             console.log("names_ui: token sources:", message)
         })
         if (tokenProgram === "")
             return
-        askLater("cli_token_holdings", [""], function(value) {
+        askLater("cli_token_holdings", [""], onNet(function(value) {
             tokenHoldings = value.holdings === null || value.holdings === undefined ? null : value.holdings
             tokenUpdating = !!value.updating
             tokenError = value.error ? sentence(value.error) : ""
-        }, function(message) {
+        }), function(message) {
             tokenUpdating = false
             tokenError = sentence(message)
         })
@@ -3838,7 +3964,7 @@ Item {
 
     property var appRequests: []          // pending_requests: the oldest first
     property var appChosen: []            // the accounts ticked on the sheet
-    property string appChosenFor: ""      // which request those ticks are for
+    property string appChosenFor: ""      // which request, in which state, those ticks are for (Logic.requestTickKey)
     property bool appUnderstood: false    // an unverified program's warning was read
     property bool appBusy: false          // an answer is on its way to the module
     property string appError: ""
@@ -3856,17 +3982,17 @@ Item {
                 appChosen = []
                 return
             }
-            if (appChosenFor !== request.id) {
-                appChosenFor = request.id
+            // Ticked again (and the warning's tick undone) on a new request and on any change of
+            // what the sheet knows about it: the publisher check or a program label coming back
+            // turns "checking" into a warning or not (M-2).
+            var key = Logic.requestTickKey(request)
+            if (appChosenFor !== key) {
+                if (appChosenFor !== "")
+                    console.log("names_ui: request " + request.id + " sheet changed: " + key)
+                appChosenFor = key
                 appUnderstood = false
                 appError = ""
-                var choices = request.choices || []
-                var given = choices.filter(function(choice) { return choice.granted })
-                // Nothing is ticked for an app that may be a fake: choosing is deliberate (M-2).
-                // The accounts shared with this app at connect come first: a declaration or a token
-                // source confirms all of them; anything else starts from the first one.
-                var many = request.kind === "programs" || request.kind === "token_source"
-                appChosen = appPublisherFailed(request) ? [] : given.length > 0 ? (many ? given.map(function(choice) { return choice.account }) : [given[0].account]) : choices.length > 0 ? [choices[0].account] : []
+                appChosen = Logic.preTicked(request, appPublisherFailed(request))
             }
             if (request.kind === "transfer")
                 loadFee()
@@ -3880,6 +4006,8 @@ Item {
             appGrants = Array.isArray(value) ? value : []
         }, function(message) {
             console.log("names_ui: app_grants:", message)
+            if (waitAgain(message))
+                againWhenFree("grants", loadAppGrants)
         })
     }
 
@@ -3907,6 +4035,9 @@ Item {
             return false
         // Asked for another zone than the one in use: the same account ID is another account there.
         if (appRequest.zone_in_use === false)
+            return false
+        // The Program Registry is still being asked about it (the module refuses it too, M-2).
+        if (appRequest.checking === true)
             return false
         if (appRequestRisky(appRequest) && !appUnderstood)
             return false
@@ -4128,7 +4259,7 @@ Item {
                 return
             inscribePlan = null
             // The module being busy isn't the account's problem: it is asked again.
-            inscribeProblem = message === moduleBusy ? "" : sentence(message)
+            inscribeProblem = waitAgain(message) ? "" : sentence(message)
         }, 30000)
     }
 
@@ -4168,7 +4299,7 @@ Item {
             inscribeBusy = false
             // No answer to an approval isn't a refusal: the node may still be proving and
             // sending it. The request leaves the list once the module has its outcome.
-            inscribeError = approve && message === moduleBusy
+            inscribeError = approve && message === moduleNoAnswer
                 ? "No answer yet: the inscription may still be on its way. Look at the history below before approving anything again."
                 : sentence(message)
             // What it costs may have changed with what was refused.
@@ -4195,7 +4326,10 @@ Item {
         onTriggered: root.loadInscribeRequests()
     }
 
-    TextEdit { id: clipboard; visible: false }
+    // Copy goes through a hidden TextEdit (QML has no clipboard of its own): plain text only.
+    // Known limit (WALLET-0.17.md): Qt hands macOS the copied text lazily, which Screen Sharing's
+    // shared clipboard may not pick up; pasting on the same Mac works.
+    TextEdit { id: clipboard; visible: false; textFormat: TextEdit.PlainText }
 
     // ── Parts ───────────────────────────────────────────────────────────
 
@@ -5164,7 +5298,7 @@ Item {
                         spacing: 0
                         Text {
                             Layout.fillWidth: true
-                            text: root.mainName !== "" ? root.mainName : "Welcome"
+                            text: root.mainName !== "" ? root.mainName : root.needsWelcome ? "Welcome" : "No name yet"
                             textFormat: Text.PlainText
                             color: root.ink
                             font.family: root.sans
@@ -5320,15 +5454,27 @@ Item {
                         color: root.alarm
                         text: "Your " + (root.namesNet === "0.4" ? "LEZ 0.4" : "LEZ 0.3") + " wallet was made for an earlier version of that network and no longer opens. Enter its recovery phrase to bring its accounts back. The old files are kept. Tokens don't carry over."
                     }
+                    // No wallet here yet: making a new one, or the same accounts as a wallet you have
+                    // (one recovery phrase gives the same public accounts on LEZ 0.3 and LEZ 0.4).
+                    Hint {
+                        visible: !root.hasCliWallet && !root.oldWallet && root.cliPath !== ""
+                        text: "Restore if you already have a wallet on LEZ 0.3 and want the same accounts here. Create a new one if you don't."
+                    }
+                    Link {
+                        visible: !root.hasCliWallet && !root.oldWallet && root.cliPath !== "" && !root.restoreOpen
+                        text: "Restore from my recovery phrase"
+                        font.pixelSize: root.px(16)
+                        onPressed: root.restoreOpen = true
+                    }
                     Field {
                         id: restorePhraseField
-                        visible: root.oldWallet
+                        visible: root.oldWallet || (root.restoreOpen && !root.hasCliWallet)
                         Layout.fillWidth: true
                         hint: "Your recovery phrase"
                     }
                     Action {
-                        visible: root.oldWallet
-                        label: root.restoreBusy ? "Restoring…" : "Bring my wallet back"
+                        visible: root.oldWallet || (root.restoreOpen && !root.hasCliWallet)
+                        label: root.restoreBusy ? "Restoring…" : root.oldWallet ? "Bring my wallet back" : "Restore my wallet"
                         strong: true
                         enabledNow: !root.restoreBusy
                         onPressed: { root.restoreWallet(restorePhraseField.text); restorePhraseField.text = "" }
@@ -5797,6 +5943,18 @@ Item {
                     // Which network the balances below are on: the names network switch.
                     NetSwitch {}
                     RunsOn { net: root.walletNet === "0.4" ? "0.4" : "0.3+chain"; prefix: "Balances on" }
+                    // A wallet with no name yet: a name is offered, never required (the bridge needs none).
+                    Card {
+                        visible: root.cliKnown && root.allMine.length === 0 && root.cliPending.length === 0 && !root.nameCardAway && root.zoneHome
+                        Layout.fillWidth: true
+                        Part { Layout.topMargin: 0; text: "No name yet" }
+                        Hint { text: "A name lets people pay and message you by it. You don't need one to hold, send or bridge tokens." }
+                        RowLayout {
+                            spacing: 14
+                            Action { label: "Pick a name"; strong: true; onPressed: root.openWallet("names") }
+                            Link { text: "Not now"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.nameCardAway = true }
+                        }
+                    }
 
                     // ── LEZ 0.4, the bridge test network: read only ──
                     Card {
@@ -5841,7 +5999,8 @@ Item {
                                     spacing: 14
                                     Text { Layout.fillWidth: true; text: netAccount.modelData.title; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); font.weight: Font.DemiBold }
                                     Link { visible: netAccount.modelData.watched; text: "Stop watching"; color: root.dim; font.pixelSize: root.px(14); onPressed: root.bridgeNetWatch(netAccount.modelData.account, false) }
-                                    Link { text: "Copy"; color: root.dim; font.pixelSize: root.px(14); onPressed: root.copy(netAccount.modelData.account, "The account ID") }
+                                    // A LEZ 0.3 account the 0.4 wallet can't sign for has no Copy.
+                                    Link { visible: netAccount.modelData.copyable !== false; text: "Copy"; color: root.dim; font.pixelSize: root.px(14); onPressed: root.copy(netAccount.modelData.account, "The account ID") }
                                 }
                                 Hint { visible: !netAccount.modelData.found; font.pixelSize: root.px(15); text: "Nothing on this network." }
                                 Repeater {
@@ -6656,9 +6815,9 @@ Item {
                         Layout.fillWidth: true
                         Part { Layout.topMargin: 0; text: "My names" }
                         Hint { visible: root.namesNote !== ""; color: root.brass; text: root.namesNote }
-                        Hint { visible: root.cliNames.length === 0 && root.cliPending.length === 0; text: root.cliKnown ? "None yet." : "Reading your names…" }
+                        Hint { visible: root.allMine.length === 0 && root.cliPending.length === 0; text: root.cliKnown ? "None yet." : "Reading your names…" }
                         Repeater {
-                            model: root.cliNames
+                            model: root.allMine
                             RowLayout {
                                 id: myName
                                 required property var modelData
@@ -6680,7 +6839,7 @@ Item {
                                     font.pixelSize: root.px(14)
                                     elide: Text.ElideRight
                                 }
-                                Link { visible: myName.modelData["private"] !== false; text: "Make public…"; font.pixelSize: root.px(15); onPressed: { root.go("settings"); root.loadAccounts() } }
+                                Link { visible: myName.modelData["private"] !== false && root.namesNet !== "0.4"; text: "Make public…"; font.pixelSize: root.px(15); onPressed: { root.go("settings"); root.loadAccounts() } }
                                 Link { visible: myName.modelData.name !== root.mainName; text: "Make main"; font.pixelSize: root.px(15); onPressed: root.setMain(myName.modelData.name) }
                                 Link { text: "Open"; font.pixelSize: root.px(15); onPressed: { root.go("search"); root.show(myName.modelData.name) } }
                                 Link { text: "Copy"; font.pixelSize: root.px(15); onPressed: root.copy(myName.modelData.name, "Your name") }
@@ -6694,6 +6853,24 @@ Item {
                                 spacing: 14
                                 Text { text: modelData.name; color: root.dim; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.Bold }
                                 Text { text: modelData.failed ? "didn't register" : "registering"; color: modelData.failed ? root.alarm : root.brass; font.family: root.sans; font.pixelSize: root.px(14) }
+                            }
+                        }
+                        // A name this wallet holds that isn't listed (handed to it, or registered
+                        // before public registrations were listed): the CLI checks the chain first.
+                        // The chain can't list a wallet's names by account, so it is typed.
+                        Hint { font.pixelSize: root.px(15); text: "Hold a name that isn't listed? Type it: the wallet checks on chain that it holds it, then lists it." }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 10
+                            Field { id: addNameField; Layout.fillWidth: true; hint: "Name you hold" }
+                            Action {
+                                label: "Add"
+                                enabledNow: root.pending === null && addNameField.text.trim() !== "" && root.zoneHome
+                                onPressed: {
+                                    var typed = addNameField.text.trim().toLowerCase().replace(/\.lez$/, "")
+                                    root.cliChange("add_name", [typed], typed, function() { return true }, "Added " + typed + ": this wallet holds it.")
+                                    addNameField.text = ""
+                                }
                             }
                         }
                     }
@@ -6748,8 +6925,10 @@ Item {
                         }
                     }
 
-                    // Take a name someone handed to you (names receive-privately).
+                    // Take a name someone handed to you (names receive-privately). Not on LEZ 0.4,
+                    // which is public only: there "Add" in My names lists a name handed to you.
                     Card {
+                        visible: root.namesNet !== "0.4"
                         Layout.fillWidth: true
                         Part { Layout.topMargin: 0; text: "Got a name from someone?" }
                         Hint { font.pixelSize: root.px(15); text: "Once they've transferred it to one of your accounts, set it up here: payments to it start arriving privately, at a new account of yours, and it joins My names." }
@@ -7367,8 +7546,9 @@ Item {
                         RowLayout {
                             visible: root.anonName === "" || root.cliPendingFor(root.anonName) === null
                             spacing: 6
-                            Tab { label: "Private anon (4 min posts)"; current: !root.anonPublic; onPressed: root.anonPublic = false }
-                            Tab { label: "Public anon (30 s posts)"; current: root.anonPublic; onPressed: root.anonPublic = true }
+                            // LEZ 0.4 is public only: no private anon there (the module refuses it too).
+                            Tab { visible: root.namesNet !== "0.4"; label: "Private anon (4 min posts)"; current: !root.anonPublic; onPressed: root.anonPublic = false }
+                            Tab { label: "Public anon (30 s posts)"; current: root.anonPublic || root.namesNet === "0.4"; onPressed: root.anonPublic = true }
                         }
                         Action {
                             visible: root.anonName === "" || root.cliPendingFor(root.anonName) === null
@@ -7749,6 +7929,8 @@ Item {
                         onPressed: root.openRegister()
                     }
                     Part { text: "Accounts" }
+                    // Which network this list is: never one network's accounts read as the other's.
+                    Hint { color: root.brass; font.pixelSize: root.px(15); text: "On " + (root.namesNet === "0.4" ? "LEZ 0.4 (the bridge test network)" : "LEZ 0.3 (the public Logos testnet)") + ": the accounts of that network's wallet. Switch networks at the top of the Wallet." }
                     Hint { visible: !root.cliOld || root.cliAccounts !== null; text: "Your wallet's accounts. The one marked Pays is where payments and new names come from, one private and one public. Names you hold stay with the accounts holding them, and payments to a name still go where the name points." }
                     Hint { visible: root.cliPath === ""; text: "Install Names on this computer first (Welcome) to see your accounts." }
                     Hint { visible: root.cliPath !== "" && root.cliAccounts === null && root.accountsError === ""; text: "Reading your accounts…" }
@@ -7782,6 +7964,8 @@ Item {
                                 }
                                 Text { visible: accountRow.chosen; text: "Pays"; color: root.brass; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(15) }
                                 Item { Layout.fillWidth: true }
+                                // The full ID, as `Public/<id>` (shown shortened beside it).
+                                Link { text: "Copy"; color: root.dim; font.pixelSize: root.px(14); onPressed: root.copy(accountRow.modelData.account, "The full account ID") }
                                 Action {
                                     // Choosing and naming accounts need the names program's 0.4 update.
                                     visible: !accountRow.chosen && !root.cliOutdated
@@ -8802,6 +8986,8 @@ Item {
                             Layout.fillWidth: true
                             spacing: 8
                             Action {
+                                // LEZ 0.4 is public only (the module refuses it there too).
+                                visible: root.namesNet !== "0.4"
                                 label: root.record !== null && root.record.npk !== null && root.record.account !== null ? "Make it private only" : "Receive privately"
                                 strong: true
                                 changes: true
@@ -9445,6 +9631,17 @@ Item {
                     font.family: root.sans
                     font.pixelSize: root.px(16)
                     font.weight: line !== null && line.tone !== "plain" ? Font.DemiBold : Font.Normal
+                    wrapMode: Text.WordWrap
+                }
+                // Still asking the Program Registry: Approve waits for the answer (M-2).
+                Text {
+                    visible: appSheet.request !== null && appSheet.request.checking === true && String(appSheet.request.checking_what || "").indexOf("who publishes") !== 0
+                    Layout.fillWidth: true
+                    text: appSheet.request === null ? "" : "Checking " + String(appSheet.request.checking_what || "") + " with the Program Registry… Approve waits for the answer."
+                    textFormat: Text.PlainText
+                    color: root.dim
+                    font.family: root.sans
+                    font.pixelSize: root.px(16)
                     wrapMode: Text.WordWrap
                 }
 
