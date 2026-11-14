@@ -12,6 +12,11 @@
 # Optional: WORK (default $TMPDIR/relayed-call-e2e), RPC_PORT (default 4720).
 set -euo pipefail
 : "${SEQ_BIN:?}" "${SEQ_CONFIG:?}" "${NAMES:?}" "${NAMES_ELF:?}"
+# The names CLI executes in-process (it is built with `local-prove`). The sequencer is NOT given
+# this: a sequencer_service built without risc0's `prove` feature (as CI builds it) panics on
+# RISC0_EXECUTOR=local ("Unsupported executor: local") and uses r0vm by default; one built with it
+# executes in-process by default anyway. So it starts with RISC0_EXECUTOR unset (`env -u`, which
+# execs the sequencer, so the PID kept below is the sequencer's own).
 export RISC0_EXECUTOR=local RAYON_NUM_THREADS=${RAYON_NUM_THREADS:-4}
 W=${WORK:-${TMPDIR:-/tmp}/relayed-call-e2e}; RPC_PORT=${RPC_PORT:-4720}; METRICS_PORT=$((RPC_PORT + 1)); RPC=http://127.0.0.1:$RPC_PORT
 LOCAL_TEST_KEY=10a26a9aec7d34b82364eeae45c5294dbb0a764b000b94eeb9b58511dc487c4d; SEGMENT=$((96 * 1024))
@@ -24,10 +29,21 @@ rpc getLastBlockId >/dev/null 2>&1 && fail "something answers on $RPC"
 rm -rf "$W"; mkdir -p "$W"; SEQ_PID=
 trap '[ -n "$SEQ_PID" ] && kill $SEQ_PID 2>/dev/null; wait 2>/dev/null; echo "sequencer stopped; left running: $(pgrep -fl "$W" || echo nothing)"' EXIT
 say "fresh rc3 standalone sequencer on $RPC (throwaway)"
-"$SEQ_BIN" setup "$W/seq" --config "$SEQ_CONFIG" --funding-public-key 0101010101010101010101010101010101010101010101010101010101010100 --create-channel > "$W/seq-setup.log" 2>&1 || fail setup
-RUST_LOG=warn "$SEQ_BIN" start "$W/seq" --rpc-listen-address "127.0.0.1:$RPC_PORT" --metrics-listen-address "127.0.0.1:$METRICS_PORT" >> "$W/sequencer.log" 2>&1 < /dev/null &
+env -u RISC0_EXECUTOR "$SEQ_BIN" setup "$W/seq" --config "$SEQ_CONFIG" --funding-public-key 0101010101010101010101010101010101010101010101010101010101010100 --create-channel > "$W/seq-setup.log" 2>&1 \
+  || { echo "== seq-setup.log (last 40 lines)"; tail -40 "$W/seq-setup.log"; fail "sequencer setup failed"; }
+env -u RISC0_EXECUTOR RUST_LOG=warn "$SEQ_BIN" start "$W/seq" --rpc-listen-address "127.0.0.1:$RPC_PORT" --metrics-listen-address "127.0.0.1:$METRICS_PORT" >> "$W/sequencer.log" 2>&1 < /dev/null &
 SEQ_PID=$!
-for _ in $(seq 1 60); do rpc getLastBlockId >/dev/null 2>&1 && break; sleep 2; done
+# Up to 120 s for the RPC to answer; stop at once if the sequencer exits.
+for _ in $(seq 1 60); do
+  rpc getLastBlockId >/dev/null 2>&1 && break
+  kill -0 "$SEQ_PID" 2>/dev/null || break
+  sleep 2
+done
+if ! rpc getLastBlockId >/dev/null 2>&1; then
+  if kill -0 "$SEQ_PID" 2>/dev/null; then why="did not answer on $RPC within 120 s"; else st=0; wait "$SEQ_PID" || st=$?; why="exited (status $st) before answering on $RPC"; SEQ_PID=; fi
+  echo "== sequencer.log (last 40 lines)"; tail -40 "$W/sequencer.log"
+  fail "the sequencer $why"
+fi
 export LEE_WALLET_PASSWORD= LOGOS_NAMES_RPC=$RPC
 new_wallet() { mkdir -p "$1"; chmod 700 "$1"; cat > "$1/wallet_config.json" <<J
 { "gas_limit": 2000000, "fee_headroom_blocks": 5, "seq_block_poll_max_amount": 100, "seq_poll_max_retries": 5,
