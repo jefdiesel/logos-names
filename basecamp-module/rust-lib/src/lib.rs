@@ -959,6 +959,11 @@ pub trait NamesModule: Send + 'static {
     /// or a malformed hint is refused. get_config `features` lists `request_access_with`.
     fn request_access_with(&mut self, reason: String, options_json: String) -> String;
 
+    /// The SHA-256 (lowercase hex) of the package file at `path`, for the Names app to check a
+    /// package it ships (the LEZ Bridge) before offering to install it. Only a `.lgx` file of at
+    /// most 64 MiB; only the Names app may ask. get_config `features` lists `file_sha256`.
+    fn file_sha256(&mut self, path: String) -> String;
+
     /// The accounts this app has been given: `{connected, accounts:
     /// [{account, account_kind}]}`, where `account` is `Public/<id>` or
     /// `Private/<id>` and `account_kind` is `public` or `private`. Asks nobody.
@@ -1380,7 +1385,7 @@ const NAMES_APP: &str = "names_ui";
 const MODULE_VERSION: &str = "0.17.0";
 /// get_config's `features`: what an app may need beyond the version (`reveal_name`;
 /// `request_access_with` and its `account_hint`).
-const MODULE_FEATURES: [&str; 2] = ["reveal_name", "request_access_with"];
+const MODULE_FEATURES: [&str; 3] = ["reveal_name", "request_access_with", "file_sha256"];
 
 /// What a private-name action answers on LEZ 0.4, where names are public only (S-B).
 const PRIVATE_OFF_04: &str = "on LEZ 0.4 names are public only: private payments and private holders are off there, so nothing was done";
@@ -4085,7 +4090,17 @@ impl NamesModule for Names {
         if only_the_names_app().is_err() {
             return reply(Ok(public_config(&self.shown_config())));
         }
+        // The Names app has opened: learn now whether the Program Registry is installed at all,
+        // so its first sheet doesn't wait on a module that isn't there.
+        program_registry::warm();
         self.shown_config().to_string()
+    }
+
+    fn file_sha256(&mut self, path: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(lgx_sha256(&path).map(Value::from))
     }
 
     fn cli_claim(&mut self, name: String, snapshot: String) -> String {
@@ -7509,6 +7524,43 @@ const MAX_CACHED: usize = 512;
 /// A wallet can hold many accounts and each costs a read, so `wallet` stops here.
 const MAX_WALLET_ACCOUNTS: usize = 64;
 
+/// The SHA-256 of the `.lgx` file at `path` (lowercase hex): `file_sha256`.
+fn lgx_sha256(path: &str) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let path = std::path::Path::new(path);
+    if !path.is_absolute() || path.extension().and_then(|e| e.to_str()) != Some("lgx") {
+        return Err("only a package file (.lgx) given by its full path".to_owned());
+    }
+    let meta = std::fs::metadata(path).map_err(|_| "that package file isn't there".to_owned())?;
+    if !meta.is_file() || meta.len() > 64 << 20 {
+        return Err("that isn't a package file of at most 64 MiB".to_owned());
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("couldn't read that package file: {e}"))?;
+    Ok(Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Whether package_manager's list of installed packages (`answer`, as the host hands it: the
+/// list, JSON text of it, or `{success, value}` around either) names `name`. None unless the list
+/// was read for sure: it must hold this names module itself, so an answer of another shape is
+/// never taken for "not installed".
+fn package_listed(answer: &Value, name: &str) -> Option<bool> {
+    let mut value = answer.clone();
+    for _ in 0..4 {
+        value = match value {
+            Value::String(text) => serde_json::from_str(&text).ok()?,
+            Value::Object(ref map) if map.contains_key("value") => map["value"].clone(),
+            other => return value_list(other, name),
+        };
+    }
+    None
+}
+
+fn value_list(value: Value, name: &str) -> Option<bool> {
+    let list = value.as_array()?;
+    let named = |wanted: &str| list.iter().any(|entry| entry["name"].as_str() == Some(wanted));
+    named("names").then(|| named(name))
+}
+
 /// The Program Registry module (`program_registry`, LP-0023), asked what a
 /// program is and whether its source is verified, for a program call's
 /// prompt. It is optional: without it the prompt says so.
@@ -7572,6 +7624,11 @@ mod program_registry {
                 _ => {}
             }
         }
+        // Not installed at all (package_manager's own list says so): said at once, rather than
+        // after the host's wait for a module that will never come (about 15 s).
+        if installed() == Some(false) {
+            return Looked::Missing;
+        }
         let absent_at = ABSENT_AT.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).get(kind).copied().unwrap_or(0);
         if now.saturating_sub(absent_at) < FAILED_S {
             return Looked::Missing;
@@ -7606,6 +7663,36 @@ mod program_registry {
             ASKING.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).remove(&slot);
         });
         Looked::Checking
+    }
+
+    /// Whether the program_registry package is installed, from package_manager's list of
+    /// installed modules (it reads its folders, at once): `Some(false)` only when that list was
+    /// read and holds this names module but not program_registry; None while unknown (asked
+    /// as before). Kept a minute; asked again on its own thread, never waited for.
+    static INSTALLED: Mutex<Option<(Option<bool>, u64)>> = Mutex::new(None);
+    static INSTALLED_ASKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    fn installed() -> Option<bool> {
+        let kept = *INSTALLED.lock().unwrap_or_else(|e| e.into_inner());
+        if kept.map_or(true, |(_, at)| super::now().saturating_sub(at) >= 60) {
+            warm();
+        }
+        kept.and_then(|(listed, _)| listed)
+    }
+
+    /// Asks package_manager (on its own thread) whether program_registry is installed, so the
+    /// first sheet after Names opens already knows. Called when the Names app reads its config.
+    pub fn warm() {
+        use std::sync::atomic::Ordering;
+        if INSTALLED_ASKING.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        std::thread::spawn(|| {
+            let answer = LogosModuleSDK::new().plugin("package_manager").call_json_with_timeout("getInstalledModules", &json!([]), Duration::from_secs(5));
+            let listed = answer.ok().and_then(|answer| super::package_listed(&answer, "program_registry"));
+            *INSTALLED.lock().unwrap_or_else(|e| e.into_inner()) = Some((listed, super::now()));
+            INSTALLED_ASKING.store(false, Ordering::SeqCst);
+        });
     }
 
     /// `program_label`'s value for `program` (base58), as far as is known now (`kept_or_ask`).
@@ -7916,6 +8003,8 @@ mod program_registry {
     pub fn publisher_state(_app: &str) -> Looked {
         looked(PUBLISHER.with(|publisher| publisher.borrow().clone()))
     }
+
+    pub fn warm() {}
 }
 
 #[cfg(not(test))]
@@ -9874,6 +9963,44 @@ mod tests {
         assert_eq!(keys, ["module_version", "names_network", "names_sequencer", "registry", "sequencer", "token_program", "zone"], "{other}");
         let zone: Vec<&String> = other["zone"].as_object().unwrap().keys().collect();
         assert_eq!(zone, ["channel", "home", "id"], "{other}");
+    }
+
+    #[test]
+    fn the_registry_counts_as_absent_only_from_a_list_that_was_read_for_sure() {
+        let list = json!([{ "name": "package_manager" }, { "name": "names", "version": "0.17.0" }]);
+        assert_eq!(package_listed(&list, "program_registry"), Some(false));
+        let with = json!([{ "name": "names" }, { "name": "program_registry" }]);
+        assert_eq!(package_listed(&with, "program_registry"), Some(true));
+        // As the host hands it: JSON text, perhaps twice, perhaps in {success, value}.
+        assert_eq!(package_listed(&Value::from(list.to_string()), "program_registry"), Some(false));
+        assert_eq!(package_listed(&Value::from(Value::from(list.to_string()).to_string()), "program_registry"), Some(false));
+        assert_eq!(package_listed(&json!({ "success": true, "value": list }), "program_registry"), Some(false));
+        // Anything else is unknown, never "not installed": asked as before.
+        assert_eq!(package_listed(&json!([]), "program_registry"), None);
+        assert_eq!(package_listed(&json!([{ "name": "chat_module" }]), "program_registry"), None);
+        assert_eq!(package_listed(&json!({ "error": "timeout" }), "program_registry"), None);
+        assert_eq!(package_listed(&Value::from("not json"), "program_registry"), None);
+        assert_eq!(package_listed(&Value::Null, "program_registry"), None);
+    }
+
+    #[test]
+    fn file_sha256_reads_only_a_package_file() {
+        let dir = std::env::temp_dir().join(format!("names-sha-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lgx = dir.join("a.lgx");
+        std::fs::write(&lgx, b"abc").unwrap();
+        assert_eq!(lgx_sha256(lgx.to_str().unwrap()).unwrap(), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        let other = dir.join("a.txt");
+        std::fs::write(&other, b"abc").unwrap();
+        assert!(lgx_sha256(other.to_str().unwrap()).is_err());
+        assert!(lgx_sha256("a.lgx").is_err());
+        assert!(lgx_sha256(dir.join("none.lgx").to_str().unwrap()).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+        // Another app may not ask.
+        let (mut names, _dir) = with_fake_cli("sha-other-app", "true");
+        as_caller(logos_rust_sdk::LogosCaller::Module { name: "evil_ui".into(), instance: None });
+        assert!(names.file_sha256(lgx.to_str().unwrap().to_owned()).contains("only the Names app"));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
     }
 
     #[test]
