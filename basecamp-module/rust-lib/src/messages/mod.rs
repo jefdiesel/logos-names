@@ -2,6 +2,10 @@
 //! app (the names format version 1, the phone's padding and safety codes), over Basecamp's own `delivery_module`
 //! on logos.test. Kept apart from the rest of the module so it merges cleanly.
 
+pub mod api;
 pub mod crypto;
+pub mod files;
+pub mod service;
+pub mod store;
 #[cfg(test)]
 mod probe;
