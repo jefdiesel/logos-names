@@ -1,0 +1,102 @@
+chain-fee-e2e 2026-11-14T00:32:17Z host minim4-5 work dir /Volumes/exos162/logos/names-rc3/runs/fees
+  names lgx /Volumes/exos162/logos/names-rc3/lgx sha256 5cb4b54e6601152d31ff5f1960abe93840f3afa51a6044bf58564480b6632bf7
+  names CLI /Volumes/exos162/logos/names-rc3/target/release/names d84a8cc9ff2dc7ba110faa4b130776987b097442f5d80c7ee239ae9bda03f840
+Daemon started (pid 80785)
+Logs: /Volumes/exos162/logos/names-rc3/runs/fees/session/logs/daemon.log
+== session 2026-11-14T00:32:18Z work dir /Volumes/exos162/logos/names-rc3/runs/fees, ports 4170/4171/4172
+    install names: exit 0 
+    module load blockchain_module: {"dependencies_loaded":[],"module":"blockchain_module","status":"ok","version":"0.3.4"}
+    module load names: {"dependencies_loaded":[],"module":"names","status":"ok","version":"0.15.3"}
+== ISOLATION
+    grep -i -E 'peer|ibd' /Volumes/exos162/logos/names-rc3/runs/fees/session/data/blockchain_module/744e2a7707e9/user_config.yaml: (no match); gen-args skip_ibd: True
+    get_cryptarchia_info: {"height": 1, "lib": "6c0cba559465e59ef5a7a9cf75fc6fdc6bd3b46d233d588c3442dcf74efd470b", "lib_slot": 0, "mode": "Online", "slot": 16335497, "tip": "d42dab25eabe88e878bedde3de30a4a1be2c2e3403b83aa9f605570b1394f70e"}
+    get_network_info (0.02s): {"n_connections": 0, "n_discovered_peers": 0, "n_peers": 0, "n_pending_connections": 0}
+    node log: Skipping IBD as no peers are configured
+    ISOLATED: no peers configured, IBD skipped, zero peers/connections
+
+== 1. send A -> B 3,000 (one input)
+    names chain_send plan (0.08s): {"amount": "3000", "balance": "100000", "fee_about": "834", "forwarded_from": null, "from": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07", "name": null, "to": "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225"}
+PASS send: the plan carries the node's estimate, twice the same, and moves nothing — fee_about 834, 834; payer notes unchanged True
+    names chain_send send (0.2s): {"amount": "3000", "balance": "100000", "fee": "834", "forwarded_from": null, "from": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07", "hash": "5a61228cb0102bfb100cd05b3b73b633ecebc09774617fdb503f1373c7b3cbb8", "name": null, "to": "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225"}
+    node: tx 5a61228cb010… spends 1 of the payer's notes; fee from the node's tx = 834; names reply fee 834
+PASS send: sent after two plans (no note reserved by them) and in a block — hash 5a61228cb0102bfb…
+PASS send: ESTIMATE 834 vs ACTUAL 834 (node) — difference 0
+
+== 2. split A 1,234
+    names chain_split plan (0.07s): {"amount": "1234", "balance": "96166", "exact": false, "fee_about": "834", "from": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07"}
+PASS split: the plan carries the node's estimate, twice the same, and moves nothing — fee_about 834, 834; payer notes unchanged True
+    names chain_split send (0.09s): {"amount": "1234", "balance": "96166", "exact": false, "fee": "834", "from": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07", "hash": "604221f4e59d099aa65fa729aa055efcfaf667f8a73833a26ee11c6040e9fd30"}
+    node: tx 604221f4e59d… spends 1 of the payer's notes; fee from the node's tx = 834; names reply fee 834
+PASS split: sent after two plans (no note reserved by them) and in a block — hash 604221f4e59d099a…
+PASS split: ESTIMATE 834 vs ACTUAL 834 (node) — difference 0
+
+== 3. send A -> B, two inputs
+    names chain_send plan (0.07s): {"amount": "94198", "balance": "95332", "fee_about": "866", "forwarded_from": null, "from": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07", "name": null, "to": "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225"}
+PASS send 2 inputs: the plan carries the node's estimate, twice the same, and moves nothing — fee_about 866, 866; payer notes unchanged True
+    names chain_send send (0.08s): {"amount": "94198", "balance": "95332", "fee": "866", "forwarded_from": null, "from": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07", "hash": "a7558d7f682b9f53edf93c05a9441afe45b5a203ec799583df56f25ccd8937cd", "name": null, "to": "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225"}
+    node: tx a7558d7f682b… spends 2 of the payer's notes; fee from the node's tx = 866; names reply fee 866
+PASS send 2 inputs: sent after two plans (no note reserved by them) and in a block — hash a7558d7f682b9f53…
+PASS send 2 inputs: ESTIMATE 866 vs ACTUAL 866 (node) — difference 0
+
+== 4. the CLI: names chain send plan over the node's HTTP API
+    $ names chain send 1000 <A> --from-key <B> --node http://127.0.0.1:4172
+    send 1,000 from 39e16b43…3225 to e3635f20…ce07
+      change back to 39e16b43…3225, through http://127.0.0.1:4172
+      fee: about 834 (the node's own figure at today's gas prices; paid from 39e16b43…3225's notes)
+    nothing sent; run again with --yes to send (it cannot be undone)
+    --json: {"amount":"1000","balance":"97298","cannot_pay_fee":false,"change":"39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225","fee_about":"834","from":"39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225","name":null,"plan":true,"to":"e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07"}
+PASS CLI: the plan prints the node's estimate and moves nothing — fee_about 834
+    names chain_send B -> A 1,000 after the CLI plans (0.49s): {"amount": "1000", "balance": "97298", "fee": "834", "forwarded_from": null, "from": "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225", "hash": "44069b619d2adf6d63dbe115f107361f66a158cd8aedb1b719b2695853864b10", "name": null, "to": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07"}
+PASS CLI: ESTIMATE 834 vs ACTUAL 834 (node), the send after it not blocked
+
+== 5. bridge: mine, split 1,000,000, deposit (stand-in sequencer names channel 00..00)
+    names reloaded: {"dependencies_loaded":[],"module":"names","status":"ok","version":"0.15.3"}
+    mined key a2f970770168…: 99999108
+    names chain_split plan (0.07s): {"amount": "1000000", "balance": "99999108", "exact": false, "fee_about": "834", "from": "a2f970770168885f41f257a782f90de6d07440c423978790f1524147ece78403"}
+PASS bridge split: the plan carries the node's estimate, twice the same, and moves nothing — fee_about 834, 834; payer notes unchanged True
+    names chain_split send (0.19s): {"amount": "1000000", "balance": "99999108", "exact": false, "fee": "834", "from": "a2f970770168885f41f257a782f90de6d07440c423978790f1524147ece78403", "hash": "c2739687aff0135d2371fb69b56ad482f80984ba73b004fa8666a3ca2ec249a8"}
+    node: tx c2739687aff0… spends 1 of the payer's notes; fee from the node's tx = 834; names reply fee 834
+PASS bridge split: sent after two plans (no note reserved by them) and in a block — hash c2739687aff0135d…
+PASS bridge split: ESTIMATE 834 vs ACTUAL 834 (node) — difference 0
+    names chain_bridge plan (0.07s): {"amount": "1000000", "channel": "0000000000000000000000000000000000000000000000000000000000000000", "channel_known": true, "fee": "100000", "fee_about": "1614", "fee_reserve": "100000", "fee_short": false, "hash": null, "lines": [], "needs_split": false, "note": "ec0dff97ba9e781aabac436c1859cd2d1da0916d48d054388a791f3cfefe3b22", "notes": "1", "others": "98998274", "sent": false, "to": "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "total": "1000000", "zone": "home", "zone_name": "Home"}
+PASS bridge deposit: the plan carries the node's estimate, twice the same, and moves nothing — fee_about 1614, 1614; payer notes unchanged True
+    names chain_bridge send (0.16s): {"amount": "1000000", "channel": "0000000000000000000000000000000000000000000000000000000000000000", "channel_known": true, "fee": "1614", "fee_reserve": "100000", "fee_short": false, "hash": "ac98111f0108fa17c54a260ceedecdf1715f095bba57713e27be36c6a4074ce5", "lines": [], "needs_split": false, "note": "ec0dff97ba9e781aabac436c1859cd2d1da0916d48d054388a791f3cfefe3b22", "notes": "1", "op_id": "b6a450bfb30d35d69009f0fe129e7b030e4e4cabf64f5c4020cf4312c99123d4", "others": "98998274", "receipt": "13D3gn1kX9rp4cUpXNd6GUXvFWBktjkVbKVaqw17Q5yg", "sent": true, "to": "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "total": "1000000", "zone": "home", "zone_name": "Home"}
+    node: tx ac98111f0108… spends 2 of the payer's notes; fee from the node's tx = 1614; names reply fee 1614
+PASS bridge deposit: sent after two plans (no note reserved by them) and in a block — hash ac98111f0108fa17…
+PASS bridge deposit: ESTIMATE 1614 vs ACTUAL 1614 (node) — difference 0
+
+== 6. claim: the plan's estimate (no comparison unless the node holds vouchers)
+    node wallet_get_claimable_vouchers (0.05s): {"reward_amount": "0", "tip": "0bcabd624369bc4206c83dee03196eda5eb45d38e2bdee3c495c05ca8abe1421", "total_claimable": "0", "vouchers": []}
+    names chain_claim plan (0.23s): {"claimable": "0", "fee_about": "1599", "reward_per_voucher": "0", "vouchers": 0}
+PASS claim: the plan carries an estimate for one claim — fee_about 1599
+
+== 7. read cases: unknown key, after a module reload, node stopped
+    a key the node lists but its wallet doesn't hold: 29fe03e8718854d44a5cd4f9d237452beb4862c2fb34f5c31cfb1a0aafbf3c04
+    names chain_send plan A -> B 1,000 (A holds {'f993abc866be0897e0de524371d6b9a799388728c4bde4eab4d46a9c131e3129': 268, 'bd36e10f3975d6500bb67ef4190d5519ef72b9009b34ada137ff80811f5d871e': 1000}) (0.02s): {"amount": "1000", "balance": "1268", "cannot_pay_fee": true, "fee_about": null, "forwarded_from": null, "from": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07", "name": null, "to": "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225"}
+PASS a key that can't pay the amount and its fee: the plan says so, no figure invented — A holds 1268; fee_about None, cannot_pay_fee True
+    names chain_send plan from a key the node can't read (0.02s): ERR That isn't a Logos Blockchain public key: check it and try again.
+PASS plan from a key the node can't read: refused in words, no estimate invented — That isn't a Logos Blockchain public key: check it and try again.
+    names chain_send plan from a key the node doesn't hold (0.02s): ERR the Logos Blockchain node refused wallet_get_balance: Unknown wallet address.
+PASS plan from a key the node doesn't hold: refused in words, no estimate invented — the Logos Blockchain node refused wallet_get_balance: Unknown wallet address.
+    reloaded: {"dependencies_loaded":[],"module":"names","status":"ok","version":"0.15.3"}
+    names chain_send plan (mined key -> B 1,000) after the reload (0.28s): {"amount": "1000", "balance": "98996660", "fee_about": "834", "forwarded_from": null, "from": "a2f970770168885f41f257a782f90de6d07440c423978790f1524147ece78403", "name": null, "to": "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225"}
+PASS after a module reload the plan still carries the node's estimate — fee_about 834
+    names chain_send plan, node stopped (0.06s): ERR Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.
+    names chain_split plan, node stopped (0.03s): ERR Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.
+    names chain_claim plan, node stopped (0.02s): ERR Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.
+    names chain_bridge plan, node stopped (0.02s): ERR Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.
+PASS node stopped: every plan says so, as the node does (no estimate without a node) — ["Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.", "Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.", "Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.", "Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app."]
+
+== SUMMARY: estimate (names plan, before) vs actual (node, after)
+    chain_send 1 input                     estimate      834   actual      834
+    chain_split                            estimate      834   actual      834
+    chain_send 2 inputs                    estimate      866   actual      866
+    names chain send (CLI plan)            estimate      834   actual      834
+    chain_split (bridge, mined notes)      estimate      834   actual      834
+    chain_bridge deposit                   estimate     1614   actual     1614
+    chain_claim (plan only)                estimate     1599   actual     None
+RESULT 23 PASS, 0 FAIL
+
+== stopping the session
+{"message":"Daemon shutting down.","status":"ok"}
+session stopped: pgrep -fl /Volumes/exos162/logos/names-rc3/runs/fees prints nothing

@@ -11,6 +11,15 @@ What LEZ `v0.4.0-rc3` changed for Names, and what the port did:
 - **Wallet.** It measures each public transaction's gas by simulating it, declares the measured gas plus 25%, prices `max_fee` at the fee headroom, and refuses to send a transaction whose simulation reverts. `private_fee_headroom_blocks` became `fee_headroom_blocks` (the old key still reads). `names wallet` takes rc3's new `--allow-revert`, `--gas-limit`, `--max-fee` and `--tip`, and prints a dry run's report.
 - Unchanged: the record layout, ids, PDAs, the commit/reveal rules, the claims format, the public transaction format, risc0 3.0.5 and the toolchain. The guest's image id changes because it links rc3's `lee_core`.
 
+Checked on the Mac mini on 2026-11-13 against a standalone rc3 sequencer (`--features standalone,prove`):
+
+- Registry guest, local (non-Docker) build: rc1 `7d0caf7f…5f4742` (459,464 bytes), rc3 `00ad4571…6dd2dd` (459,496 bytes). The Docker build CI makes (`ci.yml`, job `guest`) was not run here; its id is unverified until CI runs on this branch.
+- `cargo test --release --workspace`: 267 passed, 0 failed. `wallet-tokens`: 20 passed. Module (`basecamp-module/rust-lib`, `cargo test --lib`): 321 passed, 2 ignored. JS: resolver 28, app settings 11, claims 4, lez-tx 23, shortlist 4, `basecamp/logic.test.mjs` and the testimonial app's logic test pass.
+- `scripts/wallet-e2e.sh`: PASS (`docs/wallet/e2e-rc3-wallet.log`): deploy, deposit mode, a public registration (commit, 15-minute wait, reveal), the locked name, payments, tokens, testimonial, fees, a drop and a restart, a name handed on and back.
+- A private registration (owner a private account: shield, private commit, private reveal) passed in RISC0 dev mode only (`docs/wallet/e2e-rc3-private-devmode.log`): fake receipts, accepted by a sequencer run with `RISC0_DEV_MODE=1`. It checks the transactions, fees, clock and windows on rc3, not the proofs.
+- With this branch's CLI and its module package (`nix build .#lgx-portable`, names 0.15.3): `lp22-zones-e2e.sh` on two rc3 sequencers 57 PASS, 0 FAIL; the four solo-node Logos Blockchain e2es `chain-ipc` 43/0, `chain-accounts` 30/0, `chain-fee` 23/0, `lp22-inscribe` 32/0 (`docs/wallet/e2e-rc3-*.log`; chain-ipc's version check needs the package in a folder named `…-lgx-<version>`, which a first run lacked).
+- The clock reads `time 0` at block 1 of a fresh chain, until the first block ticks it. The CLI's `now()` takes that 0 as is (the module refuses it); it only matters in the first seconds of a new chain.
+
 ## What changed in the program
 
 LEZ 0.4 replaces shards and `plan`/`apply` with actors and messages. The port keeps the same split:

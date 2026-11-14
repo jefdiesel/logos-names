@@ -1,0 +1,221 @@
+chain-ipc-e2e  2026-11-14T00:46:45Z  host minim4-5
+  work dir  /Volumes/exos162/logos/names-rc3/runs/chain-ipc
+  ports     net 4150 (udp), blend 4151, http 127.0.0.1:4152
+  logosctl  /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/bin/logosctl (logosctl version 0.3.2)
+  module    /Volumes/exos162/logos/dev/chain-ipc/real-module/blockchain_module (blockchain_module 0.3.4)
+  names     /Volumes/exos162/logos/names-rc3/names-lgx-0.15.3
+            lgx sha256 5cb4b54e6601152d31ff5f1960abe93840f3afa51a6044bf58564480b6632bf7
+deployment.yaml: OK
+standalone-node-config.yaml: OK
+Daemon started (pid 91736)
+Logs: /Volumes/exos162/logos/names-rc3/runs/chain-ipc/session/logs/daemon.log
+  daemon processes holding the work dir:
+    91740 /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/bin/logos_host --name capability_module --path /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/modules/capability_module/capability_module_plugin.dylib --instance-persistence-path /Volumes/exos162/logos/names-rc3/runs/chain-ipc/session/data/capability_module/c79a4faed438 --transport-set W3sicHJvdG9jb2wiOiJsb2NhbCJ9XQ== --host-services token_registry,token_delivery --token-source stdin
+    91741 /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/bin/logos_host --name modules_state --path /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/modules/modules_state/modules_state_plugin.dylib --instance-persistence-path /Volumes/exos162/logos/names-rc3/runs/chain-ipc/session/data/modules_state/2a2197e625b8 --token-source stdin
+    91742 /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/bin/logos_host --name package_manager --path /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/modules-pkg/package_manager/package_manager_plugin.dylib --instance-persistence-path /Volumes/exos162/logos/names-rc3/runs/chain-ipc/session/data/package_manager/9fe2f290c37d --token-source stdin
+    91743 /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/bin/logos_host --name storage_module --path /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/modules-pkg/storage_module/storage_module_plugin.dylib --instance-persistence-path /Volumes/exos162/logos/names-rc3/runs/chain-ipc/session/data/storage_module/aa7fd349a1d1 --token-source stdin
+    91755 /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/bin/logos_host --name package_downloader --path /Volumes/exos162/logos/dev/chain-ipc/logosctl-0.3.2/modules-pkg/package_downloader/package_downloader_plugin.dylib --instance-persistence-path /Volumes/exos162/logos/names-rc3/runs/chain-ipc/session/data/package_downloader/da2432ccc7de --token-source stdin
+
+== session
+    install names: exit 0
+    module load blockchain_module: {"dependencies_loaded":[],"module":"blockchain_module","status":"ok","version":"0.3.4"}
+    module load names: {"dependencies_loaded":[],"module":"names","status":"ok","version":"0.15.3"}
+PASS session loads blockchain_module 0.3.4 and names 0.15.3
+
+== refusal: node not started
+    node get_cryptarchia_info: ERR The node is not running.
+    names chain_status: ERR Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.
+PASS refusal: node not started
+
+== solo node
+    gen-args.json: {"skip_ibd": true, "net_port": 4150, "blend_port": 4151, "http_addr": "127.0.0.1:4152", "output": "user_config.yaml", "use_persistence_paths": true}
+    config: /Volumes/exos162/logos/names-rc3/runs/chain-ipc/session/data/blockchain_module/33d8067546c3/user_config.yaml
+    add_key GenesisStake (e3635f20…): ok
+    add_key GenesisSmall (39e16b43…): ok
+
+== ISOLATION (before anything moves)
+    /Volumes/exos162/logos/names-rc3/runs/chain-ipc/session/data/blockchain_module/33d8067546c3/user_config.yaml, in full:
+      | network:
+      |   backend:
+      |     swarm:
+      |       port: 4150
+      | blend:
+      |   core:
+      |     backend:
+      |       listening_address: /ip4/0.0.0.0/udp/4151/quic-v1
+      | api:
+      |   backend:
+      |     listen_address: 127.0.0.1:4152
+      | tracing:
+      |   logger:
+      |     file:
+      |       directory: /Volumes/exos162/logos/names-rc3/runs/chain-ipc/session/data/blockchain_module/33d8067546c3/logs
+      |       prefix: node.log
+      |       appender_type: Simple
+      | state:
+      |   base_folder: /Volumes/exos162/logos/names-rc3/runs/chain-ipc/session/data/blockchain_module/33d8067546c3/state
+      | cryptarchia:
+      |   service:
+      |     bootstrap:
+      |       prolonged_bootstrap_period: 5s
+    grep -i -E 'peer|ibd' user_config.yaml: (no match)
+    skip_ibd: true is a generate_user_config argument (gen-args.json above); the yaml it writes names no peers
+    slot 16336362 (by the clock), 1638 s to the next epoch boundary
+    start: null
+    get_cryptarchia_info: {"height": 1, "lib": "6c0cba559465e59ef5a7a9cf75fc6fdc6bd3b46d233d588c3442dcf74efd470b", "lib_slot": 0, "mode": "Online", "slot": 16336368, "tip": "1a75d2e042a500cde47385c7254fcc3fdf14cc7d6d0c473f9d80434306db39d6"}
+    get_network_info: {"n_connections": 0, "n_discovered_peers": 0, "n_peers": 0, "n_pending_connections": 0}
+    node log: WARN logos_blockchain::chain::network::bootstrap::ibd: Skipping IBD as no peers are configured
+PASS ISOLATION: no peers configured, IBD skipped, zero peers and connections
+    get_chain_id: "standalone-local"
+    get_time_info: {"current_epoch": 2722, "current_slot": 16336369, "genesis_time_unix_ms": 1778280849000, "slot_duration_ms": 1000}
+PASS epoch arithmetic matches the node — slot 16336369 // 6000 = epoch 2722
+
+== chain_status
+    names chain_status: {"epoch": 2722, "height": 2, "lib_slot": 0, "mode": "Online", "slot": 16336369}
+    node before: {"height": 2, "lib": "6c0cba559465e59ef5a7a9cf75fc6fdc6bd3b46d233d588c3442dcf74efd470b", "lib_slot": 0, "mode": "Online", "slot": 16336369, "tip": "1c5db7cc5b26b62a8f1626365029fa19686ec4ab47a18a5e515a6f7cd4e95b21"}
+    node after:  {"height": 2, "lib": "6c0cba559465e59ef5a7a9cf75fc6fdc6bd3b46d233d588c3442dcf74efd470b", "lib_slot": 0, "mode": "Online", "slot": 16336369, "tip": "1c5db7cc5b26b62a8f1626365029fa19686ec4ab47a18a5e515a6f7cd4e95b21"}
+PASS chain_status matches the node — height 2 <= 2 <= 2, mode Online, epoch 2722
+FLAG shape: the solo node's get_cryptarchia_info has ['lib', 'tip'] beyond the M2 record in chain.rs (height, lib_slot, mode, slot); names reads only those four, so both shapes are accepted
+
+== chain_accounts
+    node wallet_get_balance e3635f20…: 100000
+    node wallet_get_balance a526be0a…: ERR Unknown wallet address.
+    node wallet_get_balance ac386bcf…: ERR Unknown wallet address.
+    node wallet_get_balance 621cd791…: ERR Unknown wallet address.
+    node wallet_get_balance cd68af14…: ERR Unknown wallet address.
+    node wallet_get_balance 39e16b43…: 100
+    node wallet_get_balance 3311eb07…: ERR Unknown wallet address.
+    node wallet_get_balance 78a1325b…: ERR Unknown wallet address.
+    names chain_accounts: [{"balance": "100000", "key": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07"}, {"balance": "100", "key": "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225"}]
+PASS chain_accounts lists exactly the keys the node can spend from, with its balances — 8 known to the node, 2 held, names lists 2
+
+== chain_stake
+    node wallet_get_leader_aged_notes: {"notes": [{"id": "7302de07081f1558b6705822ea852113b936efc2ba63483bd62b6c1976678f2d", "public_key": "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225", "value": "100"}, {"id": "f08aaa6388c8aa77e71fbc3a2a2b3edea5684e3b80bd7e778b8755bc893c0b0f", "public_key": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07", "value": "100000"}], "tip": "1c5db7cc5b26b62a8f1626365029fa19686ec4ab47a18a5e515a6f7cd4e95b21", "total_value": "100100"}
+    node wallet_get_claimable_vouchers: {"reward_amount": "0", "tip": "1c5db7cc5b26b62a8f1626365029fa19686ec4ab47a18a5e515a6f7cd4e95b21", "total_claimable": "0", "vouchers": []}
+    names chain_stake: {"claimable": "0", "epoch": 2722, "keys": ["39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225", "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07"], "next_epoch_in_s": null, "notes": 2, "reward_per_voucher": "0", "staked": "100100", "vouchers": 0}
+PASS chain_stake matches the node's aged notes and vouchers — staked 100100 over 2 notes, 0 vouchers
+
+== chain_send plan (send=false)
+    names chain_send plan: {"amount": "3000", "balance": "100000", "fee_about": "834", "forwarded_from": null, "from": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07", "name": null, "to": "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225"}
+PASS chain_send plan reads the node's balance and moves nothing — balance 100000 = node 100000; after: A 100000, B 100
+
+== chain_send (send=true)
+    node wallet_get_notes A (before): {"notes": [{"id": "f08aaa6388c8aa77e71fbc3a2a2b3edea5684e3b80bd7e778b8755bc893c0b0f", "value": "100000"}], "tip": "1c5db7cc5b26b62a8f1626365029fa19686ec4ab47a18a5e515a6f7cd4e95b21"}
+    names chain_send: {"amount": "3000", "balance": "100000", "fee": "834", "forwarded_from": null, "from": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07", "hash": "5a61228cb0102bfb100cd05b3b73b633ecebc09774617fdb503f1373c7b3cbb8", "name": null, "to": "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225"}
+PASS chain_send sends and returns the hash and a fee — hash 5a61228cb0102bfb100cd05b3b73b633ecebc09774617fdb503f1373c7b3cbb8, fee 834, 0.1s
+
+== chain_tx until in_block
+    names chain_tx, at once (node B balance read right after: 100): {"fee": "834", "hash": "5a61228cb0102bfb100cd05b3b73b633ecebc09774617fdb503f1373c7b3cbb8", "state": "pending"}
+      0.7s  names chain_tx: in_block  node B balance read right after: 3100
+    node log: block at slot 16336370 with 5a61228c… taken 0.63s after the send began; names' first answer was back at 0.12s
+PASS chain_tx's first answer agrees with the node: pending before the transaction is in a block — node B balance 100 after the answer (was 100)
+PASS chain_tx says in_block only once the recipient's balance moved — after 1 pending answers; node B balance 100 -> 3100
+    node get_transaction: {"mantle_tx": {"ops": [{"opcode": 0, "payload": {"inputs": ["f08aaa6388c8aa77e71fbc3a2a2b3edea5684e3b80bd7e778b8755bc893c0b0f"], "outputs": [{"pk": "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225", "value": 3000}, {"pk": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07", "value": 96166}]}}]}, "ops_proofs": [{"ZkSig": {"pi_a": "d6eb39cd8384b54050da8ec5f92f591c6ed412a8429b46455b7d0646ad8fb818", "pi_b": "aed7cf2eadd03b010390a3138a85ad69529cbf2f8383e61e2a62fecda256de279732391e03d9d656dbfd5bd6528b250c9b474caf4539175de19bf71d4afc8f18", "pi_c": "f5aae3edaae36d24479a35c5930d61a5c924d8ab9beaba3c96db55081a6c9b90"}}]}
+PASS the node's log shows the transaction in a block — block at slot 16336370 carries 5a61228c…, same ops as get_transaction
+
+== chain_tx after the names module reloads
+    module unload names: exit 0 {"dependents_unloaded":[],"module":"names","status":"ok"}
+    module load names: exit 0 {"dependencies_loaded":[],"module":"names","status":"ok","version":"0.15.3"}
+    names chain_tx H after the reload: {"fee": "834", "hash": "5a61228cb0102bfb100cd05b3b73b633ecebc09774617fdb503f1373c7b3cbb8", "state": "in_block"}
+PASS chain_tx still follows the send after the names module reloads — state in_block, fee 834
+
+== the fee
+    node wallet_get_notes A (after): {"notes": [{"id": "626fd31ff40c9449a7cdfa8dcecf0b351b1d5b42d475ffd0bf16171f5288d323", "value": "96166"}], "tip": "783e7c67f8b0b4248d31455cf19f914e89e682a4f72c2f16808c97aba20b320f"}
+    inputs ['f08aaa63'] held 100000; outputs [('39e16b43', 3000), ('e3635f20', 96166)] = 99166; fee 834
+    node balances: A 100000 -> 96166 (= 100000 - 3000 - 834?), B 100 -> 3100
+PASS the fee is inputs less outputs, and agrees with the node's notes and balances — names fee 834, node fee 834
+
+== chain_send back: B -> A 1,000
+    names chain_send B -> A: {"amount": "1000", "balance": "3100", "fee": "834", "forwarded_from": null, "from": "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225", "hash": "41f306eb7eabbc61c7192c0c10e8f48abb591f372e6d49753f5ca48aef298303", "name": null, "to": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07"}
+    node balances: A 96166 -> 97166, B 3100 -> 1266; names fee 834
+PASS a send back lands: A gains 1,000 and B pays 1,000 plus the fee names reports — state in_block, fee 834
+
+== chain_split: 1,234 off A into a note of its own (a send from A to A)
+    names chain_split A 1,234: {"amount": "1234", "balance": "97166", "exact": false, "fee": "834", "from": "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07", "hash": "604221f4e59d099aa65fa729aa055efcfaf667f8a73833a26ee11c6040e9fd30"}
+    A's notes before [1000, 96166], after [1000, 1234, 94098]; fee 834
+PASS a split lands: the node takes a send from a key to itself, and A now holds a note of exactly 1,234 — state in_block, spent 1 note(s)
+    names chain_bridge A 1,234 (plan only: nothing is deposited): {"amount": "1234", "channel": "0101010101010101010101010101010101010101010101010101010101010101", "channel_known": false, "fee": "100000", "fee_about": "1614", "fee_reserve": "100000", "fee_short": true, "hash": null, "lines": [], "needs_split": false, "note": "2d111b726c4ca9cc8634d8ba653c9cf0f2224d6d60caf10269f79418f966b62a", "notes": "1", "others": "95098", "sent": false, "to": "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "total": "1234", "zone": "home", "zone_name": "Home"}
+PASS the bridge plan then picks that exact note, with no split needed — note 2d111b726c4ca9cc8634d8ba653c9cf0f2224d6d60caf10269f79418f966b62a
+    node get_channel_state for a channel it doesn't have: ERR No channel found for id ChannelId([171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171])
+PASS the node refuses get_channel_state for a channel it doesn't have — No channel found for id ChannelId([171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171, 171])
+PASS the bridge plan says the solo node doesn't know the testnet's channel 01010101… — channel_known False
+    names chain_bridge A 1,234 send, into a channel the node doesn't know: ERR Your node doesn't know LEZ's deposit channel 0101010101010101010101010101010101010101010101010101010101010101: it may still be syncing, or your sequencer is on another network. Nothing was sent.
+PASS refusal: no deposit into a channel the node doesn't know, and A's notes are untouched — Your node doesn't know LEZ's deposit channel 0101010101010101010101010101010101010101010101010101010101010101: it may still be syncing, or your sequencer is on another network. Nothing was sent.
+
+== chain_claim
+    node wallet_get_claimable_vouchers: {"reward_amount": "0", "tip": "0767b24069936f8b7cac314f08539bb20e1c9725354deefb7259fcded44b0f1e", "total_claimable": "0", "vouchers": []}
+    names chain_claim plan: {"claimable": "0", "fee_about": "1599", "reward_per_voucher": "0", "vouchers": 0}
+PASS chain_claim plan matches the node's vouchers
+    names chain_claim send: ERR There is nothing to claim: your node has no leader rewards waiting.
+    node: 3 blocks since, carrying 0 transactions
+PASS refusal: chain_claim with nothing to claim says so, and the node moved nothing — names asks leader_claim only for vouchers; balances unchanged
+
+== refusal: overdraft
+    names chain_send B -> A 1,266 (all B holds, nothing left for the fee): ERR That key doesn't hold enough for this and its fee.
+    node: B 1266 in 2 notes (was 1266 in 2); 3 blocks since, carrying 0 transactions
+PASS refusal: overdraft by the fee, in plain words, and the node moved nothing — the amount 1266 passed names' own check (B holds 1266), so the node refused it
+    names chain_send B -> A 1,267: ERR that key holds 1266, less than 1267
+PASS refusal: overdraft by the amount, checked against the node's balance
+
+== refusal: bad keys
+    node wallet_get_balance abababab…: ERR Invalid wallet address: FrFromBytesError { parsed_bytes: "77648812782670860460512307594061302913369283834606025297048026922953510464427", modulus: "21888242871839275222246405745257275088548364400416034343698204186575808495617" }
+    names chain_send malformed sender: ERR choose the key to send from
+PASS refusal: malformed sender
+    names chain_send malformed recipient (64 chars, not hex, not a name): ERR enter a Logos Blockchain key (64 hex characters) or a name
+PASS refusal: malformed recipient (64 chars, not hex, not a name)
+    names chain_send a key the node can't read, as sender: ERR That isn't a Logos Blockchain public key: check it and try again.
+PASS refusal: a key the node can't read, as sender
+    names chain_send a key the node can't read, as recipient: ERR That isn't a Logos Blockchain public key: check it and try again.
+PASS refusal: a key the node can't read, as recipient
+PASS the node itself refuses that key — Invalid wallet address: FrFromBytesError { parsed_bytes: "77
+    node wallet_get_balance a526be0a… (known, not held): ERR Unknown wallet address.
+    names chain_send from it: ERR the Logos Blockchain node refused wallet_get_balance: Unknown wallet address.
+PASS refusal: a key the node knows but its wallet doesn't hold
+    names chain_tx zz: ERR a transaction hash is 64 hex characters
+PASS refusal: a malformed transaction hash
+    names chain_tx of a hash never sent: ERR Your node has no record of that transaction, and it wasn't sent from the Names app: check the hash.
+    node get_transaction of it: ERR No transaction found for hash TxHash([205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205, 205])
+PASS refusal: chain_tx of a hash never sent says the node has no record of it
+
+== refusal: amounts
+    names chain_send A -> B 1,5 (a decimal comma): ERR 1,5 isn't a whole number: commas go only between groups of three digits, such as 1,000.
+PASS refusal: a comma that doesn't group thousands is refused, not read as 15
+    names chain_send A -> B 100 (bare digits): ERR Call to names.chain_send failed (dispatch_failed: expected string at arg2, got number).
+    names chain_send A -> B '"100"': ERR "100" isn't a whole number. Enter digits only, such as 1000 or 1,000.
+FLAG upstream (logosctl 0.3.2): bare digits become a JSON number and the host refuses the call before names runs (Call to names.chain_send failed (dispatch_failed: expected string at arg2, got number).); nothing moved: A 96332 (was 96332), B 1266 (was 1266). The Names app passes text, so only logosctl users meet it.
+
+== bridge: a deposit sent, its fee read back, in a block
+    names reloaded with sequencer http://127.0.0.1:4155: {"dependencies_loaded":[],"module":"names","status":"ok","version":"0.15.3"}
+    mining key ac386bcf5e3cc6799d26813a50b5fbd4cf1d1223f4bd41821e8f903db3169a2b
+PASS bridge: the node's key mined at least 3,000,000 — balance 99999108
+    names chain_split KM 1,000,000: {"amount": "1000000", "balance": "99999108", "exact": false, "fee": "834", "from": "ac386bcf5e3cc6799d26813a50b5fbd4cf1d1223f4bd41821e8f903db3169a2b", "hash": "30adf01ccb8e429735975207213be42a2be367748565dd1945924d84aa22cadb"}
+PASS bridge: the split of exactly 1,000,000 is in a block
+    names chain_bridge KM 1,000,000 (plan): {"amount": "1000000", "channel": "0000000000000000000000000000000000000000000000000000000000000000", "channel_known": true, "fee": "100000", "fee_about": "1614", "fee_reserve": "100000", "fee_short": false, "hash": null, "lines": [], "needs_split": false, "note": "a9a7676ad25ae3ca588c01339a76e656a49c63fa56523918795f81d501ff6512", "notes": "1", "others": "98998274", "sent": false, "to": "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "total": "1000000", "zone": "home", "zone_name": "Home"}
+PASS bridge: the plan knows the channel, needs no split and isn't short of the fee
+    names chain_bridge KM 1,000,000 (send): {"amount": "1000000", "channel": "0000000000000000000000000000000000000000000000000000000000000000", "channel_known": true, "fee": "1614", "fee_reserve": "100000", "fee_short": false, "hash": "a2d7cd6d7dd9e899e1041c67fae9b76a7448f2fe1c4efc1b35b525411e8eaa3b", "lines": [], "needs_split": false, "note": "a9a7676ad25ae3ca588c01339a76e656a49c63fa56523918795f81d501ff6512", "notes": "1", "op_id": "8b3676c9b27bc8c3bd7c856eba8ee1dca67d90a5ca3dcd76d01bcb4f3001b256", "others": "98998274", "receipt": "7YgqnquACG8BsYT1a6gbza2pXGYpG88HmZwWYoyihN5G", "sent": true, "to": "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "total": "1000000", "zone": "home", "zone_name": "Home"}
+PASS bridge: the deposit is sent and has a hash
+    names chain_bridge KM 1,000,000 again, before the first is in a block: ERR Another transfer from this key is still using its note of exactly 1000000: wait for it to land (a minute or so), then try again. Nothing was sent.
+PASS bridge: a second deposit of the same note is refused (double-bridge)
+PASS bridge: the fee it reports is what the node took (inputs - change - deposit), under the 100,000 cap — reported 1614, node 1614
+PASS bridge: the deposit is in a block
+PASS bridge: every note it spent (the deposit's and the fee's) is gone from the key
+PASS bridge: the history has the deposit with its fee — {"amount": "1000000", "at": 1794617276, "chain": "logos", "channel": "0000000000000000000000000000000000000000000000000000000000000000", "fee": "1614", "followed": true, "from": "ac386bcf5e3cc6799d268
+
+== refusal: node stopped
+    node stop: null
+    node get_cryptarchia_info: ERR The node is not running.
+    names chain_status: ERR Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.
+    names chain_accounts: ERR Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.
+    names chain_stake: ERR Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.
+    names chain_send: ERR Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.
+    names chain_tx: ERR Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.
+    names chain_tx: ERR Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.
+    names chain_claim: ERR Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.
+    names chain_claim: ERR Your Logos Blockchain node isn't running. Start it in Basecamp's Blockchain app.
+PASS refusal: node stopped, every chain method says so as the node does
+
+== stopping the session
+{"message":"Daemon shutting down.","status":"ok"}
+PASS session stopped — pgrep -fl /Volumes/exos162/logos/names-rc3/runs/chain-ipc prints nothing
+RESULT 43 PASS, 0 FAIL (+ session stop above)
+exit 0
