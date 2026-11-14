@@ -65,6 +65,8 @@ pub const MAX_COMMIT_AGE_MS: u64 = 24 * 60 * 60 * 1000;
 /// The account the chain keeps its clock on, and the program whose state on
 /// it holds the time: `{block_id: u64, timestamp: u64}`, in milliseconds.
 const CLOCK_ACCOUNT: &AccountId = b"/LEZ/ClockProgramAccount/0000000";
+/// The clock account the public LEZ 0.3 testnet keeps its time in (rc1 read it too).
+const CLOCK_ACCOUNT_03: &AccountId = b"/LEZ/ClockProgramAccount/0000001";
 const BUILTIN_PROGRAM_PREFIX: &[u8] = b"/LEE-BuiltinProgram/v1/AccountId";
 const RECORD_SEAL: &[u8] = b"logos-names/v5/record";
 const PAGE_SEAL: &[u8] = b"logos-names/v5/page";
@@ -1337,12 +1339,20 @@ impl Registry {
     /// substitute: a transaction that claims a time ahead of the chain's is
     /// rejected and still charged the whole fee ceiling.
     pub fn now(&self) -> Result<u64, String> {
-        self.actor_state(CLOCK_ACCOUNT, &clock_program())?
-            .get(8..16)
-            .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
-            .map(u64::from_le_bytes)
-            .filter(|timestamp| *timestamp > 0)
-            .ok_or_else(|| "could not read the chain's clock, so nothing was sent".to_owned())
+        let read = |account: &AccountId| -> Result<Option<u64>, String> {
+            Ok(self
+                .actor_state(account, &clock_program())?
+                .get(8..16)
+                .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+                .map(u64::from_le_bytes)
+                .filter(|timestamp| *timestamp > 0))
+        };
+        // LEZ 0.4 rc3 keeps one clock (`CLOCK_ACCOUNT`); the public LEZ 0.3 testnet keeps its
+        // time in `CLOCK_ACCOUNT_03` (read on 2026-11-14: `…/0000000` is empty there).
+        match read(CLOCK_ACCOUNT)? {
+            Some(now) => Ok(now),
+            None => read(CLOCK_ACCOUNT_03)?.ok_or_else(|| "could not read the chain's clock, so nothing was sent".to_owned()),
+        }
     }
 
     /// The page published under a name, or `None` when it has none or the
@@ -1430,6 +1440,24 @@ mod tests {
         assert!(last_block_answer(r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}"#).is_err());
         assert!(last_block_answer(r#"{"jsonrpc":"2.0","id":1,"result":null}"#).is_err());
         assert_eq!(last_block_answer(r#"{"jsonrpc":"2.0","id":1,"result":5}"#), Ok(5));
+    }
+
+    /// The public LEZ 0.3 testnet keeps its time in `…/0000001` (its reply, recorded on
+    /// 2026-11-14, as `shards`); rc3 in `…/0000000`. Both read.
+    #[test]
+    fn the_clock_is_read_on_both_networks() {
+        let program = [7_u8; 32];
+        let on03 = stub_rpc(|request| {
+            let account = request["params"][0]["account_id"].as_str().unwrap_or_default().to_owned();
+            rpc_ok(if account == account_text(CLOCK_ACCOUNT_03) {
+                json!({ "nonce": 0, "data": { "shards": { account_text(&clock_program()): [64, 65, 1, 0, 0, 0, 0, 0, 123, 16, 155, 217, 161, 1, 0, 0] } } })
+            } else {
+                json!({ "nonce": 0, "data": { "shards": {} } })
+            })
+        });
+        assert_eq!(Registry::new(&on03, program).now(), Ok(u64::from_le_bytes([123, 16, 155, 217, 161, 1, 0, 0])));
+        let nowhere = stub_rpc(|_| rpc_ok(json!({ "nonce": 0, "data": { "shards": {} } })));
+        assert!(Registry::new(&nowhere, program).now().unwrap_err().contains("could not read the chain's clock"));
     }
 
     /// Every way a degraded sequencer (or a proxy in front of one) answers is a failed
