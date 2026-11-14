@@ -283,6 +283,7 @@ $("pick-form").addEventListener("submit", async (event) => {
       $("pick-chosen").textContent = name;
       $("pick-command").textContent = `names register ${name} --public`;
       claim.hidden = false;
+      if (!WEB_REGISTRATION) registrationMoving();
       setOnboarded(name); // remember the intended name so chat can prefill it
       $("msg-me") && ($("msg-me").value = name);
     } else {
@@ -299,6 +300,20 @@ $("pick-form").addEventListener("submit", async (event) => {
 $("pick-command-copy").addEventListener("click", (event) => copy($("pick-command").textContent, event.currentTarget));
 
 // ---------- claiming a public name (register.js, signs with the browser wallet) ----------
+
+// Off on the 0.4 line: register.js proves a name's length against the old locked list
+// (root 66c75f76…), while the registry built from this line enforces 9778bed4…, so every
+// web reveal would fail on chain after the commit fee and the 15-minute wait, and be
+// charged. Web registration is moving to its own page; until then the app says so.
+const WEB_REGISTRATION = false;
+const REGISTRATION_MOVING =
+  "Registration from the web is moving to a new page. For now, register in Names in Basecamp, or with the names CLI (the command below).";
+
+function registrationMoving() {
+  $("pick-register").hidden = true;
+  $("pick-manual").open = true;
+  claimProgress(REGISTRATION_MOVING);
+}
 
 let registerMod = null;
 let registering = false;
@@ -318,6 +333,7 @@ function claimProgress(text, cls) {
 }
 
 async function claimName(name) {
+  if (!WEB_REGISTRATION) return registrationMoving();
   if (registering) return;
   registering = true;
   $("pick-register").disabled = true;
