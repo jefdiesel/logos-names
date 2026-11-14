@@ -339,6 +339,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("replyKind", [undefined, null, "", "Timed out", "{\"error\":\"call timed out\"}", "false",
       JSON.stringify({ success: true, value: 3 }), JSON.stringify(JSON.stringify({ success: false, error: "no" })), "No such method: mine", "module not found: names"].map((r) => replyKind(r).kind),
     ["busy", "busy", "busy", "busy", "busy", "busy", "ok", "error", "missing", "missing"]);
+  check("replyKind module busy", replyKind(JSON.stringify({ success: false, busy: true, value: null, error: "The wallet is busy; still working." })).kind, "busy");
   // The reveal driver: a poll that fails (busy) mid-registration doesn't stop the reveal.
   {
     const due = [{ name: "m2-test", owner: "A", ready_at: 1000, stage: "committed" }];

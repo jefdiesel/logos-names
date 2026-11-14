@@ -8,6 +8,7 @@
   "description": "Resolve, register and manage private .lez names for any Logos app (registry v5: refundable deposits)",
   "main": "names_plugin",
   "dependencies": [],
+  "concurrency": "multi",
 
   "codegen": {
     "rust": { "crate": "rust-lib", "trait": "NamesModule" }

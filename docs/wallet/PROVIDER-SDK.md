@@ -75,6 +75,11 @@ Provider SDK. Every method returns JSON text:
 { "success": false, "value": null,     "error": "why, in plain words" }
 ```
 
+A call can also answer `{ "success": false, "busy": true, "value": null, "error": "The wallet
+is busy; still working." }`: the module runs one call at a time, and this one waited its turn
+for 15 s (another call was still on a long step, such as a Logos Blockchain node call or a
+proof). Nothing was done; ask again shortly. Only `busy` tells it apart from a refusal.
+
 Accounts are written the way the LEZ wallet writes them: `Public/<base58 id>`
 or `Private/<base58 id>`. Amounts are decimal text in base units, because
 balances are 128-bit numbers.

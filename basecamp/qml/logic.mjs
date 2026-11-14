@@ -824,6 +824,9 @@ export function replyKind(reply) {
     for (var depth = 0; depth < 2 && typeof parsed === "string"; depth++) {
         try { parsed = JSON.parse(parsed) } catch (error) { break }
     }
+    // The module's own busy answer (its call waited its turn too long): busy, not an error.
+    if (parsed && typeof parsed === "object" && parsed.busy === true)
+        return { kind: "busy", value: null, error: String(parsed.error || "") }
     if (parsed && typeof parsed === "object" && parsed.success !== undefined)
         return parsed.success ? { kind: "ok", value: parsed.value, error: "" } : { kind: "error", value: null, error: String(parsed.error) }
     var said = text !== "" ? text : JSON.stringify(parsed)

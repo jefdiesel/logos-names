@@ -127,6 +127,13 @@ the plain object must read `value` now. The Names app itself still gets the plai
 
 ## Known limits
 
+- The names module runs one call at a time. Each call now runs on its own worker thread
+  (`concurrency: "multi"`, so a call into another module can no longer freeze it, as it froze
+  the M2), but they still take turns: during a long call (a Logos Blockchain node call, up to
+  15 s for a read and 180 s for a proof; the names CLI building a private change) every other
+  call waits up to 15 s and then answers busy. The app shows "The wallet is busy; still working."
+  and asks again; nothing is lost.
+
 - rc3 binds no chain id and carries no validity window. A half-signed relayed call is good once
   on its chain, but after a reset of the test network, or on another LEZ 0.4 chain where the
   account's nonce comes back to what it was when it signed, the payer could submit it again (it
