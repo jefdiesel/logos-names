@@ -637,7 +637,7 @@ mod tests {
     /// "That key doesn't hold enough" though it held 100,000 (solo node, verify/adv.sh V1).
     #[test]
     fn a_send_or_split_while_an_unsent_funding_holds_the_keys_notes_says_held_not_short() {
-        use crate::NamesCore as _;
+        use crate::NamesModule as _;
         let to = "39e16b432574571a6bcd8ee36e370589641bd9f35367f6f97a972453c46c3225";
         solo_node("hold test");
         refuse("submit_signed_transaction", "mempool is full");
@@ -720,7 +720,7 @@ mod tests {
 
     #[test]
     fn only_the_names_app_may_inscribe() {
-        use crate::NamesCore as _;
+        use crate::NamesModule as _;
         solo_node("x");
         crate::TEST_CALLER.with(|c| *c.borrow_mut() = logos_rust_sdk::LogosCaller::Module { name: "evil_ui".into(), instance: None });
         let refused: Value = serde_json::from_str(&crate::Names::default().chain_inscribe(FROM.into(), "x".into(), true)).unwrap();

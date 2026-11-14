@@ -32,7 +32,7 @@ pub fn request(app: &str, text: &str, now: u64) -> Result<Value, String> {
 }
 
 impl Names {
-    /// See `NamesCore::propose_inscription`.
+    /// See `NamesModule::propose_inscription`.
     pub(crate) fn inscription_proposed(&mut self, text: &str) -> Result<Value, String> {
         let app = crate::asking_app()?;
         let now = provider::now_ms();
@@ -44,7 +44,7 @@ impl Names {
         Ok(view)
     }
 
-    /// See `NamesCore::pending_inscriptions`.
+    /// See `NamesModule::pending_inscriptions`.
     pub(crate) fn inscriptions_pending(&mut self) -> Result<Value, String> {
         let pending: Vec<Value> =
             self.store().requests.iter().filter(|r| r["state"] == "pending" && r["kind"] == provider::INSCRIBE).cloned().collect();
@@ -70,7 +70,7 @@ impl Names {
         Ok(Value::from(views))
     }
 
-    /// See `NamesCore::approve_inscription`.
+    /// See `NamesModule::approve_inscription`.
     pub(crate) fn inscription_approved(&mut self, id: &str, from_key: &str) -> Result<Value, String> {
         let request = self.store().get(id).cloned().ok_or("there is no such request")?;
         if request["kind"] != provider::INSCRIBE {
@@ -137,7 +137,7 @@ fn chain_choices() -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::NamesCore as _;
+    use crate::NamesModule as _;
 
     const FROM: &str = "e3635f207984ae779cf76b5f20714b514373f61ff96260879fe0a6d71f2dce07";
     const NOTE: &str = "f08aaa6388c8aa77e71fbc3a2a2b3edea5684e3b80bd7e778b8755bc893c0b0f";
