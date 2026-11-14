@@ -1,40 +1,40 @@
 
-## 00:56:03 fresh rc3 standalone sequencer on http://127.0.0.1:4200
+## 02:02:17 fresh rc3 standalone sequencer on http://127.0.0.1:4200
 
-## 00:56:06 deploy and configure the registry
-Transaction hash is b5515553bb301f3ccd7f89e34a15938c3d021b41811e0f3c0a8a0d44fd9788de
+## 02:02:23 deploy and configure the registry
+Transaction hash is 661d3ae72741f12308ec9ce6ca96c5e59603f77b97854bf1594d59700b3a4f5d
 Transaction is included in block 2
-Transaction hash is 089635a3d9c09d1cc9f63ce00d4f619cae33e56b5fa5e46a6b94d55d8476d131
+Transaction hash is 838fdb0bc82a564473383277bdd89acafdd41e35e61d17e2761cebeac548f700
 Transaction is included in block 3
-Transaction hash is bbc23b75320a42ab302e54df72e87e6d5683bc9b1d28f23c3c31514abaa68811
+Transaction hash is fe802e2db7769c4e51ce43fa410412de4c5bf985a0bbe557065f1a24587aa0b3
 Transaction is included in block 4
-Transaction hash is 88901c6d46fca7cd91da4182b041be3f9ae4b82ce75bcfa2672f8f53c8a591f9
+Transaction hash is c0a8fde1bd4da295838ce25d43cdfe102fe07ee7c49f9de2d05050522a887e7e
 Transaction is included in block 5
-Transaction hash is 72ffe2015ca4ec6d806af69071805dbed6ce2082070f24f8bd06f47535a27230
+Transaction hash is f0eecb4e360c7b239720c5f42b9f01eb702dba412bb60571546409b2bb170f3e
 Transaction is included in block 6
-Transaction hash is ae97f6596aebec0c707d74c949e0b9e43c2135d4f1541829d0ae9153b3f19916
+Transaction hash is e2e2139600eb3f254b9a9d3ea05baafbdcf079d001201f0d1ac15229a933f563
 Transaction is included in block 7
-Program deployed. Header account id: 5911beNEPCS5TALqGQtrUW1JvC4TSWzJX6ry8aepdQbx
-Transaction hash is f332dc6c34f665c87cd398c583156b5e23c6188403347ad0097e01835da799e9
+Program deployed. Header account id: EWKeLdCJeyFHePJQ6gJdPRf4jPdZhFqbSNKfLDirhRjz
+Transaction hash is d44f43cd32f966278b3f611d642e183e86d3dd51585cc8fb20eec56268411b60
 Transaction is included in block 8
 fee paid: 4088
 reading the registry's bytecode from the chain
 fee: about 261552, at most 435888 (gas: 31475 cycles, limit 47213)
-submitted b9b2509db0a1cce25938536353609e8e2e192f596840c3c84083f8a4412db191
+submitted 1aea6c1bbcc034c5023d46d505d09e8d037fa7b76932e9e0e258a0ff4ce1ef14
 applied in block 9
 fee paid: 257768
 
-## 00:58:07 two public accounts A and B in the CLI's wallet, funded
-Transaction hash is 501765fb048eed7ca5b72caa271bea6ea1ae0adfabf89c47d907a6508632ef57
+## 02:04:24 two public accounts A and B in the CLI's wallet, funded
+Transaction hash is 2087d143e1b58768610c3551406a1523352cb4183c7af234814cd0e4d47d8e24
 Transaction is included in block 10
 fee paid: 4352
-Transaction hash is d8455836f4f152dfbaf0fc42ffbfb996e08579369fe9062952d87dd351f38dc2
+Transaction hash is e6e4a694f93e3c25897f3580f172db42c7139195610230603fe1d5284047d790
 Transaction is included in block 11
 fee paid: 4352
-A=4DtzCKpxbis2eChASdE3T6yEAjVqMSSZbmDYaAVfiXZm B=mJLporEAj5noGbvfjezNMUXVrk99N2WcF97epZnhd1P registry=5911beNEPCS5TALqGQtrUW1JvC4TSWzJX6ry8aepdQbx; private accounts before: 1
+A=orbMf6HD5oN7cjKsd81LXvNmN8dQMVPuUp6dogxD6gL B=28fc88JG6e3nkx83y9cio7rDoJ4VA8aj5X6NHy3HKf6Q registry=EWKeLdCJeyFHePJQ6gJdPRf4jPdZhFqbSNKfLDirhRjz; private accounts before: 1
 
-## 00:58:44 logosctl session with this branch's names module
-Daemon started (pid 1209)
+## 02:04:49 logosctl session with this branch's names module
+Daemon started (pid 47234)
 Logs: /Volumes/exos162/logos/names-rc3/runs/module-e2e/session/logs/daemon.log
 {"affected_loaded":[],"changes":[{"action":"install","file":"/Volumes/exos162/logos/names-rc3/names-lgx-0.15.3/logos-names-module-lib.lgx","fromVersion":"","name":"names","signature":"unsigned","toVersion":"0.15.3"}],"installed":["names"],"op":"install","reloaded":[],"status":"ok","stopped_dependents":[]}
 {"dependencies_loaded":[],"module":"names","status":"ok","version":"0.15.3"}
@@ -46,51 +46,56 @@ Logs: /Volumes/exos162/logos/names-rc3/runs/module-e2e/session/logs/daemon.log
 
 {"method":"set_registry","module":"names","result":true,"status":"ok"}
 
-{"method":"get_config","module":"names","result":"{\"bridge_key\":null,\"bridge_node\":null,\"chat_names\":{},\"cli\":\"/Volumes/exos162/logos/names-rc3/target/release/names\",\"cli_wallet\":\"/Volumes/exos162/logos/names-rc3/runs/module-e2e/wallet\",\"dm_names\":{},\"follows\":[],\"likes\":[],\"main_name\":null,\"module_version\":\"0.15.3\",\"names_sequencer\":\"http://127.0.0.1:4200\",\"registry\":\"5911beNEPCS5TALqGQtrUW1JvC4TSWzJX6ry8aepdQbx\",\"sequencer\":\"http://127.0.0.1:4200\",\"token_program\":null,\"wallet_config\":null,\"wallet_storage\":null,\"zone\":{\"channel\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"home\":true,\"id\":\"home\",\"name\":\"Home\"},\"zones\":[{\"channel\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"id\":\"home\",\"name\":\"Home\",\"sequencer\":\"http://127.0.0.1:4200\",\"token_program\":null,\"wallet\":\"/Volumes/exos162/logos/names-rc3/runs/module-e2e/wallet\"}]}","status":"ok"}
+{"method":"get_config","module":"names","result":"{\"bridge_key\":null,\"bridge_node\":null,\"chat_names\":{},\"cli\":\"/Volumes/exos162/logos/names-rc3/target/release/names\",\"cli_wallet\":\"/Volumes/exos162/logos/names-rc3/runs/module-e2e/wallet\",\"dm_names\":{},\"follows\":[],\"likes\":[],\"main_name\":null,\"module_version\":\"0.15.3\",\"names_sequencer\":\"http://127.0.0.1:4200\",\"registry\":\"EWKeLdCJeyFHePJQ6gJdPRf4jPdZhFqbSNKfLDirhRjz\",\"sequencer\":\"http://127.0.0.1:4200\",\"token_program\":null,\"wallet_config\":null,\"wallet_storage\":null,\"zone\":{\"channel\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"home\":true,\"id\":\"home\",\"name\":\"Home\"},\"zones\":[{\"channel\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"id\":\"home\",\"name\":\"Home\",\"sequencer\":\"http://127.0.0.1:4200\",\"token_program\":null,\"wallet\":\"/Volumes/exos162/logos/names-rc3/runs/module-e2e/wallet\"}]}","status":"ok"}
 
 
-## 00:58:56 try-changes.py (registers twice, each waiting out the commitment)
-trying trial-17936.lez
+## 02:04:53 try-changes.py (registers twice, each waiting out the commitment)
+trying trial-21893.lez
 ok   the registry takes deposits
 ok   a normal name takes the normal deposit
 ok   a two-character name is locked
-FAIL a three-character name takes the higher deposit
-ok   register, paid privately            912s
+ok   a three-character name is locked
+ok   register, paid privately            930s
 ok   it never expires and holds its deposit
 ok   it takes private payments from the start
 ok   this device lists it among the wallet's names
-ok   register a taken name              trial-17936 is already registered
-ok   add a public account                 13s
+ok   register a taken name              trial-21893 is already registered
+ok   add a public account                 15s
 ok   the private keys are still there
-ok   go back to private only              13s
-FAIL add an entry                       'result'
-ok   change the entry                     17s
-ok   add a second entry                   12s
-ok   remove an entry                      13s
+ok   go back to private only              15s
+ok   add an entry                         14s
+     change the entry                   set_text: no result from logosctl (exit 4): {"code":"RPC_FAILED","message":"callModuleMethod('names','set_text') RPC call failed.","status":"error"} 
+ok   change the entry                     78s  (no reply from logosctl, but it landed)
+     add a second entry                 set_text: no result from logosctl (exit 4): {"code":"RPC_FAILED","message":"callModuleMethod('names','set_text') RPC call failed.","status":"error"} 
+ok   add a second entry                  154s  (no reply from logosctl, but it landed)
+     remove an entry                    set_text: no result from logosctl (exit 4): {"code":"RPC_FAILED","message":"callModuleMethod('names','set_text') RPC call failed.","status":"error"} 
+FAIL remove an entry                    resolve: no result from logosctl (exit 4): {"code":"RPC_FAILED","message":"callModuleMethod('names','resolve') RPC call failed.","status":"error"} 
 ok   the other entry and the keys survived the edits
-ok   remove an entry that is not there  trial-17936 has no entry called agent
+ok   remove an entry that is not there  trial-21893 has no entry called agent
 ok   a bad entry key                    an entry's key is 1-32 characters of a-z, 0-9, '-', '_' or '.', not "Bad Key"
-ok   set a profile in one go              13s
-FAIL replace the whole profile          'result'
-ok   publish a page                       18s
-ok   publish the account's name           14s
-ok   a name that points elsewhere       trial-17936 does not point at mJLporEAj5noGbvfjezNMUXVrk99N2WcF97epZnhd1P
-ok   stop taking payments                 13s
-ok   transfer to B                        13s
+     set a profile in one go            set_profile: no result from logosctl (exit 4): {"code":"RPC_FAILED","message":"callModuleMethod('names','set_profile') RPC call failed.","status":"error"} 
+ok   set a profile in one go              27s  (no reply from logosctl, but it landed)
+ok   replace the whole profile            14s
+ok   publish a page                       13s
+ok   publish the account's name           13s
+ok   a name that points elsewhere       trial-21893 does not point at 28fc88JG6e3nkx83y9cio7rDoJ4VA8aj5X6NHy3HKf6Q
+ok   stop taking payments                 14s
+ok   transfer to B                        14s
 ok   transfer emptied the profile and the page, and kept the deposit
 ok   the old holder is no longer shown as it
 ok   the new holder edits it              13s
-FAIL release, refunding the deposit     'result'
+ok   release, refunding the deposit       13s
 ok   it is no longer among the wallet's names
-ok   release a name nobody holds        trial-17936 is not registered
-ok   register it again, to B, with nothing set  922s
+ok   release a name nobody holds        trial-21893 is not registered
+ok   register it again, to B, with nothing set  930s
 ok   nothing of the first registration came back
-FAIL release it again                   'result'
-ok   withdraw A's published name          17s
-5 FAILED
+     release it again                   release: no result from logosctl (exit 4): {"code":"RPC_FAILED","message":"callModuleMethod('names','release') RPC call failed.","status":"error"} 
+ok   release it again                     25s  (no reply from logosctl, but it landed)
+ok   withdraw A's published name          12s
+1 FAILED
 try-changes exit 1
 
-## 01:33:44 per-name receiving accounts: private accounts the module's auto made
-3 private: [('Private/9yPWkD', '40358b55'), ('Private/DJBiak', '9f89d99d'), ('Private/9JZMgs', 'ee9559e1')]
-{"5911beNEPCS5TALqGQtrUW1JvC4TSWzJX6ry8aepdQbx":{}}
+## 02:47:18 per-name receiving accounts: private accounts the module's auto made
+3 private: [('Private/2qaeiM', '8fedc258'), ('Private/DYtz1k', '8e2e34fa'), ('Private/6c9HCy', '653d128f')]
+{"EWKeLdCJeyFHePJQ6gJdPRf4jPdZhFqbSNKfLDirhRjz":{}}
 left running: nothing
