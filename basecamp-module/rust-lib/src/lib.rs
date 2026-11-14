@@ -12698,6 +12698,44 @@ mod tests {
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
     }
 
+    /// The shell is mechanical, and this checks it from the source: every method of NamesCore
+    /// has exactly one forwarder in `impl NamesModule for NamesShell`, with the same name and
+    /// arguments, and every forwarder goes through `self.enter()` (the lock) to that same
+    /// NamesCore method; the shell itself never decides who may call (the checks are inside the
+    /// NamesCore methods, unchanged).
+    #[test]
+    fn every_core_method_is_forwarded_by_the_shell_through_its_lock() {
+        let source = include_str!("lib.rs");
+        let block = |start: &str| {
+            let from = source.find(start).expect(start);
+            let rest = &source[from..];
+            &rest[..rest.find("\n}\n").expect("a block end")]
+        };
+        let core = block("pub trait NamesCore: Send + 'static {");
+        let shell = block("impl NamesModule for NamesShell {");
+        let mut methods = Vec::new();
+        for line in core.lines() {
+            let line = line.trim();
+            let Some(rest) = line.strip_prefix("fn ") else { continue };
+            let (name, after) = rest.split_once('(').unwrap();
+            if name == "on_context_ready" {
+                continue;
+            }
+            let args = after.strip_prefix("&mut self").unwrap().split(')').next().unwrap();
+            methods.push((name.to_owned(), args.to_owned()));
+        }
+        assert!(methods.len() > 100, "{}", methods.len());
+        for (name, args) in &methods {
+            assert_eq!(shell.matches(&format!("    fn {name}(&self{args})")).count(), 1, "{name}: one forwarder with the same arguments");
+            let names: Vec<&str> = args.split(',').filter(|a| !a.trim().is_empty()).map(|a| a.split(':').next().unwrap().trim()).collect();
+            let call = format!("Some(mut core) => NamesCore::{name}(&mut *core{}),", names.iter().map(|n| format!(", {n}")).collect::<String>());
+            assert_eq!(shell.matches(&call).count(), 1, "{name}: forwards to itself, through the lock: {call}");
+        }
+        assert_eq!(shell.matches("match self.enter() {").count(), methods.len(), "every forwarder takes the lock");
+        assert_eq!(shell.matches("NamesCore::").count(), methods.len(), "and calls nothing else");
+        assert!(!shell.contains("only_the_names_app") && !shell.contains("calling()"), "the caller is judged inside NamesCore, never here");
+    }
+
     /// The shell the host holds (concurrency "multi"): calls on different threads run one at a
     /// time; a call that can't get its turn within SHELL_WAIT answers busy (its own reply shape,
     /// which the app sorts as busy) instead of waiting forever; and each call is judged by its own
