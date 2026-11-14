@@ -50,7 +50,23 @@ Not in: `pressure-fixes` (11 commits on `main`, partly ported to the 0.4 line al
 
 ## What works where
 
-See the report table (evidence: tests and runs on the Mac mini, 2026-11-14).
+Evidence from the Mac mini on 2026-11-14. "Run" means against the real network named; "tests"
+means unit or flow tests with stand-ins; "untested" means not run in this release.
+
+| Action | the public 0.3 (LEZ 0.3) | our 0.4 (LEZ 0.4) |
+|---|---|---|
+| Look up a name (resolve, recipient, page) | works: run (`jef`, `logos`) | works: run (`lns-smoke-ourzerofour`, through the public URL and 3290) |
+| Registry settings, deposit quote, locked names | works: run, after the clock fix a45cf9d (it failed since the rc3 port) | works: run (deposit mode, 1,000,000; `qkz` locked) |
+| Register from a public account (module `register_name`) | not on this network with the October CLI (it has no `names module`), as in 0.16.0 | works: run (`trial-53516`: commit, 15-minute wait, reveal, through the guarded CLI wrapper); try-changes: see below |
+| Register privately (CLI, a proof) | unchanged path (October CLI), untested in this release | off in the app until real rc3 proofs run; dev mode only, on a throwaway chain |
+| Change a name (entries, profile, page, transfer, release) | not with the October CLI, as in 0.16.0 | try-changes on our 0.4: see below |
+| Pay a name's public account (`cli_pay_public`) | untested | writes e2e: see below |
+| Pay a name's private keys / receive | unchanged path (October CLI), untested | off in the app until real rc3 proofs run; dev mode only, on a throwaway chain |
+| Balances | unchanged (October CLI) | works: run (native 20,000,000 and the bridged dUSDC/wETH rows through `bridge_net`; the CLI's account list) |
+| Tokens (the wallet's token program) | not on this network (no token program) | bridged tokens show (run); `names token` on our 0.4 untested |
+| Bridge deposits | not on this network | view: works (run); public relayed claim: wallet method ready (`propose_relayed_call`, run on a throwaway rc3 chain), bridge side by its owner; private claim: proposes a private call, proof about 11 min and 9.5 GB on the claimer's machine, measured on rc1, not proved on rc3 |
+| Messages | today: Logos chat module (address changes on every Basecamp start); Names Messages comes in 0.18.0 | same |
+| Mini-apps (provider calls) | access, transfers: unchanged; public calls need `names module`, not with the October CLI | module flow tests (stand-in CLI); relayed calls run on a throwaway rc3 chain |
 
 ## Install
 
@@ -59,3 +75,35 @@ See the report table (evidence: tests and runs on the Mac mini, 2026-11-14).
    runs it, with the user's knowledge);
 2. `install-0.17.sh --dry-run`, then `install-0.17.sh`;
 3. `rollback-0.17.sh`: back to 0.16.0, the build installed now.
+
+## What Basecamp needs, and the two lines side by side
+
+- **No LEZ module.**
+  - The names module doesn't load `lez_core` (the 0.3-line `lez_core` 0.5.0 stays installed for
+    the LEZ Wallet app) and doesn't need `logos-execution-zone-module` 0.6.0.
+  - It reads both chains with direct JSON-RPC, and signs through the names CLI that each
+    network names.
+- **Two CLIs, one install:**
+  - the public 0.3: the CLI the config already names (on the Mini, the October build at
+    `/Volumes/exos162/logos/dev/user-test/bin/names`, `names 0.1.0`);
+  - our 0.4: `names 0.17.0 (LEZ v0.4.0-rc3)`, at the path set after switching. The module runs
+    only a CLI whose `--version` says `(LEZ v0.4` there, never one found on the computer.
+- **No r0vm beside the LEZ 0.4 CLI.**
+  - The CLI is built with `local-prove` (in-process prover).
+  - On the Mini it runs behind a wrapper: reads, plans, signing and public sends run directly;
+    every other command runs under the Mini's watchdog (`guard.sh`) on 4 threads.
+  - The app offers no private proof on LEZ 0.4 in 0.17.
+- **Basecamp host:** 0.3.2. The module was loaded and driven over logosctl 0.3.2 in a scratch
+  session, never the running Basecamp.
+
+## Still missing as SDK underpinning for the private bridge (RFP-021/022)
+
+| Gap | Who needs it |
+|---|---|
+| `app_secret` never gives out the deposit master `s`. A failsafe reclaim after a wind-down needs it as a witness: there is no wallet operation for it and no explicit export approval (BRIDGE-SDK.md §1). | the bridge mini-app's reclaim path (`lez_bridge`) |
+| A private claim or burn (`propose_private_call`) has never been proven on rc3: about 11 min and 9.5 GB, measured on rc1. | `lez_bridge` private claims and exits |
+| The Names app has no buttons to pause, resume or cancel a private call's job; the module method `private_call_control` exists. | the person using `lez_bridge` |
+| `names module restore` makes 16 public accounts and 1 private one. App secrets of a second private account come back only after it is made again (no `--private N`). | `lez_bridge` recovery from the phrase |
+| Token sources are keyed by token program, and the bridge read takes one bridge program. A second bridge on the same token program would replace the first's entry. | a second bridge instance (light-client attested) |
+| rc3 public transactions carry no validity window, so a half-signed relayed call stays valid until the account's next transaction. The wallet can't revoke it, only refuse new signatures. | the bridge relay and mini-app |
+| The wallet decodes no program's message bytes. A claim shows as "unknown program" with the bytes' hash, not as "claim N dUSDC from deposit i". | `lez_bridge` claims, for the person approving |
