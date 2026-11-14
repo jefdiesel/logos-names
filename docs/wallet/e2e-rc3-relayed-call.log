@@ -1,0 +1,67 @@
+
+## 10:38:21 fresh rc3 standalone sequencer on http://127.0.0.1:4720 (throwaway)
+
+## 10:38:34 deploy and configure the Names registry
+Transaction hash is a9a826bdd3408efb18704b7cf100406e104e38f720faca8529b783d965014897
+Transaction is included in block 2
+Transaction hash is 81ecd8b843eaefe1c47a3f0eda5896521085ec0e659d803eba8ad0d0f3edeb12
+Transaction is included in block 3
+Transaction hash is b79f887cf07b6ffd8bbdd62fb83d54b0b5e3096756f78e2d20ef81ef35495b1c
+Transaction is included in block 4
+Transaction hash is 29463406bd00156c1c2a28a01133ace0b5993e43b90c17a1ec54047baf95ad3c
+Transaction is included in block 5
+Transaction hash is 8a179c0b3e5abbaa050e59769e1af6e0edb82f82b6a13d5ea7c7a82cb17dc5f8
+Transaction is included in block 6
+Transaction hash is 4dadd465e9efa2db6ebc351d98263667d2100988e6b52d5b6af227c5ac5676ea
+Transaction is included in block 7
+Program deployed. Header account id: 8WrCDB8hBtDgt8ns2aQV2hCLJ7tjt7JvfbUjPUXMsorv
+Transaction hash is 948ce11a0ccf91c403007a126982812c4733c14f4dd8c05051ff48de32493b14
+Transaction is included in block 8
+fee paid: 4088
+reading the registry's bytecode from the chain
+fee: about 261552, at most 435888 (gas: 31475 cycles, limit 47213)
+submitted e6b24ad08ae85cc36823e5131d9600106be0470a3c844ec6b2ce92bb4ee868ef
+applied in block 9
+fee paid: 257768
+
+## 10:40:36 the payer P (its own wallet, funded) and the claimer C (another wallet, never used, no LEZ)
+Transaction hash is 261473d2c3dc752f36bf5298b5d01aa35bc42b7dbea3d31879d08990c07c0803
+Transaction is included in block 10
+fee paid: 4352
+registry 8WrCDB8hBtDgt8ns2aQV2hCLJ7tjt7JvfbUjPUXMsorv payer ACzooJrSSxu1E84Dbt3E5yJkbFx6Di2kJ8iQWehRGy2b claimer 7ZkQxV71u6hjAbKzfoaBsKSeFXhiKtdj1vAD99rkE9vq
+payer holds 50000000; claimer nonce 0
+
+## 10:40:48 the call: Commit from C, which creates the commitment account (marked new)
+
+## 10:40:48 plan (as C): the wallet builds it with both nonces
+{"account":"Public/7ZkQxV71u6hjAbKzfoaBsKSeFXhiKtdj1vAD99rkE9vq","actors":[{"account":"7ZkQxV71u6hjAbKzfoaBsKSeFXhiKtdj1vAD99rkE9vq","program":"8WrCDB8hBtDgt8ns2aQV2hCLJ7tjt7JvfbUjPUXMsorv"},{"account":"68HLz1eFgxzetEwvQFgoThJmAaN1yfZbuSuHAps3EwL5","program":"8WrCDB8hBtDgt8ns2aQV2hCLJ7tjt7JvfbUjPUXMsorv"}],"creates":["68HLz1eFgxzetEwvQFgoThJmAaN1yfZbuSuHAps3EwL5"],"gas_limit":200000,"hash":"891173
+
+PASS: plan gives a 32-byte hash
+
+## 10:40:48 refusals
+PASS: sign refuses a hash that isn't the approved one: no longer the one approved
+PASS: plan refuses the signer as payer: ordinary call
+PASS: plan refuses a payer the wallet holds: one of this wallet's own accounts
+PASS: plan refuses a signing account that isn't the wallet's: is not a public account of this wallet
+
+## 10:40:49 sign (as C, with the approved hash): half signed, nothing sent
+half-signed transaction: 648 bytes
+PASS: nothing was sent: C's nonce is still 0
+
+## 10:40:49 the payer co-signs and submits
+submitted f00a6c93060be76db06077ca46555a73c1f76f0d9c7a3797ebc23c275fc8f9a2
+applied in block 11
+PASS: the co-signed call applied
+PASS: C's nonce is 1: its signature was used, once
+payer: 50000000 -> 49823496
+PASS: the payer paid the fee (176504)
+claimer balance: 0
+PASS: C still holds no LEZ
+commitment account state: {"nonce": 0, "data": {"actor_states": {"8WrCDB8hBtDgt8ns2aQV2hCLJ7tjt7JvfbUjPUXMsorv": [6, 145, 33, 165, 217, 161, 1, 0, 0]}}}
+PASS: the commitment account exists
+
+## 10:41:01 replay: the same transaction again
+PASS: the same signed call is refused the second time:     156a9f5921b5996ddf9f24d4ffaf3c9e4b5beba68aa04cdc3af3aaa50ad2ffa9 was not applied: it was not in a block after 120 s. Most often another change from the same
+
+ALL DONE
+sequencer stopped; left running: nothing

@@ -82,8 +82,9 @@ Tests:
   but the transaction isn't valid until the payer co-signs. Co-signed, its signers are exactly
   the account and the payer. Another payer, a max fee one higher, or the account's next nonce
   each break the signature.
-- e2e `relayed-e2e.sh` on a throwaway rc3 chain: the same co-signed transaction is refused the
-  second time.
+- e2e `relayed-e2e.sh` on a throwaway rc3 chain (`docs/wallet/e2e-rc3-relayed-call.log`, 12 PASS,
+  0 FAIL): the co-signed call applies once (block 11). Submitted again, it never lands: not in a
+  block after 120 s, because its nonce is spent.
 
 ## 5. An app can't get a signature for a message other than the one shown
 
