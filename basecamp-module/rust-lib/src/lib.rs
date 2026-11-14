@@ -6830,7 +6830,9 @@ impl Names {
         add(self.parked["registry"].as_str().map(str::to_owned), "names_registry");
         // The wallet's own token program, except when it is a bridge's: a bridge claim declares
         // that one as an actor's program, and it is refused as root (`root_only`) instead.
-        let bridged = self.bridge_tokens_programs().unwrap_or_else(|_| self.bridge_tokens_kept());
+        // What is known without a read (built in and kept): every check reads the bridges once,
+        // in `root_only`, and keeps what it read, so a sheet costs one read per bridge.
+        let bridged = self.bridge_tokens_kept();
         for token_program in [self.token_program.as_ref().map(registry::account_text), self.parked["token_program"].as_str().map(str::to_owned)] {
             let canonical = token_program.as_deref().and_then(|id| registry::parse_account(id).ok()).map(|id| registry::account_text(&id));
             if !canonical.is_some_and(|id| bridged.contains(&id)) {
@@ -6896,6 +6898,11 @@ impl Names {
         let mut read_now: Vec<String> = Vec::new();
         for program in self.bridge_programs_now() {
             match read(&program) {
+                // A Config naming a bridge itself as its token program would make every claim to
+                // that bridge refused for good once kept: refused now, and not kept.
+                Ok(Some(token_program)) if self.bridge_programs_now().contains(&token_program) => {
+                    return Err(format!("the token program of bridge {} (its Config names a bridge program as its token program)", registry::account_text(&program)));
+                }
                 Ok(Some(token_program)) => read_now.push(registry::account_text(&token_program)),
                 Ok(None) => {}
                 Err(why) => return Err(format!("the token program of bridge {} ({why})", registry::account_text(&program))),
@@ -11549,6 +11556,14 @@ mod tests {
             assert!(refused["error"].as_str().unwrap_or_else(|| panic!("{refused}")).contains("holds tokens your accounts have"), "{root}: {refused}");
         }
         assert!(bridge_net::seen_token_programs(&config_dir().unwrap()).contains(&bridged), "kept on disk");
+
+        // A Config that names a bridge program as its token program: refused, and not kept.
+        BRIDGE_CONFIGS.with(|configs| configs.borrow_mut().insert(bridge.to_owned(), Ok(Some(bridge.to_owned()))));
+        as_caller(app("lez_bridge"));
+        let odd = parsed(&names.propose_relayed_call(account.clone(), json!({ "program": bridge, "message": "00ff", "fee": fee }).to_string(), String::new()));
+        assert!(odd["error"].as_str().unwrap_or_else(|| panic!("{odd}")).contains("names a bridge program as its token program"), "{odd}");
+        assert!(!bridge_net::seen_token_programs(&config_dir().unwrap()).contains(&bridge.to_owned()), "not kept");
+        BRIDGE_CONFIGS.with(|configs| configs.borrow_mut().insert(bridge.to_owned(), Ok(None)));
 
         // S-4: a token source's program is refused as root.
         let source_program = registry::account_text(&[12; 32]);

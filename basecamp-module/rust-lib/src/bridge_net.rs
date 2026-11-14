@@ -37,7 +37,11 @@ pub const DEFAULT_BRIDGE_PROGRAM: &str = "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQz
 /// is kept too (`SEEN_TOKEN_PROGRAMS`, append-only).
 pub const KNOWN_TOKEN_PROGRAMS: [&str; 1] = ["3gF78HRJNCfabkWFiszahVVacq181aU8SSGua8Cj9ZE4"];
 /// The file, beside config.json, that keeps every bridge token program ever read (append-only).
+/// To take a wrong one out, delete the file: the next check reads every bridge again.
 pub const SEEN_TOKEN_PROGRAMS: &str = "bridge-token-programs.json";
+/// The most token programs kept there; past it, new ones are still refused when read, just not
+/// kept.
+pub const MAX_SEEN_TOKEN_PROGRAMS: usize = 16;
 
 /// The token programs kept in `dir` (`SEEN_TOKEN_PROGRAMS`), canonical.
 pub fn seen_token_programs(dir: &Path) -> Vec<String> {
@@ -55,7 +59,7 @@ pub fn keep_token_programs(dir: &Path, programs: &[String]) {
     let mut kept = seen_token_programs(dir);
     let before = kept.len();
     for program in programs {
-        if !kept.contains(program) {
+        if !kept.contains(program) && kept.len() < MAX_SEEN_TOKEN_PROGRAMS {
             kept.push(program.clone());
         }
     }
@@ -459,7 +463,19 @@ pub fn read(url: &str, programs: &[AccountId], accounts: &[AccountId], dir: &Pat
         let cache_good = same_chain && cached["read_at"].as_u64().is_some_and(|at| now.saturating_sub(at) < TOKENS_FRESH_S) && cached["bridge"].is_boolean();
         let bridge = if cache_good {
             let token_program = cached["token_program"].as_str().and_then(|id| registry::parse_account(id).ok());
-            let tokens = cached["list"].as_array().cloned().unwrap_or_default();
+            // A list kept by the one-bridge build has no `bridge` on its rows: say which it is.
+            let tokens = cached["list"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|mut token| {
+                    if token["bridge"].is_null() {
+                        token["bridge"] = json!(text);
+                    }
+                    token
+                })
+                .collect();
             Bridge { program, present: cached["bridge"] == true, token_program, tokens, problem: cached["problem"].as_str().map(str::to_owned), saved: cached }
         } else {
             let config = call(url, "getAccount", json!([registry::account_text(&config_address(&program))]), deadline)?;
@@ -843,18 +859,21 @@ mod tests {
             (200, fixture(file).to_string())
         });
         let dir = scratch("twobridges");
-        // A state file as the one-bridge build left it: the first bridge's list, fresh.
+        // A state file as the one-bridge build left it: the first bridge's list, fresh, its rows
+        // without `bridge`.
         save_state(&dir, &json!({ "channel": CHANNEL, "height": 690, "reset_at": null,
-            "tokens": { "read_at": 990, "program": DEFAULT_BRIDGE_PROGRAM, "bridge": true, "token_program": TOKEN_PROGRAM, "list": [], "problem": null } }));
+            "tokens": { "read_at": 990, "program": DEFAULT_BRIDGE_PROGRAM, "bridge": true, "token_program": TOKEN_PROGRAM,
+                        "list": [{ "definition": WETH, "symbol": "wETH", "decimals": 18, "name": null }], "problem": null } }));
         let first = read(&url, &[id(DEFAULT_BRIDGE_PROGRAM), second, id(DEFAULT_BRIDGE_PROGRAM)], &[id(OWNER)], &dir, 1_000).expect("reads");
         assert!(first["reset_at"].is_null(), "the old state file isn't a reset: {first}");
         assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1, "one request for the account");
         let bridges: Vec<(&str, bool, &str)> = first["bridges"].as_array().unwrap().iter().map(|b| (b["program"].as_str().unwrap(), b["bridge"] == true, b["token_program"].as_str().unwrap_or(""))).collect();
         let (second_text, second_tokens_text) = (registry::account_text(&second), registry::account_text(&second_tokens));
         assert_eq!(bridges, vec![(DEFAULT_BRIDGE_PROGRAM, true, TOKEN_PROGRAM), (second_text.as_str(), true, second_tokens_text.as_str())], "a repeat is read once");
-        // The first bridge's list came from the old state file (kept, empty); the second's from its Config.
-        let rows: Vec<(&str, &str, &str)> = first["accounts"][0]["tokens"].as_array().unwrap().iter().map(|t| (t["bridge"].as_str().unwrap(), t["symbol"].as_str().unwrap(), t["amount"].as_str().unwrap())).collect();
-        assert_eq!(rows, vec![(second_text.as_str(), "dUSDC", "0"), (second_text.as_str(), "wETH", "100000000000000000")]);
+        // The first bridge's list came from the old state file (its row now says which bridge);
+        // the second's from its Config.
+        let rows: Vec<(&str, &str, &str)> = first["accounts"][0]["tokens"].as_array().unwrap().iter().map(|t| (t["bridge"].as_str().unwrap_or("NONE"), t["symbol"].as_str().unwrap(), t["amount"].as_str().unwrap())).collect();
+        assert_eq!(rows, vec![(DEFAULT_BRIDGE_PROGRAM, "wETH", "100000000000000000"), (second_text.as_str(), "dUSDC", "0"), (second_text.as_str(), "wETH", "100000000000000000")]);
         // An hour later both Configs are read: both bridges' tokens, each held under its own program.
         let later = read(&url, &[id(DEFAULT_BRIDGE_PROGRAM), second], &[id(OWNER)], &dir, 1_000 + TOKENS_FRESH_S).expect("reads");
         let rows: Vec<(String, &str, &str)> = later["accounts"][0]["tokens"].as_array().unwrap().iter().map(|t| (t["bridge"].as_str().unwrap().to_owned(), t["symbol"].as_str().unwrap(), t["amount"].as_str().unwrap())).collect();
@@ -867,6 +886,20 @@ mod tests {
         // At most MAX_BRIDGES are read.
         let many: Vec<AccountId> = (0..6u8).map(|n| [n + 30; 32]).collect();
         assert_eq!(read(&url, &many, &[id(OWNER)], &dir, 9_000).unwrap()["bridges"].as_array().unwrap().len(), MAX_BRIDGES);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_kept_token_programs_only_grow_and_are_capped() {
+        let dir = scratch("kept");
+        keep_token_programs(&dir, &[registry::account_text(&[1; 32])]);
+        keep_token_programs(&dir, &[]);
+        assert_eq!(seen_token_programs(&dir), vec![registry::account_text(&[1; 32])]);
+        let many: Vec<String> = (2..40u8).map(|n| registry::account_text(&[n; 32])).collect();
+        keep_token_programs(&dir, &many);
+        let kept = seen_token_programs(&dir);
+        assert_eq!(kept.len(), MAX_SEEN_TOKEN_PROGRAMS);
+        assert_eq!(kept[0], registry::account_text(&[1; 32]), "never removes one");
         let _ = std::fs::remove_dir_all(dir);
     }
 

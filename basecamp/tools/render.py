@@ -350,6 +350,10 @@ SCENARIOS = {
     "welcome-net04-nocli": 'root.cliNames = []; root.cliPending = []; Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { Qt.callLater(function() { root.cliPath = "" }) }) })',
     # LEZ 0.4, a wallet with nothing in it: no faucet, no Logos node bridge, a plain line.
     "welcome-net04-funding": 'root.cliNames = []; root.cliPending = []; Qt.callLater(function() { root.setWalletNet("0.4") })',
+    # Register after a check: a free name opens its page on Search (the switch is there), a taken
+    # one stays on the form (its own switch).
+    "register-free": 'root.openRegister(); root.checkRegister("penisface")',
+    "register-taken": 'root.openRegister(); root.checkRegister("hopper")',
     # Search with a result shown: the switch stays.
     "search-result-switch": 'root.section = "search"; root.show("hopper")',
     "welcome-register": 'root.cliNames = []; root.openRegister(); root.checkRegister("penisface")',
@@ -513,7 +517,7 @@ MOCKS = {
     "wallet-bridge-nochannel": {"exact": True, "noChannel": True},
     "wallet-bridge-confirm": {"exact": True},
     "wallet-bridge-feeshort": {"exact": True, "feeShort": True},
-    "settings-oldcli": {"status": {"outdated": True}, "accountsError": "Your names program is older than this app and can't do this yet: it comes with the LEZ 0.4 update. The rest of the app still works."},
+    "settings-oldcli": {"status": {"outdated": True}, "accountsError": "The names tool set for this network is older than this app and can't do this. The rest of the app still works."},
     "wallet-waiting": {"tokenPending": [{"position": 21, "definition": "GoLDdef1nition11111111111111111111111111111", "name": "Gold", "amount": "50", "to": "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z"}]},
     "wallet-sending": {"private": "250000000", "public": "1250000"},
     "inscribe": {"inscription": {}},

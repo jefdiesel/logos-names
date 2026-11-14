@@ -2293,7 +2293,7 @@ fn failure(err: &str, out: &str) -> String {
 }
 
 /// What a names CLI too old for the command asked of it means to the person.
-pub const OLDER_CLI: &str = "Your names program is older than this app and can't do this yet: it comes with the LEZ 0.4 update. The rest of the app still works.";
+pub const OLDER_CLI: &str = "The names tool set for this network is older than this app and can't do this. The rest of the app still works.";
 
 /// Runs `process` (the program at `program`) and waits for it, at most
 /// `patience`: its exit code, what it printed, and what it wrote to stderr.

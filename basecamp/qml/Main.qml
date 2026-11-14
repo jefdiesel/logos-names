@@ -5156,7 +5156,7 @@ Item {
                 width: Math.min(parent.width - 112, 640)
                 spacing: 18
                 Text { text: "Welcome"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(36); font.weight: Font.DemiBold }
-                Hint { font.pixelSize: root.px(18); text: "Get a name, then post, pay and be paid as it. Four steps, all here." }
+                Hint { font.pixelSize: root.px(18); text: "Get a name, then post, pay and be paid as it. " + (root.namesNet === "0.4" ? "Three" : "Four") + " steps, all here." }
                 // Which network these steps are for: switchable here, before anything else, so a
                 // wallet-less start on LEZ 0.3 never hides LEZ 0.4.
                 NetSwitch {}
@@ -5323,8 +5323,10 @@ Item {
                     }
                 }
 
-                // 3. Move tokens to the private account.
+                // 3. Move tokens to the private account. Not on LEZ 0.4: private payments are off
+                // there, and its names are registered from the public account.
                 Card {
+                    visible: root.namesNet === "0.3"
                     Layout.fillWidth: true
                     opacity: root.hasCliWallet ? 1 : 0.5
                     StepHead { number: 3; done: root.hasPrivateFunds && root.shieldJob === null; title: "Move to private" }
@@ -5358,13 +5360,15 @@ Item {
                 Card {
                     Layout.fillWidth: true
                     opacity: root.hasCliWallet ? 1 : 0.5
-                    StepHead { number: 4; done: false; title: "Pick your name" }
+                    StepHead { number: root.namesNet === "0.4" ? 3 : 4; done: false; title: "Pick your name" }
                     Hint {
-                        text: "Held privately: nobody can find which account holds it. It takes a deposit (1,000,000 for most names, more for 3–4 characters), returned when you release it; if you transfer it, the deposit goes with it, and about 20 minutes to register."
+                        text: root.namesNet === "0.4"
+                            ? "On LEZ 0.4 a name is registered from your public account, in the open. It takes a deposit (1,000,000 for most names, more for 3–4 characters), returned when you release it; if you transfer it, the deposit goes with it, and about 20 minutes to register."
+                            : "Held privately: nobody can find which account holds it. It takes a deposit (1,000,000 for most names, more for 3–4 characters), returned when you release it; if you transfer it, the deposit goes with it, and about 20 minutes to register."
                     }
                     Action {
                         label: "Choose my name"
-                        strong: root.hasPrivateFunds
+                        strong: root.hasPrivateFunds || (root.namesNet === "0.4" && root.cliPublic !== null && root.cliPublic.balance !== "0")
                         enabledNow: root.cliPath !== "" && root.hasCliWallet
                         onPressed: root.openRegister()
                     }
@@ -7768,8 +7772,8 @@ Item {
                     Hint {
                         visible: root.cliOld
                         font.pixelSize: root.px(15)
-                        text: root.cliAccounts === null ? "These are the two accounts your names program pays from. Seeing every account, and making or naming more, comes with its LEZ 0.4 update."
-                            : "Making, naming and choosing accounts comes with your names program's LEZ 0.4 update."
+                        text: root.cliAccounts === null ? "These are the two accounts the names tool for " + (root.namesNet === "0.4" ? "LEZ 0.4" : "LEZ 0.3") + " pays from. That tool is too old to show every account, or to make or name more."
+                            : "The names tool for " + (root.namesNet === "0.4" ? "LEZ 0.4" : "LEZ 0.3") + " is too old to make, name or choose accounts."
                     }
                     RowLayout {
                         visible: root.accountNewKind === "" && root.cliPath !== "" && !root.cliOld
