@@ -861,3 +861,19 @@ export function bridgedGroups(sources) {
     return groups
 }
 
+
+// ── Untrusted text (from lez-program-registry/registry_browser/qml/logic.mjs, tested there) ──
+
+/// Text an app or a chain wrote, safe to show as one plain line: line breaks become ⏎, and
+/// control, bidi, zero-width and other invisible characters are dropped.
+export function clean(s) {
+    return String(s === undefined || s === null ? "" : s).replace(/\r\n|[\n\r\u000B\u000C\u0085\u2028\u2029]/g, "\u23CE").replace(/[\u0000-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB]|\uDB40[\uDC00-\uDC7F]/g, "")
+}
+
+/// The lines of a relayed call's sheet, each cleaned: `{lines, warnings, privacy, after, says, why}`.
+export function relayedSheet(sheet) {
+    var s = sheet || {}
+    var list = function(a) { return (Array.isArray(a) ? a : []).map(clean) }
+    return { lines: list(s.lines), warnings: list(s.warnings), privacy: clean(s.privacy), after: clean(s.after),
+             says: s.app_says ? clean(s.app_says) : "", why: list(s.why), refused: s.refused === true, hash: clean(s.hash) }
+}

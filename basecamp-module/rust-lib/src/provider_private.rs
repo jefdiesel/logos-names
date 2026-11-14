@@ -631,6 +631,9 @@ pub struct Grants {
     pub programs: Map<String, Value>,
     /// `[{token_program, definitions, app, since}]`.
     pub token_sources: Vec<Value>,
+    /// app → `[program]`: the programs it declared it will ask the wallet to sign calls to
+    /// (`declare_programs`; a relayed call names only these).
+    pub declared: Map<String, Value>,
 }
 
 impl Grants {
@@ -675,6 +678,7 @@ impl Grants {
                 grants.programs.insert(app.clone(), Value::from(kept));
             }
         }
+        grants.declared = crate::provider_public::load_declared(saved);
         grants.token_sources = saved["token_sources"]
             .as_array()
             .map(Vec::as_slice)
@@ -691,6 +695,27 @@ impl Grants {
         saved["secret_grants"] = Value::Object(self.secrets.clone());
         saved["program_grants"] = Value::Object(self.programs.clone());
         saved["token_sources"] = Value::from(self.token_sources.clone());
+        saved["declared_programs"] = Value::Object(self.declared.clone());
+    }
+
+    /// The programs `app` declared.
+    pub fn declared_of(&self, app: &str) -> Vec<String> {
+        self.declared.get(app).and_then(Value::as_array).map(|list| list.iter().filter_map(|p| p.as_str().map(str::to_owned)).collect()).unwrap_or_default()
+    }
+
+    /// Adds `programs` to what `app` declared, up to the limit.
+    pub fn declare(&mut self, app: &str, programs: &[String]) -> Result<(), String> {
+        let mut known = self.declared_of(app);
+        for program in programs {
+            if !known.contains(program) {
+                if known.len() >= crate::provider_public::MAX_DECLARED_PROGRAMS {
+                    return Err(format!("an app declares at most {} programs", crate::provider_public::MAX_DECLARED_PROGRAMS));
+                }
+                known.push(program.clone());
+            }
+        }
+        self.declared.insert(app.to_owned(), json!(known));
+        Ok(())
     }
 
     pub fn has_secret(&self, app: &str, account: &str, scope: &str) -> bool {
@@ -730,7 +755,8 @@ impl Grants {
     pub fn revoke(&mut self, app: &str) -> bool {
         let secrets = self.secrets.remove(app).is_some();
         let programs = self.programs.remove(app).is_some();
-        secrets || programs
+        let declared = self.declared.remove(app).is_some();
+        secrets || programs || declared
     }
 
     /// Takes back one secret grant.

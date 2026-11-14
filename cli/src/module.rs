@@ -84,10 +84,31 @@ pub enum Request {
     /// A mini-app's privacy-preserving call (`propose_private_call`; `private_call.rs`).
     #[command(subcommand)]
     PrivateCall(CallRequest),
+    /// A public call another account pays for: plan it, sign it as one of this wallet's
+    /// accounts and give it back half signed (`public_call.rs`). `cosign` is the payer's side,
+    /// for tests.
+    #[command(subcommand)]
+    PublicCall(PublicCallRequest),
     /// Where the name identifier ID (64 hex) sits relative to the locked-name list, as JSON
     /// (`length_proof_json`). Needs no wallet. The Basecamp module asks here instead of
     /// carrying the 61 MB list, and checks the proof against the root itself.
     LengthProof { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum PublicCallRequest {
+    /// The call (JSON on standard input) built with the chain's nonces: its hash and what it holds.
+    Plan,
+    /// The call (JSON in `--input`, with `expect_hash`) signed as its account: the half-signed
+    /// transaction, hex borsh, under `transaction`. Nothing is sent.
+    Sign {
+        #[arg(long)]
+        input: PathBuf,
+    },
+    /// Adds this wallet's signature as the fee payer to a half-signed transaction (hex on
+    /// standard input) and submits it.
+    #[command(hide = true)]
+    Cosign,
 }
 
 #[derive(Subcommand)]
@@ -169,6 +190,22 @@ impl Client {
                 let text = std::fs::read(&input).with_context(|| format!("cannot read {}", input.display()))?;
                 let call: crate::private_call::CallInput = serde_json::from_slice(&text).context("not a call")?;
                 self.private_call_send(&call).await
+            }
+            Request::PublicCall(PublicCallRequest::Plan) => {
+                let mut input = Vec::new();
+                std::io::Read::read_to_end(&mut std::io::stdin(), &mut input).context("cannot read the call")?;
+                let call: crate::public_call::CallInput = serde_json::from_slice(&input).context("not a call")?;
+                self.public_call_plan(&call).await
+            }
+            Request::PublicCall(PublicCallRequest::Sign { input }) => {
+                let text = std::fs::read(&input).with_context(|| format!("cannot read {}", input.display()))?;
+                let call: crate::public_call::CallInput = serde_json::from_slice(&text).context("not a call")?;
+                self.public_call_sign(&call).await
+            }
+            Request::PublicCall(PublicCallRequest::Cosign) => {
+                let mut input = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).context("cannot read the transaction")?;
+                self.public_call_cosign(&input).await
             }
             Request::Fee => {
                 let quote = self.wallet.client().get_fee_state().await?;

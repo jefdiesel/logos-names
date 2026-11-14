@@ -47,6 +47,7 @@ mod app_secret;
 mod provider;
 mod provider_inscribe;
 mod provider_private;
+mod provider_public;
 mod spell;
 mod text;
 mod registry;
@@ -1026,6 +1027,21 @@ pub trait NamesModule: Send + 'static {
     /// approved) and, once approved, `phase`. `summary` (280 characters) is shown as the app's words.
     fn propose_private_call(&mut self, account: String, call_json: String, summary: String) -> String;
 
+    /// Declares the programs this app will ask the wallet to sign calls to someone else pays
+    /// for (`propose_relayed_call`): a JSON array of 1 to 8 program IDs. The person approves
+    /// it once (`reason`, 280 characters, is shown as the app's words); a relayed call naming
+    /// any other program is refused. A request, as for access.
+    fn declare_programs(&mut self, programs_json: String, reason: String) -> String;
+
+    /// Asks the wallet to sign, as the public `account` (one this app was given; a never-used
+    /// one too), a call whose fee ANOTHER account pays: `call_json` is `{program, message,
+    /// accounts, fee: {payer, gas_limit, tip, max_fee}, privacy}` (PROVIDER-SDK.md, "Calls
+    /// someone else pays for"). The wallet builds the transaction itself and shows the person
+    /// what it built; once approved, `request_status` gives `transaction` (the half-signed
+    /// transaction, hex borsh) and `hash`. The wallet sends nothing and pays nothing. LEZ 0.4
+    /// only for now.
+    fn propose_relayed_call(&mut self, account: String, call_json: String, summary: String) -> String;
+
     /// Asks the person to list a token program's definitions in their holdings, with the
     /// names, symbols and decimals given: `definitions_json` is `[{definition, name, symbol,
     /// decimals, origin}]` (up to 16).
@@ -1197,6 +1213,9 @@ struct BoardRead {
     /// When `value` was read: how old a list kept through failed reads is.
     read_at: Option<std::time::Instant>,
 }
+
+/// How long the CLI is given to build or sign a relayed call: nonces from the chain, no proof.
+const PUBLIC_PLAN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(12);
 
 /// Where this module keeps what it remembers between runs.
 #[cfg(not(test))]
@@ -1901,6 +1920,8 @@ impl Names {
         self.bin_dir = bin_dir;
         self.provider_path = provider_path;
         self.board_reads.lock().map(|mut reads| reads.clear()).ok();
+        // The file now holds the network in use with every default filled in.
+        self.save();
         Ok(())
     }
 
@@ -2015,7 +2036,9 @@ impl Names {
         config["module_version"] = json!(MODULE_VERSION);
         config["names_network"] = self.net.shown();
         config["names_networks"] = json!([Net::Lez03.shown(), Net::Lez04.shown()]);
-        config["cli_line"] = json!(cli::find_program(self.cli.as_deref()).and_then(|path| self.cli_line(&path).ok()));
+        // What the CLI said its version is, if it was asked already (cli_status asks): get_config
+        // never runs the CLI, whoever calls it.
+        config["cli_line"] = json!(cli::find_program(self.cli.as_deref()).and_then(|path| self.cli_lines.lock().ok()?.get(&path).map(|(_, line)| line.clone())));
         config
     }
 
@@ -3937,6 +3960,9 @@ impl NamesModule for Names {
                 "cli": program.as_ref().map(|path| path.to_string_lossy().into_owned()),
                 "prover": program.as_ref().is_some_and(|path| cli::has_prover(path)),
                 "outdated": program.as_ref().is_some_and(|path| !cli::speaks_module(path)),
+                // `names 0.17.0 (LEZ v0.4.0-rc3)`; LEZ 0.4 runs only a CLI that says LEZ v0.4.
+                "cli_line": program.as_ref().and_then(|path| self.cli_line(path).ok()),
+                "names_network": self.net.shown(),
                 "old_wallet": setup.as_ref().is_some_and(cli::wallet_is_old),
                 "installing": self.running_job(cli::INSTALL_JOB),
                 "wallet_dir": wallet.as_ref().map(|dir| dir.to_string_lossy().into_owned()),
@@ -5548,6 +5574,15 @@ impl NamesModule for Names {
             .collect();
         let mut views = views;
         for view in &mut views {
+            if view["kind"] == provider_public::RELAYED_CALL {
+                let sheet = self.relayed_sheet(view);
+                view["sheet"] = sheet;
+                view["choices"] = json!([{ "account": view["account"], "account_kind": "public", "pays": false, "label": "the account the app asked for", "granted": true }]);
+                if let Some(fields) = view.as_object_mut() {
+                    fields.remove("report");
+                    fields.remove("message");
+                }
+            }
             if view["kind"] == provider::PRIVATE_CALL {
                 if view["check"] == "ready" {
                     let sheet = self.private_sheet(view);
@@ -5637,6 +5672,48 @@ impl NamesModule for Names {
             let view = self.queue_any(&app, request, now)?;
             self.start_private_check(&id, input);
             Ok(view)
+        })())
+    }
+
+    fn declare_programs(&mut self, programs_json: String, reason: String) -> String {
+        reply((|| {
+            let app = asking_app()?;
+            let now = provider::now_ms();
+            let request = provider_public::programs_request(&app, &programs_json, &reason, now)?;
+            self.queue_any(&app, request, now)
+        })())
+    }
+
+    fn propose_relayed_call(&mut self, account: String, call_json: String, summary: String) -> String {
+        reply((|| {
+            let app = asking_app()?;
+            let now = provider::now_ms();
+            if self.net != Net::Lez04 {
+                return Err("calls someone else pays for are signed on LEZ 0.4 (the bridge test network) only; the wallet is on LEZ 0.3 now".to_owned());
+            }
+            let declared = self.store().private.declared_of(&app);
+            let mut request = provider_public::relayed_call_request(&app, &account, &call_json, &summary, &declared, now)?;
+            let store = self.store();
+            let written = request["account"].as_str().unwrap_or_default().to_owned();
+            if !store.granted(&app).contains(&written) {
+                return Err(format!("{written} wasn't given to this app; ask for it with request_access"));
+            }
+            store.room_for(&app, now)?;
+            let zones = self.zones_now();
+            request["zone"] = json!(zones.current_id());
+            request["zone_channel"] = json!(zones.zone().channel);
+            request["network"] = json!(self.net.id());
+            // The wallet builds it now (nonces from the chain, a few seconds): the sheet is made
+            // from that build, and a call the wallet can't build is never shown.
+            let setup = self.cli_setup()?;
+            setup.wallet_ready()?;
+            let input = provider_public::cli_input(&request, None);
+            let output = cli::run_with_input(&setup, vec!["module".into(), "public-call".into(), "plan".into()], &input.to_string(), PUBLIC_PLAN_PATIENCE)
+                .map_err(|error| format!("the wallet couldn't build this call: {error}"))?;
+            let report: Value = serde_json::from_str(cli::last_line(&output)).map_err(|_| "the names CLI gave no build the wallet can read".to_owned())?;
+            request["report"] = report;
+            request["check"] = json!("ready");
+            self.queue_any(&app, request, now)
         })())
     }
 
@@ -5909,6 +5986,9 @@ impl Names {
         let app = request["app"].as_str().unwrap_or_default().to_owned();
         if matches!(kind.as_str(), provider::PRIVATE_CALL | provider::SECRET | provider::TOKEN_SOURCE) {
             return self.approve_private(id, &request, account);
+        }
+        if matches!(kind.as_str(), provider_public::RELAYED_CALL | provider_public::PROGRAMS) {
+            return self.approve_public(id, &request, account);
         }
         if kind == provider::TRANSFER || kind == provider::CALL {
             // Stays pending: the person can switch zones and approve it, or reject it.
@@ -6408,6 +6488,86 @@ impl Names {
         };
         store.save();
         Ok(view)
+    }
+
+    /// Approves a program declaration, or signs an approved relayed call and keeps the
+    /// half-signed transaction for the app. Signing reads the nonces again: a call whose
+    /// account or payer was used since builds to another hash, and is refused.
+    fn approve_public(&mut self, id: &str, request: &Value, account: &str) -> Result<Value, String> {
+        let now = provider::now_ms();
+        let app = request["app"].as_str().unwrap_or_default().to_owned();
+        let mut outcome = json!({ "decided": now });
+        if request["kind"] == provider_public::PROGRAMS {
+            let programs: Vec<String> = request["programs"].as_array().map(Vec::as_slice).unwrap_or_default().iter().filter_map(|p| p.as_str().map(str::to_owned)).collect();
+            self.store().private.declare(&app, &programs)?;
+            outcome["state"] = json!("approved");
+        } else {
+            let (private, chosen) = provider::account_ref(account)?;
+            if private || request["account"] != provider::account_written(false, &chosen).as_str() {
+                return Err("approve it with the account it names".to_owned());
+            }
+            self.asked_here(request)?;
+            if self.net != Net::Lez04 {
+                return Err("switch to LEZ 0.4 to approve it".to_owned());
+            }
+            let program = request["program"].as_str().unwrap_or_default().to_owned();
+            if !self.store().private.declared_of(&app).contains(&program) {
+                return Err("this app no longer has that program declared; reject it".to_owned());
+            }
+            let sheet = self.relayed_sheet(request);
+            if sheet["refused"] == true {
+                return Err("the wallet refuses this call (see why on the sheet); reject it".to_owned());
+            }
+            let hash = sheet["hash"].as_str().ok_or("the build gave no hash")?.to_owned();
+            // What goes to the CLI to sign must be the bytes the sheet was made from: the
+            // message is hashed again here, and the CLI refuses unless its own build of the
+            // whole transaction has the hash shown.
+            let message = registry::unhex(request["message"].as_str().unwrap_or_default()).unwrap_or_default();
+            if registry::hex(&<sha2::Sha256 as sha2::Digest>::digest(&message)) != request["report"]["message_sha256"].as_str().unwrap_or_default() {
+                return Err("the call to sign isn't the one shown; nothing was signed. Reject it.".to_owned());
+            }
+            let setup = self.cli_setup()?;
+            setup.wallet_ready()?;
+            let jobs = self.jobs()?;
+            let file = jobs.dir.join(format!("relayed-{id}.json"));
+            std::fs::create_dir_all(&jobs.dir).map_err(|error| format!("cannot keep the call: {error}"))?;
+            cli::write_private(&file, provider_public::cli_input(request, Some(&hash)).to_string().as_bytes()).map_err(|error| format!("cannot keep the call: {error}"))?;
+            let signed = cli::run_capture_text(&setup, vec!["module".into(), "public-call".into(), "sign".into(), format!("--input={}", file.display())], PUBLIC_PLAN_PATIENCE);
+            let _ = std::fs::remove_file(&file);
+            let signed: Value = serde_json::from_str(cli::last_line(&signed?)).map_err(|_| "the names CLI gave no signed call".to_owned())?;
+            if signed["hash"] != hash.as_str() || !signed["transaction"].is_string() {
+                return Err("the signed call isn't the one approved; nothing is given to the app".to_owned());
+            }
+            outcome["state"] = json!("done");
+            outcome["account"] = request["account"].clone();
+            outcome["hash"] = json!(hash);
+            outcome["transaction"] = signed["transaction"].clone();
+        }
+        let store = self.store();
+        let view = match store.get_mut(id) {
+            Some(stored) => {
+                for (key, value) in outcome.as_object().into_iter().flatten() {
+                    stored[key.as_str()] = value.clone();
+                }
+                // The message was kept only to be signed.
+                if let Some(fields) = stored.as_object_mut() {
+                    fields.remove("message");
+                }
+                provider::app_view(stored)
+            }
+            None => outcome,
+        };
+        store.save();
+        Ok(view)
+    }
+
+    /// The approval sheet of a relayed call (`provider_public::sheet`), with the program's
+    /// Program Registry label and the network as the site names it.
+    fn relayed_sheet(&mut self, request: &Value) -> Value {
+        let label = request["program"].as_str().and_then(program_registry::label);
+        let shown = self.net.shown();
+        let network = format!("{} · {}", shown["version"].as_str().unwrap_or_default(), shown["name"].as_str().unwrap_or_default());
+        provider_public::sheet(request, &request["report"], label.as_ref(), &network)
     }
 
     /// The approval sheet of a private call (see `provider_private::review`), with the
@@ -8764,7 +8924,7 @@ mod tests {
         let other = parsed(&names.get_config());
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
         let keys: Vec<&String> = other.as_object().unwrap().keys().collect();
-        assert_eq!(keys, ["module_version", "names_sequencer", "registry", "sequencer", "token_program", "zone"], "{other}");
+        assert_eq!(keys, ["module_version", "names_network", "names_sequencer", "registry", "sequencer", "token_program", "zone"], "{other}");
         let zone: Vec<&String> = other["zone"].as_object().unwrap().keys().collect();
         assert_eq!(zone, ["channel", "home", "id"], "{other}");
     }
@@ -9390,6 +9550,86 @@ mod tests {
         assert_eq!(parsed(&ask(&mut names))["value"]["granted"], false);
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A call someone else pays for (LEZ 0.4): only to a program the app declared, built by the
+    /// wallet, shown from that build, signed as approved and handed back half signed; nothing
+    /// is sent.
+    #[test]
+    fn a_relayed_call_is_built_shown_signed_and_handed_back_never_sent() {
+        use sha2::Digest;
+        let bridge = "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7";
+        let payer = "Public/DGu98d9jZfTAuJKr9y3vWC1DDAujYUaddb6ugTpgSBNs";
+        let account = format!("Public/{PUBLIC}");
+        let hash = "cd".repeat(32);
+        let report = json!({
+            "hash": hash, "account": account, "program": bridge, "payer": payer, "gas_limit": 120000, "tip": "0", "max_fee": "900000",
+            "message_len": 2, "message_sha256": registry::hex(&sha2::Sha256::digest([0u8, 0xff])),
+            "actors": [{ "account": PUBLIC, "program": bridge }], "creates": [], "own_balance": false,
+        });
+        let signed = json!({ "hash": hash, "transaction": "beef" });
+        let tail = format!(
+            "case \"$*\" in\n\
+             *--version*) echo 'names 0.17.0 (LEZ v0.4.0-rc3)' ;;\n\
+             *\"public-call plan\"*) cat > \"$(dirname \"$0\")/plan-in.json\"; echo '{report}' ;;\n\
+             *\"public-call sign\"*) for a in \"$@\"; do case \"$a\" in --input=*) cp \"${{a#--input=}}\" \"$(dirname \"$0\")/sign-in.json\" ;; esac; done; echo '{signed}' ;;\n\
+             *) echo 'unexpected'; exit 1 ;;\n\
+             esac"
+        );
+        let (mut names, dir) = with_wallet("provider-relayed-call", &tail);
+        let call = json!({ "program": bridge, "message": "00ff", "privacy": "bridge_public_claim", "fee": { "payer": payer, "gas_limit": 120000, "tip": "0", "max_fee": "900000" } });
+        connect(&mut names, "lez_bridge", &account);
+        // LEZ 0.3: refused.
+        as_caller(app("lez_bridge"));
+        assert!(parsed(&names.propose_relayed_call(account.clone(), call.to_string(), String::new()))["error"].as_str().unwrap().contains("LEZ 0.4"));
+        names.net = Net::Lez04;
+        // Not before the program is declared, and declaring is approved by the person.
+        assert!(parsed(&names.propose_relayed_call(account.clone(), call.to_string(), String::new()))["error"].as_str().unwrap().contains("declare_programs"));
+        let declared = parsed(&names.declare_programs(json!([bridge]).to_string(), "to claim deposits".into()))["value"].clone();
+        let declared_id = declared["request"].as_str().unwrap().to_owned();
+        assert_eq!(approve(&mut names, &declared_id, "")["value"]["state"], "approved");
+        as_caller(app("lez_bridge"));
+        let asked = parsed(&names.propose_relayed_call(account.clone(), call.to_string(), "Claim\u{202E} 100 dUSDC".into()));
+        let id = asked["value"]["request"].as_str().unwrap_or_else(|| panic!("{asked}")).to_owned();
+        assert_eq!(asked["value"]["check"], "ready");
+        assert!(asked["value"].get("transaction").is_none_or(Value::is_null));
+        // The CLI was given the call as the module keeps it, with no hash to sign yet.
+        let plan_in: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("plan-in.json")).unwrap()).unwrap();
+        assert_eq!((plan_in["account"].as_str(), plan_in["fee"]["payer"].as_str(), plan_in["expect_hash"].is_null()), (Some(account.as_str()), Some(payer), true));
+        // Another app can't see it.
+        as_caller(app("other_app"));
+        assert!(parsed(&names.request_status(id.clone()))["error"].is_string());
+        // The Names app sees the sheet, never the raw build or message.
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let pending = parsed(&names.pending_requests())["value"].clone();
+        let shown = pending.as_array().unwrap().iter().find(|r| r["id"] == id.as_str()).unwrap().clone();
+        assert!(shown.get("report").is_none() && shown.get("message").is_none(), "{shown}");
+        assert_eq!(shown["sheet"]["refused"], false, "{shown}");
+        assert_eq!(shown["sheet"]["lines"][1], "Network: LEZ 0.4 · bridge test network");
+        assert_eq!(shown["sheet"]["privacy"], "A public claim publishes the claim secret and links the Sepolia deposit to this account.");
+        assert!(!shown["sheet"]["app_says"].as_str().unwrap().contains('\u{202E}'));
+        // A change between the sheet and the signing (here, to the kept message) is refused,
+        // and nothing is signed.
+        let kept = names.store().get(&id).unwrap()["message"].clone();
+        names.store().get_mut(&id).unwrap()["message"] = json!("00fe");
+        let tampered = approve(&mut names, &id, &account);
+        assert!(tampered["error"].as_str().unwrap().contains("isn't the one shown"), "{tampered}");
+        assert!(!dir.join("sign-in.json").exists(), "nothing was signed");
+        names.store().get_mut(&id).unwrap()["message"] = kept;
+        // Approved: signed with the approved hash, handed back; single use.
+        let done = approve(&mut names, &id, &account);
+        assert_eq!(done["value"]["state"], "done", "{done}");
+        let sign_in: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("sign-in.json")).unwrap()).unwrap();
+        assert_eq!(sign_in["expect_hash"], hash.as_str());
+        as_caller(app("lez_bridge"));
+        let status = parsed(&names.request_status(id.clone()))["value"].clone();
+        assert_eq!((status["transaction"].as_str(), status["hash"].as_str(), status["payer"].as_str()), (Some("beef"), Some(hash.as_str()), Some(payer)), "{status}");
+        assert!(approve(&mut names, &id, &account)["error"].as_str().unwrap().contains("done already"));
+        // Revoking the app takes its declared programs back.
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        parsed(&names.revoke_app("lez_bridge".into()));
+        assert!(names.store().private.declared_of("lez_bridge").is_empty());
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
     }
 
     #[test]
@@ -10539,17 +10779,17 @@ mod tests {
         std::fs::write(config.join("config.json"), json!({ "cli_wallet": wallet03, "names_network": "lez-0.4" }).to_string()).unwrap();
         let mut names = Names::default();
         assert_eq!(names.net, Net::Lez04);
-        assert!(names.cli_setup().unwrap_err().contains("no names CLI for LEZ 0.4 is set"));
+        assert!(names.cli_setup().err().unwrap().contains("no names CLI for LEZ 0.4 is set"));
         let old = versioned_cli(&config.join("old"), "names 0.1.0");
         assert!(names.set_cli(old.to_string_lossy().into_owned()));
-        assert!(names.cli_setup().unwrap_err().contains("is not a LEZ 0.4 one"));
+        assert!(names.cli_setup().err().unwrap().contains("is not a LEZ 0.4 one"));
         let new = versioned_cli(&config.join("new"), "names 0.17.0 (LEZ v0.4.0-rc3)");
         assert!(names.set_cli(new.to_string_lossy().into_owned()));
         std::fs::create_dir_all(lez04_wallet_dir(&config)).unwrap();
         assert!(names.cli_setup().is_ok());
         assert!(!names.set_cli_wallet(wallet03.to_string_lossy().into_owned()), "LEZ 0.3's wallet is refused on LEZ 0.4");
         names.cli_wallet = Some(wallet03.to_string_lossy().into_owned());
-        assert!(names.cli_setup().unwrap_err().contains("each network keeps its own wallet"));
+        assert!(names.cli_setup().err().unwrap().contains("each network keeps its own wallet"));
         assert!(parsed(&names.cli_install())["error"].as_str().unwrap().contains("no names CLI for LEZ 0.4 is published"));
         assert!(parsed(&names.zone_add(String::new(), "http://127.0.0.1:9".into()))["error"].as_str().unwrap().contains("zones are kept on LEZ 0.3"));
     }

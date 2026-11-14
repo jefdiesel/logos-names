@@ -814,6 +814,7 @@ mod plan;
 mod module;
 mod private_call;
 mod prover;
+mod public_call;
 /// App secrets' derivation, one file shared with the Basecamp module (which checks the asks).
 #[path = "../../basecamp-module/rust-lib/src/app_secret.rs"]
 mod app_secret;
@@ -3954,6 +3955,8 @@ async fn main() -> Result<()> {
                             // while a job that saves the wallet does.
                             | module::Request::AppSecret
                             | module::Request::PrivateCall(module::CallRequest::Plan)
+                            // A public call another account pays for: planned and signed, never sent.
+                            | module::Request::PublicCall(module::PublicCallRequest::Plan | module::PublicCallRequest::Sign { .. })
                     )
             ),
             matches!(cli.command, Command::Setup { .. }),

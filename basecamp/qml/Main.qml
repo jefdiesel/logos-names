@@ -3018,7 +3018,7 @@ Item {
         // On LEZ 0.4 only a name's public account is paid: a payment to its private keys
         // is proven on this computer, which isn't offered there yet.
         if (namesNet === "0.4" && recipient && !recipient["public"]) {
-            say((target !== "" ? target : to) + " takes only private payments, which aren't offered on LEZ 0.4 yet. Switch to LEZ 0.3 to pay it privately.", true)
+            say((target !== "" ? target : to) + " takes only private payments, which stay off on LEZ 0.4 until real proofs have been run there. Switch to LEZ 0.3 to pay it privately.", true)
             return
         }
         if (target !== "" && payForwardSeen !== to + "→" + target) {
@@ -3844,6 +3844,9 @@ Item {
         // nothing it refuses (docs/wallet/BRIDGE-SDK.md).
         if (appRequest.kind === "private_call" && (appRequest.check !== "ready" || !appRequest.sheet || appRequest.sheet.refused))
             return false
+        // A call someone else pays for: only what the wallet built and didn't refuse.
+        if (appRequest.kind === "relayed_call" && (!appRequest.sheet || appRequest.sheet.refused))
+            return false
         return true
     }
 
@@ -3853,7 +3856,7 @@ Item {
         // An app whose publisher check failed may be a fake, whatever it asks (M-2).
         if (appPublisherFailed(request))
             return true
-        if (request.kind === "private_call")
+        if (request.kind === "private_call" || request.kind === "relayed_call")
             return !!request.sheet && (request.sheet.warnings || []).length > 0
         return (request.kind === "call" || appIsToken(request)) && ((request.warnings || []).length > 0)
     }
@@ -3906,6 +3909,10 @@ Item {
                 say(request.app + " can now get its own values from " + accountShort(request.account) + ".", false)
             else if (approve && request.kind === "token_source")
                 say("Its tokens now show in your holdings.", false)
+            else if (approve && request.kind === "relayed_call")
+                say("Signed for " + request.app + ": it has the transaction to hand to whoever pays. Your wallet sent nothing and paid nothing.", false)
+            else if (approve && request.kind === "programs")
+                say(request.app + " may now ask you to sign calls to these programs; you approve each call.", false)
             else if (approve)
                 say(request.app + " can now see the accounts you chose.", false)
             loadAppRequests()
@@ -3938,6 +3945,10 @@ Item {
             return request.app + " asks for secret values of its own"
         if (request.kind === "token_source")
             return request.app + " asks to show its tokens in your holdings"
+        if (request.kind === "relayed_call")
+            return request.app + " asks you to sign a call another account pays for"
+        if (request.kind === "programs")
+            return request.app + " names the programs it will ask you to sign for"
         return request.app + " asks you to sign a program call"
     }
 
@@ -6140,7 +6151,7 @@ Item {
                     Hint {
                         visible: root.sendKind !== "chain" && root.namesNet === "0.4"
                         color: root.brass
-                        text: "On LEZ 0.4 the wallet pays only a name's public account, from your public account: the chain shows both accounts and the amount. Paying a name's private keys isn't offered there yet (it is proven on this computer), and other sends aren't in the wallet yet."
+                        text: "On LEZ 0.4 the wallet pays only a name's public account, from your public account: the chain shows both accounts and the amount. Paying a name's private keys stays off there until real proofs have been run on LEZ 0.4, and other sends aren't in the wallet yet."
                     }
 
                     Part { text: "From" }
@@ -8236,7 +8247,7 @@ Item {
                     Hint {
                         visible: root.namesNet === "0.4"
                         color: root.brass
-                        text: "Registering privately isn't offered on LEZ 0.4 yet: it is proven on this computer, which the wallet doesn't do there yet. Register from a public account below (the name is still paid into a private account of its own), or switch to LEZ 0.3."
+                        text: "Registering privately stays off on LEZ 0.4 until real proofs have been run there. Register from a public account below (the name is still paid into a private account of its own), or switch to LEZ 0.3."
                     }
                     Card {
                         visible: root.namesNet === "0.3" && root.cliPath !== "" && !(root.deposit !== null && root.deposit.tier === "locked")
@@ -9530,6 +9541,43 @@ Item {
                     Hint { visible: appSheet.kind === "secret"; textFormat: Text.PlainText; color: root.ink; text: appSheet.kind === "secret" ? appSheet.request.explanation : "" }
                 }
 
+                // A call someone else pays for: the wallet's own build, in plain words (LEZ 0.4 only).
+                ColumnLayout {
+                    id: relayedBox
+                    visible: appSheet.kind === "relayed_call"
+                    Layout.fillWidth: true
+                    spacing: 6
+                    readonly property var shown: Logic.relayedSheet(appSheet.kind === "relayed_call" ? appSheet.request.sheet : null)
+                    Repeater {
+                        model: relayedBox.shown.lines
+                        Hint { required property var modelData; textFormat: Text.PlainText; color: root.ink; text: modelData }
+                    }
+                    Repeater {
+                        model: relayedBox.shown.warnings
+                        Hint { required property var modelData; textFormat: Text.PlainText; color: root.brass; text: modelData }
+                    }
+                    Hint { textFormat: Text.PlainText; color: root.ink; text: "Privacy: " + relayedBox.shown.privacy }
+                    Hint { textFormat: Text.PlainText; text: relayedBox.shown.after }
+                    Hint { visible: relayedBox.shown.says !== ""; textFormat: Text.PlainText; text: "The app describes it as: “" + relayedBox.shown.says + "” (its own words, not checked)" }
+                    Repeater {
+                        model: relayedBox.shown.why
+                        Hint { required property var modelData; textFormat: Text.PlainText; color: root.alarm; text: "Refused: " + modelData }
+                    }
+                }
+
+                // Programs an app declares it will ask the wallet to sign for.
+                ColumnLayout {
+                    visible: appSheet.kind === "programs"
+                    Layout.fillWidth: true
+                    spacing: 6
+                    Repeater {
+                        model: appSheet.kind === "programs" ? appSheet.request.programs : []
+                        Fact { required property var modelData; label: "Program"; code: true; value: root.shorten(modelData); full: modelData }
+                    }
+                    Hint { visible: appSheet.kind === "programs" && appSheet.request.app_summary !== ""; textFormat: Text.PlainText; text: appSheet.kind === "programs" ? "The app says why: “" + Logic.clean(appSheet.request.app_summary) + "” (its own words, not checked)" : "" }
+                    Hint { visible: appSheet.kind === "programs"; textFormat: Text.PlainText; color: root.ink; text: "Approving signs nothing. It lets this app ask you to sign calls to these programs only, each of them shown to you first. Settings → Connected apps takes it back." }
+                }
+
                 // A token source: which tokens it adds to the holdings view.
                 ColumnLayout {
                     visible: appSheet.kind === "token_source"
@@ -9548,7 +9596,7 @@ Item {
                 }
 
                 // The account to use.
-                Part { text: appSheet.kind === "connect" ? "Accounts it may see" : appSheet.kind === "call" ? "Sign with" : appSheet.kind === "private_call" || appSheet.kind === "secret" ? "Account" : appSheet.kind === "token_source" ? "Confirm" : "Pay from" }
+                Part { text: appSheet.kind === "connect" ? "Accounts it may see" : appSheet.kind === "call" || appSheet.kind === "relayed_call" ? "Sign with" : appSheet.kind === "private_call" || appSheet.kind === "secret" ? "Account" : appSheet.kind === "token_source" || appSheet.kind === "programs" ? "Confirm" : "Pay from" }
                 Repeater {
                     model: appSheet.request !== null ? (appSheet.request.choices || []) : []
                     Rectangle {
@@ -9640,7 +9688,7 @@ Item {
                     Layout.topMargin: 8
                     spacing: 10
                     Action {
-                        label: appSheet.kind === "connect" ? "Share" : appSheet.kind === "call" ? "Approve and sign" : appSheet.kind === "private_call" ? "Approve, prove and send" : appSheet.kind === "secret" ? "Allow" : appSheet.kind === "token_source" ? "Show these tokens" : "Approve and send"
+                        label: appSheet.kind === "connect" ? "Share" : appSheet.kind === "call" ? "Approve and sign" : appSheet.kind === "private_call" ? "Approve, prove and send" : appSheet.kind === "secret" ? "Allow" : appSheet.kind === "token_source" ? "Show these tokens" : appSheet.kind === "relayed_call" ? "Sign, send nothing" : appSheet.kind === "programs" ? "Allow these programs" : "Approve and send"
                         strong: true
                         enabledNow: root.appCanApprove()
                         onPressed: root.answerAppRequest(true)

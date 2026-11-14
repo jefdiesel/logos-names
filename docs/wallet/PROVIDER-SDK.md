@@ -89,6 +89,8 @@ balances are 128-bit numbers.
 | `propose_transfer(asset, amount, destination)` | Asks to send `amount` of `asset` to `destination`. `asset` is `LEZ`, the native token (empty also means LEZ), or a token of the wallet's token program, written as its definition's account ID in base58 (see [Token transfers](#token-transfers)). `destination` is a name such as `alice`, or `Public/<id>`. The person picks the account it comes from. Checked when you call it. | a request |
 | `propose_call(program_id, accounts_json, instruction_hex, summary)` | Asks to run a program, signed by an account the person picks (details below). | a request |
 | `propose_private_call(account, call_json, summary)` | Asks for a privacy-preserving transaction from one of the private accounts you were given, across up to 4 programs (see [Private calls](#private-calls)). | a request |
+| `declare_programs(programs_json, reason)` | Names the programs (1 to 8 IDs, a JSON array) you will ask the person to sign calls to that someone else pays for. The person approves it once (see [Calls someone else pays for](#calls-someone-else-pays-for)). | a request |
+| `propose_relayed_call(account, call_json, summary)` | Asks the wallet to sign, as one of the public accounts you were given, a call whose fee another account pays (a relay's). The wallet hands the signed transaction back to you and sends nothing. LEZ 0.4 only. | a request; once approved, `transaction` and `hash` |
 | `app_secret(account, scope, context_hex, tag, first, count)` | Values the wallet derives for your app from one of your accounts; the first use of each (account, scope) is approved by the person (see [App secrets](#app-secrets)). | `{granted: false, request}` or `{granted: true, account, scope, tag, first, values}` |
 | `propose_token_source(token_program, definitions_json)` | Asks to list a token program's definitions, with names, symbols and decimals, in the person's holdings (see [Token sources](#token-sources)). Needs no access first. | a request |
 | `token_sources()` | The token sources the person accepted. | `[{token_program, definitions, app, since}]` |
@@ -386,6 +388,112 @@ The person sees the sheet in [BRIDGE-SDK.md](BRIDGE-SDK.md) §2: 100 dUSDC and 2
 address, and that `V`'s ID appears in nothing public. `scripts/bridge-claim-call.py` builds this
 call from a demo run's frozen material.
 
+### Calls someone else pays for
+
+On LEZ 0.4 a public transaction's fee payer is named in the transaction and signs it; it need
+not be the account that makes the call (`lee` `FeeDeclaration`). So an account that holds no
+LEZ, even one never used on the chain, can make a public call when another account (a relay)
+pays: the account signs, the relay adds its own signature as fee payer and submits it. The
+wallet does the first half: it signs as the person's account and gives the transaction back to
+your app. **It sends nothing and pays nothing**, and it can't see what happens to the transaction
+afterwards.
+
+1. **Declare your programs once:** `declare_programs(programs_json, reason)`, a JSON array of 1
+   to 8 program IDs. The person approves the list. A relayed call to any other program is
+   refused before anyone sees it, and Settings takes the list back with the app's access.
+2. **Propose the call:** `propose_relayed_call(account, call_json, summary)`. `account` is one of
+   the public accounts you were given (`Public/<id>`). `call_json`:
+
+   ```json
+   {
+     "program": "<root program ID>",
+     "message": "<hex: the root call's message bytes, at most 16,384 bytes>",
+     "accounts": [
+       { "account": "<id>", "program": "<program ID, or native>" },
+       { "seed": "<64 hex>", "of": "<program ID>", "program": "<program ID>", "new": true }
+     ],
+     "fee": { "payer": "Public/<the relay's payer>", "gas_limit": 120000, "tip": "0", "max_fee": "900000" },
+     "privacy": "public_call"
+   }
+   ```
+
+   - The root actor is `account` under `program`; `accounts` are the other actors the call
+     declares (at most 16), in order; `program` defaults to the root program; `native` is an
+     account's LEZ balance. A program account (`seed` + `of`) the call creates is marked
+     `"new": true`, which adds its admission evidence.
+   - Every program named must be one you declared.
+   - `fee` is the fee declaration exactly as signed: the payer, the gas limit, the tip and the
+     max fee. The payer must not be the signing account, nor any account of the person's wallet
+     (that is an ordinary call, `propose_call`), and the call must not declare an actor of the
+     payer's account.
+   - `privacy` picks the sheet's privacy line from a fixed list; it is never free text:
+     - `public_call` (the default): "Public: this account, the program it runs, the bytes it sends
+       and what it changes, and the account that paid the fee."
+     - `bridge_public_claim`: "A public claim publishes the claim secret and links the Sepolia
+       deposit to this account."
+3. **The wallet builds it** at once (names CLI `module public-call plan`: the account's and the
+   payer's nonces from the chain, no proof, a second or two). A call it can't build is refused
+   with the reason, and nobody is asked. `request_status` gives `check: "ready"`.
+4. **The person sees a sheet made from that build**, never from your words: your app's name, the
+   network (LEZ 0.4 · bridge test network), the program as `unknown program <id>` with what the
+   Program Registry says of it (the wallet doesn't decode the message bytes, and a warning says
+   so: the person ticks it before approving), the account that signs, who pays the fee and its caps, each other
+   account reached (its LEZ balance or its data), the program accounts it creates, the SHA-256 of
+   exactly what is signed, the privacy line, that the wallet sends nothing and can't see what
+   happens afterwards, and then your `summary`, labelled as your own words. Every text that
+   comes from an app or the chain is shown as plain text, one line, with control, bidi and
+   zero-width characters removed. A build that differs from the request in any field is refused.
+5. **Once approved**, the wallet builds the call again and signs it only if it is still the call the
+   person saw (the same hash: an account or payer used since gives another one). `request_status`
+   then gives `state: "done"`, `transaction` (the half-signed `PublicTransaction`, hex of its borsh
+   bytes) and `hash`. The request is used up: approving it again is refused, and the transaction
+   can be submitted once.
+
+**What the account's signature covers (LEZ v0.4.0-rc3).** The SHA-256 of the whole borsh message
+under `/LEE/v0.3/Message/Public/`: the declared actors and signing accounts, the root call and its
+bytes, the fee declaration (payer, gas limit, tip, max fee), both signers' nonces, and the
+admission evidence. So the relay can't give the transaction another payer, other caps, another
+byte or another actor without breaking the account's signature, and it can't replay it: it names
+the account's current nonce. rc3 public transactions carry no validity window: the request
+expires after 10 minutes like every request, and the signed transaction dies with the account's
+next transaction. Checked by the names CLI's test `a_half_signed_call_verifies_and_binds_its_payer`
+(vector `cli/tests/vectors/public-call-v1.json`). The full argument, statement by statement with
+its test, is in [basecamp-module/rust-lib/SIGNING.md](../../basecamp-module/rust-lib/SIGNING.md).
+
+### Worked example: a relayed public bridge claim
+
+The RFP-022 bridge claims a Sepolia deposit to a public account `C` that holds no LEZ; its
+relay pays the fee (rfp-022 `lez-bridge/cli/src/relay.rs`, `public-demo/relayer/relayer.py`).
+The bridge mini-app does the bridge's part and the wallet only signs:
+
+```qml
+// Once: the programs this app will ask the person to sign calls to.
+names("declare_programs", [JSON.stringify([bridge]), "To claim your bridge deposits"], function(v) { requestId = v.request; poll.start() })
+// The relay's payer and caps, from the chain's endpoint (the bridge's own JSON-RPC methods).
+//   bridge_relayInfo -> {payer, max_gas, max_fee}
+// The claim: ClaimPlan's accounts in order after the root (relay.rs `build`), the message
+// borsh(Message::Instruction(ClaimAttested{...})) the bridge builds from the Sepolia logs.
+var call = {
+    program: bridge,
+    message: claimHex,
+    accounts: claimActors,                          // [{account|seed+of, program}], no payer actor
+    fee: { payer: "Public/" + info.payer, gas_limit: info.max_gas, tip: "0", max_fee: String(info.max_fee) },
+    privacy: "bridge_public_claim"
+}
+names("propose_relayed_call", ["Public/" + C, JSON.stringify(call), "Claim 100 dUSDC from Sepolia"], function(v) {
+    requestId = v.request; poll.start()             // check: ready, then the person approves
+})
+// request_status(requestId) -> {state: "done", transaction, hash}
+// then: bridge_relayClaim [transaction] on the chain's endpoint; the relay checks it, co-signs, submits.
+```
+
+What the bridge mini-app still does itself: read the deposit leaves from the Sepolia vault's logs
+and its proof, build the claim message exactly as `relay.rs` does, pick the gas limit and max fee
+within the relay's caps (`bridge_relayInfo`), and hand the signed transaction to
+`bridge_relayClaim`. The wallet never reads Sepolia, never talks to the relay and never decodes
+the bridge's message: the sheet names the bridge program by its ID and registry label and shows
+the message's hash.
+
 ### Limits
 
 | Limit | Value |
@@ -399,6 +507,7 @@ call from a demo run's frozen material.
 | Actors a call reaches besides the signer's own / its message | 16 / 2,048 bytes |
 | A private call's programs / actors besides its root / message / one-time addresses | 4 / 16 / 16,384 bytes / 4 |
 | `app_secret` values per call / calls per hour / grants per app | 64 / 120 / 16 |
+| A relayed call's actors besides its root / message / declared programs per app | 16 / 16,384 bytes / 8 |
 | Token sources / definitions each | 16 / 16 |
 
 Requests and grants are kept in `~/.config/logos-names/provider.json`. The

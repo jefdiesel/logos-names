@@ -33,7 +33,10 @@ pub fn is_http_url(url: &str) -> bool {
 pub fn clean_text(text: &str, max: usize) -> String {
     let hidden = |c: char| {
         c.is_control()
-            || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}' | '\u{061C}')
+            || matches!(
+                c,
+                '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}' | '\u{E0000}'..='\u{E007F}'
+            )
     };
     let mut out = String::new();
     let mut space = false;
@@ -55,5 +58,20 @@ pub fn clean_text(text: &str, max: usize) -> String {
         format!("{}…", cut.trim_end())
     } else {
         out
+    }
+
+}
+
+#[cfg(test)]
+mod clean_tests {
+    use super::clean_text;
+
+    /// The registry browser's cases (lez-program-registry `clean()`): soft hyphen, Mongolian
+    /// vowel separator, invisible operators, deprecated format characters, interlinear
+    /// annotation marks and tag characters are all hidden too.
+    #[test]
+    fn invisible_characters_are_hidden_as_in_the_registry_browser() {
+        assert_eq!(clean_text("a\u{00AD}b\u{180E}c\u{2061}d\u{206B}e\u{FFFA}f\u{E0041}g", 80), "a b c d e f g");
+        assert_eq!(clean_text("1.0\u{202E}(unproven)\u{200B}\u{2066}x\u{2069}\n", 80), "1.0 (unproven) x");
     }
 }

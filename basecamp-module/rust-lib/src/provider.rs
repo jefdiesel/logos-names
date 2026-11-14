@@ -128,7 +128,7 @@ pub fn asset(text: &str) -> Result<Asset, String> {
 }
 
 /// A new request's common fields.
-fn base(app: &str, kind: &str, now: u64) -> Result<Map<String, Value>, String> {
+pub fn base(app: &str, kind: &str, now: u64) -> Result<Map<String, Value>, String> {
     let id = registry::hex(&registry::fresh_bytes::<16>()?);
     let mut request = Map::new();
     request.insert("id".into(), json!(id));
@@ -204,7 +204,7 @@ pub fn add_token(request: &mut Value, name: Option<&str>, program: &AccountId, l
 
 /// What a prompt warns about a program, from what the Program Registry said
 /// (`label_fields`). `what` is how the prompt names the program.
-fn label_warnings(label: &Value, what: &str) -> Vec<String> {
+pub fn label_warnings(label: &Value, what: &str) -> Vec<String> {
     let mut warnings = Vec::new();
     if label["registry"] != true {
         warnings.push(format!("The Program Registry isn't installed, so who wrote this {what} and whether its source is verified is unknown."));
@@ -644,6 +644,16 @@ pub fn app_view(request: &Value) -> Value {
             }
             zone_view(&mut view, request);
         }
+        // A relayed call: how its build stands, and once approved, the half-signed transaction
+        // and its hash (what the app hands its relay). The person's other accounts never show.
+        Some(crate::provider_public::RELAYED_CALL) => {
+            for key in ["program", "check", "message_len", "transaction", "hash"] {
+                view[key] = request[key].clone();
+            }
+            view["payer"] = request["fee"]["payer"].clone();
+            view["network"] = request["network"].clone();
+        }
+        Some(crate::provider_public::PROGRAMS) => view["programs"] = request["programs"].clone(),
         Some(SECRET) => view["scope"] = request["scope"].clone(),
         Some(TOKEN_SOURCE) => view["token_program"] = request["token_program"].clone(),
         _ => {}

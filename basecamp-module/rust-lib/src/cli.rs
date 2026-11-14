@@ -2262,6 +2262,15 @@ fn run_capture(setup: &Setup, command: Vec<String>, patience: Duration) -> Resul
     capture(setup.command(command), &setup.program, patience)
 }
 
+/// Runs the CLI with `command`: what it printed, or why it failed.
+pub fn run_capture_text(setup: &Setup, command: Vec<String>, patience: Duration) -> Result<String, String> {
+    let (code, out, err) = run_capture(setup, command, patience)?;
+    if code != Some(0) {
+        return Err(failure(&err, &out));
+    }
+    Ok(out)
+}
+
 /// Runs the CLI with `command`, giving it `input` on standard input: what it
 /// printed, or why it failed. Nothing on standard input shows in the process list,
 /// or in a log.

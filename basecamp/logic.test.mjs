@@ -361,5 +361,16 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("mergedAccounts empty", mergedAccounts(null, undefined), []);
 }
 
+{
+  // Relayed calls: untrusted text is cleaned (the registry browser's cases), the sheet is read.
+  const { clean, relayedSheet } = await import("./qml/logic.mjs");
+  check("clean drops bidi, zero-width, controls; a break shows as ⏎", clean("1.0\u202E(unproven)\u200B\u2066x\u2069\n"), "1.0(unproven)x⏎");
+  check("invisible characters dropped", clean("a\u00ADb\u180Ec\u2061d\u206Be\uFFFAf\uDB40\uDC41g"), "abcdefg");
+  check("clean of nothing", [clean(null), clean(undefined)], ["", ""]);
+  const sheet = relayedSheet({ lines: ["lez_bridge asks\u202E", "Network: LEZ 0.4 · bridge test network"], warnings: [], privacy: "A public claim publishes the claim secret and links the Sepolia deposit to this account.", after: "x", app_says: "Claim\nnow\u200B", refused: false, hash: "ab" });
+  check("relayedSheet cleans every line", [sheet.lines[0], sheet.says, sheet.refused], ["lez_bridge asks", "Claim⏎now", false]);
+  check("relayedSheet of nothing", relayedSheet(null).lines, []);
+}
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);
