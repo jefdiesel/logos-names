@@ -151,12 +151,15 @@ the plain object must read `value` now. The Names app itself still gets the plai
   the reset, and gives up the token programs of bridges no longer listed (the built-in v2 and v3
   ones stay).
 
-- The names module runs one call at a time. Each call now runs on its own worker thread
-  (`concurrency: "multi"`, so a call into another module can no longer freeze it, as it froze
-  the M2), but they still take turns: during a long call (a Logos Blockchain node call, up to
-  15 s for a read and 180 s for a proof; the names CLI building a private change) every other
-  call waits up to 15 s and then answers busy. The app shows "The wallet is busy; still working."
-  and asks again; nothing is lost.
+- The names module runs one call at a time, on its one thread. A call that waits on another
+  module (a Logos Blockchain node call, up to 15 s for a read and 180 s for a proof; a Program
+  Registry lookup) waits in a nested event loop, and a names call delivered meanwhile used to wait
+  forever on the module's lock: the freeze on the M2. The generated scaffold now takes that lock
+  with try_lock (rust-lib/build.rs, scaffold_patch.rs), so that call is answered busy at once,
+  before any module code runs, and nothing is done. The app shows "The wallet is busy; still
+  working." and asks again; other apps must retry too (PROVIDER-SDK.md). Answers still go only to
+  the caller. (0.17's first fix ran calls on worker threads, `concurrency: "multi"`; it was
+  dropped because in that mode the host sends each answer to every process holding the module.)
 
 - rc3 binds no chain id and carries no validity window. A half-signed relayed call is good once
   on its chain, but after a reset of the test network, or on another LEZ 0.4 chain where the

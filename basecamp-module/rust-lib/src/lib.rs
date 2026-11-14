@@ -1149,9 +1149,10 @@ pub trait NamesModule: Send + 'static {
 }
 
 // The builder injects the generated scaffold here: the `install` entry point,
-// `RustModuleContext`, `context()` and `modules()`. Unit tests build without it.
+// `RustModuleContext`, `context()` and `modules()`. Unit tests build without it. It is the
+// builder's generated/provider_gen.rs with its instance lock taken by try_lock (build.rs).
 #[cfg(not(test))]
-include!(concat!(env!("CARGO_MANIFEST_DIR"), "/generated/provider_gen.rs"));
+include!(concat!(env!("OUT_DIR"), "/provider_gen.rs"));
 
 #[cfg(test)]
 pub struct RustModuleContext;
@@ -1361,6 +1362,53 @@ const BUILD_COMMIT_LINE: &str = include_str!("build_commit.txt");
 
 fn build_commit() -> &'static str {
     BUILD_COMMIT_LINE.trim().strip_prefix("names-build-commit=").unwrap_or("dev")
+}
+
+/// How many places the built scaffold takes its instance lock with try_lock (build.rs,
+/// scaffold_patch.rs): 3 in a module build. Kept whole in the library, so a built file can be
+/// checked with `grep -a names-scaffold-try-lock=`; `get_config` says it too.
+#[cfg(not(test))]
+const SCAFFOLD_LINE: &str = concat!("names-scaffold-try-lock=", env!("NAMES_SCAFFOLD_TRY_LOCK_SITES"));
+#[cfg(test)]
+const SCAFFOLD_LINE: &str = "names-scaffold-try-lock=test";
+
+/// What the generated dispatch answers when the module's one lock is held, which happens only to
+/// a call that came in through the nested event loop of a call waiting on another module (the
+/// Logos Blockchain node, the Program Registry): see scaffold_patch.rs. It is answered from the
+/// method's name alone, before any module code runs: no caller is read, no state is touched and
+/// nothing is stored, so `busy: true` always means the call was NOT taken and may be sent again.
+/// No module code answers `busy: true` itself.
+pub(crate) mod scaffold_busy {
+    use serde_json::{json, Value};
+
+    /// The methods that answer a bool. Their callers read `false` as "not done" (the Names app
+    /// shows its refusal and keeps the old setting), so busy and stopped answer `false` there:
+    /// an object would read as true, as success.
+    pub const BOOL_METHODS: [&str; 8] = [
+        "set_registry", "set_sequencer", "set_wallet_files", "set_cli", "set_cli_wallet",
+        "set_token_program", "set_bridge_program", "set_bridge_programs",
+    ];
+    pub const BUSY: &str = "The wallet is busy; still working.";
+    pub const STOPPED: &str = "The names module stopped after an internal error; restart Basecamp to use it again.";
+
+    /// Busy: `{success: false, busy: true, value: null, error}` as JSON text, as every other
+    /// answer is, or `false` for a bool method.
+    pub fn answer(method: &str) -> Value {
+        typed(method, json!({ "success": false, "busy": true, "value": null, "error": BUSY }))
+    }
+
+    /// The lock was left poisoned by a call that panicked: refused, never taken over.
+    pub fn stopped(method: &str) -> Value {
+        typed(method, json!({ "success": false, "value": null, "error": STOPPED }))
+    }
+
+    fn typed(method: &str, envelope: Value) -> Value {
+        if BOOL_METHODS.contains(&method) {
+            Value::Bool(false)
+        } else {
+            Value::String(envelope.to_string())
+        }
+    }
 }
 
 /// Whether `caller` may use those methods. Basecamp gives each app its own
@@ -2123,6 +2171,7 @@ impl Names {
         config["cli_wallet"] = json!(self.resolve_wallet(self.cli_wallet.as_deref()).map(|dir| dir.to_string_lossy().into_owned()));
         config["module_version"] = json!(MODULE_VERSION);
         config["build_commit"] = json!(build_commit());
+        config["scaffold"] = json!(SCAFFOLD_LINE);
         config["names_network"] = self.net.shown();
         let bridges = self.bridge_programs_now();
         config["bridge_program"] = json!(registry::account_text(&bridges[0]));
@@ -11797,5 +11846,133 @@ mod tests {
         assert!(names.asked_here(&json!({ "zone": "home", "network": "lez-0.3" })).is_ok());
         let refused = names.asked_here(&json!({ "zone": "home", "network": "lez-0.4" })).unwrap_err();
         assert!(refused.contains("asked for LEZ 0.4") && refused.contains("on LEZ 0.3"), "{refused}");
+    }
+
+    // ── The scaffold's try_lock (scaffold_patch.rs, build.rs) ───────────
+
+    mod scaffold_patch {
+        include!("../scaffold_patch.rs");
+    }
+
+    /// The scaffold lidl-gen generates for this module (logos-rust-sdk b572e81, single mode, from
+    /// the module's derived names.lidl, as the pinned builder runs it): the patch finds its three
+    /// instance-lock sites, changes them to try_lock, and leaves no plain lock(). A generator that
+    /// changed (a site missing or doubled) is refused, so the build fails instead of shipping the
+    /// freeze again.
+    #[test]
+    fn the_scaffold_patch_changes_the_three_lock_sites_of_the_pinned_generator() {
+        let generated = include_str!("../testdata/scaffold/provider_gen-b572e81-single.rs.txt");
+        assert_eq!(generated.matches("INSTANCE.0.lock().unwrap()").count(), 3);
+        let patched = scaffold_patch::patch_scaffold(generated).unwrap();
+        assert_eq!((patched.matches("INSTANCE.0.lock()").count(), patched.matches("INSTANCE.0.try_lock()").count()), (0, 3));
+        // dispatch: busy is answered before the instance is even looked at.
+        let dispatch = &patched[patched.find("fn dispatch_impl").unwrap()..];
+        let busy_at = dispatch.find("crate::scaffold_busy::answer(method)").unwrap();
+        let stopped_at = dispatch.find("crate::scaffold_busy::stopped(method)").unwrap();
+        let instance_at = dispatch.find("downcast_mut::<T>()").unwrap();
+        let first_arm = dispatch.find("match method {").unwrap();
+        assert!(busy_at < instance_at && stopped_at < instance_at && instance_at < first_arm, "busy before any module code");
+        // The rest of the file is exactly as generated.
+        let mut back = patched.clone();
+        for (_, from, to) in scaffold_patch::SCAFFOLD_SITES {
+            back = back.replacen(to, from, 1);
+        }
+        assert_eq!(back, generated);
+        // Drift: a site missing, or there twice, fails.
+        let (_, ensure, _) = scaffold_patch::SCAFFOLD_SITES[0];
+        assert!(scaffold_patch::patch_scaffold(&generated.replacen(ensure, "", 1)).unwrap_err().contains("ensure_impl line 0 times"));
+        let doubled = format!("{generated}{}", scaffold_patch::SCAFFOLD_SITES[1].1);
+        assert!(scaffold_patch::patch_scaffold(&doubled).unwrap_err().contains("dispatch_impl line 2 times"));
+        let extra = format!("{generated}\nfn other() {{ let _ = INSTANCE.0.lock(); }}\n");
+        assert!(scaffold_patch::patch_scaffold(&extra).unwrap_err().contains("lock() 1 times"));
+    }
+
+    /// `try_lock` on the thread that already holds the lock answers WouldBlock at once (the case of
+    /// a call that comes back in through a nested event loop); a poisoned lock answers Poisoned.
+    #[test]
+    fn try_lock_on_the_thread_holding_the_lock_is_would_block() {
+        let lock = std::sync::Mutex::new(0);
+        let held = lock.lock().unwrap();
+        let started = std::time::Instant::now();
+        assert!(matches!(lock.try_lock(), Err(std::sync::TryLockError::WouldBlock)));
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        drop(held);
+        assert!(lock.try_lock().is_ok());
+        let lock = std::sync::Arc::new(std::sync::Mutex::new(0));
+        let poisoner = std::sync::Arc::clone(&lock);
+        let _ = std::thread::spawn(move || {
+            let _held = poisoner.lock().unwrap();
+            panic!("poison it");
+        })
+        .join();
+        assert!(matches!(lock.try_lock(), Err(std::sync::TryLockError::Poisoned(_))));
+    }
+
+    /// The busy answer is typed as the method's own answer: JSON text that the app sorts as busy
+    /// for the 133 methods that answer text, `false` for the 8 that answer a bool (an object would
+    /// read as success there). The bool list is exactly the trait's.
+    #[test]
+    fn the_busy_answer_is_typed_and_the_bool_methods_are_the_traits() {
+        let source = include_str!("lib.rs");
+        let start = source.find("pub trait NamesModule").unwrap();
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        let mut bools: Vec<&str> = body
+            .lines()
+            .filter(|line| line.trim_start().starts_with("fn ") && line.trim_end().ends_with("-> bool;"))
+            .map(|line| line.trim_start()[3..].split('(').next().unwrap())
+            .collect();
+        bools.sort();
+        let mut listed = scaffold_busy::BOOL_METHODS.to_vec();
+        listed.sort();
+        assert_eq!(bools, listed);
+        for method in scaffold_busy::BOOL_METHODS {
+            assert_eq!(scaffold_busy::answer(method), json!(false));
+            assert_eq!(scaffold_busy::stopped(method), json!(false));
+        }
+        let busy: Value = serde_json::from_str(scaffold_busy::answer("get_config").as_str().unwrap()).unwrap();
+        assert_eq!(busy, json!({ "success": false, "busy": true, "value": null, "error": scaffold_busy::BUSY }));
+        let stopped: Value = serde_json::from_str(scaffold_busy::stopped("approve_request").as_str().unwrap()).unwrap();
+        assert_eq!((stopped["success"].clone(), stopped.get("busy")), (json!(false), None), "stopped is not busy: asking again won't help");
+        // Only the scaffold's answer says busy at the top: no module code builds that envelope.
+        let module_code = &source[..source.find("#[cfg(test)]\nmod tests {").unwrap()];
+        assert_eq!(module_code.matches("\"busy\": true").count(), 1, "only scaffold_busy::answer");
+    }
+
+    /// Every file under `dir`, with its bytes.
+    fn every_file(dir: &std::path::Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        let mut files = std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                files.extend(every_file(&path));
+            } else {
+                files.insert(path.clone(), std::fs::read(&path).unwrap());
+            }
+        }
+        files
+    }
+
+    /// The promise to apps that retry (PROVIDER-SDK.md): a busy answer to declare_programs or to
+    /// propose_relayed_call means nothing happened. It is made from the method's name alone
+    /// (`scaffold_busy::answer` takes no module, so it can't reach the store), and the store, the
+    /// wallet and every other file are byte for byte as before. The same declaration taken for
+    /// real does change the store, so the comparison would see it.
+    #[test]
+    fn a_busy_answer_to_a_declaration_or_a_relayed_call_leaves_every_file_as_it_was() {
+        let (mut names, dir) = with_wallet("busy-untouched", "");
+        names.net = Net::Lez04;
+        connect(&mut names, "lez_bridge", &format!("Public/{PUBLIC}"));
+        let before = every_file(&dir);
+        assert!(before.keys().any(|path| path.ends_with("provider.json")));
+        for method in ["declare_programs", "propose_relayed_call"] {
+            let answer: Value = serde_json::from_str(scaffold_busy::answer(method).as_str().unwrap()).unwrap();
+            assert_eq!((answer["busy"].clone(), answer["success"].clone()), (json!(true), json!(false)), "{method}");
+        }
+        assert_eq!(every_file(&dir), before, "nothing written");
+        as_caller(app("lez_bridge"));
+        let taken = parsed(&names.declare_programs(json!([bridge_net::DEFAULT_BRIDGE_PROGRAM]).to_string(), "".into()));
+        assert!(taken["value"]["request"].is_string(), "{taken}");
+        assert_ne!(every_file(&dir), before, "a call taken does write, so the check above would see a write");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
     }
 }

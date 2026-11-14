@@ -80,9 +80,20 @@ no wallet on LEZ 0.4 yet; …"); ask again once the person has created it. A tok
 (`propose_token_source`) naming a bridge program or one of the wallet's own programs is refused.
 
 A call can also answer `{ "success": false, "busy": true, "value": null, "error": "The wallet
-is busy; still working." }`: the module runs one call at a time, and this one waited its turn
-for 15 s (another call was still on a long step, such as a Logos Blockchain node call or a
-proof). Nothing was done; ask again shortly. Only `busy` tells it apart from a refusal.
+is busy; still working." }` (a method that answers a bool answers `false`). The module runs one
+call at a time, and a call that arrives while another is waiting on a long step (a Logos
+Blockchain node call, up to 15 s for a read and 180 s for a proof; a Program Registry lookup) is
+answered busy at once. **Every app must retry on busy.**
+
+- **`busy: true` ⇒ nothing happened; retry after a short wait** (a second or two, then a little
+  longer each time). The answer comes from the module's generated dispatch before any module
+  code runs: no request is created, nothing is stored, the caller is not even read. No module
+  code ever answers `busy: true` after it has changed anything, so proposing again after busy
+  can never make a second request.
+- **No answer at all (a timeout) ⇒ the call may have been taken:** read `request_status` (or
+  your pending state) before proposing again.
+- Only `busy` tells it apart from a refusal; a refusal (`success: false`, no `busy`) is final for
+  that input.
 
 Accounts are written the way the LEZ wallet writes them: `Public/<base58 id>`
 or `Private/<base58 id>`. Amounts are decimal text in base units, because
