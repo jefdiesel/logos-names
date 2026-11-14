@@ -3441,6 +3441,8 @@ fn settings_json(settings: &Settings, now: u64) -> Value {
             "5y": settings.prices[2].to_string(),
         },
         "claims_until": settings.claims_open(now).then_some(settings.claims_until),
+        // Names this short are locked (placed by the registry's admin), with the reserved list.
+        "locked_up_to": shortlist::LOCKED_UP_TO,
     })
 }
 
@@ -3615,12 +3617,25 @@ impl NamesModule for Names {
                     changed = true;
                     continue;
                 }
+                // A reveal that has landed, for a name not yet remembered (the screen that sent it
+                // closed before asking again): remembered, and the commitment dropped.
+                if saved.revealed.is_some() {
+                    let derived = self.derived(&name);
+                    if registry.resolve(&name, &derived).ok().flatten().is_some_and(|record| record.is_held_by(&derived.id, &saved.owner)) {
+                        self.remember(&registry.program, &name);
+                        commitments.remove(&registry.program, &name);
+                        changed = true;
+                        continue;
+                    }
+                }
                 under_way.push(json!({
                     "name": name,
                     "display": format!("{name}{}", registry::NAME_SUFFIX),
                     "owner": registry::account_text(&saved.owner),
                     "stage": if saved.revealed.is_some() { "revealed" } else { "committed" },
                     "ready_at": saved.ready_at(),
+                    // The last moment a reveal can still land (chain time, milliseconds).
+                    "reveal_by": saved.made.saturating_add(registry::MAX_COMMIT_AGE_MS).saturating_sub(registry::TIME_WINDOW_MS),
                     "tx": saved.revealed,
                 }));
             }

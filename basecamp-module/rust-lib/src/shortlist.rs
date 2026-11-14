@@ -313,11 +313,14 @@ impl ShortList {
 /// the locked list holds besides every name of one to four characters.
 static RESERVED: &str = include_str!("../reserved.txt");
 
+/// Names of up to this many characters are locked (placed by the registry's admin).
+pub const LOCKED_UP_TO: usize = 4;
+
 /// The tier the locked list gives `name`, worked out from the name itself: one to four
 /// characters or a reserved name is locked, anything else normal. For showing what a name
 /// takes without downloading the list; a registration still carries a proof from it.
 pub fn tier_of_name(name: &str) -> u8 {
-    if name.len() <= 4 || RESERVED.lines().any(|reserved| reserved == name) {
+    if name.len() <= LOCKED_UP_TO || RESERVED.lines().any(|reserved| reserved == name) {
         TIER_LOCKED
     } else {
         TIER_NORMAL

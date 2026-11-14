@@ -63,6 +63,8 @@ BRIDGE = r"""
                 return JSON.stringify(null)
             }
             var names = %(names)s
+            // A module still busy with another call: the host answers with something that isn't the module's.
+            if (((%(mock)s).busy || []).indexOf(method) >= 0) return "Timed out waiting for the module"
             if (module === "lez_core")
                 return method === "account_id_from_base58" ? "15145aee" : ""
             if (method === "wallet") {
@@ -79,7 +81,8 @@ BRIDGE = r"""
             if (method === "get_config") return (function(c) { return wrapNet ? ok(c) : JSON.stringify(c) })({ names_network: { id: root.mockNet || "lez-0.3" }, zone: (%(mock)s).zone || { id: "home", name: "Home", channel: "%(home_channel)s", home: true }, names_sequencer: "http://127.0.0.1:3040", registry: %(registry)s, sequencer: (%(mock)s).zone ? "http://127.0.0.1:3041" : "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json", cli: "/Users/you/.local/bin/names", cli_wallet: "/Users/you/.lee/wallet", bridge_key: "%(bridge_key)s", bridge_node: null, module_version: root.neededModule })
             if (method === "normalize") return String(args[0]).toLowerCase().replace(/\.lez$/, "")
             if (method === "mine") return ok({ names: names.filter(function(entry) { return entry.owner === "%(alice)s" }).map(function(entry) {
-                return { name: entry.name, display: entry.name + ".lez", owner: entry.owner, expires: null, never: true, lapsed: false } }), pending: [] })
+                return { name: entry.name, display: entry.name + ".lez", owner: entry.owner, expires: null, never: true, lapsed: false } }), pending: ((%(mock)s).pending || []).map(function(p) {
+                    return Object.assign({}, p, { ready_at: Date.now() + p.ready_in * 60000, reveal_by: Date.now() + p.by_in * 60000 }) }) })
             if (method === "keep") return ok(String(args[0]))
             // hopper.lez and ada.lez are held privately by the names CLI's wallet.
             if (method === "cli_mine" && (%(mock)s).noNames) return ok([])
@@ -365,6 +368,10 @@ SCENARIOS = {
     # The names network on LEZ 0.4: register from a public account only; the Names view and Send say so.
     "register-net04": 'root.setWalletNet("0.4"); Qt.callLater(function() { Qt.callLater(function() { root.show("satoshi") }) })',
     "wallet-names-net04": 'root.openWallet("names"); Qt.callLater(function() { root.setWalletNet("0.4") })',
+    # A public registration under way, with the module busy on two polls: the countdown shows,
+    # and nothing says the module is missing.
+    "names-reveal-countdown": 'root.openWallet("names"); Qt.callLater(function() { root.setWalletNet("0.4") })',
+    "register-net04-rules": 'root.openRegister(); Qt.callLater(function() { root.setWalletNet("0.4") })',
     "send-net04": 'root.setWalletNet("0.4"); Qt.callLater(function() { root.payTo("ada") })',
     "register-pending": 'root.show("knuth")',
     "register-nocli": 'root.show("satoshi"); root.cliPath = ""',
@@ -473,6 +480,9 @@ MOCKS = {
                                               "started": 1792000000000, "finished": 1792000004000, "log_tail": "Downloading names for macos-arm64...\ncurl: (6) Could not resolve host: github.com",
                                               "problem": "Couldn't reach the internet. Check your connection, then try again."}},
     "welcome-wallet": NO_WALLET,
+    "names-reveal-countdown": {"busy": ["pending_requests", "pending_inscriptions"],
+                               "pending": [{"name": "m2-test-111", "display": "m2-test-111.lez", "owner": "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk",
+                                            "stage": "committed", "ready_in": 7, "by_in": 1428, "tx": None}]},
     "welcome-outdated-03": {"status": {"outdated": True, "cli_line": "names 0.1.0", "wallet": False, "public": None, "private": None}, "balance": None},
     "welcome-net04-nocli": {"noNames": True, "status": {"cli": None, "wallet": False, "public": None, "private": None}, "balance": None},
     "welcome-net04-funding": {"noNames": True, "private": "0", "public": "0"},

@@ -811,6 +811,61 @@ export function bridgeNetShown(rows, showEmpty) {
 /// One block per public account of a `bridge_net_balances` read: `{account, title, found,
 /// assets: [{symbol, name, amount}]}`, native LEZ first, then each bridged token with its
 /// decimals. An account the network has never seen has no assets (`found` false).
+/// What a module call's raw reply means: `{kind, value, error}`. `kind` is "ok", "error" (the
+/// module answered with an error), "busy" (no answer in time, or an answer that isn't the
+/// module's, as a host gives while the module is still working on another call) or "missing"
+/// (the host says the module or the method isn't there). Only "missing" asks for an install:
+/// a busy module must never be taken for an absent one.
+export function replyKind(reply) {
+    if (reply === undefined || reply === null || String(reply) === "")
+        return { kind: "busy", value: null, error: "" }
+    var text = typeof reply === "string" ? reply : ""
+    var parsed = reply
+    for (var depth = 0; depth < 2 && typeof parsed === "string"; depth++) {
+        try { parsed = JSON.parse(parsed) } catch (error) { break }
+    }
+    if (parsed && typeof parsed === "object" && parsed.success !== undefined)
+        return parsed.success ? { kind: "ok", value: parsed.value, error: "" } : { kind: "error", value: null, error: String(parsed.error) }
+    var said = text !== "" ? text : JSON.stringify(parsed)
+    if (/no such (module|method)|unknown (module|method)|method not found|module not found|not loaded|is not installed/i.test(said))
+        return { kind: "missing", value: null, error: said }
+    return { kind: "busy", value: null, error: said }
+}
+
+/// Which public registration to ask about next (`register_name`), or null: the first one whose
+/// reveal is due (`ready_at` passed, by `now`), unless an ask is still out and younger than
+/// `patienceMs`. An ask that never answered stops holding the rest after that.
+export function revealNext(pending, now, askedAt, patienceMs) {
+    if (askedAt && now - askedAt < patienceMs)
+        return null
+    for (var i = 0; i < (pending || []).length; i++) {
+        var item = pending[i]
+        if (item.ready_at !== null && item.ready_at !== undefined && now < item.ready_at)
+            continue
+        return item
+    }
+    return null
+}
+
+/// A registration under way as a line: when its reveal goes out and by when it must have.
+/// `clock` turns milliseconds into a time of day.
+export function revealLine(item, now, clock) {
+    var name = String(item.display || item.name)
+    if (item.stage === "revealed")
+        return name + ": the reveal was sent; it shows as yours once it lands."
+    var line = name + ": "
+    if (item.ready_at && now < item.ready_at)
+        line += "the reveal goes out at " + clock(item.ready_at) + " (in " + Math.ceil((item.ready_at - now) / 60000) + " min)"
+    else
+        line += "the reveal is due now and goes out while Names is open"
+    if (item.reveal_by) {
+        var left = Math.max(0, Math.floor((item.reveal_by - now) / 60000))
+        line += left > 120 ? "; it can still be sent for " + Math.floor(left / 60) + " h"
+                           : "; it must be sent by " + clock(item.reveal_by) + " (" + left + " min left)"
+    }
+    return line + "."
+}
+
 /// What the Welcome says when the names tool for `net` ("0.3" or "0.4") is too old for the
 /// module (it has no `module` command). `line` is what the tool says its version is, or "".
 /// It names the network, offers no install (none is published that would fix it), and says that

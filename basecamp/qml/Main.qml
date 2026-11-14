@@ -31,6 +31,7 @@ Item {
     property string cliPath: ""        // the names CLI the module runs, and its wallet folder
     property string cliWallet: ""
     property bool revealing: false     // a pending registration is being asked about
+    property int lockedUpTo: 0         // names this short are placed by the registry's admin (settings.locked_up_to), 0 unknown
     property var record: null          // the name on the plate
     property string forwardedFrom: ""  // the name asked for, when the plate shows where it forwards
     property var page: null
@@ -220,35 +221,66 @@ Item {
 
     /// Asks the names module, returning its value or throwing its error.
     function ask(method, args) {
-        var reply = call("names", method, args)
-        if (!reply || reply.success === undefined)
-            throw new Error("The names module is missing or out of date. In Basecamp, open Applications, click Names and press Install.")
-        if (!reply.success)
-            throw new Error(reply.error)
-        return reply.value
+        if (!bridgeReady)
+            throw new Error("This screen needs to run inside Basecamp.")
+        var raw = logos.callModule("names", method, args)
+        lastReply = shownReply("names." + method, raw)
+        var answer = Logic.replyKind(raw)
+        if (answer.kind === "missing")
+            throw new Error(moduleMissing)
+        if (answer.kind === "busy")
+            throw new Error(moduleBusy)
+        if (answer.kind === "error")
+            throw new Error(answer.error)
+        return answer.value
     }
 
-    readonly property string moduleBusy: "The names module is busy and didn't answer in time; it's asked again shortly."
+    readonly property string moduleBusy: "The wallet is busy; still working."
+    readonly property string moduleMissing: "The names module is missing or out of date. In Basecamp, open Applications, click Names and press Install."
+    // Asks still out, by number: one the host never answers is settled as busy after its
+    // patience, so nothing that waits on it (the reveal, a refresh) stops for good.
+    property var asksOut: ({})
+    property int askCount: 0
+    Timer {
+        interval: 1000
+        repeat: true
+        running: true
+        onTriggered: {
+            var now = Date.now()
+            for (var id in root.asksOut)
+                if (root.asksOut[id].deadline < now)
+                    root.asksOut[id].expire()
+        }
+    }
 
     /// Asks the names module without holding the screen still, for anything
     /// that waits on the wallet. Exactly one of `done(value)` and
     /// `failed(message)` runs, later.
     function askLater(method, args, done, failed, patience) {
+        var id = ++askCount
+        var over = false
+        function finish() {
+            if (over)
+                return false
+            over = true
+            delete asksOut[id]
+            return true
+        }
+        asksOut[id] = { deadline: Date.now() + (patience || 30000) + 5000, expire: function() { if (finish()) failed(moduleBusy) } }
         function settle(reply) {
-            lastReply = shownReply("names." + method, reply)
-            // No reply at all is a call that waited past its time: the module answers one
-            // call at a time, so a slow one (a wallet catching up) can hold the rest.
-            if (reply === undefined || reply === null || String(reply) === "") {
-                failed(moduleBusy)
+            if (!finish())
                 return
-            }
-            reply = parsed(reply)
-            if (!reply || reply.success === undefined)
-                failed("The names module is missing or out of date. In Basecamp, open Applications, click Names and press Install.")
-            else if (!reply.success)
-                failed(reply.error)
+            lastReply = shownReply("names." + method, reply)
+            // No reply, or one that isn't the module's, is a call that waited past its time: the
+            // module answers one call at a time, so a slow one (a wallet catching up, a reveal)
+            // holds the rest. Only the host saying the module isn't there asks for an install.
+            var answer = Logic.replyKind(reply)
+            if (answer.kind === "ok")
+                done(answer.value, parsed(reply))
+            else if (answer.kind === "error")
+                failed(answer.error)
             else
-                done(reply.value, reply)
+                failed(answer.kind === "missing" ? moduleMissing : moduleBusy)
         }
         if (bridgeReady && logos.callModuleAsync)
             logos.callModuleAsync("names", method, args, settle, patience || 30000)
@@ -257,7 +289,8 @@ Item {
                 try {
                     settle(logos.callModule("names", method, args))
                 } catch (error) {
-                    failed(error.message)
+                    if (finish())
+                        failed(error.message)
                 }
             })
     }
@@ -1808,6 +1841,7 @@ Item {
     function loadClaims() {
         askLater("settings", [], function(value) {
             claimsUntil = value && value.claims_until !== undefined ? value.claims_until : null
+            lockedUpTo = value && value.locked_up_to ? Number(value.locked_up_to) : 0
         }, function(message) {
             console.log("names_ui: settings:", message)
         })
@@ -1990,11 +2024,13 @@ Item {
     /// Reads the names this device remembers that the open wallet holds. The
     /// chain keeps no list of names, so this is the module's own memory.
     function loadMine() {
-        if (registry === "" || wallet.length === 0) {
+        if (registry === "") {
             myNames = []
             pendingNames = []
             return
         }
+        // Asked even while the wallet read is failing: the registrations under way are the
+        // module's own (pending.json), and their reveals must go out whatever else is slow.
         askLater("mine", [], function(value) {
             myNames = value.names
             pendingNames = value.pending ? value.pending : []
@@ -2023,13 +2059,12 @@ Item {
     /// due and answers with the stage. This asks for every registration that
     /// is due, one at a time, until each is registered.
     function revealDue() {
-        if (revealing || bridgeReady === false)
+        if (bridgeReady === false)
             return
-        for (var i = 0; i < pendingNames.length; i++) {
-            var item = pendingNames[i]
-            if (item.ready_at !== null && item.ready_at !== undefined && Date.now() < item.ready_at)
-                continue
+        var item = Logic.revealNext(pendingNames, Date.now(), revealing ? revealAskedAt : 0, 200000)
+        if (item !== null) {
             revealing = true
+            revealAskedAt = Date.now()
             askLater("register_name", [item.name, item.owner, "auto"], function(value) {
                 revealing = false
                 if (value && value.stage === "registered") {
@@ -2043,14 +2078,23 @@ Item {
             }, function(message) {
                 revealing = false
                 console.log("names_ui: reveal:", message)
-            })
-            return
+                // Read the registrations again: a failed ask never drops one.
+                loadMine()
+            }, 180000)
         }
+    }
+    property real revealAskedAt: 0
+
+    // A busy wallet read is asked again after a short wait (loadWallet).
+    Timer {
+        id: walletRetry
+        interval: 5000
+        onTriggered: root.loadWallet(false)
     }
 
     Timer {
         id: revealTimer
-        interval: 60000
+        interval: 30000
         repeat: true
         running: root.pendingNames.length > 0
         onTriggered: root.revealDue()
@@ -2059,7 +2103,7 @@ Item {
     Timer {
         interval: 5000
         repeat: true
-        running: root.pending !== null
+        running: root.pending !== null || root.pendingNames.length > 0
         onTriggered: root.clockTick = Date.now()
     }
 
@@ -2104,6 +2148,12 @@ Item {
             if (announce)
                 say(funded.length > 0 ? "Wallet connected." : walletProblem, funded.length === 0)
         }, function(message) {
+            if (message === moduleBusy) {
+                // Busy is not "no wallet": keep what was read, and ask again soon.
+                console.log("names_ui: wallet read waits:", message)
+                walletRetry.restart()
+                return
+            }
             wallet = []
             privateWallet = []
             walletProblem = sentence(message)
@@ -2188,6 +2238,7 @@ Item {
     }
 
     function show(name) {
+        searchField.text = name
         section = "search"
         registering = false
         gettingTokens = false
@@ -2493,7 +2544,7 @@ Item {
         say("Asking the wallet to sign.", false)
         askLater("register_name", [name, owner, "auto"], function(value) {
             pending = null
-            say("Committed. The name finishes registering in about 15 to 20 minutes; keep Basecamp open.", false)
+            say("Committed. The reveal goes out by itself in about 15 minutes while Names is open; Wallet, Names shows when.", false)
             missing = ""
             loadMine()
         }, function(message) {
@@ -6553,6 +6604,17 @@ Item {
                     Text { text: "Names"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
                     NetSwitch {}
                     RunsOn {}
+                    // Public registrations under way: when each reveal goes out, and by when it must.
+                    Repeater {
+                        model: root.pendingNames
+                        Hint {
+                            required property var modelData
+                            Layout.fillWidth: true
+                            color: root.brass
+                            font.pixelSize: root.px(16)
+                            text: Logic.revealLine(modelData, Math.max(root.clockTick, Date.now()), root.clock)
+                        }
+                    }
                     Hint { text: "Your wallet can hold many names. Names held privately can't be linked to each other on chain; a name held publicly shows its holder. Each name is paid into its own private account unless it publishes a public one." }
                     // On another zone the names are still listed, and changed only on Home.
                     Card {
@@ -6567,7 +6629,7 @@ Item {
                     Card {
                         Layout.fillWidth: true
                         Part { Layout.topMargin: 0; text: "Register a name" }
-                        Hint { text: "Pick a name people can pay and message you by. It's private from the start: the chain never learns which account holds it." }
+                        Hint { text: root.namesNet === "0.4" ? "Pick a name people can pay and message you by. On LEZ 0.4 it is registered from your public account, in the open." : "Pick a name people can pay and message you by. It's private from the start: the chain never learns which account holds it." }
                         Action { label: "Register a name"; strong: true; onPressed: root.openRegister() }
                     }
 
@@ -8133,7 +8195,9 @@ Item {
                     RunsOn {}
                     Hint {
                         font.pixelSize: root.px(18)
-                        text: "Pick a name people can use to find your profile and page. Held privately, with a deposit you get back when you release it."
+                        text: root.namesNet === "0.4"
+                            ? "Pick a name people can use to find your profile and page. On LEZ 0.4 it is registered from your public account, in the open, with a deposit you get back when you release it."
+                            : "Pick a name people can use to find your profile and page. Held privately, with a deposit you get back when you release it."
                     }
                     RowLayout {
                         Layout.fillWidth: true
@@ -8171,7 +8235,7 @@ Item {
                     }
                     Hint {
                         font.pixelSize: root.px(15)
-                        text: "1 to 32 letters, digits or hyphens. One- and two-letter names are reserved."
+                        text: "1 to 32 letters, digits or hyphens. " + (root.lockedUpTo > 0 ? "Names of up to " + root.lockedUpTo + " characters, and a reserved list, are placed by the registry's admin." : "Some short names are reserved.")
                     }
                 }
 
