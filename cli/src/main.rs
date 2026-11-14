@@ -606,7 +606,9 @@ enum Command {
         name: String,
     },
     /// Pay a name. By default the payment goes to the name's private receiving keys:
-    /// the chain shows neither recipient nor amount; proving it takes a few minutes.
+    /// paid from a private account (the default), the chain shows neither payer, recipient
+    /// nor amount; proving it takes a few minutes. Paid from a public account, it shows the
+    /// payer, the amount and the account paid, which anyone who resolves the name can tie to it.
     /// The keys are fixed per name: anyone who resolves it can tell which names share
     /// them and compute the wallet account they come from. On LEZ 0.4 every payment to
     /// the name arrives at that one account, as a credit its holder claims with
@@ -620,8 +622,8 @@ enum Command {
         #[arg(value_parser = tokens::parse_amount, allow_hyphen_values = true)]
         amount: u128,
         /// Account to pay from; the wallet must hold its key. Defaults to the private
-        /// account from `names setup`, which hides the payer too; a public one is seen
-        /// paying.
+        /// account from `names setup`, which hides the payer, the recipient and the amount;
+        /// from a public one the chain shows the payer, the amount and the account paid.
         #[arg(long, value_parser = parse_account)]
         from: Option<AccountId>,
         /// Pay the name's public account instead of its private keys.
@@ -2339,7 +2341,7 @@ impl Client {
         let before = self.wallet.get_account_balance(from).await?;
 
         println!("paying {amount} privately to {name}{NAME_SUFFIX}; generating the proof");
-        println!("(paying from a public account shows that account as the payer; pay from a Private/ account to hide it)");
+        println!("(paying from a public account shows that account as the payer, the amount, and the account paid, which anyone who resolves {name} can tie to it; pay from a Private/ account to hide all three)");
         let (hash, _) = NativeTokenTransfer(&self.wallet)
             .transfer(AccountIdentity::Public(from), recipient, amount, CreditDelivery::Automatic)
             .await

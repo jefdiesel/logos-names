@@ -5934,7 +5934,7 @@ Item {
                             }
                         }
                         Hint {
-                            text: root.cliNames.length > 0 ? "Anyone can pay any of these from Names. It arrives privately, in that name's own private account, and the chain doesn't show who paid you or how much."
+                            text: root.cliNames.length > 0 ? "Anyone can pay any of these from Names. It arrives privately, in that name's own private account. Paid from a private account, the chain doesn't show who paid you or how much; paid from a public account, it shows both."
                                 : "You don't have a name yet. With one, people pay you by name, privately."
                         }
                     }

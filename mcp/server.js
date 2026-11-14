@@ -42,8 +42,9 @@ const tools = [
     description:
       "Look up a Logos name. Returns whether it can be paid privately, its public account " +
       "if the holder chose to publish one, and its text entries (such as chat, inbox and " +
-      "agent). By default a name is paid privately with `names pay <name>`, and the chain shows " +
-      "neither recipient nor amount. A name's receiving keys are fixed: anyone who resolves it " +
+      "agent). By default a name is paid privately with `names pay <name>` from a private " +
+      "account, and the chain shows neither payer, recipient nor amount; paid from a public " +
+      "account, the chain shows the payer, the amount and the account paid. A name's receiving keys are fixed: anyone who resolves it " +
       "can tell which names share them and compute the wallet account they come from; on LEZ " +
       "0.4 every payment to the name arrives at that one account. " +
       "A published public account shows its balance and history to anyone. " +

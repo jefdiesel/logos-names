@@ -92,8 +92,9 @@ names set-logos-account myname &lt;address&gt;  <span class="c"># link a Logos a
 <pre><code>names pay jef 1000                  <span class="c"># from your private account: nobody sees payer, recipient or amount</span>
 names pay shop 1000 --public        <span class="c"># to a public account the holder published</span></code></pre>
   <p>Names are private by default. Each carries private receiving keys, made when it is
-  registered, and payments go to them: the chain shows neither the recipient nor the
-  amount. The keys are fixed per name: anyone who resolves it can tell which names share
+  registered, and payments go to them. Paid from a private account (the default), the
+  chain shows neither payer, recipient nor amount; paid from a public account, it shows the
+  payer, the amount and the account paid. The keys are fixed per name: anyone who resolves it can tell which names share
   them and compute the wallet account they come from. (On testnet 0.3 each payment from
   <code>names pay</code> lands on a fresh account only the recipient can link; on LEZ 0.4
   every payment arrives at the keys' own account.) A holder can

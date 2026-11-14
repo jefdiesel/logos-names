@@ -281,8 +281,13 @@ own clock in milliseconds and a grace period of 30 days (2,592,000,000 ms):
 
 What a private payment hides depends on where it is sent from. On LEZ 0.4 every
 payment to a name arrives at the one account its keys derive, which anyone who
-resolves the name can compute (section 1). Sent from a public account, the sender and the amount are visible. Sent
-from a private account, neither is.
+resolves the name can compute (section 1). Sent from a public account, the payer,
+the amount and the account paid are in the clear, so anyone who resolves the name
+sees that payment (and the first one leaves a public recovery note at that account).
+Sent from a private account (what clients do by default), the transfer runs inside
+the proof and its credit is sealed to the name's viewing key: an observer can't tell
+that the name was paid, how much, or by whom, and the holder's later claim spends by
+nullifier, so it can't be linked either.
 
 **Reverse (account to name).** Read the registry's actor state on the account and
 decode `PrimaryName`. This is only a claim, set by the account itself. A client
