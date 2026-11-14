@@ -99,6 +99,9 @@ BRIDGE = r"""
                     public: { account: "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", balance: mock.public !== undefined ? mock.public : "1250000" },
                     waiting: mock.waiting || null })
             }
+            // The bridge test network (LEZ 0.4), as bridge_net_balances answers from its last read.
+            if (method === "bridge_net_balances") return ok(mock.bridgeNet || %(bridge_net)s)
+            if (method === "bridge_net_watch") return ok(args[1] ? [String(args[0])] : [])
             if (method === "activity") return ok(mock.activity || [
                 { id: "a1", at: Date.now() - 2 * 3600000, kind: "bridge", chain: "logos", from: "66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b", to: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", amount: "1000000", state: "in_block" },
                 { id: "a2", at: Date.now() - 2 * 3600000 - 120000, kind: "split", chain: "logos", from: "66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b", amount: "1000000", fee: "2018", state: "in_block" },
@@ -228,6 +231,18 @@ BRIDGE = r"""
 """
 
 HOME_CHANNEL = "01" * 32
+# The bridge test network (LEZ 0.4) as bridge_net_balances answers it, from the live chain's
+# replies of 2026-11-13 (basecamp-module/rust-lib/testdata/bridge-net): the owner's account holds
+# 0.1 wrapped ETH, the second public account was never seen there.
+NET04_TOKENS = [{"definition": "9ANdXnWBPygeh3mJEDqAtk2AHG6uzZATeyUNyfvZBRVJ", "eth_token": "0xac207b9bfebf3ef7c26297ea6abadeeccc4aa71e", "symbol": "dUSDC", "decimals": 6, "name": "Wrapped dUSDC (demo)"},
+                {"definition": "DbPGo6FeRLp7NaUWxQGC1WXpJkSQe1jbAqYVMQkCuuPw", "eth_token": "0x0000000000000000000000000000000000000000", "symbol": "wETH", "decimals": 18, "name": "Wrapped Sepolia ETH (demo)"}]
+def net04_held(dusdc, weth):
+    return [dict(NET04_TOKENS[0], amount=dusdc), dict(NET04_TOKENS[1], amount=weth)]
+NET04_READ = {"channel": "b4a9c0de162a2a1b0b6ee9840a90ae90e64bdb49414236679a03e1d86bcc99be", "height": 572, "read_at": 1792000000, "bridge": True,
+              "tokens": NET04_TOKENS, "token_problem": None, "reset_at": None,
+              "accounts": [{"account": "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "found": True, "native": "23786858", "tokens": net04_held("0", "100000000000000000"), "other_tokens": 0},
+                           {"account": "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", "found": False, "native": "0", "tokens": net04_held("0", "0"), "other_tokens": 0}]}
+NET04 = {"network": "bridge test network", "version": "LEZ 0.4", "rpc": "https://lez.nameswallet.app/", "read": NET04_READ, "updating": False, "error": None, "private_accounts": 4}
 ZONE_B = "03" * 32
 # Two zones as zone_list answers them: Home (the testnet) and a second chain with a wallet of its own.
 def zones(current, b_wallet=True):
@@ -301,6 +316,18 @@ SCENARIOS = {
     "wallet-add-noprogram": 'root.openWallet("add")',
     "wallet-bridge": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home"); Qt.callLater(function() { root.openGetTokens() })',
     "wallet-down": 'root.openWallet("home")',
+    "wallet-net03": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home")',
+    "wallet-net03-light": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home")',
+    "wallet-net04": 'root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4") })',
+    "wallet-net04-light": 'root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4") })',
+    "wallet-net04-down": 'root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4") })',
+    "wallet-net04-never": 'root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4") })',
+    "wallet-net04-reset": 'root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4") })',
+    "wallet-net04-many": 'root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4") })',
+    "wallet-net04-many-open": 'root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); root.bridgeNetShowEmpty = true })',
+    "wallet-net04-watch": 'root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); bridgeNetWatchField.text = "Public/0OIl"; root.bridgeNetWatch(bridgeNetWatchField.text, true) })',
+    "wallet-net04-activity": 'root.go("activity"); root.loadActivity()',
+    "wallet-net04-send": 'root.openWallet("home"); root.openSend({ id: "lez-public", kind: "lez", title: "LEZ", definition: "", fromPrivate: false }, "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR"); sendAmount.text = "1000"',
     "wallet-waiting": 'root.tokenProgram = "Tok3nProgram1111111111111111111111111111111"; root.openWallet("home")',
     "home-reply": 'root.boardReply("Jef0x")',
     "anon-off": 'root.anonOn = true',
@@ -433,6 +460,24 @@ MOCKS = {
     "welcome-moved": {"private": "5000000", "public": "1000000"},
     "pay-account": {"private": "250000000", "public": "1250000"},
     "wallet-down": {"nodeDown": True},
+    # The owner's wallet as the real-setup test read it: 14 public accounts, one holding something.
+    "wallet-net04-many": {"bridgeNet": dict(NET04, not_read=0, read=dict(NET04_READ, accounts=[NET04_READ["accounts"][0]] + [
+        {"account": "Public/" + a, "found": False, "native": "0", "tokens": net04_held("0", "0"), "other_tokens": 0} for a in
+        ["WJhfAxHvoPvFGZ1DYFLvwZLETEGqWx3kbpz5jdoDVAb", "4FxHAXMqG45em3UZPYzVLEKGzWm2JNS1JSRZMSspFgtP", "6Fbtv64VQE1NciFYqmZdiNMSxud1sGLQPN1Y7iPsMipm", "74Xmu712RoXa9GuGcEox1S6cCseckVr1KVH8Uwfzy2F6",
+         "8sWBKiKPR56CTc55yvD61Gnm9iKeaeRg2hEMjqvC6A2b", "9W9huNeAds11pdGpMijrdhTkSQ8upNudRnrZJbNNWfoW", "BHJQN5ePVJoLTkfHF6jk2Nwio3gJcqa4joNpdtphxfVB", "CCE8TqnKQavGSnqzwoUf9T3mfpNJmFtmnwb4252UiaY9",
+         "CKBM6zaH6nhpYGM9WkBXKLpFhCtYVp5Z2ULy5mBFACjr", "CnhoAmXXnZeLS2Q7RGPwxnK5G2LYFyEzoLQibtKAycqE", "F3MsAVK7RXyktPT1hpHYgBpiLq8TfD9FA1dQTvEeaBb9"]]))},
+    "wallet-net04-watch": {"bridgeNet": dict(NET04, watched=["Public/BVDcg8SbSdCTKzx4mJbSpVgEuaoPEMhxmmRwvVCGyBnD"], read=dict(NET04_READ, accounts=NET04_READ["accounts"] + [
+        {"account": "Public/BVDcg8SbSdCTKzx4mJbSpVgEuaoPEMhxmmRwvVCGyBnD", "found": True, "native": "99799912984428", "tokens": net04_held("0", "0"), "other_tokens": 0, "watched": True}]))},
+    "wallet-net04-down": {"bridgeNet": dict(NET04, error="can't reach the bridge test network: it answered HTTP 502 instead of a reading")},
+    "wallet-net04-never": {"bridgeNet": dict(NET04, read=None, error="can't reach the bridge test network: timed out")},
+    "wallet-net04-reset": {"bridgeNet": dict(NET04, read=dict(NET04_READ, height=12, reset_at=1791999000,
+                           accounts=[dict(NET04_READ["accounts"][0], native="0", tokens=net04_held("0", "0"), found=False), NET04_READ["accounts"][1]]))},
+    "wallet-net04-activity": {"activity": [
+        {"id": "n1", "at": 1792000000, "kind": "arrived", "chain": "lez-0.4", "zone": "bridge-0.4", "network": "bridge-0.4", "network_name": "bridge test network",
+         "to": "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "amount": "100000000000000000", "token": "DbPGo6FeRLp7NaUWxQGC1WXpJkSQe1jbAqYVMQkCuuPw", "symbol": "wETH", "decimals": 18, "state": "arrived"},
+        {"id": "n2", "at": 1791999000, "kind": "arrived", "chain": "lez-0.4", "zone": "bridge-0.4", "network": "bridge-0.4", "network_name": "bridge test network",
+         "to": "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "amount": "23786858", "state": "arrived"},
+        {"id": "n3", "at": 1791990000, "kind": "pay", "chain": "lez", "name": "ada", "amount": "250000", "fee": "4088", "state": "done"}]},
     "wallet-chain-notready-page": {"notReady": True},
     "wallet-chain-ready-page": {"notReady": True},
     "wallet-claim": {"waiting": {"count": "2", "total": "4000000"}},
@@ -451,6 +496,8 @@ MOCKS = {
                                       "text": "Line one of a longer testimonial.\nLine two, with a very long unbroken word: " + "x" * 300}},
     "inscribe-fake-chosen": {"inscription": {"publisher": {"status": "mismatch", "publisher": "jef", "module": "testimonial_ui", "version": "0.2.0"}}},
 }
+
+MOCKS["wallet-net04-many-open"] = MOCKS["wallet-net04-many"]
 
 def main():
     qml, out_dir = sys.argv[1], sys.argv[2]
@@ -473,11 +520,15 @@ def main():
             "mock": json.dumps(MOCKS.get(scenario, {})),
             "bridge_key": "" if scenario == "get-tokens" else "8e3b0f4a2c71d95e6a0b4c8d2f1e7a3954c6b0d8e2f4a6c8b0d2e4f6a8c0b2d4",
             "home_channel": HOME_CHANNEL,
+            "bridge_net": json.dumps(NET04),
             "scenario": (SCENARIOS[scenario] % dict(filled, zone_request=zone_request(scenario == "approve-zone"))) if "%(zone" in SCENARIOS[scenario] else SCENARIOS[scenario], "out": out, "height": 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "name", "settings-accounts", "settings-oldcli", "settings-account-new", "settings-network") or scenario.startswith("settings-zones") else 1100 if scenario.startswith("approve-") and "zone" in scenario else 1500 if scenario.startswith("get-tokens") or scenario.startswith("wallet") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1100 if scenario.startswith("inscribe") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
         }
         # Beside Main.qml, so its relative imports (logic.mjs) resolve.
         with tempfile.NamedTemporaryFile("w", suffix=".qml", delete=False, dir=os.path.join(HERE, "..", "qml")) as handle:
-            handle.write(source.replace(marker, marker + bridge, 1))
+            # A "-light" scenario reads the light palette directly. Never through Theme.settings:
+            # that is design-system.ini, shared by every Logos app and render on the machine.
+            themed = source.replace("Theme.palette", "Theme.lightTheme").replace("Theme.isDark", "false") if scenario.endswith("-light") else source
+            handle.write(themed.replace(marker, marker + bridge, 1))
         try:
             result = subprocess.run([qml, handle.name], capture_output=True, text=True, timeout=60)
         except subprocess.TimeoutExpired:

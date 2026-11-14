@@ -2,6 +2,7 @@
 // engine cannot run in CI. Run with: node basecamp/logic.test.mjs
 import { atLeast, someAmount, entryShown, amountRead, amountProblem, amountDigits, AMOUNT_MAX, CHAIN_AMOUNT_MAX, jobProblem, tokenToProblem, tokenSendProves, tokenShown, feeEstimate, feePaid, accountTitle, accountsShown, publisherLine, durationWords, keyShown, chainToProblem, stakeLines, rewardsLine, grouped, addDigits, walletAssets, subDigits, walletGroups, stakeTable, activityLine, activityFor, agoShown, readNote, chainKeyTitle, chainKeySub, chainUsable, chainLaterNote } from "./qml/logic.mjs";
 import { readFileSync } from "node:fs";
+import { publicAccounts, decimalShown, bridgeNetStatus, bridgeNetRows, bridgeNetShown, publicIdProblem, NET_03, NET_04 } from "./qml/logic.mjs";
 
 let failures = 0;
 const check = (label, got, want) => {
@@ -167,19 +168,19 @@ check("subDigits", [subDigits("1000", "1"), subDigits("210939029", "210939029"),
   const now = 1792000000000;
   const KEY = "7a6223abde07c0c278d203973fd233ab3e47b2bfa53c8ed3d74d5f453a552a2a";
   const bridge = { kind: "bridge", chain: "logos", from: KEY, to: "Public/9W9huNeAds11pdGpMijrdhTkSQ8upNudRnrZJbNNWfoW", amount: "1000000", state: "in_block", at: now - 2 * 3600 * 1000 };
-  check("activityLine bridge", activityLine(bridge, now), { title: "Bridge to LEZ", sub: "from key 7a6223ab…2a2a into Public 9W9huNeA…WfoW", amount: "1,000,000", sign: "-", state: "In a block · arrives in about 12 h", tone: "warn", ago: "2 h ago" });
+  check("activityLine bridge", activityLine(bridge, now), { title: "Bridge to LEZ 0.3", sub: "from key 7a6223ab…2a2a into Public 9W9huNeA…WfoW", amount: "1,000,000", sign: "-", state: "In a block · arrives in about 12 h", tone: "warn", ago: "2 h ago" });
   check("activityLine arrived", activityLine({ kind: "arrived", chain: "lez", to: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", amount: "5", state: "arrived", at: now }, now).sign, "+");
   check("activityLine split", activityLine({ kind: "split", chain: "logos", from: KEY, amount: "1000000", fee: "2018", state: "in_block", at: now }, now).title, "Made a note of exactly 1,000,000");
   check("activityLine failed pay", activityLine({ kind: "pay", chain: "lez", name: "ada", amount: "7", state: "failed", at: now }, now).tone, "bad");
-  check("activityLine receive_privately", [activityLine({ kind: "receive_privately", chain: "lez", name: "xferecho", fee: { about: "400000", at_most: "900000", paid: "417376" }, state: "done", at: now }, now).title, activityLine({ kind: "receive_privately", chain: "lez", name: "xferecho", fee: { about: "400000", at_most: "900000", paid: "417376" }, state: "done", at: now }, now).sub], ["Private payments to xferecho", "on LEZ, new receiving keys · fee 417,376"]);
-  check("activityLine bridge not followed", activityLine(Object.assign({}, bridge, { to_before: null, followed: false }), now).state, "In a block · its arrival on LEZ can't be followed here");
+  check("activityLine receive_privately", [activityLine({ kind: "receive_privately", chain: "lez", name: "xferecho", fee: { about: "400000", at_most: "900000", paid: "417376" }, state: "done", at: now }, now).title, activityLine({ kind: "receive_privately", chain: "lez", name: "xferecho", fee: { about: "400000", at_most: "900000", paid: "417376" }, state: "done", at: now }, now).sub], ["Private payments to xferecho", "on LEZ 0.3, new receiving keys · fee 417,376"]);
+  check("activityLine bridge not followed", activityLine(Object.assign({}, bridge, { to_before: null, followed: false }), now).state, "In a block · its arrival on LEZ 0.3 can't be followed here");
   check("activityLine nothing claimed", activityLine({ kind: "receive", chain: "lez", claimed: false, state: "done", at: now }, now).title, "Nothing claimed");
   // A send whose module restarted mid-way, or whose job record was pruned: not "failed", not "done".
   const unsure = activityLine({ kind: "pay_account", chain: "lez", to: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", amount: "100", state: "unknown", at: now }, now);
   check("activityLine unknown", [unsure.state, unsure.tone], ["Outcome unknown · check the balance", "warn"]);
   // An arrival whose window had a fee the module couldn't know claims no figure, only a least one.
   const least = activityLine({ kind: "arrived", chain: "lez", to: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", amount: null, at_least: "95648", state: "arrived", at: now }, now);
-  check("activityLine arrived at least", [least.amount, least.sign, least.sub], ["", "", "in Public CCVd76Tk…pKnk on LEZ · at least 95,648"]);
+  check("activityLine arrived at least", [least.amount, least.sign, least.sub], ["", "", "in Public CCVd76Tk…pKnk on LEZ 0.3 · at least 95,648"]);
   check("activityFor", activityFor([bridge, { kind: "pay", name: "ada" }], KEY).length, 1);
   // Zones (LP-0022): the same keys are the same LEZ account ID on every zone, so an account's
   // page lists the zone in use only; a Logos Blockchain key's page and a name's are not narrowed.
@@ -210,42 +211,42 @@ check("subDigits", [subDigits("1000", "1"), subDigits("210939029", "210939029"),
   check("activityLine bridge overdue", [activityLine(bridge, now).state, activityLine(Object.assign({}, bridge, { at: Math.floor(now / 1000) - 259200 }), now).state, activityLine(Object.assign({}, bridge, { at: 1700000000 }), now).state], ["In a block · arrives in about 12 h", "In a block · should have arrived by now; check the balance", "In a block · should have arrived by now; check the balance"]);
   // single-bridge-false-arrival-on-foreign-credit-at-least-amount: bridges matched together
   // by one credit are hedged, one matched by its own credit is not.
-  check("activityLine bridge arrived hedged", [activityLine(Object.assign({}, bridge, { state: "arrived" }), now).state, activityLine(Object.assign({}, bridge, { state: "arrived", maybe: true }), now).state], ["Arrived on LEZ", "A credit of the same total as your bridges reached LEZ"]);
+  check("activityLine bridge arrived hedged", [activityLine(Object.assign({}, bridge, { state: "arrived" }), now).state, activityLine(Object.assign({}, bridge, { state: "arrived", maybe: true }), now).state], ["Arrived on LEZ 0.3", "A credit of the same total as your bridges reached LEZ"]);
   // late-or-expired-bridge-arrival-logged-twice / expired-bridge-takes-later-bridges-credit:
   // a bridge not credited within 2 days is overdue (still followed by its receipt), and one
   // credited after that arrives late, as one row.
   const overdue = activityLine(Object.assign({}, bridge, { state: "expired", followed: true }), now);
   check("activityLine bridge expired", [overdue.state, overdue.tone, activityLine(Object.assign({}, bridge, { state: "expired", followed: false }), now).state],
-    ["Not credited on LEZ after 2 days · still followed; check the balance", "warn", "Not seen on LEZ after 2 days · check the balance"]);
-  check("activityLine bridge arrived late", activityLine(Object.assign({}, bridge, { state: "arrived", late: true }), now).state, "Arrived on LEZ, late");
+    ["Not credited on LEZ 0.3 after 2 days · still followed; check the balance", "warn", "Not seen on LEZ 0.3 after 2 days · check the balance"]);
+  check("activityLine bridge arrived late", activityLine(Object.assign({}, bridge, { state: "arrived", late: true }), now).state, "Arrived on LEZ 0.3, late");
   // claim-entry-not-on-credited-accounts-page-and-shown-as-credit-on-payer: the module's
   // reply for a live 2-account claim (payer E3, two accounts credited 2,000,000 each).
   const claim = { all: true, amount: "4000000", at: 1794204085, chain: "lez", fee: { about: "5070616", at_most: "8239751", paid: "6972097" }, from: "Private/E3j7HPx3ZhoqRnB9BtMsGjWixbms3n9kamGKXKkjiuy5", id: "1794204085-receive", kind: "receive", received: { "Private/6MJ8W5vH7vTLPpCcnuA87YU3foxrx676CkzvtGHfBJXC": "2000000", "Private/9drrc1ARLeTXhHrgV8r54iNiWDD6Rj3yUMxQJTditnaK": "2000000" }, seq: 10, state: "done" };
   const onPage = (entry, who) => activityFor([entry], who).map((x) => { const l = activityLine(x, 1794205600000, who); return [l.title, l.sign + l.amount, l.sub]; });
-  check("claim on a credited page", onPage(claim, "Private/9drrc1ARLeTXhHrgV8r54iNiWDD6Rj3yUMxQJTditnaK"), [["Claimed waiting payments", "+2,000,000", "on LEZ, into your private accounts"]]);
+  check("claim on a credited page", onPage(claim, "Private/9drrc1ARLeTXhHrgV8r54iNiWDD6Rj3yUMxQJTditnaK"), [["Claimed waiting payments", "+2,000,000", "on LEZ 0.3, into your private accounts"]]);
   check("claim on the other credited page", onPage(claim, "Private/6MJ8W5vH7vTLPpCcnuA87YU3foxrx676CkzvtGHfBJXC").length, 1);
-  check("claim on the payer's page", onPage(claim, claim.from), [["Paid the fee to claim waiting payments", "-6,972,097", "on LEZ, into your other private accounts"]]);
+  check("claim on the payer's page", onPage(claim, claim.from), [["Paid the fee to claim waiting payments", "-6,972,097", "on LEZ 0.3, into your other private accounts"]]);
   check("claim in the wallet's history", [activityLine(claim, 1794205600000).sign, activityLine(claim, 1794205600000).amount], ["+", "4,000,000"]);
   // The live 1-account claim (seq 9): its `to` is the credited account.
   const one = Object.assign({}, claim, { amount: "2000000", fee: { about: "5070616", at_most: "8239751", paid: "5070616" }, received: { "Private/6MJ8W5vH7vTLPpCcnuA87YU3foxrx676CkzvtGHfBJXC": "2000000" }, to: "Private/6MJ8W5vH7vTLPpCcnuA87YU3foxrx676CkzvtGHfBJXC" });
   check("one claim, payer and credited pages", [onPage(one, one.from)[0][1], onPage(one, one.to)[0][1]], ["-5,070,616", "+2,000,000"]);
   // A payer credited too: its own credit, with the fee it paid beside it.
   const both = Object.assign({}, claim, { received: { [claim.from]: "3000000" } });
-  check("claim payer also credited", onPage(both, claim.from), [["Claimed waiting payments", "+3,000,000", "on LEZ, into your private accounts · fee 6,972,097"]]);
+  check("claim payer also credited", onPage(both, claim.from), [["Claimed waiting payments", "+3,000,000", "on LEZ 0.3, into your private accounts · fee 6,972,097"]]);
   // partial-claim-job-and-pages-say-nothing-true: 1 of 2 claims landed (R1), R2's credit waits,
   // the payer paid one claim's fee. Partly done on all three pages, each in its own words.
   const R1 = "Private/6MJ8W5vH7vTLPpCcnuA87YU3foxrx676CkzvtGHfBJXC", R2 = "Private/9drrc1ARLeTXhHrgV8r54iNiWDD6Rj3yUMxQJTditnaK";
   const partial = Object.assign({}, claim, { amount: "1000000", to: R1, received: { [R1]: "1000000" }, left: { [R2]: "1000000" }, fee: { about: "10141232", at_most: "16479502", paid: "5070616" }, state: "partial" });
-  check("partial claim on the credited page", onPage(partial, R1), [["Claimed waiting payments", "+1,000,000", "on LEZ, into your private accounts · some still wait"]]);
-  check("partial claim on the waiting page", onPage(partial, R2), [["Still waiting to be claimed", "1,000,000", "on LEZ, not claimed yet: claim it with Receive"]]);
-  check("partial claim on the payer's page", onPage(partial, claim.from), [["Paid the fee to claim waiting payments", "-5,070,616", "on LEZ, into your other private accounts"]]);
+  check("partial claim on the credited page", onPage(partial, R1), [["Claimed waiting payments", "+1,000,000", "on LEZ 0.3, into your private accounts · some still wait"]]);
+  check("partial claim on the waiting page", onPage(partial, R2), [["Still waiting to be claimed", "1,000,000", "on LEZ 0.3, not claimed yet: claim it with Receive"]]);
+  check("partial claim on the payer's page", onPage(partial, claim.from), [["Paid the fee to claim waiting payments", "-5,070,616", "on LEZ 0.3, into your other private accounts"]]);
   check("partial claim state", [activityLine(partial, 1794205600000).state, activityLine(partial, 1794205600000).tone], ["Partly done · see what's left", "warn"]);
   // incoming-payment-shown-as-outgoing-on-receiving-accounts-page: a payment into A showed
   // "Paid Public A ... -1,000" on A's own page.
   const A = "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", P = "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z";
   const paid = { kind: "pay_account", chain: "lez", from: P, to: A, amount: "1000", private: true, fee: { about: null, at_most: null, paid: "70000" }, state: "done", at: 1794200000 };
-  check("payment on the payee's page", onPage(paid, A), [["Received from Private yGrPEbP3…fe4Z", "+1,000", "on LEZ"]]);
-  check("payment on the payer's page", onPage(paid, P), [["Paid Public CCVd76Tk…pKnk", "-1,000", "on LEZ, from your private account · fee 70,000"]]);
+  check("payment on the payee's page", onPage(paid, A), [["Received from Private yGrPEbP3…fe4Z", "+1,000", "on LEZ 0.3"]]);
+  check("payment on the payer's page", onPage(paid, P), [["Paid Public CCVd76Tk…pKnk", "-1,000", "on LEZ 0.3, from your private account · fee 70,000"]]);
   check("token on the payee's page", onPage({ kind: "token_send", chain: "lez", from: P, to: A, amount: "50", state: "done", at: 1794200000 }, A)[0].slice(0, 2), ["Received a token from Private yGrPEbP3…fe4Z", "+50"]);
   // A bridge in a block hasn't reached LEZ yet: no "+" until it arrives.
   check("bridge on the LEZ account's page", onPage(Object.assign({}, bridge, { to: A, fee: "100000" }), A)[0].slice(1), ["1,000,000", "from key 7a6223ab…2a2a into Public CCVd76Tk…pKnk"]);
@@ -260,7 +261,7 @@ check("subDigits", [subDigits("1000", "1"), subDigits("210939029", "210939029"),
   check("payee page: a token that failed", onPage({ kind: "token_send", chain: "lez", from: P, to: A, amount: "50", state: "failed", at: 1794200000 }, A)[0].slice(0, 2), ["Token payment from Private yGrPEbP3…fe4Z", "50"]);
   check("payee page: a failed bridge", onPage(Object.assign({}, bridge, { to: A, state: "failed" }), A)[0][1], "1,000,000");
   const failedClaim = Object.assign({}, claim, { state: "failed" });
-  check("credited page: a failed claim", onPage(failedClaim, "Private/9drrc1ARLeTXhHrgV8r54iNiWDD6Rj3yUMxQJTditnaK"), [["Claim of waiting payments", "2,000,000", "on LEZ, into your private accounts"]]);
+  check("credited page: a failed claim", onPage(failedClaim, "Private/9drrc1ARLeTXhHrgV8r54iNiWDD6Rj3yUMxQJTditnaK"), [["Claim of waiting payments", "2,000,000", "on LEZ 0.3, into your private accounts"]]);
   check("wallet history: a failed claim and a failed send", [activityLine(failedClaim, 1794205600000).sign, activityLine(Object.assign({}, paid, { state: "failed" }), 1794205600000).sign], ["", ""]);
   check("payer page: a payment in flight still leaves", onPage(Object.assign({}, paid, { state: "sending" }), P)[0][1], "-1,000");
   check("Logos Blockchain send into a key: in a block is received", onPage({ kind: "send", chain: "logos", from: KEY, to: "39".repeat(32), amount: "700", state: "in_block", at: 1794200000 }, "39".repeat(32))[0].slice(0, 2), ["Received on the Logos Blockchain", "+700"]);
@@ -303,6 +304,53 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     [true, false, false, false, false, false, true, true, false, false]);
   check("history: an inscription", [activityLine({ kind: "inscribe", chain: "logos", from: K1, hash: "ab".repeat(32), fee: "1086", state: "in_block", at: 1794200000 }, 1794205600000)].map(l => [l.title, l.sub, l.amount, l.sign, l.state]),
     [["Inscribed a testimonial", "on the Logos Blockchain, from key e3635f20…ce07 · fee 1,086", "", "", "In a block"]]);
+}
+
+// The bridge test network (LEZ 0.4): accounts asked about, amounts with decimals, status lines.
+{
+  const OWNER = "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk";
+  const OTHER = "BVDcg8SbSdCTKzx4mJbSpVgEuaoPEMhxmmRwvVCGyBnD";
+  check("net names", [NET_03.version + " " + NET_03.name, NET_04.version + " " + NET_04.name], ["LEZ 0.3 public Logos testnet", "LEZ 0.4 bridge test network"]);
+  check("publicAccounts from both reads, once, no private",
+    publicAccounts({ public: { account: OWNER, balance: "0" }, accounts: [{ account: "Public/" + OTHER, kind: "public" }, { account: "Private/" + OTHER, kind: "private" }] },
+                   [{ account: "Public/" + OWNER, kind: "public" }]),
+    ["Public/" + OWNER, "Public/" + OTHER]);
+  check("publicAccounts nothing read", [publicAccounts(null, null), publicAccounts(undefined, [])], [[], []]);
+  check("publicAccounts refuses junk", publicAccounts({ public: { account: "not an id" } }, [{ account: "Public/0OIl", kind: "public" }]), []);
+  check("decimalShown", [decimalShown("100000000000000000", 18), decimalShown("123456789", 6), decimalShown("0", 6), decimalShown("1234567000000", 6), decimalShown("23786858", 0), decimalShown("1", 18), decimalShown("000100", 2)],
+    ["0.1", "123.456789", "0", "1,234,567", "23,786,858", "0.000000000000000001", "1"]);
+  check("decimalShown past 2^53", decimalShown("340282366920938463463374607431768211455", 18), "340,282,366,920,938,463,463.374607431768211455");
+  const clock = (s) => "t" + s;
+  const read = { channel: "b4a9", height: 1572, read_at: 100, bridge: true, token_problem: null, reset_at: null,
+    tokens: [{ definition: "9ANd", symbol: "dUSDC", decimals: 6, name: "Wrapped dUSDC (demo)" }, { definition: "DbPG", symbol: "wETH", decimals: 18, name: "Wrapped Sepolia ETH (demo)" }],
+    accounts: [{ account: "Public/" + OWNER, found: true, native: "23786858", other_tokens: 0,
+                 tokens: [{ definition: "9ANd", symbol: "dUSDC", decimals: 6, name: "Wrapped dUSDC (demo)", amount: "0" }, { definition: "DbPG", symbol: "wETH", decimals: 18, name: "Wrapped Sepolia ETH (demo)", amount: "100000000000000000" }] },
+               { account: "Public/" + OTHER, found: false, native: "0", other_tokens: 0, tokens: [] }] };
+  check("bridgeNetStatus reading", bridgeNetStatus(null, clock), { line: "Reading the bridge test network…", tone: "plain", reset: "" });
+  check("bridgeNetStatus never read, down", bridgeNetStatus({ read: null, error: "can't reach the bridge test network: it answered HTTP 502 instead of a reading" }, clock),
+    { line: "Can't read the bridge test network: it answered HTTP 502 instead of a reading", tone: "bad", reset: "" });
+  check("bridgeNetStatus fresh", bridgeNetStatus({ read, error: null }, clock), { line: "Updated t100 · block 1,572", tone: "plain", reset: "" });
+  check("bridgeNetStatus stale", bridgeNetStatus({ read, error: "can't reach" }, clock).line, "Can't reach the bridge test network now. Showing what it said at t100.");
+  check("bridgeNetStatus reset", bridgeNetStatus({ read: Object.assign({}, read, { reset_at: 90 }) }, clock).reset, "The bridge test network was reset at t90. What was held there before is gone; balances start again.");
+  check("bridgeNetRows", bridgeNetRows(read).map((r) => [r.title, r.found, r.assets.map((a) => a.symbol + " " + a.amount)]),
+    [["Public account CCVd76Tk…pKnk", true, ["LEZ 23,786,858", "dUSDC 0", "wETH 0.1"]], ["Public account BVDcg8Sb…yBnD", false, []]]);
+  check("bridgeNetRows watched", bridgeNetRows({ accounts: [{ account: "Public/" + OTHER, found: false, watched: true }] }).map((r) => [r.title, r.watched]), [["Watched account BVDcg8Sb…yBnD", true]]);
+  check("publicIdProblem", [publicIdProblem(OWNER), publicIdProblem(" Public/" + OWNER + " "), publicIdProblem(""), publicIdProblem("Private/" + OWNER), publicIdProblem("0OIl" + OWNER)],
+    ["", "", "Paste a public account ID.", "A private account can't be read on the bridge test network yet.", "That isn't a public account ID: 32 to 44 letters and digits, without 0, O, I or l."]);
+  {
+    const rows = [{ account: "a", found: true }, { account: "b", found: false }, { account: "c", found: false, watched: true }, { account: "d", found: false }];
+    check("bridgeNetShown folds the empty ones", ((v) => [v.shown.map((r) => r.account), v.empty])(bridgeNetShown(rows, false)), [["a", "c"], 2]);
+    check("bridgeNetShown all", bridgeNetShown(rows, true).shown.length, 4);
+    check("bridgeNetShown none", bridgeNetShown(null, false), { shown: [], empty: 0 });
+  }
+  check("bridgeNetRows none", [bridgeNetRows(null), bridgeNetRows({})], [[], []]);
+  check("activityLine arrived on the bridge test network",
+    ((l) => [l.title, l.sub, l.amount, l.sign, l.quiet, l.tone])(activityLine({ kind: "arrived", chain: "lez-0.4", network: "bridge-0.4", to: "Public/" + OWNER, amount: "100000000000000000", token: "DbPG", symbol: "wETH", decimals: 18, state: "arrived", at: 1 }, 2000)),
+    ["Arrived", "in Public CCVd76Tk…pKnk on LEZ 0.4, the bridge test network", "0.1 wETH", "+", true, "plain"]);
+  check("activityLine on LEZ 0.3 keeps its colours", ((l) => [l.quiet, l.tone])(activityLine({ kind: "arrived", chain: "lez", to: "Public/" + OWNER, amount: "5", state: "arrived", at: 1 }, 2000)).map((v) => v === undefined ? false : v), [false, "good"]);
+  check("activityLine native on the bridge test network",
+    ((l) => [l.sub, l.amount])(activityLine({ kind: "arrived", chain: "lez-0.4", to: "Public/" + OWNER, amount: "5", state: "arrived", at: 1 }, 2000)),
+    ["in Public CCVd76Tk…pKnk on LEZ 0.4, the bridge test network", "5"]);
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");

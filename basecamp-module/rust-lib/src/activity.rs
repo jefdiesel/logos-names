@@ -488,6 +488,13 @@ pub fn note_zone_balances(dir: &Path, at: u64, scope: &str, zone: &str, balances
     note(dir, at, "lez", scope, Some(zone), balances)
 }
 
+/// `note_balances` for another network than the zones' (`bridge_net`, the bridge test network):
+/// its own `chain` tag, marks under `scope`, and only entries of `zone` explain a change, so
+/// nothing done on LEZ 0.3 is ever counted against a balance there.
+pub fn note_network_balances(dir: &Path, at: u64, chain: &str, scope: &str, zone: &str, balances: &[(String, u128)]) -> Vec<String> {
+    note(dir, at, chain, scope, Some(zone), balances)
+}
+
 /// Moves `chain`'s balance marks kept under `from` to `to`, when a zone's marks change
 /// what they are kept under (its channel, once known, instead of its sequencer's
 /// address), so the next read isn't a first one. A moved mark takes the place of one

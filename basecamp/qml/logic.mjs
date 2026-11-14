@@ -466,7 +466,7 @@ export function activityLine(entry, now, account) {
     if (page !== "") {
         var own = accountSide(e, kind, page)
         if (own)
-            return own(activityLine(e, now))
+            return lezNamed(own(activityLine(e, now)), e)
     }
     var amount = e.amount ? grouped(e.amount) : ""
     var title = "", sub = "", sign = "-"
@@ -485,7 +485,17 @@ export function activityLine(entry, now, account) {
     case "token_send": title = "Sent a token"; sub = "to " + whoShown(e.to); break
     case "transfer": title = "Gave " + (e.name || "a name") + " away"; sub = "to " + whoShown(e.to); sign = ""; break
     case "receive_privately": title = "Private payments to " + (e.name || "a name"); sub = "on LEZ, new receiving keys"; sign = ""; break
-    case "arrived": title = "Arrived"; sub = "in " + whoShown(e.to) + (e.chain === "logos" ? " on the Logos Blockchain" : " on LEZ") + (!e.amount && e.at_least ? " · at least " + grouped(e.at_least) : ""); sign = "+"; break
+    case "arrived":
+        title = "Arrived"
+        sub = "in " + whoShown(e.to) + (e.chain === "logos" ? " on the Logos Blockchain" : e.chain === "lez-0.4" ? " on LEZ 0.4, the bridge test network" : " on LEZ")
+        // On the bridge test network a token's rise is told in its own units.
+        if (e.chain === "lez-0.4" && e.token) {
+            var units = e.amount ? e.amount : e.at_least
+            amount = units ? decimalShown(units, e.decimals) + " " + String(e.symbol || "") : ""
+            if (!e.amount && e.at_least) { sub += " · at least " + amount; amount = "" }
+        } else if (!e.amount && e.at_least)
+            sub += " · at least " + grouped(e.at_least)
+        sign = "+"; break
     default: title = kind; sub = ""
     }
     var stateText = "", tone = "plain"
@@ -527,7 +537,25 @@ export function activityLine(entry, now, account) {
         sub += (sub ? " · " : "") + "zone " + e.zone_name
     else if (e.zone_name === null && e.zone)
         sub += (sub ? " · " : "") + "a zone removed since"
-    return { title: title, sub: sub, amount: amount, sign: amount === "" ? "" : sign, state: stateText, tone: tone, ago: agoShown(e.at, now) }
+    // The bridge test network's rows are new UI: told in ink, never in green (`quiet`).
+    var quiet = e.chain === "lez-0.4"
+    if (quiet && tone === "good") tone = "plain"
+    var line = { title: title, sub: sub, amount: amount, sign: amount === "" ? "" : sign, state: stateText, tone: tone, ago: agoShown(e.at, now) }
+    if (quiet) line.quiet = true
+    return lezNamed(line, e)
+}
+
+/// `line` of entry `e` with its LEZ named: a home-zone entry is on LEZ 0.3, the public Logos
+/// testnet. Another zone names itself (`zone …`), and the bridge test network's entries
+/// already say LEZ 0.4. Saying it twice changes nothing.
+function lezNamed(line, e) {
+    if (!(e.chain === "lez" || e.kind === "bridge") || e.zone)
+        return line
+    var named = function(text) { return String(text).replace(/\b(on|to) LEZ\b(?! 0\.)/g, "$1 LEZ 0.3") }
+    line.title = named(line.title)
+    line.sub = named(line.sub)
+    line.state = named(line.state)
+    return line
 }
 
 /// Whether entry `e`'s money landed: a change done, a bridge arrived on LEZ, a Logos
@@ -691,4 +719,99 @@ export function inscribeCanApprove(state) {
     if (s.risky && !s.understood)
         return false
     return !!s.plan && !s.problem
+}
+
+// ── The bridge test network (LEZ 0.4), read only ─────────────────────────
+
+/// What the two networks are called, everywhere in the app.
+export var NET_03 = { id: "0.3", version: "LEZ 0.3", name: "public Logos testnet" }
+export var NET_04 = { id: "0.4", version: "LEZ 0.4", name: "bridge test network" }
+
+/// Every public account the wallet lists, as `Public/<id>`, once each, in order: from
+/// `cli_accounts`, else from `cli_balance` (its `accounts`, then its default public one).
+/// Empty accounts count too: what one holds on LEZ 0.3 says nothing about LEZ 0.4.
+export function publicAccounts(cliBalance, accounts) {
+    var out = []
+    function add(text) {
+        var id = String(text || "").replace(/^Public\//, "")
+        if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(id) && out.indexOf("Public/" + id) < 0)
+            out.push("Public/" + id)
+    }
+    ;(Array.isArray(accounts) ? accounts : []).forEach(function(a) { if (a && a.kind === "public") add(a.account) })
+    if (cliBalance && Array.isArray(cliBalance.accounts))
+        cliBalance.accounts.forEach(function(a) { if (a && a.kind === "public") add(a.account) })
+    if (cliBalance && cliBalance["public"] && cliBalance["public"].account)
+        add(cliBalance["public"].account)
+    return out
+}
+
+/// Why `text` isn't a public account ID to watch, or "": base58 of 32 to 44 characters,
+/// with an optional `Public/`. The module checks it decodes to exactly 32 bytes.
+export function publicIdProblem(text) {
+    var id = String(text === null || text === undefined ? "" : text).trim()
+    if (id === "") return "Paste a public account ID."
+    if (/^Private\//.test(id)) return "A private account can't be read on the bridge test network yet."
+    id = id.replace(/^Public\//, "")
+    return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(id) ? "" : "That isn't a public account ID: 32 to 44 letters and digits, without 0, O, I or l."
+}
+
+/// `digits` base units (decimal text) shown with `decimals` places, trailing zeros cut:
+/// `100000000000000000`, 18 → `0.1`; `123456789`, 6 → `123.456789`; whole part grouped.
+export function decimalShown(digits, decimals) {
+    var text = String(digits === null || digits === undefined ? "" : digits).replace(/^0+(?=\d)/, "")
+    var places = Number(decimals) || 0
+    if (!/^\d+$/.test(text)) return text
+    if (places <= 0) return grouped(text)
+    while (text.length <= places) text = "0" + text
+    var whole = text.substr(0, text.length - places), part = text.substr(text.length - places).replace(/0+$/, "")
+    return grouped(whole) + (part ? "." + part : "")
+}
+
+/// The status lines of a `bridge_net_balances` answer: `{line, tone, reset}`. `clock` turns
+/// seconds into a time of day. `tone` is "plain", "warn" or "bad"; `reset` is "" or the
+/// sentence telling the network was reset.
+export function bridgeNetStatus(value, clock) {
+    var v = value || {}, read = v.read || null, error = String(v.error || "")
+    var out = { line: "", tone: "plain", reset: "" }
+    if (read && read.reset_at)
+        out.reset = "The bridge test network was reset at " + clock(read.reset_at) + ". What was held there before is gone; balances start again."
+    if (!read) {
+        out.line = error ? "Can't read the bridge test network: " + error.replace(/^can't reach the bridge test network: /, "") : "Reading the bridge test network…"
+        out.tone = error ? "bad" : "plain"
+        return out
+    }
+    if (error) {
+        out.line = "Can't reach the bridge test network now. Showing what it said at " + clock(read.read_at) + "."
+        out.tone = "warn"
+        return out
+    }
+    out.line = "Updated " + clock(read.read_at) + " · block " + grouped(read.height)
+    return out
+}
+
+/// The blocks of `bridgeNetRows` the LEZ 0.4 card shows: every account that holds something
+/// there, and every watched one; the wallet's accounts the network has never seen are folded
+/// into one line (`empty`, how many) unless `showEmpty`.
+export function bridgeNetShown(rows, showEmpty) {
+    var list = Array.isArray(rows) ? rows : []
+    var empty = list.filter(function(r) { return !r.found && !r.watched })
+    return { shown: showEmpty ? list : list.filter(function(r) { return r.found || r.watched }), empty: empty.length }
+}
+
+/// One block per public account of a `bridge_net_balances` read: `{account, title, found,
+/// assets: [{symbol, name, amount}]}`, native LEZ first, then each bridged token with its
+/// decimals. An account the network has never seen has no assets (`found` false).
+export function bridgeNetRows(read) {
+    if (!read || !Array.isArray(read.accounts)) return []
+    return read.accounts.map(function(a) {
+        var assets = []
+        if (a.found) {
+            assets.push({ symbol: "LEZ", name: "Native", amount: grouped(a.native) })
+            ;(a.tokens || []).forEach(function(t) {
+                assets.push({ symbol: String(t.symbol || ""), name: t.name ? String(t.name) : "Bridged token", amount: decimalShown(t.amount, t.decimals) })
+            })
+        }
+        var id = keyShown(String(a.account || "").replace(/^Public\//, ""))
+        return { account: a.account, title: (a.watched ? "Watched account " : "Public account ") + id, found: !!a.found, watched: !!a.watched, other: Number(a.other_tokens) || 0, assets: assets }
+    })
 }
