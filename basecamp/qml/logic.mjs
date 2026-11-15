@@ -1274,7 +1274,15 @@ export function uncheckedLine(tool, kinds) {
     for (var i = 0; i < kinds.length; i++)
         total += Number(caps[kinds[i]] || 0)
     return "This computer can't check the call first. If the network refuses it, the fee"
-        + (total > 0 ? " (up to " + grouped(String(total)) + ")" : "") + " is still paid."
+        + (total > 0 ? " (at most " + shortAmount(total) + ")" : "") + " is still paid."
+}
+
+/// An amount for one line: 1440624 as "1.44M", 636156 as "636,156".
+export function shortAmount(n) {
+    var v = Number(n) || 0
+    if (v >= 1000000)
+        return String(Math.round(v / 10000) / 100) + "M"
+    return grouped(String(Math.round(v)))
 }
 
 /// Whether the running LEZ Bridge (its config() answer) is another build than the one shipped:

@@ -2054,7 +2054,11 @@ impl Client {
                     bail!("names can't check this call on this computer, and it has no measured cost to send it with. Nothing was sent.");
                 }
                 let limit = unchecked_limit(cycles);
-                println!("This computer can't check the call first. If the network refuses it, the fee (up to {}) is still paid.", max_fee_for(limit));
+                // A refused call is charged its whole gas limit: at today's base fees, about this.
+                let quote = self.wallet.client().get_fee_state().await?;
+                let refused = fees::public(&quote, limit, limit, message.len()).about;
+                println!("This computer can't check the call first. If the network refuses it, the fee (about {}) is still paid.", short_amount(refused));
+                println!("  details: at most {} (the cap this call declares; gas limit {limit})", short_amount(max_fee_for(limit)));
                 (cycles, limit)
             };
             self.check_payer(&mentions, message.len(), spent, limit, cycles).await?;
@@ -3175,6 +3179,17 @@ const REVEAL_CYCLES: u64 = 165_000;
 const CHANGE_CYCLES: u64 = 65_590;
 /// A release's cycles (see [`call_cycles`]).
 const RELEASE_CYCLES: u64 = 51_322;
+
+/// An amount for one line: 1,440,624 as "1.44M", 636,156 as "636,156".
+fn short_amount(amount: u128) -> String {
+    if amount >= 1_000_000 {
+        let hundredths = (amount + 5_000) / 10_000;
+        let text = format!("{}.{:02}", hundredths / 100, hundredths % 100);
+        format!("{}M", text.trim_end_matches('0').trim_end_matches('.'))
+    } else {
+        chain::grouped(amount)
+    }
+}
 
 /// The gas limit a call measured at `cycles` is sent with when it can't be tried here first
 /// (`prover::can_run`): twice the measured run, then the usual 1.5x margin (3x in all), for a
@@ -4667,6 +4682,7 @@ mod unchecked_tests {
         }
         assert_ne!(unchecked_limit(COMMIT_CYCLES), unchecked_limit(REVEAL_CYCLES));
         assert_eq!(call_cycles(&Instruction::Release { id: [0; 32], refund: 0 }), RELEASE_CYCLES);
+        assert_eq!((super::short_amount(1_440_624), super::short_amount(38_080_000), super::short_amount(636_156), super::short_amount(2_000_000)), ("1.44M".to_owned(), "38.08M".to_owned(), "636,156".to_owned(), "2M".to_owned()));
     }
 }
 
