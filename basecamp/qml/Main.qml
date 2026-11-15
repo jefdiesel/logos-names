@@ -1429,6 +1429,8 @@ Item {
     property var sbRelease: null           // send_back_release_code()
     property bool sbDetails: false
     property bool sbNamesOld: false        // send_back_burn said this Names Wallet can't sign a burn
+    property bool sbCommandCopied: false
+    property bool sbProverTried: false     // set_release_prover tried once in this window
     readonly property bool sbCan: Logic.bridgeCan(bridgeFeatures, "send_back")
     readonly property var sbAmounts: Logic.sendBackAmounts(receiveRegistry, sbAsset)
     readonly property var sbFocusRow: sbFocus !== "" ? (sendBacks.filter(function(x) { return x.id === sbFocus })[0] || null) : null
@@ -1707,6 +1709,20 @@ Item {
         sbError = ""
         var id = sbFocus
         bridgeCall("send_back_prove", [id], function(value) {
+            // No prover set yet: the installed one, once (the bridge refuses a path with no program).
+            if (value && value.needs === "prover" && !sbProverTried) {
+                sbProverTried = true
+                bridgeCall("set_release_prover", [JSON.stringify([Logic.RELEASE_PROVER])], function() {
+                    console.log("names_ui: send back: release prover set to", Logic.RELEASE_PROVER)
+                    sbAsking = false
+                    sbProve()
+                }, function(message, kind) {
+                    console.log("names_ui: send back: set_release_prover:", kind, message)
+                    sbAsking = false
+                    sbProve()
+                }, 30000, false)
+                return
+            }
             if (value && value.needs === "prover") {
                 bridgeCall("send_back_witness", [id], function(w) {
                     sbAsking = false
@@ -5976,6 +5992,9 @@ Item {
         // An app whose publisher check failed may be a fake, whatever it asks (M-2).
         if (appPublisherFailed(request))
             return true
+        // A burn the wallet decoded (it says what it burns): its one warning is a line, not a tick.
+        if (request.kind === "relayed_call" && request.sheet && request.sheet.burn && request.sheet.refused !== true)
+            return false
         // A declaration of a program the Program Registry doesn't vouch for needs the tick too.
         if (request.kind === "private_call" || request.kind === "relayed_call" || request.kind === "programs")
             return !!request.sheet && (request.sheet.warnings || []).length > 0
@@ -6878,6 +6897,14 @@ Item {
             spacing: 8
             Hint { color: root.ink; text: "Choose the account:" }
             AccountChoices { request: sheetBody.request; kind: sheetBody.kind }
+        }
+        // A decoded burn's warning (it can't be undone), as a line: nothing to tick.
+        Hint {
+            readonly property var burnSheet: sheetBody.request !== null && sheetBody.request.kind === "relayed_call" && sheetBody.request.sheet && sheetBody.request.sheet.burn ? sheetBody.request.sheet : null
+            visible: root.appSheetCompact && burnSheet !== null && (burnSheet.warnings || []).length > 0 && root.appSheetWarning(sheetBody.request) === ""
+            color: root.brass
+            textFormat: Text.PlainText
+            text: burnSheet !== null && (burnSheet.warnings || []).length > 0 ? String(burnSheet.warnings[0]) : ""
         }
         Hint { visible: root.appSheetCompact && root.appError !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.appError }
         Hint { visible: root.appSheetCompact && root.appBusy; color: root.brass; text: "One moment…" }
@@ -10222,7 +10249,7 @@ Item {
                             Layout.fillWidth: true
                             spacing: 8
                             Hint { color: root.ink; text: "This computer has no prover set up yet: the proof runs from one command (about 30 s)." }
-                            Action { label: "Copy the command"; strong: true; onPressed: root.copy(root.sbWitness !== null ? (Array.isArray(root.sbWitness.command) ? root.sbWitness.command.join(" ") : String(root.sbWitness.command || "")) : "", "The command") }
+                            Action { label: root.sbCommandCopied ? "Copied." : "Copy the command"; strong: true; onPressed: { root.sbCommandCopied = true; root.againAfter(2500, function() { root.sbCommandCopied = false }); root.copy(root.sbWitness !== null ? (Array.isArray(root.sbWitness.command) ? root.sbWitness.command.join(" ") : String(root.sbWitness.command || "")) : "", "The command") } }
                             TextEdit {
                                 Layout.fillWidth: true
                                 text: root.sbWitness !== null ? (Array.isArray(root.sbWitness.command) ? root.sbWitness.command.join(" ") : String(root.sbWitness.command || "")) : ""
@@ -10253,7 +10280,7 @@ Item {
                             visible: sendBackScreen.p.action === "release"
                             Layout.fillWidth: true
                             spacing: 8
-                            Action { label: root.sbLinkCopied ? "Copied." : "Copy the link"; strong: true; enabledNow: !root.sbAsking; onPressed: root.sbCopyRelease() }
+                            Action { label: root.sbLinkCopied ? "Copied." : root.sbAsking ? "Getting the link…" : "Copy the link"; strong: true; enabledNow: !root.sbAsking; onPressed: root.sbCopyRelease() }
                             Hint { font.pixelSize: root.px(15); text: "Open it in your browser and press Release with the Ethereum wallet you connected." }
                         }
                         Hint { visible: sendBackScreen.st !== null && !!sendBackScreen.st.note && sendBackScreen.p.detail !== String(sendBackScreen.st.note); font.pixelSize: root.px(15); color: root.brass; text: sendBackScreen.st !== null && sendBackScreen.st.note ? root.sentence(String(sendBackScreen.st.note)) : "" }

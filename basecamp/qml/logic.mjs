@@ -1368,11 +1368,11 @@ export function receiveCodeRefused(message) {
 /// module first: the app depends on it.
 export const BUNDLED_BRIDGE = [
     { name: "lez_bridge", file: "lez_bridge.lgx", label: "LEZ Bridge module",
-      sha256: "64f0414d4c2d7cb2a3121c6e86bfb12c29099db13d1c17e7cd1448ae531af2cf",
-      root: "282703ca41e533576bfe846e66a99d38820725114ff81890c4e544bf419d23a1",
+      sha256: "e81def8b782b947a9fd40fd8ee6d891ded4fde2641f3895cf9ae1e1050e306dd",
+      root: "a9d9575bb749ffd588546b2e825d1baf66a54d083181054cf22538297e9667ff",
       // The commit the shipped bridge says it was built from (its config().build.commit): rfp-022
-      // 0acf483 (v4 the default deployment; each receive read on its own deployment).
-      build: "0acf483" }
+      // f09a174 (send-back: send_back_*, the installed release prover; everything in 0acf483).
+      build: "f09a174" }
 ]
 
 /// The LEZ 0.4 names tool this app ships in qml/bundled/ (built without in-process proving, so
@@ -2183,3 +2183,8 @@ export function sendBackBurnHeld(value) {
         return "This Names Wallet can't sign a burn yet. Nothing was signed or sent."
     return ""
 }
+
+/// Where the release prover is installed beside the v4 helper (rfp-022 public-demo/prove/
+/// release-prover.sh): set in the LEZ Bridge (`set_release_prover`) the first time "Make the
+/// proof" finds none set, if it is there; the bridge refuses a path with no program.
+export const RELEASE_PROVER = "/Volumes/exos162/logos/rfp-022/v4/release-prover.sh"
