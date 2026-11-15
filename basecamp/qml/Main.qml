@@ -989,7 +989,7 @@ Item {
         // A bridge panel or screen came into view: one check now (not again within 10 s), and
         // what is due by itself recomputed for this view.
         if (receiveWatching) {
-            bridgeCheckOnView()
+            bridgeCheckOnView(true)
             receiveScheduleNext()
             sbScheduleNext()
         }
@@ -1157,8 +1157,21 @@ Item {
     /// One check at the next tick (a panel or screen came into view), unless one finished in the
     /// last 10 s.
     function receiveCheckSoon() {
-        if (Date.now() - receiveCheckedAt > 10000)
+        if (Date.now() - receiveCheckedAt > checkOnViewMs)
             receiveAskNow = true
+    }
+    // A panel coming into view again checks only if the last check is older than this (Check now
+    // always checks): switching between the browser and Basecamp doesn't cost a round each time.
+    readonly property int checkOnViewMs: 60000
+    // The bridge still starting or busy when a list is first read: asked again a few times, 15 s
+    // apart, so a panel and its Check now appear without the person leaving and coming back.
+    property int bridgeListRetries: 0
+    function bridgeListRetry(kind) {
+        if ((kind === "starting" || kind === "busy" || kind === "missing") && bridgeListRetries < 4) {
+            bridgeListRetries++
+            return Date.now() + 15000
+        }
+        return 0
     }
     /// "Check now": one call for the receive on the Receive screen, a round on the card; asked
     /// at once, or as soon as the call under way has answered.
@@ -1293,6 +1306,7 @@ Item {
     function pollReceives(onlyId) {
         if (receivePolling || receiveHold || !bridgeReady || receiveAsking || receiveNeeds !== null || sbPolling || sbAsking || sbNeeds !== null)
             return
+        var asked = receiveAskNow
         receiveAskNow = false
         if (bridgeConfig === null) {
             receivePolling = true
@@ -1301,7 +1315,7 @@ Item {
                 bridgeAnswered(value)
                 if (receiveHasStatus)
                     pollReceives(onlyId)
-            }, function(message, kind) { receivePolling = false; bridgeSilent(kind); receiveScheduleNext() }, 10000, false)
+            }, function(message, kind) { receivePolling = false; bridgeSilent(kind); receiveCheckFailed = true; receiveNextAt = bridgeListRetry(kind) }, 10000, false)
             return
         }
         if (!receiveHasStatus) {
@@ -1314,6 +1328,7 @@ Item {
             bridgeCall("receives", [], function(value) {
                 receivePolling = false
                 receivesLoaded = true
+                bridgeListRetries = 0
                 var found = Logic.receivesFrom(value)
                 receives = found.concat(receives.filter(function(x) { return !found.some(function(f) { return f.id === x.id }) }))
                 var all = receiveStatuses
@@ -1323,12 +1338,16 @@ Item {
                 pollReceives(onlyId)
             }, function(message, kind) {
                 receivePolling = false
-                receiveScheduleNext()
+                receiveCheckFailed = true
+                receiveNextAt = bridgeListRetry(kind)
                 console.log("names_ui: receives:", kind, message)
             }, 30000, false)
             return
         }
         var open = receives.filter(function(x) { var st = receiveStatuses[x.id]; return (!st || st.stage !== "claimed") && (!onlyId || x.id === onlyId) })
+        // Due by itself (not asked): only what checks by itself.
+        if (!asked)
+            open = open.filter(function(x) { return Logic.receiveAutoMode(receiveStatuses[x.id]) !== "none" })
         if (receiveFocus !== "")
             open = open.filter(function(x) { return x.id === receiveFocus }).concat(open.filter(function(x) { return x.id !== receiveFocus }))
         if (open.length === 0) {
@@ -1385,18 +1404,21 @@ Item {
     // Nothing while the person is elsewhere.
     readonly property bool receiveWatching: bridgeReady && namesNet === "0.4" && section === "wallet"
         && (walletView === "home" || walletView === "ethreceive" || walletView === "sendback")
-    function bridgeCheckOnView() {
-        receiveCheckSoon()
-        if (Date.now() - sbCheckedAt > 10000)
+    /// One check because a bridge panel or screen came into view: always when the person opened
+    /// it (`opened`), else (Basecamp back in front) only if the last one is a minute old.
+    function bridgeCheckOnView(opened) {
+        if (opened || Date.now() - receiveCheckedAt > checkOnViewMs)
+            receiveAskNow = true
+        if (opened || Date.now() - sbCheckedAt > checkOnViewMs)
             sbAskNow = true
     }
-    onReceiveWatchingChanged: if (receiveWatching) bridgeCheckOnView(); else { receiveNextAt = 0; sbNextAt = 0 }
+    onReceiveWatchingChanged: if (receiveWatching) bridgeCheckOnView(true); else { receiveNextAt = 0; sbNextAt = 0 }
     readonly property bool receiveFrontmost: Qt.application.state === Qt.ApplicationActive
     onReceiveFrontmostChanged: {
         if (!receiveWatching)
             return
         if (receiveFrontmost)
-            bridgeCheckOnView()
+            bridgeCheckOnView(false)
         else {
             // Away: only a job in progress goes on.
             receiveAskNow = false
@@ -1491,6 +1513,8 @@ Item {
         stage: sbFocus !== "" ? (sbProgressNow.stage === "checking" ? "planned" : sbProgressNow.stage) : sbNeeds !== null ? "needs" : sbDenom >= 0 ? "address" : "choose",
         needs: sbNeeds !== null ? sbNeeds.needs : "", extras: sbExtras })
     readonly property var sbRowsNow: Logic.sendBackRowsShown(sendBacks, sbStatuses, sbReceivedAt, receiveNow)
+    // "next check in N min" only for a gentle check of the send-back on screen (never a known time).
+    readonly property double sbNextShown: walletView === "sendback" && sbFocusStatus !== null && Logic.sendBackAutoMode(sbFocusStatus).mode === "gentle" ? sbNextAt : 0
 
     /// Opens Send back to Ethereum for `asset` (a card asset row) of `account`, or the send-back
     /// `focusId` (a card row).
@@ -1703,6 +1727,7 @@ Item {
     function pollSendBacks() {
         if (sbPolling || receivePolling || receiveHold || !bridgeReady || receiveAsking || sbAsking || receiveNeeds !== null || sbNeeds !== null)
             return
+        var asked = sbAskNow
         sbAskNow = false
         if (!sbCan) {
             sbNextAt = 0
@@ -1719,7 +1744,7 @@ Item {
             }, function(message, kind) {
                 sbPolling = false
                 sbCheckFailed = !Logic.rateLimited(message)
-                sbScheduleNext()
+                sbNextAt = bridgeListRetry(kind)
                 console.log("names_ui: send_backs:", kind, message)
             }, 30000, false)
             return
@@ -1728,6 +1753,7 @@ Item {
         var open = sendBacks.filter(function(x) {
             var st = sbStatuses[x.id] ? sbStatuses[x.id].stage : x.stage
             return st !== "released" && (st !== "planned" || x.id === onScreen) && (onScreen === "" || x.id === onScreen)
+                && (asked || Logic.sendBackAutoMode(sbStatuses[x.id] || { stage: x.stage }).mode !== "none")
         })
         if (open.length === 0) {
             sbCheckedAt = Date.now()
@@ -7454,7 +7480,7 @@ Item {
     component SendBackCheckLine: RowLayout {
         spacing: 12
         Action { readonly property var b: Logic.checkButton(root.sbPolling, root.sbAskNow); label: b.label; enabledNow: b.enabled && !root.sbAsking; onPressed: root.sbCheckNow() }
-        Text { text: Logic.receiveCheckLine(root.sbPolling, root.sbCheckedAt, root.sbNextAt, root.receiveNow, root.sbCheckFailed); visible: text !== "" && text !== "Checking…"; color: root.sbCheckFailed && !root.sbPolling ? root.brass : root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
+        Text { text: Logic.receiveCheckLine(root.sbPolling, root.sbCheckedAt, root.sbNextShown, root.receiveNow, root.sbCheckFailed); visible: text !== "" && text !== "Checking…"; color: root.sbCheckFailed && !root.sbPolling ? root.brass : root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
     }
 
     component BridgeSetupBox: RowLayout {
