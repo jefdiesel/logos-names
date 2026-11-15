@@ -858,7 +858,7 @@ Item {
     property var claimBridgeAnswers: null
     property string bridgeBundle: ""
     property var bridgeInstall: null       // {phase: "asking"|"installing"|"slow"|"starting"|"failed"|"updated", line}
-    readonly property string bridgeSetupNow: Logic.bridgeSetup({ list: installedList, answers: claimBridgeAnswers, checkWith: claimCheckWith })
+    readonly property string bridgeSetupNow: Logic.bridgeSetup({ list: installedList, answers: claimBridgeAnswers, checkWith: claimCheckWith, features: bridgeConfig !== null ? bridgeFeatures : null })
     readonly property var bridgeLabels: [["JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", "bridge v2"], ["4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr", "bridge v3"]]
     readonly property string claimAccount: claimCheck !== null && claimCheck.ok && claimCheck.deposit ? String(claimCheck.deposit.account || "") : ""
     readonly property string claimAccountProblemNow: cliAccounts === null ? "" : Logic.claimAccountProblem(claimAccount, cliAccounts)

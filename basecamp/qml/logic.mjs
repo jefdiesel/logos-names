@@ -1242,11 +1242,11 @@ export function otherDeployment(name) {
 /// module first: the app depends on it.
 export const BUNDLED_BRIDGE = [
     { name: "lez_bridge", file: "lez_bridge.lgx", label: "LEZ Bridge module",
-      sha256: "bdaff1d82bbb95caeaf1399192a920e895527e8e185fa4dae380b86a21a3fb96",
-      root: "13025b09ca142a2dc24ca01ee94805eb75af8a2161c05c8f2eb480addc5b809c" },
+      sha256: "5f8377e4989d85ba36b4ff4bc5bf807d482eafe0f0da6eb3f65f68f2b288faa6",
+      root: "02bfbd506d56bdab49be45c28583973a3e6d1c02019f61a3f09dd6fbe6992461" },
     { name: "lez_bridge_ui", file: "lez_bridge_ui.lgx", label: "LEZ Bridge app",
-      sha256: "8bba2edab1d5a638c37540a21d7fab2202ec7d6f91498bbbfa25706ab245bf42",
-      root: "c391b90698b2a26bb71faa996ca96f3809da3413ba61d0cbcb9616b5eca9109a" }
+      sha256: "0d7e317c1fbef3e9c9d4155c10746256af8e9ed2b5a8156413823fbc568ea270",
+      root: "ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9" }
 ]
 
 /// package_manager.getInstalledPackages' list, out of whatever the host wrapped it in (JSON text,
@@ -1300,7 +1300,10 @@ export function bridgeSetup(s) {
         return "absent"
     if (st.answers !== true)
         return st.answers === false ? "idle" : "unknown"
-    if (st.checkWith === false && bridgeDiffers(st.list))
+    // An older pair (another build, and one that can't receive: busy-3647c9c, acct-9cbdc72, all
+    // "0.1.0"): the claim works, and Update offers the pair shipped inside Names. A pair that
+    // says it can receive is never offered a replacement (it may be newer than this one).
+    if (bridgeDiffers(st.list) && (Array.isArray(st.features) ? !bridgeCan(st.features, "receives") : st.checkWith === false))
         return "older"
     return "ready"
 }

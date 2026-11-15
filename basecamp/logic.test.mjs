@@ -569,11 +569,12 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("bridgeSetup: installed, not answering → idle; not asked yet → unknown",
     [bridgeSetup({ list: list.concat([newMod, newUi]), answers: false }), bridgeSetup({ list: list.concat([newMod, newUi]) })], ["idle", "unknown"]);
   check("bridgeSetup: running", bridgeSetup({ list: list.concat([newMod, newUi]), answers: true, checkWith: true }), "ready");
-  check("bridgeSetup: older only when it lacks the new call AND is another build",
-    [bridgeSetup({ list: list.concat([oldMod, oldUi]), answers: true, checkWith: false }),
-     bridgeSetup({ list: list.concat([oldMod, oldUi]), answers: true, checkWith: true }),
-     bridgeSetup({ list: list.concat([newMod, newUi]), answers: true, checkWith: false })],
-    ["older", "ready", "ready"]);
+  check("bridgeSetup: older only when it can't receive AND is another build",
+    [bridgeSetup({ list: list.concat([oldMod, oldUi]), answers: true, features: [] }),
+     bridgeSetup({ list: list.concat([oldMod, oldUi]), answers: true, features: ["receive", "receives"] }),
+     bridgeSetup({ list: list.concat([newMod, newUi]), answers: true, features: [] }),
+     bridgeSetup({ list: list.concat([oldMod, oldUi]), answers: true, checkWith: false })],
+    ["older", "ready", "ready", "older"]);
   check("bridgeDiffers", [bridgeDiffers(list.concat([oldMod, newUi])), bridgeDiffers(list.concat([newMod, newUi])), bridgeDiffers(list)], [true, false, false]);
   check("installReply: success has a path and no error",
     installReply(JSON.stringify({ name: "lez_bridge", path: "/x/modules/lez_bridge", isCoreModule: true, signatureStatus: "unsigned" })),
