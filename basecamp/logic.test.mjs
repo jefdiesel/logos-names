@@ -858,6 +858,9 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("relayed call refused by the wallet: dim", canApprove({ request: { kind: "relayed_call", sheet: { refused: true } }, chosen: ["Public/BBB"] }), false);
   check("connect with the hint ticked", canApprove({ request: { kind: "connect", choices: two.choices }, chosen: preTicked({ kind: "connect", choices: two.choices, account_hint: "Public/BBB" }, false, ""), risky: false }), true);
   check("secret with its account", canApprove({ request: { kind: "secret", account: "Public/AAA", choices: [{ account: "Public/AAA" }] }, chosen: preTicked({ kind: "secret", account: "Public/AAA", choices: [{ account: "Public/AAA" }] }, false, ""), risky: false }), true);
+  const { receiveBalanceLine } = await import("./qml/logic.mjs");
+  const blocks = [{ account: "Public/3J29s1Wy62NYMRuTe6MWXQrpWkqUAkv9t6PqzHWF7CNA", assets: [{ symbol: "wETH", name: "Wrapped Sepolia ETH (demo) · bridge v2", amount: "0" }, { symbol: "wETH", name: "Wrapped Sepolia ETH (v4) · bridge v4", amount: "0.01" }] }];
+  check("balance line: the bridge that holds it, not v2's 0", receiveBalanceLine(blocks, "Public/3J29s1Wy62NYMRuTe6MWXQrpWkqUAkv9t6PqzHWF7CNA", "ETH"), "3J29s1…7CNA now holds 0.01 wETH.");
   check("Add: a name not yours", [addNameNotYours("Adding the name didn't finish: this wallet doesn't hold jef04, so it isn't added."), addNameNotYours("Adding the name didn't finish: Error: jef04 is not registered"), addNameNotYours("Adding the name didn't finish: couldn't reach the sequencer")], [true, true, false]);
 }
 

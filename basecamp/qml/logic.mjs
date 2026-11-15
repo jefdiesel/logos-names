@@ -1845,7 +1845,14 @@ export function receiveBalanceLine(blocks, account, symbol) {
     var id = String(account || "").replace(/^Public\//, "")
     var block = (Array.isArray(blocks) ? blocks : []).filter(function(b) { return String(b.account || "").replace(/^Public\//, "") === id })[0]
     // The wrapped token keeps the symbol or puts a "w" before it (ETH arrives as wETH).
-    var asset = block && Array.isArray(block.assets) ? block.assets.filter(function(a) { return a.symbol === symbol || a.symbol === "w" + symbol })[0] : null
+    // With several bridges, one row per bridge: the one this receive's bridge listed (`bridge`,
+    // its label such as "bridge v4"), else one that holds something (the first was v2's 0 wETH
+    // after a v4 claim on the M2, 15 Nov), else the first.
+    var all = block && Array.isArray(block.assets) ? block.assets.filter(function(a) { return a.symbol === symbol || a.symbol === "w" + symbol }) : []
+    var bridge = arguments.length > 3 ? String(arguments[3] || "") : ""
+    var ofBridge = bridge ? all.filter(function(a) { return String(a.name || "").indexOf("· " + bridge) >= 0 }) : []
+    var held = all.filter(function(a) { return !/^0(\.0*)?$/.test(String(a.amount || "0")) })
+    var asset = ofBridge[0] || held[0] || all[0] || null
     if (asset) return idShort(id) + " now holds " + asset.amount + " " + asset.symbol + "."
     return "It shows under " + idShort(id) + " below once the network is read again."
 }
