@@ -645,8 +645,8 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   const oldMod = { name: "lez_bridge", hashes: { root: "a2c6c311" } };
   const newMod = { name: "lez_bridge", hashes: { root: BUNDLED_BRIDGE[0].root } };
   const FEAT = ["receive", "public_receive", "receive_status", "receives"];
-  const NEW = { features: FEAT, scaffold: "lez-bridge-scaffold-try-lock=3" };
-  const RECEIVES_NO_FIX = { features: FEAT };
+  const NEW = { features: FEAT, scaffold: "lez-bridge-scaffold-try-lock=3", build: { commit: BUNDLED_BRIDGE[0].build } };
+  const RECEIVES_NO_FIX = { features: FEAT, scaffold: "lez-bridge-scaffold-try-lock=3" };
   const cases = [
     ["not installed", { list: [me], bundle: "ok" }, "install", "Install"],
     ["not installed, bundle bad", { list: [me], bundle: "bad" }, "manual", ""],
@@ -661,7 +661,9 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     ["ready", { list: [me, newMod], bundle: "ok", answers: true, features: FEAT, config: NEW }, "", ""],
     ["older that receives, no freeze fix", { list: [me, oldMod], bundle: "ok", answers: true, features: FEAT, config: RECEIVES_NO_FIX }, "update", "Update"],
     ["new files, pre-fix module running", { list: [me, newMod], bundle: "ok", answers: true, features: FEAT, config: RECEIVES_NO_FIX }, "unload", "Open Settings"],
-    ["another build that has the fix", { list: [me, oldMod], bundle: "ok", answers: true, features: FEAT, config: { features: FEAT, scaffold: { marker: "lez-bridge-scaffold-try-lock=4" } } }, "", ""],
+    ["another build (build.commit differs)", { list: [me, oldMod], bundle: "ok", answers: true, features: FEAT, config: { features: FEAT, build: { commit: "1234567" } } }, "update", "Update"],
+    ["the shipped build running, other files listed", { list: [me, oldMod], bundle: "ok", answers: true, features: FEAT, config: NEW }, "", ""],
+    ["installed, not loaded in this tab", { list: [me, newMod], bundle: "ok", answers: false, notLoaded: true }, "reopen", ""],
     ["stale token", { list: [me, newMod], bundle: "ok", answers: false, stale: true, stuck: true }, "stale", ""],
     ["just updated, after reopen", { list: [me, newMod], bundle: "ok", answers: true, features: FEAT, config: NEW, done: "LEZ Bridge updated." }, "done", ""],
     ["unread list", { list: null, bundle: "ok" }, "", ""],

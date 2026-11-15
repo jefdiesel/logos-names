@@ -1250,25 +1250,20 @@ export function otherDeployment(name) {
 /// module first: the app depends on it.
 export const BUNDLED_BRIDGE = [
     { name: "lez_bridge", file: "lez_bridge.lgx", label: "LEZ Bridge module",
-      sha256: "29a69b5de6414fd2abb99091b4a48cd525e30e7d59f2a9fb138c004b0e65b3c4",
-      root: "0a6f86b78a4145fd36f412e59e72c6559250bb669c5c9158aeb588a802bb82e7",
-      // What the running bridge's config() shows when it is this build or a later one: a feature
-      // ("feature:x") or a marker in config().scaffold ("scaffold:x"). One missing: it is older.
-      has: ["feature:receives", "scaffold:try-lock"] }
+      sha256: "55f474d88f43effd0c6f9cc122fe1af37fac52b441a11de4922cb6bd17503561",
+      root: "ee90c31ffa02781abf1beb8735acf2ad352af23b932a8e11a41912e31634c0a7",
+      // The commit the shipped bridge says it was built from (its config().build.commit).
+      build: "00e6f3a" }
 ]
 
-/// Whether the running LEZ Bridge (its config() answer) is older than the one shipped: it lacks
-/// a feature or a scaffold marker the shipped one has (the freeze fix's try-lock, 2026-11-14).
+/// Whether the running LEZ Bridge (its config() answer) is another build than the one shipped:
+/// its config().build.commit differs, or it has no `build` (every bridge before 00e6f3a).
 /// Unknown (no answer yet): false.
 export function bridgeBehind(config) {
     if (!config || typeof config !== "object")
         return false
-    var features = Array.isArray(config.features) ? config.features : []
-    var scaffold = typeof config.scaffold === "string" ? config.scaffold : JSON.stringify(config.scaffold || "")
-    return BUNDLED_BRIDGE[0].has.some(function(mark) {
-        var at = mark.indexOf(":"), kind = mark.substr(0, at), what = mark.substr(at + 1)
-        return kind === "feature" ? features.indexOf(what) < 0 : scaffold.indexOf(what) < 0
-    })
+    var build = config.build && typeof config.build === "object" ? String(config.build.commit || "") : ""
+    return build === "" || build !== BUNDLED_BRIDGE[0].build
 }
 
 /// package_manager.getInstalledPackages' list, out of whatever the host wrapped it in (JSON text,
@@ -1612,7 +1607,7 @@ export function receiveSteps(s) {
 /// What the bridge needs before Claim or Receive can go on, the same on every entry point:
 /// {state, line, button ("Install" | "Update" | "Open Settings" | ""), action}. `s`: {list
 /// (installedPackages, null unread), bundle ("ok"/"bad"/""), answers (the module answered config:
-/// true/false/null), config (its config() answer: older than the shipped one by bridgeBehind; without
+/// true/false/null), notLoaded (its last config call found it not loaded), config (its config() answer: older than the shipped one by bridgeBehind; without
 /// it, `features` lacking "receives"), stuck (it is installed and timed out twice), stale (its last reply was to an
 /// old token), features, install (the install/update under way: {phase, line} or null), done (the
 /// line shown once after a setup step finished, or "")}.
@@ -1632,6 +1627,9 @@ export function bridgeSetupState(s) {
     if (!mod)
         return st.bundle === "ok" ? t("install", "The LEZ Bridge isn't installed. It comes with Names.", "Install", "install")
             : st.bundle === "bad" ? t("manual", "Install the LEZ Bridge package: Package Manager (the cube icon) → Install Local Package") : t("", "")
+    // Installed but not loaded while this Names tab is open (after Unload All): a new tab starts it.
+    if (st.answers === false && st.notLoaded)
+        return t("reopen", "Close the Names tab and open Names again.")
     // A reply to an old token (the bridge was reloaded under Names): only a reopen reconnects.
     if (st.answers === false && st.stale)
         return t("stale", "Close the Names tab and open Names again to reconnect to the bridge.")

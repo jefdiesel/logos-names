@@ -917,6 +917,7 @@ Item {
     // module answers nobody until it is unloaded).
     property int bridgeFails: 0
     property bool bridgeStale: false       // its last reply was to an old token: a reopen reconnects
+    property bool bridgeNotLoaded: false   // its last config call found the module not loaded
     // "LEZ Bridge updated." once, on the screen the person lands on after a setup step finished
     // (bridgeDoneView), then gone at the next screen.
     property string bridgeDone: ""
@@ -927,7 +928,7 @@ Item {
     property bool bridgeNoteRead: false
     // The one bridge setup state the claim screen, Receive and the card all show (Logic.bridgeSetupState).
     readonly property var bridgeSetup: Logic.bridgeSetupState({ list: installedList, bundle: bridgeBundle, answers: bridgeAnswers,
-        stuck: bridgeFails >= 2, stale: bridgeStale, features: bridgeFeatures, config: bridgeConfig, install: bridgeInstall,
+        stuck: bridgeFails >= 2, stale: bridgeStale, notLoaded: bridgeNotLoaded, features: bridgeFeatures, config: bridgeConfig, install: bridgeInstall,
         done: bridgeDone !== "" && walletView === bridgeDoneView ? bridgeDone : "" })
     onWalletViewChanged: if (bridgeDone !== "" && walletView !== bridgeDoneView) bridgeDone = ""
     function bridgeAnswered(value) {
@@ -935,11 +936,13 @@ Item {
         bridgeAnswers = true
         bridgeFails = 0
         bridgeStale = false
+        bridgeNotLoaded = false
     }
     /// A config call that failed: `kind` from Logic.bridgeReply ("busy" is Basecamp's timeout).
     function bridgeSilent(kind) {
         bridgeAnswers = false
         bridgeStale = kind === "stale"
+        bridgeNotLoaded = kind === "missing" || kind === "starting"
         if (kind === "busy")
             bridgeFails = bridgeFails + 1
     }
