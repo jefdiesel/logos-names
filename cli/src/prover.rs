@@ -203,7 +203,8 @@ pub fn can_run() -> bool {
 
 /// Whether a private change can be proved here (the proof engine settled at start).
 pub fn can_prove() -> bool {
-    SETTLED.get().is_some_and(|settled| settled.prover.is_ok() && !settled.bare)
+    // Not settled yet (tests, library use): assumed able, as before this was asked.
+    !SETTLED.get().is_some_and(|settled| settled.prover.is_err() || settled.bare)
 }
 
 /// `names prover-status`: what this build can do on this computer, as JSON (`run`: public
