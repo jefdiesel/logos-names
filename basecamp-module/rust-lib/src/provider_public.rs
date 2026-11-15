@@ -31,13 +31,20 @@ pub const MAX_ACTORS: usize = 16;
 pub const MAX_DECLARED_PROGRAMS: usize = 8;
 
 /// The privacy lines an app may choose from: a key, never free text.
-pub const PRIVACY: [(&str, &str); 2] = [
+pub const PRIVACY: [(&str, &str); 3] = [
     (
         "public_call",
         "Public: this account, the program it runs, the bytes it sends and what it changes, and the account that paid the fee.",
     ),
     ("bridge_public_claim", "A public claim publishes the claim secret and links the Sepolia deposit to this account."),
+    (BURN_PRIVACY, "A public burn publishes this account, the amount and an exit commitment; the Ethereum address stays hidden until the release."),
 ];
+
+/// The privacy key of a burn to a bridge (Send back to Ethereum), and only of one.
+pub const BURN_PRIVACY: &str = "bridge_public_burn";
+
+/// What a burn's sheet always warns.
+pub const BURN_WARNING: &str = "This destroys the wrapped tokens on Logos and can't be undone; the ETH is released on Ethereum after the bridge's steps.";
 
 /// How long after the approval a relayed call may be signed again (`resign_relayed_call`).
 pub const RESIGN_WINDOW_MS: u64 = 10 * 60 * 1000;
@@ -364,6 +371,134 @@ pub fn relayed_call_request(
     Ok(Value::Object(request))
 }
 
+/// A relayed call checked as a burn to a bridge the wallet knows (`burn_check`): everything its
+/// sheet says about it comes from here, read from the bridge's Config and the message bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeBurn {
+    pub bridge: String,
+    pub bridge_label: String,
+    pub token_program: String,
+    pub definition: String,
+    pub symbol: String,
+    pub decimals: u8,
+    pub amount: u128,
+    pub amount_text: String,
+    pub denom_index: usize,
+    /// The exit commitment E (the memo), `0x` and 64 hex digits.
+    pub exit: String,
+}
+
+/// `amount` base units with `decimals`, as a person reads it: `10000000000000000`, 18 → `0.01`.
+pub fn units_text(amount: u128, decimals: u8) -> String {
+    let digits = amount.to_string();
+    let decimals = usize::from(decimals);
+    if decimals == 0 {
+        return digits;
+    }
+    let padded = format!("{digits:0>width$}", width = decimals + 1);
+    let (whole, part) = padded.split_at(padded.len() - decimals);
+    let part = part.trim_end_matches('0');
+    if part.is_empty() { whole.to_owned() } else { format!("{whole}.{part}") }
+}
+
+/// Whether the stored relayed call `request` (as `relayed_call_request` made it) is exactly a
+/// burn of one denomination of a token registered in the Config of `bridge` (one of
+/// `bridge_net::BURN_BRIDGES`), notified to that bridge's Config, and nothing else:
+/// - its root is the Config's token program, and its message decodes exactly as `BurnWithNotice`
+///   (`bridge_net::decode_burn`: 145 bytes, nothing left over);
+/// - the notified actor is this bridge's Config PDA under this bridge;
+/// - the definition is registered there, the amount is one of its denominations, and burns are
+///   frozen neither for every token nor for this one;
+/// - it declares exactly two accounts: the definition under the token program, then the Config
+///   by its seed under the bridge, not created;
+/// - its privacy key is `bridge_public_burn`.
+pub fn burn_check(request: &Value, bridge: &AccountId, config: &crate::bridge_net::BridgeConfig) -> Result<BridgeBurn, String> {
+    use crate::bridge_net;
+    let bridge_text = registry::account_text(bridge);
+    let token_program = registry::account_text(&config.token_program);
+    let label = bridge_net::bridge_label(&bridge_text).map_or_else(|| short(&bridge_text), str::to_owned);
+    if request["program"].as_str() != Some(token_program.as_str()) {
+        return Err(format!("a burn goes to the token program of {label}; this call goes elsewhere"));
+    }
+    let message = registry::unhex(request["message"].as_str().unwrap_or_default()).map_err(|_| "the call's message is hex".to_owned())?;
+    let burn = bridge_net::decode_burn(&message)?;
+    if burn.notify_program != *bridge || burn.notify_account != bridge_net::config_address(bridge) {
+        return Err(format!("the burn tells another program than {label}'s Config what was burned; the wallet signs it only to that one"));
+    }
+    let token = config
+        .tokens
+        .iter()
+        .find(|token| token.definition == burn.definition)
+        .ok_or_else(|| format!("{} isn't a token of {label}", short(&registry::account_text(&burn.definition))))?;
+    if !token.registered {
+        return Err(format!("{} isn't registered on {label}", token.symbol()));
+    }
+    if config.burn_frozen || token.burn_frozen {
+        return Err(format!("sending {} back is paused on {label}; nothing is signed", token.symbol()));
+    }
+    let denom_index = token
+        .denoms
+        .iter()
+        .position(|denom| *denom == burn.amount)
+        .ok_or_else(|| format!("a burn is exactly one denomination of {}; {} isn't one", token.symbol(), units_text(burn.amount, token.decimals)))?;
+    let definition = registry::account_text(&burn.definition);
+    let accounts = request["accounts"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let config_account = registry::account_text(&bridge_net::config_address(bridge));
+    let first_ok = accounts.first().is_some_and(|entry| {
+        entry["account"] == definition.as_str() && entry["program"] == token_program.as_str() && entry["seed"].is_null()
+    });
+    let second_ok = accounts.get(1).is_some_and(|entry| {
+        entry["seed"] == bridge_net::config_seed_hex().as_str()
+            && entry["of"] == bridge_text.as_str()
+            && entry["program"] == bridge_text.as_str()
+            && entry["new"] != true
+            && entry["account"] == config_account.as_str()
+    });
+    if accounts.len() != 2 || !first_ok || !second_ok {
+        return Err(format!("a burn declares exactly the token's definition and {label}'s Config; this call declares other accounts"));
+    }
+    if request["privacy"] != BURN_PRIVACY {
+        return Err(format!("a burn to a bridge says so: privacy {BURN_PRIVACY}"));
+    }
+    Ok(BridgeBurn {
+        bridge: bridge_text,
+        bridge_label: label,
+        token_program,
+        definition,
+        symbol: token.symbol(),
+        decimals: token.decimals,
+        amount: burn.amount,
+        amount_text: units_text(burn.amount, token.decimals),
+        denom_index,
+        exit: format!("0x{}", registry::hex(&burn.memo)),
+    })
+}
+
+/// What the wallet's build of a burn must be (`report`), beyond what `sheet` checks for every
+/// relayed call: the root actor (the account under the token program) and the two declared
+/// accounts, nothing more; the account's LEZ balance not given; nothing created. So the only thing
+/// the call moves out of the account is the burned denomination.
+pub fn burn_report_problems(report: &Value, request: &Value, burn: &BridgeBurn) -> Vec<String> {
+    let mut why = Vec::new();
+    let account = request["account"].as_str().unwrap_or_default().trim_start_matches("Public/");
+    let config_account = request["accounts"][1]["account"].as_str().unwrap_or_default();
+    let want = json!([
+        { "account": account, "program": burn.token_program },
+        { "account": burn.definition, "program": burn.token_program },
+        { "account": config_account, "program": burn.bridge },
+    ]);
+    if report["actors"] != want {
+        why.push("the wallet's build of the burn reaches other accounts than the token's definition and the bridge's Config".to_owned());
+    }
+    if report["own_balance"] != false {
+        why.push("the wallet's build of the burn gives the program your LEZ balance".to_owned());
+    }
+    if report["creates"].as_array().is_none_or(|made| !made.is_empty()) {
+        why.push("the wallet's build of the burn creates an account".to_owned());
+    }
+    why
+}
+
 /// What the names CLI gets for `module public-call plan|sign`.
 pub fn cli_input(request: &Value, expect_hash: Option<&str>) -> Value {
     json!({
@@ -380,12 +515,19 @@ pub fn cli_input(request: &Value, expect_hash: Option<&str>) -> Value {
 /// words: `{lines, warnings, privacy, after, hash, refused, why}`. `label` is what the Program
 /// Registry says of the program (`provider::label_fields` input), `network` how the network is
 /// named (the site's rule: version · name). Refused when the build doesn't match the request.
-pub fn sheet(request: &Value, report: &Value, label: Option<&Value>, network: &str, own: &OwnPrograms, root_only: &RootOnly) -> Value {
+/// `burn`: the call checked as a burn to a bridge (`burn_check`, from a Config read now), for
+/// which `root_only` no longer holds its token program; the sheet then says what is burned.
+pub fn sheet(request: &Value, report: &Value, label: Option<&Value>, network: &str, own: &OwnPrograms, root_only: &RootOnly, burn: Option<&BridgeBurn>) -> Value {
     let app = clean_text(request["app"].as_str().unwrap_or_default(), 40);
     let mut why: Vec<String> = Vec::new();
     // The same rule as when it was asked, applied again now: never shown as approvable otherwise.
     if let Err(refused) = programs_allowed(request, own, root_only) {
         why.push(refused);
+    }
+    match burn {
+        Some(burn) => why.extend(burn_report_problems(report, request, burn)),
+        None if request["privacy"] == BURN_PRIVACY => why.push("only a burn to a bridge the wallet knows has the burn's privacy line".to_owned()),
+        None => {}
     }
     for (field, want) in [("account", &request["account"]), ("program", &request["program"]), ("payer", &request["fee"]["payer"])] {
         if report[field] != *want {
@@ -421,17 +563,21 @@ pub fn sheet(request: &Value, report: &Value, label: Option<&Value>, network: &s
         None => "the Program Registry isn't installed, so it has no label".to_owned(),
     };
     let named = format!("unknown program {program} ({registry_says})");
+    let fee_line = format!(
+            "Fee: paid by {payer}, not by you: at most {} (gas limit {}, tip {}).",
+            crate::provider_private::grouped(whole(&report["max_fee"], "").unwrap_or(0)),
+            crate::provider_private::grouped(u128::from(report["gas_limit"].as_u64().unwrap_or(0))),
+            crate::provider_private::grouped(whole(&report["tip"], "").unwrap_or(0)),
+    );
+    if let Some(burn) = burn {
+        return burn_sheet(request, report, burn, &app, network, account, fee_line, hash, why, &label);
+    }
     let mut lines = vec![
         format!("{app} asks your wallet to sign a call that another account pays for."),
         format!("Network: {network}"),
         format!("Program: {named}"),
         format!("Signs: {account}, your account"),
-        format!(
-            "Fee: paid by {payer}, not by you: at most {} (gas limit {}, tip {}).",
-            crate::provider_private::grouped(whole(&report["max_fee"], "").unwrap_or(0)),
-            crate::provider_private::grouped(u128::from(report["gas_limit"].as_u64().unwrap_or(0))),
-            crate::provider_private::grouped(whole(&report["tip"], "").unwrap_or(0)),
-        ),
+        fee_line,
     ];
     let mut warnings = vec![format!(
         "Your wallet can't decode what this call tells {} to do: it shows only the exact bytes' hash. Approve it only if you trust {app} and this program.",
@@ -479,6 +625,54 @@ pub fn sheet(request: &Value, report: &Value, label: Option<&Value>, network: &s
     })
 }
 
+/// The sheet of a burn to a bridge: what it burns, decoded by the wallet (amount and token from
+/// the bridge's Config), to where it is told, the exit commitment, who pays the fee.
+#[allow(clippy::too_many_arguments)]
+fn burn_sheet(
+    request: &Value,
+    report: &Value,
+    burn: &BridgeBurn,
+    app: &str,
+    network: &str,
+    account: &str,
+    fee_line: String,
+    hash: Option<String>,
+    why: Vec<String>,
+    label: &Value,
+) -> Value {
+    let lines = vec![
+        format!("{app} asks your wallet to sign a burn that the bridge's relay pays for."),
+        format!("Network: {network}"),
+        format!("Burns: {} {} ({}) from {account}, your account, to send it back to Ethereum.", burn.amount_text, burn.symbol, burn.bridge_label),
+        format!("Program: the bridge's token program {}; it tells {} ({}) what was burned.", burn.token_program, burn.bridge_label, burn.bridge),
+        format!("Exit commitment: {} (it hides the Ethereum address until the release).", burn.exit),
+        fee_line,
+        format!(
+            "Exactly these bytes are signed: {} (the message is {} bytes, SHA-256 {}).",
+            hash.as_deref().unwrap_or("?"),
+            report["message_len"].as_u64().unwrap_or(0),
+            report["message_sha256"].as_str().unwrap_or_default()
+        ),
+    ];
+    let mut warnings = vec![BURN_WARNING.to_owned()];
+    warnings.extend(provider::label_warnings(label, "program"));
+    json!({
+        "lines": lines,
+        "warnings": warnings,
+        "privacy": privacy_line(BURN_PRIVACY).unwrap_or(PRIVACY[0].1),
+        "after": AFTER,
+        "app_says": request["app_summary"],
+        "hash": hash,
+        "burn": {
+            "bridge": burn.bridge, "bridge_label": burn.bridge_label, "token_program": burn.token_program,
+            "definition": burn.definition, "symbol": burn.symbol, "amount": burn.amount.to_string(),
+            "amount_text": burn.amount_text, "denom_index": burn.denom_index, "exit": burn.exit,
+        },
+        "refused": !why.is_empty(),
+        "why": why,
+    })
+}
+
 /// The programs each app declared, kept in the provider's store (`declared_programs`).
 pub fn load_declared(saved: &Value) -> Map<String, Value> {
     let mut out = Map::new();
@@ -503,7 +697,7 @@ pub fn load_declared(saved: &Value) -> Map<String, Value> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const BRIDGE: &str = "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7";
@@ -571,7 +765,7 @@ mod tests {
         let declared = vec![BRIDGE.to_owned()];
         let summary = "Claim \u{202E}CDSUd 001\u{202C} for you\u{200B}\nnow";
         let request = relayed_call_request("lez_bridge", ACCOUNT, &call(json!({})), summary, &declared, &own(), &[], 1).unwrap();
-        let sheet = sheet(&request, &report_for(&request), Some(&json!({ "text": "RFP-022 bridge", "verified": true })), "LEZ 0.4 · bridge test network", &own(), &[]);
+        let sheet = sheet(&request, &report_for(&request), Some(&json!({ "text": "RFP-022 bridge", "verified": true })), "LEZ 0.4 · bridge test network", &own(), &[], None);
         assert_eq!(sheet["refused"], false, "{sheet}");
         let lines: Vec<&str> = sheet["lines"].as_array().unwrap().iter().map(|l| l.as_str().unwrap()).collect();
         assert_eq!(lines[0], "lez_bridge asks your wallet to sign a call that another account pays for.");
@@ -593,14 +787,14 @@ mod tests {
         let mut report = report_for(&request);
         report["payer"] = json!(ACCOUNT);
         report["max_fee"] = json!("1");
-        let refused = super::sheet(&request, &report, None, "LEZ 0.4 · bridge test network", &own(), &[]);
+        let refused = super::sheet(&request, &report, None, "LEZ 0.4 · bridge test network", &own(), &[], None);
         assert_eq!(refused["refused"], true);
         assert_eq!(refused["why"].as_array().unwrap().len(), 2, "{refused}");
         assert!(refused["lines"][2].as_str().unwrap().contains("the Program Registry isn't installed"));
         // Its own balance given to the program is a warning.
         let mut report = report_for(&request);
         report["own_balance"] = json!(true);
-        let warned = super::sheet(&request, &report, None, "LEZ 0.4 · bridge test network", &own(), &[]);
+        let warned = super::sheet(&request, &report, None, "LEZ 0.4 · bridge test network", &own(), &[], None);
         assert!(warned["warnings"][1].as_str().unwrap().contains("can move LEZ out of"), "{warned}");
     }
 
@@ -635,7 +829,7 @@ mod tests {
         ] {
             let mut report = report_for(&request);
             report[field] = value;
-            let shown = sheet(&request, &report, None, "LEZ 0.4 · bridge test network", &own(), &[]);
+            let shown = sheet(&request, &report, None, "LEZ 0.4 · bridge test network", &own(), &[], None);
             assert_eq!(shown["refused"], true, "{field}: {shown}");
         }
     }
@@ -728,7 +922,7 @@ mod tests {
         let request = relayed_call_request("lez_bridge", ACCOUNT, &call(json!({})), "", &declared, &own(), &[], 1).unwrap();
         let mut report = report_for(&request);
         report["actors"] = json!([{ "account": ACCOUNT.trim_start_matches("Public/"), "program": BRIDGE }, { "account": ACCOUNT.trim_start_matches("Public/"), "program": TOKENS }]);
-        let shown = sheet(&request, &report, None, "LEZ 0.4 · bridge test network", &own(), &[]);
+        let shown = sheet(&request, &report, None, "LEZ 0.4 · bridge test network", &own(), &[], None);
         assert!(shown["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().starts_with("The call acts as your account toward 3gF78H")), "{shown}");
         assert!(!shown["lines"].as_array().unwrap().iter().any(|l| l.as_str().unwrap().contains("data for 3gF78H")));
     }
@@ -763,22 +957,251 @@ mod tests {
     fn a_stored_request_is_checked_again_on_its_sheet() {
         let declared = vec![BRIDGE.to_owned()];
         let fine = relayed_call_request("lez_bridge", ACCOUNT, &call(json!({})), "", &declared, &own(), &[], 1).unwrap();
-        assert_eq!(sheet(&fine, &report_for(&fine), None, "LEZ 0.4", &own(), &[])["refused"], false);
+        assert_eq!(sheet(&fine, &report_for(&fine), None, "LEZ 0.4", &own(), &[], None)["refused"], false);
         let mut to_registry = fine.clone();
         to_registry["program"] = json!(REGISTRY_04);
         let mut report = report_for(&to_registry);
         report["program"] = json!(REGISTRY_04);
-        let shown = sheet(&to_registry, &report, None, "LEZ 0.4", &own(), &[]);
+        let shown = sheet(&to_registry, &report, None, "LEZ 0.4", &own(), &[], None);
         assert_eq!(shown["refused"], true, "{shown}");
         assert!(shown["why"][0].as_str().unwrap().contains("Names registry"), "{shown}");
         let mut actor = fine.clone();
         actor["accounts"] = json!([{ "account": OTHER, "program": TOKENS }]);
-        assert_eq!(sheet(&actor, &report_for(&actor), None, "LEZ 0.4", &own(), &[])["refused"], true);
+        assert_eq!(sheet(&actor, &report_for(&actor), None, "LEZ 0.4", &own(), &[], None)["refused"], true);
         let bridged = "4VScJ7mtwaanQ5gcSZZw2iAMHYAbLrVmbYKwEGx2eSex";
         let mut tokens_root = fine.clone();
         tokens_root["program"] = json!(bridged);
         let mut report = report_for(&tokens_root);
         report["program"] = json!(bridged);
-        assert_eq!(sheet(&tokens_root, &report, None, "LEZ 0.4", &own(), &[(bridged.to_owned(), "bridged_tokens")])["refused"], true);
+        assert_eq!(sheet(&tokens_root, &report, None, "LEZ 0.4", &own(), &[(bridged.to_owned(), "bridged_tokens")], None)["refused"], true);
+    }
+
+    // ── Burns to a bridge (Send back to Ethereum) ──
+
+    const V4: &str = "BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf";
+    const V3: &str = "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr";
+    const V4_TOKENS: &str = "5w6nTkftFFDy8mtdpnKpZVetGQJ2WCKdhmpJsAYArbU7";
+    const V4_WETH: &str = "9tcLmjKixcGZJMnXS381Dhuzd8u9jPvQYF21F3vDhGE2";
+    const V4_DUSDC: &str = "92PJXZ2E3QPupUFuhc5f4rgsRiAZKv62TpSYfZEgLeru";
+    const CENT: u128 = 10_000_000_000_000_000;
+
+    fn id(text: &str) -> AccountId {
+        registry::parse_account(text).unwrap()
+    }
+
+    /// The v4 Config as our 0.4 holds it (testdata/bridge-net/config-v4.json, read 2026-11-15).
+    pub(crate) fn v4_config() -> crate::bridge_net::BridgeConfig {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/bridge-net/config-v4.json");
+        let reply: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let bytes = crate::bridge_net::config_bytes_in(&reply["result"], &id(V4)).unwrap();
+        crate::bridge_net::decode_bridge_config(&bytes).unwrap()
+    }
+
+    fn burn_message(definition: &str, amount: u128, bridge: &str) -> Vec<u8> {
+        crate::bridge_net::encode_burn(&crate::bridge_net::BurnMessage {
+            definition: id(definition),
+            amount,
+            notify_account: crate::bridge_net::config_address(&id(bridge)),
+            notify_program: id(bridge),
+            memo: [0xE5; 32],
+        })
+    }
+
+    fn burn_call(message: &[u8], extra: Value) -> String {
+        let mut call = json!({
+            "program": V4_TOKENS, "message": registry::hex(message), "privacy": BURN_PRIVACY,
+            "accounts": [
+                { "account": V4_WETH, "program": V4_TOKENS },
+                { "seed": crate::bridge_net::config_seed_hex(), "of": V4, "program": V4 },
+            ],
+            "fee": { "payer": PAYER, "gas_limit": 250000, "tip": "0", "max_fee": "2500000" }
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            call[k] = v.clone();
+        }
+        call.to_string()
+    }
+
+    fn burn_request(call: &str) -> Result<Value, String> {
+        relayed_call_request("lez_bridge", ACCOUNT, call, "Send 0.01 ETH back", &[V4_TOKENS.to_owned(), V4.to_owned(), V3.to_owned()], &own(), &[], 1)
+    }
+
+    fn burn_report(request: &Value) -> Value {
+        json!({
+            "hash": "ab".repeat(32), "account": request["account"], "program": request["program"], "payer": request["fee"]["payer"],
+            "gas_limit": request["fee"]["gas_limit"], "tip": request["fee"]["tip"], "max_fee": request["fee"]["max_fee"],
+            "message_len": request["message_len"], "message_sha256": request["message_sha256"],
+            "actors": [
+                { "account": ACCOUNT.trim_start_matches("Public/"), "program": V4_TOKENS },
+                { "account": V4_WETH, "program": V4_TOKENS },
+                { "account": registry::account_text(&crate::bridge_net::config_address(&id(V4))), "program": V4 },
+            ],
+            "creates": [], "own_balance": false,
+        })
+    }
+
+    /// The bridge module's golden vector (rfp-022 `modules/lez_bridge/rust-lib/testdata/
+    /// public-burn-v1.json`, copied as is): its `expected.call` is exactly what `send_back_build`
+    /// hands the wallet. It decodes to its inputs, and passes the check against a Config of its
+    /// (stand-in) bridge listing that definition and denomination.
+    #[test]
+    fn the_bridge_module_s_golden_burn_passes() {
+        let vector: Value = serde_json::from_str(include_str!("../testdata/public-burn-v1.json")).unwrap();
+        let (inputs, expected) = (&vector["inputs"], &vector["expected"]);
+        let bridge = id(inputs["bridge_program"].as_str().unwrap());
+        let message = registry::unhex(expected["call"]["message"].as_str().unwrap()).unwrap();
+        assert_eq!(message.len() as u64, expected["message_len"].as_u64().unwrap());
+        let burn = crate::bridge_net::decode_burn(&message).unwrap();
+        assert_eq!(registry::account_text(&burn.definition), inputs["definition"].as_str().unwrap());
+        assert_eq!(burn.amount.to_string(), inputs["denom"].as_str().unwrap());
+        assert_eq!(registry::account_text(&burn.notify_account), expected["config_pda"].as_str().unwrap());
+        assert_eq!(burn.notify_account, crate::bridge_net::config_address(&bridge));
+        assert_eq!(burn.notify_program, bridge);
+        assert_eq!(format!("0x{}", registry::hex(&burn.memo)), expected["exit_commitment"].as_str().unwrap());
+        assert_eq!(crate::bridge_net::encode_burn(&burn), message, "encodes back to the same bytes");
+        let config = crate::bridge_net::BridgeConfig {
+            token_program: id(inputs["token_program"].as_str().unwrap()),
+            burn_frozen: false,
+            tokens: vec![crate::bridge_net::Token {
+                eth_token: inputs["eth_token"].as_str().unwrap().to_owned(),
+                definition: burn.definition,
+                decimals: 18,
+                denoms: vec![10_000_000_000_000_000, 100_000_000_000_000_000, 1_000_000_000_000_000_000],
+                registered: true,
+                burn_frozen: false,
+            }],
+        };
+        let declared = vec![inputs["token_program"].as_str().unwrap().to_owned(), inputs["bridge_program"].as_str().unwrap().to_owned()];
+        let request = relayed_call_request("lez_bridge", inputs["burner"].as_str().unwrap(), &expected["call"].to_string(), "", &declared, &own(), &[], 1).unwrap();
+        let checked = burn_check(&request, &bridge, &config).unwrap();
+        assert_eq!((checked.amount_text.as_str(), checked.symbol.as_str(), checked.exit.as_str()), ("0.01", "wETH", expected["exit_commitment"].as_str().unwrap()));
+    }
+
+    #[test]
+    fn amounts_read_as_a_person_reads_them() {
+        assert_eq!(units_text(CENT, 18), "0.01");
+        assert_eq!(units_text(10 * CENT, 18), "0.1");
+        assert_eq!(units_text(100 * CENT, 18), "1");
+        assert_eq!(units_text(100_000_000, 6), "100");
+        assert_eq!(units_text(1, 6), "0.000001");
+        assert_eq!(units_text(0, 18), "0");
+        assert_eq!(units_text(42, 0), "42");
+    }
+
+    /// A burn of one denomination of wrapped ETH to bridge v4, as the bridge module builds it:
+    /// checked from the message bytes and the Config, the amount and token from the Config.
+    #[test]
+    fn a_burn_to_v4_is_read_from_its_bytes_and_the_config() {
+        let config = v4_config();
+        assert_eq!(registry::account_text(&config.token_program), V4_TOKENS, "v4 shares v3's token program");
+        let message = burn_message(V4_WETH, CENT, V4);
+        assert_eq!(message.len(), crate::bridge_net::BURN_MESSAGE_LEN);
+        assert_eq!(message[0], 10, "BurnWithNotice is the token program's 11th variant");
+        let request = burn_request(&burn_call(&message, json!({}))).unwrap();
+        let burn = burn_check(&request, &id(V4), &config).unwrap();
+        assert_eq!(
+            (burn.amount_text.as_str(), burn.symbol.as_str(), burn.denom_index, burn.bridge_label.as_str(), burn.definition.as_str()),
+            ("0.01", "wETH", 0, "bridge v4", V4_WETH)
+        );
+        assert_eq!(burn.exit, format!("0x{}", "e5".repeat(32)));
+        assert_eq!(burn_check(&burn_request(&burn_call(&burn_message(V4_WETH, 100 * CENT, V4), json!({}))).unwrap(), &id(V4), &config).unwrap().denom_index, 2);
+    }
+
+    /// Everything that is not exactly that burn is refused, each for its own reason.
+    #[test]
+    fn anything_but_exactly_that_burn_is_refused() {
+        let config = v4_config();
+        let refused = |call: String| -> String {
+            match burn_request(&call) {
+                Ok(request) => burn_check(&request, &id(V4), &config).expect_err(&call),
+                Err(why) => why,
+            }
+        };
+        let good = burn_message(V4_WETH, CENT, V4);
+        // Not one denomination; another token's amount; a token v4 doesn't list.
+        assert!(refused(burn_call(&burn_message(V4_WETH, 2 * CENT, V4), json!({}))).contains("exactly one denomination"));
+        assert!(refused(burn_call(&burn_message(V4_DUSDC, CENT, V4), json!({ "accounts": [{ "account": V4_DUSDC, "program": V4_TOKENS }, { "seed": crate::bridge_net::config_seed_hex(), "of": V4, "program": V4 }] }))).contains("exactly one denomination"));
+        assert!(refused(burn_call(&burn_message(OTHER, CENT, V4), json!({}))).contains("isn't a token of bridge v4"));
+        // Told to v3 (whose vault can never release), or to v4's program at another account.
+        assert!(refused(burn_call(&burn_message(V4_WETH, CENT, V3), json!({}))).contains("another program"));
+        let mut elsewhere = good.clone();
+        elsewhere[49..81].copy_from_slice(&id(OTHER));
+        assert!(refused(burn_call(&elsewhere, json!({}))).contains("another program"));
+        // Another instruction shape: a byte more, a byte less, another variant (a plain Burn).
+        let mut long = good.clone();
+        long.push(0);
+        assert!(refused(burn_call(&long, json!({}))).contains("145 bytes"));
+        assert!(refused(burn_call(&good[..144], json!({}))).contains("145 bytes"));
+        let mut tag = good.clone();
+        tag[0] = 3;
+        assert!(refused(burn_call(&tag, json!({}))).contains("isn't a burn with notice"));
+        // Other accounts: a third one, the two swapped, the Config created, the definition missing.
+        let seed = crate::bridge_net::config_seed_hex();
+        for accounts in [
+            json!([{ "account": V4_WETH, "program": V4_TOKENS }, { "seed": seed, "of": V4, "program": V4 }, { "account": OTHER, "program": V4_TOKENS }]),
+            json!([{ "seed": seed, "of": V4, "program": V4 }, { "account": V4_WETH, "program": V4_TOKENS }]),
+            json!([{ "account": V4_WETH, "program": V4_TOKENS }, { "seed": seed, "of": V4, "program": V4, "new": true }]),
+            json!([{ "seed": seed, "of": V4, "program": V4 }]),
+            json!([{ "account": V4_WETH, "program": V4_TOKENS }, { "seed": "33".repeat(32), "of": V4, "program": V4 }]),
+        ] {
+            assert!(refused(burn_call(&good, json!({ "accounts": accounts }))).contains("declares exactly"), "{accounts}");
+        }
+        // Another privacy line; another root program.
+        assert!(refused(burn_call(&good, json!({ "privacy": "public_call" }))).contains("privacy bridge_public_burn"));
+        let other_root = relayed_call_request("lez_bridge", ACCOUNT, &burn_call(&good, json!({ "program": V4 })), "", &[V4_TOKENS.to_owned(), V4.to_owned()], &own(), &[], 1).unwrap();
+        assert!(burn_check(&other_root, &id(V4), &config).unwrap_err().contains("goes elsewhere"));
+        // Paused burns, for every token or for this one; a token no longer registered.
+        let mut frozen = config.clone();
+        frozen.burn_frozen = true;
+        let request = burn_request(&burn_call(&good, json!({}))).unwrap();
+        assert!(burn_check(&request, &id(V4), &frozen).unwrap_err().contains("paused"));
+        let mut frozen = config.clone();
+        frozen.tokens.iter_mut().for_each(|t| t.burn_frozen = true);
+        assert!(burn_check(&request, &id(V4), &frozen).unwrap_err().contains("paused"));
+        let mut gone = config.clone();
+        gone.tokens.iter_mut().for_each(|t| t.registered = false);
+        assert!(burn_check(&request, &id(V4), &gone).unwrap_err().contains("isn't registered"));
+        assert!(burn_check(&request, &id(V4), &config).is_ok(), "the good one still passes");
+    }
+
+    /// The burn's sheet says what the wallet decoded: the amount and token, the bridge, the exit
+    /// commitment, who pays; it warns that the tokens are destroyed; the wallet's build must reach
+    /// exactly the root and the two accounts, give no LEZ balance and create nothing.
+    #[test]
+    fn a_burn_s_sheet_says_what_it_burns_and_checks_the_build() {
+        let config = v4_config();
+        let request = burn_request(&burn_call(&burn_message(V4_WETH, CENT, V4), json!({}))).unwrap();
+        let burn = burn_check(&request, &id(V4), &config).unwrap();
+        let shown = sheet(&request, &burn_report(&request), None, "LEZ 0.4 · bridge test network", &own(), &[], Some(&burn));
+        assert_eq!(shown["refused"], false, "{shown}");
+        let lines: Vec<&str> = shown["lines"].as_array().unwrap().iter().map(|l| l.as_str().unwrap()).collect();
+        assert_eq!(lines[0], "lez_bridge asks your wallet to sign a burn that the bridge's relay pays for.");
+        assert_eq!(lines[2], format!("Burns: 0.01 wETH (bridge v4) from {ACCOUNT}, your account, to send it back to Ethereum."));
+        assert!(lines[4].starts_with(&format!("Exit commitment: 0x{}", "e5".repeat(32))), "{lines:?}");
+        assert_eq!(lines[5], format!("Fee: paid by {PAYER}, not by you: at most 2,500,000 (gas limit 250,000, tip 0)."));
+        assert_eq!(shown["warnings"][0], BURN_WARNING);
+        assert!(!shown["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("can't decode")), "{shown}");
+        assert_eq!(shown["privacy"], "A public burn publishes this account, the amount and an exit commitment; the Ethereum address stays hidden until the release.");
+        assert_eq!((shown["burn"]["amount_text"].as_str(), shown["burn"]["symbol"].as_str()), (Some("0.01"), Some("wETH")));
+        // The wallet's build reaches more, gives the LEZ balance, or creates an account: refused.
+        for tweak in [
+            |r: &mut Value| r["actors"].as_array_mut().unwrap().push(json!({ "account": OTHER, "program": V4_TOKENS })),
+            |r: &mut Value| r["own_balance"] = json!(true),
+            |r: &mut Value| r["creates"] = json!([OTHER]),
+            |r: &mut Value| r["actors"][1]["account"] = json!(V4_DUSDC),
+        ] {
+            let mut report = burn_report(&request);
+            tweak(&mut report);
+            assert_eq!(sheet(&request, &report, None, "LEZ 0.4", &own(), &[], Some(&burn))["refused"], true);
+        }
+        // The burn's privacy line on a call the wallet didn't check as a burn: refused.
+        assert_eq!(sheet(&request, &burn_report(&request), None, "LEZ 0.4", &own(), &[], None)["refused"], true);
+        // The token program stays refused as root unless the caller took it off for this burn.
+        let root_only = vec![(V4_TOKENS.to_owned(), "bridged_tokens")];
+        assert_eq!(sheet(&request, &burn_report(&request), None, "LEZ 0.4", &own(), &root_only, Some(&burn))["refused"], true);
+        assert!(burn_request(&burn_call(&burn_message(V4_WETH, CENT, V4), json!({})))
+            .and_then(|_| relayed_call_request("lez_bridge", ACCOUNT, &burn_call(&burn_message(V4_WETH, CENT, V4), json!({})), "", &[V4_TOKENS.to_owned(), V4.to_owned()], &own(), &root_only, 1))
+            .unwrap_err()
+            .contains("holds tokens"));
     }
 }

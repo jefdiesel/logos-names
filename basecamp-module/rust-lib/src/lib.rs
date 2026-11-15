@@ -1439,7 +1439,12 @@ const MODULE_VERSION: &str = "0.17.0";
 /// get_config's `features`: what an app may need beyond the version (`reveal_name`;
 /// `request_access_with` and its `account_hint`; `grant_add_account`: a hint for an account
 /// the app wasn't given is a request to add it to the app's grant, not "approved").
-const MODULE_FEATURES: [&str; 6] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "bundled_tool"];
+/// `relayed_bridge_burn`: `propose_relayed_call` signs a burn of one denomination to a bridge whose
+/// vault releases by proof (`provider_public::burn_check`, privacy `bridge_public_burn`).
+const MODULE_FEATURES: [&str; 7] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "bundled_tool", "relayed_bridge_burn"];
+
+/// What a call that says it is a burn answers when it isn't one to a bridge a burn may go to.
+const NOT_A_BURN_BRIDGE: &str = "the wallet signs a burn only to a bridge whose vault releases by proof (bridge v4), and this call isn't one to its token program";
 
 /// What a private-name action answers on LEZ 0.4, where names are public only (S-B).
 const PRIVATE_OFF_04: &str = "on LEZ 0.4 names are public only: private payments and private holders are off there, so nothing was done";
@@ -6678,7 +6683,23 @@ impl NamesModule for Names {
             let declared = self.store().private.declared_of(&app);
             let own = self.own_programs();
             let root_only = self.root_only()?;
+            // A burn to a bridge (privacy `bridge_public_burn`): the Configs of the bridges a burn
+            // may go to are read now, and their token program may be the root only if the call is
+            // exactly such a burn (`burn_check`, below and at every later step).
+            let asks_burn = serde_json::from_str::<Value>(&call_json).ok().is_some_and(|call| call["privacy"] == provider_public::BURN_PRIVACY);
+            let burn_configs = if asks_burn { self.burn_configs()? } else { Vec::new() };
+            let root_only: Vec<(String, &'static str)> = if asks_burn {
+                let token_programs: Vec<String> = burn_configs.iter().map(|(_, config)| registry::account_text(&config.token_program)).collect();
+                let asked_root = serde_json::from_str::<Value>(&call_json).ok().and_then(|call| call["program"].as_str().and_then(|p| registry::parse_account(p.trim().trim_start_matches("Public/")).ok()));
+                if !asked_root.is_some_and(|id| token_programs.contains(&registry::account_text(&id))) {
+                    return Err(NOT_A_BURN_BRIDGE.to_owned());
+                }
+                root_only.into_iter().filter(|(id, _)| !token_programs.contains(id)).collect()
+            } else {
+                root_only
+            };
             let mut request = provider_public::relayed_call_request(&app, &account, &call_json, &summary, &declared, &own, &root_only, now)?;
+            let burn = Self::burn_gate_with(&request, &burn_configs)?;
             let store = self.store();
             let written = request["account"].as_str().unwrap_or_default().to_owned();
             if !store.granted(&app).contains(&written) {
@@ -6697,6 +6718,12 @@ impl NamesModule for Names {
             let output = cli::run_with_input(&setup, vec!["module".into(), "public-call".into(), "plan".into()], &input.to_string(), PUBLIC_PLAN_PATIENCE)
                 .map_err(|error| format!("the wallet couldn't build this call: {error}"))?;
             let report: Value = serde_json::from_str(cli::last_line(&output)).map_err(|_| "the names CLI gave no build the wallet can read".to_owned())?;
+            if let Some(burn) = &burn {
+                let problems = provider_public::burn_report_problems(&report, &request, burn);
+                if let Some(first) = problems.first() {
+                    return Err(format!("{first}; the wallet doesn't sign it"));
+                }
+            }
             request["report"] = report;
             request["check"] = json!("ready");
             self.queue_any(&app, request, now)
@@ -7704,10 +7731,12 @@ impl Names {
         if !self.store().private.declared_of(&app).contains(&program) {
             return Err(again("this app no longer has that program declared".to_owned()));
         }
-        // The rule about the wallet's own programs and the person's tokens, applied again.
+        // The rule about the wallet's own programs and the person's tokens, applied again; a burn
+        // to a bridge is checked again against the bridge's Config read now.
         let own = self.own_programs();
         let root_only = self.root_only().map_err(refused)?;
-        provider_public::programs_allowed(&request, &own, &root_only).map_err(refused)?;
+        let burn = self.burn_gate(&request).map_err(refused)?;
+        provider_public::programs_allowed(&request, &own, &Self::root_only_for(root_only, burn.as_ref())).map_err(refused)?;
         // The kept bytes are still the approved ones.
         let message = registry::unhex(request["message"].as_str().unwrap_or_default()).unwrap_or_default();
         if registry::hex(&<sha2::Sha256 as sha2::Digest>::digest(&message)) != request["approved_report"]["message_sha256"].as_str().unwrap_or_default() {
@@ -7721,6 +7750,11 @@ impl Names {
             .map_err(|error| refused(format!("the wallet couldn't build this call again: {error}")))?;
         let report: Value = serde_json::from_str(cli::last_line(&output)).map_err(|_| refused("the names CLI gave no build the wallet can read".to_owned()))?;
         let last_payer_nonce = request["signed_payer_nonce"].as_str().and_then(|n| n.parse::<u128>().ok());
+        if let Some(burn) = &burn {
+            if let Some(first) = provider_public::burn_report_problems(&report, &request, burn).first() {
+                return Err(refused(first.clone()));
+            }
+        }
         let hash = provider_public::resign_check(&request["approved_report"], last_payer_nonce, &report).map_err(|refusal| (refusal.text().to_owned(), refusal.code()))?;
         let transaction = self.sign_relayed(id, &request, &hash).map_err(refused)?;
         let store = self.store();
@@ -7817,6 +7851,59 @@ impl Names {
         Ok(list)
     }
 
+    /// The Configs of the bridges a relayed burn may go to (`bridge_net::BURN_BRIDGES`, built in),
+    /// read now; a bridge with no Config on this chain is left out. Any failed read is an error:
+    /// the caller signs nothing (fail closed).
+    fn burn_configs(&self) -> Result<Vec<(AccountId, bridge_net::BridgeConfig)>, String> {
+        #[cfg(not(test))]
+        let url = std::env::var("LOGOS_NAMES_BRIDGE_RPC").ok().filter(|url| !url.trim().is_empty()).unwrap_or_else(|| self.lez04_rpc());
+        let mut out = Vec::new();
+        for text in bridge_net::BURN_BRIDGES {
+            let program = registry::parse_account(text)?;
+            #[cfg(not(test))]
+            let read = bridge_net::config_of(&url, &program);
+            // Tests set the Config the chain would give (`BURN_CONFIGS`); unset, none.
+            #[cfg(test)]
+            let read = tests::BURN_CONFIGS.with(|configs| configs.borrow().get(text).cloned()).unwrap_or(Ok(None));
+            match read {
+                Ok(Some(config)) => out.push((program, config)),
+                Ok(None) => {}
+                Err(why) => return Err(format!("the wallet couldn't read the Config of {} just now ({why}), so it signs no burn; try again", bridge_net::bridge_label(text).unwrap_or(text))),
+            }
+        }
+        Ok(out)
+    }
+
+    /// A relayed call that says it is a burn to a bridge (privacy `bridge_public_burn`), checked
+    /// exactly (`provider_public::burn_check`) against the Configs read now; `None` for any other
+    /// call. Recomputed from the stored bytes at every step (sheet, approval, re-sign), never kept.
+    fn burn_gate(&self, request: &Value) -> Result<Option<provider_public::BridgeBurn>, String> {
+        if request["privacy"] != provider_public::BURN_PRIVACY {
+            return Ok(None);
+        }
+        Self::burn_gate_with(request, &self.burn_configs()?)
+    }
+
+    fn burn_gate_with(request: &Value, configs: &[(AccountId, bridge_net::BridgeConfig)]) -> Result<Option<provider_public::BridgeBurn>, String> {
+        if request["privacy"] != provider_public::BURN_PRIVACY {
+            return Ok(None);
+        }
+        let program = request["program"].as_str().unwrap_or_default();
+        let (bridge, config) = configs
+            .iter()
+            .find(|(_, config)| registry::account_text(&config.token_program) == program)
+            .ok_or(NOT_A_BURN_BRIDGE)?;
+        provider_public::burn_check(request, bridge, config).map(Some)
+    }
+
+    /// `root_only` without the token program of a checked burn (that one root is allowed).
+    fn root_only_for(root_only: Vec<(String, &'static str)>, burn: Option<&provider_public::BridgeBurn>) -> Vec<(String, &'static str)> {
+        match burn {
+            Some(burn) => root_only.into_iter().filter(|(id, _)| *id != burn.token_program).collect(),
+            None => root_only,
+        }
+    }
+
     /// Before the bridge list changes, the token program of each bridge listed now is read and
     /// kept (SF-2), so a bridge removed before any relayed call was checked stays refused as root.
     /// Best effort: a read that fails keeps nothing new (the balance view and every check keep
@@ -7906,12 +7993,14 @@ impl Names {
         let shown = request["network"].as_str().and_then(Net::parse).unwrap_or(self.net).shown();
         let network = format!("{} · {}", shown["version"].as_str().unwrap_or_default(), shown["name"].as_str().unwrap_or_default());
         let own = self.own_programs();
-        match self.root_only() {
-            Ok(root_only) => provider_public::sheet(request, &request["report"], label.as_ref(), &network, &own, &root_only),
+        match self.root_only().and_then(|root_only| self.burn_gate(request).map(|burn| (root_only, burn))) {
+            Ok((root_only, burn)) => {
+                provider_public::sheet(request, &request["report"], label.as_ref(), &network, &own, &Self::root_only_for(root_only, burn.as_ref()), burn.as_ref())
+            }
             Err(why) => {
                 // Fail closed: shown, but refused, until the wallet can read which program holds
-                // the person's bridged tokens.
-                let mut sheet = provider_public::sheet(request, &request["report"], label.as_ref(), &network, &own, &[]);
+                // the person's bridged tokens (and, for a burn, the bridge's Config).
+                let mut sheet = provider_public::sheet(request, &request["report"], label.as_ref(), &network, &own, &[], None);
                 sheet["refused"] = json!(true);
                 if let Some(list) = sheet["why"].as_array_mut() {
                     list.push(json!(why));
@@ -8561,6 +8650,9 @@ mod tests {
         /// What the chain says each bridge's Config names as its token program, by bridge program
         /// (`bridge_tokens_programs`): a bridge not listed has no Config there.
         pub(super) static BRIDGE_CONFIGS: std::cell::RefCell<HashMap<String, Result<Option<String>, String>>> = std::cell::RefCell::new(HashMap::new());
+        /// The Config bytes the chain gives for each bridge a burn may go to (`burn_configs`), by
+        /// bridge program: a bridge not listed has no Config there.
+        pub(super) static BURN_CONFIGS: std::cell::RefCell<HashMap<String, Result<Option<bridge_net::BridgeConfig>, String>>> = std::cell::RefCell::new(HashMap::new());
     }
 
     fn parsed(text: &str) -> Value {
@@ -11601,6 +11693,126 @@ mod tests {
         let closed = parsed(&names.propose_relayed_call(account.clone(), call.to_string(), String::new()));
         assert!(closed["error"].as_str().unwrap().contains("couldn't check the token program of bridge"), "{closed}");
         BRIDGE_CONFIGS.with(|configs| configs.borrow_mut().clear());
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+    }
+
+    /// Send back to Ethereum: a burn of one denomination to bridge v4, relayed. Its token program
+    /// is the root only for exactly that burn, checked against the bridge's Config read at every
+    /// step (propose, sheet, approval, re-sign), failing closed; signed and handed back; the
+    /// feature is published. Anything else to the token program stays refused.
+    #[test]
+    fn a_burn_to_bridge_v4_is_signed_only_as_exactly_that_burn() {
+        use sha2::Digest;
+        let v4 = bridge_net::BRIDGE_V4_PROGRAM;
+        let tokens = "5w6nTkftFFDy8mtdpnKpZVetGQJ2WCKdhmpJsAYArbU7";
+        let weth = "9tcLmjKixcGZJMnXS381Dhuzd8u9jPvQYF21F3vDhGE2";
+        let payer = "Public/DGu98d9jZfTAuJKr9y3vWC1DDAujYUaddb6ugTpgSBNs";
+        let account = format!("Public/{PUBLIC}");
+        let v4_id = registry::parse_account(v4).unwrap();
+        let config_account = registry::account_text(&bridge_net::config_address(&v4_id));
+        let burn_bytes = |amount: u128, notify: &str| {
+            let notify = registry::parse_account(notify).unwrap();
+            bridge_net::encode_burn(&bridge_net::BurnMessage {
+                definition: registry::parse_account(weth).unwrap(),
+                amount,
+                notify_account: bridge_net::config_address(&notify),
+                notify_program: notify,
+                memo: [0x5E; 32],
+            })
+        };
+        let message = burn_bytes(10_000_000_000_000_000, v4);
+        let call = |message: &[u8]| json!({
+            "program": tokens, "message": registry::hex(message), "privacy": "bridge_public_burn",
+            "accounts": [{ "account": weth, "program": tokens }, { "seed": bridge_net::config_seed_hex(), "of": v4, "program": v4 }],
+            "fee": { "payer": payer, "gas_limit": 250000, "tip": "0", "max_fee": "2500000" },
+        });
+        let report = |message: &[u8], payer_nonce: &str, hash: &str| json!({
+            "hash": hash, "account": account, "program": tokens, "payer": payer, "gas_limit": 250000, "tip": "0", "max_fee": "2500000",
+            "message_len": message.len(), "message_sha256": registry::hex(&sha2::Sha256::digest(message)),
+            "actors": [{ "account": PUBLIC, "program": tokens }, { "account": weth, "program": tokens }, { "account": config_account, "program": v4 }],
+            "creates": [], "own_balance": false,
+            "nonces": { PUBLIC: "3", payer.trim_start_matches("Public/"): payer_nonce },
+        });
+        let tail = "case \"$*\" in\n\
+             *--version*) echo 'names 0.17.0 (LEZ v0.4.0-rc3)' ;;\n\
+             *\"public-call plan\"*) cat \"$(dirname \"$0\")/plan-out.json\" ;;\n\
+             *\"public-call sign\"*) touch \"$(dirname \"$0\")/signed\"; cat \"$(dirname \"$0\")/sign-out.json\" ;;\n\
+             *) echo 'unexpected'; exit 1 ;;\n\
+             esac";
+        let (mut names, dir) = with_wallet("relayed-burn", tail);
+        let hash = "cd".repeat(32);
+        std::fs::write(dir.join("plan-out.json"), report(&message, "41", &hash).to_string()).unwrap();
+        std::fs::write(dir.join("sign-out.json"), json!({ "hash": hash, "transaction": "b0b0" }).to_string()).unwrap();
+        names.net = Net::Lez04;
+        assert!(parsed(&names.get_config())["features"].as_array().unwrap().contains(&json!("relayed_bridge_burn")));
+        connect(&mut names, "lez_bridge", &account);
+        as_caller(app("lez_bridge"));
+        let declared = parsed(&names.declare_programs(json!([tokens, v4]).to_string(), "to send tokens back".into()))["value"]["request"].as_str().unwrap().to_owned();
+        assert_eq!(approve(&mut names, &declared, "")["value"]["state"], "approved");
+        let v4_config = provider_public::tests::v4_config();
+        let set_config = |config: Result<Option<bridge_net::BridgeConfig>, String>| BURN_CONFIGS.with(|configs| configs.borrow_mut().insert(v4.to_owned(), config));
+
+        // Fail closed: v4's Config can't be read, so no burn is proposed; none on this chain either.
+        as_caller(app("lez_bridge"));
+        set_config(Err("timed out".to_owned()));
+        let closed = parsed(&names.propose_relayed_call(account.clone(), call(&message).to_string(), String::new()));
+        assert!(closed["error"].as_str().unwrap().contains("couldn't read the Config of bridge v4"), "{closed}");
+        set_config(Ok(None));
+        let none = parsed(&names.propose_relayed_call(account.clone(), call(&message).to_string(), String::new()));
+        assert!(none["error"].as_str().unwrap().contains("releases by proof"), "{none}");
+        set_config(Ok(Some(v4_config.clone())));
+        // The token program as root without the burn's privacy line: refused as before.
+        let mut plain = call(&message);
+        plain["privacy"] = json!("public_call");
+        let plain = parsed(&names.propose_relayed_call(account.clone(), plain.to_string(), String::new()));
+        assert!(plain["error"].as_str().unwrap().contains("holds tokens your accounts have"), "{plain}");
+        // With it, but not that burn: an amount that isn't a denomination, a burn told to v3.
+        for (bytes, words) in [(burn_bytes(20_000_000_000_000_000, v4), "exactly one denomination"), (burn_bytes(10_000_000_000_000_000, bridge_net::BRIDGE_V3_PROGRAM), "another program")] {
+            let refused = parsed(&names.propose_relayed_call(account.clone(), call(&bytes).to_string(), String::new()));
+            assert!(refused["error"].as_str().unwrap().contains(words), "{words}: {refused}");
+        }
+        // The wallet's build reaching another account: refused before anything is shown.
+        let mut wide = report(&message, "41", &hash);
+        wide["actors"].as_array_mut().unwrap().push(json!({ "account": PUBLIC, "program": "11111111111111111111111111111111" }));
+        std::fs::write(dir.join("plan-out.json"), wide.to_string()).unwrap();
+        let wide = parsed(&names.propose_relayed_call(account.clone(), call(&message).to_string(), String::new()));
+        assert!(wide["error"].as_str().unwrap().contains("reaches other accounts"), "{wide}");
+        std::fs::write(dir.join("plan-out.json"), report(&message, "41", &hash).to_string()).unwrap();
+
+        // The burn: proposed, shown decoded.
+        let asked = parsed(&names.propose_relayed_call(account.clone(), call(&message).to_string(), "Send 0.01 ETH back to 0xAbC…".into()));
+        let id = asked["value"]["request"].as_str().unwrap_or_else(|| panic!("{asked}")).to_owned();
+        assert_eq!(asked["value"]["check"], "ready", "{asked}");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let pending = parsed(&names.pending_requests())["value"].clone();
+        let shown = pending.as_array().unwrap().iter().find(|r| r["id"] == id.as_str()).unwrap().clone();
+        assert_eq!(shown["sheet"]["refused"], false, "{shown}");
+        assert_eq!(shown["sheet"]["lines"][2], format!("Burns: 0.01 wETH (bridge v4) from {account}, your account, to send it back to Ethereum."));
+        assert_eq!(shown["sheet"]["warnings"][0], provider_public::BURN_WARNING);
+        // Burns paused on v4 between the sheet and the approval: refused, nothing signed.
+        let mut paused = v4_config.clone();
+        paused.burn_frozen = true;
+        set_config(Ok(Some(paused)));
+        let at_approval = approve(&mut names, &id, &account);
+        assert!(at_approval["error"].as_str().unwrap().contains("refuses"), "{at_approval}");
+        assert!(!dir.join("signed").exists(), "nothing was signed");
+        // Approved as it is: signed and handed back.
+        set_config(Ok(Some(v4_config.clone())));
+        let done = approve(&mut names, &id, &account);
+        assert_eq!(done["value"]["state"], "done", "{done}");
+        as_caller(app("lez_bridge"));
+        let status = parsed(&names.request_status(id.clone()))["value"].clone();
+        assert_eq!(status["transaction"], "b0b0", "{status}");
+        // A re-sign (the relay's payer moved on): checked against the Config again.
+        std::fs::write(dir.join("plan-out.json"), report(&message, "42", &"ef".repeat(32)).to_string()).unwrap();
+        std::fs::write(dir.join("sign-out.json"), json!({ "hash": "ef".repeat(32), "transaction": "b0b1" }).to_string()).unwrap();
+        set_config(Err("timed out".to_owned()));
+        let closed = parsed(&names.resign_relayed_call(id.clone()));
+        assert_eq!(closed["code"], "refused", "{closed}");
+        set_config(Ok(Some(v4_config.clone())));
+        let resigned = parsed(&names.resign_relayed_call(id.clone()))["value"].clone();
+        assert_eq!((resigned["transaction"].as_str(), resigned["resigns"].as_u64()), (Some("b0b1"), Some(1)), "{resigned}");
+        BURN_CONFIGS.with(|configs| configs.borrow_mut().clear());
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
     }
 

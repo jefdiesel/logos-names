@@ -1,0 +1,47 @@
+{
+ "about": "a relayed public burn of one denomination to the bridge's config (modules/NAMES-SEND-BACK.md \u00a73.3); generator modules/tools/make-public-burn-vector.py",
+ "inputs": {
+  "bridge_program": "9q1WTMLJiD7w2MXuXMv6dRw5p3iCd7gcEuG2VdSFgAMA",
+  "token_program": "BEGCoYnLKDrFSuEZ8u8nAMMAmQjcSubvuCKktpZ6dWDh",
+  "definition": "DPZfdTKKTiKxxHuggK93FGQyUHrj61zSpQdJHeLpLHK7",
+  "burner": "Public/5DNyon1w3jf4Ai2ANzLz1bYnrkeFwuoNRmTL48FTGGb7",
+  "payer": "Public/BVarzrZL4dgZUCM93vvbn9QbiRJBjkkLdZACy3qd8zsx",
+  "cfg_id": "0x643b7731ce87a7a0e0e62e6fbe3f5100a48e1b98d6ef7a28dffb388c8d0ea4b3",
+  "exit_secret": "0x752cce8f1c78cf4d6ba905247d3f42ee689172ec0d98b62ecdd55925dd1a72b7",
+  "eth_dest": "0xe2c4857976b346f8f9b3a7be714cd92d0bf68680",
+  "eth_token": "0x0000000000000000000000000000000000000000",
+  "denom": "10000000000000000",
+  "max_relay_fee": "0",
+  "gas_limit": 120000,
+  "max_fee": "2500000"
+ },
+ "expected": {
+  "exit_commitment": "0xe2ba7765d0fbf247044cb907a4c921c03ca316c6cfcb6323a6b5e2545ff3dfd5",
+  "release_nullifier": "0xcfb005440c0563b703addb024d30d9f3d3f42423cd08717dc201f5201b2bcce0",
+  "exit_leaf": "0xa43aaa9ed0191adb681892dd94b9df809b07c21411e52e1992ce51af730a4973",
+  "config_pda": "DVC8BihbhRhqyfuDesTL7htyvgNUYYY7W6HY9R1j9qN6",
+  "message_len": 145,
+  "call": {
+   "program": "BEGCoYnLKDrFSuEZ8u8nAMMAmQjcSubvuCKktpZ6dWDh",
+   "message": "0ab813f4dc8457895226ac4e2cb563d9190697e5270774f6cbb397a5396687f4620000c16ff28623000000000000000000b98515654e5018d039fb93af2f080e1015a204088ca9d7f817d88a7d713f76678329f2cdf4d057ad6d29ee78b66f5996c684ad1fa1f6e0309daa738a7d11806de2ba7765d0fbf247044cb907a4c921c03ca316c6cfcb6323a6b5e2545ff3dfd5",
+   "accounts": [
+    {
+     "account": "DPZfdTKKTiKxxHuggK93FGQyUHrj61zSpQdJHeLpLHK7",
+     "program": "BEGCoYnLKDrFSuEZ8u8nAMMAmQjcSubvuCKktpZ6dWDh"
+    },
+    {
+     "seed": "2f5246503032322f6272696467652f636f6e6669672f76312f3030303030302f",
+     "of": "9q1WTMLJiD7w2MXuXMv6dRw5p3iCd7gcEuG2VdSFgAMA",
+     "program": "9q1WTMLJiD7w2MXuXMv6dRw5p3iCd7gcEuG2VdSFgAMA"
+    }
+   ],
+   "fee": {
+    "payer": "Public/BVarzrZL4dgZUCM93vvbn9QbiRJBjkkLdZACy3qd8zsx",
+    "gas_limit": 120000,
+    "tip": "0",
+    "max_fee": "2500000"
+   },
+   "privacy": "bridge_public_burn"
+  }
+ }
+}

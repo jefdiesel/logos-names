@@ -240,6 +240,19 @@ pub struct Token {
     pub eth_token: String,
     pub definition: AccountId,
     pub decimals: u8,
+    /// The amounts a claim or a burn may be, base units, in the Config's order.
+    pub denoms: Vec<u128>,
+    pub registered: bool,
+    pub burn_frozen: bool,
+}
+
+/// A bridge Config as far as the Wallet reads it: its token program, whether burns are frozen
+/// for every token, and the tokens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeConfig {
+    pub token_program: AccountId,
+    pub burn_frozen: bool,
+    pub tokens: Vec<Token>,
 }
 
 impl Token {
@@ -251,6 +264,11 @@ impl Token {
 /// The bridge Config's token program and tokens (`Config` and `TokenEntry` in
 /// `lez-bridge/bridge/src/lib.rs`). Fails on anything that isn't exactly one Config.
 pub fn decode_config(bytes: &[u8]) -> Result<(AccountId, Vec<Token>), String> {
+    decode_bridge_config(bytes).map(|config| (config.token_program, config.tokens))
+}
+
+/// The same Config, with the burn freeze and each token's denominations and flags.
+pub fn decode_bridge_config(bytes: &[u8]) -> Result<BridgeConfig, String> {
     let mut r = Reader::new(bytes);
     r.take(32 + 20)?; // cfg_id, vault
     r.take(8)?; // evm_chain_id
@@ -261,7 +279,7 @@ pub fn decode_config(bytes: &[u8]) -> Result<(AccountId, Vec<Token>), String> {
     r.id()?; // freezer
     r.id()?; // attestor
     r.flag()?; // mint_frozen
-    r.flag()?; // burn_frozen
+    let all_burns_frozen = r.flag()?;
     let count = r.u32()?;
     if count > 32 {
         return Err("more tokens than a Config holds".to_owned());
@@ -271,18 +289,25 @@ pub fn decode_config(bytes: &[u8]) -> Result<(AccountId, Vec<Token>), String> {
         let eth_token = format!("0x{}", hex(r.take(20)?));
         let definition = r.id()?;
         let decimals = r.u8()?;
-        r.skip_vec(16)?; // denoms
+        let denom_count = r.u32()?;
+        if denom_count > 16 {
+            return Err("more denominations than a Config holds".to_owned());
+        }
+        let mut denoms = Vec::with_capacity(denom_count);
+        for _ in 0..denom_count {
+            denoms.push(r.u128()?);
+        }
         r.skip_vec(8)?; // claims
         r.skip_vec(8)?; // burns
         r.u128()?; // claimed_value
         r.u128()?; // burned_value
-        r.flag()?; // registered
+        let registered = r.flag()?;
         r.flag()?; // mint_frozen
-        r.flag()?; // burn_frozen
+        let burn_frozen = r.flag()?;
         if decimals > 38 {
             return Err("a token with more decimals than any amount has digits".to_owned());
         }
-        tokens.push(Token { eth_token, definition, decimals });
+        tokens.push(Token { eth_token, definition, decimals, denoms, registered, burn_frozen });
     }
     match r.u8()? {
         0 => {}
@@ -293,7 +318,85 @@ pub fn decode_config(bytes: &[u8]) -> Result<(AccountId, Vec<Token>), String> {
     }
     r.u128()?; // sponsor_amount
     r.end()?;
-    Ok((token_program, tokens))
+    Ok(BridgeConfig { token_program, burn_frozen: all_burns_frozen, tokens })
+}
+
+// ── Burns to a bridge (Send back to Ethereum) ──────────────────────────────
+
+/// The bridges a relayed burn may go to: the ones whose vault releases by proof (v4). Built in,
+/// not a setting: v2 and v3 share v4's token program, and a burn to them destroys the tokens for
+/// good (their vaults can never release). Never `set_bridge_programs`.
+pub const BURN_BRIDGES: [&str; 1] = [BRIDGE_V4_PROGRAM];
+
+/// The bridge Config's seed, as a relayed call's program account names it (`seed`, hex).
+pub fn config_seed_hex() -> String {
+    hex(CONFIG_SEED)
+}
+
+/// `Message::BurnWithNotice` of the bridge's token program (`lez-bridge/token/src/lib.rs`), borsh:
+/// variant 10, then the definition, the amount (u128, little-endian), the notified actor (its
+/// account, then its program) and the 32-byte memo (the exit commitment E). 145 bytes.
+pub const BURN_WITH_NOTICE_TAG: u8 = 10;
+pub const BURN_MESSAGE_LEN: usize = 1 + 32 + 16 + 32 + 32 + 32;
+
+/// A decoded `BurnWithNotice`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BurnMessage {
+    pub definition: AccountId,
+    pub amount: u128,
+    pub notify_account: AccountId,
+    pub notify_program: AccountId,
+    pub memo: [u8; 32],
+}
+
+/// Decodes `bytes` as exactly one `BurnWithNotice`: the tag, the exact length, nothing left over.
+pub fn decode_burn(bytes: &[u8]) -> Result<BurnMessage, String> {
+    if bytes.len() != BURN_MESSAGE_LEN {
+        return Err(format!("a burn to a bridge is {BURN_MESSAGE_LEN} bytes; this message is {}", bytes.len()));
+    }
+    let mut r = Reader::new(bytes);
+    if r.u8()? != BURN_WITH_NOTICE_TAG {
+        return Err("the message isn't a burn with notice".to_owned());
+    }
+    let definition = r.id()?;
+    let amount = r.u128()?;
+    let notify_account = r.id()?;
+    let notify_program = r.id()?;
+    let memo = r.id()?;
+    r.end()?;
+    Ok(BurnMessage { definition, amount, notify_account, notify_program, memo })
+}
+
+/// The bytes of a `BurnWithNotice` (tests and the shared vector).
+pub fn encode_burn(burn: &BurnMessage) -> Vec<u8> {
+    let mut out = Vec::with_capacity(BURN_MESSAGE_LEN);
+    out.push(BURN_WITH_NOTICE_TAG);
+    out.extend_from_slice(&burn.definition);
+    out.extend_from_slice(&burn.amount.to_le_bytes());
+    out.extend_from_slice(&burn.notify_account);
+    out.extend_from_slice(&burn.notify_program);
+    out.extend_from_slice(&burn.memo);
+    out
+}
+
+/// The whole Config of the bridge `program` on the chain at `url`, or `None` when the chain has
+/// none. Any failed read is an error (fail closed), as in `token_program_of`.
+pub fn config_of(url: &str, program: &AccountId) -> Result<Option<BridgeConfig>, String> {
+    let deadline = Deadline::after(Duration::from_secs(8));
+    let config = call(url, "getAccount", json!([registry::account_text(&config_address(program))]), deadline)?;
+    if config.is_null() {
+        return Ok(None);
+    }
+    let bytes = state_under(&config, program)?;
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    decode_bridge_config(&bytes).map(Some)
+}
+
+/// The Config bytes of the bridge `program` in a `getAccount` reply (tests' fixtures).
+pub fn config_bytes_in(reply: &Value, program: &AccountId) -> Result<Vec<u8>, String> {
+    state_under(reply, program)
 }
 
 /// A token definition's own name (`TokenState::Definition(Fungible { name, .. })`), cleaned
