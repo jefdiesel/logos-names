@@ -631,7 +631,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("receiveReply", [receiveReply({ needs: "secret" }).kind, receiveReply({ request: "logosdep1qq" }).kind, receiveReply({ deposit: {} }).kind], ["needs", "code", "old"]);
   check("receivesFrom keeps the unclaimed receives",
     receivesFrom({ receives: [{ id: "dep-1", symbol: "ETH", denom_text: "0.1", account: "A", account_kind: "public", stage: "deposited" }, { id: "dep-2", claimed: true }, { id: "dep-3", stage: "claimed" }] }),
-    [{ id: "dep-1", symbol: "ETH", amount: "0.1", account: "A", account_kind: "public", stage: "deposited", compare: null }]);
+    [{ id: "dep-1", symbol: "ETH", amount: "0.1", account: "A", account_kind: "public", stage: "deposited", compare: null, deployment: null }]);
   check("receivesFrom keeps the row's compare words", receivesFrom({ receives: [{ id: "d", compare: { words: ["a", "b", "c", "d"] } }] })[0].compare.words.length, 4);
   check("receivesFrom: the amount from denom and decimals", receivesFrom({ receives: [{ id: "d", symbol: "ETH", denom: "100000000000000000", decimals: 18 }] })[0].amount, "0.1");
   const { bridgeCan } = await import("./qml/logic.mjs");
@@ -803,6 +803,25 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("refused: an older build", receiveCodeRefused("The deposit code of dep-1 can't be shown again: it was made by an older build of this module, which did not keep the vault it was for. Nothing was guessed").line,
     "This code can't be shown again: an older LEZ Bridge made it and didn't keep what's needed.");
   check("refused: other reasons, the reason kept for Details", [receiveCodeRefused("there is no deposit dep-9 on this computer").line, receiveCodeRefused("x").detail], ["This code can't be shown again.", "x"]);
+}
+
+{
+  const { receiveProgress, receiveWhere, receiveRowsShown, receiveSteps, codeOlderVault, claimErrorTitle, receivesFrom } = await import("./qml/logic.mjs");
+  // The bridge 0acf483: a receive it can't follow, and one arrived where the relay moved on.
+  const lost = receiveProgress({ stage: "unknown", action: "recover", text: "It was made by an older build…" });
+  check("a receive the bridge can't follow", [lost.stage, lost.card, lost.detail, lost.claim], ["lost", "Can't be followed here", "It was made by an older build…", false]);
+  check("unknown without recover is still checking", receiveProgress({ stage: "unknown" }).stage, "checking");
+  const moved = receiveProgress({ stage: "claimable", relay: false, text: "Arrived: 0.1 ETH is ready to claim on bridge v3 (an older vault)." });
+  check("arrived, the relay moved on: no Claim", [moved.stage, moved.claim, moved.tone], ["noclaim", false, "plain"]);
+  check("arrived with the relay: Claim", receiveProgress({ stage: "claimable", relay: true }).claim, true);
+  const v3 = { id: "bridge-test-network-v3", label: "bridge v3", current: false };
+  check("where: only when not the current vault", [receiveWhere({ deployment: v3 }, null), receiveWhere(null, { deployment: v3 }), receiveWhere({ deployment: Object.assign({}, v3, { current: true }) }, null), receiveWhere(null, null)], ["bridge v3", "bridge v3", "", ""]);
+  const shown = receiveRowsShown([{ id: "a", symbol: "ETH", amount: "0.1", account: "A", deployment: v3 }], { a: { stage: "deposited", final_in_min: 5 } }, {}, 0, true).rows[0];
+  check("card row says the older vault", shown.where, "bridge v3");
+  check("steps: lost sits on Deposit, noclaim on Claim", [receiveSteps({ stage: "lost" }).find((x) => x.state === "now").key, receiveSteps({ stage: "noclaim" }).find((x) => x.state === "now").key], ["deposit", "claim"]);
+  check("older-vault code", [codeOlderVault({ deployment: "bridge-test-network-v3" }), codeOlderVault({ deployment: "bridge-test-network-v4" }), codeOlderVault({}), codeOlderVault(null), codeOlderVault({ deployment: v3 })], [true, false, false, false, true]);
+  check("relay_other_bridge title", claimErrorTitle("relay_other_bridge"), "The relay no longer pays claims on this vault");
+  check("receivesFrom keeps the deployment", receivesFrom({ receives: [{ id: "a", deployment: v3 }] })[0].deployment.label, "bridge v3");
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");

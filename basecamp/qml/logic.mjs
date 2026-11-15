@@ -1222,7 +1222,7 @@ export function claimErrorTitle(code) {
         wrong_chain: "This bridge belongs to another network", bridge_unreadable: "The bridge's settings can't be read",
         bad_config: "The bridge module's settings are out of date", no_relay: "No claim relay for this bridge",
         relay_cap: "The relay's limit is reached", relay_funds: "The relay is out of funds", relay_once: "The relay already sent this claim",
-        relay_refused: "The relay refused the claim", relay_busy: "The relay is busy", relay_unavailable: "The relay is not answering",
+        relay_refused: "The relay refused the claim", relay_other_bridge: "The relay no longer pays claims on this vault", relay_busy: "The relay is busy", relay_unavailable: "The relay is not answering",
         rate_limited: "Too many requests just now", unreachable: "The bridge test network can't be reached",
         eth_unreachable: "Sepolia can't be read", wrong_account: "Wrong account", busy: "The relay was busy",
         landed_or_used: "Your account was used since you approved", reverted: "Included, then refused",
@@ -1278,6 +1278,15 @@ export function receiveHoldLine(config, programs) {
     return ""
 }
 
+/// Whether a code (a receive_request reply) was made for another vault than Receive's: its
+/// `deployment` (a name, or {id, current}) is not RECEIVE_DEPLOYMENT. A fresh code has none: false.
+export function codeOlderVault(code) {
+    var d = code ? code.deployment : null
+    if (d && typeof d === "object")
+        return d.current === false || (!!d.id && d.id !== RECEIVE_DEPLOYMENT)
+    return typeof d === "string" && d !== "" && d !== RECEIVE_DEPLOYMENT
+}
+
 /// The line for a code that can't be shown again (`receive_request` refused): {line, detail}.
 /// Never promises the link; the module's own reason goes under Details.
 export function receiveCodeRefused(message) {
@@ -1296,11 +1305,11 @@ export function receiveCodeRefused(message) {
 /// module first: the app depends on it.
 export const BUNDLED_BRIDGE = [
     { name: "lez_bridge", file: "lez_bridge.lgx", label: "LEZ Bridge module",
-      sha256: "9ae6d4a730364b0e86f8b885f5b90ee6f133b813518b3e6820582dedef2a1b20",
-      root: "cbb7a03cf6beacdf95bc5cb7813328ca0c10d60b21b5d477ceaa6906f35819a7",
+      sha256: "64f0414d4c2d7cb2a3121c6e86bfb12c29099db13d1c17e7cd1448ae531af2cf",
+      root: "282703ca41e533576bfe846e66a99d38820725114ff81890c4e544bf419d23a1",
       // The commit the shipped bridge says it was built from (its config().build.commit): rfp-022
-      // v4-live 652ee7a, deployment v4 the default.
-      build: "652ee7a" }
+      // 0acf483 (v4 the default deployment; each receive read on its own deployment).
+      build: "0acf483" }
 ]
 
 /// The LEZ 0.4 names tool this app ships in qml/bundled/ (built without in-process proving, so
@@ -1646,7 +1655,8 @@ export function receivesFrom(value) {
     return rows.filter(function(d) { return d && d.id && d.claimed !== true && d.stage !== "claimed" }).map(function(d) {
         var amount = d.denom_text || d.amount_text || (d.denom !== undefined && d.decimals !== undefined ? withDecimals(d.denom, d.decimals) : "")
         return { id: String(d.id), symbol: String(d.symbol || ""), amount: String(amount), account: String(d.account || ""), account_kind: String(d.account_kind || ""),
-                 stage: String(d.stage || "unknown"), compare: d.compare && typeof d.compare === "object" ? d.compare : null }
+                 stage: String(d.stage || "unknown"), compare: d.compare && typeof d.compare === "object" ? d.compare : null,
+                 deployment: d.deployment && typeof d.deployment === "object" ? d.deployment : null }
     })
 }
 
@@ -1676,13 +1686,30 @@ export function receiveProgress(status) {
         return r("deposited", "Deposited · final on Sepolia in up to about " + m + " min", "Final on Sepolia in up to about " + m + " min.", seen, "wait")
     }
     case "final": return r("final", "Final on Sepolia · arriving any minute now", "Any minute now.", "Final on Sepolia; the bridge records it next (about a minute).", "wait")
-    case "claimable": return r("claimable", "Arrived · ready to claim", "Arrived: ready to claim.", "", "ready", true)
+    case "claimable":
+        // Arrived on an older vault whose relay has moved on (`relay: false`): the bridge's words,
+        // no Claim (it would be refused).
+        if (s.relay === false)
+            return r("noclaim", "Arrived · can't be claimed here yet", "Arrived, but it can't be claimed here yet.", String(s.text || ""), "plain")
+        return r("claimable", "Arrived · ready to claim", "Arrived: ready to claim.", "", "ready", true)
     case "claimed": {
         var line = "Claimed" + (s.claimed_block ? " in block " + s.claimed_block : "")
         return r("claimed", line, line + ".", "", "done")
     }
+    case "unknown":
+        // A receive the bridge can't follow (an older build kept no deployment with it): its reason.
+        if (s.action === "recover")
+            return r("lost", "Can't be followed here", "This receive can't be followed here.", String(s.text || ""), "plain")
     }
     return r("checking", "Checking…", "Checking…", "", "plain")
+}
+
+/// Where a receive was made, when that is not the bridge's current vault: "bridge v3", else "".
+/// From its receive_status or its receives() row (`deployment: {id, label, current, network}`).
+export function receiveWhere(status, row) {
+    var d = status && status.deployment && typeof status.deployment === "object" ? status.deployment
+        : row && row.deployment && typeof row.deployment === "object" ? row.deployment : null
+    return d && d.current === false && d.label ? String(d.label) : ""
 }
 
 /// How long a receive claimed while Names was open stays on the card ("Claimed in block N").
@@ -1694,7 +1721,7 @@ export const RECEIVE_CLAIMED_SHOWN_MS = 30 * 60 * 1000
 /// those unless `showAll` (an unused code stays "requested" for good), `hidden` how many more.
 export function receiveRowsShown(list, statuses, claimedAt, now, showAll) {
     var st = statuses || {}, at = claimedAt || {}
-    var rank = { claimable: 0, final: 1, deposited: 1, claimed: 2, checking: 3, waiting: 3 }
+    var rank = { claimable: 0, noclaim: 1, final: 1, deposited: 1, claimed: 2, checking: 3, waiting: 3, lost: 3 }
     var rows = (Array.isArray(list) ? list : []).map(function(x, i) { return { row: x, i: i, progress: receiveProgress(st[x.id]) } })
         .filter(function(e) { return e.progress.stage !== "claimed" || (at[e.row.id] && Number(now) - at[e.row.id] < RECEIVE_CLAIMED_SHOWN_MS) })
         .sort(function(a, b) { return rank[a.progress.stage] - rank[b.progress.stage] || a.i - b.i })
@@ -1706,7 +1733,7 @@ export function receiveRowsShown(list, statuses, claimedAt, now, showAll) {
         hidden++
         return false
     })
-    return { rows: rows.map(function(e) { return { id: e.row.id, symbol: e.row.symbol, amount: e.row.amount, account: e.row.account, progress: e.progress } }), hidden: hidden }
+    return { rows: rows.map(function(e) { return { id: e.row.id, symbol: e.row.symbol, amount: e.row.amount, account: e.row.account, progress: e.progress, where: receiveWhere(st[e.row.id], e.row) } }), hidden: hidden }
 }
 
 /// The receive that opening "Receive from Ethereum" shows first, or "": the newest one on its way
@@ -1714,7 +1741,7 @@ export function receiveRowsShown(list, statuses, claimedAt, now, showAll) {
 /// (`codes`: id → the code) and not deposited yet. Old unused codes never take the screen.
 export function receiveInProgress(list, statuses, codes) {
     var rows = Array.isArray(list) ? list : [], st = statuses || {}, made = codes || {}
-    var going = rows.filter(function(x) { return ["deposited", "final", "claimable"].indexOf(receiveProgress(st[x.id]).stage) >= 0 })
+    var going = rows.filter(function(x) { return ["deposited", "final", "claimable", "noclaim"].indexOf(receiveProgress(st[x.id]).stage) >= 0 })
     if (going.length > 0) return String(going[0].id)
     // The newest code made here (`made_at` kept with it).
     var mine = rows.filter(function(x) { return made[x.id] && ["waiting", "checking"].indexOf(receiveProgress(st[x.id]).stage) >= 0 })
@@ -1731,7 +1758,8 @@ export function receiveOnItsWay(row, status) {
     switch (p.stage) {
     case "deposited": return "You have a deposit on its way: " + what + " · " + p.card.replace(/^Deposited · /, "")
     case "final": return "You have a deposit on its way: " + what + " · arriving any minute now"
-    case "claimable": return "Your " + what + " deposit has arrived."
+    case "claimable": case "noclaim": return "Your " + what + " deposit has arrived."
+    case "lost": return "Your " + what + " receive can't be followed here."
     case "claimed": return "Your " + what + " deposit is claimed."
     case "waiting": return "Your code for " + what + " is waiting for a deposit."
     }
@@ -1778,9 +1806,9 @@ export function receiveSteps(s) {
     var titles = { choose: "Choose the amount and account", connect: "Let the bridge see this account", public_account: "Give the bridge this account",
                    private_account: "Give the bridge this account", secret: "Allow the bridge's deposit keys",
                    deposit: "Deposit on the page", wait: "Waiting for Ethereum",
-                   claim: st.stage === "claimable" ? "Arrived: claim it" : st.stage === "claimed" ? "Claimed" + (st.claimedBlock ? " in block " + st.claimedBlock : "") : "Claim" }
-    var now = st.stage === "code" || st.stage === "waiting" || st.stage === "checking" ? "deposit" : st.stage === "deposited" || st.stage === "final" ? "wait"
-        : st.stage === "claimable" ? "claim" : st.stage === "needs" ? (needs || "choose") : "choose"
+                   claim: st.stage === "claimable" ? "Arrived: claim it" : st.stage === "noclaim" ? "Arrived" : st.stage === "claimed" ? "Claimed" + (st.claimedBlock ? " in block " + st.claimedBlock : "") : "Claim" }
+    var now = st.stage === "code" || st.stage === "waiting" || st.stage === "checking" || st.stage === "lost" ? "deposit" : st.stage === "deposited" || st.stage === "final" ? "wait"
+        : st.stage === "claimable" || st.stage === "noclaim" ? "claim" : st.stage === "needs" ? (needs || "choose") : "choose"
     var at = st.stage === "claimed" ? keys.length : keys.indexOf(now)
     return keys.map(function(k, i) {
         var state = i < at ? "done" : i === at ? "now" : "later"

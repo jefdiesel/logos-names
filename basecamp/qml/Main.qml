@@ -1060,7 +1060,7 @@ Item {
     readonly property string receiveCheckLine: Logic.receiveCheckLine(receivePolling, receiveCheckedAt, receiveNextAt, receiveNow, receiveCheckFailed)
     // The card's account blocks keep the accounts a receive is arriving in, or just arrived in.
     readonly property var receiveKeepAccounts: Logic.receiveRowsShown(receives, receiveStatuses, receiveClaimedAt, receiveNow, true).rows
-        .filter(function(x) { return x.progress.stage !== "waiting" && x.progress.stage !== "checking" }).map(function(x) { return x.account })
+        .filter(function(x) { return x.progress.stage !== "waiting" && x.progress.stage !== "checking" && x.progress.stage !== "lost" }).map(function(x) { return x.account })
     readonly property var receiveStepsNow: Logic.receiveSteps({
         stage: receiveFocus !== "" ? receiveFocusProgress.stage : receiveResult !== null ? "code" : receiveNeeds !== null ? "needs" : "choose",
         needs: receiveNeeds !== null ? receiveNeeds.needs : "", extras: receiveExtras,
@@ -8115,7 +8115,7 @@ Item {
                                             RowLayout {
                                                 spacing: 10
                                                 Text { text: arrivingRow.modelData.amount + " " + arrivingRow.modelData.symbol; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.Bold }
-                                                Text { Layout.alignment: Qt.AlignBaseline; text: "into " + Logic.idShort(arrivingRow.modelData.account); color: root.dim; font.family: root.sans; font.pixelSize: root.px(15) }
+                                                Text { Layout.alignment: Qt.AlignBaseline; text: "into " + Logic.idShort(arrivingRow.modelData.account) + (arrivingRow.modelData.where ? " · " + arrivingRow.modelData.where : ""); color: root.dim; font.family: root.sans; font.pixelSize: root.px(15) }
                                             }
                                             Text {
                                                 Layout.fillWidth: true
@@ -9416,7 +9416,7 @@ Item {
                         }
                         // A code shown again that was made for an older vault.
                         Hint {
-                            visible: receiveScreen.result !== null && !!receiveScreen.result.deployment && String(receiveScreen.result.deployment) !== Logic.RECEIVE_DEPLOYMENT
+                            visible: Logic.codeOlderVault(receiveScreen.result)
                             color: root.brass
                             text: "This code is for an older vault. For the new one (v4), make another code."
                         }
