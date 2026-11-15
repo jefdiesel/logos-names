@@ -1749,6 +1749,15 @@ fn load_object(path: &std::path::Path) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
+/// This computer's memory in bytes (macOS `hw.memsize`), read once; None when unknown.
+fn machine_memory() -> Option<u64> {
+    static MEMORY: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *MEMORY.get_or_init(|| {
+        let out = std::process::Command::new("/usr/sbin/sysctl").args(["-n", "hw.memsize"]).stdin(std::process::Stdio::null()).output().ok()?;
+        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    })
+}
+
 /// The LEZ 0.4 tool's download address: the release asset (tests point it elsewhere).
 #[cfg(not(test))]
 fn lez04_tool_url() -> String {
@@ -2266,6 +2275,8 @@ impl Names {
         // What this build can do that an earlier 0.17.0 can't, for an app to check (every 0.17.0
         // says 0.17.0): `reveal_name` (the reveal driver's reveal-only call).
         config["features"] = json!(MODULE_FEATURES);
+        // This computer's memory, for the app's warning before a proof (about 9.5 GB).
+        config["memory_bytes"] = machine_memory().map_or(Value::Null, Value::from);
         config["names_network"] = self.net.shown();
         let bridges = self.bridge_programs_now();
         config["bridge_program"] = json!(registry::account_text(&bridges[0]));
@@ -4584,6 +4595,10 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
+        // A proof on the person's own machine, with no guard there: off on LEZ 0.4 (no screen offers it).
+        if self.net == Net::Lez04 {
+            return reply(Err(PRIVATE_OFF_04.to_owned()));
+        }
         let out = reply((|| {
             // An amount like every other, never 0; empty is setup's default.
             if !amount.trim().is_empty() {
@@ -4606,6 +4621,10 @@ impl NamesModule for Names {
     fn cli_receive(&mut self) -> String {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
+        }
+        // A proof on the person's own machine, with no guard there: off on LEZ 0.4 (no screen offers it).
+        if self.net == Net::Lez04 {
+            return reply(Err(PRIVATE_OFF_04.to_owned()));
         }
         let out = reply(self.wallet_job("receive", |setup| {
             if !cli::has_command(&setup.program, "receive") {
@@ -4690,6 +4709,10 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
+        // A proof on the person's own machine, with no guard there: off on LEZ 0.4 (no screen offers it).
+        if self.net == Net::Lez04 {
+            return reply(Err(PRIVATE_OFF_04.to_owned()));
+        }
         let out = reply(self.wallet_job("receive", |setup| {
             if !cli::has_command(&setup.program, "receive") {
                 return Err(cli::OLDER_CLI.to_owned());
@@ -4754,6 +4777,10 @@ impl NamesModule for Names {
     fn cli_pay_account(&mut self, account: String, amount: String, from_private: bool) -> String {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
+        }
+        // From or to a private account is a proof: off on LEZ 0.4 (no screen offers it).
+        if self.net == Net::Lez04 && (from_private || account.trim().starts_with("Private/")) {
+            return reply(Err(PRIVATE_OFF_04.to_owned()));
         }
         let out = reply((|| {
             // Checked before the CLI is looked for, so bad input fails the same way every time.
@@ -12567,6 +12594,11 @@ mod tests {
             names.set_private_keys("jef".into(), "00".repeat(32), "00".repeat(33)),
             names.cli_receive_privately("jef".into()),
             names.make_anon(false),
+            names.cli_shield("100".into()),
+            names.cli_receive(),
+            names.cli_receive_all(),
+            names.cli_pay_account("Private/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR".into(), "5".into(), false),
+            names.cli_pay_account("Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR".into(), "5".into(), true),
             names.cli_register("jef".into(), false),
         ];
         for answer in answers {

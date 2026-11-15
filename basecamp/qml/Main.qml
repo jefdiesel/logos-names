@@ -119,6 +119,10 @@ Item {
     readonly property string appVersion: "0.17.0"
     property string buildCommit: ""   // the module's build commit (get_config build_commit), "" for a dev build
     property var moduleFeatures: []    // get_config features: what this build of the names module can do
+    property real machineMemory: 0     // get_config memory_bytes: this computer's memory (0: unknown)
+    // One line before any proof on a computer with under 16 GB of memory (a proof takes about 9.5 GB).
+    readonly property string proofWarning: machineMemory > 0 && machineMemory < 16 * 1024 * 1024 * 1024
+        ? "This computer has " + Math.round(machineMemory / (1024 * 1024 * 1024)) + " GB of memory: a proof needs about 9.5 GB and 11 minutes or more, and it may be slow or fail here." : ""
     property string moduleOutdated: ""   // the loaded module's version when it is too old
     property string lastReply: ""
     property bool showLastReply: false // for finding out why something failed
@@ -439,6 +443,7 @@ Item {
             var loaded = config.module_version ? String(config.module_version) : ""
             buildCommit = config.build_commit && config.build_commit !== "dev" ? String(config.build_commit) : ""
             moduleFeatures = Array.isArray(config.features) ? config.features : []
+            machineMemory = Number(config.memory_bytes) || 0
             // Every 0.17.0 says 0.17.0: the reveal driver needs a build that has `reveal_name`.
             if (versionAtLeast(loaded, neededModule) && !(Array.isArray(config.features) && config.features.indexOf("reveal_name") >= 0))
                 loaded = loaded + " (an earlier build)"
@@ -9576,6 +9581,7 @@ Item {
                     }
                     Part { text: "names CLI" }
                     Hint { text: "Names your names CLI holds privately are edited through it. Each change is proven on this machine and takes a few minutes." }
+                    Hint { visible: root.proofWarning !== ""; color: root.alarm; text: root.proofWarning }
                     Field {
                         id: cliPathField
                         Layout.fillWidth: true
@@ -11026,6 +11032,7 @@ Item {
                             ? "Proven on this computer first: 7-12 minutes"
                             : "One block, about 30 seconds; public: everyone sees who sent it"
                     }
+                    Hint { visible: root.appIsToken(appSheet.request) && Logic.tokenSendProves(/^Private\//.test(root.appChosen[0] || ""), appSheet.request.destination) && root.proofWarning !== ""; color: root.alarm; text: root.proofWarning }
                     Repeater {
                         model: root.appIsToken(appSheet.request) ? (appSheet.request.warnings || []) : []
                         Hint {
@@ -11162,6 +11169,7 @@ Item {
                     }
                     Fact { label: "Data"; value: appSheet.kind === "private_call" ? appSheet.request.message_len + " bytes, proven, not published" : "" }
                     Hint { visible: appSheet.kind === "private_call"; textFormat: Text.PlainText; color: root.brass; text: appSheet.kind === "private_call" ? appSheet.request.prove_expect : "" }
+                    Hint { visible: appSheet.kind === "private_call" && root.proofWarning !== ""; color: root.alarm; text: root.proofWarning }
                     Hint {
                         visible: appSheet.kind === "private_call" && appSheet.request.app_summary !== ""
                         textFormat: Text.PlainText
