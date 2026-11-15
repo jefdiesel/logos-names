@@ -81,7 +81,17 @@ is for, which the sheet ticks first when the wallet holds it. It only pre-ticks:
 chooses, and nothing is given without their tick. A hint the wallet doesn't hold is dropped, and
 an unknown field or a malformed hint is refused. `"{}"` is the same as `request_access(reason)`.
 Check `get_config().features` for `"request_access_with"` first, and fall back to
-`request_access(reason)` on an older Names module.
+`request_access(reason)` on an older Names module. `features` is in the reply's `value`
+(`{"success": true, "value": {…, "features": [...]}}`); builds before 3434018 showed it only to the
+Names app, so another app never saw it there.
+
+Adding an account to the access an app already has: check `get_config().features` for `"grant_add_account"`.
+With it, `request_access_with` naming an `account_hint` the app wasn't given
+asks to add that one account: `{request: "<id>", state: "pending"}`, a sheet that offers only that
+account. Approved, it is added and the accounts given before stay; Not now ends the request
+`rejected` with an `error` the app can show, and the access is as it was. A hint the app already
+sees answers `{request: null, state: "approved"}` as before; a hint the wallet doesn't hold is
+refused ("the Names wallet doesn't hold Public/<id>…").
 
 `request_access` with no wallet on the network in use is refused at once ("the Names wallet has
 no wallet on LEZ 0.4 yet; …"); ask again once the person has created it. A token source
@@ -125,7 +135,7 @@ balances are 128-bit numbers.
 | `propose_token_source(token_program, definitions_json)` | Asks to list a token program's definitions, with names, symbols and decimals, in the person's holdings (see [Token sources](#token-sources)). Needs no access first. | a request |
 | `token_sources()` | The token sources the person accepted. | `[{token_program, definitions, app, since}]` |
 | `propose_inscription(text)` | Asks to inscribe a testimonial on the Logos Blockchain (not the LEZ zone), paid from one of the person's node's accounts, which they pick. Needs no access first (see [Inscriptions](#inscriptions-on-the-logos-blockchain)). | a request |
-| `get_config()` | The network part of the Names configuration (`sequencer`, `names_sequencer`, `registry`, `token_program`, `zone`, `names_network`, `module_version`). Since 0.17.0 in the usual envelope; earlier versions answered a plain object. | `{sequencer, …}` |
+| `get_config()` | The network part of the Names configuration (`sequencer`, `names_sequencer`, `registry`, `token_program`, `zone`, `names_network`, `module_version`) and `features`, what this build can do. Since 0.17.0 in the usual envelope; earlier versions answered a plain object. | `{sequencer, …}` |
 | `request_status(request_id)` | How your request stands. Only the app that made a request can read it. | a request |
 | `cancel_request(request_id)` | Withdraws your request while it's pending. | a request, `state: "cancelled"` |
 | `drop_access()` | Gives up the access you were given. | `{revoked}` |

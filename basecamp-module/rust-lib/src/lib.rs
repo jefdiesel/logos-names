@@ -1510,6 +1510,9 @@ fn public_config(config: &Value) -> Value {
         "zone": { "id": config["zone"]["id"], "channel": config["zone"]["channel"], "home": config["zone"]["home"] },
         "module_version": config["module_version"],
         "names_network": config["names_network"],
+        // What this build can do (MODULE_FEATURES): an app checks it before using a newer call
+        // (`request_access_with`, `grant_add_account`). Nothing in it is private.
+        "features": config["features"],
     })
 }
 
@@ -10235,6 +10238,31 @@ mod tests {
         assert_eq!(package_listed(&json!({ "error": "timeout" }), "program_registry"), None);
         assert_eq!(package_listed(&Value::from("not json"), "program_registry"), None);
         assert_eq!(package_listed(&Value::Null, "program_registry"), None);
+    }
+
+    /// Another app reads `features` from get_config (`value.features` in the envelope): every
+    /// feature PROVIDER-SDK.md names, and every one this build has. Until 3434018 only the Names
+    /// app saw them, so no app ever sent an account hint (M2, 2026-11-14).
+    #[test]
+    fn another_app_sees_every_documented_feature() {
+        let mut names = fresh();
+        as_caller(logos_rust_sdk::LogosCaller::Module { name: "lez_bridge".into(), instance: None });
+        let seen = parsed(&names.get_config());
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert_eq!(seen["success"], true, "{seen}");
+        let features: Vec<&str> = seen["value"]["features"].as_array().unwrap_or_else(|| panic!("no features for another app: {seen}")).iter().filter_map(Value::as_str).collect();
+        assert_eq!(features, MODULE_FEATURES.to_vec());
+        // Each feature the SDK document tells apps to check is one they see.
+        let doc = include_str!("../../../docs/wallet/PROVIDER-SDK.md");
+        let documented: Vec<&str> = doc.split("features` for `\"").skip(1).filter_map(|rest| rest.split('"').next()).collect();
+        assert!(documented.contains(&"request_access_with") && documented.contains(&"grant_add_account"), "{documented:?}");
+        for feature in documented {
+            assert!(features.contains(&feature), "PROVIDER-SDK.md names {feature}, which another app doesn't see in get_config");
+        }
+        // Nothing beyond the network part and the features: no paths, wallet or CLI.
+        for private in ["cli", "cli_wallet", "wallet_config", "wallet_storage", "main_name", "memory_bytes"] {
+            assert!(seen["value"].get(private).is_none(), "{private} must stay with the Names app");
+        }
     }
 
     #[test]
