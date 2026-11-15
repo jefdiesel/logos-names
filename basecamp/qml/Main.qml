@@ -1284,9 +1284,13 @@ Item {
     }
     // The clock of the checks: a tick a second while the card or Receive shows (it moves the
     // "next check in N s" line), and a check whenever one is due.
+    // Not gated on Basecamp being the front app: the person deposits in a browser beside it and
+    // the wait must move meanwhile. Coming back to the front only adds a check.
     readonly property bool receiveWatching: bridgeReady && namesNet === "0.4" && section === "wallet"
-        && (walletView === "home" || walletView === "ethreceive") && Qt.application.state === Qt.ApplicationActive
+        && (walletView === "home" || walletView === "ethreceive")
     onReceiveWatchingChanged: if (receiveWatching) receiveCheckSoon()
+    readonly property bool receiveFrontmost: Qt.application.state === Qt.ApplicationActive
+    onReceiveFrontmostChanged: if (receiveFrontmost && receiveWatching) receiveCheckSoon()
     Timer {
         interval: 1000
         repeat: true
