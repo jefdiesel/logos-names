@@ -1089,7 +1089,7 @@ export function bridgeReply(reply) {
     if (reply === undefined || reply === null || String(reply) === "")
         return { ok: false, kind: "busy", error: "The LEZ Bridge module gave no answer yet." }
     if (/auth token|unauthori[sz]ed/i.test(String(reply)))
-        return { ok: false, kind: "stale", error: "Reopen Names to reconnect to the bridge." }
+        return { ok: false, kind: "stale", error: "Close the Names tab and open Names again to reconnect to the bridge." }
     var r = reply
     for (var depth = 0; depth < 2 && typeof r === "string"; depth++) {
         try { r = JSON.parse(r) } catch (e) { return { ok: false, kind: "error", error: "The LEZ Bridge module answered something that isn't JSON." } }
@@ -1098,7 +1098,7 @@ export function bridgeReply(reply) {
         return r.success ? { ok: true, value: r.value } : { ok: false, kind: "error", error: String(r.error || "The LEZ Bridge module did not say why.") }
     var said = r && typeof r === "object" ? String(r.error || "") : String(r)
     if (/auth token|unauthori[sz]ed/i.test(said))
-        return { ok: false, kind: "stale", error: "Reopen Names to reconnect to the bridge." }
+        return { ok: false, kind: "stale", error: "Close the Names tab and open Names again to reconnect to the bridge." }
     if (/timeout/i.test(said))
         return { ok: false, kind: "busy", error: "The LEZ Bridge module is still answering an earlier call." }
     if (/method not found|unknown_method|no such (module|method)|module not found|not installed/i.test(said))
@@ -1619,11 +1619,11 @@ export function receiveSteps(s) {
 export function bridgeSetupState(s) {
     var st = s || {}
     var t = function(state, line, button, action) { return { state: state, line: line, button: button || "", action: action || "" } }
-    var unload = "Settings → Module Inspector → LEZ Bridge → Unload All. Then open Names again."
+    var unload = "Settings → Module Inspector → LEZ Bridge → Unload All. Then close the Names tab and open Names again."
     if (st.install) {
         var p = st.install.phase
         if (p === "asking" || p === "installing" || p === "slow") return t("busy", st.install.line)
-        if (p === "reopen") return t("reopen", "Close and reopen Names to finish.")
+        if (p === "reopen") return t("reopen", "Close the Names tab and open Names again to finish.")
         if (p === "unload") return t("unload", "Last step: " + unload, "Open Settings", "settings")
         if (p === "failed") return t("failed", st.install.line, st.bundle === "ok" ? "Install" : "", st.bundle === "ok" ? "install" : "")
     }
@@ -1634,14 +1634,14 @@ export function bridgeSetupState(s) {
             : st.bundle === "bad" ? t("manual", "Install the LEZ Bridge package: Package Manager (the cube icon) → Install Local Package") : t("", "")
     // A reply to an old token (the bridge was reloaded under Names): only a reopen reconnects.
     if (st.answers === false && st.stale)
-        return t("stale", "Reopen Names to reconnect to the bridge.")
+        return t("stale", "Close the Names tab and open Names again to reconnect to the bridge.")
     // A bridge that doesn't answer and is an older build than the one shipped (tonight's frozen
     // one): the new files first, so the one Unload All that follows starts the new bridge.
     if (st.answers === false && st.stuck && st.bundle === "ok" && bridgeDiffers(st.list))
         return t("update", "The LEZ Bridge doesn't answer, and an update is ready.", "Update", "update")
     if (st.answers === false)
         return st.stuck ? t("stuck", "The LEZ Bridge doesn't answer. " + unload, "Open Settings", "settings")
-            : t("reopen", "The LEZ Bridge isn't running. Close and reopen Names to start it.")
+            : t("reopen", "The LEZ Bridge isn't running. Close the Names tab and open Names again to start it.")
     if (st.answers !== true) return t("", "")
     var behind = st.config ? bridgeBehind(st.config) : !bridgeCan(st.features, "receives")
     if (behind && st.bundle === "ok" && bridgeDiffers(st.list)) return t("update", "LEZ Bridge update ready.", "Update", "update")
