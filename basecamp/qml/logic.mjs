@@ -2326,7 +2326,7 @@ export function setupKind(state) {
 export function claimNext(code, failed, fromFile) {
     var c = String(code || "")
     if (claimIsWait(c))
-        return { kind: "waiting", label: "Check again", action: "check" }
+        return { kind: "waiting", label: "Check now", action: "check" }
     if (c === "already_claimed" || c === "private_account" || c === "relay_once")
         return { kind: "problem", label: "Back to the wallet", action: "back" }
     if (c === "bad_file" || c === "wrong_leaf")
@@ -2335,7 +2335,7 @@ export function claimNext(code, failed, fromFile) {
         return { kind: "problem", label: "Start again", action: "retry" }
     if (failed)
         return { kind: "problem", label: "Try again", action: "retry" }
-    return { kind: "problem", label: fromFile ? "Check again" : "Try again", action: fromFile ? "check" : "retry" }
+    return { kind: "problem", label: fromFile ? "Check now" : "Try again", action: fromFile ? "check" : "retry" }
 }
 
 /// Why the approval's Approve can't be pressed now, in one line ("" when it can). `s`: as

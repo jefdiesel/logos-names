@@ -980,7 +980,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("setup states", ["failed", "stuck", "busy", "done", "install", "unload"].map(setupKind), ["problem", "problem", "waiting", "done", "", ""]);
   // A refusal no retry can change never offers Check again (it was a dead loop on "already claimed").
   check("already claimed: the way out", claimNext("already_claimed", false, true), { kind: "problem", label: "Back to the wallet", action: "back" });
-  check("not final: a wait with Check again", claimNext("not_final", false, true), { kind: "waiting", label: "Check again", action: "check" });
+  check("not final: a wait with Check now (the same words as everywhere)", claimNext("not_final", false, true), { kind: "waiting", label: "Check now", action: "check" });
   check("failed claim from an arrived deposit: Try again, not Choose file", claimNext("relay_refused", true, false), { kind: "problem", label: "Try again", action: "retry" });
   check("a bad file: choose another", claimNext("bad_file", false, true).label, "Choose another file");
   // relay_cap is also the bridge's answer for fees above what the relay pays (relayed.rs:684).

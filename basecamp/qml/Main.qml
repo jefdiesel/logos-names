@@ -2212,9 +2212,13 @@ Item {
     Timer {
         interval: 3000
         repeat: true
-        running: root.bridgeSetup.state === "reopen" || root.bridgeSetup.state === "unload" || root.bridgeSetup.state === "stuck"
+        // Only while that setup step is on screen and Basecamp is in front.
+        running: (root.bridgeSetup.state === "reopen" || root.bridgeSetup.state === "unload" || root.bridgeSetup.state === "stuck") && root.bridgeSetupOnView
         onTriggered: root.pollBridgeSetup()
     }
+    // The setup box is shown on Claim, Receive, Bridge to Ethereum and the LEZ 0.4 card.
+    readonly property bool bridgeSetupOnView: section === "wallet" && receiveFrontmost
+        && (walletView === "home" ? walletNet === "0.4" : ["claim", "ethreceive", "sendback"].indexOf(walletView) >= 0)
     function bridgeSetupAction(action, then) {
         if (action === "install")
             installBridgeFor(then)
@@ -2536,14 +2540,10 @@ Item {
         })
     }
 
-    // Read only while the bridge test network's balances are on screen, every 30 s.
-    Timer {
-        id: bridgeNetPoll
-        interval: 30000
-        repeat: true
-        running: root.walletNet === "0.4" && root.section === "wallet" && root.walletView === "home" && Qt.application.state === Qt.ApplicationActive
-        onTriggered: root.loadBridgeNet()
-    }
+    // Read when the bridge test network's balances come into view (and after the person's own
+    // actions, and on Refresh): no timer ("if they ignore it, we ignore it").
+    readonly property bool bridgeNetOnView: walletNet === "0.4" && section === "wallet" && walletView === "home" && Qt.application.state === Qt.ApplicationActive
+    onBridgeNetOnViewChanged: if (bridgeNetOnView) loadBridgeNet()
     // A read under way: ask again shortly for its result (the module answers from memory).
     Timer { id: bridgeNetSoon; interval: 3000; onTriggered: root.loadBridgeNet() }
     property string namesNote: ""     // the same for the names list: kept from before, and why
@@ -10175,7 +10175,7 @@ Item {
                         visible: root.claimError !== ""
                         kind: root.claimErrorKind
                         text: root.claimError
-                        actionLabel: root.claimCheck === null && root.claimStageNow !== "refused" && root.claimStageNow !== "failed" ? (root.claimSource !== "" ? "Check again" : "Choose a file") : ""
+                        actionLabel: root.claimCheck === null && root.claimStageNow !== "refused" && root.claimStageNow !== "failed" ? (root.claimSource !== "" ? "Check now" : "Choose a file") : ""
                         onAct: if (root.claimSource !== "") root.checkAgain(); else { root.leaveClaim(); root.openClaim() }
                     }
 
@@ -10596,8 +10596,6 @@ Item {
                         StatusLine {
                             kind: Logic.toneKind(sendBackScreen.p.tone)
                             text: sendBackScreen.p.headline
-                            actionLabel: sendBackScreen.p.action === "check" && !root.sbPolling ? "Check again" : ""
-                            onAct: root.sbCheckNow()
                         }
                         Hint { visible: sendBackScreen.p.detail !== ""; font.pixelSize: root.px(15); text: sendBackScreen.p.detail }
                         // The steps done by hand today, said once, here.
