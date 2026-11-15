@@ -1635,6 +1635,10 @@ export function bridgeSetupState(s) {
     // A reply to an old token (the bridge was reloaded under Names): only a reopen reconnects.
     if (st.answers === false && st.stale)
         return t("stale", "Reopen Names to reconnect to the bridge.")
+    // A bridge that doesn't answer and is an older build than the one shipped (tonight's frozen
+    // one): the new files first, so the one Unload All that follows starts the new bridge.
+    if (st.answers === false && st.stuck && st.bundle === "ok" && bridgeDiffers(st.list))
+        return t("update", "The LEZ Bridge doesn't answer, and an update is ready.", "Update", "update")
     if (st.answers === false)
         return st.stuck ? t("stuck", "The LEZ Bridge doesn't answer. " + unload, "Open Settings", "settings")
             : t("reopen", "The LEZ Bridge isn't running. Close and reopen Names to start it.")

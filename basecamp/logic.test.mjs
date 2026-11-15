@@ -654,6 +654,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     ["installed while Names open", { list: [me, newMod], bundle: "ok", install: { phase: "reopen" } }, "reopen", ""],
     ["installed, not running", { list: [me, newMod], bundle: "ok", answers: false }, "reopen", ""],
     ["installed, stuck", { list: [me, newMod], bundle: "ok", answers: false, stuck: true }, "stuck", "Open Settings"],
+    ["older installed, stuck (frozen)", { list: [me, oldMod], bundle: "ok", answers: false, stuck: true }, "update", "Update"],
     ["older running", { list: [me, oldMod], bundle: "ok", answers: true, features: [] }, "update", "Update"],
     ["update installed, last step", { list: [me, newMod], bundle: "ok", answers: true, features: [], install: { phase: "unload" } }, "unload", "Open Settings"],
     ["new files, old module running", { list: [me, newMod], bundle: "ok", answers: true, features: [] }, "unload", "Open Settings"],
