@@ -11789,6 +11789,9 @@ mod tests {
         assert_eq!(shown["sheet"]["refused"], false, "{shown}");
         assert_eq!(shown["sheet"]["lines"][2], format!("Burns: 0.01 wETH (bridge v4) from {account}, your account, to send it back to Ethereum."));
         assert_eq!(shown["sheet"]["warnings"][0], provider_public::BURN_WARNING);
+        // What the Names app's title and warning read: the decoded burn on the sheet.
+        assert_eq!((shown["sheet"]["burn"]["amount_text"].as_str(), shown["sheet"]["burn"]["symbol"].as_str(), shown["sheet"]["burn"]["bridge_label"].as_str()), (Some("0.01"), Some("wETH"), Some("bridge v4")), "{shown}");
+        assert_eq!(shown["sheet"]["privacy"], "A public burn publishes this account, the amount and an exit commitment; the Ethereum address stays hidden until the release.");
         // Burns paused on v4 between the sheet and the approval: refused, nothing signed.
         let mut paused = v4_config.clone();
         paused.burn_frozen = true;

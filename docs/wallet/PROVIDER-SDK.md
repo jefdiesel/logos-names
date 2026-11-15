@@ -474,6 +474,22 @@ afterwards.
      declare them. The wallet reads them from the chain, also keeps every one it has read and
      knows the default bridge's built in; if it can't read any one bridge's Config, it signs
      nothing. The token program of a token source an app added is refused as the root too. Each rule is applied again at approval and at re-sign.
+   - **One exception: a burn to send tokens back to Ethereum** (feature `relayed_bridge_burn`).
+     A bridge's token program may be the root of exactly one shape: `BurnWithNotice` (variant
+     10, 145 bytes: definition, amount u128 LE, notify account and program, a 32-byte memo E)
+     of one denomination of a token registered in the Config of a bridge whose vault releases by
+     proof (built in: bridge v4 `BKXe3q5J…JBf` only; v2 and v3 share its token program and are
+     refused), notified to that bridge's Config PDA, declaring exactly
+     `[{account: <definition>, program: <token program>}, {seed: <Config seed>, of: <bridge>,
+     program: <bridge>}]` (not `new`), with privacy `bridge_public_burn`, burns not frozen. The
+     wallet reads that Config at proposal, sheet, approval and re-sign (failing closed); its own
+     build must reach only the root and those two accounts, give no LEZ balance and create
+     nothing. Both programs are declared as usual. Anything else to that root stays refused. The
+     sheet then shows what is burned (amount and token from the Config), the bridge, the exit
+     commitment and "This destroys the wrapped tokens on Logos and can't be undone; the ETH is
+     released on Ethereum after the bridge's steps." The Ethereum address is not in the burn (only
+     E), so the wallet can't check it: name it in your `summary`, which the sheet labels as your
+     words. Shape and vector: rfp-022 `modules/NAMES-SEND-BACK.md` §7, `public-burn-v1.json`.
    - `fee` is the fee declaration exactly as signed: the payer, the gas limit, the tip and the
      max fee. The payer must not be the signing account, nor any account of the person's wallet
      (that is an ordinary call, `propose_call`), and the call must not declare an actor of the
@@ -483,6 +499,8 @@ afterwards.
        and what it changes, and the account that paid the fee."
      - `bridge_public_claim`: "A public claim publishes the claim secret and links the Sepolia
        deposit to this account."
+     - `bridge_public_burn` (the burn above only): "A public burn publishes this account, the
+       amount and an exit commitment; the Ethereum address stays hidden until the release."
 3. **The wallet builds it** at once (names CLI `module public-call plan`: the account's and the
    payer's nonces from the chain, no proof, a second or two). A call it can't build is refused
    with the reason, and nobody is asked. `request_status` gives `check: "ready"`.

@@ -1665,7 +1665,8 @@ Item {
                 sbPolling = false
                 sbCheckedAt = Date.now()
                 sbCheckFailed = failedAny
-                var quick = onScreen !== "" && sbStatuses[onScreen] && ["approve", "burning", "proving"].indexOf(sbStatuses[onScreen].stage) >= 0
+                // Quick while it moves by itself; never while the relay refuses (each check tries it again).
+                var quick = onScreen !== "" && sbStatuses[onScreen] && ["approve", "burning", "proving"].indexOf(sbStatuses[onScreen].stage) >= 0 && !sbStatuses[onScreen].note
                 sbNextAt = Date.now() + (quick ? 5000 : 60000)
                 return
             }
@@ -10083,7 +10084,10 @@ Item {
                     readonly property var stepNow: root.sbStepsNow.filter(function(x) { return x.state === "now" })[0] || null
                     readonly property var p: root.sbProgressNow
                     readonly property var st: root.sbFocusStatus
-                    readonly property bool shows: !root.receiveMissing && root.bridgeSetupClear && root.sbCan
+                    // A bridge that can't send back now (send_back_link: its vault can't release) offers
+                    // no new send-back; one already made is still followed.
+                    readonly property bool closed: root.sbFocus === "" && root.sbLink !== null && root.sbLink.available === false
+                    readonly property bool shows: !root.receiveMissing && root.bridgeSetupClear && root.sbCan && !closed
                     readonly property bool choosing: root.sbFocus === "" && root.sbNeeds === null
                     // The burn's approval is drawn here (appInline): it is the step, not the panel.
                     readonly property bool burning: root.appInline && root.sbFocus !== "" && (p.stage === "planned" || p.stage === "approve")
@@ -10098,7 +10102,7 @@ Item {
                         Hint { Layout.fillWidth: false; color: root.brass; text: "The LEZ Bridge doesn't answer yet." }
                         Link { text: "Look again"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.openSendBack(root.sbAccount, root.sbAsset, root.sbFocus === "" ? undefined : root.sbFocus) }
                     }
-                    Hint { visible: sendBackScreen.shows && root.sbLink !== null && root.sbLink.available === false; color: root.brass; text: root.sbLink !== null && root.sbLink.why ? root.sentence(String(root.sbLink.why)) : "" }
+                    Hint { visible: !root.receiveMissing && sendBackScreen.closed; color: root.brass; text: root.sbLink !== null && root.sbLink.why ? root.sentence(String(root.sbLink.why)) : "" }
 
                     StepRow { visible: sendBackScreen.shows; steps: root.sbStepsNow }
                     Text {
@@ -10252,7 +10256,7 @@ Item {
                             Action { label: root.sbLinkCopied ? "Copied." : "Copy the link"; strong: true; enabledNow: !root.sbAsking; onPressed: root.sbCopyRelease() }
                             Hint { font.pixelSize: root.px(15); text: "Open it in your browser and press Release with the Ethereum wallet you connected." }
                         }
-                        Hint { visible: sendBackScreen.st !== null && !!sendBackScreen.st.note; font.pixelSize: root.px(15); color: root.brass; text: sendBackScreen.st !== null && sendBackScreen.st.note ? root.sentence(String(sendBackScreen.st.note)) : "" }
+                        Hint { visible: sendBackScreen.st !== null && !!sendBackScreen.st.note && sendBackScreen.p.detail !== String(sendBackScreen.st.note); font.pixelSize: root.px(15); color: root.brass; text: sendBackScreen.st !== null && sendBackScreen.st.note ? root.sentence(String(sendBackScreen.st.note)) : "" }
                         RowLayout {
                             visible: sendBackScreen.p.stage !== "released"
                             spacing: 12
@@ -10281,6 +10285,19 @@ Item {
                         Hint { font.pixelSize: root.px(15); text: "The wallet burns the wrapped tokens on the bridge test network; the bridge's relay pays the LEZ fee. Ethereum then records the burn, this computer proves it, and the vault releases the ETH to the address you connected, after its one-hour delay." }
                         Hint { font.pixelSize: root.px(15); text: "The burn carries an exit commitment, not the address: the address stays hidden until the release. Your wallet makes the exit's secret from your account's key; this app never sees it." }
                         Hint { font.pixelSize: root.px(15); text: "Today the bridge team posts the update to Ethereum and makes the proof's wrapper by hand." }
+                        Hint { font.pixelSize: root.px(15); text: "Text copied in Names may not reach another computer through Screen Sharing: open the link in a browser on this computer, or select it below." }
+                        TextEdit {
+                            visible: root.sbLink !== null && !!root.sbLink.link && root.sbFocus === ""
+                            Layout.fillWidth: true
+                            text: root.sbLink !== null ? String(root.sbLink.link || "") : ""
+                            readOnly: true
+                            selectByMouse: true
+                            wrapMode: TextEdit.WrapAnywhere
+                            color: root.ink
+                            selectionColor: root.underwayLine
+                            font.family: root.mono
+                            font.pixelSize: root.px(13)
+                        }
                         Hint { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.privacy; font.pixelSize: root.px(15); text: root.sbFocusStatus !== null && root.sbFocusStatus.privacy ? String(root.sbFocusStatus.privacy) : "" }
                         Fact { visible: root.sbFocusRow !== null; label: "To"; code: true; value: root.sbFocusRow !== null ? root.sbFocusRow.recipient : ""; full: root.sbFocusRow !== null ? root.sbFocusRow.recipient : "" }
                         Fact { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.exit_commitment; label: "Exit"; code: true; value: root.sbFocusStatus !== null ? String(root.sbFocusStatus.exit_commitment || "") : ""; full: root.sbFocusStatus !== null ? String(root.sbFocusStatus.exit_commitment || "") : "" }

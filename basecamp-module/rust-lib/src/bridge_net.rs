@@ -368,6 +368,7 @@ pub fn decode_burn(bytes: &[u8]) -> Result<BurnMessage, String> {
 }
 
 /// The bytes of a `BurnWithNotice` (tests and the shared vector).
+#[cfg(test)]
 pub fn encode_burn(burn: &BurnMessage) -> Vec<u8> {
     let mut out = Vec::with_capacity(BURN_MESSAGE_LEN);
     out.push(BURN_WITH_NOTICE_TAG);
@@ -395,6 +396,7 @@ pub fn config_of(url: &str, program: &AccountId) -> Result<Option<BridgeConfig>,
 }
 
 /// The Config bytes of the bridge `program` in a `getAccount` reply (tests' fixtures).
+#[cfg(test)]
 pub fn config_bytes_in(reply: &Value, program: &AccountId) -> Result<Vec<u8>, String> {
     state_under(reply, program)
 }

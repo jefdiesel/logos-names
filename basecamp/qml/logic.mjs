@@ -2112,7 +2112,11 @@ export function sendBackProgress(status, nowSeconds, clock) {
     var until = later ? "Releasable at " + at(when) + " at the earliest (the vault's one-hour delay)." : ""
     switch (s.stage) {
     case "planned": return r("planned", "Ready to send back · approve the burn", "Ready: approve the burn.", "", "ready", "burn")
-    case "approve": return r("approve", "Waiting for your approval", "Waiting for your approval.", "", "ready")
+    case "approve":
+        // Approved and signed, but the bridge's relay refused or didn't answer (`note`): its words,
+        // and the bridge tries again at each check.
+        if (s.note) return r("approve", "Signed · the bridge's relay hasn't sent it", "Signed, but the bridge's relay hasn't sent it yet.", String(s.note), "plain")
+        return r("approve", "Waiting for your approval", "Waiting for your approval.", "", "ready")
     case "burning": return r("burning", "Sending the burn · about 15 s", "Sending the burn: about 15 s.", "", "wait")
     case "burned": return r("burned", "Burned · waiting for Ethereum to record it", "Waiting for Ethereum to record it.",
         "The bridge team posts these updates to Ethereum by hand today, so this can take from minutes to hours.", "wait")
@@ -2140,8 +2144,8 @@ export function sendBacksFrom(value) {
     })
 }
 
-/// The card's "Going back to Ethereum" rows: those under way first (newest first), then the ones
-/// received in the last 30 min; a send-back only planned (never approved) is left out after a day.
+/// The card's "Going back to Ethereum" rows, newest first: every one not received yet, and the
+/// ones received in the last 30 min (`receivedAt`: id → ms, while Names was open).
 export function sendBackRowsShown(list, statuses, receivedAt, nowMs) {
     var st = statuses || {}, at = receivedAt || {}
     return (Array.isArray(list) ? list : []).map(function(x) { var s = st[x.id] || { stage: x.stage }; return { row: x, status: s } })

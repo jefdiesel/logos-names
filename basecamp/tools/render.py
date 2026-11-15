@@ -870,6 +870,14 @@ for _name, _js, _mock in [
     ("sendback-wrapped", sb_focus(sb_view("wrapped", seal=True, releasable_at="@SOON@")), sb_mock(sb_view("wrapped"))),
     ("sendback-releasable", sb_focus(sb_view("releasable", seal=True)), sb_mock(sb_view("releasable", seal=True))),
     ("sendback-released", sb_focus(sb_view("released", seal=True, released_tx="0x" + "7a" * 32)), sb_mock(sb_view("released", seal=True, released_tx="0x" + "7a" * 32))),
+    ("sendback-burning", sb_focus(sb_view("burning")), sb_mock(sb_view("burning"))),
+    ("sendback-proving", sb_focus(sb_view("proving", releasable_at="@HOUR@")), sb_mock(sb_view("proving"))),
+    ("sendback-burn-unclear", sb_focus(sb_view("burn_unclear", text="Included in a block, but the account's balance did not go down: it may have been refused. Look in the Names app.")), sb_mock(sb_view("burn_unclear"))),
+    ("sendback-relay-refused", sb_focus(sb_view("approve", note="The bridge's relay refused the burn: the relay's daily limit for burns is reached. Nothing was sent.")), sb_mock(sb_view("approve"))),
+    ("sendback-exit-keys", SB_OPEN % ('root.againAfter(60, function() { root.sbDenom = 0; root.sbCodeInput = "%s"; root.sbCheckCode(); root.againAfter(60, function() { root.sbPlan(); root.againAfter(60, function() { '
+        'root.appRequests = [{ id: "r5", kind: "secret", app: "lez_bridge", account: "%s", scope: "RFP022/exit", explanation: "lez_bridge asks for keys of its own, made from this account key: the wallet can make the same ones again after a restore, and they cannot sign or spend", created: Date.now(), expires: Date.now() + 600000, publisher: null, choices: [{ account: "%s", account_kind: "public", label: "Names wallet, main public account", granted: true }] }]; root.appChosen = ["%s"] }) }) })') % (SB_CODE, OWNER, OWNER, OWNER),
+        sb_mock(send_back_plan={"needs": "secret", "request": {"request": "r5", "state": "pending"}, "message": "Approve \"RFP022/exit\" in the Names app: your wallet makes this app's exit secrets from your account, so a send-back can be released after you restore the wallet."})),
+    ("sendback-unavailable", SB_OPEN % '', sb_mock(send_back_link=dict(SB_LINK, available=False, why="this bridge's vault can't release (bridge v3); send back works on bridge v4"))),
 ]:
     SCENARIOS[_name] = _js
     MOCKS[_name] = _mock
