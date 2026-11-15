@@ -10188,7 +10188,7 @@ mod tests {
         assert_eq!(answered["success"], true, "the envelope: {answered}");
         let other = answered["value"].clone();
         let keys: Vec<&String> = other.as_object().unwrap().keys().collect();
-        assert_eq!(keys, ["module_version", "names_network", "names_sequencer", "registry", "sequencer", "token_program", "zone"], "{other}");
+        assert_eq!(keys, ["features", "module_version", "names_network", "names_sequencer", "registry", "sequencer", "token_program", "zone"], "{other}");
         let zone: Vec<&String> = other["zone"].as_object().unwrap().keys().collect();
         assert_eq!(zone, ["channel", "home", "id"], "{other}");
     }
