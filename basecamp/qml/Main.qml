@@ -440,6 +440,10 @@ Item {
         function take(config) {
             if (!config || typeof config !== "object" || !("sequencer" in config))
                 return false
+            // It answered: whatever it says, the module is reachable.
+            configAskSince = 0
+            if (notice === moduleUnreachable)
+                notice = ""
             var loaded = config.module_version ? String(config.module_version) : ""
             buildCommit = config.build_commit && config.build_commit !== "dev" ? String(config.build_commit) : ""
             moduleFeatures = Array.isArray(config.features) ? config.features : []
@@ -489,6 +493,8 @@ Item {
             return true
         }
         if (bridgeReady && logos.callModuleAsync) {
+            if (configAskSince === 0)
+                configAskSince = Date.now()
             logos.callModuleAsync("names", "get_config", [], function(reply) {
                 if (!take(parsed(reply)))
                     configRetry.start()
@@ -507,6 +513,23 @@ Item {
         id: configRetry
         interval: 2000
         onTriggered: root.loadConfig()
+    }
+
+    // The names module never answering at all (Basecamp hasn't connected this window to it; seen
+    // after an update on 15 Nov): after 20 s, one plain line instead of an empty wallet, and
+    // asked again every 10 s until it answers.
+    readonly property string moduleUnreachable: "Names can't reach its module. Settings → Module Inspector → Names → Unload All, then close the Names tab and open Names again. If it still can't, restart Basecamp."
+    property double configAskSince: 0
+    Timer {
+        interval: 10000
+        repeat: true
+        running: root.bridgeReady && root.configAskSince > 0
+        onTriggered: {
+            if (Date.now() - root.configAskSince < 20000)
+                return
+            root.say(root.moduleUnreachable, true)
+            root.loadConfig()
+        }
     }
 
     /// Saves the registry. Sequencers are set per zone (Settings, Zones).
