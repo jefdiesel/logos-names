@@ -1699,7 +1699,9 @@ export function compareLine(compare) {
 }
 /// The four words, large: "maple · tiger · seven · lamp" (as the module returns them, never made here).
 export function compareWords(compare) {
-    return compare && Array.isArray(compare.words) && compare.words.length > 0 ? compare.words.map(String).join(" · ") : ""
+    if (!compare || !Array.isArray(compare.words) || compare.words.length === 0)
+        return ""
+    return compare.words_text ? String(compare.words_text) : compare.words.map(String).join(" · ")
 }
 /// Under Details when the words are shown: the commitment's digits too.
 export function compareDigitsDetail(compare) {

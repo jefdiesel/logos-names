@@ -4013,9 +4013,15 @@ Item {
         } catch (error) {
             opened = false
         }
-        if (!opened)
-            say("Basecamp didn't open the page. Copy the link and open it in your browser.", true)
+        console.log("names_ui: open the deposit page:", opened ? "handed to the system" : "refused")
+        // Never a dead button: when it isn't opened, the link is the action (said on this screen).
+        if (!opened) {
+            depositPageRefused = true
+            copy(url, "The link")
+        }
     }
+    property bool depositPageRefused: false   // Basecamp didn't open the page: Copy the link leads
+    property bool receiveQrOpen: false        // Receive's QR, closed by default
 
     /// Opens the link last pressed in the page in the browser, if it is an
     /// http(s) address (the module lets no other kind through) and Basecamp
@@ -8535,7 +8541,9 @@ Item {
                             text: receiveScreen.result === null ? "" : receiveScreen.result.bridge_fee && receiveScreen.result.bridge_fee.text ? receiveScreen.result.bridge_fee.text
                                 : String(receiveScreen.result.denom_text || "") + " " + String(receiveScreen.result.symbol || "") + " into " + Logic.idShort(root.receiveAccount) + ". The deposit page shows the bridge fee."
                         }
-                        Action { label: "Open the deposit page"; strong: true; onPressed: root.openDepositPage(receiveScreen.result.request_url) }
+                        Action { visible: !root.depositPageRefused; label: "Open the deposit page"; strong: true; onPressed: root.openDepositPage(receiveScreen.result.request_url) }
+                        Action { visible: root.depositPageRefused; label: "Copy the link"; strong: true; onPressed: root.copy(receiveScreen.result.request_url, "The link") }
+                        Hint { visible: root.depositPageRefused; font.pixelSize: root.px(15); text: "Basecamp didn't open the page. Paste the link into your browser." }
                         Text {
                             Layout.fillWidth: true
                             text: Logic.compareLine(receiveScreen.result !== null ? receiveScreen.result.compare : null)
@@ -8555,17 +8563,18 @@ Item {
                             font.weight: Font.Bold
                             wrapMode: Text.WordWrap
                         }
-                        Hint { font.pixelSize: root.px(15); text: "No file to save: this wallet keeps what it needs. The card shows when it arrives." }
+                        Hint { font.pixelSize: root.px(15); text: "No file to save: this wallet keeps what it needs." }
                         RowLayout {
+                            spacing: 14
+                            Link { text: "Copy the link"; font.pixelSize: root.px(15); onPressed: root.copy(receiveScreen.result.request_url, "The link") }
+                            Link { text: "Copy the code"; font.pixelSize: root.px(15); onPressed: root.copy(receiveScreen.result.request, "The code") }
+                            Link { text: root.receiveQrOpen ? "On your phone ▾" : "On your phone ▸"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.receiveQrOpen = !root.receiveQrOpen }
+                        }
+                        RowLayout {
+                            visible: root.receiveQrOpen
                             spacing: 18
                             QrCode { rows: receiveScreen.result !== null && receiveScreen.result.request_qr ? receiveScreen.result.request_qr.rows : []; side: root.px(180) }
-                            ColumnLayout {
-                                Layout.fillWidth: true
-                                spacing: 8
-                                Hint { font.pixelSize: root.px(15); text: "On your phone: scan this, or copy the link." }
-                                Link { text: "Copy the link"; font.pixelSize: root.px(15); onPressed: root.copy(receiveScreen.result.request_url, "The link") }
-                                Link { text: "Copy the code"; font.pixelSize: root.px(15); onPressed: root.copy(receiveScreen.result.request, "The code") }
-                            }
+                            Hint { Layout.fillWidth: true; font.pixelSize: root.px(15); text: "Scan this with your phone, or copy the link." }
                         }
                     }
                     RowLayout {
