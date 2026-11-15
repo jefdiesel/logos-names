@@ -905,7 +905,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   }
   check("wrapped: releasable at the vault's time", [sendBackProgress({ stage: "wrapped", releasable_at: 5000 }, 4000, at).headline, sendBackProgress({ stage: "wrapped", releasable_at: 5000 }, 5000, at).headline], ["Releasable at T5000.", "Releasable any minute now."]);
   check("recorded: the earliest release under it", sendBackProgress({ stage: "recorded", releasable_at: 5000 }, 1000, at).detail, "Releasable at T5000 at the earliest (the vault's one-hour delay).");
-  check("proof and wrapper times", [sendBackProgress({ stage: "proving" }, 0, at).headline, sendBackProgress({ stage: "proved" }, 0, at).headline], ["Making the release proof on this computer: about 20 s.", "Waiting for the proof's Ethereum wrapper (about 3 min once it is run)."]);
+  check("proof and wrapper times", [sendBackProgress({ stage: "proving" }, 0, at).headline, sendBackProgress({ stage: "proved" }, 0, at).headline], ["Making the release proof on this computer: about 20 s.", "Proof made. Next: its Ethereum wrapper (about 3 min once it is run), then the release."]);
   check("approved, the relay refused: its words, not a wait for approval", [sendBackProgress({ stage: "approve", note: "The bridge's relay refused the burn: cap. Nothing was sent." }, 0, at).headline, sendBackProgress({ stage: "approve", note: "x" }, 0, at).tone], ["Signed; the bridge's relay hasn't sent it yet and tries again at each check.", "wait"]);
   check("the endpoint busy is not a relay refusal", sendBackProgress({ stage: "approve", busy: true, note: "The bridge's endpoint is busy; trying again shortly." }, 0, at).headline, "Waiting for your approval.");
   const { rateLimited } = await import("./qml/logic.mjs");
@@ -917,8 +917,8 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("card rows: under way, and received only for a while", rows.map((x) => x.id + ":" + x.progress.stage), ["a:recorded", "b:released"]);
   const now = (st) => sendBackSteps(st).find((x) => x.state === "now");
   check("steps follow the stage", [now({ stage: "choose" }).key, now({ stage: "address" }).key, now({ stage: "needs", needs: "secret" }).key, now({ stage: "planned", extras: ["secret"] }).key, now({ stage: "approve" }).key, now({ stage: "burned" }).key, now({ stage: "wrapped" }).key],
-    ["choose", "address", "secret", "burn", "burn", "back", "back"]);
-  check("steps: a first-time question stays in the row", sendBackSteps({ stage: "burned", extras: ["secret"] }).map((x) => x.short + ":" + x.state), ["Amount:done", "Address:done", "Keys:done", "Approved:done", "Ethereum:now"]);
+    ["source", "address", "secret", "burn", "burn", "back", "back"]);
+  check("steps: a first-time question stays in the row", sendBackSteps({ stage: "burned", extras: ["secret"] }).map((x) => x.short + ":" + x.state), ["Account:done", "Address:done", "Keys:done", "Approved:done", "Ethereum:now"]);
   check("steps: received, all done", sendBackSteps({ stage: "released" }).map((x) => x.state), ["done", "done", "done", "done"]);
   check("steps: the last title", sendBackSteps({ stage: "released" })[3].title, "Received on Ethereum");
   check("names_update said plainly", [sendBackBurnHeld({ needs: "names_update" }), sendBackBurnHeld({ stage: "approve" })], ["This Names Wallet can't sign a burn yet: it needs a newer Names build. Nothing was signed or sent.", ""]);
@@ -1024,6 +1024,26 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("none says who said no", ["rejected", "expired", "cancelled"].map(approvalEndedLine).some((l) => /you said|in your wallet/i.test(l)), false);
   check("they offer Start again", ["rejected", "expired", "cancelled"].map((x) => approvalEnded(approvalEndedLine(x))), [true, true, true]);
   check("a rejected claim: Start again", claimNext("wallet_rejected", true, false), { kind: "problem", label: "Start again", action: "retry" });
+}
+
+{
+  const { sealInputProblem, sendBackProgress } = await import("./qml/logic.mjs");
+  const seal = "0xe71e6620" + "ab".repeat(256);
+  check("seal box: other codes said plainly", [sealInputProblem("logoswd1qyqq"), sealInputProblem("LOGOSREL1QQ"), sealInputProblem("https://nameswallet.app/bridge/#logosdep1abc")],
+    ["That is the withdraw-to code, not the seal. The seal starts 0xe71e6620.", "That is the release code, not the seal. The seal starts 0xe71e6620.", "That is a deposit code, not the seal. The seal starts 0xe71e6620."]);
+  check("seal box: hex checks", [sealInputProblem(seal), sealInputProblem(seal.slice(2)), sealInputProblem("hello"), sealInputProblem("0x1234"), sealInputProblem(seal.slice(0, 100))],
+    ["", "", "That isn't a seal: the seal is hex and starts 0xe71e6620.", "That isn't this proof's seal: it starts 0xe71e6620.", "The seal looks cut short: it is 260 bytes (520 hex digits) from 0xe71e6620."]);
+  const proved = sendBackProgress({ stage: "proved" }, 0, String);
+  check("after the proof: never complete, the next wait", [proved.tone, /complete|done|received/i.test(proved.headline + proved.card), proved.headline.indexOf("Next") >= 0], ["wait", false, true]);
+  const stages = ["planned", "approve", "burning", "burned", "recorded", "proving", "proved", "wrapped", "releasable"];
+  check("only released is done", stages.every((stage) => sendBackProgress({ stage }, 0, String).tone !== "done" && !/complete|received/i.test(sendBackProgress({ stage }, 0, String).headline)), true);
+}
+
+{
+  const { faucetReply, grouped } = await import("./qml/logic.mjs");
+  check("faucet: got, in a block", faucetReply({ ok: true, amount: "10000000", block: "11222" }, grouped), { line: "Got 10,000,000 LEZ · block 11222.", kind: "done", retry: false });
+  check("faucet: refusals plainly, waits not red", [faucetReply({ ok: false, code: "already_today", reason: "Once a day per account." }).kind, faucetReply({ ok: false, code: "busy", retry: true }).retry, faucetReply({ ok: false, code: "bad_key" }).kind, faucetReply({ ok: false, code: "faucet_empty" }).line],
+    ["waiting", true, "problem", "The faucet is empty for now."]);
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");

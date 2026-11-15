@@ -1010,6 +1010,17 @@ pub trait NamesModule: Send + 'static {
     /// 256. Only the Names app may ask. get_config `features` lists `app_note`.
     fn app_note(&mut self, key: String, value: String) -> String;
 
+    /// LEZ 0.4 (the bridge test network): what its test-LEZ faucet gives (`bridge_faucetInfo` on
+    /// the network's endpoint): `{amount, per_account_hours, available, reason}`. Names app only.
+    /// get_config `features` lists `test_lez_faucet`.
+    fn faucet_info(&mut self) -> String;
+
+    /// Asks the LEZ 0.4 faucet for test LEZ for `account` (`Public/<id>`, a public account of
+    /// this wallet), by its public key (a never-used account can only be paid by key): `{ok: true,
+    /// tx, block, amount, account}` once in a block, or `{ok: false, code (already_today |
+    /// faucet_empty | busy | rate_limited | bad_key), reason, retry}`. Up to 2 minutes. Names app only.
+    fn faucet_claim(&mut self, account: String) -> String;
+
     /// The accounts this app has been given: `{connected, accounts:
     /// [{account, account_kind}]}`, where `account` is `Public/<id>` or
     /// `Private/<id>` and `account_kind` is `public` or `private`. Asks nobody.
@@ -1441,7 +1452,7 @@ const MODULE_VERSION: &str = "0.17.0";
 /// the app wasn't given is a request to add it to the app's grant, not "approved").
 /// `relayed_bridge_burn`: `propose_relayed_call` signs a burn of one denomination to a bridge whose
 /// vault releases by proof (`provider_public::burn_check`, privacy `bridge_public_burn`).
-const MODULE_FEATURES: [&str; 7] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "bundled_tool", "relayed_bridge_burn"];
+const MODULE_FEATURES: [&str; 8] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "bundled_tool", "relayed_bridge_burn", "test_lez_faucet"];
 
 /// What a call that says it is a burn answers when it isn't one to a bridge a burn may go to.
 const NOT_A_BURN_BRIDGE: &str = "the wallet signs a burn only to a bridge whose vault releases by proof (bridge v4), and this call isn't one to its token program";
@@ -4419,6 +4430,34 @@ impl NamesModule for Names {
         reply(lgx_sha256(&path).map(Value::from))
     }
 
+    fn faucet_info(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            if self.net != Net::Lez04 {
+                return Err("the test-LEZ faucet is on LEZ 0.4 (the bridge test network); the wallet is on LEZ 0.3 now".to_owned());
+            }
+            bridge_net::faucet_call(&self.lez04_rpc(), "bridge_faucetInfo", json!([])).map(|v| bridge_net::faucet_shown(&v))
+        })())
+    }
+
+    fn faucet_claim(&mut self, account: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            if self.net != Net::Lez04 {
+                return Err("the test-LEZ faucet is on LEZ 0.4 (the bridge test network); the wallet is on LEZ 0.3 now".to_owned());
+            }
+            let id = bridge_net::public_account(&account)?;
+            let written = format!("Public/{}", registry::account_text(&id));
+            let key = wallet::public_key(&self.cli_setup()?, &id)?.ok_or_else(|| format!("{written} isn't a public account of this wallet, so the faucet can't be asked for it"))?;
+            let value = bridge_net::faucet_call(&self.lez04_rpc(), "bridge_faucet", json!([registry::hex(&key), written]))?;
+            Ok(bridge_net::faucet_shown(&value))
+        })())
+    }
+
     fn app_note(&mut self, key: String, value: String) -> String {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
@@ -4820,9 +4859,9 @@ impl NamesModule for Names {
                 return Err(format!("the faucet pays on {home} only. Switch to {home} to ask it."));
             }
             let wallet = self.resolve_wallet(self.cli_wallet.as_deref())
-                .ok_or_else(|| "create your wallet first (Welcome, Create my wallet)".to_owned())?;
+                .ok_or_else(|| "create your wallet first (Create my wallet)".to_owned())?;
             let account = cli::saved_account(&wallet, "public")
-                .ok_or_else(|| "your wallet has no public account yet; create your wallet first (Welcome, Create my wallet)".to_owned())?;
+                .ok_or_else(|| "your wallet has no public account yet; create your wallet first (Create my wallet)".to_owned())?;
             let url = std::env::var("LOGOS_NAMES_FAUCET").ok().filter(|url| !url.trim().is_empty());
             cli::request_faucet(url.as_deref().unwrap_or(cli::FAUCET_URL), &account)
         })())
@@ -11694,6 +11733,29 @@ mod tests {
         assert!(closed["error"].as_str().unwrap().contains("couldn't check the token program of bridge"), "{closed}");
         BRIDGE_CONFIGS.with(|configs| configs.borrow_mut().clear());
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+    }
+
+    /// The LEZ 0.4 faucet through the module: the Names app only, LEZ 0.4 only, the endpoint's
+    /// answer kept plain; the feature is published.
+    #[test]
+    fn the_test_lez_faucet_is_asked_on_lez_0_4_only() {
+        let url = registry::stub_rpc(|request| match request["method"].as_str().unwrap_or_default() {
+            "bridge_faucetInfo" => registry::rpc_ok(json!({ "amount": "10000000", "per_account_hours": 24, "available": false, "reason": "The faucet is empty for today." })),
+            _ => (404, String::new()),
+        });
+        let mut names = fresh();
+        assert!(parsed(&names.get_config())["features"].as_array().unwrap().contains(&json!("test_lez_faucet")));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert!(parsed(&names.faucet_info())["error"].as_str().unwrap().contains("LEZ 0.4"), "LEZ 0.3: refused");
+        names.net = Net::Lez04;
+        names.sequencer = url;
+        let info = parsed(&names.faucet_info())["value"].clone();
+        assert_eq!(info, json!({ "available": false, "amount": "10000000", "per_account_hours": "24", "reason": "The faucet is empty for today." }));
+        as_caller(app("other_app"));
+        assert!(parsed(&names.faucet_info())["error"].is_string(), "another app: refused");
+        assert!(parsed(&names.faucet_claim(format!("Public/{PUBLIC}")))["error"].is_string(), "another app: refused");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert!(parsed(&names.faucet_claim("Private/x".into()))["error"].is_string(), "a private account: refused");
     }
 
     /// Send back to Ethereum: a burn of one denomination to bridge v4, relayed. Its token program

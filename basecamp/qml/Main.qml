@@ -438,12 +438,18 @@ Item {
     /// as a wait when its words are one: busy, no answer, starting), false for a plain result
     /// (done), or a kind said outright ("working", "waiting"). noticeIsError keeps meaning "it
     /// failed" (an app's request is answered with it), whatever colour the line has.
-    function say(message, how) {
+    function say(message, how, at) {
         notice = sentence(message)
         noticeIsError = how === true
         noticeKind = Logic.noticeKind(notice, how)
+        if (at !== undefined)
+            noticeAt = at
     }
     property string noticeKind: ""
+    // Which control the notice belongs to ("register", "profile", "page", "release",
+    // "publish:<name>"): shown under it, not at the top of the page (STYLE.md). "": a page notice.
+    property string noticeAt: ""
+    onSectionChanged: noticeAt = ""
 
     // ── Reading ─────────────────────────────────────────────────────────
 
@@ -846,6 +852,42 @@ Item {
 
     /// Asks the module what the public accounts hold on the bridge test network. It answers
     /// at once with its last read and reads again itself, at most every 30 s.
+    // ── Test LEZ on LEZ 0.4 (the bridge test network's faucet, through the names module) ──
+    property var faucetInfo: null          // faucet_info: {amount, per_account_hours, available, reason}
+    property var faucetState: ({})         // account → {busy, line, kind}
+    readonly property bool faucetOffered: namesNet === "0.4" && faucetInfo !== null && faucetInfo.available === true && moduleFeatures.indexOf("test_lez_faucet") >= 0
+    function loadFaucetInfo() {
+        if (namesNet !== "0.4" || moduleFeatures.indexOf("test_lez_faucet") < 0)
+            return
+        askLater("faucet_info", [], function(value) { faucetInfo = value }, function(message) { console.log("names_ui: faucet_info:", message) }, 30000)
+    }
+    function faucetSet(account, st) {
+        var all = faucetState
+        all[account] = st
+        faucetState = all
+        faucetStateChanged()
+    }
+    /// "Get 10,000,000 test LEZ": the module asks the faucet by the account's public key; the
+    /// answer comes once the transfer is in a block. A busy faucet is asked again (3 times).
+    function getTestLez(account, tries) {
+        var n = tries || 0
+        faucetSet(account, { busy: true, line: n > 0 ? "The faucet is busy; asking again…" : "", kind: "working" })
+        askLater("faucet_claim", [account], function(value) {
+            var r = Logic.faucetReply(value, Logic.grouped)
+            if (r.retry && n < 3) {
+                faucetSet(account, { busy: true, line: r.line, kind: "waiting" })
+                againAfter(5000, function() { getTestLez(account, n + 1) })
+                return
+            }
+            faucetSet(account, { busy: false, line: r.line, kind: r.kind })
+            if (r.kind === "done") {
+                loadBridgeNet()
+                loadFaucetInfo()
+            }
+        }, function(message) {
+            faucetSet(account, { busy: false, line: sentence(message), kind: Logic.noticeKind(message, true) })
+        }, 150000)
+    }
     function loadBridgeNet() {
         askLater("bridge_net_balances", [JSON.stringify(bridgeNetAccounts)], onNet(function(value) {
             bridgeNet = value
@@ -1891,9 +1933,14 @@ Item {
     }
     /// The seal the bridge team sends (today's stand-in for the wrap service), checked by the bridge
     /// against Sepolia's verifier before it is kept.
+    property string sbSealProblem: ""      // said under the seal box
     function sbSeal() {
         var seal = sbSealInput.replace(/\s+/g, "")
         if (sbAsking || sbFocus === "" || seal === "")
+            return
+        // Another code pasted, or not hex: said plainly here, nothing sent.
+        sbSealProblem = Logic.sealInputProblem(seal)
+        if (sbSealProblem !== "")
             return
         sbAsking = true
         sbError = ""
@@ -1907,7 +1954,7 @@ Item {
             sbStatusesChanged()
         }, function(message, kind) {
             sbAsking = false
-            sbError = sentence(message)
+            sbSealProblem = sentence(message)
             console.log("names_ui: send back: send_back_seal:", kind, message)
         }, 120000, false)
     }
@@ -2548,7 +2595,7 @@ Item {
     // Read when the bridge test network's balances come into view (and after the person's own
     // actions, and on Refresh): no timer ("if they ignore it, we ignore it").
     readonly property bool bridgeNetOnView: walletNet === "0.4" && section === "wallet" && walletView === "home" && Qt.application.state === Qt.ApplicationActive
-    onBridgeNetOnViewChanged: if (bridgeNetOnView) loadBridgeNet()
+    onBridgeNetOnViewChanged: if (bridgeNetOnView) { loadBridgeNet(); loadFaucetInfo() }
     // A read under way: ask again shortly for its result (the module answers from memory).
     Timer { id: bridgeNetSoon; interval: 3000; onTriggered: root.loadBridgeNet() }
     property string namesNote: ""     // the same for the names list: kept from before, and why
@@ -4023,8 +4070,21 @@ Item {
         // Asked even while the wallet read is failing: the registrations under way are the
         // module's own (pending.json), and their reveals must go out whatever else is slow.
         askLater("mine", [], onNet(function(value) {
+            var before = pendingNames
             myNames = value.names
             pendingNames = value.pending ? value.pending : []
+            // LEZ 0.4: a registration that was under way and is now a name of this wallet with no
+            // public account gets its holder account published (the default; the person unticks
+            // it on Register). The reveal answers "revealed", never "registered": the name shows
+            // up here a block later, so this is where it is noticed.
+            if (root.namesNet === "0.4")
+                before.forEach(function(p) {
+                    if (pendingNames.some(function(q) { return q.name === p.name }))
+                        return
+                    var held = myNames.filter(function(n) { return n.name === p.name && !n.account && n.owner })[0]
+                    if (held)
+                        publishAfterRegister(held.name, held.owner)
+                })
             if (pendingNames.length > 0)
                 revealTimer.start()
         }), function(message) {
@@ -4090,7 +4150,13 @@ Item {
 
     /// LEZ 0.4, a name just registered: its holder account published as its public account, unless
     /// the person unticked that when registering (kept in the module: `publish:<name>`).
+    property var publishStarted: ({})   // names whose default publish ran this session (once each)
     function publishAfterRegister(name, owner) {
+        if (publishStarted[name])
+            return
+        var started = publishStarted
+        started[name] = true
+        publishStarted = started
         var go = function() { publishAccount(name, owner) }
         if (moduleFeatures.indexOf("app_note") < 0)
             return go()
@@ -4103,12 +4169,12 @@ Item {
     function publishAccount(name, account) {
         if (account === "")
             return
-        say("Publishing the account people pay " + name + " at…", "working")
+        say("Publishing the account people pay " + name + " at…", "working", "publish:" + name)
         askLater("set_account", [name, account], function() {
             say("People can pay " + name + " at your account " + Logic.idShort(account) + ".", false)
             loadMine()
         }, function(message) {
-            say("The account of " + name + " wasn't published: " + sentence(message) + " Names → Let people pay it, to try again.", true)
+            say("The account of " + name + " wasn't published: " + sentence(message) + " Use “Let people pay it…” beside the name to try again.", true)
             loadMine()
         }, 180000)
     }
@@ -4633,7 +4699,7 @@ Item {
             askLater("app_note", ["publish:" + name, publishOnRegister ? "yes" : "no"], function() {}, function() {}, 10000)
         askLater("register_name", [name, owner, namesNet === "0.4" ? "" : "auto"], function(value) {
             pending = null
-            say("Committed. The reveal goes out by itself in about 15 minutes while Names is open; Wallet, Names shows when.", "waiting")
+            say("Committed. The reveal goes out by itself in about 15 minutes while Names is open.", "waiting")
             missing = ""
             loadMine()
         }, function(message) {
@@ -7384,8 +7450,8 @@ Item {
         StatusLine {
             visible: sheetBody.request !== null && (sheetBody.request.choices || []).length === 0
             kind: "problem"
-            text: sheetBody.kind === "call" ? "No account can sign this yet. Your wallet's public accounts are being read; if none shows, create your wallet first (Welcome, Create my wallet)."
-                : "Your wallet has no accounts yet. Create your wallet first (Welcome, Create my wallet)."
+            text: sheetBody.kind === "call" ? "No account can sign this yet. Your wallet's public accounts are being read; if none shows, create your wallet first (Create my wallet)."
+                : "Your wallet has no accounts yet. Create your wallet first (Create my wallet)."
         }
 
         }
@@ -8508,7 +8574,7 @@ Item {
                     Hint {
                         visible: root.namesNet === "0.4" && root.hasCliWallet
                         font.pixelSize: root.px(16)
-                        text: "LEZ 0.4 has no faucet. Coins come from the network's operator, and bridged Sepolia tokens arrive through the LEZ Bridge app. Your public account above is where to have them sent."
+                        text: "Test LEZ comes from the bridge test network's faucet: “Get " + (root.faucetInfo !== null && root.faucetInfo.amount ? root.grouped(root.faucetInfo.amount) : "10,000,000") + " test LEZ” beside each public account in your wallet. Bridged Sepolia tokens arrive with Receive from Ethereum."
                     }
                     Action {
                         visible: root.namesNet === "0.3" && root.hasCliWallet && !root.canShield && !root.hasPrivateFunds && !root.faucetSent
@@ -9141,8 +9207,24 @@ Item {
                                     }
                                 }
                                 Hint { visible: netAccount.modelData.other > 0; font.pixelSize: root.px(14); text: "Also holds " + netAccount.modelData.other + (netAccount.modelData.other === 1 ? " other token" : " other tokens") + " that the bridge didn't make. Not shown." }
+                                // Test LEZ from the bridge test network's faucet, for this account.
+                                Action {
+                                    readonly property var st: root.faucetState[netAccount.modelData.account] || null
+                                    visible: root.faucetOffered && !netAccount.modelData.watched && !netAccount.modelData.viewOnly
+                                    label: st !== null && st.busy ? "Getting test LEZ…" : "Get " + root.grouped(root.faucetInfo !== null && root.faucetInfo.amount ? root.faucetInfo.amount : "0") + " test LEZ"
+                                    enabledNow: !(st !== null && st.busy)
+                                    onPressed: root.getTestLez(String(netAccount.modelData.account))
+                                }
+                                StatusLine {
+                                    readonly property var st: root.faucetState[netAccount.modelData.account] || null
+                                    visible: st !== null && st.line !== "" && !netAccount.modelData.watched
+                                    kind: st !== null ? st.kind : ""
+                                    text: st !== null ? st.line : ""
+                                }
                             }
                         }
+                        // The faucet closed for now: its reason, once.
+                        StatusLine { visible: root.faucetInfo !== null && root.faucetInfo.available === false; kind: "waiting"; text: root.faucetInfo !== null && root.faucetInfo.reason ? "Test LEZ: " + String(root.faucetInfo.reason) : "The test LEZ faucet is closed just now." }
                         // The wallet's accounts this network has never seen, in one line.
                         RowLayout {
                             visible: root.bridgeNetView.empty > 0 || root.bridgeNetShowEmpty
@@ -9208,7 +9290,7 @@ Item {
                         StatusLine { visible: root.walletError !== ""; kind: Logic.noticeKind(root.walletError, true); text: root.walletError }
                     }
                     StatusLine { visible: root.sendingLine() !== ""; kind: "waiting"; text: root.sendingLine() }
-                    StatusLine { visible: root.notice !== "" && root.sendingLine() === ""; kind: root.noticeKind; text: root.notice }
+                    StatusLine { visible: root.notice !== "" && root.noticeAt === "" && root.sendingLine() === ""; kind: root.noticeKind; text: root.notice }
                     // Payments to your names' private keys wait until you claim them (SC-1).
                     Card {
                         visible: root.walletNet === "0.3" && (root.waitingPayments !== null || root.receiveJob !== null || root.receiveProblem !== "")
@@ -9619,7 +9701,7 @@ Item {
                         font.pixelSize: root.px(16)
                         text: root.chainSent === null ? "" : "Sent " + root.grouped(root.chainSent.amount) + ": it's in a block." + (root.chainSent.fee ? " The fee was " + root.grouped(root.chainSent.fee) + "." : "")
                     }
-                    StatusLine { visible: root.notice !== "" && root.sendingLine() === ""; kind: root.noticeKind; text: root.notice }
+                    StatusLine { visible: root.notice !== "" && root.noticeAt === "" && root.sendingLine() === ""; kind: root.noticeKind; text: root.notice }
                 }
 
                 // ── Receive ──
@@ -9921,9 +10003,12 @@ Item {
                         Hint { visible: root.allMine.length === 0 && root.cliPending.length === 0; text: root.cliKnown ? "None yet." : "Reading your names…" }
                         Repeater {
                             model: root.allMine
-                            RowLayout {
+                            ColumnLayout {
                                 id: myName
                                 required property var modelData
+                                Layout.fillWidth: true
+                                spacing: 4
+                            RowLayout {
                                 Layout.fillWidth: true
                                 spacing: 14
                                 Text { text: myName.modelData.name; color: root.ink; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.Bold }
@@ -9950,6 +10035,9 @@ Item {
                                 Link { text: "Open"; font.pixelSize: root.px(15); onPressed: { root.go("search"); root.show(myName.modelData.name) } }
                                 Link { text: "Copy"; font.pixelSize: root.px(15); onPressed: root.copy(myName.modelData.name, "Your name") }
                                 Link { text: "Transfer…"; font.pixelSize: root.px(15); onPressed: root.openTransfer(myName.modelData.name) }
+                            }
+                                // Publishing its account: said under its own row.
+                                StatusLine { visible: root.notice !== "" && root.noticeAt === "publish:" + myName.modelData.name; kind: root.noticeKind; text: root.notice }
                             }
                         }
                         Repeater {
@@ -10082,7 +10170,7 @@ Item {
                         font.pixelSize: root.px(15)
                         text: root.boardJob === null ? "" : root.boardJob.label + ": proving it on this computer. Usually 5–12 min, " + Math.max(0, Math.floor((Math.max(root.clockTick, Date.now()) - root.boardJob.started) / 60000)) + " so far."
                     }
-                    StatusLine { visible: root.notice !== "" && root.walletView === "names"; kind: root.noticeKind; text: root.notice }
+                    StatusLine { visible: root.notice !== "" && root.noticeAt === "" && root.walletView === "names"; kind: root.noticeKind; text: root.notice }
                 }
 
                 // ── Claim a bridge deposit ──
@@ -10643,9 +10731,10 @@ Item {
                             RowLayout {
                                 Layout.fillWidth: true
                                 spacing: 10
-                                Field { id: sbSealField; Layout.fillWidth: true; size: 15; code: true; hint: "Paste the seal (0xe71e6620…)"; onTextChanged: root.sbSealInput = text; onAccepted: root.sbSeal() }
+                                Field { id: sbSealField; Layout.fillWidth: true; size: 15; code: true; hint: "Paste the seal (0xe71e6620…)"; onTextChanged: { root.sbSealInput = text; root.sbSealProblem = "" } onAccepted: root.sbSeal() }
                                 Action { label: root.sbAsking ? "Checking…" : "Add the seal"; enabledNow: !root.sbAsking && root.sbSealInput.trim() !== ""; onPressed: root.sbSeal() }
                             }
+                            StatusLine { visible: root.sbSealProblem !== ""; kind: "problem"; text: root.sbSealProblem }
                         }
                         // Releasable: the link to collect it on the bridge page.
                         ColumnLayout {
@@ -11119,7 +11208,7 @@ Item {
                         Layout.fillWidth: true
                         Part { Layout.topMargin: 0; text: "Your LEZ wallet" }
                         Hint {
-                            text: root.cliPath === "" ? "Install the names program first (see Welcome)."
+                            text: root.cliPath === "" ? "Install the names program first."
                                 : root.cliBalance === undefined ? "Checking your accounts…"
                                 : root.hasCliWallet ? "Couldn't read your accounts just now."
                                 : "You don't have a wallet yet. Create one first: it's where bridged tokens land."
@@ -11701,7 +11790,7 @@ Item {
                     // Which network this list is: never one network's accounts read as the other's.
                     Hint { color: root.ink; font.pixelSize: root.px(15); text: "On " + (root.namesNet === "0.4" ? "LEZ 0.4 (the bridge test network)" : "LEZ 0.3 (the public Logos testnet)") + ": the accounts of that network's wallet. Switch networks at the top of the Wallet." }
                     Hint { visible: !root.cliOld || root.cliAccounts !== null; text: "Your wallet's accounts. The one marked Pays is where payments and new names come from, one private and one public. Names you hold stay with the accounts holding them, and payments to a name still go where the name points." }
-                    Hint { visible: root.cliPath === ""; text: "Install Names on this computer first (Welcome) to see your accounts." }
+                    Hint { visible: root.cliPath === ""; text: "Install Names on this computer first to see your accounts." }
                     Hint { visible: root.cliPath !== "" && root.cliAccounts === null && root.accountsError === ""; text: "Reading your accounts…" }
                     Repeater {
                         model: (root.cliAccounts || []).filter(function(entry) { return root.walletShowEmpty || entry.balance !== "0" || entry["default"] || (entry.npk && root.namesByNpk[entry.npk]) })
@@ -12259,7 +12348,7 @@ Item {
                 }
 
                 StatusLine {
-                    visible: root.notice !== ""
+                    visible: root.notice !== "" && root.noticeAt === ""
                     kind: root.noticeKind
                     text: root.notice
                 }
@@ -12527,8 +12616,9 @@ Item {
                             strong: true
                             changes: true
                             enabledNow: root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode !== "unconfigured" && root.cliBalance !== null && root.cliBalance !== undefined && root.cliCanPay()
-                            onPressed: root.registerPrivately()
+                            onPressed: { root.noticeAt = "register"; root.registerPrivately() }
                         }
+                        StatusLine { visible: root.notice !== "" && root.noticeAt === "register" && root.cliPath !== "" && !root.publicRegisterOpen && root.namesNet !== "0.4"; kind: root.noticeKind; text: root.notice }
                         Text {
                             text: "Testnet name: to keep it on mainnet, claim it within 30 days of launch."
                             Layout.fillWidth: true
@@ -12579,8 +12669,9 @@ Item {
                             strong: root.cliPath === ""
                             changes: true
                             enabledNow: root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode !== "unconfigured"
-                            onPressed: root.registerName()
+                            onPressed: { root.noticeAt = "register"; root.registerName() }
                         }
+                        StatusLine { visible: root.notice !== "" && root.noticeAt === "register"; kind: root.noticeKind; text: root.notice }
                     }
                     }
                     ColumnLayout {
@@ -12754,7 +12845,7 @@ Item {
                         Rectangle { Layout.fillWidth: true; height: 1; color: root.line }
 
                         StatusLine {
-                            visible: root.cliHeld && root.busy && root.notice !== ""
+                            visible: root.cliHeld && root.busy && root.notice !== "" && (root.noticeAt === "" || root.noticeAt === "profile")
                             kind: root.noticeKind
                             text: root.notice
                         }
@@ -12895,10 +12986,11 @@ Item {
                                 strong: true
                                 changes: true
                                 enabledNow: Object.keys(root.profileChanges()).length > 0
-                                onPressed: root.saveProfile()
+                                onPressed: { root.noticeAt = "profile"; root.saveProfile() }
                             }
                             Item { Layout.fillWidth: true }
                         }
+                        StatusLine { visible: root.notice !== "" && root.noticeAt === "profile" && !(root.cliHeld && root.busy); kind: root.noticeKind; text: root.notice }
 
                         ColumnLayout {
                         visible: !root.cliHeld
@@ -13132,20 +13224,21 @@ Item {
                                 strong: true
                                 changes: true
                                 enabledNow: pageArea.text !== "" && (root.page === null || pageArea.text !== root.page.text)
-                                onPressed: root.savePage(pageArea.text)
+                                onPressed: { root.noticeAt = "page"; root.savePage(pageArea.text) }
                             }
                             Action {
                                 label: "Remove page"
                                 changes: true
                                 enabledNow: root.page !== null
-                                onPressed: root.savePage("")
+                                onPressed: { root.noticeAt = "page"; root.savePage("") }
                             }
                         }
+                        StatusLine { visible: root.notice !== "" && root.noticeAt === "page"; kind: root.noticeKind; text: root.notice }
                         }
 
                         Hint {
                             visible: root.editTab === "giveup" && root.cliHeld
-                            text: "To hand this name to someone, use Names → Transfer… beside it. To give it up for good, use the names CLI: names release."
+                            text: "To hand this name to someone, use Transfer… beside it in your names. To give it up for good, use the names CLI: names release."
                         }
                         RowLayout {
                             visible: root.editTab === "giveup" && !root.cliHeld
@@ -13223,7 +13316,7 @@ Item {
                                         strong: true
                                         grave: true
                                         changes: true
-                                        onPressed: root.releaseName()
+                                        onPressed: { root.noticeAt = "release"; root.releaseName() }
                                     }
                                     Action {
                                         visible: root.confirmingRelease
@@ -13231,6 +13324,7 @@ Item {
                                         onPressed: root.confirmingRelease = false
                                     }
                                 }
+                                StatusLine { visible: root.notice !== "" && root.noticeAt === "release"; kind: root.noticeKind; text: root.notice }
                             }
                         }
                     }

@@ -364,7 +364,7 @@ pub fn proof_from_json(v: &serde_json::Value) -> Result<LengthProof, String> {
 /// so a CLI with another list can't make this module send a proof the program refuses.
 #[cfg(not(test))]
 pub fn length_proof(id: &[u8; 32]) -> Result<(LengthProof, u8), String> {
-    let setup = PROVER.lock().ok().and_then(|p| p.clone()).ok_or("the names CLI isn't installed, and it holds the list of locked names a registration needs: install Names first (Welcome)")?;
+    let setup = PROVER.lock().ok().and_then(|p| p.clone()).ok_or("the names CLI isn't installed, and it holds the list of locked names a registration needs: install Names first")?;
     let proof = proof_from_json(&crate::cli::run_length_proof(&setup, id)?)?;
     let tier = verify(&SHORTLIST_ROOT, id, &proof).map_err(|reason| format!("the names CLI's list doesn't match the registry program's ({reason}); update the names CLI"))?;
     Ok((proof, tier))

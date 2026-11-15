@@ -198,7 +198,7 @@ impl Setup {
             Ok(())
         } else {
             Err(format!(
-                "there is no wallet in {} yet; create your wallet first (Welcome, Create my wallet), or choose the CLI's wallet folder in App settings",
+                "there is no wallet in {} yet; create your wallet first (Create my wallet), or choose the CLI's wallet folder in App settings",
                 self.wallet.display()
             ))
         }
@@ -424,7 +424,7 @@ pub fn bridge_args(amount: &str, to: &str, from_key: &str, node: &str, send: boo
 /// wallet's `names.json` (what `names balance` marks `(default)`).
 pub fn default_public(setup: &Setup) -> Result<String, String> {
     saved_account(&setup.wallet, "public")
-        .ok_or_else(|| "your wallet has no public account yet; create your wallet first (Welcome, Create my wallet)".to_owned())
+        .ok_or_else(|| "your wallet has no public account yet; create your wallet first (Create my wallet)".to_owned())
 }
 
 /// The Names faucet: a little LEZ for a new wallet's public account, so a new
@@ -771,7 +771,7 @@ fn group(digits: &str) -> String {
 
 /// The CLI wallet's default private account, as `names setup` saved it.
 pub fn default_private(setup: &Setup) -> Result<String, String> {
-    saved_account(&setup.wallet, "private").ok_or_else(|| "your wallet has no private account yet; create your wallet first (Welcome, Create my wallet)".to_owned())
+    saved_account(&setup.wallet, "private").ok_or_else(|| "your wallet has no private account yet; create your wallet first (Create my wallet)".to_owned())
 }
 
 /// An account `names setup` saved in the wallet's `names.json`, checked.

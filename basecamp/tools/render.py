@@ -111,7 +111,7 @@ BRIDGE = r"""
             }
             // The names network: set_names_network moves it, get_config says it.
             if (method === "set_names_network") { root.mockNet = String(args[0]); method = "get_config"; var wrapNet = true }
-            if (method === "get_config") return (function(c) { return wrapNet ? ok(c) : JSON.stringify(c) })({ features: ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note"], bridge_programs: ["JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr", "BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf"], names_network: { id: root.mockNet || "lez-0.3" }, zone: (%(mock)s).zone || { id: "home", name: "Home", channel: "%(home_channel)s", home: true }, names_sequencer: "http://127.0.0.1:3040", registry: %(registry)s, sequencer: (%(mock)s).zone ? "http://127.0.0.1:3041" : "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json", cli: "/Users/you/.local/bin/names", cli_wallet: "/Users/you/.lee/wallet", bridge_key: "%(bridge_key)s", bridge_node: null, module_version: root.neededModule })
+            if (method === "get_config") return (function(c) { return wrapNet ? ok(c) : JSON.stringify(c) })({ features: ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "test_lez_faucet"], bridge_programs: ["JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr", "BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf"], names_network: { id: root.mockNet || "lez-0.3" }, zone: (%(mock)s).zone || { id: "home", name: "Home", channel: "%(home_channel)s", home: true }, names_sequencer: "http://127.0.0.1:3040", registry: %(registry)s, sequencer: (%(mock)s).zone ? "http://127.0.0.1:3041" : "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json", cli: "/Users/you/.local/bin/names", cli_wallet: "/Users/you/.lee/wallet", bridge_key: "%(bridge_key)s", bridge_node: null, module_version: root.neededModule })
             if (method === "normalize") return String(args[0]).toLowerCase().replace(/\.lez$/, "")
             if (method === "mine") return ok({ names: names.filter(function(entry) { return !(%(mock)s).noNames && entry.owner === "%(alice)s" }).map(function(entry) {
                 return { name: entry.name, display: entry.name + ".lez", owner: entry.owner, expires: null, never: true, lapsed: false } }), pending: ((%(mock)s).pending || []).map(function(p) {
@@ -141,6 +141,9 @@ BRIDGE = r"""
             }
             // The bridge test network (LEZ 0.4), as bridge_net_balances answers from its last read.
             if (method === "bridge_net_balances") return ok(mock.bridgeNet || %(bridge_net)s)
+            // The LEZ 0.4 test-LEZ faucet (faucet_info / faucet_claim), when a scenario gives it.
+            if (method === "faucet_info" && mock.faucet) return ok(mock.faucet.info)
+            if (method === "faucet_claim" && mock.faucet) return ok(mock.faucet.claim)
             if (method === "bridge_net_watch") return ok(args[1] ? [String(args[0])] : [])
             if (method === "activity") return ok(mock.activity || [
                 { id: "a1", at: Date.now() - 2 * 3600000, kind: "bridge", chain: "logos", from: "66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b", to: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", amount: "1000000", state: "in_block" },
@@ -895,6 +898,19 @@ SCENARIOS["receive-deposited-gentle"] = RECEIVE_04 % (ARR, '({ "dep-1": { stage:
 MOCKS["receive-deposited-gentle"] = MOCKS.get("receive-deposited", {})
 SCENARIOS["card-arriving-checking"] = CARD_04 % (ARR, '({ "dep-1": { stage: "deposited", confirmations: 20, final_in_min: 7 } })', CHECKED + '; root.againAfter(120, function() { root.receiveAskNow = true })')
 MOCKS["card-arriving-checking"] = MOCKS.get("card-arriving-waiting", {})
+
+# The test-LEZ faucet on the LEZ 0.4 card: offered under each public account; got; closed.
+_FAUCET_CARD = SB_CARD % 'root.namesNet = "0.4"; root.loadFaucetInfo(); %s'
+SCENARIOS["card-faucet"] = _FAUCET_CARD % ''
+MOCKS["card-faucet"] = dict(sb_mock(), faucet={"info": {"amount": "10000000", "per_account_hours": "24", "available": True}, "claim": {"ok": True, "tx": "ab" * 32, "block": "11222", "amount": "10000000", "account": OWNER}})
+SCENARIOS["card-faucet-got"] = _FAUCET_CARD % ('root.againAfter(120, function() { root.getTestLez("%s") })' % OWNER)
+MOCKS["card-faucet-got"] = MOCKS["card-faucet"]
+SCENARIOS["card-faucet-refused"] = _FAUCET_CARD % ('root.againAfter(120, function() { root.getTestLez("%s") })' % OWNER)
+MOCKS["card-faucet-refused"] = dict(sb_mock(), faucet={"info": {"amount": "10000000", "per_account_hours": "24", "available": True}, "claim": {"ok": False, "code": "already_today", "reason": "This account already had test LEZ in the last 24 hours.", "retry": False}})
+SCENARIOS["card-faucet-closed"] = _FAUCET_CARD % ''
+MOCKS["card-faucet-closed"] = dict(sb_mock(), faucet={"info": {"amount": "10000000", "per_account_hours": "24", "available": False, "reason": "The faucet is empty for today; it fills again at midnight UTC."}})
+SCENARIOS["sendback-seal-wrong"] = sb_focus(sb_view("proved"), 'root.againAfter(60, function() { root.sbSealInput = "%s"; root.sbSeal() })' % SB_CODE)
+MOCKS["sendback-seal-wrong"] = sb_mock(sb_view("proved"))
 
 def main():
     qml, out_dir = sys.argv[1], sys.argv[2]

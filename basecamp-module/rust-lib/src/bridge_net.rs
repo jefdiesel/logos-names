@@ -532,6 +532,70 @@ pub fn token_program_of(url: &str, program: &AccountId) -> Result<Option<Account
     decode_config(&bytes).map(|(token_program, _)| Some(token_program))
 }
 
+// ── The test-LEZ faucet on the bridge test network's endpoint (bridge_faucetInfo, bridge_faucet) ──
+
+/// How long a faucet call may take: the faucet answers once its transfer is in a block.
+pub const FAUCET_WAIT: Duration = Duration::from_secs(120);
+
+/// One faucet call on `url` (JSON-RPC POST). The endpoint's own refusals come back as a result
+/// `{ok: false, code, reason, retry}`; its HTTP 429 is said the same way (`rate_limited`), and a
+/// 502 or 503 as `busy` with `retry: true`. Anything else that fails is an error in words.
+pub fn faucet_call(url: &str, method: &str, params: Value) -> Result<Value, String> {
+    let response = ureq::post(url)
+        .timeout(FAUCET_WAIT)
+        .send_json(json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }));
+    let body = match response {
+        Ok(response) => response.into_string().map_err(|error| format!("the bridge test network's reply broke off: {error}"))?,
+        Err(ureq::Error::Status(429, _)) => {
+            return Ok(json!({ "ok": false, "code": "rate_limited", "reason": "Too many requests to the bridge test network just now. Try again in a minute.", "retry": false }))
+        }
+        Err(ureq::Error::Status(502 | 503, _)) => {
+            return Ok(json!({ "ok": false, "code": "busy", "reason": "The faucet is busy. Try again in a few seconds.", "retry": true }))
+        }
+        Err(ureq::Error::Status(status, _)) => return Err(format!("the bridge test network answered HTTP {status}")),
+        Err(error) => return Err(problem(error.to_string())),
+    };
+    if body.len() > 64 * 1024 {
+        return Err("the bridge test network sent a reply too large for a faucet answer".to_owned());
+    }
+    let reply: Value = serde_json::from_str(&body).map_err(|_| "the bridge test network's faucet reply isn't JSON".to_owned())?;
+    if let Some(error) = reply.get("error").filter(|e| !e.is_null()) {
+        let message = error["message"].as_str().unwrap_or("refused");
+        return Err(format!("the bridge test network refused {method}: {}", crate::text::clean_text(message, 160)));
+    }
+    Ok(reply["result"].clone())
+}
+
+/// The faucet's answer, kept to what the app shows: `{amount, per_account_hours, available,
+/// reason}` for the info; `{ok, tx, block, amount, account}` or `{ok: false, code, reason, retry}`
+/// for a claim. Text the endpoint sends is cleaned for showing.
+pub fn faucet_shown(value: &Value) -> Value {
+    let text = |key: &str| value[key].as_str().map(|t| crate::text::clean_text(t, 200));
+    let mut out = serde_json::Map::new();
+    for key in ["ok", "available", "retry"] {
+        if let Some(flag) = value[key].as_bool() {
+            out.insert(key.into(), json!(flag));
+        }
+    }
+    for key in ["amount", "per_account_hours", "block"] {
+        match &value[key] {
+            Value::String(t) if t.chars().all(|c| c.is_ascii_digit()) && !t.is_empty() => {
+                out.insert(key.into(), json!(t));
+            }
+            Value::Number(n) => {
+                out.insert(key.into(), json!(n.to_string()));
+            }
+            _ => {}
+        }
+    }
+    for key in ["reason", "code", "tx", "account"] {
+        if let Some(t) = text(key) {
+            out.insert(key.into(), json!(t));
+        }
+    }
+    Value::Object(out)
+}
+
 /// What the state file says, or an empty object.
 fn load_state(dir: &Path) -> Value {
     std::fs::read_to_string(dir.join(STATE_FILE)).ok().and_then(|text| serde_json::from_str(&text).ok()).filter(Value::is_object).unwrap_or_else(|| json!({}))
@@ -1088,6 +1152,30 @@ mod tests {
         assert!(why.starts_with("can't reach the bridge test network"), "{why}");
         assert!(!dir.join(STATE_FILE).exists(), "nothing remembered from a failed read");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The faucet: its info and a claim through the endpoint, its 429 and 502 said as refusals
+    /// the app shows, its JSON-RPC errors as words; text cleaned, numbers as digits.
+    #[test]
+    fn the_faucet_is_asked_and_its_answers_kept_plain() {
+        let url = registry::stub_rpc(|request| match request["method"].as_str().unwrap_or_default() {
+            "bridge_faucetInfo" => registry::rpc_ok(json!({ "amount": "10000000", "per_account_hours": 24, "available": true, "reason": null })),
+            "bridge_faucet" if request["params"][0] == "ab".repeat(32) => registry::rpc_ok(json!({ "ok": true, "tx": "cd".repeat(32), "block": 11222, "amount": "10000000", "account": "Public/X" })),
+            "bridge_faucet" if request["params"][0] == "ee".repeat(32) => registry::rpc_ok(json!({ "ok": false, "code": "already_today", "reason": "This account had test LEZ today\u{202E}.", "retry": false })),
+            "bridge_faucet" if request["params"][0] == "42".repeat(32) => (429, "slow down".to_owned()),
+            "bridge_faucet" if request["params"][0] == "50".repeat(32) => (503, "".to_owned()),
+            _ => (200, json!({ "jsonrpc": "2.0", "id": 1, "error": { "code": -32601, "message": "no such method" } }).to_string()),
+        });
+        let info = faucet_shown(&faucet_call(&url, "bridge_faucetInfo", json!([])).unwrap());
+        assert_eq!(info, json!({ "available": true, "amount": "10000000", "per_account_hours": "24" }));
+        let got = faucet_shown(&faucet_call(&url, "bridge_faucet", json!(["ab".repeat(32), "Public/X"])).unwrap());
+        assert_eq!((got["ok"].as_bool(), got["block"].as_str(), got["amount"].as_str()), (Some(true), Some("11222"), Some("10000000")));
+        let refused = faucet_shown(&faucet_call(&url, "bridge_faucet", json!(["ee".repeat(32)])).unwrap());
+        assert_eq!((refused["code"].as_str(), refused["reason"].as_str()), (Some("already_today"), Some("This account had test LEZ today.")));
+        assert_eq!(faucet_call(&url, "bridge_faucet", json!(["42".repeat(32)])).unwrap()["code"], "rate_limited");
+        let busy = faucet_call(&url, "bridge_faucet", json!(["50".repeat(32)])).unwrap();
+        assert_eq!((busy["code"].as_str(), busy["retry"].as_bool()), (Some("busy"), Some(true)));
+        assert!(faucet_call(&url, "bridge_other", json!([])).unwrap_err().contains("no such method"));
     }
 
     #[test]

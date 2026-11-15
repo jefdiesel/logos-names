@@ -1568,7 +1568,8 @@ var STEP_SHORT = {
     programs: ["Programs", "Programs"], public_account: ["Account", "Account"], private_account: ["Account", "Account"],
     secret: ["Keys", "Keys"], approve: ["Approve", "Approved"], done: ["Claim", "Claimed"],
     choose: ["Amount", "Amount"], deposit: ["Deposit", "Deposited"], wait: ["Wait", "Final"], claim: ["Claim", "Claimed"],
-    address: ["Address", "Address"], burn: ["Approve", "Approved"], back: ["Ethereum", "Received"]
+    address: ["Address", "Address"], burn: ["Approve", "Approved"], back: ["Ethereum", "Received"],
+    source: ["Account", "Account"]
 }
 export function stepShort(key, state) {
     var pair = STEP_SHORT[key]
@@ -2189,7 +2190,8 @@ export function sendBackProgress(status, nowSeconds, clock) {
     case "burn_unclear": return r("burn_unclear", "The burn may have been refused", "The burn may have been refused.", String(s.text || "").replace(/\s*Look in the Names app\.?/i, "").trim(), "problem", "check")
     case "recorded": return r("recorded", "Recorded on Ethereum · make the proof", "Recorded on Ethereum: make the release proof.", until, "ready", "prove")
     case "proving": return r("proving", "Making the release proof · " + SEND_BACK_TIMES.proof, "Making the release proof on this computer: " + SEND_BACK_TIMES.proof + ".", until, "wait")
-    case "proved": return r("proved", "Waiting for the proof's Ethereum wrapper", "Waiting for the proof's Ethereum wrapper (" + SEND_BACK_TIMES.wrap + " once it is run).",
+    // Not done yet: the proof is one step; the ETH comes only with the release (owner, 15 Nov).
+    case "proved": return r("proved", "Proof made · not on Ethereum yet", "Proof made. Next: its Ethereum wrapper (" + SEND_BACK_TIMES.wrap + " once it is run), then the release.",
         "Paste its seal here when it comes.", "wait", "seal")
     case "wrapped":
         return r("wrapped", later ? "Releasable at " + at(when) : "Releasable any minute now",
@@ -2228,12 +2230,12 @@ export function sendBackSteps(s) {
     var needs = needsStep(st.needs)
     if (needs && extras.indexOf(needs) < 0)
         extras = extras.concat([needs])
-    var keys = ["choose", "address"].concat(extras, ["burn", "back"])
-    var titles = { choose: "Choose the account and the amount", address: "Give the Ethereum address", connect: "Let the bridge see this account",
+    var keys = ["source", "address"].concat(extras, ["burn", "back"])
+    var titles = { source: "Choose the account and the amount", address: "Give the Ethereum address", connect: "Let the bridge see this account",
                    programs: "Allow the bridge's programs", public_account: "Give the bridge this account",
                    secret: "Allow the bridge's exit keys", burn: "Approve the burn", back: st.stage === "released" ? "Received on Ethereum" : "Back to Ethereum" }
     var stage = String(st.stage || "choose")
-    var now = stage === "choose" ? "choose" : stage === "address" ? "address" : stage === "needs" ? (needs || "burn")
+    var now = stage === "choose" ? "source" : stage === "address" ? "address" : stage === "needs" ? (needs || "burn")
         : stage === "planned" || stage === "approve" ? "burn" : "back"
     var at = stage === "released" ? keys.length : keys.indexOf(now)
     return keys.map(function(k, i) {
@@ -2391,4 +2393,31 @@ export function approvalEndedLine(state) {
 /// Whether a line is one of those (its one next action is Start again).
 export function approvalEnded(line) {
     return /^(The approval was (rejected|cancelled)|Nobody answered the approval|The approval wasn't answered|The approval ended without)/.test(String(line || ""))
+}
+
+/// What is wrong with a pasted seal before it is sent, or "": another code pasted in its place
+/// (the withdraw-to, deposit or release code), or text that isn't the seal's hex.
+export function sealInputProblem(text) {
+    var t = String(text || "").replace(/\s+/g, "")
+    var low = t.toLowerCase()
+    var what = low.indexOf("logoswd1") >= 0 ? "the withdraw-to code" : low.indexOf("logosrel1") >= 0 ? "the release code"
+        : low.indexOf("logosdep1") >= 0 ? "a deposit code" : ""
+    if (what !== "") return "That is " + what + ", not the seal. The seal starts 0xe71e6620."
+    if (!/^(0x)?[0-9a-fA-F]+$/.test(t)) return "That isn't a seal: the seal is hex and starts 0xe71e6620."
+    var hex = low.replace(/^0x/, "")
+    if (hex.indexOf("e71e6620") !== 0) return "That isn't this proof's seal: it starts 0xe71e6620."
+    if (hex.length !== 520) return "The seal looks cut short: it is 260 bytes (520 hex digits) from 0xe71e6620."
+    return ""
+}
+
+/// What the faucet's answer says under its button: {line, kind ("done" | "waiting" | "problem"),
+/// retry}. `grouped`: digits with separators.
+export function faucetReply(value, grouped) {
+    var v = value || {}
+    var g = grouped || function(x) { return String(x) }
+    if (v.ok === true)
+        return { line: "Got " + g(String(v.amount || "0")) + " LEZ" + (v.block ? " · block " + String(v.block) : "") + ".", kind: "done", retry: false }
+    var waits = ["busy", "rate_limited", "already_today"]
+    var reason = String(v.reason || "") || (v.code === "already_today" ? "This account already had test LEZ today." : v.code === "faucet_empty" ? "The faucet is empty for now." : "The faucet said no.")
+    return { line: reason, kind: waits.indexOf(String(v.code || "")) >= 0 ? "waiting" : "problem", retry: v.retry === true }
 }
