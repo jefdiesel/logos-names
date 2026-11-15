@@ -901,7 +901,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   const now = (st) => sendBackSteps(st).find((x) => x.state === "now");
   check("steps follow the stage", [now({ stage: "choose" }).key, now({ stage: "address" }).key, now({ stage: "needs", needs: "secret" }).key, now({ stage: "planned", extras: ["secret"] }).key, now({ stage: "approve" }).key, now({ stage: "burned" }).key, now({ stage: "wrapped" }).key],
     ["choose", "address", "secret", "burn", "burn", "back", "back"]);
-  check("steps: a first-time question stays in the row", sendBackSteps({ stage: "burned", extras: ["secret"] }).map((x) => x.short + ":" + x.state), ["Amount:done", "Address:done", "Keys:done", "Burned:done", "Ethereum:now"]);
+  check("steps: a first-time question stays in the row", sendBackSteps({ stage: "burned", extras: ["secret"] }).map((x) => x.short + ":" + x.state), ["Amount:done", "Address:done", "Keys:done", "Approved:done", "Ethereum:now"]);
   check("steps: received, all done", sendBackSteps({ stage: "released" }).map((x) => x.state), ["done", "done", "done", "done"]);
   check("steps: the last title", sendBackSteps({ stage: "released" })[3].title, "Received on Ethereum");
   check("names_update said plainly", [sendBackBurnHeld({ needs: "names_update" }), sendBackBurnHeld({ stage: "approve" })], ["This Names Wallet can't sign a burn yet. Nothing was signed or sent.", ""]);

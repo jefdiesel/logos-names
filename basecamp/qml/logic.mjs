@@ -1567,7 +1567,7 @@ var STEP_SHORT = {
     programs: ["Programs", "Programs"], public_account: ["Account", "Account"], private_account: ["Account", "Account"],
     secret: ["Keys", "Keys"], approve: ["Approve", "Approved"], done: ["Claim", "Claimed"],
     choose: ["Amount", "Amount"], deposit: ["Deposit", "Deposited"], wait: ["Wait", "Final"], claim: ["Claim", "Claimed"],
-    address: ["Address", "Address"], burn: ["Approve", "Burned"], back: ["Ethereum", "Received"]
+    address: ["Address", "Address"], burn: ["Approve", "Approved"], back: ["Ethereum", "Received"]
 }
 export function stepShort(key, state) {
     var pair = STEP_SHORT[key]
