@@ -868,5 +868,45 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("Add: a name not yours", [addNameNotYours("Adding the name didn't finish: this wallet doesn't hold jef04, so it isn't added."), addNameNotYours("Adding the name didn't finish: Error: jef04 is not registered"), addNameNotYours("Adding the name didn't finish: couldn't reach the sequencer")], [true, true, false]);
 }
 
+// ── Send back to Ethereum ──
+{
+  const { sendBackOffer, sendBackAmounts, sendBackSymbol, sendBackCode, sendBackCodeTitle, sendBackProgress, sendBacksFrom, sendBackRowsShown, sendBackSteps, sendBackBurnHeld, clockShown, BRIDGE_V4_PROGRAM, bridgeNetRows } = await import("./qml/logic.mjs");
+  const V3 = "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr";
+  const weth = (bridge, base) => ({ symbol: "wETH", bridge, base, decimals: 18 });
+  check("offered on v4 with a denomination held", [sendBackOffer(weth(BRIDGE_V4_PROGRAM, "10000000000000000")), sendBackOffer(weth(BRIDGE_V4_PROGRAM, "9999999999999999")), sendBackOffer(weth(V3, "100000000000000000")), sendBackOffer(null)], [true, false, false, false]);
+  check("dUSDC on v4 from 100", [sendBackOffer({ symbol: "dUSDC", bridge: BRIDGE_V4_PROGRAM, base: "100000000" }), sendBackOffer({ symbol: "LEZ", bridge: BRIDGE_V4_PROGRAM, base: "999" })], [true, false]);
+  check("amounts held only", sendBackAmounts(null, weth(BRIDGE_V4_PROGRAM, "150000000000000000")).map((d) => d.text + "@" + d.index), ["0.01@0", "0.1@1"]);
+  check("amounts from the registry", sendBackAmounts({ tokens: [{ symbol: "ETH", denoms: [{ index: 0, value: "10000000000000000" }, { index: 1, value: "100000000000000000" }, { index: 2, value: "1000000000000000000" }] }] }, weth(BRIDGE_V4_PROGRAM, "1000000000000000000")).map((d) => d.text), ["0.01", "0.1", "1"]);
+  check("no amounts below the smallest", sendBackAmounts(null, weth(BRIDGE_V4_PROGRAM, "1")), []);
+  check("symbol for the bridge", [sendBackSymbol("wETH"), sendBackSymbol("dUSDC"), sendBackSymbol("X")], ["ETH", "dUSDC", "X"]);
+  const code = "logoswd1qyqqqqqqqqqzr7dm2wcgqnmxn3uq7c2yupx7qfguwl6zcw0d2ej8zhwpsa8x4a5xg9ws3xcqp";
+  check("code from a link, spaces, capitals", [sendBackCode(code), sendBackCode("https://nameswallet.app/bridge/#" + code), sendBackCode("  " + code.slice(0, 20) + "\n" + code.slice(20) + " "), sendBackCode(code.toUpperCase()), sendBackCode("logosdep1abc"), sendBackCode("")], [code, code, code, code, "", ""]);
+  check("code titles", ["other_vault", "other_chain", "bad_code:checksum", "x"].map(sendBackCodeTitle), ["This code is for another bridge vault", "This code is for another chain", "That is not a usable code", "The code was refused"]);
+  const at = (s) => "T" + s;
+  const stages = ["planned", "approve", "burning", "burned", "burn_unclear", "recorded", "proving", "proved", "wrapped", "releasable", "released", undefined];
+  check("stage tones", stages.map((stage) => sendBackProgress(stage ? { stage } : null, 0, at).tone), ["ready", "ready", "wait", "wait", "plain", "ready", "wait", "wait", "wait", "ready", "done", "plain"]);
+  check("stage actions", stages.map((stage) => sendBackProgress({ stage }, 0, at).action), ["burn", "", "", "", "", "prove", "", "seal", "", "release", "", ""]);
+  check("burned: the honest wait, no time promised", [sendBackProgress({ stage: "burned" }, 0, at).headline, sendBackProgress({ stage: "burned" }, 0, at).detail],
+    ["Waiting for Ethereum to record it.", "The bridge team posts these updates to Ethereum by hand today, so this can take from minutes to hours."]);
+  check("wrapped: releasable at the vault's time", [sendBackProgress({ stage: "wrapped", releasable_at: 5000 }, 4000, at).headline, sendBackProgress({ stage: "wrapped", releasable_at: 5000 }, 5000, at).headline], ["Releasable at T5000.", "Releasable any minute now."]);
+  check("recorded: the earliest release under it", sendBackProgress({ stage: "recorded", releasable_at: 5000 }, 1000, at).detail, "Releasable at T5000 at the earliest (the vault's one-hour delay).");
+  check("proof and wrapper times", [sendBackProgress({ stage: "proving" }, 0, at).headline, sendBackProgress({ stage: "proved" }, 0, at).headline], ["Making the release proof on this computer: about 20 s.", "Waiting for the proof's Ethereum wrapper: about 3 min."]);
+  check("clock is HH:MM", /^[0-2][0-9]:[0-5][0-9]$/.test(clockShown(1763208000)), true);
+  check("send_backs rows", sendBacksFrom({ send_backs: [{ id: "sb-1", amount_text: "0.01 ETH", account: "Public/A", recipient: "0xAb", words_text: "a · b · c · d", stage: "burned" }, { stage: "x" }] }),
+    [{ id: "sb-1", amount: "0.01 ETH", account: "Public/A", recipient: "0xAb", words: "a · b · c · d", stage: "burned" }]);
+  const rows = sendBackRowsShown([{ id: "a", stage: "burned" }, { id: "b", stage: "released" }, { id: "c", stage: "released" }], { a: { stage: "recorded" } }, { b: 1000 }, 2000);
+  check("card rows: under way, and received only for a while", rows.map((x) => x.id + ":" + x.progress.stage), ["a:recorded", "b:released"]);
+  const now = (st) => sendBackSteps(st).find((x) => x.state === "now");
+  check("steps follow the stage", [now({ stage: "choose" }).key, now({ stage: "address" }).key, now({ stage: "needs", needs: "secret" }).key, now({ stage: "planned", extras: ["secret"] }).key, now({ stage: "approve" }).key, now({ stage: "burned" }).key, now({ stage: "wrapped" }).key],
+    ["choose", "address", "secret", "burn", "burn", "back", "back"]);
+  check("steps: a first-time question stays in the row", sendBackSteps({ stage: "burned", extras: ["secret"] }).map((x) => x.short + ":" + x.state), ["Amount:done", "Address:done", "Keys:done", "Burned:done", "Ethereum:now"]);
+  check("steps: received, all done", sendBackSteps({ stage: "released" }).map((x) => x.state), ["done", "done", "done", "done"]);
+  check("steps: the last title", sendBackSteps({ stage: "released" })[3].title, "Received on Ethereum");
+  check("names_update said plainly", [sendBackBurnHeld({ needs: "names_update" }), sendBackBurnHeld({ stage: "approve" })], ["This Names Wallet can't sign a burn yet. Nothing was signed or sent.", ""]);
+  const read = { bridges: [{}, {}], accounts: [{ account: "Public/A", found: true, native: "0", tokens: [{ symbol: "wETH", amount: "100000000000000000", decimals: 18, bridge: BRIDGE_V4_PROGRAM, bridge_label: "bridge v4", definition: "D" }] }] };
+  const asset = bridgeNetRows(read, null)[0].assets[1];
+  check("card asset rows carry what Send back needs", [asset.bridge === BRIDGE_V4_PROGRAM, asset.base, asset.decimals, sendBackOffer(asset)], [true, "100000000000000000", 18, true]);
+}
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);

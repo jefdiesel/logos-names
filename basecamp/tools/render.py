@@ -804,6 +804,76 @@ MOCKS["receive-hold-old-bridge"] = {"bridge": {"config": {"build": {"commit": "5
     "features": ["relayed_claim", "relayed_claim_check_with", "receive", "deposit_code", "public_receive", "receive_status", "receives", "relayed_claim_check_deposit"]}},
     "packages": [{"name": "lez_bridge", "version": "0.1.0", "hashes": {"root": "d55b06acb191406f1a785d7606abc949b3552c7bd5973882f2089846f65cd6b7"}}]}
 
+# ── Send back to Ethereum (rfp-022 modules/NAMES-SEND-BACK.md) ──
+# The card on LEZ 0.4 with 0.15 wrapped ETH on bridge v4 in the owner's account; the bridge
+# module's send_back_* answers as its sendback.rs gives them.
+V4 = "BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf"
+OWNER = "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk"
+_v4_tokens = [{"definition": "92PJXZ2E3QPupUFuhc5f4rgsRiAZKv62TpSYfZEgLeru", "eth_token": "0xac207b9bfebf3ef7c26297ea6abadeeccc4aa71e", "symbol": "dUSDC", "decimals": 6, "name": "Wrapped dUSDC (demo v4)", "bridge": V4, "bridge_label": "bridge v4"},
+              {"definition": "9tcLmjKixcGZJMnXS381Dhuzd8u9jPvQYF21F3vDhGE2", "eth_token": "0x0000000000000000000000000000000000000000", "symbol": "wETH", "decimals": 18, "name": "Wrapped Sepolia ETH (demo v4)", "bridge": V4, "bridge_label": "bridge v4"}]
+NET04_V4 = dict(NET04, read=dict(NET04_READ, tokens=_v4_tokens, bridges=[{"program": V4, "label": "bridge v4", "bridge": True, "token_program": "5w6nTkftFFDy8mtdpnKpZVetGQJ2WCKdhmpJsAYArbU7"}],
+    accounts=[{"account": OWNER, "found": True, "native": "0", "tokens": [dict(_v4_tokens[0], amount="0"), dict(_v4_tokens[1], amount="150000000000000000")], "other_tokens": 0},
+              {"account": "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", "found": False, "native": "0", "tokens": [dict(_v4_tokens[0], amount="0"), dict(_v4_tokens[1], amount="0")], "other_tokens": 0}]))
+SB_FEATURES = ["relayed_claim", "relayed_claim_check_with", "relayed_claim_build", "relayed_claim_submit", "account_hint", "receive", "deposit_code", "public_receive", "receive_status", "receives", "receive_request", "relayed_claim_check_deposit", "send_back"]
+SB_CONFIG = {"build": {"commit": "0acf483"}, "deployment": {"name": "bridge-test-network-v4", "bridge_program": V4}, "features": SB_FEATURES, "notices": {}}
+SB_LINK = {"link": "https://nameswallet.app/bridge/#withdraw", "deployment": "bridge-test-network-v4", "vault": "0xC2c6A059eAB928966B24FA5549d441A3B17B54Ed", "chain_id": 11155111, "available": True, "why": None}
+SB_CODE = "logoswd1qyqqqqqqqqqzr7dm2wcgqnmxn3uq7c2yupx7qfguwl6zcw0d2ej8zhwpsa8x4a5xg9ws3xcqp"
+SB_RECIPIENT = "0xE2C4857976b346F8F9b3a7be714Cd92d0bF68680"
+SB_CHECK = {"ok": True, "recipient": SB_RECIPIENT, "recipient_short": "0xE2C4…8680", "words": ["maple", "tiger", "seven", "lamp"], "words_text": "maple · tiger · seven · lamp", "fee_choice": 0, "chain_id": 11155111, "vault": "0xC2c6A059eAB928966B24FA5549d441A3B17B54Ed", "warnings": []}
+def sb_view(stage, **more):
+    texts = {"planned": "Ready to send back: approve the burn in your Names Wallet.", "approve": "Waiting for you in the Names app.", "burning": "Sent; waiting for its block on the bridge test network (about 15 s).",
+             "burned": "Burned. Waiting for Ethereum to record it: the bridge operator posts updates by hand today.", "recorded": "Recorded on Ethereum. Make the release proof (about 20 s on this computer).",
+             "proving": "Making the release proof on this computer (about 20 s).", "proved": "Proof made. Waiting for its Ethereum wrapper (about 3 min, by the bridge operator today).",
+             "wrapped": "Proof ready. Waiting for the vault's one-hour delay.", "releasable": "Ready: copy the release code into the bridge page and press Release.", "released": "Released on Ethereum."}
+    return dict({"id": "sb-e2ba7765d0fbf247", "stage": stage, "text": texts.get(stage, ""), "account": OWNER, "symbol": "ETH", "amount_text": "0.01 ETH", "receive_text": "0.00995 ETH", "relay_fee_text": "0 ETH",
+                 "recipient": SB_RECIPIENT, "words_text": "maple · tiger · seven · lamp", "exit_commitment": "0xe2ba7765d0fbf247044cb907a4c921c03ca316c6cfcb6323a6b5e2545ff3dfd5",
+                 "burn_tx": None if stage in ("planned", "approve") else "9f2c" * 16, "burn_block": None, "leaf_index": None, "root": None, "releasable_at": None, "seal": False, "released_tx": None,
+                 "fee_payer": "The bridge's relay pays the LEZ fee: your account needs no LEZ.", "privacy": "A public burn publishes this account, the amount and an exit commitment; the Ethereum address stays hidden until the release.",
+                 "wait": None}, **more)
+def sb_mock(status=None, **bridge):
+    b = {"config": SB_CONFIG, "send_back_link": SB_LINK, "send_back_check": SB_CHECK, "send_backs": {"send_backs": [sb_view(status["stage"])] if status else []}, "receives": {"receives": []}}
+    if status:
+        b["send_back_status"] = status
+    b.update(bridge)
+    return {"bridge": b, "bridgeNet": NET04_V4}
+SB_CARD = 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.bridgeConfig = %s; root.loadBridgeNet(); %s }) })' % (json.dumps(SB_CONFIG), "%s")
+SB_ASSET = '{ symbol: "wETH", name: "Wrapped Sepolia ETH (demo v4)", amount: "0.15", bridge: "%s", base: "150000000000000000", decimals: 18 }' % V4
+SB_OPEN = SB_CARD % ('root.openSendBack("%s", %s)' % (OWNER, SB_ASSET) + '; %s')
+_SB_FOCUS = SB_CARD % ('root.sendBacksLoaded = true; root.sendBacks = [{ id: "sb-e2ba7765d0fbf247", amount: "0.01 ETH", account: "%s", recipient: "%s", words: "maple · tiger · seven · lamp", stage: "burned" }]; root.openSendBack("", null, "sb-e2ba7765d0fbf247"); root.sbStatuses = { "sb-e2ba7765d0fbf247": @VIEW@ }; root.sbCheckedAt = Date.now() - 4000; root.sbNextAt = Date.now() + 56000; %s' % (OWNER, SB_RECIPIENT, "%s"))
+def sb_focus(view, js=""):
+    return _SB_FOCUS.replace("@VIEW@", json.dumps(view).replace('"@SOON@"', "Math.floor(Date.now() / 1000) + 1500").replace('"@HOUR@"', "Math.floor(Date.now() / 1000) + 3400")) % js
+SB_BURN_SHEET = ('root.appRequests = [{"id": "r9", "kind": "relayed_call", "app": "lez_bridge", "created": 0, "expires": 4102444800000, "account": "%s", "program": "5w6nTkftFFDy8mtdpnKpZVetGQJ2WCKdhmpJsAYArbU7", "check": "ready", "message_len": 145, '
+                 '"app_summary": "Send back 0.01 ETH to %s on Ethereum (exit 0xe2ba7765…). The bridge\'s relay sends it and pays the fee.", '
+                 '"sheet": {"lines": ["lez_bridge asks your wallet to sign a burn that the bridge\'s relay pays for.", "Network: LEZ 0.4 · bridge test network", "Burns: 0.01 wETH (bridge v4) from %s, your account, to send it back to Ethereum.", '
+                 '"Program: the bridge\'s token program 5w6nTkftFFDy8mtdpnKpZVetGQJ2WCKdhmpJsAYArbU7; it tells bridge v4 (%s) what was burned.", "Exit commitment: 0xe2ba7765d0fbf247044cb907a4c921c03ca316c6cfcb6323a6b5e2545ff3dfd5 (it hides the Ethereum address until the release).", '
+                 '"Fee: paid by Public/6zkdhN9yAmzxkPrJ2Co92QAD7EKESM1AQcmoNEQ3KQpq, not by you: at most 2,500,000 (gas limit 120,000, tip 0).", "Exactly these bytes are signed: 5f1c0e77c2a1b6f0a8d3e94b7c2d10f3e6a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5 (the message is 145 bytes, SHA-256 9b1d…)."], '
+                 '"warnings": ["This destroys the wrapped tokens on Logos and can\'t be undone; the ETH is released on Ethereum after the bridge\'s steps."], '
+                 '"privacy": "A public burn publishes this account, the amount and an exit commitment; the Ethereum address stays hidden until the release.", "after": "", "hash": "5f1c", '
+                 '"burn": {"amount_text": "0.01", "symbol": "wETH", "bridge_label": "bridge v4", "exit": "0xe2ba7765d0fbf247044cb907a4c921c03ca316c6cfcb6323a6b5e2545ff3dfd5"}, "refused": false, "why": []}, '
+                 '"publisher": null, "choices": [{"account": "%s", "account_kind": "public", "label": "Names wallet, main public account", "granted": true}]}]; root.appChosen = ["%s"]') % (OWNER, SB_RECIPIENT, OWNER, V4, OWNER, OWNER)
+for _name, _js, _mock in [
+    ("card-sendback", SB_CARD % 'root.sendBacksLoaded = true; root.sendBacks = [{ id: "sb-e2ba7765d0fbf247", amount: "0.01 ETH", account: "%s", recipient: "%s", words: "", stage: "burned" }]; root.sbStatuses = { "sb-e2ba7765d0fbf247": { stage: "burned" } }' % (OWNER, SB_RECIPIENT), sb_mock(sb_view("burned"))),
+    ("sendback-amount", SB_OPEN % '', sb_mock()),
+    ("sendback-link", SB_OPEN % 'root.againAfter(200, function() { root.sbDenom = 0 })', sb_mock()),
+    ("sendback-words", SB_OPEN % 'root.againAfter(200, function() { root.sbDenom = 0; root.sbCodeInput = "%s"; root.sbCheckCode() })' % SB_CODE, sb_mock()),
+    ("sendback-bad-code", SB_OPEN % 'root.againAfter(200, function() { root.sbDenom = 0; root.sbCodeInput = "%s"; root.sbCheckCode() })' % SB_CODE, sb_mock(send_back_check={"ok": False, "error": {"code": "other_vault", "message": "This code is for another bridge vault: open the bridge page from this wallet's link again."}})),
+    ("sendback-approve", SB_OPEN % 'root.againAfter(60, function() { root.sbDenom = 0; root.sbCodeInput = "%s"; root.sbCheckCode(); root.againAfter(60, function() { root.sbPlan(); root.againAfter(60, function() { %s }) }) })' % (SB_CODE, SB_BURN_SHEET),
+        sb_mock(send_back_plan=sb_view("planned"), send_back_burn=sb_view("approve"))),
+    ("sendback-names-update", SB_OPEN % 'root.againAfter(200, function() { root.sbDenom = 0; root.sbCodeInput = "%s"; root.sbCheckCode(); root.againAfter(200, function() { root.sbPlan() }) })' % SB_CODE,
+        sb_mock(send_back_plan=sb_view("planned"), send_back_burn={"needs": "names_update", "request": None, "message": "x"})),
+    ("sendback-burned", sb_focus(sb_view("burned")), sb_mock(sb_view("burned"))),
+    ("sendback-recorded", sb_focus(sb_view("recorded", releasable_at="@HOUR@")), sb_mock(sb_view("recorded"))),
+    ("sendback-witness", sb_focus(sb_view("recorded", releasable_at="@HOUR@"), 'root.againAfter(50, function() { root.sbProve() })'), sb_mock(sb_view("recorded"), send_back_prove={"needs": "prover", "request": None, "message": "x"},
+        send_back_witness={"id": "sb-e2ba7765d0fbf247", "command": ["/Volumes/exos162/logos/rfp-022/public-demo/prove/prove-release-rc3.sh", "--secret-file", "/Users/you/Library/Application Support/lez_bridge/send-back/sb-e2ba7765d0fbf247/k", "--inputs", "…/inputs.json", "--leaves", "…/leaves.txt"],
+                           "note": "The file k holds this exit's secret (mode 600). It can only release to the recipient fixed in the burn; it shows which burn pays which address. Delete it after the proof."})),
+    ("sendback-proved", sb_focus(sb_view("proved", releasable_at="@HOUR@")), sb_mock(sb_view("proved"))),
+    ("sendback-wrapped", sb_focus(sb_view("wrapped", seal=True, releasable_at="@SOON@")), sb_mock(sb_view("wrapped"))),
+    ("sendback-releasable", sb_focus(sb_view("releasable", seal=True)), sb_mock(sb_view("releasable", seal=True))),
+    ("sendback-released", sb_focus(sb_view("released", seal=True, released_tx="0x" + "7a" * 32)), sb_mock(sb_view("released", seal=True, released_tx="0x" + "7a" * 32))),
+]:
+    SCENARIOS[_name] = _js
+    MOCKS[_name] = _mock
+
 def main():
     qml, out_dir = sys.argv[1], sys.argv[2]
     wanted = sys.argv[3:] or list(SCENARIOS)
@@ -822,11 +892,11 @@ def main():
                                "log_tail": "proving the change on this machine...\nError: the transaction was refused: out of gas"} if scenario == "cli-failed"
                               else {"id": "hopper-1792000000000", "name": "hopper", "kind": "set_text", "started": 1792000000000, "finished": None, "exit": None, "state": "running", "log_tail": "proving the change on this machine..."}), "records": json.dumps(RECORDS),
             "registry": "null" if scenario == "unset" else json.dumps("DbYLkKwd2b13bQhceVj351mpPw7QmRzEjRT2EfU56CKH"),
-            "mock": json.dumps(MOCKS.get(scenario, {})),
+            "mock": json.dumps(MOCKS.get(scenario, {})).replace('"@SOON@"', str(int(__import__("time").time()) + 1500)).replace('"@HOUR@"', str(int(__import__("time").time()) + 3400)),
             "bridge_key": "" if scenario == "get-tokens" else "8e3b0f4a2c71d95e6a0b4c8d2f1e7a3954c6b0d8e2f4a6c8b0d2e4f6a8c0b2d4",
             "home_channel": HOME_CHANNEL,
             "bridge_net": json.dumps(NET04),
-            "scenario": (SCENARIOS[scenario] % dict(filled, zone_request=zone_request(scenario == "approve-zone"))) if "%(zone" in SCENARIOS[scenario] else SCENARIOS[scenario], "out": out, "height": 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "register-net04", "wallet-names-net04", "send-net04", "name", "settings-accounts", "settings-oldcli", "settings-account-new", "settings-network") or scenario.startswith("settings-zones") or scenario.startswith("backup") else 2000 if scenario.startswith("approve-private") or scenario.startswith("approve-relayed") else 1100 if scenario.startswith("approve-") and "zone" in scenario else 1500 if scenario.startswith("get-tokens") or scenario.startswith("wallet") or scenario.startswith("claim") or scenario.startswith("card-arriving") else 1100 if scenario.startswith("receive-") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1100 if scenario.startswith("inscribe") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
+            "scenario": (SCENARIOS[scenario] % dict(filled, zone_request=zone_request(scenario == "approve-zone"))) if "%(zone" in SCENARIOS[scenario] else SCENARIOS[scenario], "out": out, "height": 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "register-net04", "wallet-names-net04", "send-net04", "name", "settings-accounts", "settings-oldcli", "settings-account-new", "settings-network") or scenario.startswith("settings-zones") or scenario.startswith("backup") else 2000 if scenario.startswith("approve-private") or scenario.startswith("approve-relayed") else 1500 if scenario.startswith("card-sendback") or scenario.startswith("sendback-") else 1100 if scenario.startswith("approve-") and "zone" in scenario else 1500 if scenario.startswith("get-tokens") or scenario.startswith("wallet") or scenario.startswith("claim") or scenario.startswith("card-arriving") else 1100 if scenario.startswith("receive-") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1100 if scenario.startswith("inscribe") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
         }
         # Beside Main.qml, so its relative imports (logic.mjs) resolve.
         with tempfile.NamedTemporaryFile("w", suffix=".qml", delete=False, dir=os.path.join(HERE, "..", "qml")) as handle:

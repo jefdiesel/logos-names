@@ -1070,7 +1070,8 @@ export function bridgeNetRows(read, own) {
                 var name = t.name ? String(t.name) : "Bridged token"
                 // "bridge v2" / "bridge v3" from the module (its built-in labels), else the short ID.
                 if (many && t.bridge) name += " · " + (t.bridge_label ? String(t.bridge_label) : "bridge " + keyShown(String(t.bridge)))
-                assets.push({ symbol: String(t.symbol || ""), name: name, amount: decimalShown(t.amount, t.decimals) })
+                assets.push({ symbol: String(t.symbol || ""), name: name, amount: decimalShown(t.amount, t.decimals),
+                              bridge: String(t.bridge || ""), base: String(t.amount || "0"), decimals: Number(t.decimals) || 0, definition: String(t.definition || "") })
             })
         }
         var id = keyShown(String(a.account || "").replace(/^Public\//, ""))
@@ -1565,7 +1566,8 @@ var STEP_SHORT = {
     file: ["File", "File"], arrived: ["Arrived", "Arrived"], check: ["Check", "Checked"], connect: ["Connect", "Connected"],
     programs: ["Programs", "Programs"], public_account: ["Account", "Account"], private_account: ["Account", "Account"],
     secret: ["Keys", "Keys"], approve: ["Approve", "Approved"], done: ["Claim", "Claimed"],
-    choose: ["Amount", "Amount"], deposit: ["Deposit", "Deposited"], wait: ["Wait", "Final"], claim: ["Claim", "Claimed"]
+    choose: ["Amount", "Amount"], deposit: ["Deposit", "Deposited"], wait: ["Wait", "Final"], claim: ["Claim", "Claimed"],
+    address: ["Address", "Address"], burn: ["Approve", "Burned"], back: ["Ethereum", "Received"]
 }
 export function stepShort(key, state) {
     var pair = STEP_SHORT[key]
@@ -2026,4 +2028,152 @@ export function backupCheckedLine(check) {
     if (!same)
         return { text: "The backup opens, but its files differ from the wallet now (it keeps syncing). Make another one to be sure.", ok: false }
     return { text: "Backup checked: it opens with your password and holds " + (n === 1 ? "this account." : "these " + n + " accounts."), ok: true }
+}
+
+// ── Send back to Ethereum (rfp-022 modules/NAMES-SEND-BACK.md): wrapped tokens in a public
+// account on bridge v4 burned, then released on Ethereum to an address the person connects on
+// the bridge page. The bridge module keeps everything; these only say it in words. ──
+
+/// The denominations of the bridged tokens on v4, base units, by the symbol the card shows, for
+/// when the bridge's registry can't be read.
+export const SEND_BACK_FALLBACK = {
+    wETH: { symbol: "ETH", decimals: 18, denoms: ["10000000000000000", "100000000000000000", "1000000000000000000"] },
+    dUSDC: { symbol: "dUSDC", decimals: 6, denoms: ["100000000", "1000000000", "10000000000"] }
+}
+
+/// Whether a card asset row (bridgeNetRows) can be sent back: wrapped on bridge v4 (the vault
+/// that releases by proof), at least its smallest denomination held. Never offered otherwise, so
+/// no button is dead.
+export function sendBackOffer(asset) {
+    if (!asset || asset.bridge !== BRIDGE_V4_PROGRAM) return false
+    var known = SEND_BACK_FALLBACK[asset.symbol]
+    return !!known && atLeast(String(asset.base || "0"), known.denoms[0])
+}
+
+/// The amounts to offer for `asset` (a card asset row): one button per denomination the account
+/// holds at least once, from the bridge's `registry()` when it lists the token (`value` in base
+/// units), else SEND_BACK_FALLBACK. [{index, text, value}] in the registry's order.
+export function sendBackAmounts(registry, asset) {
+    if (!asset) return []
+    var known = SEND_BACK_FALLBACK[asset.symbol]
+    if (!known) return []
+    var listed = registry && Array.isArray(registry.tokens) ? registry.tokens.filter(function(t) { return t && t.symbol === known.symbol && Array.isArray(t.denoms) })[0] : null
+    var denoms = listed ? listed.denoms.map(function(d, i) { return { index: d.index !== undefined ? Number(d.index) : i, value: String(d.value || "") } })
+        : known.denoms.map(function(v, i) { return { index: i, value: v } })
+    return denoms.filter(function(d) { return /^[0-9]+$/.test(d.value) && atLeast(String(asset.base || "0"), d.value) })
+        .map(function(d) { return { index: d.index, value: d.value, text: withDecimals(d.value, known.decimals) } })
+}
+
+/// The bridge module's symbol for a card symbol: wETH → ETH (what `send_back_plan` takes).
+export function sendBackSymbol(symbol) {
+    var known = SEND_BACK_FALLBACK[String(symbol || "")]
+    return known ? known.symbol : String(symbol || "")
+}
+
+/// A pasted withdraw-to code, cleaned: the `logoswd1…` part of a bare code, a link or text around
+/// it (chat apps add spaces and line breaks), lowercase. "" when there is none.
+export function sendBackCode(text) {
+    var t = String(text || "").replace(/\s+/g, "")
+    var m = /(logoswd1[02-9ac-hj-np-z]+)/i.exec(t)
+    return m ? m[1].toLowerCase() : ""
+}
+
+/// A refused withdraw-to code, as a title: the bridge's `error.code` (`bad_code:<why>`,
+/// `other_chain`, `other_vault`).
+export function sendBackCodeTitle(code) {
+    var c = String(code || "")
+    if (c === "other_chain") return "This code is for another chain"
+    if (c === "other_vault") return "This code is for another bridge vault"
+    if (c.indexOf("bad_code") === 0) return "That is not a usable code"
+    return "The code was refused"
+}
+
+/// `HH:MM` of a time in seconds, on this computer's clock.
+export function clockShown(seconds) {
+    var d = new Date(Number(seconds) * 1000)
+    var two = function(n) { return (n < 10 ? "0" : "") + n }
+    return two(d.getHours()) + ":" + two(d.getMinutes())
+}
+
+/// Where one send-back stands, from its `send_back_status(id)` (or a `send_backs()` row): {stage,
+/// headline (the big line; the wait itself while waiting), card (the card row's state), detail,
+/// tone ("wait" | "ready" | "done" | "plain"), action ("" | "burn" | "prove" | "seal" |
+/// "release")}. `clock`: seconds → "14:32" (clockShown). Times are only the bridge's: the update on
+/// Ethereum has none (the operator posts it by hand today), the proof about 20 s, the wrapper about
+/// 3 min, the release at the vault's own `releasable_at`.
+export function sendBackProgress(status, nowSeconds, clock) {
+    var s = status || {}
+    var at = clock || clockShown
+    var r = function(stage, card, headline, detail, tone, action) { return { stage: stage, card: card, headline: headline, detail: detail || "", tone: tone, action: action || "" } }
+    var when = s.releasable_at ? Number(s.releasable_at) : 0
+    var later = when > 0 && Number(nowSeconds) < when
+    var until = later ? "Releasable at " + at(when) + " at the earliest (the vault's one-hour delay)." : ""
+    switch (s.stage) {
+    case "planned": return r("planned", "Ready to send back · approve the burn", "Ready: approve the burn.", "", "ready", "burn")
+    case "approve": return r("approve", "Waiting for your approval", "Waiting for your approval.", "", "ready")
+    case "burning": return r("burning", "Sending the burn · about 15 s", "Sending the burn: about 15 s.", "", "wait")
+    case "burned": return r("burned", "Burned · waiting for Ethereum to record it", "Waiting for Ethereum to record it.",
+        "The bridge team posts these updates to Ethereum by hand today, so this can take from minutes to hours.", "wait")
+    case "burn_unclear": return r("burn_unclear", "The burn may have been refused", "The burn may have been refused.", String(s.text || ""), "plain")
+    case "recorded": return r("recorded", "Recorded on Ethereum · make the proof", "Recorded on Ethereum: make the release proof.", until, "ready", "prove")
+    case "proving": return r("proving", "Making the release proof · about 20 s", "Making the release proof on this computer: about 20 s.", until, "wait")
+    case "proved": return r("proved", "Waiting for the proof's Ethereum wrapper", "Waiting for the proof's Ethereum wrapper: about 3 min.",
+        "The bridge team makes it by hand today and sends you the seal to paste here.", "wait", "seal")
+    case "wrapped":
+        return r("wrapped", later ? "Releasable at " + at(when) : "Releasable any minute now",
+            later ? "Releasable at " + at(when) + "." : "Releasable any minute now.", "The vault waits one hour after Ethereum records a send-back.", "wait")
+    case "releasable": return r("releasable", "Ready to collect on Ethereum", "Ready: collect it on the bridge page.", "", "ready", "release")
+    case "released": return r("released", "Received on Ethereum", "Received on Ethereum.", "", "done")
+    }
+    return r("checking", "Checking…", "Checking…", "", "plain")
+}
+
+/// This wallet's send-backs, from the bridge's `send_backs()` (no chain read; newest first):
+/// [{id, symbol, amount, account, recipient, words, stage}].
+export function sendBacksFrom(value) {
+    var rows = value && Array.isArray(value.send_backs) ? value.send_backs : Array.isArray(value) ? value : []
+    return rows.filter(function(x) { return x && x.id }).map(function(x) {
+        return { id: String(x.id), amount: String(x.amount_text || ""), account: String(x.account || ""), recipient: String(x.recipient || ""),
+                 words: String(x.words_text || ""), stage: String(x.stage || "") }
+    })
+}
+
+/// The card's "Going back to Ethereum" rows: those under way first (newest first), then the ones
+/// received in the last 30 min; a send-back only planned (never approved) is left out after a day.
+export function sendBackRowsShown(list, statuses, receivedAt, nowMs) {
+    var st = statuses || {}, at = receivedAt || {}
+    return (Array.isArray(list) ? list : []).map(function(x) { var s = st[x.id] || { stage: x.stage }; return { row: x, status: s } })
+        .filter(function(e) { return e.status.stage !== "released" || (at[e.row.id] && Number(nowMs) - at[e.row.id] < RECEIVE_CLAIMED_SHOWN_MS) })
+        .map(function(e) { return { id: e.row.id, amount: e.row.amount, account: e.row.account, recipient: e.row.recipient, progress: sendBackProgress(e.status, Number(nowMs) / 1000) } })
+}
+
+/// The send-back screen's steps: [{key, n, total, title, short, state}]. `s`: {stage ("choose" |
+/// "address" (the code being given) | "needs" | a send-back's stage), needs, extras}. Amount, the
+/// Ethereum address, the first-time questions the bridge asks, Approve, then the way back.
+export function sendBackSteps(s) {
+    var st = s || {}
+    var extras = (st.extras || []).map(needsStep)
+    var needs = needsStep(st.needs)
+    if (needs && extras.indexOf(needs) < 0)
+        extras = extras.concat([needs])
+    var keys = ["choose", "address"].concat(extras, ["burn", "back"])
+    var titles = { choose: "Choose the amount", address: "Give the Ethereum address", connect: "Let the bridge see this account",
+                   programs: "Allow the bridge's programs", public_account: "Give the bridge this account",
+                   secret: "Allow the bridge's exit keys", burn: "Approve the burn", back: st.stage === "released" ? "Received on Ethereum" : "Back to Ethereum" }
+    var stage = String(st.stage || "choose")
+    var now = stage === "choose" ? "choose" : stage === "address" ? "address" : stage === "needs" ? (needs || "burn")
+        : stage === "planned" || stage === "approve" ? "burn" : "back"
+    var at = stage === "released" ? keys.length : keys.indexOf(now)
+    return keys.map(function(k, i) {
+        var state = i < at ? "done" : i === at ? "now" : "later"
+        return { key: k, n: i + 1, total: keys.length, title: titles[k] || k, short: stepShort(k, state), state: state, line: "" }
+    })
+}
+
+/// What the screen says about a `send_back_burn` that can't propose: `needs: "names_update"`
+/// (an older Names Wallet), the bridge's own message otherwise.
+export function sendBackBurnHeld(value) {
+    if (value && value.needs === "names_update")
+        return "This Names Wallet can't sign a burn yet. Nothing was signed or sent."
+    return ""
 }

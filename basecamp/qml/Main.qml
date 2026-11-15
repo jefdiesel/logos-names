@@ -1277,7 +1277,7 @@ Item {
     /// a time, every 60 s while the LEZ 0.4 wallet shows (it never asks Names anything). `onlyId`:
     /// just that receive (the Receive screen's); else every open one, the screen's first.
     function pollReceives(onlyId) {
-        if (receivePolling || receiveHold || !bridgeReady || receiveAsking || receiveNeeds !== null)
+        if (receivePolling || receiveHold || !bridgeReady || receiveAsking || receiveNeeds !== null || sbPolling || sbAsking || sbNeeds !== null)
             return
         if (bridgeConfig === null) {
             receivePolling = true
@@ -1364,7 +1364,7 @@ Item {
     // Not gated on Basecamp being the front app: the person deposits in a browser beside it and
     // the wait must move meanwhile. Coming back to the front only adds a check.
     readonly property bool receiveWatching: bridgeReady && namesNet === "0.4" && section === "wallet"
-        && (walletView === "home" || walletView === "ethreceive")
+        && (walletView === "home" || walletView === "ethreceive" || walletView === "sendback")
     onReceiveWatchingChanged: if (receiveWatching) receiveCheckSoon()
     readonly property bool receiveFrontmost: Qt.application.state === Qt.ApplicationActive
     onReceiveFrontmostChanged: if (receiveFrontmost && receiveWatching) receiveCheckSoon()
@@ -1374,8 +1374,10 @@ Item {
         running: root.receiveWatching
         onTriggered: {
             root.receiveNow = Date.now()
-            if (root.receiveNow >= root.receiveNextAt)
+            if (root.receiveNow >= root.receiveNextAt && root.walletView !== "sendback")
                 root.pollReceives(root.walletView === "ethreceive" ? root.receiveFocus : "")
+            else if (root.receiveNow >= root.sbNextAt && root.walletView !== "ethreceive")
+                root.pollSendBacks()
         }
     }
 
@@ -1392,6 +1394,388 @@ Item {
         receiveClaimedAt = at
         receiveClaimedAtChanged()
         console.log("names_ui: receive", id + ": claimed", block ? "in block " + block : "")
+    }
+
+    // ── Send back to Ethereum (rfp-022 modules/NAMES-SEND-BACK.md): wrapped tokens in a public
+    // account on bridge v4 burned (the wallet signs, the bridge's relay pays), then released on
+    // Ethereum to the address the person connects on the bridge page. The bridge module keeps the
+    // send-back; this screen asks it and says what it answers. One bridge call at a time. ──
+    property string sbAccount: ""          // the public account the tokens leave
+    property var sbAsset: null             // its card asset row (bridgeNetRows)
+    property int sbDenom: -1               // the denomination chosen
+    property var sbLink: null              // send_back_link()
+    property bool sbLinkCopied: false
+    property string sbCodeInput: ""
+    property var sbCheck: null             // send_back_check(code), with `code`
+    property string sbCheckError: ""
+    property bool sbAsking: false
+    property var sbNeeds: null             // the bridge's first-time question (connect, programs, account, keys)
+    property string sbNeedsState: ""
+    property bool sbNeedsPolling: false
+    property string sbNeedsThen: ""        // what to ask again once it is answered: "plan" | "burn"
+    property var sbExtras: []
+    property string sbError: ""
+    property string sbFocus: ""            // the send-back on the screen
+    property var sbStatuses: ({})          // id → send_back_status
+    property var sendBacks: []             // Logic.sendBacksFrom rows
+    property bool sendBacksLoaded: false
+    property bool sbPolling: false
+    property double sbNextAt: 0
+    property double sbCheckedAt: 0
+    property bool sbCheckFailed: false
+    property var sbReceivedAt: ({})        // id → when it was seen released, for the card
+    property var sbWitness: null           // send_back_witness(): today's proof command
+    property string sbSealInput: ""
+    property var sbRelease: null           // send_back_release_code()
+    property bool sbDetails: false
+    property bool sbNamesOld: false        // send_back_burn said this Names Wallet can't sign a burn
+    readonly property bool sbCan: Logic.bridgeCan(bridgeFeatures, "send_back")
+    readonly property var sbAmounts: Logic.sendBackAmounts(receiveRegistry, sbAsset)
+    readonly property var sbFocusRow: sbFocus !== "" ? (sendBacks.filter(function(x) { return x.id === sbFocus })[0] || null) : null
+    readonly property var sbFocusStatus: sbFocus !== "" ? (sbStatuses[sbFocus] || (sbFocusRow !== null ? { stage: sbFocusRow.stage } : null)) : null
+    readonly property var sbProgressNow: Logic.sendBackProgress(sbFocusStatus, receiveNow / 1000)
+    readonly property var sbStepsNow: Logic.sendBackSteps({
+        stage: sbFocus !== "" ? (sbProgressNow.stage === "checking" ? "planned" : sbProgressNow.stage) : sbNeeds !== null ? "needs" : sbDenom >= 0 ? "address" : "choose",
+        needs: sbNeeds !== null ? sbNeeds.needs : "", extras: sbExtras })
+    readonly property var sbRowsNow: Logic.sendBackRowsShown(sendBacks, sbStatuses, sbReceivedAt, receiveNow)
+
+    /// Opens Send back to Ethereum for `asset` (a card asset row) of `account`, or the send-back
+    /// `focusId` (a card row).
+    function openSendBack(account, asset, focusId) {
+        walletView = "sendback"
+        sbError = ""
+        sbNeeds = null
+        sbCheck = null
+        sbCheckError = ""
+        sbCodeInput = ""
+        sbWitness = null
+        sbRelease = null
+        sbSealInput = ""
+        sbDetails = false
+        sbNamesOld = false
+        sbExtras = []
+        sbAccount = account || ""
+        sbAsset = asset || null
+        sbDenom = -1
+        sbFocus = typeof focusId === "string" ? focusId : ""
+        if (sbFocus !== "" && sbFocusRow !== null)
+            sbAccount = sbFocusRow.account
+        loadInstalled(checkBundle)
+        receiveHold = true
+        bridgeCall("config", [], function(value) {
+            bridgeAnswered(value)
+            bridgeCall("send_back_link", [], function(link) {
+                sbLink = link
+                receiveHold = false
+                if (sbFocus === "" && receiveRegistry === null)
+                    loadReceiveRegistry()
+                else
+                    sbNextAt = 0
+                if (sbFocus === "" && sbAmounts.length === 1)
+                    sbDenom = sbAmounts[0].index
+            }, function(message, kind) {
+                receiveHold = false
+                sbError = kind === "missing" ? "" : sentence(message)
+                console.log("names_ui: send back: send_back_link:", kind, message)
+            }, 30000, false)
+        }, function(message, kind) {
+            receiveHold = false
+            bridgeSilent(kind)
+            if (kind === "missing" || kind === "starting" || kind === "busy" || kind === "stale")
+                receiveMissing = true
+        }, 10000, false)
+    }
+    function sbCopyLink() {
+        if (sbLink === null || !sbLink.link)
+            return
+        copy(String(sbLink.link), "The link")
+        sbLinkCopied = true
+        console.log("names_ui: send back: the withdraw page link copied")
+        againAfter(2500, function() { sbLinkCopied = false })
+    }
+    /// The pasted withdraw-to code: what it says (address and four words), read by the bridge.
+    function sbCheckCode() {
+        var code = Logic.sendBackCode(sbCodeInput)
+        sbCheck = null
+        sbCheckError = ""
+        if (code === "") {
+            sbCheckError = "Paste the code the bridge page shows: it starts logoswd1."
+            return
+        }
+        sbAsking = true
+        bridgeCall("send_back_check", [code], function(value) {
+            sbAsking = false
+            if (value && value.ok === true)
+                sbCheck = Object.assign({ code: code }, value)
+            else {
+                var e = value && value.error ? value.error : {}
+                sbCheckError = e.message ? sentence(String(e.message)) : Logic.sendBackCodeTitle(e.code) + "."
+            }
+        }, function(message, kind) {
+            sbAsking = false
+            sbCheckError = sentence(kind === "busy" ? "The LEZ Bridge is still answering an earlier call. Try again." : message)
+        }, 60000, false)
+    }
+    /// A first-time question from the bridge (connect, programs, account, keys): drawn in the page
+    /// (appInline), and asked again once answered.
+    function sbNeedsReply(value, then) {
+        if (Logic.needsWithoutRequest(value) !== "") {
+            sbError = sentence(Logic.needsWithoutRequest(value))
+            return
+        }
+        var key = Logic.needsStep(value.needs)
+        if (sbExtras.indexOf(key) < 0)
+            sbExtras = sbExtras.concat([key])
+        sbNeeds = value
+        sbNeedsThen = then
+        sbNeedsState = value.request && value.request.state ? value.request.state : "pending"
+    }
+    /// "Send back": the exit is made (the wallet's keys), then the burn is proposed to this wallet;
+    /// its approval shows here.
+    function sbPlan() {
+        if (sbAsking || sbCheck === null || sbDenom < 0 || sbAsset === null)
+            return
+        sbAsking = true
+        sbError = ""
+        bridgeCall("send_back_plan", [Logic.sendBackSymbol(sbAsset.symbol), String(sbDenom), sbAccount, sbCheck.code], function(value) {
+            sbAsking = false
+            if (value && value.needs) {
+                sbNeedsReply(value, "plan")
+                return
+            }
+            if (value && value.ok === false) {
+                var e = value.error || {}
+                sbError = e.message ? sentence(String(e.message)) : Logic.sendBackCodeTitle(e.code) + "."
+                return
+            }
+            if (!value || !value.id) {
+                sbError = "The LEZ Bridge gave no send-back. Nothing was done."
+                return
+            }
+            var id = String(value.id)
+            var row = { id: id, amount: String(value.amount_text || ""), account: String(value.account || sbAccount), recipient: String(value.recipient || ""), words: String(value.words_text || ""), stage: String(value.stage || "planned") }
+            sendBacks = [row].concat(sendBacks.filter(function(x) { return x.id !== id }))
+            var all = sbStatuses
+            all[id] = value
+            sbStatuses = all
+            sbStatusesChanged()
+            sbFocus = id
+            console.log("names_ui: send back: planned", id)
+            sbBurn()
+        }, function(message, kind) {
+            sbAsking = false
+            sbError = sentence(kind === "busy" ? "The LEZ Bridge is still answering an earlier call. Try again." : message)
+            console.log("names_ui: send back: send_back_plan:", kind, message)
+        }, 180000, false)
+    }
+    function sbBurn() {
+        if (sbAsking || sbFocus === "")
+            return
+        sbAsking = true
+        sbError = ""
+        var id = sbFocus
+        bridgeCall("send_back_burn", [id, "{}"], function(value) {
+            sbAsking = false
+            if (value && value.needs === "names_update") {
+                sbNamesOld = true
+                sbError = Logic.sendBackBurnHeld(value)
+                console.log("names_ui: send back: names_update:", value.detail || "")
+                return
+            }
+            if (value && value.needs) {
+                sbNeedsReply(value, "burn")
+                return
+            }
+            var all = sbStatuses
+            all[id] = value
+            sbStatuses = all
+            sbStatusesChanged()
+            sbNextAt = Date.now() + 5000
+            console.log("names_ui: send back:", id, value && value.stage)
+        }, function(message, kind) {
+            sbAsking = false
+            sbError = sentence(kind === "busy" ? "The LEZ Bridge is still answering an earlier call. Try again." : message)
+            console.log("names_ui: send back: send_back_burn:", kind, message)
+        }, 240000, false)
+    }
+    function pollSbNeeds() {
+        var id = sbNeeds && sbNeeds.request ? String(sbNeeds.request.request || "") : ""
+        if (id === "" || sbNeedsPolling)
+            return
+        sbNeedsPolling = true
+        bridgeCall("wallet_request", [id], function(value) {
+            sbNeedsPolling = false
+            sbNeedsState = value && value.state ? value.state : ""
+            if (sbNeedsState === "approved" || sbNeedsState === "done") {
+                sbNeeds = null
+                if (sbNeedsThen === "plan")
+                    sbPlan()
+                else
+                    sbBurn()
+            } else if (sbNeedsState === "rejected" || sbNeedsState === "expired" || sbNeedsState === "cancelled") {
+                sbNeeds = null
+                sbError = "Nothing was done: you said no."
+            }
+        }, function() { sbNeedsPolling = false }, 120000)
+    }
+    Timer {
+        interval: 2500
+        repeat: true
+        running: root.sbNeeds !== null && (root.sbNeedsState === "" || root.sbNeedsState === "pending")
+        onTriggered: root.pollSbNeeds()
+    }
+    /// The send-backs: the bridge's list once, then send_back_status of each one under way, one
+    /// call at a time, never beside a receive check. Every 60 s; every 5 s while the screen's
+    /// send-back waits for an approval or its block.
+    function pollSendBacks() {
+        if (sbPolling || receivePolling || receiveHold || !bridgeReady || receiveAsking || sbAsking || receiveNeeds !== null || sbNeeds !== null)
+            return
+        if (!sbCan) {
+            sbNextAt = Date.now() + 60000
+            return
+        }
+        if (!sendBacksLoaded) {
+            sbPolling = true
+            bridgeCall("send_backs", [], function(value) {
+                sbPolling = false
+                sendBacksLoaded = true
+                var found = Logic.sendBacksFrom(value)
+                sendBacks = found.concat(sendBacks.filter(function(x) { return !found.some(function(f) { return f.id === x.id }) }))
+                sbNextAt = 0
+            }, function(message, kind) {
+                sbPolling = false
+                sbNextAt = Date.now() + 60000
+                console.log("names_ui: send_backs:", kind, message)
+            }, 30000, false)
+            return
+        }
+        var onScreen = walletView === "sendback" ? sbFocus : ""
+        var open = sendBacks.filter(function(x) {
+            var st = sbStatuses[x.id] ? sbStatuses[x.id].stage : x.stage
+            return st !== "released" && (st !== "planned" || x.id === onScreen) && (onScreen === "" || x.id === onScreen)
+        })
+        if (open.length === 0) {
+            sbNextAt = Date.now() + 60000
+            return
+        }
+        sbPolling = true
+        var failedAny = false
+        var next = function(i) {
+            if (i >= open.length) {
+                sbPolling = false
+                sbCheckedAt = Date.now()
+                sbCheckFailed = failedAny
+                var quick = onScreen !== "" && sbStatuses[onScreen] && ["approve", "burning", "proving"].indexOf(sbStatuses[onScreen].stage) >= 0
+                sbNextAt = Date.now() + (quick ? 5000 : 60000)
+                return
+            }
+            var id = open[i].id
+            bridgeCall("send_back_status", [id], function(value) {
+                var all = sbStatuses
+                var was = all[id] ? all[id].stage : open[i].stage
+                all[id] = value
+                sbStatuses = all
+                sbStatusesChanged()
+                if (value && value.stage !== was) {
+                    console.log("names_ui: send back", id + ":", value.stage)
+                    // The burn landed: the account's balance is read again.
+                    if (value.stage === "burned")
+                        loadBridgeNet()
+                }
+                if (value && value.stage === "released" && !sbReceivedAt[id]) {
+                    var at = sbReceivedAt
+                    at[id] = Date.now()
+                    sbReceivedAt = at
+                    sbReceivedAtChanged()
+                }
+                next(i + 1)
+            }, function(message, kind) {
+                console.log("names_ui: send_back_status", id + ":", kind, message)
+                failedAny = true
+                next(i + 1)
+            }, 90000, false)
+        }
+        next(0)
+    }
+    /// "Make the release proof": the bridge's prover on this computer; without one set up (today),
+    /// the proof inputs and the command that makes it.
+    function sbProve() {
+        if (sbAsking || sbFocus === "")
+            return
+        sbAsking = true
+        sbError = ""
+        var id = sbFocus
+        bridgeCall("send_back_prove", [id], function(value) {
+            if (value && value.needs === "prover") {
+                bridgeCall("send_back_witness", [id], function(w) {
+                    sbAsking = false
+                    sbWitness = w
+                }, function(message, kind) {
+                    sbAsking = false
+                    sbError = sentence(message)
+                    console.log("names_ui: send back: send_back_witness:", kind, message)
+                }, 120000, false)
+                return
+            }
+            sbAsking = false
+            if (value && value.needs) {
+                sbNeedsReply(value, "burn")
+                return
+            }
+            var all = sbStatuses
+            all[id] = Object.assign({}, all[id] || {}, { stage: value && value.stage ? value.stage : "proving" })
+            sbStatuses = all
+            sbStatusesChanged()
+            sbNextAt = Date.now() + 5000
+        }, function(message, kind) {
+            sbAsking = false
+            sbError = sentence(message)
+            console.log("names_ui: send back: send_back_prove:", kind, message)
+        }, 120000, false)
+    }
+    /// The seal the bridge team sends (today's stand-in for the wrap service), checked by the bridge
+    /// against Sepolia's verifier before it is kept.
+    function sbSeal() {
+        var seal = sbSealInput.replace(/\s+/g, "")
+        if (sbAsking || sbFocus === "" || seal === "")
+            return
+        sbAsking = true
+        sbError = ""
+        var id = sbFocus
+        bridgeCall("send_back_seal", [id, seal], function(value) {
+            sbAsking = false
+            sbSealInput = ""
+            var all = sbStatuses
+            all[id] = value
+            sbStatuses = all
+            sbStatusesChanged()
+        }, function(message, kind) {
+            sbAsking = false
+            sbError = sentence(message)
+            console.log("names_ui: send back: send_back_seal:", kind, message)
+        }, 120000, false)
+    }
+    /// "Copy the link" once releasable: the bridge page's link with the release code in it.
+    function sbCopyRelease() {
+        if (sbAsking || sbFocus === "")
+            return
+        if (sbRelease !== null && sbRelease.id === sbFocus && sbRelease.release_link) {
+            copy(String(sbRelease.release_link), "The link")
+            sbLinkCopied = true
+            againAfter(2500, function() { sbLinkCopied = false })
+            return
+        }
+        sbAsking = true
+        var id = sbFocus
+        bridgeCall("send_back_release_code", [id], function(value) {
+            sbAsking = false
+            sbRelease = Object.assign({ id: id }, value)
+            sbCopyRelease()
+        }, function(message, kind) {
+            sbAsking = false
+            sbError = sentence(message)
+            console.log("names_ui: send back: send_back_release_code:", kind, message)
+        }, 60000, false)
     }
 
     /// Claims a receive that arrived: the claim screen, with the deposit instead of a file.
@@ -1612,6 +1996,8 @@ Item {
         loadInstalled(function() {})
         if (then === "receive")
             openEthReceive()
+        else if (then === "sendback")
+            openSendBack(sbAccount, sbAsset, sbFocus === "" ? undefined : sbFocus)
         else if (then === "claim")
             openClaim()
         bridgeDoneView = walletView
@@ -5418,11 +5804,14 @@ Item {
     // leaves it pending, and the sheet shows it wherever the person goes in Names.
     readonly property bool appInline: appRequest !== null && appSheetCompact && appRequest.app === "lez_bridge" && section === "wallet"
         && ((walletView === "claim" && ["asking", "needs", "running", "uncertain"].indexOf(claimStageNow) >= 0)
-            || (walletView === "ethreceive" && receiveNeeds !== null))
+            || (walletView === "ethreceive" && receiveNeeds !== null)
+            || (walletView === "sendback" && (sbNeeds !== null || (sbFocusStatus !== null && sbFocusStatus.stage === "approve"))))
     function appSheetTitle(request) {
         if (request === null)
             return ""
         var bridge = request.app === "lez_bridge"
+        if (request.kind === "relayed_call" && request.sheet && request.sheet.burn)
+            return "Send " + request.sheet.burn.amount_text + " " + request.sheet.burn.symbol + " back to Ethereum?"
         if (request.kind === "relayed_call")
             return appForClaim && claimCheck.deposit ? "Claim " + claimCheck.deposit.amount_text + " from the bridge?" : request.app + " asks you to sign"
         // Adding one account to what the app already sees (grant_add_account): the others stay.
@@ -5433,12 +5822,14 @@ Item {
         if (request.kind === "programs")
             return bridge ? "Allow the bridge's programs?" : request.app + " asks to allow its programs"
         if (request.kind === "secret")
-            return bridge ? "Allow the bridge's deposit keys?" : request.app + " asks for keys of its own"
+            return bridge ? (String(request.scope || "") === "RFP022/exit" ? "Allow the bridge's exit keys?" : "Allow the bridge's deposit keys?") : request.app + " asks for keys of its own"
         return appRequestTitle(request)
     }
     function appSheetLine(request) {
         if (request === null)
             return ""
+        if (request.kind === "relayed_call" && request.sheet && request.sheet.burn)
+            return "From your account " + Logic.idShort(request.account || "") + " · the bridge's relay pays the fee"
         if (request.kind === "relayed_call")
             return appForClaim ? "Into your account " + Logic.idShort(claimAccount) + " · the bridge pays the fee"
                 : "Signs with your account " + Logic.idShort(request.account || (appChosen[0] || "")) + " · another account pays the fee"
@@ -5465,6 +5856,9 @@ Item {
         // unreadable.
         if (request.kind === "programs")
             return "Allow " + (request.app === "lez_bridge" ? "the LEZ Bridge's" : request.app + "'s") + " programs to ask this wallet to sign claims. Only allow programs you trust."
+        // A burn the wallet decoded: its one warning (it can't be undone).
+        if (request.kind === "relayed_call" && request.sheet && request.sheet.burn && (request.sheet.warnings || []).length > 0)
+            return String(request.sheet.warnings[0])
         return "This wallet can't read what the call does. Approve only if you trust " + (request.app === "lez_bridge" ? "the bridge" : request.app) + "."
     }
     property bool appBusy: false          // an answer is on its way to the module
@@ -8212,6 +8606,47 @@ Item {
                             }
                             ReceiveCheckLine { visible: root.receiveHasStatus }
                         }
+                        // Going back to Ethereum: this wallet's send-backs, in the same tone; the wait
+                        // large. A row opens Send back at its stage.
+                        UnderwayPanel {
+                            visible: root.sbRowsNow.length > 0
+                            Text { text: "Going back to Ethereum"; color: root.underway; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold; font.capitalization: Font.AllUppercase; font.letterSpacing: 0.6 }
+                            Repeater {
+                                model: root.sbRowsNow
+                                ColumnLayout {
+                                    id: backRow
+                                    required property var modelData
+                                    required property int index
+                                    readonly property var p: modelData.progress
+                                    Layout.fillWidth: true
+                                    spacing: 4
+                                    Rectangle { visible: backRow.index > 0; Layout.fillWidth: true; Layout.bottomMargin: 8; implicitHeight: 1; color: root.underwayLine }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 14
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 2
+                                            RowLayout {
+                                                spacing: 10
+                                                Text { text: backRow.modelData.amount; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.Bold }
+                                                Text { Layout.alignment: Qt.AlignBaseline; text: "from " + Logic.idShort(backRow.modelData.account) + " to " + Logic.idShort(backRow.modelData.recipient); color: root.dim; font.family: root.sans; font.pixelSize: root.px(15) }
+                                            }
+                                            Text {
+                                                Layout.fillWidth: true
+                                                text: (backRow.p.stage === "released" ? "✓ " : "") + backRow.p.card
+                                                color: backRow.p.tone === "done" ? root.good : backRow.p.tone === "plain" ? root.dim : backRow.p.tone === "ready" ? root.ink : root.underway
+                                                font.family: root.sans
+                                                font.pixelSize: root.px(20)
+                                                font.weight: Font.DemiBold
+                                                wrapMode: Text.WordWrap
+                                            }
+                                        }
+                                        Link { text: "Open ›"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.openSendBack("", null, backRow.modelData.id) }
+                                    }
+                                }
+                            }
+                        }
                         BridgeSetupBox { visible: root.walletView === "home" && root.bridgeSetup.state !== ""; primary: root.cardSetupBlocks }
                         Hint {
                             font.pixelSize: root.px(15)
@@ -8262,6 +8697,13 @@ Item {
                                             Text { text: netAsset.modelData.name; textFormat: Text.PlainText; color: root.dim; font.family: root.sans; font.pixelSize: root.px(13) }
                                         }
                                         Item { Layout.fillWidth: true }
+                                        Link {
+                                            visible: root.sbCan && !netAccount.modelData.viewOnly && !netAccount.modelData.watched && Logic.sendBackOffer(netAsset.modelData)
+                                            text: "Send back to Ethereum ›"
+                                            color: root.dim
+                                            font.pixelSize: root.px(14)
+                                            onPressed: root.openSendBack(String(netAccount.modelData.account), netAsset.modelData)
+                                        }
                                         Text {
                                             text: root.walletHidden ? "••••••" : netAsset.modelData.amount
                                             color: root.ink
@@ -8301,7 +8743,7 @@ Item {
                         }
                         Hint { visible: root.bridgeNetWatchProblem !== ""; font.pixelSize: root.px(14); color: root.alarm; text: root.bridgeNetWatchProblem }
                         Hint { font.pixelSize: root.px(14); text: "Private balances on the bridge test network are not shown yet." }
-                        Hint { font.pixelSize: root.px(14); text: "Sending on the bridge test network isn't in the wallet yet, apart from paying a name." }
+                        Hint { font.pixelSize: root.px(14); text: "Sending on the bridge test network isn't in the wallet yet, apart from paying a name and sending back to Ethereum." }
                     }
                     // What runs on LEZ 0.3 only, unavailable while LEZ 0.4 is shown.
                     ColumnLayout {
@@ -9629,6 +10071,235 @@ Item {
                         Hint { visible: root.receiveNeeds !== null && !!root.receiveNeeds.message; font.pixelSize: root.px(15); text: root.receiveNeeds !== null ? String(root.receiveNeeds.message || "") : "" }
                     }
                     Link { visible: receiveScreen.shows && (root.receiveFocus !== "" || receiveScreen.result !== null); text: "Make another code"; font.pixelSize: root.px(15); onPressed: root.startNewReceive() }
+                }
+
+                // ── Send back to Ethereum ──
+                ColumnLayout {
+                    id: sendBackScreen
+                    visible: root.walletView === "sendback"
+                    Layout.fillWidth: true
+                    Layout.maximumWidth: 680
+                    spacing: 12
+                    readonly property var stepNow: root.sbStepsNow.filter(function(x) { return x.state === "now" })[0] || null
+                    readonly property var p: root.sbProgressNow
+                    readonly property var st: root.sbFocusStatus
+                    readonly property bool shows: !root.receiveMissing && root.bridgeSetupClear && root.sbCan
+                    readonly property bool choosing: root.sbFocus === "" && root.sbNeeds === null
+                    // The burn's approval is drawn here (appInline): it is the step, not the panel.
+                    readonly property bool burning: root.appInline && root.sbFocus !== "" && (p.stage === "planned" || p.stage === "approve")
+                    Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
+                    Text { text: "Send back to Ethereum"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
+                    RunsOn { net: "0.4" }
+                    BridgeSetupBox { then: "sendback" }
+                    Hint { visible: !root.receiveMissing && root.bridgeSetupClear && root.bridgeConfig !== null && !root.sbCan; color: root.brass; text: "This LEZ Bridge can't send back yet. Update it." }
+                    RowLayout {
+                        visible: root.receiveMissing && root.bridgeSetup.state === ""
+                        spacing: 12
+                        Hint { Layout.fillWidth: false; color: root.brass; text: "The LEZ Bridge doesn't answer yet." }
+                        Link { text: "Look again"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.openSendBack(root.sbAccount, root.sbAsset, root.sbFocus === "" ? undefined : root.sbFocus) }
+                    }
+                    Hint { visible: sendBackScreen.shows && root.sbLink !== null && root.sbLink.available === false; color: root.brass; text: root.sbLink !== null && root.sbLink.why ? root.sentence(String(root.sbLink.why)) : "" }
+
+                    StepRow { visible: sendBackScreen.shows; steps: root.sbStepsNow }
+                    Text {
+                        readonly property var step: sendBackScreen.stepNow !== null ? sendBackScreen.stepNow : root.sbStepsNow[root.sbStepsNow.length - 1]
+                        visible: sendBackScreen.shows && step !== undefined
+                        Layout.fillWidth: true
+                        text: step === undefined ? "" : (step.state === "done" ? "✓ " : "") + "Step " + step.n + " of " + step.total + " · " + step.title
+                        color: step !== undefined && step.state === "done" ? root.good : root.ink
+                        font.family: root.sans
+                        font.pixelSize: root.px(22)
+                        font.weight: Font.DemiBold
+                        wrapMode: Text.WordWrap
+                    }
+
+                    // Step 1: the amount, one denomination this account holds.
+                    ColumnLayout {
+                        visible: sendBackScreen.shows && sendBackScreen.choosing && root.sbDenom < 0
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Hint { color: root.ink; text: "From " + Logic.idShort(root.sbAccount) + ", which holds " + (root.sbAsset !== null ? root.sbAsset.amount + " " + root.sbAsset.symbol : "") + " on bridge v4." }
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Repeater {
+                                model: root.sbAmounts
+                                Action { required property var modelData; label: modelData.text + " " + (root.sbAsset !== null ? root.sbAsset.symbol : ""); onPressed: root.sbDenom = modelData.index }
+                            }
+                        }
+                        Hint { visible: root.sbAmounts.length === 0; color: root.brass; text: "This account holds less than the smallest amount that can be sent back." }
+                    }
+
+                    // Step 2: the Ethereum address, from the bridge page: copy its link, connect there, paste its code.
+                    ColumnLayout {
+                        visible: sendBackScreen.shows && sendBackScreen.choosing && root.sbDenom >= 0
+                        Layout.fillWidth: true
+                        spacing: 12
+                        RowLayout {
+                            spacing: 14
+                            Hint { Layout.fillWidth: false; color: root.ink; text: (root.sbAmounts.filter(function(d) { return d.index === root.sbDenom })[0] || { text: "" }).text + " " + (root.sbAsset !== null ? root.sbAsset.symbol : "") + " from " + Logic.idShort(root.sbAccount) + "." }
+                            Link { visible: root.sbAmounts.length > 1 && root.sbCheck === null; text: "Change"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.sbDenom = -1 }
+                        }
+                        ColumnLayout {
+                            visible: root.sbCheck === null
+                            Layout.fillWidth: true
+                            spacing: 10
+                            Action { label: root.sbLinkCopied ? "Copied." : "Copy the link"; strong: true; enabledNow: root.sbLink !== null && !!root.sbLink.link; onPressed: root.sbCopyLink() }
+                            Hint { font.pixelSize: root.px(15); text: "Open it in your browser, connect the Ethereum wallet that should receive, and paste the code it shows here." }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 10
+                                Field { id: sbCodeField; Layout.fillWidth: true; size: 15; code: true; hint: "logoswd1…"; onTextChanged: root.sbCodeInput = text; onAccepted: root.sbCheckCode() }
+                                Action { label: root.sbAsking ? "Reading…" : "Read the code"; enabledNow: !root.sbAsking && Logic.sendBackCode(root.sbCodeInput) !== ""; onPressed: root.sbCheckCode() }
+                            }
+                            Hint { visible: root.sbCheckError !== ""; color: root.alarm; text: root.sbCheckError }
+                        }
+                        // The address the code names, and its four words: the same as on the page.
+                        ColumnLayout {
+                            visible: root.sbCheck !== null
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Hint { color: root.ink; text: "To this Ethereum address:" }
+                            Text { Layout.fillWidth: true; text: root.sbCheck !== null ? String(root.sbCheck.recipient || "") : ""; textFormat: Text.PlainText; color: root.ink; font.family: root.mono; font.pixelSize: root.px(16); wrapMode: Text.WrapAnywhere }
+                            Text { Layout.fillWidth: true; text: "Check these four words match the bridge page. If they differ, stop."; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold; wrapMode: Text.WordWrap }
+                            Text { Layout.fillWidth: true; text: root.sbCheck !== null ? String(root.sbCheck.words_text || "") : ""; color: root.ink; font.family: root.sans; font.pixelSize: root.px(30); font.weight: Font.Bold; wrapMode: Text.WordWrap }
+                            Repeater {
+                                model: root.sbCheck !== null && Array.isArray(root.sbCheck.warnings) ? root.sbCheck.warnings : []
+                                Hint { required property var modelData; color: root.brass; text: String(modelData) }
+                            }
+                            RowLayout {
+                                spacing: 14
+                                Action { label: root.sbAsking ? "Getting it ready…" : "Send back"; strong: true; enabledNow: !root.sbAsking; onPressed: root.sbPlan() }
+                                Link { visible: !root.sbAsking; text: "Another code"; color: root.dim; font.pixelSize: root.px(15); onPressed: { root.sbCheck = null; root.sbCodeInput = ""; sbCodeField.text = "" } }
+                            }
+                        }
+                    }
+
+                    Hint { visible: root.sbNeeds !== null && !root.appInline; text: "Answer it in the sheet." }
+                    // The burn's approval: where it goes first (the burn carries only a commitment, so
+                    // the wallet's own sheet can't show the address), then the approval itself.
+                    ColumnLayout {
+                        visible: sendBackScreen.burning && root.sbFocusRow !== null
+                        Layout.fillWidth: true
+                        spacing: 6
+                        Hint { color: root.ink; text: root.sbFocusRow !== null ? root.sbFocusRow.amount + " to this Ethereum address" + (sendBackScreen.st !== null && sendBackScreen.st.receive_text ? " (you receive " + sendBackScreen.st.receive_text + "):" : ":") : "" }
+                        Text { Layout.fillWidth: true; text: root.sbFocusRow !== null ? root.sbFocusRow.recipient : ""; textFormat: Text.PlainText; color: root.ink; font.family: root.mono; font.pixelSize: root.px(16); wrapMode: Text.WrapAnywhere }
+                        Text { Layout.fillWidth: true; text: root.sbFocusRow !== null ? root.sbFocusRow.words : ""; color: root.ink; font.family: root.sans; font.pixelSize: root.px(24); font.weight: Font.Bold; wrapMode: Text.WordWrap }
+                    }
+                    // The bridge's first-time questions and the burn itself, answered here.
+                    ApproveBody { visible: root.appInline && root.walletView === "sendback"; inline: true }
+
+                    // Step 3 and on: where the send-back is. The wait is the headline.
+                    UnderwayPanel {
+                        visible: sendBackScreen.shows && root.sbFocus !== "" && !sendBackScreen.burning && !(root.sbNamesOld && sendBackScreen.p.stage === "planned")
+                        Text {
+                            Layout.fillWidth: true
+                            text: (sendBackScreen.p.stage === "released" ? "✓ " : "") + sendBackScreen.p.headline
+                            color: sendBackScreen.p.tone === "done" ? root.good : sendBackScreen.p.tone === "plain" ? root.dim : sendBackScreen.p.tone === "ready" ? root.ink : root.underway
+                            font.family: root.sans
+                            font.pixelSize: root.px(26)
+                            font.weight: Font.DemiBold
+                            wrapMode: Text.WordWrap
+                        }
+                        Hint { visible: sendBackScreen.p.detail !== ""; font.pixelSize: root.px(15); text: sendBackScreen.p.detail }
+                        Hint {
+                            visible: root.sbFocusRow !== null
+                            color: root.ink
+                            text: root.sbFocusRow === null ? "" : root.sbFocusRow.amount + " from " + Logic.idShort(root.sbFocusRow.account) + " to " + Logic.idShort(root.sbFocusRow.recipient)
+                                + (sendBackScreen.st !== null && sendBackScreen.st.receive_text ? "; you receive " + sendBackScreen.st.receive_text + "." : ".")
+                        }
+                        Hint { visible: root.sbFocusRow !== null && root.sbFocusRow.words !== ""; font.pixelSize: root.px(15); text: root.sbFocusRow !== null ? "Its words: " + root.sbFocusRow.words : "" }
+                        // The burn not proposed yet (or proposed again after a no).
+                        Action { visible: sendBackScreen.p.action === "burn" && !root.appInline && root.sbError === ""; label: root.sbAsking ? "Asking your wallet…" : "Approve the burn"; strong: true; enabledNow: !root.sbAsking; onPressed: root.sbBurn() }
+                        // Recorded: the release proof on this computer.
+                        Action { visible: sendBackScreen.p.action === "prove" && root.sbWitness === null; label: root.sbAsking ? "Starting…" : "Make the proof"; strong: true; enabledNow: !root.sbAsking; onPressed: root.sbProve() }
+                        ColumnLayout {
+                            visible: root.sbWitness !== null && (sendBackScreen.p.stage === "recorded" || sendBackScreen.p.stage === "proving")
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Hint { color: root.ink; text: "This computer has no prover set up yet: the proof runs from one command (about 30 s)." }
+                            Action { label: "Copy the command"; strong: true; onPressed: root.copy(root.sbWitness !== null ? (Array.isArray(root.sbWitness.command) ? root.sbWitness.command.join(" ") : String(root.sbWitness.command || "")) : "", "The command") }
+                            TextEdit {
+                                Layout.fillWidth: true
+                                text: root.sbWitness !== null ? (Array.isArray(root.sbWitness.command) ? root.sbWitness.command.join(" ") : String(root.sbWitness.command || "")) : ""
+                                readOnly: true
+                                selectByMouse: true
+                                wrapMode: TextEdit.WrapAnywhere
+                                color: root.ink
+                                selectionColor: root.underwayLine
+                                font.family: root.mono
+                                font.pixelSize: root.px(13)
+                            }
+                            Hint { font.pixelSize: root.px(15); text: root.sbWitness !== null && root.sbWitness.note ? String(root.sbWitness.note) : "" }
+                        }
+                        // The proof's Ethereum wrapper, by hand today: the seal the bridge team sends.
+                        ColumnLayout {
+                            visible: sendBackScreen.p.action === "seal"
+                            Layout.fillWidth: true
+                            spacing: 8
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 10
+                                Field { id: sbSealField; Layout.fillWidth: true; size: 15; code: true; hint: "Paste the seal (0xe71e6620…)"; onTextChanged: root.sbSealInput = text; onAccepted: root.sbSeal() }
+                                Action { label: root.sbAsking ? "Checking…" : "Add the seal"; enabledNow: !root.sbAsking && root.sbSealInput.trim() !== ""; onPressed: root.sbSeal() }
+                            }
+                        }
+                        // Releasable: the link to collect it on the bridge page.
+                        ColumnLayout {
+                            visible: sendBackScreen.p.action === "release"
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Action { label: root.sbLinkCopied ? "Copied." : "Copy the link"; strong: true; enabledNow: !root.sbAsking; onPressed: root.sbCopyRelease() }
+                            Hint { font.pixelSize: root.px(15); text: "Open it in your browser and press Release with the Ethereum wallet you connected." }
+                        }
+                        Hint { visible: sendBackScreen.st !== null && !!sendBackScreen.st.note; font.pixelSize: root.px(15); color: root.brass; text: sendBackScreen.st !== null && sendBackScreen.st.note ? root.sentence(String(sendBackScreen.st.note)) : "" }
+                        RowLayout {
+                            visible: sendBackScreen.p.stage !== "released"
+                            spacing: 12
+                            Text { text: Logic.receiveCheckLine(root.sbPolling, root.sbCheckedAt, root.sbNextAt, root.receiveNow, root.sbCheckFailed); visible: text !== ""; color: root.sbCheckFailed && !root.sbPolling ? root.brass : root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
+                            Link { visible: !root.sbPolling && !root.sbAsking; text: "Check now"; color: root.dim; font.pixelSize: root.px(14); onPressed: root.sbNextAt = 0 }
+                        }
+                    }
+                    RowLayout {
+                        visible: root.sbError !== ""
+                        spacing: 12
+                        Hint { Layout.fillWidth: true; color: root.alarm; text: root.sbError }
+                        Action { visible: root.sbFocus !== "" && sendBackScreen.p.action === "burn" && !root.sbAsking && !root.sbNamesOld; label: "Try again"; onPressed: root.sbBurn() }
+                    }
+
+                    Link {
+                        visible: sendBackScreen.shows && !root.appInline
+                        text: root.sbDetails ? "Details ▾" : "Details ▸"
+                        color: root.dim
+                        font.pixelSize: root.px(15)
+                        onPressed: root.sbDetails = !root.sbDetails
+                    }
+                    ColumnLayout {
+                        visible: root.sbDetails && sendBackScreen.shows && !root.appInline
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Hint { font.pixelSize: root.px(15); text: "The wallet burns the wrapped tokens on the bridge test network; the bridge's relay pays the LEZ fee. Ethereum then records the burn, this computer proves it, and the vault releases the ETH to the address you connected, after its one-hour delay." }
+                        Hint { font.pixelSize: root.px(15); text: "The burn carries an exit commitment, not the address: the address stays hidden until the release. Your wallet makes the exit's secret from your account's key; this app never sees it." }
+                        Hint { font.pixelSize: root.px(15); text: "Today the bridge team posts the update to Ethereum and makes the proof's wrapper by hand." }
+                        Hint { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.privacy; font.pixelSize: root.px(15); text: root.sbFocusStatus !== null && root.sbFocusStatus.privacy ? String(root.sbFocusStatus.privacy) : "" }
+                        Fact { visible: root.sbFocusRow !== null; label: "To"; code: true; value: root.sbFocusRow !== null ? root.sbFocusRow.recipient : ""; full: root.sbFocusRow !== null ? root.sbFocusRow.recipient : "" }
+                        Fact { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.exit_commitment; label: "Exit"; code: true; value: root.sbFocusStatus !== null ? String(root.sbFocusStatus.exit_commitment || "") : ""; full: root.sbFocusStatus !== null ? String(root.sbFocusStatus.exit_commitment || "") : "" }
+                        Fact { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.burn_tx; label: "Burn"; code: true; value: root.sbFocusStatus !== null ? String(root.sbFocusStatus.burn_tx || "") : ""; full: root.sbFocusStatus !== null ? String(root.sbFocusStatus.burn_tx || "") : "" }
+                        Fact { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.released_tx; label: "Released"; code: true; value: root.sbFocusStatus !== null ? String(root.sbFocusStatus.released_tx || "") : ""; full: root.sbFocusStatus !== null ? String(root.sbFocusStatus.released_tx || "") : "" }
+                        Hint { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.text; font.pixelSize: root.px(15); text: root.sbFocusStatus !== null && root.sbFocusStatus.text ? "The bridge says: " + String(root.sbFocusStatus.text) : "" }
+                        TextEdit {
+                            visible: root.sbRelease !== null && root.sbRelease.id === root.sbFocus
+                            Layout.fillWidth: true
+                            text: root.sbRelease !== null ? String(root.sbRelease.release_link || "") : ""
+                            readOnly: true
+                            selectByMouse: true
+                            wrapMode: TextEdit.WrapAnywhere
+                            color: root.ink
+                            selectionColor: root.underwayLine
+                            font.family: root.mono
+                            font.pixelSize: root.px(13)
+                        }
+                    }
                 }
 
                 // ── Add a token by its address ──
