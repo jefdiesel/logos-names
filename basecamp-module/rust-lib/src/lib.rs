@@ -1081,7 +1081,7 @@ pub trait NamesModule: Send + 'static {
     /// accounts, fee: {payer, gas_limit, tip, max_fee}, privacy}` (PROVIDER-SDK.md, "Calls
     /// someone else pays for"). The wallet builds the transaction itself and shows the person
     /// what it built; once approved, `request_status` gives `transaction` (the half-signed
-    /// transaction, hex borsh) and `hash`. The wallet sends nothing and pays nothing. LEZ 0.4
+    /// transaction, hex borsh) and `hash`. The other account sends it and pays the fee. LEZ 0.4
     /// only for now.
     fn propose_relayed_call(&mut self, account: String, call_json: String, summary: String) -> String;
 

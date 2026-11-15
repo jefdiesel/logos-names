@@ -426,7 +426,7 @@ not be the account that makes the call (`lee` `FeeDeclaration`). So an account t
 LEZ, even one never used on the chain, can make a public call when another account (a relay)
 pays: the account signs, the relay adds its own signature as fee payer and submits it. The
 wallet does the first half: it signs as the person's account and gives the transaction back to
-your app. **It sends nothing and pays nothing**, and it can't see what happens to the transaction
+your app. **The relay sends it and pays the fee**; the wallet can't see what happens to the transaction
 afterwards.
 
 1. **Declare your programs once:** `declare_programs(programs_json, reason)`, a JSON array of 1

@@ -5,7 +5,7 @@
 //! and a fee declaration whose payer is ANOTHER account (a relay's). The wallet builds the
 //! transaction itself (names CLI `module public-call plan`), shows a sheet made from that build,
 //! never from the app's words, and once the person approves, signs it as the account (`sign`) and
-//! hands it back half signed. The wallet sends nothing and pays nothing.
+//! hands it back half signed; the other account sends it and pays the fee.
 //!
 //! What the account's signature covers on LEZ v0.4.0-rc3 (CLI `public_call.rs`): the whole
 //! message, payer, fee caps and both signers' nonces included. So the payer can't swap itself
@@ -125,7 +125,7 @@ pub fn resign_check(approved: &Value, last_payer_nonce: Option<u128>, now: &Valu
 }
 
 /// What the wallet says about who sees the signed transaction afterwards. Fixed.
-pub const AFTER: &str = "Your wallet sends nothing and pays nothing: it gives the signed transaction back to the app. It can't see what happens to it after that. The payer can only submit exactly these bytes, and only once on this chain: changing the program, an account, the fee or one byte of the message breaks your signature. After a reset of this test network, or on another LEZ 0.4 chain where your account's nonce comes back to what it is now, the payer could submit it again.";
+pub const AFTER: &str = "Your wallet signs and gives the transaction back to the app; the other account sends it and pays the fee. It can't see what happens to it after that. The payer can only submit exactly these bytes, and only once on this chain: changing the program, an account, the fee or one byte of the message breaks your signature. After a reset of this test network, or on another LEZ 0.4 chain where your account's nonce comes back to what it is now, the payer could submit it again.";
 
 fn privacy_line(key: &str) -> Option<&'static str> {
     PRIVACY.iter().find(|(k, _)| *k == key).map(|(_, line)| *line)
