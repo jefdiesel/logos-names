@@ -34,6 +34,7 @@
 
 mod activity;
 mod avatar;
+mod backup;
 mod bridge_net;
 mod chain;
 mod chain_keys;
