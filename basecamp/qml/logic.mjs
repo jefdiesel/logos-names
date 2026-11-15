@@ -1688,6 +1688,24 @@ export function backupLastLine(last, clock) {
     return "Last backup: " + clock(Number(last.at)) + " · " + what
 }
 
+/// The compare step on Receive. With the bridge's four words (`compare.words`): check them on
+/// the page; with an older bridge: the commitment's first and last digits, as before.
+export function compareLine(compare) {
+    if (!compare)
+        return ""
+    if (Array.isArray(compare.words) && compare.words.length > 0)
+        return "Check these four words match the deposit page. If they differ, stop."
+    return "The page must show a commitment starting " + compare.first + " and ending " + compare.last + "."
+}
+/// The four words, large: "maple · tiger · seven · lamp" (as the module returns them, never made here).
+export function compareWords(compare) {
+    return compare && Array.isArray(compare.words) && compare.words.length > 0 ? compare.words.map(String).join(" · ") : ""
+}
+/// Under Details when the words are shown: the commitment's digits too.
+export function compareDigitsDetail(compare) {
+    return compare && Array.isArray(compare.words) && compare.words.length > 0 && compare.first ? "Commitment starts " + compare.first + " and ends " + compare.last + "." : ""
+}
+
 /// Which wallet folders went into a backup, in one line: "From /Users/you/.lee/wallet (LEZ 0.3)".
 export function backupFoldersLine(folders) {
     var list = Array.isArray(folders) ? folders : []

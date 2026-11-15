@@ -723,5 +723,14 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("dialog path with spaces", dialogPath("file:///Users/you/Names%20Wallet%20Backups/b.lnsbackup"), "/Users/you/Names Wallet Backups/b.lnsbackup");
 }
 
+{
+  const { compareLine, compareWords, compareDigitsDetail } = await import("./qml/logic.mjs");
+  const words = { words: ["maple", "tiger", "seven", "lamp"], first: "b95db8", last: "6b299d" };
+  check("words line", compareLine(words), "Check these four words match the deposit page. If they differ, stop.");
+  check("words", compareWords(words), "maple · tiger · seven · lamp");
+  check("digits under details", compareDigitsDetail(words), "Commitment starts b95db8 and ends 6b299d.");
+  check("older bridge", [compareLine({ first: "b95db8", last: "6b299d" }), compareWords({ first: "b95db8" })], ["The page must show a commitment starting b95db8 and ending 6b299d.", ""]);
+}
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);

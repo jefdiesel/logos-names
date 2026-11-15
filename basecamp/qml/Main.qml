@@ -8538,11 +8538,21 @@ Item {
                         Action { label: "Open the deposit page"; strong: true; onPressed: root.openDepositPage(receiveScreen.result.request_url) }
                         Text {
                             Layout.fillWidth: true
-                            text: receiveScreen.result === null || !receiveScreen.result.compare ? "" : "The page must show a commitment starting " + receiveScreen.result.compare.first + " and ending " + receiveScreen.result.compare.last + "."
+                            text: Logic.compareLine(receiveScreen.result !== null ? receiveScreen.result.compare : null)
                             color: root.ink
                             font.family: root.sans
                             font.pixelSize: root.px(20)
                             font.weight: Font.DemiBold
+                            wrapMode: Text.WordWrap
+                        }
+                        Text {
+                            visible: text !== ""
+                            Layout.fillWidth: true
+                            text: Logic.compareWords(receiveScreen.result !== null ? receiveScreen.result.compare : null)
+                            color: root.ink
+                            font.family: root.sans
+                            font.pixelSize: root.px(30)
+                            font.weight: Font.Bold
                             wrapMode: Text.WordWrap
                         }
                         Hint { font.pixelSize: root.px(15); text: "No file to save: this wallet keeps what it needs. The card shows when it arrives." }
@@ -8586,6 +8596,7 @@ Item {
                         Hint { visible: receiveScreen.result !== null && !!receiveScreen.result.not_private; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.not_private ? String(receiveScreen.result.not_private.text || "") : "" }
                         Hint { visible: receiveScreen.result !== null && !!receiveScreen.result.bridge_fee && !!receiveScreen.result.bridge_fee.error; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.bridge_fee && receiveScreen.result.bridge_fee.error ? String(receiveScreen.result.bridge_fee.error) : "" }
                         Hint { visible: receiveScreen.result !== null && !!receiveScreen.result.compare; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.compare ? String(receiveScreen.result.compare.text || "") : "" }
+                        Hint { visible: text !== ""; font.pixelSize: root.px(15); text: Logic.compareDigitsDetail(receiveScreen.result !== null ? receiveScreen.result.compare : null) }
                         Hint { visible: root.receiveNeeds !== null && !!root.receiveNeeds.message; font.pixelSize: root.px(15); text: root.receiveNeeds !== null ? String(root.receiveNeeds.message || "") : "" }
                     }
                     Repeater {
