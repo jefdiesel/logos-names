@@ -13,9 +13,11 @@
 //! binaries (`*.bin`, downloaded again), the lock file, sub-folders (logs, proof caches).
 //!
 //! Nothing here logs, keeps or returns the password or a decrypted byte except the account
-//! summary and the file names; decrypted buffers are overwritten before they are dropped. A
-//! backup file is written mode 600, through a temporary file of its own in the same folder
-//! (encrypted bytes only), then renamed into place.
+//! summary and the file names. Wiping is best effort: the payload buffer and the key array are
+//! overwritten; JSON copies, the password strings and the ciphers' own state are not (the keys
+//! sit in plain text in the wallet folder anyway). A backup file is written mode 600, through a
+//! temporary file of its own in the same folder (encrypted bytes only), then linked into place
+//! (never over a file that is there).
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -34,6 +36,14 @@ pub const KDF_P: u32 = 1;
 pub const MIN_PASSWORD: usize = 10;
 /// The largest backup file read back (a wallet folder is well under a megabyte).
 const MAX_FILE: u64 = 64 << 20;
+/// What a backup's header may ask of Argon2id to be opened here: memory (KiB), passes, lanes.
+/// A file asking for more is refused before any work (a crafted one could stall the module).
+pub const KDF_M_KIB_RANGE: std::ops::RangeInclusive<u32> = 19_456..=1_048_576;
+pub const KDF_T_RANGE: std::ops::RangeInclusive<u32> = 2..=10;
+pub const KDF_P_RANGE: std::ops::RangeInclusive<u32> = 1..=4;
+/// Left in a wallet folder while a restore writes it; a restore that died midway is recognised
+/// by it, and the files it lists (its own) are removed before trying again.
+pub const RESTORE_MARKER: &str = ".names-restore-in-progress";
 /// The most files and bytes one wallet folder may put in a backup.
 const MAX_WALLET_FILES: usize = 32;
 const MAX_WALLET_BYTES: u64 = 16 << 20;
@@ -49,18 +59,21 @@ pub fn wallet_files(dir: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
     let entries = std::fs::read_dir(dir).map_err(|_| format!("the wallet folder {} can't be read", dir.display()))?;
     let mut out = Vec::new();
     let mut total = 0u64;
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.map_err(|_| format!("the wallet folder {} can't be read", dir.display()))?;
         let name = entry.file_name().to_string_lossy().into_owned();
         let kind = entry.file_type().map_err(|_| format!("{name} in the wallet folder can't be read"))?;
         if !kind.is_file() || !wanted(&name) {
             continue;
         }
-        let bytes = std::fs::read(entry.path()).map_err(|_| format!("{name} in the wallet folder can't be read"))?;
-        total += bytes.len() as u64;
-        out.push((name, bytes));
-        if out.len() > MAX_WALLET_FILES || total > MAX_WALLET_BYTES {
+        // The size is checked before anything is read.
+        let size = entry.metadata().map_err(|_| format!("{name} in the wallet folder can't be read"))?.len();
+        total += size;
+        if out.len() + 1 > MAX_WALLET_FILES || total > MAX_WALLET_BYTES {
             return Err(format!("the wallet folder {} holds more than a wallet; nothing was backed up", dir.display()));
         }
+        let bytes = std::fs::read(entry.path()).map_err(|_| format!("{name} in the wallet folder can't be read"))?;
+        out.push((name, bytes));
     }
     if !out.iter().any(|(name, _)| name == "storage.json") {
         return Err(format!("there is no wallet in {}", dir.display()));
@@ -204,9 +217,11 @@ pub fn open(file: &[u8], password: &str) -> Result<Value, String> {
     if kdf["alg"] != "argon2id" || head["cipher"] != "aes-256-gcm" {
         return Err("this backup uses a kind of encryption this version can't open".to_owned());
     }
-    let m = kdf["m_kib"].as_u64().and_then(|v| u32::try_from(v).ok()).filter(|m| (8..=1 << 22).contains(m)).ok_or_else(bad)?;
-    let t = kdf["t"].as_u64().and_then(|v| u32::try_from(v).ok()).filter(|t| (1..=16).contains(t)).ok_or_else(bad)?;
-    let p = kdf["p"].as_u64().and_then(|v| u32::try_from(v).ok()).filter(|p| (1..=8).contains(p)).ok_or_else(bad)?;
+    let number = |key: &str| kdf[key].as_u64().and_then(|v| u32::try_from(v).ok()).ok_or_else(bad);
+    let (m, t, p) = (number("m_kib")?, number("t")?, number("p")?);
+    if !KDF_M_KIB_RANGE.contains(&m) || !KDF_T_RANGE.contains(&t) || !KDF_P_RANGE.contains(&p) {
+        return Err("this backup asks for more memory or time to open than this app allows, so it wasn't opened".to_owned());
+    }
     let salt = kdf["salt"].as_str().and_then(unhex).filter(|s| s.len() >= 16).ok_or_else(bad)?;
     let nonce = head["nonce"].as_str().and_then(unhex).filter(|n| n.len() == 12).ok_or_else(bad)?;
     let params = Params::new(m, t, p, Some(32)).map_err(|_| bad())?;
@@ -272,8 +287,9 @@ fn private_dir(path: &Path) -> std::io::Result<()> {
 /// Writes a sealed backup to `path` (mode 600): never over a file that is there, through a
 /// temporary file of its own beside it (the encrypted bytes only), renamed into place.
 pub fn write_file(path: &Path, sealed: &[u8]) -> Result<(), String> {
-    if path.exists() {
-        return Err(format!("{} is there already; choose another name", path.display()));
+    let taken = || format!("{} is there already; choose another name", path.display());
+    if path.symlink_metadata().is_ok() {
+        return Err(taken());
     }
     let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).ok_or("a backup needs a folder to go in")?;
     private_dir(dir).map_err(|_| format!("the folder {} can't be made", dir.display()))?;
@@ -283,24 +299,41 @@ pub fn write_file(path: &Path, sealed: &[u8]) -> Result<(), String> {
     let result = (|| {
         let mut file = private_file(&temp).map_err(|_| format!("a file can't be written in {}", dir.display()))?;
         file.write_all(sealed).and_then(|_| file.sync_all()).map_err(|_| format!("the backup couldn't be written in {}", dir.display()))?;
-        std::fs::rename(&temp, path).map_err(|_| format!("the backup couldn't be put at {}", path.display()))
+        // A link, not a rename: it fails if a file appeared at `path` meanwhile, never replacing it.
+        std::fs::hard_link(&temp, path).map_err(|error| if error.kind() == std::io::ErrorKind::AlreadyExists { taken() } else { format!("the backup couldn't be put at {}", path.display()) })
     })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
-    }
+    let _ = std::fs::remove_file(&temp);
     result
 }
 
 /// Puts a backup's wallet files into `dir`, which must hold no wallet: the folder is made (700)
 /// if missing, and each file is written new (600), never over one that is there.
 pub fn restore_into(dir: &Path, files: &[(String, Vec<u8>)]) -> Result<Vec<String>, String> {
+    let marker = dir.join(RESTORE_MARKER);
     if dir.join("storage.json").exists() {
         return Err(format!("there is a wallet in {} already, so nothing was restored or changed", dir.display()));
+    }
+    // A restore that died midway left its marker, listing the files it wrote: they are its own
+    // (the store, written last, isn't among them), so they go before this one starts.
+    if let Ok(text) = std::fs::read_to_string(&marker) {
+        for name in text.lines().filter(|name| wanted(name)) {
+            let _ = std::fs::remove_file(dir.join(name));
+        }
+        let _ = std::fs::remove_file(&marker);
     }
     if let Some((name, _)) = files.iter().find(|(name, _)| dir.join(name).exists()) {
         return Err(format!("{name} is in {} already, so nothing was restored or changed", dir.display()));
     }
     private_dir(dir).map_err(|_| format!("the wallet folder {} can't be made", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let names: String = files.iter().map(|(name, _)| format!("{name}\n")).collect();
+    let mut note = private_file(&marker).map_err(|_| format!("the wallet folder {} can't be written", dir.display()))?;
+    note.write_all(names.as_bytes()).and_then(|_| note.sync_all()).map_err(|_| format!("the wallet folder {} can't be written", dir.display()))?;
+    drop(note);
     let mut written = Vec::new();
     // The store last: a folder without storage.json is no wallet, so a half-done restore
     // never looks like one.
@@ -322,6 +355,7 @@ pub fn restore_into(dir: &Path, files: &[(String, Vec<u8>)]) -> Result<Vec<Strin
         }
         written.push(name.clone());
     }
+    let _ = std::fs::remove_file(&marker);
     Ok(written)
 }
 
@@ -329,11 +363,14 @@ fn undo(dir: &Path, written: &[String]) {
     for name in written {
         let _ = std::fs::remove_file(dir.join(name));
     }
+    let _ = std::fs::remove_file(dir.join(RESTORE_MARKER));
 }
 
-/// The folder backups go to when no other is chosen: `~/Documents/Names Wallet Backups`.
+/// The folder backups go to when no other is chosen: `~/Names Wallet Backups`. Not under
+/// ~/Documents, which a Mac may sync to iCloud (the file is encrypted, but it is the person's
+/// choice where a copy of their keys goes).
 pub fn default_folder() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| Path::new(&home).join("Documents").join("Names Wallet Backups"))
+    std::env::var_os("HOME").map(|home| Path::new(&home).join("Names Wallet Backups"))
 }
 
 #[cfg(test)]
@@ -381,7 +418,8 @@ mod tests {
         let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, ["names.json", "storage.json", "storage.nullifiers", "wallet_config.json"], "no binaries, locks or logs");
         let sealed = seal(&[Part { network: "lez-0.4".into(), files: files.clone() }], PASSWORD, 1_794_700_000).unwrap();
-        assert!(!contains(&sealed, MARKER.as_bytes()), "the marker never appears in the file");
+        let marker_hex = hex(MARKER.as_bytes());
+        assert!(!contains(&sealed, MARKER.as_bytes()) && !contains(&sealed, marker_hex.as_bytes()), "the marker never appears in the file, plain or as the payload's hex");
         assert!(!contains(&sealed, PASSWORD.as_bytes()), "nor the password");
         let file = home.join("Backups").join("b.lnsbackup");
         write_file(&file, &sealed).unwrap();
@@ -410,22 +448,28 @@ mod tests {
         for (name, bytes) in &files {
             assert_eq!(&std::fs::read(target.join(name)).unwrap(), bytes, "{name}");
         }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o700, "the restored folder");
+            for (name, _) in &files {
+                assert_eq!(std::fs::metadata(target.join(name)).unwrap().permissions().mode() & 0o777, 0o600, "{name}");
+            }
+        }
+        assert!(!target.join(RESTORE_MARKER).exists(), "a finished restore leaves no marker");
         // Never over a wallet that is there.
         assert!(restore_into(&target, &files_of(net).unwrap()).unwrap_err().contains("already"));
         assert!(restore_into(&live, &files_of(net).unwrap()).unwrap_err().contains("already"));
-        // No plain copy anywhere in the scratch home (the backup folder included) but the wallets
-        // themselves, nor a leftover temporary file beside the temp folder's backups.
-        let leftovers: Vec<PathBuf> = std::fs::read_dir(std::env::temp_dir()).into_iter().flatten().flatten()
-            .map(|entry| entry.path()).filter(|path| path.is_file() && path.to_string_lossy().contains("names-backup")).collect();
-        for root in [home.clone()] {
-            for entry in walk(&root).into_iter().chain(leftovers.iter().cloned()) {
-                if entry.starts_with(&live) || entry.starts_with(&target) {
-                    continue;
-                }
-                let bytes = std::fs::read(&entry).unwrap_or_default();
-                assert!(!contains(&bytes, MARKER.as_bytes()) || entry.starts_with(live.join("logs")), "plain copy at {}", entry.display());
-                assert!(!contains(&bytes, PASSWORD.as_bytes()), "password at {}", entry.display());
+        // No plain copy anywhere in the scratch home but the wallets themselves: the backup's
+        // temporary file is written beside it (in the backup folder, inside home), and gone.
+        for entry in walk(&home) {
+            if entry.starts_with(&live) || entry.starts_with(&target) {
+                continue;
             }
+            assert!(!entry.to_string_lossy().contains(".part"), "a temporary file was left: {}", entry.display());
+            let bytes = std::fs::read(&entry).unwrap_or_default();
+            assert!(!contains(&bytes, MARKER.as_bytes()) && !contains(&bytes, marker_hex.as_bytes()), "plain copy at {}", entry.display());
+            assert!(!contains(&bytes, PASSWORD.as_bytes()), "password at {}", entry.display());
         }
         std::fs::remove_dir_all(&home).unwrap();
     }
@@ -469,6 +513,55 @@ mod tests {
         let file = home.join("b.lnsbackup");
         write_file(&file, &sealed).unwrap();
         assert!(write_file(&file, &sealed).unwrap_err().contains("there already"));
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// A header asking for more than this app allows is refused before any key work.
+    #[test]
+    fn a_header_asking_too_much_of_argon2_is_refused_at_once() {
+        let home = scratch("kdf");
+        let live = home.join("w");
+        wallet(&live);
+        let sealed = seal(&[Part { network: "lez-0.3".into(), files: wallet_files(&live).unwrap() }], PASSWORD, 1).unwrap();
+        let swap = |from: &str, to: &str| -> Vec<u8> {
+            let len = u32::from_be_bytes(sealed[8..12].try_into().unwrap()) as usize;
+            let head = String::from_utf8(sealed[12..12 + len].to_vec()).unwrap().replace(from, to);
+            let mut out = sealed[..8].to_vec();
+            out.extend_from_slice(&(head.len() as u32).to_be_bytes());
+            out.extend_from_slice(head.as_bytes());
+            out.extend_from_slice(&sealed[12 + len..]);
+            out
+        };
+        for (from, to) in [("\"m_kib\":65536", "\"m_kib\":4194304"), ("\"t\":3", "\"t\":16"), ("\"p\":1", "\"p\":8"), ("\"m_kib\":65536", "\"m_kib\":8")] {
+            let started = std::time::Instant::now();
+            let refused = open(&swap(from, to), PASSWORD).unwrap_err();
+            assert!(refused.contains("more memory or time"), "{to}: {refused}");
+            assert!(started.elapsed() < std::time::Duration::from_millis(200), "refused before any key work");
+        }
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// A restore that died midway (its marker and some of its files left) doesn't block the next.
+    #[test]
+    fn a_restore_that_died_midway_is_cleaned_up_by_the_next() {
+        let home = scratch("died");
+        let live = home.join("w");
+        wallet(&live);
+        let files = wallet_files(&live).unwrap();
+        let target = home.join("t");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("names.json"), b"half").unwrap();
+        std::fs::write(target.join(RESTORE_MARKER), "names.json\nstorage.nullifiers\nwallet_config.json\nstorage.json\n").unwrap();
+        let written = restore_into(&target, &files).unwrap();
+        assert_eq!(written.len(), files.len());
+        assert_eq!(std::fs::read(target.join("names.json")).unwrap(), b"{\"names\":[]}");
+        assert!(!target.join(RESTORE_MARKER).exists());
+        // Without a marker, a file that is there is never touched.
+        let other = home.join("o");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("names.json"), b"someone's").unwrap();
+        assert!(restore_into(&other, &files).unwrap_err().contains("already"));
+        assert_eq!(std::fs::read(other.join("names.json")).unwrap(), b"someone's");
         std::fs::remove_dir_all(&home).unwrap();
     }
 

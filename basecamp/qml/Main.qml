@@ -2737,8 +2737,13 @@ Item {
             console.log("names_ui: backup_status:", message)
         })
     }
+    /// The typed passwords go whenever the Backup screen opens again or Settings is left.
+    function clearBackupPasswords() {
+        try { backupPw1.text = ""; backupPw2.text = ""; restorePw.text = "" } catch (e) {}
+    }
     function openBackup(mode) {
         go("settings")
+        clearBackupPasswords()
         backupMode = mode
         backupError = ""
         backupMade = null
@@ -2750,7 +2755,7 @@ Item {
     function chooseBackupWhere() {
         try {
             var d = Qt.createQmlObject('import QtQuick.Dialogs; FileDialog { title: "Save the backup as"; fileMode: FileDialog.SaveFile; defaultSuffix: "lnsbackup"; nameFilters: ["Names Wallet backups (*.lnsbackup)"] }', root, "backupSave")
-            d.accepted.connect(function() { backupWhere = String(d.selectedFile).replace(/^file:\/\//, ""); d.destroy() })
+            d.accepted.connect(function() { backupWhere = Logic.dialogPath(d.selectedFile); d.destroy() })
             d.rejected.connect(function() { d.destroy() })
             d.open()
         } catch (error) {
@@ -2777,7 +2782,7 @@ Item {
     function chooseRestoreFile() {
         try {
             var d = Qt.createQmlObject('import QtQuick.Dialogs; FileDialog { title: "Choose the backup file"; nameFilters: ["Names Wallet backups (*.lnsbackup)", "All files (*)"] }', root, "backupOpen")
-            d.accepted.connect(function() { restoreFile = String(d.selectedFile).replace(/^file:\/\//, ""); restoreInside = null; d.destroy() })
+            d.accepted.connect(function() { restoreFile = Logic.dialogPath(d.selectedFile); restoreInside = null; d.destroy() })
             d.rejected.connect(function() { d.destroy() })
             d.open()
         } catch (error) {
@@ -4197,6 +4202,8 @@ Item {
     /// Opens a section of the sidebar; a notice from another section doesn't follow.
     function go(which) {
         say("", false)
+        if (section === "settings" && which !== "settings")
+            clearBackupPasswords()
         section = which
     }
 
@@ -9843,7 +9850,7 @@ Item {
                         Hint { color: root.ink; text: "Step 3 of 3 · Where it goes" }
                         Hint {
                             font.pixelSize: root.px(15)
-                            text: root.backupWhere !== "" ? root.backupWhere : (root.backupStatus !== null && root.backupStatus.folder ? root.backupStatus.folder + "/" : "~/Documents/Names Wallet Backups/")
+                            text: root.backupWhere !== "" ? root.backupWhere : (root.backupStatus !== null && root.backupStatus.folder ? root.backupStatus.folder + "/" : "~/Names Wallet Backups/")
                         }
                         RowLayout {
                             spacing: 14
@@ -9868,6 +9875,7 @@ Item {
                         spacing: 8
                         readonly property var checked: Logic.backupCheckedLine(root.backupMade !== null ? root.backupMade.check : null)
                         Hint { color: parent.checked.ok ? root.good : root.brass; text: (parent.checked.ok ? "✓ " : "") + parent.checked.text }
+                        Hint { font.pixelSize: root.px(15); text: root.backupMade !== null ? Logic.backupFoldersLine(root.backupMade.folders) : "" }
                         RowLayout {
                             spacing: 14
                             Hint { Layout.fillWidth: false; font.pixelSize: root.px(15); text: root.backupMade !== null ? root.backupMade.file : "" }
@@ -9924,6 +9932,11 @@ Item {
                                     font.pixelSize: root.px(15)
                                     color: restoreNet.modelData.can_restore ? root.dim : root.brass
                                     text: restoreNet.modelData.can_restore ? "Goes to " + restoreNet.modelData.folder + "." : "A wallet is there already, so it can't be restored over it."
+                                }
+                                Hint {
+                                    visible: restoreNet.modelData.settings === true
+                                    font.pixelSize: root.px(15)
+                                    text: "Its settings come back too" + (restoreNet.modelData.sequencer ? ": it reads " + restoreNet.modelData.sequencer + "." : ".")
                                 }
                                 Action {
                                     visible: restoreNet.modelData.can_restore

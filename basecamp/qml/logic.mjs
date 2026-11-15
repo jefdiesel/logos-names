@@ -1688,6 +1688,20 @@ export function backupLastLine(last, clock) {
     return "Last backup: " + clock(Number(last.at)) + " · " + what
 }
 
+/// Which wallet folders went into a backup, in one line: "From /Users/you/.lee/wallet (LEZ 0.3)".
+export function backupFoldersLine(folders) {
+    var list = Array.isArray(folders) ? folders : []
+    if (list.length === 0)
+        return ""
+    return "From " + list.map(function(f) { return f.folder + " (" + (f.id === "lez-0.4" ? "LEZ 0.4" : "LEZ 0.3") + ")" }).join(" and ") + "."
+}
+
+/// A path from a file dialog (`file:///Users/you/Names%20Wallet%20Backups/x`) as a plain path.
+export function dialogPath(url) {
+    var text = String(url || "").replace(/^file:\/\//, "")
+    try { return decodeURIComponent(text) } catch (e) { return text }
+}
+
 /// The line that shows only when true: accounts no recovery phrase brings back.
 export function backupUncoveredLine(status) {
     var nets = status && Array.isArray(status.networks) ? status.networks : []
@@ -1718,9 +1732,11 @@ export function backupNetworks(which, inUse, status) {
 export function backupCheckedLine(check) {
     var nets = check && Array.isArray(check.networks) ? check.networks : []
     var n = nets.reduce(function(sum, x) { return sum + (Array.isArray(x.accounts) ? x.accounts.length : 0) }, 0)
-    var same = nets.every(function(x) { return x.matches === true })
+    var same = nets.length > 0 && nets.every(function(x) { return x.matches === true })
     if (!check || check.opens !== true)
         return { text: "The backup didn't open again. Make another one.", ok: false }
+    if (nets.length === 0 || nets.some(function(x) { return x.checked === false }))
+        return { text: "The backup opens, but it couldn't be compared with the wallet here. Make another one to be sure.", ok: false }
     if (!same)
         return { text: "The backup opens, but its files differ from the wallet now (it keeps syncing). Make another one to be sure.", ok: false }
     return { text: "Backup checked: it opens with your password and holds " + (n === 1 ? "this account." : "these " + n + " accounts."), ok: true }

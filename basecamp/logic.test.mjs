@@ -713,5 +713,15 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     ["Backup checked: it opens with your password and holds these 5 accounts.", false]);
 }
 
+{
+  const { backupCheckedLine, backupFoldersLine, dialogPath } = await import("./qml/logic.mjs");
+  check("no networks is not checked", backupCheckedLine({ opens: true, networks: [] }).ok, false);
+  check("couldn't compare", backupCheckedLine({ opens: true, networks: [{ checked: false, matches: false, accounts: [] }] }).text,
+    "The backup opens, but it couldn't be compared with the wallet here. Make another one to be sure.");
+  check("folders line", backupFoldersLine([{ id: "lez-0.3", folder: "/Users/you/.lee/wallet" }, { id: "lez-0.4", folder: "/Users/you/.config/logos-names/lez-0.4/wallet" }]),
+    "From /Users/you/.lee/wallet (LEZ 0.3) and /Users/you/.config/logos-names/lez-0.4/wallet (LEZ 0.4).");
+  check("dialog path with spaces", dialogPath("file:///Users/you/Names%20Wallet%20Backups/b.lnsbackup"), "/Users/you/Names Wallet Backups/b.lnsbackup");
+}
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);

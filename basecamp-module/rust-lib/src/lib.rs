@@ -2166,9 +2166,12 @@ impl Names {
     }
 
     /// The wallet folder of `net` here: the one in use, or the other network's.
+    /// Always home's: on an added zone `cli_wallet` is the zone's own folder, which a backup of
+    /// "the LEZ 0.4 wallet" must not take in home's place (review M1, 15 Nov).
     fn wallet_dir_of(&self, net: Net) -> Option<std::path::PathBuf> {
         if net == self.net {
-            self.resolve_wallet(self.cli_wallet.as_deref())
+            let home = if self.on_home() { self.cli_wallet.clone() } else { self.zones.at(0).and_then(|zone| zone.wallet.clone()) };
+            self.resolve_wallet(home.as_deref())
         } else {
             self.other_wallet()
         }
@@ -2179,14 +2182,24 @@ impl Names {
     fn backup_compare(&self, sealed: &[u8], password: &str) -> Result<Value, String> {
         use sha2::{Digest, Sha256};
         let payload = backup::open(sealed, password)?;
+        // Compared both ways, file by file (a live file missing from the backup counts), and by
+        // the account IDs; anything that can't be read is "couldn't check", never a match.
         let networks: Vec<Value> = payload["networks"].as_array().cloned().unwrap_or_default().iter().map(|n| {
-            let files = backup::files_of(n).unwrap_or_default();
-            let dir = n["id"].as_str().and_then(Net::parse).and_then(|net| self.wallet_dir_of(net));
-            let differs: Vec<String> = files.iter().filter(|(name, bytes)| {
-                let live = dir.as_ref().and_then(|d| std::fs::read(d.join(name)).ok());
-                live.map_or(true, |live| Sha256::digest(&live) != Sha256::digest(bytes))
+            let id = n["id"].clone();
+            let unchecked = |why: &str| json!({ "id": id, "accounts": n["accounts"], "matches": false, "checked": false, "why": why, "differs": [] });
+            let Ok(files) = backup::files_of(n) else { return unchecked("the backup's files for it are damaged") };
+            let Some(dir) = n["id"].as_str().and_then(Net::parse).and_then(|net| self.wallet_dir_of(net)) else { return unchecked("there is no wallet folder for it here") };
+            let Ok(live) = backup::wallet_files(&dir) else { return unchecked("the wallet folder couldn't be read") };
+            let mut differs: Vec<String> = files.iter().filter(|(name, bytes)| {
+                live.iter().find(|(live_name, _)| live_name == name).map_or(true, |(_, live_bytes)| Sha256::digest(live_bytes) != Sha256::digest(bytes))
             }).map(|(name, _)| name.clone()).collect();
-            json!({ "id": n["id"], "accounts": n["accounts"], "matches": differs.is_empty(), "differs": differs })
+            differs.extend(live.iter().filter(|(name, _)| !files.iter().any(|(backed, _)| backed == name)).map(|(name, _)| name.clone()));
+            let ids = |store: Option<&[u8]>| -> Vec<Value> { store.map(backup::accounts_of).unwrap_or_default().into_iter().map(|a| a["account"].clone()).collect() };
+            let backed_ids = ids(files.iter().find(|(name, _)| name == cli::STORAGE_FILE).map(|(_, b)| b.as_slice()));
+            let live_ids = ids(live.iter().find(|(name, _)| name == cli::STORAGE_FILE).map(|(_, b)| b.as_slice()));
+            let same_accounts = backed_ids == live_ids;
+            json!({ "id": id, "accounts": n["accounts"], "matches": differs.is_empty() && same_accounts, "checked": true,
+                    "same_accounts": same_accounts, "differs": differs, "folder": dir.display().to_string() })
         }).collect();
         Ok(json!({ "opens": true, "created": payload["created"], "networks": networks }))
     }
@@ -4468,11 +4481,16 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         reply((|| {
+            if let Some(job) = self.wallet_busy() {
+                return Err(format!("the wallet is busy ({}); back up once it is done", job["kind"].as_str().unwrap_or("a change")));
+            }
             let nets = backup_nets(&networks)?;
             let mut parts = Vec::new();
+            let mut folders = Vec::new();
             for net in &nets {
                 let dir = self.wallet_dir_of(*net).ok_or_else(|| format!("{} has no wallet folder here", net.shown()["version"].as_str().unwrap_or("")))?;
                 parts.push(backup::Part { network: net.id().to_owned(), files: backup::wallet_files(&dir)? });
+                folders.push(json!({ "id": net.id(), "folder": dir.display().to_string() }));
             }
             let created = now();
             let file = if path.trim().is_empty() {
@@ -4498,7 +4516,7 @@ impl NamesModule for Names {
                 last.insert("file".into(), Value::from(file.display().to_string()));
                 save_object(&dir.join("backup.json"), &last);
             }
-            Ok(json!({ "file": file.display().to_string(), "networks": ids, "created": created, "check": check }))
+            Ok(json!({ "file": file.display().to_string(), "networks": ids, "folders": folders, "created": created, "check": check }))
         })())
     }
 
@@ -4523,8 +4541,13 @@ impl NamesModule for Names {
                 let net = n["id"].as_str().and_then(Net::parse);
                 let folder = net.and_then(|net| self.wallet_dir_of(net));
                 let has_wallet = folder.as_ref().is_some_and(|d| d.join(cli::STORAGE_FILE).exists());
+                // The settings that come back with it: the sequencer its wallet_config.json points at.
+                let settings = backup::files_of(n).ok().and_then(|files| files.into_iter().find(|(name, _)| name == "wallet_config.json"))
+                    .and_then(|(_, bytes)| serde_json::from_slice::<Value>(&bytes).ok());
+                let sequencer = settings.as_ref().and_then(|c| c["sequencer"]["sequencer_addr"].as_str().or_else(|| c["sequencer_addr"].as_str()).map(str::to_owned));
                 json!({ "id": n["id"], "shown": net.map(Net::shown), "accounts": n["accounts"],
                         "folder": folder.as_ref().map(|d| d.display().to_string()), "has_wallet": has_wallet,
+                        "settings": settings.is_some(), "sequencer": sequencer,
                         "can_restore": net.is_some() && folder.is_some() && !has_wallet })
             }).collect();
             Ok(json!({ "created": payload["created"], "networks": networks }))
@@ -4536,6 +4559,9 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         reply((|| {
+            if let Some(job) = self.wallet_busy() {
+                return Err(format!("the wallet is busy ({}); restore once it is done", job["kind"].as_str().unwrap_or("a change")));
+            }
             let net = Net::parse(&network).ok_or("the networks are lez-0.3 and lez-0.4")?;
             let file = backup::read_file(std::path::Path::new(path.trim().trim_start_matches("file://")))?;
             let payload = backup::open(&file, &password)?;
@@ -10555,6 +10581,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// On an added zone, a backup still takes home's wallet for the network (review M1), says
+    /// which folder went in, and its check compares with home's.
+    #[test]
+    fn a_backup_made_on_an_added_zone_holds_homes_wallet() {
+        let (mut names, dir, second) = with_two_zones("backup-zone", "exit 0");
+        let home_wallet = std::path::PathBuf::from(names.cli_wallet.clone().unwrap());
+        std::fs::write(home_wallet.join(cli::STORAGE_FILE), json!({ "key_chain": { "accounts": [
+            { "Public": { "account_id": "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "data": {} } } ] } }).to_string()).unwrap();
+        use_zone(&mut names, &second);
+        let zone_wallet = std::path::PathBuf::from(names.cli_wallet.clone().unwrap());
+        assert_ne!(zone_wallet, home_wallet);
+        std::fs::write(zone_wallet.join(cli::STORAGE_FILE), json!({ "key_chain": { "accounts": [
+            { "Public": { "account_id": "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", "data": {} } } ] } }).to_string()).unwrap();
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let file = dir.join("zone-out").join("b.lnsbackup");
+        let made = parsed(&names.backup_make("lez-0.3".into(), "a long password".into(), file.to_string_lossy().into_owned()));
+        assert_eq!(made["success"], true, "{made}");
+        assert_eq!(made["value"]["folders"][0]["folder"], home_wallet.display().to_string(), "{made}");
+        assert_eq!(made["value"]["check"]["networks"][0]["accounts"][0]["account"], "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "home's account, not the zone's");
+        assert_eq!(made["value"]["check"]["networks"][0]["matches"], true, "{made}");
+        // A live file the backup lacks, or an unreadable folder, is never a match.
+        std::fs::write(home_wallet.join("extra.json"), "{}").unwrap();
+        let checked = parsed(&names.backup_check(file.to_string_lossy().into_owned(), "a long password".into()));
+        assert_eq!(checked["value"]["networks"][0]["matches"], false, "{checked}");
+        assert_eq!(checked["value"]["networks"][0]["differs"], json!(["extra.json"]));
+        zone_test_end(dir);
+    }
+
     #[test]
     fn a_wallet_backup_round_trips_through_the_module_and_never_over_a_wallet() {
         let (mut names, dir) = with_fake_cli("backup", "true");
@@ -10591,7 +10645,9 @@ mod tests {
         // Another app gets nothing.
         as_caller(logos_rust_sdk::LogosCaller::Module { name: "evil_ui".into(), instance: None });
         for answer in [names.backup_status(), names.backup_open(file.to_string_lossy().into_owned(), "a long password".into()),
-                       names.backup_make("lez-0.3".into(), "a long password".into(), String::new())] {
+                       names.backup_make("lez-0.3".into(), "a long password".into(), String::new()),
+                       names.backup_check(file.to_string_lossy().into_owned(), "a long password".into()),
+                       names.backup_restore(file.to_string_lossy().into_owned(), "a long password".into(), "lez-0.3".into())] {
             assert!(answer.contains("only the Names app"), "{answer}");
         }
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
