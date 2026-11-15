@@ -33,6 +33,9 @@
     },
     {
       "intent": "basecamp.packages.confirm_install"
+    },
+    {
+      "intent": "basecamp.settings.open"
     }
   ],
   "nix": {

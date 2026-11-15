@@ -483,6 +483,7 @@ Item {
             loadChain()
             loadRunningJobs()
             loadAppGrants()
+            loadInstalled(checkBundle)
             return true
         }
         if (bridgeReady && logos.callModuleAsync) {
@@ -909,6 +910,26 @@ Item {
     property var bridgeConfig: null        // the LEZ Bridge's config(): its features and notices (null until read)
     readonly property var bridgeFeatures: bridgeConfig !== null && Array.isArray(bridgeConfig.features) ? bridgeConfig.features : []
     readonly property bool bridgeReceives: Logic.bridgeCan(bridgeFeatures, "receive") && Logic.bridgeCan(bridgeFeatures, "public_receive")
+    // The LEZ Bridge shipped inside Names is newer than the one installed (another build that
+    // can't receive): offered wherever it matters, as one button.
+    readonly property bool bridgeUpdateReady: bridgeBundle === "ok" && installedList !== null
+        && Logic.installedEntry(installedList, "lez_bridge") !== null && Logic.installedEntry(installedList, "lez_bridge_ui") !== null
+        && Logic.bridgeDiffers(installedList) && bridgeConfig !== null && !Logic.bridgeCan(bridgeFeatures, "receives")
+    property string bridgeUpdateThen: ""   // where the update goes on to: "receive", "claim" or ""
+    // The new files are installed (the same as the ones shipped) but Basecamp still runs the old
+    // LEZ Bridge: no update to make, only its restart (Module Inspector → Unload), which this notices.
+    readonly property bool bridgeRestartNeeded: bridgeBundle === "ok" && installedList !== null
+        && Logic.installedEntry(installedList, "lez_bridge") !== null && Logic.installedEntry(installedList, "lez_bridge_ui") !== null
+        && !Logic.bridgeDiffers(installedList) && bridgeConfig !== null && !Logic.bridgeCan(bridgeFeatures, "receives")
+    onBridgeRestartNeededChanged: if (bridgeRestartNeeded && bridgeInstall === null) askBridgeRestart()
+    function askBridgeRestart() {
+        bridgeRestartLaunched = false
+        if (bridgeUpdateThen === "")
+            bridgeUpdateThen = walletView === "ethreceive" ? "receive" : walletView === "claim" ? "claim" : ""
+        bridgeInstall = { phase: "restart", line: "The new LEZ Bridge is installed; Basecamp still runs the old one. In Basecamp's Settings: Module Inspector → LEZ Bridge → Unload. Names notices and goes on." }
+    }
+    property bool bridgeRestartAsking: false
+    property bool bridgeRestartLaunched: false
     readonly property var receiveTokenList: Logic.receiveTokens(receiveRegistry)
     property string receiveToken: "ETH"
     property int receiveDenom: 1
@@ -936,6 +957,7 @@ Item {
 
     function openEthReceive() {
         walletView = "ethreceive"
+        loadInstalled(checkBundle)
         receiveResult = null
         receiveError = ""
         receiveNeeds = null
@@ -1169,9 +1191,18 @@ Item {
     /// names Names as the app asking, and says the package isn't signed); only on its OK, the
     /// module, then the app; then starts it. `update`: over an older build of the same version,
     /// which "only if newer" would skip.
+    function updateBridge(then) {
+        bridgeUpdateThen = then || ""
+        installBridge(true)
+    }
     function installBridge(update) {
         if (bridgeInstall !== null && bridgeInstall.phase !== "failed" && bridgeInstall.phase !== "updated")
             return
+        // The files are the shipped ones already: nothing to install again, only the restart.
+        if (update && installedList !== null && Logic.installedEntry(installedList, "lez_bridge") !== null && !Logic.bridgeDiffers(installedList)) {
+            askBridgeRestart()
+            return
+        }
         if (bridgeBundle !== "ok" || installedList === null || !logos.request)
             return
         bridgeInstall = { phase: "asking", update: !!update, line: "Basecamp asks you to confirm the install…" }
@@ -1229,11 +1260,56 @@ Item {
                 return
             }
             if (update) {
-                bridgeInstall = { phase: "updated", line: "Updated. To use it now: Settings (the gear) → Module Inspector → LEZ Bridge → Unload, then Start here." }
+                // The running LEZ Bridge keeps its old code until it restarts, which only Basecamp
+                // can do (Module Inspector → Unload): one click there; this notices and goes on.
+                bridgeRestartLaunched = false
+                bridgeInstall = { phase: "restart", line: "Last step: in Basecamp's Settings, Module Inspector → LEZ Bridge → Unload. Names notices and goes on." }
                 return
             }
             againAfter(1500, startBridge)
         })
+    }
+
+    /// After an update: the old LEZ Bridge still running is waited out (the person unloads it in
+    /// Basecamp); once it is gone the new one is started (its app, for a moment) and, when it says
+    /// it can receive, the person is taken on to where they were.
+    function pollBridgeRestart() {
+        if (bridgeRestartAsking || bridgeInstall === null || bridgeInstall.phase !== "restart")
+            return
+        bridgeRestartAsking = true
+        bridgeCall("config", [], function(value) {
+            bridgeRestartAsking = false
+            bridgeConfig = value
+            // Still the old one running: a later "gone" starts the new one again.
+            if (!Logic.bridgeCan(bridgeFeatures, "receives"))
+                bridgeRestartLaunched = false
+            if (Logic.bridgeCan(bridgeFeatures, "receives")) {
+                bridgeInstall = null
+                loadInstalled(function() {})
+                var then = bridgeUpdateThen
+                bridgeUpdateThen = ""
+                logos.request("basecamp.apps.launch", { app: "names_ui" }, function() {})
+                if (then === "receive")
+                    openEthReceive()
+                else if (then === "claim")
+                    openClaim()
+            }
+        }, function() {
+            bridgeRestartAsking = false
+            // Gone: start the new one (Basecamp starts it when its app opens), once.
+            if (!bridgeRestartLaunched) {
+                bridgeRestartLaunched = true
+                bridgeInstall = { phase: "restart", line: "Starting the new LEZ Bridge…" }
+                logos.request("basecamp.apps.launch", { app: "lez_bridge_ui" }, function() {})
+                againAfter(2500, function() { logos.request("basecamp.apps.launch", { app: "names_ui" }, function() {}) })
+            }
+        }, 5000, false)
+    }
+    Timer {
+        interval: 3000
+        repeat: true
+        running: root.bridgeInstall !== null && root.bridgeInstall.phase === "restart"
+        onTriggered: root.pollBridgeRestart()
     }
 
     /// Starts the LEZ Bridge module: Basecamp starts it when its app opens (closing that app later
@@ -5701,6 +5777,31 @@ Item {
         }
     }
 
+    /// The LEZ Bridge update, where it is needed (the card, Receive, the claim screen): one line and
+    /// one button, then one line of progress; the last step (Unload in Basecamp) with Open Settings.
+    component BridgeUpdateBox: ColumnLayout {
+        property string then: ""
+        Layout.fillWidth: true
+        spacing: 8
+        visible: root.bridgeInstall !== null || root.bridgeUpdateReady
+        RowLayout {
+            visible: root.bridgeInstall === null || root.bridgeInstall.phase === "failed"
+            spacing: 12
+            Hint { Layout.fillWidth: false; color: root.ink; text: "LEZ Bridge update ready." }
+            Action { label: "Update"; strong: true; onPressed: root.updateBridge(parent.parent.then) }
+        }
+        Hint {
+            visible: root.bridgeInstall !== null
+            color: root.bridgeInstall !== null && root.bridgeInstall.phase === "failed" ? root.alarm : root.brass
+            text: root.bridgeInstall === null ? "" : root.bridgeInstall.line
+        }
+        Action {
+            visible: root.bridgeInstall !== null && root.bridgeInstall.phase === "restart" && !root.bridgeRestartLaunched
+            label: "Open Settings"
+            onPressed: logos.request("basecamp.settings.open", {}, function() {})
+        }
+    }
+
     /// A QR code drawn from the module's rows of "0"/"1" (QML has no QR library), with its quiet zone.
     component QrCode: Canvas {
         id: qr
@@ -6884,12 +6985,7 @@ Item {
                                 Action { visible: root.receiveHasStatus && receiveRow.status.claim; label: "Claim"; strong: true; onPressed: root.claimReceive(receiveRow.modelData.id) }
                             }
                         }
-                        RowLayout {
-                            visible: !root.receiveHasStatus && root.bridgeConfig !== null && root.receives.length > 0
-                            spacing: 10
-                            Hint { Layout.fillWidth: false; font.pixelSize: root.px(15); text: "This LEZ Bridge can't tell when a deposit arrives." }
-                            Link { visible: root.bridgeBundle === "ok"; text: "Update"; color: root.brass; font.pixelSize: root.px(15); onPressed: root.installBridge(true) }
-                        }
+                        BridgeUpdateBox { visible: root.walletView === "home" && (root.bridgeUpdateReady || (root.bridgeInstall !== null && root.bridgeInstall.phase === "restart")) }
                         Hint {
                             font.pixelSize: root.px(15)
                             color: root.bridgeNetStatusNow.tone === "bad" ? root.alarm : root.bridgeNetStatusNow.tone === "warn" ? root.brass : root.dim
@@ -7914,12 +8010,7 @@ Item {
                         text: root.bridgeInstall === null ? "" : root.bridgeInstall.line
                     }
                     // An older build of the LEZ Bridge than the one Names ships: the claim works as it is.
-                    RowLayout {
-                        visible: !root.claimMissing && root.bridgeSetupNow === "older" && root.bridgeBundle === "ok" && (root.bridgeInstall === null || root.bridgeInstall.phase === "failed")
-                        spacing: 10
-                        Hint { Layout.fillWidth: false; font.pixelSize: root.px(15); text: "A newer LEZ Bridge comes with Names." }
-                        Link { text: "Update"; color: root.brass; font.pixelSize: root.px(15); onPressed: root.installBridge(true) }
-                    }
+                    BridgeUpdateBox { visible: !root.claimMissing && (root.bridgeInstall !== null && root.bridgeInstall.update === true || root.bridgeInstall !== null && root.bridgeInstall.phase === "restart" || root.bridgeInstall === null && root.bridgeSetupNow === "older" && root.bridgeBundle === "ok"); then: "claim" }
 
                     Hint { visible: root.claimStageNow === "looking"; text: "Looking for the LEZ Bridge…" }
 
@@ -8086,12 +8177,8 @@ Item {
                     Text { text: "Receive from Ethereum"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
                     RunsOn { net: "0.4" }
                     Hint { visible: root.receiveMissing; color: root.ink; text: "The LEZ Bridge isn't running or installed. Open Claim a bridge deposit to set it up." }
-                    RowLayout {
-                        visible: !root.receiveMissing && root.bridgeConfig !== null && !root.bridgeReceives
-                        spacing: 10
-                        Hint { Layout.fillWidth: false; color: root.ink; text: "This LEZ Bridge can't receive yet." }
-                        Link { visible: root.bridgeBundle === "ok"; text: "Update"; color: root.brass; font.pixelSize: root.px(17); onPressed: root.installBridge(true) }
-                    }
+                    Hint { visible: !root.receiveMissing && root.bridgeConfig !== null && !root.bridgeReceives && root.bridgeInstall === null && root.bridgeUpdateReady; color: root.ink; text: "This LEZ Bridge can't receive yet: it needs the update." }
+                    BridgeUpdateBox { visible: !root.receiveMissing && (root.bridgeInstall !== null || (root.bridgeConfig !== null && !root.bridgeReceives && root.bridgeUpdateReady)); then: "receive" }
 
                     Repeater {
                         model: root.receiveMissing || !root.bridgeReceives ? [] : root.receiveStepsNow.filter(function(x) { return x.state === "done" })

@@ -59,10 +59,10 @@ BRIDGE = r"""
             if (module === "package_manager" && method === "getInstalledPackages") {
                 var me = { name: "names_ui", version: "0.17.0", installDir: "/Users/you/Library/Application Support/Logos/LogosBasecamp/plugins/names_ui" }
                 var pk = (%(mock)s).packages
-                return JSON.stringify(pk ? [me].concat(pk) : [me, { name: "lez_bridge", version: "0.1.0", hashes: { root: "13025b09ca142a2dc24ca01ee94805eb75af8a2161c05c8f2eb480addc5b809c" } }, { name: "lez_bridge_ui", version: "0.1.0", hashes: { root: "c391b90698b2a26bb71faa996ca96f3809da3413ba61d0cbcb9616b5eca9109a" } }])
+                return JSON.stringify(pk ? [me].concat(pk) : [me, { name: "lez_bridge", version: "0.1.0", hashes: { root: "02bfbd506d56bdab49be45c28583973a3e6d1c02019f61a3f09dd6fbe6992461" } }, { name: "lez_bridge_ui", version: "0.1.0", hashes: { root: "ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9" } }])
             }
             if (module === "names" && method === "file_sha256")
-                return ok(String(args[0]).indexOf("lez_bridge_ui") >= 0 ? "8bba2edab1d5a638c37540a21d7fab2202ec7d6f91498bbbfa25706ab245bf42" : "bdaff1d82bbb95caeaf1399192a920e895527e8e185fa4dae380b86a21a3fb96")
+                return ok(String(args[0]).indexOf("lez_bridge_ui") >= 0 ? "0d7e317c1fbef3e9c9d4155c10746256af8e9ed2b5a8156413823fbc568ea270" : "5f8377e4989d85ba36b4ff4bc5bf807d482eafe0f0da6eb3f65f68f2b288faa6")
             if (module === "lez_bridge") {
                 var lb = (%(mock)s).bridge
                 if (!lb) return JSON.stringify({ error: "Method not found" })
@@ -292,6 +292,10 @@ def zone_request(in_use, removed=False):
             % (ZONE_B, ZONE_B, "null" if removed else '"Games zone"', "true" if in_use else "false", "true" if removed else "false"))
 
 SCENARIOS = {
+    'card-update-ready': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() {  }) })',
+    'receive-update-ready': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive() }) })',
+    'receive-restart-needed': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive() }) })',
+    'card-restart-needed': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() {  }) })',
     'receive-choose': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive() }) })',
     'receive-ready-to-make': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive(); root.receivePublicOk = true }) })',
     'receive-needs': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive(); root.receivePublicOk = true; root.againAfter(300, function() { root.makeReceive() }) }) })',
@@ -531,6 +535,10 @@ ZONE_ACTIVITY = [
     {"id": "z4", "at": 1791970000, "kind": "send", "chain": "logos", "from": "66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b", "to": "73058ad5edb0e72b66c3e05ae90471382c3bb4d61314db995ef40e674dbf591e", "amount": "5000", "fee": "2018", "state": "in_block"},
 ]
 MOCKS = {
+    'card-update-ready': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'a2c6c3117443a92f2a5b2a1a2267175f4f82ed209a3dae8e554461bd09df0d18'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': '788f2f0dde4bd7ae'}}], 'bridge': {'config': {'deployment': {'name': 'bridge-test-network-v3', 'bridge_program': '4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr'}}}},
+    'receive-update-ready': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'a2c6c3117443a92f2a5b2a1a2267175f4f82ed209a3dae8e554461bd09df0d18'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': '788f2f0dde4bd7ae'}}], 'bridge': {'config': {'deployment': {'name': 'bridge-test-network-v3', 'bridge_program': '4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr'}}}},
+    'receive-restart-needed': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': '02bfbd506d56bdab49be45c28583973a3e6d1c02019f61a3f09dd6fbe6992461'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}], 'bridge': {'config': {'deployment': {'name': 'bridge-test-network-v3', 'bridge_program': '4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr'}}}},
+    'card-restart-needed': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': '02bfbd506d56bdab49be45c28583973a3e6d1c02019f61a3f09dd6fbe6992461'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}], 'bridge': {'config': {'deployment': {'name': 'bridge-test-network-v3', 'bridge_program': '4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr'}}}},
     'receive-choose': {'bridge': {}},
     'receive-ready-to-make': {'bridge': {}},
     'receive-needs': {'bridge': {'make_public_deposit_request': {'needs': 'secret', 'request': {'request': 'r5', 'state': 'pending'}, 'message': 'Approve "RFP022/deposit" in the Names app…'}, 'wallet_request': {'state': 'pending'}}},
@@ -550,8 +558,8 @@ MOCKS = {
     'claim-installing': {'packages': []},
     'claim-install-slow': {'packages': []},
     'claim-install-failed': {'packages': []},
-    'claim-idle': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': '13025b09ca142a2dc24ca01ee94805eb75af8a2161c05c8f2eb480addc5b809c'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'c391b90698b2a26bb71faa996ca96f3809da3413ba61d0cbcb9616b5eca9109a'}}]},
-    'claim-starting': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': '13025b09ca142a2dc24ca01ee94805eb75af8a2161c05c8f2eb480addc5b809c'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'c391b90698b2a26bb71faa996ca96f3809da3413ba61d0cbcb9616b5eca9109a'}}]},
+    'claim-idle': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': '02bfbd506d56bdab49be45c28583973a3e6d1c02019f61a3f09dd6fbe6992461'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}]},
+    'claim-starting': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': '02bfbd506d56bdab49be45c28583973a3e6d1c02019f61a3f09dd6fbe6992461'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}]},
     'claim-older': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'a2c6c3117443a92f2a5b2a1a2267175f4f82ed209a3dae8e554461bd09df0d18'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': '788f2f0dde4bd7ae'}}], 'bridge': {}},
     'claim-updated': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'a2c6c3117443a92f2a5b2a1a2267175f4f82ed209a3dae8e554461bd09df0d18'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': '788f2f0dde4bd7ae'}}], 'bridge': {}},
     'approve-checking-publisher': {},
