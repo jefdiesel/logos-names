@@ -94,7 +94,14 @@ pub fn settle(job: &str, asked: Option<&str>, in_process_built: bool, places: &P
 struct Settled {
     executor: Result<Engine, String>,
     prover: Result<Engine, String>,
+    /// Built without in-process proving, no r0vm anywhere and nothing asked for in the
+    /// environment: the bundled LEZ 0.4 tool on a computer without RISC Zero. It sends public
+    /// calls unchecked (`can_run`) and refuses proofs in one sentence (`to_prove`).
+    bare: bool,
 }
+
+/// What a bare build says to a proof (see [`Settled::bare`]).
+pub const NO_PROOFS: &str = "This build of the LEZ 0.4 names tool can't make proofs. Nothing was sent.";
 
 static SETTLED: OnceLock<Settled> = OnceLock::new();
 
@@ -144,9 +151,11 @@ pub fn start() {
         on_path: on_path(),
     };
     let built = cfg!(feature = "local-prove");
+    let asked = env_text("RISC0_EXECUTOR").is_some() || env_text("RISC0_PROVER").is_some();
     let settled = Settled {
         executor: settle("executor", env_text("RISC0_EXECUTOR").as_deref(), built, &places),
         prover: settle("prover", env_text("RISC0_PROVER").as_deref(), built, &places),
+        bare: !built && !asked && places.r0vm().is_none(),
     };
     // risc0 is handed the r0vm found, so it uses that one. When none was found here, risc0's
     // own search (the same places) finds none either; every call that would run a program is
@@ -168,18 +177,39 @@ fn refusal(what: &str, reason: &str) -> anyhow::Error {
 
 /// Before a call's programs are tried here (a public call, before it is sent).
 pub fn to_run() -> anyhow::Result<()> {
-    match SETTLED.get().map(|settled| &settled.executor) {
-        Some(Err(reason)) => Err(refusal("run the program this call needs", reason)),
+    match SETTLED.get() {
+        Some(settled) if settled.bare => {
+            Err(anyhow::anyhow!("names can't check this call on this computer (this build of the LEZ 0.4 names tool can't run programs here). Nothing was sent."))
+        }
+        Some(Settled { executor: Err(reason), .. }) => Err(refusal("run the program this call needs", reason)),
         _ => Ok(()),
     }
 }
 
 /// Before the first proof of a private change, and before any step of a job that has one.
 pub fn to_prove() -> anyhow::Result<()> {
-    match SETTLED.get().map(|settled| &settled.prover) {
-        Some(Err(reason)) => Err(refusal("make the proof a private change needs", reason)),
+    match SETTLED.get() {
+        Some(settled) if settled.bare => Err(anyhow::anyhow!(NO_PROOFS)),
+        Some(Settled { prover: Err(reason), .. }) => Err(refusal("make the proof a private change needs", reason)),
         _ => Ok(()),
     }
+}
+
+/// Whether a public call can be tried here before it is sent (`simulate`): false only for a
+/// bare build (see [`Settled::bare`]), which sends a registry call with its measured cap.
+pub fn can_run() -> bool {
+    !SETTLED.get().is_some_and(|settled| settled.bare)
+}
+
+/// `names prover-status`: what this build can do on this computer, as JSON (`run`: public
+/// calls are tried first; `prove`: private changes can be proved).
+pub fn status() -> serde_json::Value {
+    let settled = SETTLED.get();
+    serde_json::json!({
+        "run": settled.is_some_and(|settled| settled.executor.is_ok()),
+        "prove": settled.is_some_and(|settled| settled.prover.is_ok()),
+        "bare": settled.is_some_and(|settled| settled.bare),
+    })
 }
 
 #[cfg(test)]

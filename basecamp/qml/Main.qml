@@ -2634,6 +2634,10 @@ Item {
     // ── Getting started: install, wallet, move to private ───────────────
 
     property var cliStatus: null        // cli_status: {cli, prover, installing, wallet_dir, wallet, public, private, busy}; null until known
+    // The LEZ 0.4 tool can't try a public call here first (the shipped one, no r0vm): each
+    // public change says once, where it is confirmed, what a refused one still costs.
+    readonly property var toolNow: namesNet === "0.4" && cliStatus !== null && cliStatus.tool ? cliStatus.tool : null
+    property bool toolAutoTried: false   // the shipped LEZ 0.4 tool was offered to the module this session
     property var installJob: null       // the install under way: {id, started, line}
     property string installProblem: ""
     property string installWarning: ""
@@ -2704,6 +2708,14 @@ Item {
                 console.log("names_ui: the module says there is no wallet now:", JSON.stringify(value))
             if (value && value.installing && installJob === null)
                 installJob = { id: value.installing.id, started: value.installing.started || Date.now(), line: installLine(value.installing.log_tail) }
+            // LEZ 0.4 with no tool at all: the one shipped inside Names goes in by itself.
+            if (net === "0.4" && value && !value.cli && cliPath === "" && !toolAutoTried && installJob === null) {
+                toolAutoTried = true
+                if (installedList === null)
+                    loadInstalled(function() { installBundledTool(true) })
+                else
+                    installBundledTool(true)
+            }
             if (value && value.busy && value.busy.kind === "shield" && shieldJob === null)
                 shieldJob = { id: value.busy.id, started: value.busy.started || Date.now() }
         }, function(message) {
@@ -2711,8 +2723,37 @@ Item {
         })
     }
 
-    /// Installs the names program and its prover into the module's folder.
+    /// LEZ 0.4: the tool shipped inside Names, put in place by the module (checksum, then its
+    /// version). `auto`: on opening, with no tool set (nothing said when it can't).
+    function installBundledTool(auto) {
+        var path = Logic.bundledPath(installedList, Logic.BUNDLED_TOOL.file)
+        if (installJob !== null || path === "" || moduleFeatures.indexOf("bundled_tool") < 0) {
+            if (!auto)
+                installProblem = "This Names package has no LEZ 0.4 names tool inside. Install the Names package again."
+            return
+        }
+        installProblem = ""
+        installJob = { id: "", started: Date.now(), line: "Installing the LEZ 0.4 names tool…" }
+        askLater("cli_install_bundled", [path, Logic.BUNDLED_TOOL.sha256], function(value) {
+            installJob = null
+            loadConfig()
+            loadCliStatus()
+        }, function(message) {
+            installJob = null
+            installProblem = sentence(message)
+        }, 60000)
+    }
+
+    /// Installs the names program and its prover into the module's folder (on LEZ 0.4, the
+    /// tool shipped inside Names; the full download only in a build that allows it).
     function installCli() {
+        if (namesNet === "0.4" && !Logic.FULL_TOOL_DOWNLOAD) {
+            installBundledTool(false)
+            return
+        }
+        installFullTool()
+    }
+    function installFullTool() {
         if (installJob !== null)
             return
         installProblem = ""
@@ -6401,7 +6442,7 @@ Item {
                     }
                     Hint {
                         visible: root.cliPath === "" && root.namesNet === "0.4"
-                        text: "LEZ 0.4 needs its own names tool. About 100 MB, checked against its SHA-256 before it runs."
+                        text: Logic.FULL_TOOL_DOWNLOAD ? "LEZ 0.4 needs its own names tool. About 100 MB, checked against its SHA-256 before it runs." : "LEZ 0.4 needs its own names tool. It comes with Names: Install puts it in place."
                     }
                     RowLayout {
                         visible: root.cliPath === ""
@@ -9730,6 +9771,7 @@ Item {
                         visible: root.namesNet === "0.4" && (root.cliPath === "" || root.cliOutdated)
                         spacing: 12
                         Action { label: root.installJob !== null ? "Installing…" : "Install the LEZ 0.4 names tool"; strong: true; enabledNow: root.installJob === null; onPressed: root.installCli() }
+                        Link { visible: Logic.FULL_TOOL_DOWNLOAD && root.installJob === null; text: "Install the full tool, with proving"; font.pixelSize: root.px(15); onPressed: root.installFullTool() }
                         Hint { visible: root.installJob !== null; Layout.fillWidth: true; color: root.brass; font.pixelSize: root.px(15); text: root.installJob === null ? "" : root.installJob.line }
                     }
                     Link {
@@ -10053,6 +10095,7 @@ Item {
                             color: root.cliPath !== "" ? root.dim : root.brass
                             text: "Anyone who knows the name can find this account, and so its balance and history." + (root.cliPath !== "" ? "" : " To hide it, install the names CLI and register privately.") + " Payments to the name still go to your private account."
                         }
+                        Hint { visible: text !== ""; color: root.brass; font.pixelSize: root.px(15); text: Logic.uncheckedLine(root.toolNow, ["commit", "register"]) }
                         Action {
                             label: "Register " + root.missing + " publicly"
                             strong: root.cliPath === ""
@@ -10370,6 +10413,7 @@ Item {
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 8
+                            Hint { visible: text !== ""; color: root.brass; font.pixelSize: root.px(15); text: Logic.uncheckedLine(root.toolNow, ["change"]) }
                             Action {
                                 label: "Save profile"
                                 strong: true

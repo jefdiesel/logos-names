@@ -649,6 +649,13 @@ pub trait NamesModule: Send + 'static {
     /// done one whose prover didn't download carries `warning`.
     fn cli_install(&mut self) -> String;
 
+    /// On LEZ 0.4 with no names tool set: installs the tool the Names app ships (`path`, a file
+    /// named `names-lez04` in its package) into the module's folder (`bin/names-lez04`), when its
+    /// SHA-256 is `sha256` and it says it is a LEZ 0.4 tool, and uses it from then on. A tool
+    /// already set (that exists) is left as it is: `{installed: false, kept: <path>}`. Otherwise
+    /// `{installed: true, path, version}`. Names app only. get_config `features`: `bundled_tool`.
+    fn cli_install_bundled(&mut self, path: String, sha256: String) -> String;
+
     /// Makes the names CLI's wallet, with a public and a private account, if
     /// it has none: `names setup` moving nothing, so it never proves. Waits
     /// for it, a few seconds (at most three minutes if an old wallet catches
@@ -1270,6 +1277,9 @@ struct Names {
     bridge_programs: Vec<AccountId>,
     /// What each CLI said its version is, by path and modification time.
     cli_lines: std::sync::Mutex<HashMap<std::path::PathBuf, (std::time::SystemTime, String)>>,
+    /// What each LEZ 0.4 tool said it can do (`cli::prover_status`), by path and modification
+    /// time; null for one too old to say.
+    tool_status: std::sync::Mutex<HashMap<std::path::PathBuf, (std::time::SystemTime, Value)>>,
     /// When LEZ last answered about each followed bridge's receipt (seconds), so each is
     /// asked on its schedule (`activity::receipt_due`), not on every balance read.
     receipt_asks: std::sync::Mutex<std::collections::BTreeMap<AccountId, u64>>,
@@ -1372,6 +1382,7 @@ impl Default for Names {
             rejected: HashMap::new(),
             bridge_programs: Vec::new(),
             cli_lines: Default::default(),
+            tool_status: Default::default(),
         };
         // Files saved by versions before 0.10 were readable by every account on the
         // machine; this closes them up once.
@@ -1401,7 +1412,7 @@ const MODULE_VERSION: &str = "0.17.0";
 /// get_config's `features`: what an app may need beyond the version (`reveal_name`;
 /// `request_access_with` and its `account_hint`; `grant_add_account`: a hint for an account
 /// the app wasn't given is a request to add it to the app's grant, not "approved").
-const MODULE_FEATURES: [&str; 5] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note"];
+const MODULE_FEATURES: [&str; 6] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "bundled_tool"];
 
 /// What a private-name action answers on LEZ 0.4, where names are public only (S-B).
 const PRIVATE_OFF_04: &str = "on LEZ 0.4 names are public only: private payments and private holders are off there, so nothing was done";
@@ -2827,6 +2838,73 @@ impl Names {
         }
         let job = jobs.start_install04(&bin, &lez04_tool_url(), &lez04_tool_sha())?;
         Ok(json!({ "installed": false, "path": ours, "version": null, "prover": false, "job": job }))
+    }
+
+    /// `cli_install_bundled`: the shipped tool at `from` (checked against `sha256`) copied into
+    /// `bin/names-lez04` (a new file, then renamed over), checked again there, and used.
+    fn install_bundled_tool(&mut self, from: &std::path::Path, sha256: &str) -> Result<Value, String> {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::PermissionsExt;
+        if self.net != Net::Lez04 {
+            return Err("the shipped names tool is for LEZ 0.4; switch to LEZ 0.4 first".to_owned());
+        }
+        if let Some(set) = self.cli.clone().filter(|set| std::path::Path::new(set).is_file()) {
+            return Ok(json!({ "installed": false, "kept": set }));
+        }
+        if from.file_name().and_then(|name| name.to_str()) != Some(LEZ04_TOOL_FILE) || !from.is_file() {
+            return Err(format!("{} isn't the names tool Names ships", from.display()));
+        }
+        if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("the expected SHA-256 is 64 hex digits".to_owned());
+        }
+        let digest = |path: &std::path::Path| -> Result<String, String> {
+            let bytes = std::fs::read(path).map_err(|error| format!("couldn't read {}: {error}", path.display()))?;
+            Ok(Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect())
+        };
+        if digest(from)? != sha256.to_ascii_lowercase() {
+            return Err("the names tool shipped with Names doesn't match its checksum, so nothing was installed; install the Names package again".to_owned());
+        }
+        let (bin, _) = self.install_dirs()?;
+        std::fs::create_dir_all(&bin).map_err(|error| format!("couldn't make {}: {error}", bin.display()))?;
+        let ours = bin.join(LEZ04_TOOL_FILE);
+        let part = bin.join(format!(".{LEZ04_TOOL_FILE}.part"));
+        let copied = std::fs::copy(from, &part)
+            .and_then(|_| std::fs::set_permissions(&part, std::fs::Permissions::from_mode(0o755)))
+            .map_err(|error| format!("couldn't copy the names tool: {error}"));
+        if let Err(error) = copied {
+            let _ = std::fs::remove_file(&part);
+            return Err(error);
+        }
+        if digest(&part)? != sha256.to_ascii_lowercase() {
+            let _ = std::fs::remove_file(&part);
+            return Err("the copied names tool doesn't match its checksum, so nothing was installed".to_owned());
+        }
+        std::fs::rename(&part, &ours).map_err(|error| format!("couldn't put the names tool in place: {error}"))?;
+        let line = match cli::version(&ours) {
+            Ok(line) if line.contains(LEZ04_CLI_MARK) => line,
+            Ok(line) => return Err(format!("the shipped tool says \"{line}\", not a LEZ 0.4 names tool")),
+            Err(error) => return Err(error),
+        };
+        self.cli = Some(ours.to_string_lossy().into_owned());
+        self.rejected.remove("cli");
+        self.save();
+        self.forget_mine();
+        Ok(json!({ "installed": true, "path": ours, "version": line }))
+    }
+
+    /// What the LEZ 0.4 tool at `program` can do here (`cli::prover_status`), asked once per file.
+    fn tool_status_of(&self, program: &std::path::Path) -> Value {
+        let Ok(modified) = std::fs::metadata(program).and_then(|meta| meta.modified()) else { return Value::Null };
+        if let Some((when, status)) = self.tool_status.lock().ok().and_then(|seen| seen.get(program).cloned()) {
+            if when == modified {
+                return status;
+            }
+        }
+        let status = cli::prover_status(program).unwrap_or(Value::Null);
+        if let Ok(mut seen) = self.tool_status.lock() {
+            seen.insert(program.to_path_buf(), (modified, status.clone()));
+        }
+        status
     }
 
     /// Puts the LEZ 0.4 names tool at `path` to use, when its SHA-256 is the expected one and it
@@ -4547,6 +4625,9 @@ impl NamesModule for Names {
                 "outdated": program.as_ref().is_some_and(|path| !cli::speaks_module(path)),
                 // `names 0.17.0 (LEZ v0.4.0-rc3)`; LEZ 0.4 runs only a CLI that says LEZ v0.4.
                 "cli_line": program.as_ref().and_then(|path| self.cli_line(path).ok()),
+                // On LEZ 0.4, what its tool can do here: `bare` (it can't try a public call first,
+                // nor prove), `unchecked_max_fee` per call kind. Null for a tool too old to say.
+                "tool": if self.net == Net::Lez04 { program.as_ref().map_or(Value::Null, |path| self.tool_status_of(path)) } else { Value::Null },
                 "names_network": self.net.shown(),
                 "old_wallet": setup.as_ref().is_some_and(cli::wallet_is_old),
                 "installing": self.running_job(cli::INSTALL_JOB),
@@ -4559,6 +4640,13 @@ impl NamesModule for Names {
                 "busy": self.wallet_busy().unwrap_or(Value::Null),
             }))
         })())
+    }
+
+    fn cli_install_bundled(&mut self, path: String, sha256: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(self.install_bundled_tool(std::path::Path::new(path.trim()), sha256.trim()))
     }
 
     fn cli_install(&mut self) -> String {
@@ -8290,6 +8378,7 @@ mod tests {
             rejected: HashMap::new(),
             bridge_programs: Vec::new(),
             cli_lines: Default::default(),
+            tool_status: Default::default(),
         }
     }
 
@@ -10219,6 +10308,56 @@ mod tests {
         assert!(lez04_install_problem("could not download the LEZ 0.4 names tool", false).contains("network"));
         assert!(lez04_install_problem("the download's SHA-256 is 1, not 2", false).contains("didn't match"));
         LEZ04_TOOL_SHA_TEST.with(|s| *s.borrow_mut() = LEZ04_TOOL_SHA256.to_owned());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// cli_install_bundled: the tool the Names app ships goes into bin/names-lez04 only on LEZ 0.4,
+    /// only when no tool is set, only when its SHA-256 checks and it says LEZ 0.4; cli_status then
+    /// says what it can do here (prover-status).
+    #[test]
+    fn the_shipped_lez04_tool_is_installed_only_when_none_is_set() {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::PermissionsExt;
+        let (mut names, dir) = with_fake_cli("bundled04", "true");
+        let shipped = dir.join("app").join("qml").join("bundled");
+        std::fs::create_dir_all(&shipped).unwrap();
+        let tool = shipped.join("names-lez04");
+        std::fs::write(&tool, "#!/bin/sh\ncase \"$1\" in prover-status) echo '{\"run\":false,\"prove\":false,\"bare\":true,\"unchecked_max_fee\":{\"register\":\"4455000\"}}' ;; *) echo 'names 0.17.0 (LEZ v0.4.0-rc3)' ;; esac\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let sha: String = Sha256::digest(std::fs::read(&tool).unwrap()).iter().map(|b| format!("{b:02x}")).collect();
+        names.bin_dir = Some(dir.join("bin"));
+        names.cli = None;
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let path = tool.to_string_lossy().into_owned();
+        // Not on LEZ 0.3.
+        assert!(parsed(&names.cli_install_bundled(path.clone(), sha.clone()))["error"].as_str().unwrap_or_default().contains("LEZ 0.4"));
+        names.net = Net::Lez04;
+        // A wrong checksum: nothing installed, nothing set.
+        let wrong = parsed(&names.cli_install_bundled(path.clone(), "0".repeat(64)));
+        assert!(wrong["error"].as_str().unwrap_or_default().contains("checksum"), "{wrong}");
+        assert!(!dir.join("bin").join("names-lez04").exists() && names.cli.is_none());
+        // Only a file called names-lez04.
+        let other = dir.join("names");
+        assert!(parsed(&names.cli_install_bundled(other.to_string_lossy().into_owned(), sha.clone()))["error"].as_str().unwrap_or_default().contains("isn't the names tool"));
+        // The right one: copied, executable, set, and cli_status says it is bare.
+        let done = parsed(&names.cli_install_bundled(path.clone(), sha.clone()));
+        assert_eq!(done["value"]["installed"], true, "{done}");
+        let ours = dir.join("bin").join("names-lez04");
+        assert_eq!(names.cli.as_deref(), ours.to_str());
+        assert_eq!(std::fs::metadata(&ours).unwrap().permissions().mode() & 0o777, 0o755);
+        assert_eq!(done["value"]["version"], "names 0.17.0 (LEZ v0.4.0-rc3)");
+        let status = parsed(&names.cli_status());
+        assert_eq!(status["value"]["tool"]["bare"], true, "{status}");
+        assert_eq!(status["value"]["tool"]["unchecked_max_fee"]["register"], "4455000");
+        // A tool already set is kept, even another one.
+        names.cli = Some(other.to_string_lossy().into_owned());
+        let kept = parsed(&names.cli_install_bundled(path, sha));
+        assert_eq!((kept["value"]["installed"].clone(), kept["value"]["kept"].clone()), (json!(false), json!(other.to_string_lossy())), "{kept}");
+        assert!(parsed(&names.get_config())["features"].as_array().unwrap().contains(&json!("bundled_tool")));
+        // Only the Names app.
+        as_caller(logos_rust_sdk::LogosCaller::Module { name: "evil_ui".into(), instance: None });
+        assert_eq!(parsed(&names.cli_install_bundled("x".into(), "y".into()))["success"], false);
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

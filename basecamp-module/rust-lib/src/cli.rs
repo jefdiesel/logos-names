@@ -2405,6 +2405,24 @@ echo "installed $dest"
 "#;
 /// `names --version` answers at once.
 const VERSION_PATIENCE: Duration = Duration::from_secs(20);
+
+/// What a LEZ 0.4 names tool can do on this computer (`names prover-status`): `{run, prove, bare,
+/// unchecked_max_fee}`. `bare`: it can't try a public call first (no r0vm, no in-process
+/// prover), so it sends registry calls with their measured caps and makes no proofs. Err for a
+/// tool too old to say (it has no such command).
+pub fn prover_status(program: &Path) -> Result<Value, String> {
+    if !is_executable(program) {
+        return Err(format!("there is no program at {}", program.display()));
+    }
+    let mut process = Command::new(program);
+    process.arg("prover-status").stdin(Stdio::null());
+    let (code, out, _) = capture(process, program, VERSION_PATIENCE)?;
+    let status: Value = serde_json::from_str(last_line(&out)).map_err(|_| "this names tool doesn't say what it can do".to_owned())?;
+    if code != Some(0) || !status["bare"].is_boolean() {
+        return Err("this names tool doesn't say what it can do".to_owned());
+    }
+    Ok(status)
+}
 /// Settings a person's network may need, passed on to the installer's curl.
 const PROXY_VARS: [&str; 8] = ["http_proxy", "https_proxy", "all_proxy", "no_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
 

@@ -251,6 +251,8 @@ impl Client {
     /// See the module docs.
     pub async fn plan_private_call(&mut self, input: &CallInput) -> Result<Plan> {
         println!("phase: plan");
+        // A private call is proved: a build that can't prove says so before anything else.
+        crate::prover::to_prove()?;
         crate::prover::to_run()?;
         let call = self.checked_call(input)?;
         let catalog = self.call_catalog(&call.programs).await?;

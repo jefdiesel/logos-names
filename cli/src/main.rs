@@ -695,6 +695,11 @@ enum Command {
     /// Write the man pages (`names.1`, `names-register.1`, ...) into a directory.
     #[command(hide = true)]
     Man { dir: PathBuf },
+    /// What this build can do here, as JSON: `run` (a public call is tried before it is sent),
+    /// `prove` (private changes), `bare` (neither: public registry calls go unchecked, with
+    /// their measured caps), and `unchecked_max_fee`, the most such a call can be charged.
+    #[command(hide = true)]
+    ProverStatus,
     /// Post on the LNS board as one of your names, privately: the chain sees the
     /// name, never the account that holds it. Prints the post as `<name>/<n>`.
     Post {
@@ -2039,8 +2044,19 @@ impl Client {
             // A call that fails is billed what it ran and keeps nothing, so try it here
             // first: the same run tells what a refused call would be refused for, and
             // sizes the gas limit, whose whole reserve is held from the payer meanwhile.
-            let cycles = self.simulate(&mentions, &message, programs).await?;
-            let limit = gas_limit_for(cycles);
+            // A build that can't run programs here (the bundled LEZ 0.4 tool with no r0vm)
+            // sends it unchecked, with the cap measured for this call (`unchecked_limit`).
+            let (cycles, limit) = if prover::can_run() {
+                let cycles = self.simulate(&mentions, &message, programs).await?;
+                (cycles, gas_limit_for(cycles))
+            } else {
+                if cycles == 0 {
+                    bail!("names can't check this call on this computer, and it has no measured cost to send it with. Nothing was sent.");
+                }
+                let limit = unchecked_limit(cycles);
+                println!("This computer can't check the call first. If the network refuses it, the fee (up to {}) is still paid.", max_fee_for(limit));
+                (cycles, limit)
+            };
             self.check_payer(&mentions, message.len(), spent, limit, cycles).await?;
             if dry_run {
                 bail!("LOGOS_NAMES_DRY_RUN is set, so nothing was sent");
@@ -3140,7 +3156,7 @@ fn call_cycles(instruction: &Instruction) -> u64 {
     match instruction {
         Instruction::Commit { .. } => COMMIT_CYCLES,
         Instruction::Register { .. } | Instruction::Claim { .. } => REVEAL_CYCLES,
-        Instruction::Release { .. } => 51_322,
+        Instruction::Release { .. } => RELEASE_CYCLES,
         _ => CHANGE_CYCLES,
     }
 }
@@ -3151,6 +3167,15 @@ const COMMIT_CYCLES: u64 = 23_214;
 const REVEAL_CYCLES: u64 = 165_000;
 /// A profile change's or a hand-over's cycles (see [`call_cycles`]).
 const CHANGE_CYCLES: u64 = 65_590;
+/// A release's cycles (see [`call_cycles`]).
+const RELEASE_CYCLES: u64 = 51_322;
+
+/// The gas limit a call measured at `cycles` is sent with when it can't be tried here first
+/// (`prover::can_run`): twice the measured run, then the usual 1.5x margin (3x in all), for a
+/// chain whose state makes it run longer than when it was measured.
+fn unchecked_limit(cycles: u64) -> u64 {
+    gas_limit_for(cycles.saturating_mul(2))
+}
 
 /// The arguments of the background `names register` that finishes a registration: the same
 /// name, holder and term, `--public` only when this registration asked for it.
@@ -3808,6 +3833,17 @@ async fn main() -> Result<()> {
     let mut cli = Cli::parse();
     if let Command::Man { dir } = &cli.command {
         return write_man_pages(dir);
+    }
+    if let Command::ProverStatus = &cli.command {
+        let mut status = prover::status();
+        status["unchecked_max_fee"] = serde_json::json!({
+            "commit": max_fee_for(unchecked_limit(COMMIT_CYCLES)).to_string(),
+            "register": max_fee_for(unchecked_limit(REVEAL_CYCLES)).to_string(),
+            "release": max_fee_for(unchecked_limit(RELEASE_CYCLES)).to_string(),
+            "change": max_fee_for(unchecked_limit(CHANGE_CYCLES)).to_string(),
+        });
+        println!("{status}");
+        return Ok(());
     }
     if let Command::Zone(command) = &cli.command {
         let home_wallet = fetch_persistent_storage_path().ok().and_then(|storage| storage.parent().map(std::path::Path::to_owned));
@@ -4474,7 +4510,8 @@ async fn main() -> Result<()> {
         | Command::Wallet { .. }
         | Command::Bridge { .. }
         | Command::Zone(_)
-        | Command::Man { .. } => {
+        | Command::Man { .. }
+        | Command::ProverStatus => {
             unreachable!("handled before the wallet is opened")
         }
     }
@@ -4606,6 +4643,24 @@ mod bridge_metadata_tests {
         assert!(said.contains(&format!("doesn't hold Public/{account}")), "{said}");
         assert!(said.contains("public key (64 hex characters"), "{said}");
         assert!(said.ends_with("Nothing was sent."), "{said}");
+    }
+}
+
+#[cfg(test)]
+mod unchecked_tests {
+    use super::{call_cycles, gas_limit_for, unchecked_limit, CHANGE_CYCLES, COMMIT_CYCLES, RELEASE_CYCLES, REVEAL_CYCLES};
+    use names_core::Instruction;
+
+    /// A call that can't be tried here first goes with three times its measured run, per
+    /// operation (never one cap for every call), and always more than a checked call's limit.
+    #[test]
+    fn an_unchecked_call_has_its_own_measured_cap() {
+        assert_eq!(unchecked_limit(COMMIT_CYCLES), 69_642);
+        for cycles in [COMMIT_CYCLES, REVEAL_CYCLES, RELEASE_CYCLES, CHANGE_CYCLES] {
+            assert!(unchecked_limit(cycles) >= cycles * 3 && unchecked_limit(cycles) > gas_limit_for(cycles), "{cycles}");
+        }
+        assert_ne!(unchecked_limit(COMMIT_CYCLES), unchecked_limit(REVEAL_CYCLES));
+        assert_eq!(call_cycles(&Instruction::Release { id: [0; 32], refund: 0 }), RELEASE_CYCLES);
     }
 }
 

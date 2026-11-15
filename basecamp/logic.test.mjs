@@ -686,5 +686,17 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("not a needs", needsWithoutRequest({ deposit: {} }), "");
 }
 
+{
+  // The shipped LEZ 0.4 tool that can't try a call first: one line with the most it can cost.
+  const { uncheckedLine, FULL_TOOL_DOWNLOAD, BUNDLED_TOOL } = await import("./qml/logic.mjs");
+  const bare = { bare: true, unchecked_max_fee: { commit: "626778", register: "4455000", change: "1770930" } };
+  check("unchecked register", uncheckedLine(bare, ["commit", "register"]), "This computer can't check the call first. If the network refuses it, the fee (up to 5,081,778) is still paid.");
+  check("unchecked change", uncheckedLine(bare, ["change"]), "This computer can't check the call first. If the network refuses it, the fee (up to 1,770,930) is still paid.");
+  check("a tool that checks", uncheckedLine({ bare: false }, ["change"]), "");
+  check("no tool status", uncheckedLine(null, ["change"]), "");
+  check("download off for people", FULL_TOOL_DOWNLOAD, false);
+  check("tool file", BUNDLED_TOOL.file, "names-lez04");
+}
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);

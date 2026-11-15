@@ -1256,6 +1256,27 @@ export const BUNDLED_BRIDGE = [
       build: "00e6f3a" }
 ]
 
+/// The LEZ 0.4 names tool this app ships in qml/bundled/ (built without in-process proving, so
+/// small enough to ship): installed by the names module (`cli_install_bundled`) when LEZ 0.4 has
+/// no tool set, after its SHA-256 checks. The build writes the checksum here (build-lgx).
+export const BUNDLED_TOOL = { file: "names-lez04", sha256: "@TOOL_SHA256@" }
+/// Whether the full LEZ 0.4 tool (with proving, about 100 MB) can still be downloaded from the
+/// app: off in builds for people; a build-time switch for testing.
+export const FULL_TOOL_DOWNLOAD = false
+
+/// The one line said before a public call when the LEZ 0.4 tool can't try it here first
+/// (`cli_status().tool.bare`): `fee`, the most it can be charged (digits), or "".
+export function uncheckedLine(tool, kinds) {
+    if (!tool || tool.bare !== true)
+        return ""
+    var caps = tool.unchecked_max_fee || {}
+    var total = 0
+    for (var i = 0; i < kinds.length; i++)
+        total += Number(caps[kinds[i]] || 0)
+    return "This computer can't check the call first. If the network refuses it, the fee"
+        + (total > 0 ? " (up to " + grouped(String(total)) + ")" : "") + " is still paid."
+}
+
 /// Whether the running LEZ Bridge (its config() answer) is another build than the one shipped:
 /// its config().build.commit differs, or it has no `build` (every bridge before 00e6f3a).
 /// Unknown (no answer yet): false.
