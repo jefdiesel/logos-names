@@ -2377,6 +2377,32 @@ fn feed(mut process: Command, program: &Path, input: &str, patience: Duration, s
 pub const INSTALLER: &str = include_str!("../install.sh");
 /// The job name for installing. A name never starts with `-`.
 pub const INSTALL_JOB: &str = "-install";
+/// The job name for installing the LEZ 0.4 names tool.
+pub const INSTALL04_JOB: &str = "-install04";
+/// The LEZ 0.4 names tool's installer: downloads `$NAMES04_URL` to a file of its own beside the
+/// destination, checks its SHA-256 against `$NAMES04_SHA256` BEFORE it is made executable or run,
+/// then moves it to `$NAMES_INSTALL_DIR/names-lez04`. A file that fails the check is deleted.
+pub const INSTALLER04: &str = r#"set -eu
+case "$(uname -s)/$(uname -m)" in
+  Darwin/arm64) ;;
+  *) echo "no build for $(uname -s)/$(uname -m): the LEZ 0.4 names tool is built for Apple silicon Macs only"; exit 3 ;;
+esac
+dest="$NAMES_INSTALL_DIR/names-lez04"
+part="$NAMES_INSTALL_DIR/.names-lez04.download"
+rm -f "$part"
+echo "Downloading the LEZ 0.4 names tool…"
+if ! curl -fL --retry 2 --connect-timeout 20 -o "$part" "$NAMES04_URL"; then
+  rm -f "$part"; echo "could not download the LEZ 0.4 names tool: no network, or the release isn't there"; exit 4
+fi
+echo "Checking it…"
+got=$(shasum -a 256 "$part" | cut -d' ' -f1)
+if [ "$got" != "$NAMES04_SHA256" ]; then
+  rm -f "$part"; echo "the download's SHA-256 is $got, not $NAMES04_SHA256: deleted, nothing installed"; exit 5
+fi
+chmod 755 "$part"
+mv -f "$part" "$dest"
+echo "installed $dest"
+"#;
 /// `names --version` answers at once.
 const VERSION_PATIENCE: Duration = Duration::from_secs(20);
 /// Settings a person's network may need, passed on to the installer's curl.
@@ -2490,6 +2516,17 @@ impl Jobs {
     /// Starts the installer `script` as a job, putting the CLI and the prover
     /// in `bin` and the man pages in `man`: `{id, name, kind, state, started}`.
     /// The script is written to the jobs folder and removed once it ends.
+    /// Starts the LEZ 0.4 names tool's install (`INSTALLER04`) from `url`, checked against `sha256`.
+    pub fn start_install04(&self, bin: &Path, url: &str, sha256: &str) -> Result<Value, String> {
+        let id = self.prepare(INSTALL04_JOB)?;
+        std::fs::create_dir_all(bin).map_err(|error| format!("cannot make {}: {error}", bin.display()))?;
+        let file = self.scratch(&id, "sh");
+        write_private(&file, INSTALLER04.as_bytes()).map_err(|error| format!("cannot write the installer: {error}"))?;
+        let mut process = install_process(&file, bin, bin);
+        process.env("NAMES04_URL", url).env("NAMES04_SHA256", sha256);
+        self.start_process(&id, INSTALL04_JOB, "install04", process, "the installer", Some(file))
+    }
+
     pub fn start_install(&self, script: &str, bin: &Path, man: &Path) -> Result<Value, String> {
         let id = self.prepare(INSTALL_JOB)?;
         for dir in [bin, man] {

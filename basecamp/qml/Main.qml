@@ -2594,7 +2594,7 @@ Item {
         askLater("cli_install", [], function(value) {
             if (value.installed) {
                 installJob = null
-                installWarning = value.prover ? "" : "The prover isn't installed, so private changes can't be made yet."
+                installWarning = value.prover || namesNet === "0.4" ? "" : "The prover isn't installed, so private changes can't be made yet."
                 loadConfig()
                 return
             }
@@ -6247,10 +6247,10 @@ Item {
                     }
                     Hint {
                         visible: root.cliPath === "" && root.namesNet === "0.4"
-                        text: "LEZ 0.4 needs its own names tool, which this app doesn't install. Give its path in Settings, App settings (names CLI)."
+                        text: "LEZ 0.4 needs its own names tool. About 100 MB, checked against its SHA-256 before it runs."
                     }
                     RowLayout {
-                        visible: root.cliPath === "" && root.namesNet === "0.3"
+                        visible: root.cliPath === ""
                         spacing: 12
                         Action {
                             label: root.installJob !== null ? "Installing…" : "Install"
@@ -9593,6 +9593,13 @@ Item {
                     Action {
                         label: "Use this CLI"
                         onPressed: root.saveCliSettings(cliPathField.text.trim(), cliWalletField.text.trim())
+                    }
+                    // LEZ 0.4 without a working tool: the one-click install, as on Welcome.
+                    RowLayout {
+                        visible: root.namesNet === "0.4" && (root.cliPath === "" || root.cliOutdated)
+                        spacing: 12
+                        Action { label: root.installJob !== null ? "Installing…" : "Install the LEZ 0.4 names tool"; strong: true; enabledNow: root.installJob === null; onPressed: root.installCli() }
+                        Hint { visible: root.installJob !== null; Layout.fillWidth: true; color: root.brass; font.pixelSize: root.px(15); text: root.installJob === null ? "" : root.installJob.line }
                     }
                     Link {
                         visible: root.lastReply !== ""

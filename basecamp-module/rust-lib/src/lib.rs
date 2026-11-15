@@ -87,6 +87,12 @@ const NET_KEYS: [&str; 9] = ["sequencer", "registry", "cli", "cli_wallet", "wall
 /// What a LEZ 0.4 names CLI says after its version (`names --version`): the module runs
 /// only such a CLI on LEZ 0.4, and tells when LEZ 0.3 is given one (it reads, can't send).
 const LEZ04_CLI_MARK: &str = "(LEZ v0.4";
+/// The LEZ 0.4 names tool this build installs (Settings and Welcome, "Install"): a release asset,
+/// and the SHA-256 it must have before it is made executable or run. Apple silicon Macs only.
+const LEZ04_TOOL_URL: &str = "https://github.com/jefdiesel/logos-names/releases/download/wallet-0.17.0-test.1/names-cli-0.17.0-lez04-darwin-arm64";
+const LEZ04_TOOL_SHA256: &str = "674b819608665b644fb691d6075a5c998a88de6cd274fcfc6919c9b6b95cd63e";
+/// Its file in the module's own folder.
+const LEZ04_TOOL_FILE: &str = "names-lez04";
 
 /// Which names network the module uses: where names are looked up, registered and paid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1743,6 +1749,48 @@ fn load_object(path: &std::path::Path) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
+/// The LEZ 0.4 tool's download address: the release asset (tests point it elsewhere).
+#[cfg(not(test))]
+fn lez04_tool_url() -> String {
+    LEZ04_TOOL_URL.to_owned()
+}
+#[cfg(test)]
+thread_local! {
+    static LEZ04_TOOL_URL_TEST: std::cell::RefCell<String> = std::cell::RefCell::new(LEZ04_TOOL_URL.to_owned());
+}
+#[cfg(test)]
+fn lez04_tool_url() -> String {
+    LEZ04_TOOL_URL_TEST.with(|url| url.borrow().clone())
+}
+/// The SHA-256 the LEZ 0.4 tool must have (tests use their own stand-in's).
+#[cfg(not(test))]
+fn lez04_tool_sha() -> String {
+    LEZ04_TOOL_SHA256.to_owned()
+}
+#[cfg(test)]
+thread_local! {
+    static LEZ04_TOOL_SHA_TEST: std::cell::RefCell<String> = std::cell::RefCell::new(LEZ04_TOOL_SHA256.to_owned());
+}
+#[cfg(test)]
+fn lez04_tool_sha() -> String {
+    LEZ04_TOOL_SHA_TEST.with(|sha| sha.borrow().clone())
+}
+
+/// Why the LEZ 0.4 tool's install failed, in one line, from its log.
+fn lez04_install_problem(log: &str, done: bool) -> String {
+    if log.contains("no build for") {
+        "The LEZ 0.4 names tool is built for Apple silicon Macs only.".to_owned()
+    } else if log.contains("could not download") {
+        "Couldn't download the LEZ 0.4 names tool: check the network, then try again.".to_owned()
+    } else if log.contains("SHA-256") {
+        "The download didn't match the expected file, so it was deleted and nothing was installed.".to_owned()
+    } else if done {
+        "It installed, but it isn't the LEZ 0.4 names tool this app expects.".to_owned()
+    } else {
+        "The install stopped. Try again.".to_owned()
+    }
+}
+
 /// Failing to save is not an error for the caller: the memory still serves
 /// this run.
 /// Makes `dir`, and the files and folders directly in it and in its `jobs`, readable
@@ -2730,6 +2778,54 @@ impl Names {
     }
 
     /// Where `cli_install` puts the CLI and its man pages.
+    /// The LEZ 0.4 names tool, installed into the module's own folder (`bin/names-lez04`): a working
+    /// one already set is left as it is; the file installed here earlier is used again once its
+    /// SHA-256 checks; otherwise a download job starts (`INSTALLER04`).
+    fn install_lez04_tool(&mut self) -> Result<Value, String> {
+        let jobs = self.jobs()?;
+        let (bin, _) = self.install_dirs()?;
+        let ours = bin.join(LEZ04_TOOL_FILE);
+        if let Some(id) = jobs.running_for(cli::INSTALL04_JOB) {
+            return Ok(json!({ "installed": false, "path": ours, "version": null, "prover": false, "job": jobs.state(&id)? }));
+        }
+        if let Some(set) = self.cli.clone() {
+            if let Ok(line) = self.cli_line(std::path::Path::new(&set)) {
+                if line.contains(LEZ04_CLI_MARK) {
+                    return Ok(json!({ "installed": true, "path": set, "version": line, "prover": false, "job": null }));
+                }
+            }
+        }
+        if let Some(line) = self.adopt_lez04_tool(&ours) {
+            return Ok(json!({ "installed": true, "path": ours, "version": line, "prover": false, "job": null }));
+        }
+        if !(cfg!(target_os = "macos") && cfg!(target_arch = "aarch64")) {
+            return Err("the LEZ 0.4 names tool is built for Apple silicon Macs only, so it can't be installed on this computer".to_owned());
+        }
+        let job = jobs.start_install04(&bin, &lez04_tool_url(), &lez04_tool_sha())?;
+        Ok(json!({ "installed": false, "path": ours, "version": null, "prover": false, "job": job }))
+    }
+
+    /// Puts the LEZ 0.4 names tool at `path` to use, when its SHA-256 is the expected one and it
+    /// says it is a LEZ 0.4 tool, and only while LEZ 0.4 is the network in use: its version line.
+    fn adopt_lez04_tool(&mut self, path: &std::path::Path) -> Option<String> {
+        use sha2::{Digest, Sha256};
+        if self.net != Net::Lez04 || !path.is_file() {
+            return None;
+        }
+        let bytes = std::fs::read(path).ok()?;
+        let sha: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+        drop(bytes);
+        if sha != lez04_tool_sha() {
+            return None;
+        }
+        let line = cli::version(path).ok().filter(|line| line.contains(LEZ04_CLI_MARK))?;
+        self.cli = Some(path.to_string_lossy().into_owned());
+        self.rejected.remove("cli");
+        self.save();
+        self.forget_mine();
+        Some(line)
+    }
+
     fn install_dirs(&self) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
         let bin = self.bin_dir.clone().or_else(install_dir).ok_or("this device has nowhere to install the names program")?;
         let man = bin.parent().map_or_else(|| bin.join("man"), |parent| parent.join("man"));
@@ -2840,6 +2936,19 @@ impl Names {
                         } else {
                             problem
                         });
+                    }
+                }
+            }
+            Some("install04") if !running => {
+                let path = self.install_dirs().ok().map(|(bin, _)| bin.join(LEZ04_TOOL_FILE));
+                match path.as_ref().filter(|_| done).and_then(|p| self.adopt_lez04_tool(p)) {
+                    Some(line) => {
+                        state["path"] = json!(path);
+                        state["version"] = Value::from(line);
+                    }
+                    None => {
+                        state["state"] = Value::from("failed");
+                        state["problem"] = Value::from(lez04_install_problem(&log, done));
                     }
                 }
             }
@@ -4414,7 +4523,7 @@ impl NamesModule for Names {
         }
         reply((|| {
             if self.net == Net::Lez04 {
-                return Err("no names CLI for LEZ 0.4 is published yet, so none can be installed from here: give the path of a LEZ 0.4 names CLI in App settings".to_owned());
+                return self.install_lez04_tool();
             }
             let jobs = self.jobs()?;
             let (bin, man) = self.install_dirs()?;
@@ -9963,6 +10072,35 @@ mod tests {
         assert_eq!(keys, ["module_version", "names_network", "names_sequencer", "registry", "sequencer", "token_program", "zone"], "{other}");
         let zone: Vec<&String> = other["zone"].as_object().unwrap().keys().collect();
         assert_eq!(zone, ["channel", "home", "id"], "{other}");
+    }
+
+    #[test]
+    fn the_lez04_tool_is_used_only_when_its_hash_checks_and_only_on_lez04() {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::PermissionsExt;
+        let (mut names, dir) = with_fake_cli("tool04", "true");
+        let tool = dir.join("names-lez04");
+        std::fs::write(&tool, "#!/bin/sh\necho 'names 0.17.0 (LEZ v0.4.0-rc3)'\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let sha: String = Sha256::digest(std::fs::read(&tool).unwrap()).iter().map(|b| format!("{b:02x}")).collect();
+        names.cli = None;
+        // On LEZ 0.3, never.
+        LEZ04_TOOL_SHA_TEST.with(|s| *s.borrow_mut() = sha.clone());
+        assert_eq!(names.adopt_lez04_tool(&tool), None);
+        names.net = Net::Lez04;
+        // A wrong hash: never set, never run.
+        LEZ04_TOOL_SHA_TEST.with(|s| *s.borrow_mut() = "0".repeat(64));
+        assert_eq!(names.adopt_lez04_tool(&tool), None);
+        assert_eq!(names.cli, None);
+        // The right one: set as LEZ 0.4's tool.
+        LEZ04_TOOL_SHA_TEST.with(|s| *s.borrow_mut() = sha.clone());
+        assert_eq!(names.adopt_lez04_tool(&tool).as_deref(), Some("names 0.17.0 (LEZ v0.4.0-rc3)"));
+        assert_eq!(names.cli.as_deref(), tool.to_str());
+        assert!(lez04_install_problem("no build for Linux/x86_64", false).contains("Apple silicon"));
+        assert!(lez04_install_problem("could not download the LEZ 0.4 names tool", false).contains("network"));
+        assert!(lez04_install_problem("the download's SHA-256 is 1, not 2", false).contains("didn't match"));
+        LEZ04_TOOL_SHA_TEST.with(|s| *s.borrow_mut() = LEZ04_TOOL_SHA256.to_owned());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
