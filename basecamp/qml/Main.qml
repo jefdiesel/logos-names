@@ -1341,13 +1341,17 @@ Item {
     function pollReceives(onlyId) {
         if (receivePolling || receiveHold || !bridgeReady || receiveAsking || receiveNeeds !== null || sbPolling || sbAsking || sbNeeds !== null)
             return
-        var asked = receiveAskNow
+        // A round before the list is read (the first, or a retry of a refused first read) checks
+        // everything, as if asked.
+        var asked = receiveAskNow || !receivesLoaded || bridgeConfig === null
         receiveAskNow = false
         if (bridgeConfig === null) {
             receivePolling = true
             bridgeCall("config", [], function(value) {
                 receivePolling = false
                 bridgeAnswered(value)
+                // The same round goes on: what was asked stays asked.
+                receiveAskNow = asked
                 if (receiveHasStatus)
                     pollReceives(onlyId)
             }, function(message, kind) { receivePolling = false; bridgeSilent(kind); receiveCheckFailed = true; receiveNextAt = bridgeListRetry(kind) }, 10000, false)
@@ -1370,6 +1374,7 @@ Item {
                 found.forEach(function(x) { if (!all[x.id] && x.stage !== "unknown") all[x.id] = { stage: x.stage } })
                 receiveStatuses = all
                 receiveStatusesChanged()
+                receiveAskNow = asked
                 pollReceives(onlyId)
             }, function(message, kind) {
                 receivePolling = false
@@ -1762,7 +1767,7 @@ Item {
     function pollSendBacks() {
         if (sbPolling || receivePolling || receiveHold || !bridgeReady || receiveAsking || sbAsking || receiveNeeds !== null || sbNeeds !== null)
             return
-        var asked = sbAskNow
+        var asked = sbAskNow || !sendBacksLoaded
         sbAskNow = false
         if (!sbCan) {
             sbNextAt = 0
