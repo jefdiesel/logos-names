@@ -189,6 +189,11 @@ Item {
     readonly property color brass: Theme.isDark ? Theme.palette.warning : Theme.palette.primary
     readonly property color alarm: Theme.palette.error
     readonly property color good: Theme.palette.success
+    // The third tone: something of yours under way (a receive arriving from Ethereum). Not the
+    // yellow of the primary buttons, not the grey of text, not green or blue: a calm violet.
+    readonly property color underway: Theme.isDark ? "#B9A2EE" : "#6F4FB0"
+    readonly property color underwayFill: Qt.rgba(underway.r, underway.g, underway.b, Theme.isDark ? 0.13 : 0.07)
+    readonly property color underwayLine: Qt.rgba(underway.r, underway.g, underway.b, Theme.isDark ? 0.45 : 0.35)
     readonly property color noticeFill: Qt.rgba(brass.r, brass.g, brass.b, 0.14)
     readonly property color ownBubble: Qt.rgba(brass.r, brass.g, brass.b, 0.24)
 
@@ -810,7 +815,7 @@ Item {
     // On LEZ 0.4 the rows know which accounts are the 0.4 wallet's own: a LEZ 0.3 one is view only.
     readonly property var bridgeNetBlocks: Logic.bridgeNetRows(bridgeNet ? bridgeNet.read : null, namesNet === "0.4" ? Logic.publicAccounts(cliBalance, cliAccounts) : null)
     property bool bridgeNetShowEmpty: false   // the wallet's accounts with nothing there, shown one by one
-    readonly property var bridgeNetView: Logic.bridgeNetShown(bridgeNetBlocks, bridgeNetShowEmpty)
+    readonly property var bridgeNetView: Logic.bridgeNetShown(bridgeNetBlocks, bridgeNetShowEmpty, receiveKeepAccounts)
 
     /// A time of day for a reading taken at `seconds`.
     function clockShown(seconds) {
@@ -958,10 +963,22 @@ Item {
     readonly property var bridgeSetup: Logic.bridgeSetupState({ list: installedList, bundle: bridgeBundle, answers: bridgeAnswers,
         stuck: bridgeFails >= 2, stale: bridgeStale, notLoaded: bridgeNotLoaded, features: bridgeFeatures, config: bridgeConfig, install: bridgeInstall,
         done: bridgeDone !== "" && walletView === bridgeDoneView ? bridgeDone : "" })
-    onWalletViewChanged: if (bridgeDone !== "" && walletView !== bridgeDoneView) bridgeDone = ""
+    onWalletViewChanged: {
+        if (bridgeDone !== "" && walletView !== bridgeDoneView)
+            bridgeDone = ""
+        // Back on the card: one check of the receives now (not again within 10 s).
+        if (walletView === "home")
+            receiveCheckSoon()
+    }
     // The bridge needs a step first (Update, Unload, a reopen…): Receive's and Claim's own steps
     // wait under it, so nobody runs into a failure the setup line already explains.
-    readonly property bool bridgeSetupClear: bridgeSetup.state === "" || bridgeSetup.state === "done"
+    // An update (or its Unload step) for a bridge that answers and receives holds nothing up:
+    // Receive and Claim go on with the running one; the update is offered beside them.
+    readonly property bool bridgeSetupOptional: (bridgeSetup.state === "update" || bridgeSetup.state === "unload") && bridgeAnswers === true && bridgeReceives
+    readonly property bool bridgeSetupClear: bridgeSetup.state === "" || bridgeSetup.state === "done" || bridgeSetupOptional
+    // The setup's button is yellow only when nothing works without it (the bridge missing, stuck,
+    // or unable to receive); an optional update is a plain button, everywhere.
+    readonly property bool cardSetupBlocks: bridgeSetup.button !== "" && bridgeSetup.action !== "settings" && !bridgeSetupOptional
     function bridgeAnswered(value) {
         bridgeConfig = value
         bridgeAnswers = true
@@ -1000,33 +1017,94 @@ Item {
     readonly property var receiveAccountList: Logic.publicAccounts(cliBalance, cliAccounts)
     // The account chosen, else the first public account (the one the card shows first).
     readonly property string receiveAccountNow: receiveAccountList.indexOf(receiveAccount) >= 0 ? receiveAccount : receiveAccountList.length > 0 ? receiveAccountList[0] : ""
-    readonly property var receiveStepsNow: Logic.receiveSteps({ stage: receiveResult !== null ? "code" : receiveNeeds !== null ? "needs" : "choose",
-        needs: receiveNeeds !== null ? receiveNeeds.needs : "", extras: receiveExtras })
+    // The receive the Receive screen follows ("" while choosing a new one): the code just made,
+    // one opened from the card, or the one on its way when the screen opens.
+    property string receiveFocus: ""
+    property var receiveCodes: ({})        // codes made in this window, by id (with made_at), to show again
+    property var receiveCodeExtras: ({})   // the first-time steps each of those asked, so its numbers stay
+    property var receiveClaimedAt: ({})    // receives claimed while Names was open: id → ms
+    property bool receiveShowAll: false    // the card's older unused codes, shown one by one
+    // One check of every receive a minute, one call at a time (the bridge's notes), plus one when
+    // the card or Receive opens, when Names comes back to the front, and on "Check now".
+    property double receiveCheckedAt: 0
+    property double receiveNextAt: 0
+    property bool receiveCheckFailed: false
+    property double receiveNow: Date.now()
+    // A config/registry call of Receive's own is under way: no check meanwhile (one call at a time).
+    property bool receiveHold: false
+    readonly property var receiveFocusRow: receiveFocus === "" ? null : (receives.filter(function(x) { return x.id === receiveFocus })[0] || null)
+    readonly property var receiveFocusProgress: Logic.receiveProgress(receiveFocus === "" ? null : receiveStatuses[receiveFocus])
+    readonly property string receiveCheckLine: Logic.receiveCheckLine(receivePolling, receiveCheckedAt, receiveNextAt, receiveNow, receiveCheckFailed)
+    // The card's account blocks keep the accounts a receive is arriving in, or just arrived in.
+    readonly property var receiveKeepAccounts: Logic.receiveRowsShown(receives, receiveStatuses, receiveClaimedAt, receiveNow, true).rows
+        .filter(function(x) { return x.progress.stage !== "waiting" && x.progress.stage !== "checking" }).map(function(x) { return x.account })
+    readonly property var receiveStepsNow: Logic.receiveSteps({
+        stage: receiveFocus !== "" ? receiveFocusProgress.stage : receiveResult !== null ? "code" : receiveNeeds !== null ? "needs" : "choose",
+        needs: receiveNeeds !== null ? receiveNeeds.needs : "", extras: receiveExtras,
+        claimedBlock: receiveFocus !== "" && receiveStatuses[receiveFocus] ? receiveStatuses[receiveFocus].claimed_block : null })
 
-    function openEthReceive() {
+    /// Opens Receive from Ethereum. `focusId`: a receive to show (a card row); without it, the one
+    /// on its way if there is one (Logic.receiveInProgress), else the choice of a new code.
+    function openEthReceive(focusId) {
         walletView = "ethreceive"
         loadInstalled(checkBundle)
-        receiveResult = null
         receiveError = ""
         receiveNeeds = null
-        receiveExtras = []
         receiveDetails = false
         receivePublicOk = false
         receiveMissing = false
+        receiveFocus = typeof focusId === "string" ? focusId : Logic.receiveInProgress(receives, receiveStatuses, receiveCodes)
+        receiveResult = receiveFocus !== "" && receiveCodes[receiveFocus] ? receiveCodes[receiveFocus] : null
+        receiveExtras = receiveFocus !== "" && receiveCodeExtras[receiveFocus] ? receiveCodeExtras[receiveFocus] : []
         if (receiveAccount === "" || receiveAccountList.indexOf(receiveAccount) < 0)
             receiveAccount = receiveAccountList.length > 0 ? receiveAccountList[0] : ""
         // Is the bridge module here (config answers at once), then its denominations (the
-        // registry reads the chains; without it, the bridge test network's known list).
+        // registry reads the chains; without it, the bridge test network's known list), then one
+        // check of the receive shown. One call at a time.
+        receiveHold = true
         bridgeCall("config", [], function(value) {
             bridgeAnswered(value)
-            // The denominations: read once per screen (it reads both chains), never polled.
-            if (bridgeReceives)
-                bridgeCall("registry", [], function(value) { receiveRegistry = value }, function() {}, 60000, false)
+            if (receiveFocus === "" && bridgeReceives)
+                loadReceiveRegistry()
+            else {
+                receiveHold = false
+                receiveCheckSoon()
+            }
         }, function(message, kind) {
+            receiveHold = false
             bridgeSilent(kind)
             if (kind === "missing" || kind === "starting" || kind === "busy" || kind === "stale")
                 receiveMissing = true
         }, 10000, false)
+    }
+    /// The denominations: read once per screen (it reads both chains), never polled.
+    function loadReceiveRegistry() {
+        receiveHold = true
+        bridgeCall("registry", [], function(value) { receiveRegistry = value; receiveHold = false; receiveCheckSoon() }, function() { receiveHold = false; receiveCheckSoon() }, 60000, false)
+    }
+    /// "Make another code": the choice of amount and account, whatever is on its way.
+    function startNewReceive() {
+        receiveFocus = ""
+        receiveResult = null
+        receiveExtras = []
+        receiveError = ""
+        receiveNeeds = null
+        receivePublicOk = false
+        receiveDetails = false
+        if (receiveRegistry === null && bridgeReceives && !receivePolling)
+            loadReceiveRegistry()
+    }
+    /// One check at the next tick, unless one finished in the last 10 s.
+    function receiveCheckSoon() {
+        if (Date.now() - receiveCheckedAt > 10000)
+            receiveNextAt = 0
+    }
+    /// "Check now": one call for the receive on the Receive screen, a round on the card; nothing
+    /// while a call is under way.
+    function receiveCheckNow() {
+        if (receivePolling || receiveHold)
+            return
+        pollReceives(walletView === "ethreceive" ? receiveFocus : "")
     }
 
     /// The deposit code for the chosen amount and account. A public account only after the person
@@ -1058,8 +1136,30 @@ Item {
                 return
             }
             receiveResult = value
-            if (value.deposit && value.deposit.id && !receives.some(function(x) { return x.id === value.deposit.id }))
-                receives = receives.concat([{ id: String(value.deposit.id), symbol: String(value.symbol || ""), amount: String(value.denom_text || ""), account: receiveAccount }])
+            if (value.deposit && value.deposit.id) {
+                var id = String(value.deposit.id)
+                if (!receives.some(function(x) { return x.id === id }))
+                    receives = [{ id: id, symbol: String(value.symbol || ""), amount: String(value.denom_text || ""), account: receiveAccount }].concat(receives)
+                // Followed from here on: kept for this window, so the screen can show it again.
+                var codes = receiveCodes
+                codes[id] = Object.assign({ made_at: Date.now() }, value)
+                receiveCodes = codes
+                receiveCodesChanged()
+                var extras = receiveCodeExtras
+                extras[id] = receiveExtras.slice()
+                receiveCodeExtras = extras
+                receiveCodeExtrasChanged()
+                // Nothing can be on Ethereum yet: the first check comes a minute from now.
+                if (!receiveStatuses[id]) {
+                    var all = receiveStatuses
+                    all[id] = { stage: "requested" }
+                    receiveStatuses = all
+                    receiveStatusesChanged()
+                }
+                receiveFocus = id
+                receiveNextAt = Date.now() + 60000
+                console.log("names_ui: receive: code made for", id)
+            }
         }, function(message, kind) {
             receiveAsking = false
             if (kind === "missing")
@@ -1094,9 +1194,10 @@ Item {
     }
 
     /// The card's receives: the bridge's own list once, then receive_status of each, one call at
-    /// a time, every 60 s while the LEZ 0.4 wallet shows (it never asks Names anything).
-    function pollReceives() {
-        if (receivePolling || !bridgeReady)
+    /// a time, every 60 s while the LEZ 0.4 wallet shows (it never asks Names anything). `onlyId`:
+    /// just that receive (the Receive screen's); else every open one, the screen's first.
+    function pollReceives(onlyId) {
+        if (receivePolling || receiveHold || !bridgeReady || receiveAsking || receiveNeeds !== null)
             return
         if (bridgeConfig === null) {
             receivePolling = true
@@ -1104,12 +1205,14 @@ Item {
                 receivePolling = false
                 bridgeAnswered(value)
                 if (receiveHasStatus)
-                    pollReceives()
-            }, function(message, kind) { receivePolling = false; bridgeSilent(kind) }, 10000, false)
+                    pollReceives(onlyId)
+            }, function(message, kind) { receivePolling = false; bridgeSilent(kind); receiveNextAt = Date.now() + 60000 }, 10000, false)
             return
         }
-        if (!receiveHasStatus)
+        if (!receiveHasStatus) {
+            receiveNextAt = Date.now() + 60000
             return
+        }
         if (!receivesLoaded) {
             // The list (no chain read): what receive_status last saw for each, newest first.
             receivePolling = true
@@ -1122,37 +1225,89 @@ Item {
                 found.forEach(function(x) { if (!all[x.id] && x.stage !== "unknown") all[x.id] = { stage: x.stage } })
                 receiveStatuses = all
                 receiveStatusesChanged()
-                pollReceives()
-            }, function() { receivePolling = false }, 30000, false)
+                pollReceives(onlyId)
+            }, function(message, kind) {
+                receivePolling = false
+                receiveNextAt = Date.now() + 60000
+                console.log("names_ui: receives:", kind, message)
+            }, 30000, false)
             return
         }
-        var open = receives.filter(function(x) { var st = receiveStatuses[x.id]; return !st || st.stage !== "claimed" })
-        if (open.length === 0 || !receiveHasStatus)
+        var open = receives.filter(function(x) { var st = receiveStatuses[x.id]; return (!st || st.stage !== "claimed") && (!onlyId || x.id === onlyId) })
+        if (receiveFocus !== "")
+            open = open.filter(function(x) { return x.id === receiveFocus }).concat(open.filter(function(x) { return x.id !== receiveFocus }))
+        if (open.length === 0) {
+            receiveNextAt = Date.now() + 60000
             return
+        }
         receivePolling = true
+        var failedAny = false
         var next = function(i) {
             if (i >= open.length) {
                 receivePolling = false
+                receiveCheckedAt = Date.now()
+                receiveCheckFailed = failedAny
+                receiveNextAt = Date.now() + 60000
                 return
             }
-            bridgeCall("receive_status", [open[i].id], function(value) {
+            var id = open[i].id
+            bridgeCall("receive_status", [id], function(value) {
                 var all = receiveStatuses
-                all[open[i].id] = value
+                var was = all[id] ? all[id].stage : ""
+                all[id] = value
                 receiveStatuses = all
                 receiveStatusesChanged()
+                if (value && value.stage !== was)
+                    console.log("names_ui: receive", id + ":", value.stage)
+                // Claimed (from here or elsewhere): the row says so for a while, and the account's
+                // balance is read again so it shows.
+                if (value && value.stage === "claimed") {
+                    var at = receiveClaimedAt
+                    if (!at[id]) {
+                        at[id] = Date.now()
+                        receiveClaimedAt = at
+                        receiveClaimedAtChanged()
+                    }
+                    loadBridgeNet()
+                }
                 next(i + 1)
-            }, function() {
+            }, function(message, kind) {
+                failedAny = true
+                console.log("names_ui: receive_status", id + ":", kind, message)
                 next(i + 1)
             }, 60000, false)
         }
         next(0)
     }
+    // The clock of the checks: a tick a second while the card or Receive shows (it moves the
+    // "next check in N s" line), and a check whenever one is due.
+    readonly property bool receiveWatching: bridgeReady && namesNet === "0.4" && section === "wallet"
+        && (walletView === "home" || walletView === "ethreceive") && Qt.application.state === Qt.ApplicationActive
+    onReceiveWatchingChanged: if (receiveWatching) receiveCheckSoon()
     Timer {
-        interval: 60000
+        interval: 1000
         repeat: true
-        triggeredOnStart: true
-        running: root.bridgeReady && root.namesNet === "0.4" && (root.walletView === "home" || root.walletView === "ethreceive")
-        onTriggered: root.pollReceives()
+        running: root.receiveWatching
+        onTriggered: {
+            root.receiveNow = Date.now()
+            if (root.receiveNow >= root.receiveNextAt)
+                root.pollReceives(root.walletView === "ethreceive" ? root.receiveFocus : "")
+        }
+    }
+
+    /// A receive claimed here: claimed in `block` (or unknown), shown so for a while.
+    function receiveClaimed(id, block) {
+        if (id === "")
+            return
+        var all = receiveStatuses
+        all[id] = Object.assign({}, all[id] || {}, { stage: "claimed", claimed_block: block || (all[id] ? all[id].claimed_block : null) })
+        receiveStatuses = all
+        receiveStatusesChanged()
+        var at = receiveClaimedAt
+        at[id] = Date.now()
+        receiveClaimedAt = at
+        receiveClaimedAtChanged()
+        console.log("names_ui: receive", id + ": claimed", block ? "in block " + block : "")
     }
 
     /// Claims a receive that arrived: the claim screen, with the deposit instead of a file.
@@ -1653,8 +1808,12 @@ Item {
         bridgeCall("relayed_claim_status", [depositClaimJob.id], function(value) {
             claimPolling = false
             depositClaimJob = value
-            if (value && value.state === "done")
+            if (value && value.state === "done") {
                 loadBridgeNet()
+                // A receive claimed from the card: its row reads "Claimed in block N" for a while.
+                if (claimSource.indexOf("deposit:") === 0)
+                    receiveClaimed(claimSource.substr(8), value.block)
+            }
         }, function() { claimPolling = false }, 150000)
     }
     Timer {
@@ -5100,6 +5259,12 @@ Item {
         && (appRequest.kind !== "connect" || appChosen.length > 0) && appRequest.zone_in_use !== false
     // This app's own claim screen is what asked (the bridge, for the file being claimed).
     readonly property bool appForClaim: appRequest !== null && appRequest.app === "lez_bridge" && walletView === "claim" && claimCheck !== null && claimCheck.ok === true
+    // This app's own Claim or Receive screen is what asked (the bridge, inside its flow): the
+    // request is that screen's step, drawn there and not as a sheet over it. Leaving the screen
+    // leaves it pending, and the sheet shows it wherever the person goes in Names.
+    readonly property bool appInline: appRequest !== null && appSheetCompact && appRequest.app === "lez_bridge" && section === "wallet"
+        && ((walletView === "claim" && ["asking", "needs", "running", "uncertain"].indexOf(claimStageNow) >= 0)
+            || (walletView === "ethreceive" && receiveNeeds !== null))
     function appSheetTitle(request) {
         if (request === null)
             return ""
@@ -6069,9 +6234,564 @@ Item {
     /// The LEZ Bridge's setup where it is needed (the claim screen, Receive, the LEZ 0.4 card): one
     /// line and at most one button, from the one state machine (Logic.bridgeSetupState). `then`: the
     /// screen the person goes back to when the step is over.
+    /// What a request asks the wallet, and Approve / Not now: the sheet over everything for
+    /// another app's request, or, for this app's own Claim and Receive (`inline`), the step itself
+    /// on that screen (root.appInline). The same request, checks and answer either way.
+    component ApproveBody: ColumnLayout {
+        id: sheetBody
+        property bool inline: false
+        readonly property var request: root.appRequest
+        readonly property string kind: request !== null ? request.kind : ""
+        Layout.fillWidth: true
+        spacing: 14
+        // The short sheet (appSheetCompact): everything a person needs to decide, above the fold.
+        Text {
+            visible: root.appSheetCompact
+            Layout.fillWidth: true
+            text: root.appSheetTitle(sheetBody.request)
+            textFormat: Text.PlainText
+            color: root.ink
+            font.family: root.sans
+            font.pixelSize: root.px(sheetBody.inline ? 20 : 24)
+            font.weight: Font.DemiBold
+            wrapMode: Text.WordWrap
+        }
+        Hint { visible: root.appSheetCompact; color: root.ink; textFormat: Text.PlainText; text: root.appSheetLine(sheetBody.request) }
+        Hint { visible: root.appSheetCompact && root.publisherChecking(sheetBody.request); font.pixelSize: root.px(15); text: root.publisherShown(sheetBody.request) !== null ? root.publisherShown(sheetBody.request).text : "" }
+        RowLayout {
+            visible: root.appSheetCompact && root.appSheetWarning(sheetBody.request) !== ""
+            Layout.fillWidth: true
+            spacing: 10
+            Rectangle {
+                Layout.preferredWidth: 18
+                Layout.preferredHeight: 18
+                Layout.alignment: Qt.AlignTop
+                radius: 4
+                color: root.appUnderstood ? root.alarm : "transparent"
+                border.width: 2
+                border.color: root.alarm
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.appUnderstood = !root.appUnderstood }
+            }
+            Hint {
+                color: root.ink
+                textFormat: Text.PlainText
+                text: root.appSheetWarning(sheetBody.request)
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.appUnderstood = !root.appUnderstood }
+            }
+        }
+        Hint { visible: root.appSheetCompact && root.appError !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.appError }
+        Hint { visible: root.appSheetCompact && root.appBusy; color: root.brass; text: "One moment…" }
+        RowLayout {
+            visible: root.appSheetCompact
+            spacing: 10
+            Action {
+                label: sheetBody.request !== null && sheetBody.request.checking === true ? "Waiting for the check…" : "Approve"
+                strong: true
+                enabledNow: root.appCanApprove()
+                onPressed: root.answerAppRequest(true)
+            }
+            Action { label: "Not now"; enabledNow: !root.appBusy; onPressed: root.answerAppRequest(false) }
+        }
+        Link {
+            visible: root.appSheetCompact
+            text: root.appSheetDetails ? "Details ▾" : "Details ▸"
+            color: root.dim
+            font.pixelSize: root.px(15)
+            onPressed: root.appSheetDetails = !root.appSheetDetails
+        }
+        // The full sheet: shown as it is, or under Details on the short sheet.
+        ColumnLayout {
+            visible: !root.appSheetCompact || root.appSheetDetails
+            Layout.fillWidth: true
+            spacing: 14
+        Text {
+            visible: !root.appSheetCompact
+            Layout.fillWidth: true
+            text: root.appRequestTitle(sheetBody.request)
+            textFormat: Text.PlainText
+            color: root.ink
+            font.family: root.sans
+            font.pixelSize: root.px(24)
+            font.weight: Font.DemiBold
+            wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+        }
+        Hint {
+            font.pixelSize: root.px(15)
+            text: sheetBody.request === null ? "" : "Asked by the app “" + sheetBody.request.app + "”, as Basecamp names it. "
+                + root.appExpiresIn(sheetBody.request) + (root.appRequests.length > 1 ? " " + (root.appRequests.length - 1) + " more waiting." : "")
+        }
+        // Who publishes the app, checked against its LNS name by the Program Registry.
+        Text {
+            readonly property var line: root.publisherShown(sheetBody.request)
+            visible: line !== null
+            Layout.fillWidth: true
+            text: line === null ? "" : line.text
+            textFormat: Text.PlainText
+            color: line === null ? root.dim : line.tone === "good" ? root.good : line.tone === "warn" ? root.alarm : root.dim
+            font.family: root.sans
+            font.pixelSize: root.px(16)
+            font.weight: line !== null && line.tone !== "plain" ? Font.DemiBold : Font.Normal
+            wrapMode: Text.WordWrap
+        }
+        // Still asking the Program Registry: Approve waits for the answer (M-2).
+        Text {
+            visible: sheetBody.request !== null && sheetBody.request.checking === true && String(sheetBody.request.checking_what || "").indexOf("who publishes") !== 0
+            Layout.fillWidth: true
+            text: sheetBody.request === null ? "" : "Checking " + String(sheetBody.request.checking_what || "") + " with the Program Registry… Approve waits for the answer."
+            textFormat: Text.PlainText
+            color: root.dim
+            font.family: root.sans
+            font.pixelSize: root.px(16)
+            wrapMode: Text.WordWrap
+        }
+
+        // Access: why, and what sharing means.
+        Hint {
+            visible: sheetBody.kind === "connect" && sheetBody.request.reason !== ""
+            textFormat: Text.PlainText
+            color: root.ink
+            text: sheetBody.kind === "connect" ? "It says: “" + sheetBody.request.reason + "”" : ""
+        }
+        Hint {
+            visible: sheetBody.kind === "connect"
+            text: "Choose the accounts it may see. It will see their addresses and balances, and can then ask you to approve payments. It can't send anything without you."
+        }
+
+        // A token transfer: in one line, then the token, its program and how that program stands.
+        Hint {
+            visible: root.appIsToken(sheetBody.request)
+            textFormat: Text.PlainText
+            color: root.ink
+            font.pixelSize: root.px(19)
+            font.weight: Font.DemiBold
+            text: root.appTokenLine(sheetBody.request)
+        }
+        ColumnLayout {
+            visible: root.appIsToken(sheetBody.request)
+            Layout.fillWidth: true
+            spacing: 6
+            Fact { label: "Token"; value: root.appIsToken(sheetBody.request) ? Logic.tokenShown(sheetBody.request.token_name) + " (named by its maker; not LEZ)" : "" }
+            Fact { label: "Token ID"; code: true; value: root.appIsToken(sheetBody.request) ? root.shorten(sheetBody.request.asset) : ""; full: root.appIsToken(sheetBody.request) ? sheetBody.request.asset : "" }
+            Fact {
+                label: "Program"
+                value: !root.appIsToken(sheetBody.request) ? ""
+                    : sheetBody.request.program_label && sheetBody.request.program_label.text ? sheetBody.request.program_label.text
+                    : root.shorten(sheetBody.request.token_program)
+                full: root.appIsToken(sheetBody.request) ? sheetBody.request.token_program : ""
+            }
+            Fact { label: "Source"; value: root.appIsToken(sheetBody.request) ? root.programStatus(sheetBody.request.program_label) : "" }
+            Fact {
+                label: "Time"
+                value: !root.appIsToken(sheetBody.request) ? ""
+                    : Logic.tokenSendProves(/^Private\//.test(root.appChosen[0] || ""), sheetBody.request.destination)
+                    ? "Proven on this computer first: 7-12 minutes"
+                    : "One block, about 30 seconds; public: everyone sees who sent it"
+            }
+            Hint { visible: root.appIsToken(sheetBody.request) && Logic.tokenSendProves(/^Private\//.test(root.appChosen[0] || ""), sheetBody.request.destination) && root.proofWarning !== ""; color: root.alarm; text: root.proofWarning }
+            Repeater {
+                model: root.appIsToken(sheetBody.request) ? (sheetBody.request.warnings || []) : []
+                Hint {
+                    required property string modelData
+                    textFormat: Text.PlainText
+                    color: root.alarm
+                    text: "!  " + modelData
+                }
+            }
+        }
+
+        // A payment: asset, amount, destination.
+        ColumnLayout {
+            visible: sheetBody.kind === "transfer"
+            Layout.fillWidth: true
+            spacing: 6
+            Fact { visible: root.zoneFact(sheetBody.request) !== ""; label: "Zone"; value: root.zoneFact(sheetBody.request) }
+            Fact { visible: !root.appIsToken(sheetBody.request); label: "Asset"; value: sheetBody.kind === "transfer" ? sheetBody.request.asset + " (the native token)" : "" }
+            Fact { label: "Amount"; value: sheetBody.kind === "transfer" ? root.appSends(sheetBody.request) : "" }
+            Fact {
+                label: "To"
+                code: sheetBody.kind === "transfer" && sheetBody.request.destination_kind === "account"
+                value: sheetBody.kind !== "transfer" ? "" : sheetBody.request.destination_kind === "name" ? sheetBody.request.destination + " (a name)" : sheetBody.request.destination
+                full: sheetBody.kind === "transfer" ? sheetBody.request.destination : ""
+            }
+            Fact {
+                label: "Network fee"
+                value: {
+                    if (sheetBody.kind !== "transfer")
+                        return ""
+                    var fromPrivate = /^Private\//.test(root.appChosen[0] || "")
+                    // A token transfer runs the token program: its gas is sized when it's tried.
+                    if (root.appIsToken(sheetBody.request) && !Logic.tokenSendProves(fromPrivate, sheetBody.request.destination))
+                        return "Sized when it's tried, just before sending"
+                    var estimate = Logic.feeEstimate(root.feeQuote, fromPrivate || sheetBody.request.destination_kind === "name")
+                    return estimate !== "" ? estimate : "Reading the chain's fees…"
+                }
+            }
+        }
+
+        // A program call: what it is, what it can do, what the app says.
+        ColumnLayout {
+            visible: sheetBody.kind === "call"
+            Layout.fillWidth: true
+            spacing: 6
+            Fact { visible: root.zoneFact(sheetBody.request) !== ""; label: "Zone"; value: root.zoneFact(sheetBody.request) }
+            Fact {
+                label: "Program"
+                value: sheetBody.kind !== "call" ? "" : sheetBody.request.program_label && sheetBody.request.program_label.text ? sheetBody.request.program_label.text : root.shorten(sheetBody.request.program)
+            }
+            Fact { label: "Program ID"; code: true; value: sheetBody.kind === "call" ? root.shorten(sheetBody.request.program) : ""; full: sheetBody.kind === "call" ? sheetBody.request.program : "" }
+            Fact {
+                label: "Source"
+                value: sheetBody.kind === "call" ? root.programStatus(sheetBody.request.program_label) : ""
+            }
+            Fact { label: "Data"; value: sheetBody.kind === "call" ? sheetBody.request.instruction_len + " bytes" : "" }
+            Fact { label: "Gas"; value: "Sized when it's tried, just before sending; if the call would fail, nothing is sent" }
+            Part { text: "What it can do" }
+            Repeater {
+                model: sheetBody.kind === "call" ? (sheetBody.request.effects || []) : []
+                Hint {
+                    required property string modelData
+                    textFormat: Text.PlainText
+                    color: root.ink
+                    text: "•  " + modelData
+                }
+            }
+            Repeater {
+                model: sheetBody.kind === "call" ? (sheetBody.request.warnings || []) : []
+                Hint {
+                    required property string modelData
+                    textFormat: Text.PlainText
+                    color: root.alarm
+                    text: "!  " + modelData
+                }
+            }
+            Hint {
+                visible: sheetBody.kind === "call" && sheetBody.request.app_summary !== ""
+                textFormat: Text.PlainText
+                font.pixelSize: root.px(15)
+                text: sheetBody.kind === "call" ? "The app describes it as: “" + sheetBody.request.app_summary + "” (its own words, not checked)" : ""
+            }
+        }
+
+        // A private call: what the wallet's own simulation shows it does. The app's
+        // words are shown apart and never decide anything.
+        ColumnLayout {
+            visible: sheetBody.kind === "private_call"
+            Layout.fillWidth: true
+            spacing: 6
+            readonly property var sheet: sheetBody.kind === "private_call" && sheetBody.request.sheet ? sheetBody.request.sheet : null
+            Fact { visible: root.zoneFact(sheetBody.request) !== ""; label: "Zone"; value: root.zoneFact(sheetBody.request) }
+            Fact { label: "From"; code: true; value: sheetBody.kind === "private_call" ? root.accountShort(sheetBody.request.account) : ""; full: sheetBody.kind === "private_call" ? sheetBody.request.account : "" }
+            Hint {
+                visible: sheetBody.kind === "private_call" && sheetBody.request.check !== "ready"
+                color: sheetBody.kind === "private_call" && sheetBody.request.check === "failed" ? root.alarm : root.brass
+                textFormat: Text.PlainText
+                text: sheetBody.kind !== "private_call" ? ""
+                    : sheetBody.request.check === "failed" ? "The wallet couldn't simulate it, so it can't be approved: " + (sheetBody.request.check_problem || "")
+                    : "Simulating it against the chain to see what it really does…"
+            }
+            Part { visible: parent.sheet !== null; text: "What it does (simulated by your wallet)" }
+            Repeater {
+                model: parent.sheet ? parent.sheet.lines : []
+                Hint { required property string modelData; textFormat: Text.PlainText; color: root.ink; text: "•  " + modelData }
+            }
+            Repeater {
+                model: parent.sheet ? parent.sheet.refusals : []
+                Hint { required property string modelData; textFormat: Text.PlainText; color: root.alarm; text: "✕  " + modelData }
+            }
+            Part { visible: parent.sheet !== null; text: "Programs" }
+            Repeater {
+                model: parent.sheet ? parent.sheet.programs : []
+                Fact {
+                    required property var modelData
+                    label: "Program"
+                    value: (modelData.label && modelData.label.text ? modelData.label.text + " · " : "") + root.shorten(modelData.program) + " · " + root.programStatus(modelData.label)
+                           + (modelData.new_for_app ? " · new for this app" : "")
+                }
+            }
+            Part { visible: parent.sheet !== null && parent.sheet.public_changes.length > 0; text: "Public changes" }
+            Repeater {
+                model: parent.sheet ? parent.sheet.public_changes : []
+                Hint { required property string modelData; textFormat: Text.PlainText; color: root.ink; text: "•  " + modelData }
+            }
+            Part { visible: parent.sheet !== null; text: "Privacy" }
+            Repeater {
+                model: parent.sheet ? parent.sheet.privacy : []
+                Hint { required property string modelData; textFormat: Text.PlainText; color: root.ink; text: "•  " + modelData }
+            }
+            Repeater {
+                model: parent.sheet ? parent.sheet.warnings : []
+                Hint { required property string modelData; textFormat: Text.PlainText; color: root.alarm; text: "!  " + modelData }
+            }
+            Fact { label: "Data"; value: sheetBody.kind === "private_call" ? sheetBody.request.message_len + " bytes, proven, not published" : "" }
+            Hint { visible: sheetBody.kind === "private_call"; textFormat: Text.PlainText; color: root.brass; text: sheetBody.kind === "private_call" ? sheetBody.request.prove_expect : "" }
+            Hint { visible: sheetBody.kind === "private_call" && root.proofWarning !== ""; color: root.alarm; text: root.proofWarning }
+            Hint {
+                visible: sheetBody.kind === "private_call" && sheetBody.request.app_summary !== ""
+                textFormat: Text.PlainText
+                font.pixelSize: root.px(15)
+                text: sheetBody.kind === "private_call" ? "The app describes it as: “" + sheetBody.request.app_summary + "” (its own words, not checked)" : ""
+            }
+        }
+
+        // A secret grant: what the app gets, and what it can't do with it.
+        ColumnLayout {
+            visible: sheetBody.kind === "secret"
+            Layout.fillWidth: true
+            spacing: 6
+            Fact { label: "Account"; code: true; value: sheetBody.kind === "secret" ? root.accountShort(sheetBody.request.account) : ""; full: sheetBody.kind === "secret" ? sheetBody.request.account : "" }
+            Fact { label: "For"; value: sheetBody.kind === "secret" ? sheetBody.request.scope : "" }
+            Hint { visible: sheetBody.kind === "secret"; textFormat: Text.PlainText; color: root.ink; text: sheetBody.kind === "secret" ? sheetBody.request.explanation : "" }
+        }
+
+        // A call someone else pays for: the wallet's own build, in plain words (LEZ 0.4 only).
+        ColumnLayout {
+            id: relayedBox
+            visible: sheetBody.kind === "relayed_call"
+            Layout.fillWidth: true
+            spacing: 6
+            readonly property var shown: Logic.relayedSheet(sheetBody.kind === "relayed_call" ? sheetBody.request.sheet : null)
+            Repeater {
+                model: relayedBox.shown.lines
+                Hint { required property var modelData; textFormat: Text.PlainText; color: root.ink; text: modelData }
+            }
+            Repeater {
+                model: relayedBox.shown.warnings
+                Hint { required property var modelData; textFormat: Text.PlainText; color: root.brass; text: modelData }
+            }
+            Hint { textFormat: Text.PlainText; color: root.ink; text: "Privacy: " + relayedBox.shown.privacy }
+            Hint { textFormat: Text.PlainText; text: relayedBox.shown.after }
+            Hint { visible: relayedBox.shown.says !== ""; textFormat: Text.PlainText; text: "The app describes it as: “" + relayedBox.shown.says + "” (its own words, not checked)" }
+            Repeater {
+                model: relayedBox.shown.why
+                Hint { required property var modelData; textFormat: Text.PlainText; color: root.alarm; text: "Refused: " + modelData }
+            }
+        }
+
+        // Programs an app declares it will ask the wallet to sign for.
+        ColumnLayout {
+            visible: sheetBody.kind === "programs"
+            Layout.fillWidth: true
+            spacing: 6
+            // Each program in full, with what the Program Registry says of it.
+            Repeater {
+                model: sheetBody.kind === "programs" && sheetBody.request.sheet ? sheetBody.request.sheet.programs : []
+                ColumnLayout {
+                    required property var modelData
+                    Layout.fillWidth: true
+                    spacing: 2
+                    Hint { textFormat: Text.PlainText; color: root.ink; font.family: root.mono; text: modelData.program }
+                    Hint {
+                        textFormat: Text.PlainText
+                        text: modelData.label && modelData.label.text ? "Program Registry: " + Logic.clean(modelData.label.text) + (modelData.label.verified ? " (source verified)" : " (source not verified)")
+                            : modelData.label && modelData.label.registry ? "Not in the Program Registry." : "The Program Registry isn't installed, so this program has no label."
+                    }
+                }
+            }
+            Repeater {
+                model: sheetBody.kind === "programs" && sheetBody.request.sheet ? sheetBody.request.sheet.warnings : []
+                Hint { required property var modelData; textFormat: Text.PlainText; color: root.brass; text: Logic.clean(modelData) }
+            }
+            Hint { visible: sheetBody.kind === "programs" && sheetBody.request.app_summary !== ""; textFormat: Text.PlainText; text: sheetBody.kind === "programs" ? "The app says why: “" + Logic.clean(sheetBody.request.app_summary) + "” (its own words, not checked)" : "" }
+            Hint { visible: sheetBody.kind === "programs"; textFormat: Text.PlainText; color: root.ink; text: "Approving signs nothing. It lets this app ask you to sign calls to these programs only, each of them shown to you first. Settings → Connected apps takes it back." }
+        }
+
+        // A token source: which tokens it adds to the holdings view.
+        ColumnLayout {
+            visible: sheetBody.kind === "token_source"
+            Layout.fillWidth: true
+            spacing: 6
+            Fact { label: "Token program"; code: true; value: sheetBody.kind === "token_source" ? root.shorten(sheetBody.request.token_program) : ""; full: sheetBody.kind === "token_source" ? sheetBody.request.token_program : "" }
+            Repeater {
+                model: sheetBody.kind === "token_source" ? sheetBody.request.definitions : []
+                Fact {
+                    required property var modelData
+                    label: modelData.symbol !== "" ? modelData.symbol : "Token"
+                    value: modelData.name + " · " + modelData.decimals + " decimals · " + root.shorten(modelData.definition) + (modelData.origin !== "" ? " · " + modelData.origin : "")
+                }
+            }
+            Hint { visible: sheetBody.kind === "token_source"; textFormat: Text.PlainText; color: root.ink; text: "The names and decimals are the app's words. Approving only lists these tokens with your holdings; it moves nothing." }
+        }
+
+        // The account to use.
+        Part { text: sheetBody.kind === "connect" ? "Accounts it may see" : sheetBody.kind === "call" || sheetBody.kind === "relayed_call" ? "Sign with" : sheetBody.kind === "private_call" || sheetBody.kind === "secret" ? "Account" : sheetBody.kind === "token_source" || sheetBody.kind === "programs" ? "Confirm" : "Pay from" }
+        Repeater {
+            model: sheetBody.request !== null ? (sheetBody.request.choices || []) : []
+            Rectangle {
+                id: choiceRow
+                required property var modelData
+                readonly property bool ticked: root.appChosen.indexOf(modelData.account) >= 0
+                Layout.fillWidth: true
+                implicitHeight: root.px(44)
+                radius: 6
+                color: ticked ? root.raised : "transparent"
+                border.width: 1
+                border.color: ticked ? root.brass : root.line
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 12
+                    anchors.rightMargin: 12
+                    spacing: 10
+                    Rectangle {
+                        Layout.preferredWidth: 18
+                        Layout.preferredHeight: 18
+                        radius: sheetBody.kind === "connect" ? 4 : 9
+                        color: choiceRow.ticked ? root.brass : "transparent"
+                        border.width: 2
+                        border.color: choiceRow.ticked ? root.brass : root.dim
+                    }
+                    Text { text: root.accountShort(choiceRow.modelData.account); color: root.ink; font.family: root.mono; font.pixelSize: root.px(16) }
+                    Text { text: choiceRow.modelData.label; color: root.dim; font.family: root.sans; font.pixelSize: root.px(15); elide: Text.ElideRight; Layout.fillWidth: true }
+                    Text { visible: !!choiceRow.modelData.granted; text: "Shared with this app"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(14) }
+                }
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.chooseAppAccount(choiceRow.modelData.account)
+                }
+            }
+        }
+        Hint {
+            visible: sheetBody.request !== null && (sheetBody.request.choices || []).length === 0
+            color: root.alarm
+            text: sheetBody.kind === "call" ? "No account can sign this yet. Your wallet's public accounts are being read; if none shows, create your wallet first (Welcome, Create my wallet)."
+                : "Your wallet has no accounts yet. Create your wallet first (Welcome, Create my wallet)."
+        }
+
+        }
+
+        // A risky call needs a second, deliberate tick.
+        RowLayout {
+            visible: !root.appSheetCompact && sheetBody.request !== null && root.appRequestRisky(sheetBody.request)
+            Layout.fillWidth: true
+            spacing: 10
+            Rectangle {
+                Layout.preferredWidth: 18
+                Layout.preferredHeight: 18
+                Layout.alignment: Qt.AlignTop
+                radius: 4
+                color: root.appUnderstood ? root.alarm : "transparent"
+                border.width: 2
+                border.color: root.alarm
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.appUnderstood = !root.appUnderstood }
+            }
+            Hint {
+                color: root.ink
+                text: root.appIsToken(sheetBody.request) ? "I've read the warnings above and still want to send this token."
+                    : "I've read the warnings above and trust " + (sheetBody.request !== null ? sheetBody.request.app : "this app") + " with this account."
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.appUnderstood = !root.appUnderstood }
+            }
+        }
+
+        ColumnLayout {
+            visible: sheetBody.request !== null && sheetBody.request.zone_in_use === false
+            Layout.fillWidth: true
+            spacing: 8
+            Hint {
+                textFormat: Text.PlainText
+                color: root.alarm
+                text: sheetBody.request === null || sheetBody.request.zone_in_use !== false ? ""
+                    : sheetBody.request.zone_removed ? "This was asked for a zone that has been removed since. Reject it, and the app can ask again."
+                    : "This was asked for " + sheetBody.request.zone_name + ", and the wallet is using " + root.zoneName + " now. Switch to " + sheetBody.request.zone_name + " to approve it, or reject it."
+            }
+            Action {
+                visible: sheetBody.request !== null && !sheetBody.request.zone_removed
+                label: root.zoneBusy ? "Switching…" : "Switch to " + (sheetBody.request !== null && sheetBody.request.zone_name ? sheetBody.request.zone_name : "it")
+                enabledNow: !root.zoneBusy && !root.appBusy
+                onPressed: root.zoneUse(sheetBody.request.zone)
+            }
+            Hint { visible: root.zoneNoteBad; color: root.alarm; font.pixelSize: root.px(15); textFormat: Text.PlainText; text: root.zoneNote }
+        }
+        Hint { visible: !root.appSheetCompact && root.appError !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.appError }
+        Hint { visible: !root.appSheetCompact && root.appBusy; color: root.brass; text: sheetBody.kind === "call" ? "Trying it, then signing and sending it. This waits for its block, up to two minutes…" : "One moment…" }
+        RowLayout {
+            visible: !root.appSheetCompact
+            Layout.topMargin: 8
+            spacing: 10
+            Action {
+                label: sheetBody.request !== null && sheetBody.request.checking === true ? "Waiting for the check…" : sheetBody.kind === "connect" ? "Share" : sheetBody.kind === "call" ? "Approve and sign" : sheetBody.kind === "private_call" ? "Approve, prove and send" : sheetBody.kind === "secret" ? "Allow" : sheetBody.kind === "token_source" ? "Show these tokens" : sheetBody.kind === "relayed_call" ? "Approve" : sheetBody.kind === "programs" ? "Allow these programs" : "Approve and send"
+                strong: true
+                enabledNow: root.appCanApprove()
+                onPressed: root.answerAppRequest(true)
+            }
+            Action {
+                label: "Reject"
+                enabledNow: !root.appBusy
+                onPressed: root.answerAppRequest(false)
+            }
+        }
+    }
+
+    /// The steps in one row, "✓ Arrived  ✓ Checked  3 Approve  4 Claim": done ones ticked, the
+    /// current one marked, later ones dim. Wraps when the pane is narrow.
+    component StepRow: Flow {
+        id: stepRow
+        property var steps: []
+        Layout.fillWidth: true
+        spacing: 6
+        Repeater {
+            model: stepRow.steps
+            Row {
+                id: stepCell
+                required property var modelData
+                required property int index
+                spacing: 6
+                Text { visible: stepCell.index > 0; anchors.verticalCenter: parent.verticalCenter; text: "›"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(16) }
+                Rectangle {
+                    readonly property bool now: stepCell.modelData.state === "now"
+                    implicitWidth: stepLabel.implicitWidth + 22
+                    implicitHeight: root.px(32)
+                    width: implicitWidth
+                    height: implicitHeight
+                    radius: height / 2
+                    color: now ? root.raised : "transparent"
+                    border.width: now ? 2 : 1
+                    border.color: now ? root.ink : stepCell.modelData.state === "done" ? Qt.rgba(root.good.r, root.good.g, root.good.b, 0.5) : root.line
+                    Text {
+                        id: stepLabel
+                        anchors.centerIn: parent
+                        text: (stepCell.modelData.state === "done" ? "✓ " : stepCell.modelData.n + " ") + stepCell.modelData.short
+                        color: stepCell.modelData.state === "done" ? root.good : parent.now ? root.ink : root.dim
+                        font.family: root.sans
+                        font.pixelSize: root.px(15)
+                        font.weight: parent.now ? Font.Bold : Font.Medium
+                    }
+                }
+            }
+        }
+    }
+
+    /// A panel in the third tone (root.underway): something of yours under way. Tinted, with a
+    /// rule down its left side.
+    component UnderwayPanel: Rectangle {
+        default property alias content: underwayColumn.data
+        Layout.fillWidth: true
+        implicitHeight: underwayColumn.implicitHeight + 36
+        radius: 10
+        color: root.underwayFill
+        border.width: 1
+        border.color: root.underwayLine
+        Rectangle { x: 0; y: 0; width: 5; height: parent.height; radius: 2; color: root.underway }
+        ColumnLayout {
+            id: underwayColumn
+            x: 24
+            y: 18
+            width: parent.width - 44
+            spacing: 10
+        }
+    }
+    /// "Checked just now · next check in 42 s" and Check now (one call; nothing while one runs).
+    component ReceiveCheckLine: RowLayout {
+        spacing: 12
+        Text { text: root.receiveCheckLine; visible: text !== ""; color: root.receiveCheckFailed && !root.receivePolling ? root.brass : root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
+        Link { visible: !root.receivePolling && !root.receiveHold; text: "Check now"; color: root.dim; font.pixelSize: root.px(14); onPressed: root.receiveCheckNow() }
+    }
+
     component BridgeSetupBox: RowLayout {
         id: setupBox
         property string then: ""
+        // Yellow only where it holds up what the screen is for (Receive, Claim, an install);
+        // the card's Update for a bridge that still receives is a plain button.
+        property bool primary: true
         readonly property var setup: root.bridgeSetup
         Layout.fillWidth: true
         spacing: 12
@@ -6085,7 +6805,7 @@ Item {
         Action {
             visible: setupBox.setup.button !== ""
             label: setupBox.setup.button
-            strong: setupBox.setup.action !== "settings"
+            strong: setupBox.primary && setupBox.setup.action !== "settings" && !root.bridgeSetupOptional
             onPressed: root.bridgeSetupAction(setupBox.setup.action, setupBox.then)
         }
     }
@@ -7254,32 +7974,75 @@ Item {
                             Text { text: "LEZ 0.4"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
                         }
                         Hint { font.pixelSize: root.px(15); text: "Our own chain for the bridge, where bridged Sepolia tokens arrive. It is reset now and then." }
+                        // The card's one yellow button: Receive, unless a receive has arrived (its
+                        // Claim is then the one) or the bridge setup blocks everything.
                         Flow {
                             Layout.fillWidth: true
                             spacing: 10
-                            Action { label: "Receive from Ethereum"; strong: true; onPressed: root.openEthReceive() }
+                            Action { label: "Receive from Ethereum"; strong: !root.cardSetupBlocks && !arrivingPanel.anyClaim; onPressed: root.openEthReceive() }
                             Action { label: "Claim a bridge deposit"; onPressed: root.openClaim() }
                         }
-                        // This wallet's receives: each one's state, and Claim once it has arrived.
-                        Repeater {
-                            model: root.receives.filter(function(x) { var st = root.receiveStatuses[x.id]; return !st || st.stage !== "claimed" })
-                            RowLayout {
-                                id: receiveRow
-                                required property var modelData
-                                readonly property var status: Logic.receiveStatusLine(root.receiveStatuses[modelData.id])
-                                Layout.fillWidth: true
-                                spacing: 10
-                                Hint {
+                        // Arriving from Ethereum: this wallet's receives in their own panel, in the
+                        // third tone; amount large, the account short, the state under it; Claim
+                        // in the panel once it has arrived. A row opens Receive at its step.
+                        UnderwayPanel {
+                            id: arrivingPanel
+                            readonly property var view: root.receiveHasStatus ? Logic.receiveRowsShown(root.receives, root.receiveStatuses, root.receiveClaimedAt, root.receiveNow, root.receiveShowAll)
+                                : { rows: root.receives.map(function(x) { return { id: x.id, symbol: x.symbol, amount: x.amount, account: x.account, progress: { stage: "old", card: "The LEZ Bridge here can't follow it: update it.", tone: "plain", claim: false } } }), hidden: 0 }
+                            readonly property bool anyClaim: view.rows.some(function(x) { return x.progress.claim })
+                            visible: view.rows.length > 0 || view.hidden > 0
+                            Text { text: "Arriving from Ethereum"; color: root.underway; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold; font.capitalization: Font.AllUppercase; font.letterSpacing: 0.6 }
+                            Repeater {
+                                model: arrivingPanel.view.rows
+                                ColumnLayout {
+                                    id: arrivingRow
+                                    required property var modelData
+                                    required property int index
+                                    readonly property var p: modelData.progress
                                     Layout.fillWidth: true
-                                    font.pixelSize: root.px(15)
-                                    color: root.receiveHasStatus && receiveRow.status.tone === "ready" ? root.good : root.ink
-                                    text: receiveRow.modelData.amount + " " + receiveRow.modelData.symbol + " to " + Logic.idShort(receiveRow.modelData.account)
-                                        + " · " + (root.receiveHasStatus ? receiveRow.status.line : "sent from Ethereum?")
+                                    spacing: 4
+                                    Rectangle { visible: arrivingRow.index > 0; Layout.fillWidth: true; Layout.bottomMargin: 8; implicitHeight: 1; color: root.underwayLine }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 14
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 2
+                                            RowLayout {
+                                                spacing: 10
+                                                Text { text: arrivingRow.modelData.amount + " " + arrivingRow.modelData.symbol; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.Bold }
+                                                Text { Layout.alignment: Qt.AlignBaseline; text: "into " + Logic.idShort(arrivingRow.modelData.account); color: root.dim; font.family: root.sans; font.pixelSize: root.px(15) }
+                                            }
+                                            Text {
+                                                Layout.fillWidth: true
+                                                text: (arrivingRow.p.stage === "claimed" ? "✓ " : "") + arrivingRow.p.card
+                                                color: arrivingRow.p.tone === "done" ? root.good : arrivingRow.p.tone === "plain" ? root.dim : arrivingRow.p.tone === "ready" ? root.ink : root.underway
+                                                font.family: root.sans
+                                                font.pixelSize: root.px(20)
+                                                font.weight: Font.DemiBold
+                                                wrapMode: Text.WordWrap
+                                            }
+                                            Hint {
+                                                visible: arrivingRow.p.stage === "claimed"
+                                                font.pixelSize: root.px(15)
+                                                text: arrivingRow.p.stage === "claimed" ? Logic.receiveBalanceLine(root.bridgeNetBlocks, arrivingRow.modelData.account, arrivingRow.modelData.symbol) : ""
+                                            }
+                                        }
+                                        Action { visible: arrivingRow.p.claim && root.bridgeSetupClear; label: "Claim"; strong: true; onPressed: root.claimReceive(arrivingRow.modelData.id) }
+                                        Link { visible: !arrivingRow.p.claim && arrivingRow.p.stage !== "old"; text: "Open ›"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.openEthReceive(arrivingRow.modelData.id) }
+                                    }
                                 }
-                                Action { visible: root.receiveHasStatus && receiveRow.status.claim; label: "Claim"; strong: true; onPressed: root.claimReceive(receiveRow.modelData.id) }
                             }
+                            Link {
+                                visible: arrivingPanel.view.hidden > 0 || root.receiveShowAll
+                                text: root.receiveShowAll ? "Show fewer" : "Show " + arrivingPanel.view.hidden + (arrivingPanel.view.hidden === 1 ? " more code" : " more codes") + " not deposited"
+                                color: root.dim
+                                font.pixelSize: root.px(15)
+                                onPressed: root.receiveShowAll = !root.receiveShowAll
+                            }
+                            ReceiveCheckLine { visible: root.receiveHasStatus }
                         }
-                        BridgeSetupBox { visible: root.walletView === "home" && root.bridgeSetup.state !== "" }
+                        BridgeSetupBox { visible: root.walletView === "home" && root.bridgeSetup.state !== ""; primary: root.cardSetupBlocks }
                         Hint {
                             font.pixelSize: root.px(15)
                             color: root.bridgeNetStatusNow.tone === "bad" ? root.alarm : root.bridgeNetStatusNow.tone === "warn" ? root.brass : root.dim
@@ -8297,15 +9060,7 @@ Item {
                         needs: root.claimNeeds !== null ? root.claimNeeds.needs : "", job: root.depositClaimJob, summary: root.claimSummaryNow })
                     readonly property var stepNow: steps.filter(function(x) { return x.state === "now" })[0] || null
                     readonly property bool stepsShown: root.claimStageNow !== "missing" && root.claimStageNow !== "looking" && root.bridgeSetupClear
-                    Repeater {
-                        model: claimScreen.stepsShown ? claimScreen.steps.filter(function(x) { return x.state === "done" && x.key !== "done" }) : []
-                        Hint {
-                            required property var modelData
-                            font.pixelSize: root.px(15)
-                            color: root.good
-                            text: "✓ Step " + modelData.n + " of " + modelData.total + " · " + modelData.title + (modelData.line ? ": " + modelData.line : "")
-                        }
-                    }
+                    StepRow { visible: claimScreen.stepsShown || root.claimStageNow === "done"; steps: claimScreen.steps }
                     Text {
                         visible: claimScreen.stepsShown && claimScreen.stepNow !== null || root.claimStageNow === "done"
                         Layout.fillWidth: true
@@ -8337,14 +9092,16 @@ Item {
                     Hint { visible: root.claimStageNow === "elsewhere"; color: root.alarm; text: root.claimAccountProblemNow }
                     Hint { visible: root.claimStageNow === "wrong_bridge"; color: root.alarm; text: root.claimBridgeNow.problem }
                     Hint { visible: root.claimStageNow === "ready" && root.claimCheck !== null && !!root.claimCheck.privacy; color: root.brass; font.pixelSize: root.px(15); text: "Public claim: links this deposit to this account." }
-                    Action { visible: root.claimStageNow === "ready"; label: "Claim"; strong: true; onPressed: root.startClaim(false) }
+                    // Approve (next) is the real action: this only goes on to it.
+                    Action { visible: root.claimStageNow === "ready"; label: "Continue"; strong: true; onPressed: root.startClaim(false) }
                     Hint { visible: root.claimStageNow === "ready"; font.pixelSize: root.px(15); text: "The bridge pays the fee." }
 
-                    // Steps answered in a sheet over this screen.
+                    // The wallet's questions for this claim, answered here as the step itself.
                     Hint {
-                        visible: root.claimStageNow === "asking" || root.claimStageNow === "needs" || (root.claimStageNow === "running" && claimScreen.stepNow !== null && claimScreen.stepNow.key === "approve")
-                        text: root.claimStageNow === "asking" ? "Asking your wallet…" : "Answer it in the sheet."
+                        visible: !root.appInline && (root.claimStageNow === "asking" || root.claimStageNow === "needs" || (root.claimStageNow === "running" && claimScreen.stepNow !== null && claimScreen.stepNow.key === "approve"))
+                        text: root.claimStageNow === "asking" ? "Asking your wallet…" : root.appRequest !== null ? "Answer it in the sheet." : "Asking your wallet…"
                     }
+                    ApproveBody { visible: root.appInline && root.walletView === "claim"; inline: true }
                     Hint { visible: root.claimStageNow === "uncertain"; color: root.brass; text: "No answer from your wallet. If a claim sheet is open, reject it, then press Continue." }
                     Action { visible: root.claimStageNow === "uncertain"; label: "Continue"; strong: true; onPressed: root.startClaim(true) }
 
@@ -8379,14 +9136,14 @@ Item {
 
                     // Details, closed by default: every fact the screen used to show.
                     Link {
-                        visible: claimScreen.stepsShown && root.claimStageNow !== "start"
+                        visible: claimScreen.stepsShown && root.claimStageNow !== "start" && !root.appInline
                         text: root.claimDetails ? "Details ▾" : "Details ▸"
                         color: root.dim
                         font.pixelSize: root.px(15)
                         onPressed: root.claimDetails = !root.claimDetails
                     }
                     ColumnLayout {
-                        visible: root.claimDetails && claimScreen.stepsShown && root.claimStageNow !== "start"
+                        visible: root.claimDetails && claimScreen.stepsShown && root.claimStageNow !== "start" && !root.appInline
                         Layout.fillWidth: true
                         spacing: 10
                         Hint { visible: root.claimStageNow === "checking"; font.pixelSize: root.px(15); text: "Checking the claim file on Sepolia and the bridge test network. Nothing is signed or sent." }
@@ -8423,16 +9180,6 @@ Item {
                         Hint { visible: root.claimNeeds !== null && !!root.claimNeeds.message; font.pixelSize: root.px(15); text: root.claimNeeds !== null ? String(root.claimNeeds.message || "") : "" }
                     }
 
-                    // Later steps, grey.
-                    Repeater {
-                        model: claimScreen.stepsShown ? claimScreen.steps.filter(function(x) { return x.state === "later" }) : []
-                        Hint {
-                            required property var modelData
-                            font.pixelSize: root.px(15)
-                            color: root.faint
-                            text: "Step " + modelData.n + " of " + modelData.total + " · " + modelData.title
-                        }
-                    }
                     Link {
                         visible: root.claimStageNow === "done"
                         text: "Claim another deposit"
@@ -8450,6 +9197,10 @@ Item {
                     spacing: 12
                     readonly property var stepNow: root.receiveStepsNow.filter(function(x) { return x.state === "now" })[0] || null
                     readonly property var result: root.receiveResult
+                    readonly property var p: root.receiveFocusProgress
+                    // The receive followed has no deposit seen yet: its code (when made here) is the step.
+                    readonly property bool depositing: root.receiveFocus === "" || p.stage === "waiting" || p.stage === "checking"
+                    readonly property bool shows: !root.receiveMissing && root.bridgeReceives && root.bridgeSetupClear
                     Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
                     Text { text: "Receive from Ethereum"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
                     RunsOn { net: "0.4" }
@@ -8459,18 +9210,28 @@ Item {
                         visible: root.receiveMissing && root.bridgeSetup.state === ""
                         spacing: 12
                         Hint { Layout.fillWidth: false; color: root.brass; text: root.installedList === null || root.bridgeBundle === "" ? "Looking for the LEZ Bridge…" : "The LEZ Bridge doesn't answer yet." }
-                        Link { text: "Look again"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.openEthReceive() }
+                        Link { text: "Look again"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.openEthReceive(root.receiveFocus === "" ? undefined : root.receiveFocus) }
+                    }
+                    // A receive opened again (or on its way when Receive opened): said first.
+                    Text {
+                        visible: receiveScreen.shows && root.receiveFocus !== "" && receiveScreen.result === null
+                        Layout.fillWidth: true
+                        text: Logic.receiveOnItsWay(root.receiveFocusRow, root.receiveStatuses[root.receiveFocus])
+                        color: root.ink
+                        font.family: root.sans
+                        font.pixelSize: root.px(20)
+                        wrapMode: Text.WordWrap
                     }
 
-                    Repeater {
-                        model: root.receiveMissing || !root.bridgeReceives ? [] : root.receiveStepsNow.filter(function(x) { return x.state === "done" })
-                        Hint { required property var modelData; font.pixelSize: root.px(15); color: root.good; text: "✓ Step " + modelData.n + " of " + modelData.total + " · " + modelData.title }
-                    }
+                    // The steps in a row (done ticked, the current one marked, later ones dim); under
+                    // it only the current step.
+                    StepRow { visible: receiveScreen.shows; steps: root.receiveStepsNow }
                     Text {
-                        visible: !root.receiveMissing && root.bridgeReceives && root.bridgeSetupClear && receiveScreen.stepNow !== null
+                        readonly property var step: receiveScreen.stepNow !== null ? receiveScreen.stepNow : root.receiveStepsNow[root.receiveStepsNow.length - 1]
+                        visible: receiveScreen.shows && step !== undefined
                         Layout.fillWidth: true
-                        text: receiveScreen.stepNow === null ? "" : "Step " + receiveScreen.stepNow.n + " of " + receiveScreen.stepNow.total + " · " + receiveScreen.stepNow.title
-                        color: root.ink
+                        text: step === undefined ? "" : (step.state === "done" ? "✓ " : "") + "Step " + step.n + " of " + step.total + " · " + step.title
+                        color: step !== undefined && step.state === "done" ? root.good : root.ink
                         font.family: root.sans
                         font.pixelSize: root.px(22)
                         font.weight: Font.DemiBold
@@ -8479,7 +9240,7 @@ Item {
 
                     // Step: amount and account.
                     ColumnLayout {
-                        visible: !root.receiveMissing && root.bridgeReceives && root.bridgeSetupClear && root.receiveResult === null && root.receiveNeeds === null
+                        visible: receiveScreen.shows && root.receiveFocus === "" && root.receiveResult === null && root.receiveNeeds === null
                         Layout.fillWidth: true
                         spacing: 10
                         Flow {
@@ -8529,11 +9290,13 @@ Item {
                         }
                         Action { label: root.receiveAsking ? "Making the code…" : "Make the deposit code"; strong: true; enabledNow: !root.receiveAsking && root.receivePublicOk && root.receiveAccountNow !== ""; onPressed: root.makeReceive() }
                     }
-                    Hint { visible: root.receiveNeeds !== null; text: "Answer it in the sheet." }
+                    Hint { visible: root.receiveNeeds !== null && !root.appInline; text: "Answer it in the sheet." }
+                    // This screen's own question to the wallet, answered here (not in a sheet over it).
+                    ApproveBody { visible: root.appInline && root.walletView === "ethreceive"; inline: true }
 
-                    // Step: the code, for the deposit page.
+                    // Step: the code, for the deposit page (until the deposit is seen).
                     ColumnLayout {
-                        visible: receiveScreen.result !== null
+                        visible: receiveScreen.result !== null && receiveScreen.depositing
                         Layout.fillWidth: true
                         spacing: 12
                         Hint {
@@ -8577,6 +9340,38 @@ Item {
                             Hint { Layout.fillWidth: true; font.pixelSize: root.px(15); text: "Scan this with your phone, or copy the link." }
                         }
                     }
+                    // Where the deposit is, as it happens: waiting for it, seen, final, arrived (Claim
+                    // here), claimed. The wait is the headline, in the third tone.
+                    UnderwayPanel {
+                        visible: receiveScreen.shows && root.receiveFocus !== "" && root.receiveHasStatus
+                        Text {
+                            Layout.fillWidth: true
+                            text: (receiveScreen.p.stage === "claimed" ? "✓ " : "") + receiveScreen.p.headline
+                            color: receiveScreen.p.tone === "done" ? root.good : receiveScreen.p.tone === "plain" ? root.dim : receiveScreen.p.tone === "ready" ? root.ink : root.underway
+                            font.family: root.sans
+                            font.pixelSize: root.px(26)
+                            font.weight: Font.DemiBold
+                            wrapMode: Text.WordWrap
+                        }
+                        Hint { visible: receiveScreen.p.detail !== ""; font.pixelSize: root.px(15); text: receiveScreen.p.detail }
+                        Hint {
+                            visible: receiveScreen.p.stage === "claimable" && root.receiveFocusRow !== null
+                            color: root.ink
+                            text: root.receiveFocusRow === null ? "" : root.receiveFocusRow.amount + " " + root.receiveFocusRow.symbol + " is ready to claim into " + Logic.idShort(root.receiveFocusRow.account) + ". The bridge's relay pays the fee."
+                        }
+                        Action { visible: receiveScreen.p.claim; label: "Claim"; strong: true; onPressed: root.claimReceive(root.receiveFocus) }
+                        Hint {
+                            visible: receiveScreen.p.stage === "claimed" && root.receiveFocusRow !== null
+                            font.pixelSize: root.px(15)
+                            text: root.receiveFocusRow === null ? "" : Logic.receiveBalanceLine(root.bridgeNetBlocks, root.receiveFocusRow.account, root.receiveFocusRow.symbol)
+                        }
+                        Hint {
+                            visible: receiveScreen.p.stage === "waiting" && receiveScreen.result === null
+                            font.pixelSize: root.px(15)
+                            text: "Its page link shows only when the code is made. If you haven't deposited yet, make another code."
+                        }
+                        ReceiveCheckLine { visible: receiveScreen.p.stage !== "claimed" && receiveScreen.p.stage !== "claimable" }
+                    }
                     RowLayout {
                         visible: root.receiveError !== ""
                         spacing: 12
@@ -8585,14 +9380,14 @@ Item {
                     }
 
                     Link {
-                        visible: !root.receiveMissing
+                        visible: !root.receiveMissing && !root.appInline
                         text: root.receiveDetails ? "Details ▾" : "Details ▸"
                         color: root.dim
                         font.pixelSize: root.px(15)
                         onPressed: root.receiveDetails = !root.receiveDetails
                     }
                     ColumnLayout {
-                        visible: root.receiveDetails && !root.receiveMissing
+                        visible: root.receiveDetails && !root.receiveMissing && !root.appInline
                         Layout.fillWidth: true
                         spacing: 10
                         Hint { font.pixelSize: root.px(15); text: "The wallet makes this deposit's secret from your account's own key; this app never sees it. The page gets only a code: the amount, the vault and a commitment that hides which account receives it." }
@@ -8608,11 +9403,7 @@ Item {
                         Hint { visible: text !== ""; font.pixelSize: root.px(15); text: Logic.compareDigitsDetail(receiveScreen.result !== null ? receiveScreen.result.compare : null) }
                         Hint { visible: root.receiveNeeds !== null && !!root.receiveNeeds.message; font.pixelSize: root.px(15); text: root.receiveNeeds !== null ? String(root.receiveNeeds.message || "") : "" }
                     }
-                    Repeater {
-                        model: root.receiveMissing || !root.bridgeReceives ? [] : root.receiveStepsNow.filter(function(x) { return x.state === "later" })
-                        Hint { required property var modelData; font.pixelSize: root.px(15); color: root.faint; text: "Step " + modelData.n + " of " + modelData.total + " · " + modelData.title }
-                    }
-                    Link { visible: receiveScreen.result !== null; text: "Make another code"; font.pixelSize: root.px(15); onPressed: root.openEthReceive() }
+                    Link { visible: receiveScreen.shows && (root.receiveFocus !== "" || receiveScreen.result !== null); text: "Make another code"; font.pixelSize: root.px(15); onPressed: root.startNewReceive() }
                 }
 
                 // ── Add a token by its address ──
@@ -11418,7 +12209,8 @@ Item {
     // person answers it: who asks, the account to use, then what it will do.
     Rectangle {
         id: appSheet
-        visible: root.appRequest !== null
+        // Not while this app's own Claim or Receive screen shows it as its step (never twice).
+        visible: root.appRequest !== null && !root.appInline
         anchors.fill: parent
         color: Qt.rgba(root.slate.r, root.slate.g, root.slate.b, 0.94)
         readonly property var request: root.appRequest
@@ -11436,481 +12228,7 @@ Item {
                 width: Math.min(appSheet.width - root.px(64), root.px(760))
                 x: (appSheet.width - width) / 2
                 y: Math.max(root.px(32), (appSheet.height - implicitHeight) / 2)
-                // The short sheet (appSheetCompact): everything a person needs to decide, above the fold.
-                Text {
-                    visible: root.appSheetCompact
-                    Layout.fillWidth: true
-                    text: root.appSheetTitle(appSheet.request)
-                    textFormat: Text.PlainText
-                    color: root.ink
-                    font.family: root.sans
-                    font.pixelSize: root.px(24)
-                    font.weight: Font.DemiBold
-                    wrapMode: Text.WordWrap
-                }
-                Hint { visible: root.appSheetCompact; color: root.ink; textFormat: Text.PlainText; text: root.appSheetLine(appSheet.request) }
-                Hint { visible: root.appSheetCompact && root.publisherChecking(appSheet.request); font.pixelSize: root.px(15); text: root.publisherShown(appSheet.request) !== null ? root.publisherShown(appSheet.request).text : "" }
-                RowLayout {
-                    visible: root.appSheetCompact && root.appSheetWarning(appSheet.request) !== ""
-                    Layout.fillWidth: true
-                    spacing: 10
-                    Rectangle {
-                        Layout.preferredWidth: 18
-                        Layout.preferredHeight: 18
-                        Layout.alignment: Qt.AlignTop
-                        radius: 4
-                        color: root.appUnderstood ? root.alarm : "transparent"
-                        border.width: 2
-                        border.color: root.alarm
-                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.appUnderstood = !root.appUnderstood }
-                    }
-                    Hint {
-                        color: root.ink
-                        textFormat: Text.PlainText
-                        text: root.appSheetWarning(appSheet.request)
-                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.appUnderstood = !root.appUnderstood }
-                    }
-                }
-                Hint { visible: root.appSheetCompact && root.appError !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.appError }
-                Hint { visible: root.appSheetCompact && root.appBusy; color: root.brass; text: "One moment…" }
-                RowLayout {
-                    visible: root.appSheetCompact
-                    spacing: 10
-                    Action {
-                        label: appSheet.request !== null && appSheet.request.checking === true ? "Waiting for the check…" : "Approve"
-                        strong: true
-                        enabledNow: root.appCanApprove()
-                        onPressed: root.answerAppRequest(true)
-                    }
-                    Action { label: "Not now"; enabledNow: !root.appBusy; onPressed: root.answerAppRequest(false) }
-                }
-                Link {
-                    visible: root.appSheetCompact
-                    text: root.appSheetDetails ? "Details ▾" : "Details ▸"
-                    color: root.dim
-                    font.pixelSize: root.px(15)
-                    onPressed: root.appSheetDetails = !root.appSheetDetails
-                }
-                // The full sheet: shown as it is, or under Details on the short sheet.
-                ColumnLayout {
-                    visible: !root.appSheetCompact || root.appSheetDetails
-                    Layout.fillWidth: true
-                    spacing: 14
-                Text {
-                    visible: !root.appSheetCompact
-                    Layout.fillWidth: true
-                    text: root.appRequestTitle(appSheet.request)
-                    textFormat: Text.PlainText
-                    color: root.ink
-                    font.family: root.sans
-                    font.pixelSize: root.px(24)
-                    font.weight: Font.DemiBold
-                    wrapMode: Text.WrapAtWordBoundaryOrAnywhere
-                }
-                Hint {
-                    font.pixelSize: root.px(15)
-                    text: appSheet.request === null ? "" : "Asked by the app “" + appSheet.request.app + "”, as Basecamp names it. "
-                        + root.appExpiresIn(appSheet.request) + (root.appRequests.length > 1 ? " " + (root.appRequests.length - 1) + " more waiting." : "")
-                }
-                // Who publishes the app, checked against its LNS name by the Program Registry.
-                Text {
-                    readonly property var line: root.publisherShown(appSheet.request)
-                    visible: line !== null
-                    Layout.fillWidth: true
-                    text: line === null ? "" : line.text
-                    textFormat: Text.PlainText
-                    color: line === null ? root.dim : line.tone === "good" ? root.good : line.tone === "warn" ? root.alarm : root.dim
-                    font.family: root.sans
-                    font.pixelSize: root.px(16)
-                    font.weight: line !== null && line.tone !== "plain" ? Font.DemiBold : Font.Normal
-                    wrapMode: Text.WordWrap
-                }
-                // Still asking the Program Registry: Approve waits for the answer (M-2).
-                Text {
-                    visible: appSheet.request !== null && appSheet.request.checking === true && String(appSheet.request.checking_what || "").indexOf("who publishes") !== 0
-                    Layout.fillWidth: true
-                    text: appSheet.request === null ? "" : "Checking " + String(appSheet.request.checking_what || "") + " with the Program Registry… Approve waits for the answer."
-                    textFormat: Text.PlainText
-                    color: root.dim
-                    font.family: root.sans
-                    font.pixelSize: root.px(16)
-                    wrapMode: Text.WordWrap
-                }
-
-                // Access: why, and what sharing means.
-                Hint {
-                    visible: appSheet.kind === "connect" && appSheet.request.reason !== ""
-                    textFormat: Text.PlainText
-                    color: root.ink
-                    text: appSheet.kind === "connect" ? "It says: “" + appSheet.request.reason + "”" : ""
-                }
-                Hint {
-                    visible: appSheet.kind === "connect"
-                    text: "Choose the accounts it may see. It will see their addresses and balances, and can then ask you to approve payments. It can't send anything without you."
-                }
-
-                // A token transfer: in one line, then the token, its program and how that program stands.
-                Hint {
-                    visible: root.appIsToken(appSheet.request)
-                    textFormat: Text.PlainText
-                    color: root.ink
-                    font.pixelSize: root.px(19)
-                    font.weight: Font.DemiBold
-                    text: root.appTokenLine(appSheet.request)
-                }
-                ColumnLayout {
-                    visible: root.appIsToken(appSheet.request)
-                    Layout.fillWidth: true
-                    spacing: 6
-                    Fact { label: "Token"; value: root.appIsToken(appSheet.request) ? Logic.tokenShown(appSheet.request.token_name) + " (named by its maker; not LEZ)" : "" }
-                    Fact { label: "Token ID"; code: true; value: root.appIsToken(appSheet.request) ? root.shorten(appSheet.request.asset) : ""; full: root.appIsToken(appSheet.request) ? appSheet.request.asset : "" }
-                    Fact {
-                        label: "Program"
-                        value: !root.appIsToken(appSheet.request) ? ""
-                            : appSheet.request.program_label && appSheet.request.program_label.text ? appSheet.request.program_label.text
-                            : root.shorten(appSheet.request.token_program)
-                        full: root.appIsToken(appSheet.request) ? appSheet.request.token_program : ""
-                    }
-                    Fact { label: "Source"; value: root.appIsToken(appSheet.request) ? root.programStatus(appSheet.request.program_label) : "" }
-                    Fact {
-                        label: "Time"
-                        value: !root.appIsToken(appSheet.request) ? ""
-                            : Logic.tokenSendProves(/^Private\//.test(root.appChosen[0] || ""), appSheet.request.destination)
-                            ? "Proven on this computer first: 7-12 minutes"
-                            : "One block, about 30 seconds; public: everyone sees who sent it"
-                    }
-                    Hint { visible: root.appIsToken(appSheet.request) && Logic.tokenSendProves(/^Private\//.test(root.appChosen[0] || ""), appSheet.request.destination) && root.proofWarning !== ""; color: root.alarm; text: root.proofWarning }
-                    Repeater {
-                        model: root.appIsToken(appSheet.request) ? (appSheet.request.warnings || []) : []
-                        Hint {
-                            required property string modelData
-                            textFormat: Text.PlainText
-                            color: root.alarm
-                            text: "!  " + modelData
-                        }
-                    }
-                }
-
-                // A payment: asset, amount, destination.
-                ColumnLayout {
-                    visible: appSheet.kind === "transfer"
-                    Layout.fillWidth: true
-                    spacing: 6
-                    Fact { visible: root.zoneFact(appSheet.request) !== ""; label: "Zone"; value: root.zoneFact(appSheet.request) }
-                    Fact { visible: !root.appIsToken(appSheet.request); label: "Asset"; value: appSheet.kind === "transfer" ? appSheet.request.asset + " (the native token)" : "" }
-                    Fact { label: "Amount"; value: appSheet.kind === "transfer" ? root.appSends(appSheet.request) : "" }
-                    Fact {
-                        label: "To"
-                        code: appSheet.kind === "transfer" && appSheet.request.destination_kind === "account"
-                        value: appSheet.kind !== "transfer" ? "" : appSheet.request.destination_kind === "name" ? appSheet.request.destination + " (a name)" : appSheet.request.destination
-                        full: appSheet.kind === "transfer" ? appSheet.request.destination : ""
-                    }
-                    Fact {
-                        label: "Network fee"
-                        value: {
-                            if (appSheet.kind !== "transfer")
-                                return ""
-                            var fromPrivate = /^Private\//.test(root.appChosen[0] || "")
-                            // A token transfer runs the token program: its gas is sized when it's tried.
-                            if (root.appIsToken(appSheet.request) && !Logic.tokenSendProves(fromPrivate, appSheet.request.destination))
-                                return "Sized when it's tried, just before sending"
-                            var estimate = Logic.feeEstimate(root.feeQuote, fromPrivate || appSheet.request.destination_kind === "name")
-                            return estimate !== "" ? estimate : "Reading the chain's fees…"
-                        }
-                    }
-                }
-
-                // A program call: what it is, what it can do, what the app says.
-                ColumnLayout {
-                    visible: appSheet.kind === "call"
-                    Layout.fillWidth: true
-                    spacing: 6
-                    Fact { visible: root.zoneFact(appSheet.request) !== ""; label: "Zone"; value: root.zoneFact(appSheet.request) }
-                    Fact {
-                        label: "Program"
-                        value: appSheet.kind !== "call" ? "" : appSheet.request.program_label && appSheet.request.program_label.text ? appSheet.request.program_label.text : root.shorten(appSheet.request.program)
-                    }
-                    Fact { label: "Program ID"; code: true; value: appSheet.kind === "call" ? root.shorten(appSheet.request.program) : ""; full: appSheet.kind === "call" ? appSheet.request.program : "" }
-                    Fact {
-                        label: "Source"
-                        value: appSheet.kind === "call" ? root.programStatus(appSheet.request.program_label) : ""
-                    }
-                    Fact { label: "Data"; value: appSheet.kind === "call" ? appSheet.request.instruction_len + " bytes" : "" }
-                    Fact { label: "Gas"; value: "Sized when it's tried, just before sending; if the call would fail, nothing is sent" }
-                    Part { text: "What it can do" }
-                    Repeater {
-                        model: appSheet.kind === "call" ? (appSheet.request.effects || []) : []
-                        Hint {
-                            required property string modelData
-                            textFormat: Text.PlainText
-                            color: root.ink
-                            text: "•  " + modelData
-                        }
-                    }
-                    Repeater {
-                        model: appSheet.kind === "call" ? (appSheet.request.warnings || []) : []
-                        Hint {
-                            required property string modelData
-                            textFormat: Text.PlainText
-                            color: root.alarm
-                            text: "!  " + modelData
-                        }
-                    }
-                    Hint {
-                        visible: appSheet.kind === "call" && appSheet.request.app_summary !== ""
-                        textFormat: Text.PlainText
-                        font.pixelSize: root.px(15)
-                        text: appSheet.kind === "call" ? "The app describes it as: “" + appSheet.request.app_summary + "” (its own words, not checked)" : ""
-                    }
-                }
-
-                // A private call: what the wallet's own simulation shows it does. The app's
-                // words are shown apart and never decide anything.
-                ColumnLayout {
-                    visible: appSheet.kind === "private_call"
-                    Layout.fillWidth: true
-                    spacing: 6
-                    readonly property var sheet: appSheet.kind === "private_call" && appSheet.request.sheet ? appSheet.request.sheet : null
-                    Fact { visible: root.zoneFact(appSheet.request) !== ""; label: "Zone"; value: root.zoneFact(appSheet.request) }
-                    Fact { label: "From"; code: true; value: appSheet.kind === "private_call" ? root.accountShort(appSheet.request.account) : ""; full: appSheet.kind === "private_call" ? appSheet.request.account : "" }
-                    Hint {
-                        visible: appSheet.kind === "private_call" && appSheet.request.check !== "ready"
-                        color: appSheet.kind === "private_call" && appSheet.request.check === "failed" ? root.alarm : root.brass
-                        textFormat: Text.PlainText
-                        text: appSheet.kind !== "private_call" ? ""
-                            : appSheet.request.check === "failed" ? "The wallet couldn't simulate it, so it can't be approved: " + (appSheet.request.check_problem || "")
-                            : "Simulating it against the chain to see what it really does…"
-                    }
-                    Part { visible: parent.sheet !== null; text: "What it does (simulated by your wallet)" }
-                    Repeater {
-                        model: parent.sheet ? parent.sheet.lines : []
-                        Hint { required property string modelData; textFormat: Text.PlainText; color: root.ink; text: "•  " + modelData }
-                    }
-                    Repeater {
-                        model: parent.sheet ? parent.sheet.refusals : []
-                        Hint { required property string modelData; textFormat: Text.PlainText; color: root.alarm; text: "✕  " + modelData }
-                    }
-                    Part { visible: parent.sheet !== null; text: "Programs" }
-                    Repeater {
-                        model: parent.sheet ? parent.sheet.programs : []
-                        Fact {
-                            required property var modelData
-                            label: "Program"
-                            value: (modelData.label && modelData.label.text ? modelData.label.text + " · " : "") + root.shorten(modelData.program) + " · " + root.programStatus(modelData.label)
-                                   + (modelData.new_for_app ? " · new for this app" : "")
-                        }
-                    }
-                    Part { visible: parent.sheet !== null && parent.sheet.public_changes.length > 0; text: "Public changes" }
-                    Repeater {
-                        model: parent.sheet ? parent.sheet.public_changes : []
-                        Hint { required property string modelData; textFormat: Text.PlainText; color: root.ink; text: "•  " + modelData }
-                    }
-                    Part { visible: parent.sheet !== null; text: "Privacy" }
-                    Repeater {
-                        model: parent.sheet ? parent.sheet.privacy : []
-                        Hint { required property string modelData; textFormat: Text.PlainText; color: root.ink; text: "•  " + modelData }
-                    }
-                    Repeater {
-                        model: parent.sheet ? parent.sheet.warnings : []
-                        Hint { required property string modelData; textFormat: Text.PlainText; color: root.alarm; text: "!  " + modelData }
-                    }
-                    Fact { label: "Data"; value: appSheet.kind === "private_call" ? appSheet.request.message_len + " bytes, proven, not published" : "" }
-                    Hint { visible: appSheet.kind === "private_call"; textFormat: Text.PlainText; color: root.brass; text: appSheet.kind === "private_call" ? appSheet.request.prove_expect : "" }
-                    Hint { visible: appSheet.kind === "private_call" && root.proofWarning !== ""; color: root.alarm; text: root.proofWarning }
-                    Hint {
-                        visible: appSheet.kind === "private_call" && appSheet.request.app_summary !== ""
-                        textFormat: Text.PlainText
-                        font.pixelSize: root.px(15)
-                        text: appSheet.kind === "private_call" ? "The app describes it as: “" + appSheet.request.app_summary + "” (its own words, not checked)" : ""
-                    }
-                }
-
-                // A secret grant: what the app gets, and what it can't do with it.
-                ColumnLayout {
-                    visible: appSheet.kind === "secret"
-                    Layout.fillWidth: true
-                    spacing: 6
-                    Fact { label: "Account"; code: true; value: appSheet.kind === "secret" ? root.accountShort(appSheet.request.account) : ""; full: appSheet.kind === "secret" ? appSheet.request.account : "" }
-                    Fact { label: "For"; value: appSheet.kind === "secret" ? appSheet.request.scope : "" }
-                    Hint { visible: appSheet.kind === "secret"; textFormat: Text.PlainText; color: root.ink; text: appSheet.kind === "secret" ? appSheet.request.explanation : "" }
-                }
-
-                // A call someone else pays for: the wallet's own build, in plain words (LEZ 0.4 only).
-                ColumnLayout {
-                    id: relayedBox
-                    visible: appSheet.kind === "relayed_call"
-                    Layout.fillWidth: true
-                    spacing: 6
-                    readonly property var shown: Logic.relayedSheet(appSheet.kind === "relayed_call" ? appSheet.request.sheet : null)
-                    Repeater {
-                        model: relayedBox.shown.lines
-                        Hint { required property var modelData; textFormat: Text.PlainText; color: root.ink; text: modelData }
-                    }
-                    Repeater {
-                        model: relayedBox.shown.warnings
-                        Hint { required property var modelData; textFormat: Text.PlainText; color: root.brass; text: modelData }
-                    }
-                    Hint { textFormat: Text.PlainText; color: root.ink; text: "Privacy: " + relayedBox.shown.privacy }
-                    Hint { textFormat: Text.PlainText; text: relayedBox.shown.after }
-                    Hint { visible: relayedBox.shown.says !== ""; textFormat: Text.PlainText; text: "The app describes it as: “" + relayedBox.shown.says + "” (its own words, not checked)" }
-                    Repeater {
-                        model: relayedBox.shown.why
-                        Hint { required property var modelData; textFormat: Text.PlainText; color: root.alarm; text: "Refused: " + modelData }
-                    }
-                }
-
-                // Programs an app declares it will ask the wallet to sign for.
-                ColumnLayout {
-                    visible: appSheet.kind === "programs"
-                    Layout.fillWidth: true
-                    spacing: 6
-                    // Each program in full, with what the Program Registry says of it.
-                    Repeater {
-                        model: appSheet.kind === "programs" && appSheet.request.sheet ? appSheet.request.sheet.programs : []
-                        ColumnLayout {
-                            required property var modelData
-                            Layout.fillWidth: true
-                            spacing: 2
-                            Hint { textFormat: Text.PlainText; color: root.ink; font.family: root.mono; text: modelData.program }
-                            Hint {
-                                textFormat: Text.PlainText
-                                text: modelData.label && modelData.label.text ? "Program Registry: " + Logic.clean(modelData.label.text) + (modelData.label.verified ? " (source verified)" : " (source not verified)")
-                                    : modelData.label && modelData.label.registry ? "Not in the Program Registry." : "The Program Registry isn't installed, so this program has no label."
-                            }
-                        }
-                    }
-                    Repeater {
-                        model: appSheet.kind === "programs" && appSheet.request.sheet ? appSheet.request.sheet.warnings : []
-                        Hint { required property var modelData; textFormat: Text.PlainText; color: root.brass; text: Logic.clean(modelData) }
-                    }
-                    Hint { visible: appSheet.kind === "programs" && appSheet.request.app_summary !== ""; textFormat: Text.PlainText; text: appSheet.kind === "programs" ? "The app says why: “" + Logic.clean(appSheet.request.app_summary) + "” (its own words, not checked)" : "" }
-                    Hint { visible: appSheet.kind === "programs"; textFormat: Text.PlainText; color: root.ink; text: "Approving signs nothing. It lets this app ask you to sign calls to these programs only, each of them shown to you first. Settings → Connected apps takes it back." }
-                }
-
-                // A token source: which tokens it adds to the holdings view.
-                ColumnLayout {
-                    visible: appSheet.kind === "token_source"
-                    Layout.fillWidth: true
-                    spacing: 6
-                    Fact { label: "Token program"; code: true; value: appSheet.kind === "token_source" ? root.shorten(appSheet.request.token_program) : ""; full: appSheet.kind === "token_source" ? appSheet.request.token_program : "" }
-                    Repeater {
-                        model: appSheet.kind === "token_source" ? appSheet.request.definitions : []
-                        Fact {
-                            required property var modelData
-                            label: modelData.symbol !== "" ? modelData.symbol : "Token"
-                            value: modelData.name + " · " + modelData.decimals + " decimals · " + root.shorten(modelData.definition) + (modelData.origin !== "" ? " · " + modelData.origin : "")
-                        }
-                    }
-                    Hint { visible: appSheet.kind === "token_source"; textFormat: Text.PlainText; color: root.ink; text: "The names and decimals are the app's words. Approving only lists these tokens with your holdings; it moves nothing." }
-                }
-
-                // The account to use.
-                Part { text: appSheet.kind === "connect" ? "Accounts it may see" : appSheet.kind === "call" || appSheet.kind === "relayed_call" ? "Sign with" : appSheet.kind === "private_call" || appSheet.kind === "secret" ? "Account" : appSheet.kind === "token_source" || appSheet.kind === "programs" ? "Confirm" : "Pay from" }
-                Repeater {
-                    model: appSheet.request !== null ? (appSheet.request.choices || []) : []
-                    Rectangle {
-                        id: choiceRow
-                        required property var modelData
-                        readonly property bool ticked: root.appChosen.indexOf(modelData.account) >= 0
-                        Layout.fillWidth: true
-                        implicitHeight: root.px(44)
-                        radius: 6
-                        color: ticked ? root.raised : "transparent"
-                        border.width: 1
-                        border.color: ticked ? root.brass : root.line
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 12
-                            anchors.rightMargin: 12
-                            spacing: 10
-                            Rectangle {
-                                Layout.preferredWidth: 18
-                                Layout.preferredHeight: 18
-                                radius: appSheet.kind === "connect" ? 4 : 9
-                                color: choiceRow.ticked ? root.brass : "transparent"
-                                border.width: 2
-                                border.color: choiceRow.ticked ? root.brass : root.dim
-                            }
-                            Text { text: root.accountShort(choiceRow.modelData.account); color: root.ink; font.family: root.mono; font.pixelSize: root.px(16) }
-                            Text { text: choiceRow.modelData.label; color: root.dim; font.family: root.sans; font.pixelSize: root.px(15); elide: Text.ElideRight; Layout.fillWidth: true }
-                            Text { visible: !!choiceRow.modelData.granted; text: "Shared with this app"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(14) }
-                        }
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.chooseAppAccount(choiceRow.modelData.account)
-                        }
-                    }
-                }
-                Hint {
-                    visible: appSheet.request !== null && (appSheet.request.choices || []).length === 0
-                    color: root.alarm
-                    text: appSheet.kind === "call" ? "No account can sign this yet. Your wallet's public accounts are being read; if none shows, create your wallet first (Welcome, Create my wallet)."
-                        : "Your wallet has no accounts yet. Create your wallet first (Welcome, Create my wallet)."
-                }
-
-                }
-
-                // A risky call needs a second, deliberate tick.
-                RowLayout {
-                    visible: !root.appSheetCompact && appSheet.request !== null && root.appRequestRisky(appSheet.request)
-                    Layout.fillWidth: true
-                    spacing: 10
-                    Rectangle {
-                        Layout.preferredWidth: 18
-                        Layout.preferredHeight: 18
-                        Layout.alignment: Qt.AlignTop
-                        radius: 4
-                        color: root.appUnderstood ? root.alarm : "transparent"
-                        border.width: 2
-                        border.color: root.alarm
-                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.appUnderstood = !root.appUnderstood }
-                    }
-                    Hint {
-                        color: root.ink
-                        text: root.appIsToken(appSheet.request) ? "I've read the warnings above and still want to send this token."
-                            : "I've read the warnings above and trust " + (appSheet.request !== null ? appSheet.request.app : "this app") + " with this account."
-                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.appUnderstood = !root.appUnderstood }
-                    }
-                }
-
-                ColumnLayout {
-                    visible: appSheet.request !== null && appSheet.request.zone_in_use === false
-                    Layout.fillWidth: true
-                    spacing: 8
-                    Hint {
-                        textFormat: Text.PlainText
-                        color: root.alarm
-                        text: appSheet.request === null || appSheet.request.zone_in_use !== false ? ""
-                            : appSheet.request.zone_removed ? "This was asked for a zone that has been removed since. Reject it, and the app can ask again."
-                            : "This was asked for " + appSheet.request.zone_name + ", and the wallet is using " + root.zoneName + " now. Switch to " + appSheet.request.zone_name + " to approve it, or reject it."
-                    }
-                    Action {
-                        visible: appSheet.request !== null && !appSheet.request.zone_removed
-                        label: root.zoneBusy ? "Switching…" : "Switch to " + (appSheet.request !== null && appSheet.request.zone_name ? appSheet.request.zone_name : "it")
-                        enabledNow: !root.zoneBusy && !root.appBusy
-                        onPressed: root.zoneUse(appSheet.request.zone)
-                    }
-                    Hint { visible: root.zoneNoteBad; color: root.alarm; font.pixelSize: root.px(15); textFormat: Text.PlainText; text: root.zoneNote }
-                }
-                Hint { visible: !root.appSheetCompact && root.appError !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.appError }
-                Hint { visible: !root.appSheetCompact && root.appBusy; color: root.brass; text: appSheet.kind === "call" ? "Trying it, then signing and sending it. This waits for its block, up to two minutes…" : "One moment…" }
-                RowLayout {
-                    visible: !root.appSheetCompact
-                    Layout.topMargin: 8
-                    spacing: 10
-                    Action {
-                        label: appSheet.request !== null && appSheet.request.checking === true ? "Waiting for the check…" : appSheet.kind === "connect" ? "Share" : appSheet.kind === "call" ? "Approve and sign" : appSheet.kind === "private_call" ? "Approve, prove and send" : appSheet.kind === "secret" ? "Allow" : appSheet.kind === "token_source" ? "Show these tokens" : appSheet.kind === "relayed_call" ? "Approve" : appSheet.kind === "programs" ? "Allow these programs" : "Approve and send"
-                        strong: true
-                        enabledNow: root.appCanApprove()
-                        onPressed: root.answerAppRequest(true)
-                    }
-                    Action {
-                        label: "Reject"
-                        enabledNow: !root.appBusy
-                        onPressed: root.answerAppRequest(false)
-                    }
-                }
+                ApproveBody {}
             }
         }
     }

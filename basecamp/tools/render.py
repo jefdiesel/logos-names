@@ -59,10 +59,10 @@ BRIDGE = r"""
             if (module === "package_manager" && method === "getInstalledPackages") {
                 var me = { name: "names_ui", version: "0.17.0", installDir: "/Users/you/Library/Application Support/Logos/LogosBasecamp/plugins/names_ui" }
                 var pk = (%(mock)s).packages
-                return JSON.stringify(pk ? [me].concat(pk) : [me, { name: "lez_bridge", version: "0.1.0", hashes: { root: "ee90c31ffa02781abf1beb8735acf2ad352af23b932a8e11a41912e31634c0a7" } }, { name: "lez_bridge_ui", version: "0.1.0", hashes: { root: "ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9" } }])
+                return JSON.stringify(pk ? [me].concat(pk) : [me, { name: "lez_bridge", version: "0.1.0", hashes: { root: "d55b06acb191406f1a785d7606abc949b3552c7bd5973882f2089846f65cd6b7" } }, { name: "lez_bridge_ui", version: "0.1.0", hashes: { root: "ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9" } }])
             }
             if (module === "names" && method === "file_sha256")
-                return ok(String(args[0]).indexOf("lez_bridge_ui") >= 0 ? "0d7e317c1fbef3e9c9d4155c10746256af8e9ed2b5a8156413823fbc568ea270" : "55f474d88f43effd0c6f9cc122fe1af37fac52b441a11de4922cb6bd17503561")
+                return ok(String(args[0]).indexOf("lez_bridge_ui") >= 0 ? "0d7e317c1fbef3e9c9d4155c10746256af8e9ed2b5a8156413823fbc568ea270" : "a364ffbad43ba2c3c7ad9c989a712084af3bf83a0692ec2dc1d898128c00280f")
             if (module === "lez_bridge") {
                 var lb = (%(mock)s).bridge
                 if (!lb) return JSON.stringify({ error: "Method not found" })
@@ -74,7 +74,7 @@ BRIDGE = r"""
                     answer = answer.__seq[Math.min(n, answer.__seq.length - 1)]
                 }
                 if (answer === undefined && method !== "config" && method !== "relayed_claims" && method !== "relayed_claim_forget" && method !== "receives") return JSON.stringify({ error: "Method not found" })
-                if (answer === undefined) answer = method === "config" ? { build: { commit: "00e6f3a" }, deployment: { name: "bridge-test-network-v3", bridge_program: "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr" }, features: ["relayed_claim", "relayed_claim_check_with", "relayed_claim_build", "relayed_claim_submit", "account_hint", "receive", "deposit_code", "public_receive", "receive_status", "receives", "relayed_claim_check_deposit"], notices: { not_private: { title: "Not private", text: "A public claim publishes the claim secret and links the Sepolia deposit to this account, for good. A private account keeps them apart (its claim needs a proof)." } } } : method === "relayed_claims" ? [] : method === "receives" ? { receives: [] } : null
+                if (answer === undefined) answer = method === "config" ? { build: { commit: "5cad169" }, deployment: { name: "bridge-test-network-v3", bridge_program: "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr" }, features: ["relayed_claim", "relayed_claim_check_with", "relayed_claim_build", "relayed_claim_submit", "account_hint", "receive", "deposit_code", "public_receive", "receive_status", "receives", "relayed_claim_check_deposit"], notices: { not_private: { title: "Not private", text: "A public claim publishes the claim secret and links the Sepolia deposit to this account, for good. A private account keeps them apart (its claim needs a proof)." } } } : method === "relayed_claims" ? [] : method === "receives" ? { receives: [] } : null
                 return JSON.stringify(JSON.stringify({ success: true, value: answer, error: null }))
             }
             if (module === "chat_module") {
@@ -299,6 +299,12 @@ def zone_request(in_use, removed=False):
             'publisher: { status: "verified", publisher: "forumer", module: "forumer_ui", version: "1.2.0" } }'
             % (ZONE_B, ZONE_B, "null" if removed else '"Games zone"', "true" if in_use else "false", "true" if removed else "false"))
 
+# The LEZ 0.4 card with this wallet's receives (`receives`, `receiveStatuses`, then more JS), and
+# the Receive screen the same way.
+CARD_04 = 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.receivesLoaded = true; root.receives = %s; root.receiveStatuses = %s; %s }) })'
+RECEIVE_04 = CARD_04
+ARR = '[{ id: "dep-1", symbol: "ETH", amount: "0.1", account: "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR" }]'
+CHECKED = 'root.receiveCheckedAt = Date.now() - 3000; root.receiveNextAt = Date.now() + 57000'
 SCENARIOS = {
     'card-update-ready': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() {  }) })',
     'receive-update-ready': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive() }) })',
@@ -310,6 +316,30 @@ SCENARIOS = {
     'receive-code': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive(); root.receivePublicOk = true; root.againAfter(300, function() { root.makeReceive() }) }) })',
     'receive-code-details': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive(); root.receivePublicOk = true; root.againAfter(300, function() { root.makeReceive() }); root.receiveDetails = true }) })',
     'card-receives': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.receivesLoaded = true; root.receives = [{ id: "dep-1", symbol: "ETH", amount: "0.1", account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk" }, { id: "dep-2", symbol: "dUSDC", amount: "100", account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk" }, { id: "dep-3", symbol: "ETH", amount: "0.01", account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk" }]; root.receiveStatuses = { "dep-1": { stage: "claimable" }, "dep-2": { stage: "deposited", confirmations: 12, final_in_min: 9 }, "dep-3": { stage: "requested" } } }) })',
+    # "Arriving from Ethereum": the card's own panel in the third tone, and Receive following one receive.
+    'card-arriving-none': CARD_04 % ('[]', '({})', ''),
+    'card-arriving-waiting': CARD_04 % (ARR, '({ "dep-1": { stage: "deposited", confirmations: 20, final_in_min: 7 } })', CHECKED),
+    'card-arriving-waiting-light': CARD_04 % (ARR, '({ "dep-1": { stage: "deposited", confirmations: 20, final_in_min: 7 } })', CHECKED),
+    'card-arriving-code': CARD_04 % (ARR, '({ "dep-1": { stage: "requested" } })', CHECKED),
+    'card-arriving-arrived': CARD_04 % (ARR, '({ "dep-1": { stage: "claimable" } })', CHECKED),
+    'card-arriving-update': CARD_04 % (ARR, '({ "dep-1": { stage: "claimable" } })', CHECKED + '; root.loadInstalled(root.checkBundle); root.bridgeCall("config", [], function(v) { root.bridgeAnswered(v) })'),
+    'card-arriving-claimed': CARD_04 % (ARR, '({ "dep-1": { stage: "claimed", claimed_block: 6054 } })', CHECKED + '; root.receiveClaimedAt = { "dep-1": Date.now() - 60000 }'),
+    'card-arriving-many': CARD_04 % ('[' + ", ".join('{ id: "dep-%d", symbol: "ETH", amount: "%s", account: "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR" }' % (i, a) for i, a in [(1, "0.1"), (2, "0.01"), (3, "0.01"), (4, "1"), (5, "0.1")]) + ']',
+                                    '({ "dep-1": { stage: "final" }, "dep-2": { stage: "requested" }, "dep-3": { stage: "requested" }, "dep-4": { stage: "requested" }, "dep-5": { stage: "claimable" } })', CHECKED),
+    'receive-deposited': RECEIVE_04 % (ARR, '({ "dep-1": { stage: "deposited", confirmations: 20, final_in_min: 14 } })', CHECKED + '; root.openEthReceive("dep-1")'),
+    'receive-deposited-light': RECEIVE_04 % (ARR, '({ "dep-1": { stage: "deposited", confirmations: 20, final_in_min: 14 } })', CHECKED + '; root.openEthReceive("dep-1")'),
+    'receive-final': RECEIVE_04 % (ARR, '({ "dep-1": { stage: "final" } })', CHECKED + '; root.openEthReceive("dep-1")'),
+    'receive-claimable': RECEIVE_04 % (ARR, '({ "dep-1": { stage: "claimable" } })', CHECKED + '; root.openEthReceive("dep-1")'),
+    'receive-claimed': RECEIVE_04 % (ARR, '({ "dep-1": { stage: "claimed", claimed_block: 6054 } })', CHECKED + '; root.openEthReceive("dep-1")'),
+    'receive-old-code': RECEIVE_04 % (ARR, '({ "dep-1": { stage: "requested" } })', CHECKED + '; root.openEthReceive("dep-1")'),
+    # Opening Receive with a deposit on its way: that first, "Make another code" under it.
+    'receive-entry-onitsway': RECEIVE_04 % (ARR, '({ "dep-1": { stage: "deposited", confirmations: 20, final_in_min: 7 } })', CHECKED + '; root.openEthReceive()'),
+    # The code just made, then the deposit seen: step 4 done by itself, step 5 the wait.
+    'receive-code-then-deposited': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.receivesLoaded = true; root.openEthReceive(); root.receivePublicOk = true; root.againAfter(200, function() { root.makeReceive(); root.againAfter(150, function() { var all = root.receiveStatuses; all["dep-a50e0f44940e"] = { stage: "deposited", confirmations: 3, final_in_min: 14 }; root.receiveStatuses = all; root.receiveStatusesChanged(); root.receiveCheckedAt = Date.now() - 2000 }) }) }) })',
+    # The deposit keys asked inside Receive: answered on the screen as its step, not in a sheet.
+    'receive-needs-inline': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive(); root.receivePublicOk = true; root.againAfter(300, function() { root.makeReceive(); root.againAfter(100, function() { root.appRequests = [{ id: "r5", kind: "secret", app: "lez_bridge", account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", scope: "RFP022/deposit", created: Date.now(), expires: Date.now() + 600000, publisher: null }] }) }) }) })',
+    # The same request while the person is elsewhere in Names: the sheet over everything.
+    'receive-needs-elsewhere': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive(); root.receivePublicOk = true; root.againAfter(300, function() { root.makeReceive(); root.againAfter(100, function() { root.appRequests = [{ id: "r5", kind: "secret", app: "lez_bridge", account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", scope: "RFP022/deposit", created: Date.now(), expires: Date.now() + 600000, publisher: null }]; root.walletView = "home" }) }) }) })',
     'card-receives-old': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.receivesLoaded = true; root.bridgeConfig = { deployment: {} }; root.receives = [{ id: "dep-1", symbol: "ETH", amount: "0.1", account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk" }] }) })',
     'claim-arrived': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.claimReceive("dep-1") }) })',
     'claim-arrived-secret': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.claimReceive("dep-1") }) })',
@@ -337,7 +367,7 @@ SCENARIOS = {
     'claim-updated': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openClaim(); Qt.callLater(function() { Qt.callLater(function() { root.claimCheckWith = false; root.bridgeInstall = { phase: "updated", line: "Updated. To use it now: Settings (the gear) → Module Inspector → LEZ Bridge → Unload, then Start here." } }) }) }) })',
     'approve-checking-publisher': 'root.appRequests = [{ id: "r7", kind: "connect", app: "lez_bridge", reason: "To claim bridge deposits into your public account", created: Date.now(), expires: Date.now() + 600000, checking: true, checking_what: "who publishes lez_bridge", choices: [{ account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", label: "Names wallet, main public account", granted: false }], publisher: { status: "checking" } }]; root.publisherSince = { r7: Date.now() - 4000 }; root.publisherNow = Date.now()',
     'wallet-starting': 'root.openWallet("home"); root.sayRead(root.moduleNoAnswer)',
-    'setup-card-stuck': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.installedList = [{ name: "names_ui", installDir: "/x" }, { name: "lez_bridge", hashes: { root: "ee90c31ffa02781abf1beb8735acf2ad352af23b932a8e11a41912e31634c0a7" } }]; root.bridgeAnswers = false; root.bridgeFails = 2 }) })',
+    'setup-card-stuck': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.installedList = [{ name: "names_ui", installDir: "/x" }, { name: "lez_bridge", hashes: { root: "d55b06acb191406f1a785d7606abc949b3552c7bd5973882f2089846f65cd6b7" } }]; root.bridgeAnswers = false; root.bridgeFails = 2 }) })',
     'setup-receive-unload': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive(); root.againAfter(300, function() { root.bridgeInstall = { phase: "unload" } }) }) })',
     'setup-claim-stale': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openClaim(); root.againAfter(300, function() { root.bridgeAnswers = false; root.bridgeStale = true; root.claimMissing = true }) }) })',
     'setup-receive-done': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive(); root.againAfter(300, function() { root.bridgeDoneView = "ethreceive"; root.bridgeDone = "LEZ Bridge updated." }) }) })',
@@ -565,8 +595,8 @@ MOCKS = {
     'setup-receive-install': {'packages': []},
     'card-update-ready': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'a2c6c3117443a92f2a5b2a1a2267175f4f82ed209a3dae8e554461bd09df0d18'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': '788f2f0dde4bd7ae'}}], 'bridge': {'config': {'deployment': {'name': 'bridge-test-network-v3', 'bridge_program': '4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr'}}}},
     'receive-update-ready': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'a2c6c3117443a92f2a5b2a1a2267175f4f82ed209a3dae8e554461bd09df0d18'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': '788f2f0dde4bd7ae'}}], 'bridge': {'config': {'deployment': {'name': 'bridge-test-network-v3', 'bridge_program': '4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr'}}}},
-    'receive-restart-needed': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'ee90c31ffa02781abf1beb8735acf2ad352af23b932a8e11a41912e31634c0a7'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}], 'bridge': {'config': {'deployment': {'name': 'bridge-test-network-v3', 'bridge_program': '4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr'}}}},
-    'card-restart-needed': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'ee90c31ffa02781abf1beb8735acf2ad352af23b932a8e11a41912e31634c0a7'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}], 'bridge': {'config': {'deployment': {'name': 'bridge-test-network-v3', 'bridge_program': '4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr'}}}},
+    'receive-restart-needed': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'd55b06acb191406f1a785d7606abc949b3552c7bd5973882f2089846f65cd6b7'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}], 'bridge': {'config': {'deployment': {'name': 'bridge-test-network-v3', 'bridge_program': '4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr'}}}},
+    'card-restart-needed': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'd55b06acb191406f1a785d7606abc949b3552c7bd5973882f2089846f65cd6b7'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}], 'bridge': {'config': {'deployment': {'name': 'bridge-test-network-v3', 'bridge_program': '4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr'}}}},
     'receive-choose': {'bridge': {}},
     'receive-ready-to-make': {'bridge': {}},
     'receive-needs': {'bridge': {'make_public_deposit_request': {'needs': 'secret', 'request': {'request': 'r5', 'state': 'pending'}, 'message': 'Approve "RFP022/deposit" in the Names app…'}, 'wallet_request': {'state': 'pending'}}},
@@ -594,8 +624,8 @@ MOCKS = {
     'claim-installing': {'packages': []},
     'claim-install-slow': {'packages': []},
     'claim-install-failed': {'packages': []},
-    'claim-idle': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'ee90c31ffa02781abf1beb8735acf2ad352af23b932a8e11a41912e31634c0a7'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}]},
-    'claim-starting': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'ee90c31ffa02781abf1beb8735acf2ad352af23b932a8e11a41912e31634c0a7'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}]},
+    'claim-idle': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'd55b06acb191406f1a785d7606abc949b3552c7bd5973882f2089846f65cd6b7'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}]},
+    'claim-starting': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'd55b06acb191406f1a785d7606abc949b3552c7bd5973882f2089846f65cd6b7'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}]},
     'claim-older': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'a2c6c3117443a92f2a5b2a1a2267175f4f82ed209a3dae8e554461bd09df0d18'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': '788f2f0dde4bd7ae'}}], 'bridge': {}},
     'claim-updated': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'a2c6c3117443a92f2a5b2a1a2267175f4f82ed209a3dae8e554461bd09df0d18'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': '788f2f0dde4bd7ae'}}], 'bridge': {}},
     'approve-checking-publisher': {},
@@ -700,6 +730,28 @@ MOCKS = {
 }
 
 MOCKS["wallet-net04-many-open"] = MOCKS["wallet-net04-many"]
+# The receive scenarios: the bridge answers each check with the state the scenario shows.
+def _arriving(status, **more):
+    return dict({"bridge": {"receive_status": status, "receives": {"receives": []}}}, **more)
+for _name, _status in [("card-arriving-waiting", {"stage": "deposited", "confirmations": 20, "final_in_min": 7}), ("card-arriving-code", {"stage": "requested"}),
+                       ("card-arriving-arrived", {"stage": "claimable"}), ("card-arriving-many", {"stage": "requested"}),
+                       ("receive-deposited", {"stage": "deposited", "confirmations": 20, "final_in_min": 14}), ("receive-final", {"stage": "final"}),
+                       ("receive-claimable", {"stage": "claimable"}), ("receive-claimed", {"stage": "claimed", "claimed_block": 6054}), ("receive-old-code", {"stage": "requested"}),
+                       ("receive-entry-onitsway", {"stage": "deposited", "confirmations": 20, "final_in_min": 7})]:
+    MOCKS[_name] = _arriving(_status)
+MOCKS["card-arriving-waiting-light"] = MOCKS["card-arriving-waiting"]
+MOCKS["receive-deposited-light"] = MOCKS["receive-deposited"]
+MOCKS["card-arriving-none"] = {"bridge": {}}
+MOCKS["receive-needs-inline"] = MOCKS["receive-needs"]
+MOCKS["receive-needs-elsewhere"] = MOCKS["receive-needs"]
+# An update ready for a bridge that still receives: Update is a plain button, Claim the yellow one.
+MOCKS["card-arriving-update"] = dict(_arriving({"stage": "claimable"}), packages=[{"name": "lez_bridge", "version": "0.1.0", "hashes": {"root": "a2c6c3117443a92f2a5b2a1a2267175f4f82ed209a3dae8e554461bd09df0d18"}}, {"name": "lez_bridge_ui", "version": "0.1.0", "hashes": {"root": "788f2f0dde4bd7ae"}}])
+MOCKS["card-arriving-update"]["bridge"]["config"] = {"build": {"commit": "02bfbd0"}, "deployment": {"name": "bridge-test-network-v3", "bridge_program": "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr"}, "features": ["relayed_claim", "relayed_claim_check_with", "receive", "deposit_code", "public_receive", "receive_status", "receives", "relayed_claim_check_deposit"]}
+# Claimed a minute ago: the account it went into is shown, holding it.
+MOCKS["card-arriving-claimed"] = dict(_arriving({"stage": "claimed", "claimed_block": 6054}), bridgeNet=dict(NET04, read=dict(NET04_READ, accounts=[NET04_READ["accounts"][0],
+    dict(NET04_READ["accounts"][1], found=True, tokens=net04_held("0", "100000000000000000"))])))
+MOCKS["receive-code-then-deposited"] = {"bridge": dict(MOCKS["receive-code"]["bridge"], receive_status={"stage": "deposited", "confirmations": 3, "final_in_min": 14}, receives={"receives": []})}
+
 
 def main():
     qml, out_dir = sys.argv[1], sys.argv[2]
@@ -723,7 +775,7 @@ def main():
             "bridge_key": "" if scenario == "get-tokens" else "8e3b0f4a2c71d95e6a0b4c8d2f1e7a3954c6b0d8e2f4a6c8b0d2e4f6a8c0b2d4",
             "home_channel": HOME_CHANNEL,
             "bridge_net": json.dumps(NET04),
-            "scenario": (SCENARIOS[scenario] % dict(filled, zone_request=zone_request(scenario == "approve-zone"))) if "%(zone" in SCENARIOS[scenario] else SCENARIOS[scenario], "out": out, "height": 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "register-net04", "wallet-names-net04", "send-net04", "name", "settings-accounts", "settings-oldcli", "settings-account-new", "settings-network") or scenario.startswith("settings-zones") or scenario.startswith("backup") else 2000 if scenario.startswith("approve-private") or scenario.startswith("approve-relayed") else 1100 if scenario.startswith("approve-") and "zone" in scenario else 1500 if scenario.startswith("get-tokens") or scenario.startswith("wallet") or scenario.startswith("claim") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1100 if scenario.startswith("inscribe") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
+            "scenario": (SCENARIOS[scenario] % dict(filled, zone_request=zone_request(scenario == "approve-zone"))) if "%(zone" in SCENARIOS[scenario] else SCENARIOS[scenario], "out": out, "height": 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "register-net04", "wallet-names-net04", "send-net04", "name", "settings-accounts", "settings-oldcli", "settings-account-new", "settings-network") or scenario.startswith("settings-zones") or scenario.startswith("backup") else 2000 if scenario.startswith("approve-private") or scenario.startswith("approve-relayed") else 1100 if scenario.startswith("approve-") and "zone" in scenario else 1500 if scenario.startswith("get-tokens") or scenario.startswith("wallet") or scenario.startswith("claim") or scenario.startswith("card-arriving") else 1100 if scenario.startswith("receive-") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1100 if scenario.startswith("inscribe") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
         }
         # Beside Main.qml, so its relative imports (logic.mjs) resolve.
         with tempfile.NamedTemporaryFile("w", suffix=".qml", delete=False, dir=os.path.join(HERE, "..", "qml")) as handle:

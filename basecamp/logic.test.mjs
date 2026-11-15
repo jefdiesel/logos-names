@@ -608,6 +608,8 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("steps: approve, then sending, then done",
     [view(claimSteps({ stage: "running", job: { phase: "approve" }, extras: [] }))[2], view(claimSteps({ stage: "running", job: { phase: "relay" }, extras: [] }))[3], view(claimSteps({ stage: "done", job: { phase: "done", state: "done", block: 5249 }, extras: [] }))[3]],
     ["3/4 now Approve in your wallet", "4/4 now Claiming…", "4/4 done Done: claimed in block 5249"]);
+  check("steps: the row's words", claimSteps({ first: "arrived", stage: "running", job: { phase: "approve" }, extras: [] }).map((x) => x.short + " " + x.state),
+    ["Arrived done", "Checked done", "Approve now", "Claim later"]);
   const { claimRetryAfter } = await import("./qml/logic.mjs");
   check("claimRetryAfter", [claimRetryAfter("not_final", { eta_s: 330 }), claimRetryAfter("not_final", {}), claimRetryAfter("root_not_attested"), claimRetryAfter("relay_cap")], [330, 0, 60, 0]);
   const { claimIsWait } = await import("./qml/logic.mjs");
@@ -620,7 +622,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
 }
 
 {
-  const { receiveTokens, receiveReply, receivesFrom, receiveStatusLine, receiveSteps, RECEIVE_FALLBACK } = await import("./qml/logic.mjs");
+  const { receiveTokens, receiveReply, receivesFrom, receiveProgress, receiveSteps, RECEIVE_FALLBACK } = await import("./qml/logic.mjs");
   check("receiveTokens from registry", receiveTokens({ tokens: [{ symbol: "ETH", denoms: [{ index: 0, value: "10000000000000000", text: "0.01" }] }] }), [{ symbol: "ETH", frozen: false, denoms: [{ index: 0, text: "0.01" }] }]);
   check("receiveTokens fallback", receiveTokens(null), RECEIVE_FALLBACK);
   check("receiveReply", [receiveReply({ needs: "secret" }).kind, receiveReply({ request: "logosdep1qq" }).kind, receiveReply({ deposit: {} }).kind], ["needs", "code", "old"]);
@@ -630,11 +632,52 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("receivesFrom: the amount from denom and decimals", receivesFrom({ receives: [{ id: "d", symbol: "ETH", denom: "100000000000000000", decimals: 18 }] })[0].amount, "0.1");
   const { bridgeCan } = await import("./qml/logic.mjs");
   check("bridgeCan", [bridgeCan(["receive", "receives"], "receives"), bridgeCan(undefined, "receives"), bridgeCan([], "receive")], [true, false, false]);
-  check("deposited: up to about N min, then any minute now", [receiveStatusLine({ stage: "deposited", final_in_min: 7 }).line, receiveStatusLine({ stage: "deposited", final_in_min: 0 }).line], ["On Ethereum: final in up to about 7 min", "On Ethereum: final any minute now"]);
-  check("receiveStatusLine", ["requested", "deposited", "final", "claimable", "claimed"].map((stage) => receiveStatusLine({ stage, final_in_min: 6, claimed_block: 812 }).line),
-    ["Not deposited yet", "On Ethereum: final in up to about 6 min", "Final: waiting for the bridge to record it (about a minute)", "Arrived", "Claimed in block 812"]);
-  check("receiveSteps", receiveSteps({ stage: "code", extras: ["public_account", "secret"] }).map((x) => x.n + "/" + x.total + " " + x.state + " " + x.title),
-    ["1/5 done Choose the amount and account", "2/5 done Give the bridge this account", "3/5 done Allow the bridge's deposit keys", "4/5 now Deposit on the page", "5/5 later Claim when it arrives"]);
+  check("deposited: up to about N min, then any minute now", [receiveProgress({ stage: "deposited", final_in_min: 7 }).headline, receiveProgress({ stage: "deposited", final_in_min: 1 }).headline, receiveProgress({ stage: "deposited" }).card],
+    ["Final on Sepolia in up to about 7 min.", "Any minute now.", "Deposited · final on Sepolia in up to about 20 min"]);
+  check("receiveProgress: the card's words", ["requested", "deposited", "final", "claimable", "claimed", undefined].map((stage) => receiveProgress(stage ? { stage, final_in_min: 14, claimed_block: 812 } : null).card),
+    ["Waiting for your deposit", "Deposited · final on Sepolia in up to about 14 min", "Final on Sepolia · arriving any minute now", "Arrived · ready to claim", "Claimed in block 812", "Checking…"]);
+  check("receiveProgress: tones and Claim", ["requested", "deposited", "final", "claimable", "claimed", "unknown"].map((stage) => receiveProgress({ stage }).tone + (receiveProgress({ stage }).claim ? "+claim" : "")),
+    ["wait", "wait", "wait", "ready+claim", "done", "plain"]);
+  check("receiveProgress: seen on Ethereum", receiveProgress({ stage: "deposited", confirmations: 12, final_in_min: 9 }).detail, "Deposit seen on Sepolia · 12 confirmations.");
+  const steps = (s) => receiveSteps(s).map((x) => x.n + "/" + x.total + " " + x.state + " " + x.title);
+  check("receiveSteps", steps({ stage: "code", extras: ["public_account", "secret"] }),
+    ["1/6 done Choose the amount and account", "2/6 done Give the bridge this account", "3/6 done Allow the bridge's deposit keys", "4/6 now Deposit on the page", "5/6 later Waiting for Ethereum", "6/6 later Claim"]);
+  // The deposit seen: the deposit step completes by itself, the wait is the step, then Claim, then claimed.
+  check("receiveSteps: deposited", steps({ stage: "deposited", extras: ["public_account", "secret"] }).slice(3), ["4/6 done Deposited", "5/6 now Waiting for Ethereum", "6/6 later Claim"]);
+  check("receiveSteps: final", steps({ stage: "final", extras: [] }).slice(1), ["2/4 done Deposited", "3/4 now Waiting for Ethereum", "4/4 later Claim"]);
+  check("receiveSteps: claimable", steps({ stage: "claimable", extras: ["secret"] }).slice(2), ["3/5 done Deposited", "4/5 done Waiting for Ethereum", "5/5 now Arrived: claim it"]);
+  check("receiveSteps: claimed", steps({ stage: "claimed", claimedBlock: 6054, extras: [] }), ["1/4 done Choose the amount and account", "2/4 done Deposited", "3/4 done Waiting for Ethereum", "4/4 done Claimed in block 6054"]);
+  check("receiveSteps: waiting is the deposit step", [steps({ stage: "waiting", extras: [] })[1], steps({ stage: "checking", extras: [] })[1]], ["2/4 now Deposit on the page", "2/4 now Deposit on the page"]);
+  check("receiveSteps: the row's words", receiveSteps({ stage: "deposited", extras: ["secret"] }).map((x) => x.short), ["Amount", "Keys", "Deposited", "Wait", "Claim"]);
+}
+
+{
+  const { receiveRowsShown, receiveInProgress, receiveOnItsWay, receiveCheckLine, receiveBalanceLine, RECEIVE_CLAIMED_SHOWN_MS, bridgeNetShown } = await import("./qml/logic.mjs");
+  const R = (id, amount) => ({ id, symbol: "ETH", amount: amount || "0.1", account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk" });
+  const list = [R("w1"), R("w2"), R("w3"), R("d1"), R("a1"), R("c1"), R("c2")];
+  const st = { w1: { stage: "requested" }, w2: { stage: "requested" }, w3: { stage: "requested" }, d1: { stage: "deposited", final_in_min: 14 }, a1: { stage: "claimable" }, c1: { stage: "claimed", claimed_block: 9 }, c2: { stage: "claimed" } };
+  const now = 1000000000;
+  const shown = receiveRowsShown(list, st, { c1: now - 60000, c2: now - RECEIVE_CLAIMED_SHOWN_MS - 1 }, now, false);
+  check("rows: arrived, on the way, just claimed, then two unused codes", [shown.rows.map((r) => r.id + " " + r.progress.card), shown.hidden],
+    [["a1 Arrived · ready to claim", "d1 Deposited · final on Sepolia in up to about 14 min", "c1 Claimed in block 9", "w1 Waiting for your deposit", "w2 Waiting for your deposit"], 1]);
+  check("rows: show all", receiveRowsShown(list, st, {}, now, true).rows.map((r) => r.id), ["a1", "d1", "w1", "w2", "w3"]);
+  check("rows: never checked", receiveRowsShown([R("x")], {}, {}, now, false).rows[0].progress.card, "Checking…");
+  check("in progress: the one on its way", receiveInProgress(list, st, {}), "d1");
+  check("in progress: an unused old code never", receiveInProgress([R("w1")], { w1: { stage: "requested" } }, {}), "");
+  check("in progress: the newest code made here", receiveInProgress([R("w1"), R("w2")], { w1: { stage: "requested" }, w2: { stage: "requested" } }, { w1: { made_at: 5 }, w2: { made_at: 9 } }), "w2");
+  check("receiveOnItsWay", [receiveOnItsWay(R("d1"), st.d1), receiveOnItsWay(R("f"), { stage: "final" }), receiveOnItsWay(R("a1"), st.a1), receiveOnItsWay(R("w1"), st.w1)],
+    ["You have a deposit on its way: 0.1 ETH · final on Sepolia in up to about 14 min", "You have a deposit on its way: 0.1 ETH · arriving any minute now", "Your 0.1 ETH deposit has arrived.", "Your code for 0.1 ETH is waiting for a deposit."]);
+  check("receiveCheckLine", [receiveCheckLine(false, now - 3000, now + 57000, now, false), receiveCheckLine(false, now - 40000, now + 20000, now, false), receiveCheckLine(true, 0, 0, now, false),
+    receiveCheckLine(false, now - 3000, now + 57000, now, true), receiveCheckLine(false, 0, now + 60000, now, false), receiveCheckLine(false, now - 61000, now - 1000, now, false)],
+    ["Checked just now · next check in 57 s", "Checked 40 s ago · next check in 20 s", "Checking…", "Couldn't check just now · next try in 57 s", "Next check in 60 s", "Checked 61 s ago · checking again now"]);
+  const blocks = [{ account: "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", found: true, assets: [{ symbol: "LEZ", amount: "0" }, { symbol: "ETH", amount: "0.1" }] }];
+  check("receiveBalanceLine: wrapped symbol", receiveBalanceLine([{ account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", assets: [{ symbol: "wETH", amount: "0.2" }] }], "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "ETH"), "CCVd76…pKnk now holds 0.2 wETH.");
+  check("receiveBalanceLine", [receiveBalanceLine(blocks, "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "ETH"), receiveBalanceLine([], "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "ETH")],
+    ["CCVd76…pKnk now holds 0.1 ETH.", "It shows under CCVd76…pKnk below once the network is read again."]);
+  // The receiving account stays in view even when the network has nothing for it yet.
+  const rows = [{ account: "AAA", found: true }, { account: "BBB", found: false }, { account: "CCC", found: false }];
+  check("bridgeNetShown keeps a receive's account", [bridgeNetShown(rows, false, ["Public/BBB"]).shown.map((r) => r.account), bridgeNetShown(rows, false, ["Public/BBB"]).empty, bridgeNetShown(rows, false).empty],
+    [["AAA", "BBB"], 1, 2]);
 }
 
 {
@@ -730,6 +773,11 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("words", compareWords(words), "maple · tiger · seven · lamp");
   check("digits under details", compareDigitsDetail(words), "Commitment starts b95db8 and ends 6b299d.");
   check("older bridge", [compareLine({ first: "b95db8", last: "6b299d" }), compareWords({ first: "b95db8" })], ["The page must show a commitment starting b95db8 and ending 6b299d.", ""]);
+  // The bridge 5cad169's words (rfp-022 f2fbdd9 web/deposit/test/vectors/compare-words-v1.json): the
+  // app shows what the module returns, as it returns it; it never makes words itself.
+  const VECTORS = [[["cream", "laugh", "load", "visual"], "cream · laugh · load · visual"], [["valley", "venue", "pyramid", "notable"], "valley · venue · pyramid · notable"], [["expire", "mimic", "burst", "echo"], "expire · mimic · burst · echo"]];
+  check("compare vectors: words_text shown as given", VECTORS.map(([words, text]) => compareWords({ words, words_text: text, first: "000000", last: "000000" })), VECTORS.map(([, text]) => text));
+  check("compare vectors: the same from the words alone", VECTORS.map(([words]) => compareWords({ words })), VECTORS.map(([, text]) => text));
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");

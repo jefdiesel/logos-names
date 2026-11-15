@@ -843,10 +843,14 @@ export function bridgeNetStatus(value, clock) {
 /// The blocks of `bridgeNetRows` the LEZ 0.4 card shows: every account that holds something
 /// there, and every watched one; the wallet's accounts the network has never seen are folded
 /// into one line (`empty`, how many) unless `showEmpty`.
-export function bridgeNetShown(rows, showEmpty) {
+/// `keep`: accounts shown even with nothing there yet (where a receive arrives), `Public/` or bare.
+export function bridgeNetShown(rows, showEmpty, keep) {
     var list = Array.isArray(rows) ? rows : []
-    var empty = list.filter(function(r) { return !r.found && !r.watched })
-    return { shown: showEmpty ? list : list.filter(function(r) { return r.found || r.watched }), empty: empty.length }
+    var bare = function(a) { return String(a || "").replace(/^Public\//, "") }
+    var kept = (Array.isArray(keep) ? keep : []).map(bare)
+    var shows = function(r) { return r.found || r.watched || kept.indexOf(bare(r.account)) >= 0 }
+    var empty = list.filter(function(r) { return !shows(r) })
+    return { shown: showEmpty ? list : list.filter(shows), empty: empty.length }
 }
 
 /// One block per public account of a `bridge_net_balances` read: `{account, title, found,
@@ -1250,10 +1254,10 @@ export function otherDeployment(name) {
 /// module first: the app depends on it.
 export const BUNDLED_BRIDGE = [
     { name: "lez_bridge", file: "lez_bridge.lgx", label: "LEZ Bridge module",
-      sha256: "55f474d88f43effd0c6f9cc122fe1af37fac52b441a11de4922cb6bd17503561",
-      root: "ee90c31ffa02781abf1beb8735acf2ad352af23b932a8e11a41912e31634c0a7",
+      sha256: "a364ffbad43ba2c3c7ad9c989a712084af3bf83a0692ec2dc1d898128c00280f",
+      root: "d55b06acb191406f1a785d7606abc949b3552c7bd5973882f2089846f65cd6b7",
       // The commit the shipped bridge says it was built from (its config().build.commit).
-      build: "00e6f3a" }
+      build: "5cad169" }
 ]
 
 /// The LEZ 0.4 names tool this app ships in qml/bundled/ (built without in-process proving, so
@@ -1441,6 +1445,19 @@ export function needsStep(needs) {
     return n === "declare" ? "programs" : n
 }
 
+/// A step's word in the row of steps at the top of Claim and Receive ("1 Arrived · 2 Checked ·
+/// 3 Approve · 4 Claimed"): short, and the past tense once done.
+var STEP_SHORT = {
+    file: ["File", "File"], arrived: ["Arrived", "Arrived"], check: ["Check", "Checked"], connect: ["Connect", "Connected"],
+    programs: ["Programs", "Programs"], public_account: ["Account", "Account"], private_account: ["Account", "Account"],
+    secret: ["Keys", "Keys"], approve: ["Approve", "Approved"], done: ["Claim", "Claimed"],
+    choose: ["Amount", "Amount"], deposit: ["Deposit", "Deposited"], wait: ["Wait", "Final"], claim: ["Claim", "Claimed"]
+}
+export function stepShort(key, state) {
+    var pair = STEP_SHORT[key]
+    return pair ? pair[state === "done" ? 1 : 0] : String(key || "")
+}
+
 var STEP_TITLES = {
     file: "Choose the claim file", arrived: "Your deposit arrived", check: "Check", connect: "Let the bridge see this account",
     programs: "Allow the bridge's programs", public_account: "Give the bridge this account",
@@ -1490,7 +1507,7 @@ export function claimSteps(s) {
         if (k === "approve" && state === "now" && stage === "failed")
             title = "Not approved"
         var line = state !== "done" ? "" : k === "check" ? String(st.summary || "Checked") : k === "done" ? "" : STEP_DONE[k] || ""
-        return { key: k, n: i + 1, total: keys.length, title: title, state: state, line: line }
+        return { key: k, n: i + 1, total: keys.length, title: title, short: stepShort(k, state), state: state, line: line }
     })
 }
 
@@ -1595,39 +1612,137 @@ export function bridgeCan(features, what) {
     return Array.isArray(features) && features.indexOf(what) >= 0
 }
 
-/// A receive's line on the card, from `receive_status(id)`: {line, tone ("plain" | "ready" |
-/// "done"), claim (true when it can be claimed)}.
-export function receiveStatusLine(status) {
+/// Where one receive stands, from its `receive_status(id)`, in the words the Receive screen, the
+/// card's "Arriving from Ethereum" panel and the Receive entry all use: {stage, card (the card
+/// row's state), headline (the waiting step's big line), detail (one small line or ""), tone
+/// ("wait" | "ready" | "done" | "plain"), claim}. `stage`: "checking" (no answer yet), "waiting"
+/// (the code is made, nothing on Ethereum yet), "deposited", "final", "claimable", "claimed".
+/// Nothing is promised past what the bridge said: the minutes are its upper bound (whole Sepolia
+/// epochs), and once final, "any minute now" (it records a final root about once a minute).
+export function receiveProgress(status) {
     var s = status || {}
+    var r = function(stage, card, headline, detail, tone, claim) { return { stage: stage, card: card, headline: headline, detail: detail, tone: tone, claim: !!claim } }
     switch (s.stage) {
-    case "requested": return { line: "Not deposited yet", tone: "plain", claim: false }
+    case "requested": return r("waiting", "Waiting for your deposit", "Waiting for your deposit…", "", "wait")
     case "deposited": {
-        // An upper bound in whole Sepolia epochs; past it, any minute now (never a stuck zero).
-        var m = s.final_in_min !== undefined && s.final_in_min !== null ? Math.ceil(Number(s.final_in_min)) : null
-        return { line: "On Ethereum" + (m === null ? ": final in up to about 20 min" : m > 0 ? ": final in up to about " + m + " min" : ": final any minute now"), tone: "plain", claim: false }
+        var m = s.final_in_min !== undefined && s.final_in_min !== null && !isNaN(Number(s.final_in_min)) ? Math.ceil(Number(s.final_in_min)) : 20
+        var conf = Number(s.confirmations) || 0
+        var seen = "Deposit seen on Sepolia" + (conf > 0 ? " · " + conf + (conf === 1 ? " confirmation." : " confirmations.") : ".")
+        if (m <= 1)
+            return r("deposited", "Deposited · final on Sepolia any minute now", "Any minute now.", seen, "wait")
+        return r("deposited", "Deposited · final on Sepolia in up to about " + m + " min", "Final on Sepolia in up to about " + m + " min.", seen, "wait")
     }
-    case "final": return { line: "Final: waiting for the bridge to record it (about a minute)", tone: "plain", claim: false }
-    case "claimable": return { line: "Arrived", tone: "ready", claim: true }
-    case "claimed": return { line: "Claimed" + (s.claimed_block ? " in block " + s.claimed_block : ""), tone: "done", claim: false }
+    case "final": return r("final", "Final on Sepolia · arriving any minute now", "Any minute now.", "Final on Sepolia; the bridge records it next (about a minute).", "wait")
+    case "claimable": return r("claimable", "Arrived · ready to claim", "Arrived: ready to claim.", "", "ready", true)
+    case "claimed": {
+        var line = "Claimed" + (s.claimed_block ? " in block " + s.claimed_block : "")
+        return r("claimed", line, line + ".", "", "done")
     }
-    return { line: "Checking…", tone: "plain", claim: false }
+    }
+    return r("checking", "Checking…", "Checking…", "", "plain")
 }
 
-/// The Receive screen's steps: [{key, n, total, title, state, line}]. `s`: {stage ("choose" |
-/// "asking" | "needs" | "code"), needs, extras (first-time questions seen)}.
+/// How long a receive claimed while Names was open stays on the card ("Claimed in block N").
+export const RECEIVE_CLAIMED_SHOWN_MS = 30 * 60 * 1000
+
+/// The card's "Arriving from Ethereum" rows: {rows: [{id, symbol, amount, account, progress}],
+/// hidden}. Arrived first, then those on their way, then the ones claimed in the last 30 min
+/// (`claimedAt`: id → ms), then codes nothing was deposited for yet: only the newest two of
+/// those unless `showAll` (an unused code stays "requested" for good), `hidden` how many more.
+export function receiveRowsShown(list, statuses, claimedAt, now, showAll) {
+    var st = statuses || {}, at = claimedAt || {}
+    var rank = { claimable: 0, final: 1, deposited: 1, claimed: 2, checking: 3, waiting: 3 }
+    var rows = (Array.isArray(list) ? list : []).map(function(x, i) { return { row: x, i: i, progress: receiveProgress(st[x.id]) } })
+        .filter(function(e) { return e.progress.stage !== "claimed" || (at[e.row.id] && Number(now) - at[e.row.id] < RECEIVE_CLAIMED_SHOWN_MS) })
+        .sort(function(a, b) { return rank[a.progress.stage] - rank[b.progress.stage] || a.i - b.i })
+    var waiting = 0, hidden = 0
+    rows = rows.filter(function(e) {
+        if (rank[e.progress.stage] < 3 || showAll) return true
+        waiting++
+        if (waiting <= 2) return true
+        hidden++
+        return false
+    })
+    return { rows: rows.map(function(e) { return { id: e.row.id, symbol: e.row.symbol, amount: e.row.amount, account: e.row.account, progress: e.progress } }), hidden: hidden }
+}
+
+/// The receive that opening "Receive from Ethereum" shows first, or "": the newest one on its way
+/// or arrived (deposited, final, claimable), else one whose code was made in this window
+/// (`codes`: id → the code) and not deposited yet. Old unused codes never take the screen.
+export function receiveInProgress(list, statuses, codes) {
+    var rows = Array.isArray(list) ? list : [], st = statuses || {}, made = codes || {}
+    var going = rows.filter(function(x) { return ["deposited", "final", "claimable"].indexOf(receiveProgress(st[x.id]).stage) >= 0 })
+    if (going.length > 0) return String(going[0].id)
+    // The newest code made here (`made_at` kept with it).
+    var mine = rows.filter(function(x) { return made[x.id] && ["waiting", "checking"].indexOf(receiveProgress(st[x.id]).stage) >= 0 })
+        .sort(function(a, b) { return (Number(made[b.id].made_at) || 0) - (Number(made[a.id].made_at) || 0) })
+    return mine.length > 0 ? String(mine[0].id) : ""
+}
+
+/// The Receive screen's first line for a receive opened again (its code isn't on the screen):
+/// "You have a deposit on its way: 0.1 ETH · final in up to about 14 min".
+export function receiveOnItsWay(row, status) {
+    if (!row) return ""
+    var what = String(row.amount || "") + (row.symbol ? " " + row.symbol : "")
+    var p = receiveProgress(status)
+    switch (p.stage) {
+    case "deposited": return "You have a deposit on its way: " + what + " · " + p.card.replace(/^Deposited · /, "")
+    case "final": return "You have a deposit on its way: " + what + " · arriving any minute now"
+    case "claimable": return "Your " + what + " deposit has arrived."
+    case "claimed": return "Your " + what + " deposit is claimed."
+    case "waiting": return "Your code for " + what + " is waiting for a deposit."
+    }
+    return "Your " + what + " deposit: checking…"
+}
+
+/// The small line under a receive's state: "Checked just now · next check in 42 s". `polling`: a
+/// check is under way; `checkedAt`/`nextAt`: ms (0: never); `failed`: the last check got no answer.
+export function receiveCheckLine(polling, checkedAt, nextAt, now, failed) {
+    if (polling) return "Checking…"
+    var next = Math.min(60, Math.max(0, Math.ceil((Number(nextAt) - Number(now)) / 1000)))
+    var after = nextAt > 0 ? (next > 0 ? "next check in " + next + " s" : "checking again now") : ""
+    if (failed) return "Couldn't check just now" + (after ? " · " + after.replace("next check", "next try") : "")
+    if (!checkedAt) return after ? after.charAt(0).toUpperCase() + after.slice(1) : ""
+    var ago = Math.max(0, Number(now) - Number(checkedAt))
+    var when = ago < 15000 ? "just now" : ago < 90000 ? Math.round(ago / 1000) + " s ago" : Math.round(ago / 60000) + " min ago"
+    return "Checked " + when + (after ? " · " + after : "")
+}
+
+/// Where a claimed receive's tokens are now, from the card's account blocks (bridgeNetRows):
+/// "CCVd76…pKnk now holds 0.1 ETH." or, before the network is read again, where to look.
+export function receiveBalanceLine(blocks, account, symbol) {
+    var id = String(account || "").replace(/^Public\//, "")
+    var block = (Array.isArray(blocks) ? blocks : []).filter(function(b) { return String(b.account || "").replace(/^Public\//, "") === id })[0]
+    // The wrapped token keeps the symbol or puts a "w" before it (ETH arrives as wETH).
+    var asset = block && Array.isArray(block.assets) ? block.assets.filter(function(a) { return a.symbol === symbol || a.symbol === "w" + symbol })[0] : null
+    if (asset) return idShort(id) + " now holds " + asset.amount + " " + asset.symbol + "."
+    return "It shows under " + idShort(id) + " below once the network is read again."
+}
+
+/// The Receive screen's steps: [{key, n, total, title, short, state, line}]. `s`: {stage ("choose" |
+/// "asking" | "needs" | "code", or a receive's progress stage: "waiting" | "checking" |
+/// "deposited" | "final" | "claimable" | "claimed"), needs, extras (first-time questions seen),
+/// claimedBlock}. Amount, the first-time questions, Deposit, Wait, Claim: once the deposit is seen
+/// the deposit step is done by itself ("Deposited") and the wait is the step ("Waiting for
+/// Ethereum"); then Claim ("Arrived"); then all done ("Claimed in block N").
 export function receiveSteps(s) {
     var st = s || {}
     var extras = (st.extras || []).map(needsStep)
     var needs = needsStep(st.needs)
     if (needs && extras.indexOf(needs) < 0)
         extras = extras.concat([needs])
-    var keys = ["choose"].concat(extras, ["deposit", "arrive"])
+    var keys = ["choose"].concat(extras, ["deposit", "wait", "claim"])
     var titles = { choose: "Choose the amount and account", connect: "Let the bridge see this account", public_account: "Give the bridge this account",
-                   private_account: "Give the bridge this account", secret: "Allow the bridge's deposit keys", deposit: "Deposit on the page", arrive: "Claim when it arrives" }
-    var now = st.stage === "code" ? "deposit" : st.stage === "needs" ? (needs || "choose") : "choose"
-    var at = keys.indexOf(now)
+                   private_account: "Give the bridge this account", secret: "Allow the bridge's deposit keys",
+                   deposit: "Deposit on the page", wait: "Waiting for Ethereum",
+                   claim: st.stage === "claimable" ? "Arrived: claim it" : st.stage === "claimed" ? "Claimed" + (st.claimedBlock ? " in block " + st.claimedBlock : "") : "Claim" }
+    var now = st.stage === "code" || st.stage === "waiting" || st.stage === "checking" ? "deposit" : st.stage === "deposited" || st.stage === "final" ? "wait"
+        : st.stage === "claimable" ? "claim" : st.stage === "needs" ? (needs || "choose") : "choose"
+    var at = st.stage === "claimed" ? keys.length : keys.indexOf(now)
     return keys.map(function(k, i) {
-        return { key: k, n: i + 1, total: keys.length, title: titles[k] || k, state: i < at ? "done" : i === at ? "now" : "later", line: "" }
+        var state = i < at ? "done" : i === at ? "now" : "later"
+        var title = k === "deposit" && state === "done" ? "Deposited" : titles[k] || k
+        return { key: k, n: i + 1, total: keys.length, title: title, short: stepShort(k, state), state: state, line: "" }
     })
 }
 
