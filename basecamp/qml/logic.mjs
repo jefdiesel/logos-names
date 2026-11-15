@@ -945,6 +945,12 @@ export function replyKind(reply) {
 /// a name), not an envelope, so it is sorted here: `{kind: "ok", value: name}`, or "busy" (the
 /// module's busy answer, or no answer) or "missing" as replyKind says. Never "[object Object]".
 export function normalizedReply(reply) {
+    // Through callModuleAsync, Basecamp 0.3.2 hands a plain string reply JSON-encoded, once or
+    // twice ("\"jef04\""): unwrapped first (the blocking callModule gave it bare; read as "busy"
+    // every time on the M2, 15 Nov).
+    for (var depth = 0; depth < 2 && typeof reply === "string" && reply.length >= 2 && reply.charAt(0) === '"'; depth++) {
+        try { reply = JSON.parse(reply) } catch (error) { break }
+    }
     if (reply === "")
         return { kind: "ok", value: "", error: "" }
     if (typeof reply === "string" && /^[a-z0-9-]{1,32}$/.test(reply))

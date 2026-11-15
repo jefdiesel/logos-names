@@ -861,6 +861,10 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   const { receiveBalanceLine } = await import("./qml/logic.mjs");
   const blocks = [{ account: "Public/3J29s1Wy62NYMRuTe6MWXQrpWkqUAkv9t6PqzHWF7CNA", assets: [{ symbol: "wETH", name: "Wrapped Sepolia ETH (demo) · bridge v2", amount: "0" }, { symbol: "wETH", name: "Wrapped Sepolia ETH (v4) · bridge v4", amount: "0.01" }] }];
   check("balance line: the bridge that holds it, not v2's 0", receiveBalanceLine(blocks, "Public/3J29s1Wy62NYMRuTe6MWXQrpWkqUAkv9t6PqzHWF7CNA", "ETH"), "3J29s1…7CNA now holds 0.01 wETH.");
+  const { normalizedReply } = await import("./qml/logic.mjs");
+  check("normalize through callModuleAsync (JSON-encoded once or twice)", [normalizedReply('"jef04"').value, normalizedReply(JSON.stringify(JSON.stringify("jef04"))).value, normalizedReply('""').value, normalizedReply("jef04").value, normalizedReply(JSON.stringify({ success: true, value: "jef04" })).value],
+    ["jef04", "jef04", "", "jef04", "jef04"]);
+  check("normalize: a real busy answer stays busy", normalizedReply(JSON.stringify({ success: false, busy: true, error: "busy" })).kind, "busy");
   check("Add: a name not yours", [addNameNotYours("Adding the name didn't finish: this wallet doesn't hold jef04, so it isn't added."), addNameNotYours("Adding the name didn't finish: Error: jef04 is not registered"), addNameNotYours("Adding the name didn't finish: couldn't reach the sequencer")], [true, true, false]);
 }
 
