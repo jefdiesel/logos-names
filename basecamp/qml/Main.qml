@@ -479,6 +479,7 @@ Item {
             walletStorage = config.wallet_storage ? config.wallet_storage : ""
             cliPath = config.cli ? config.cli : ""
             bridgePrograms = Array.isArray(config.bridge_programs) ? config.bridge_programs : []
+            addBundledBridge()
             cliWallet = config.cli_wallet ? config.cli_wallet : ""
             configKnown = true
             settingsOpen = registry === ""
@@ -900,7 +901,7 @@ Item {
     property string bridgeBundle: ""
     property var bridgeInstall: null       // {phase: "asking"|"installing"|"slow"|"starting"|"failed"|"updated", line}
     readonly property string bridgeSetupNow: Logic.bridgeSetup({ list: installedList, answers: claimBridgeAnswers, checkWith: claimCheckWith, features: bridgeConfig !== null ? bridgeFeatures : null })
-    readonly property var bridgeLabels: [["JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", "bridge v2"], ["4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr", "bridge v3"]]
+    readonly property var bridgeLabels: [["JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", "bridge v2"], ["4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr", "bridge v3"], [Logic.BRIDGE_V4_PROGRAM, "bridge v4"]]
     readonly property string claimAccount: claimCheck !== null && claimCheck.ok && claimCheck.deposit ? String(claimCheck.deposit.account || "") : ""
     readonly property string claimAccountProblemNow: cliAccounts === null ? "" : Logic.claimAccountProblem(claimAccount, cliAccounts)
     readonly property var claimBridgeNow: Logic.claimBridge(claimCheck !== null && claimCheck.call ? claimCheck.call.program : "", bridgePrograms, bridgeLabels)
@@ -928,6 +929,23 @@ Item {
             }
             if (failed) failed(r.error, r.kind)
         }, timeout || 120000)
+    }
+    /// A saved list of bridges without v4 (the bundled bridge's default since 0343cb0) gets it
+    /// added, so its claims aren't refused and its tokens show; once per window, and never more
+    /// than the module allows (4).
+    property bool bridgeAddTried: false
+    function addBundledBridge() {
+        var list = Logic.bridgesToAdd(bridgePrograms)
+        if (list === null || bridgeAddTried || !bridgeReady)
+            return
+        bridgeAddTried = true
+        askLater("set_bridge_programs", [JSON.stringify(list)], function(value) {
+            if (value === true || value === "true") {
+                bridgePrograms = list
+                console.log("names_ui: the wallet now reads the bridge", Logic.BRIDGE_V4_PROGRAM)
+            } else
+                console.log("names_ui: set_bridge_programs refused", JSON.stringify(value))
+        }, function(message) { console.log("names_ui: set_bridge_programs:", message) }, 15000)
     }
     function againAfter(ms, fn) {
         var t = Qt.createQmlObject('import QtQuick; Timer { repeat: false }', root, "claimLater")
@@ -1022,6 +1040,10 @@ Item {
     // one opened from the card, or the one on its way when the screen opens.
     property string receiveFocus: ""
     property var receiveCodes: ({})        // codes made in this window, by id (with made_at), to show again
+    property var receiveCodesAgain: ({})   // codes of earlier sessions, from receive_request(id), by id
+    property var receiveCodeRefusals: ({}) // receive_request(id) refused: id → {line, detail}
+    // Why a new code can't be made with the running bridge yet ("" when it can).
+    readonly property string receiveHoldNow: Logic.receiveHoldLine(bridgeConfig, bridgePrograms)
     property var receiveCodeExtras: ({})   // the first-time steps each of those asked, so its numbers stay
     property var receiveClaimedAt: ({})    // receives claimed while Names was open: id → ms
     property bool receiveShowAll: false    // the card's older unused codes, shown one by one
@@ -1055,7 +1077,8 @@ Item {
         receivePublicOk = false
         receiveMissing = false
         receiveFocus = typeof focusId === "string" ? focusId : Logic.receiveInProgress(receives, receiveStatuses, receiveCodes)
-        receiveResult = receiveFocus !== "" && receiveCodes[receiveFocus] ? receiveCodes[receiveFocus] : null
+        receiveResult = receiveFocus !== "" && receiveCodes[receiveFocus] ? receiveCodes[receiveFocus]
+            : receiveFocus !== "" && receiveCodesAgain[receiveFocus] ? receiveCodesAgain[receiveFocus] : null
         receiveExtras = receiveFocus !== "" && receiveCodeExtras[receiveFocus] ? receiveCodeExtras[receiveFocus] : []
         if (receiveAccount === "" || receiveAccountList.indexOf(receiveAccount) < 0)
             receiveAccount = receiveAccountList.length > 0 ? receiveAccountList[0] : ""
@@ -1067,6 +1090,8 @@ Item {
             bridgeAnswered(value)
             if (receiveFocus === "" && bridgeReceives)
                 loadReceiveRegistry()
+            else if (receiveFocus !== "" && receiveResult === null && Logic.bridgeCan(bridgeFeatures, "receive_request") && !receiveCodeRefusals[receiveFocus])
+                loadReceiveCode(receiveFocus)
             else {
                 receiveHold = false
                 receiveCheckSoon()
@@ -1077,6 +1102,34 @@ Item {
             if (kind === "missing" || kind === "starting" || kind === "busy" || kind === "stale")
                 receiveMissing = true
         }, 10000, false)
+    }
+    /// The code of a receive made in an earlier session (`receive_request`: read-only, no wallet
+    /// or chain call). Refused for a code an older bridge made: the screen says so, never a link.
+    function loadReceiveCode(id) {
+        receiveHold = true
+        bridgeCall("receive_request", [id], function(value) {
+            receiveHold = false
+            if (value && typeof value.request === "string" && value.request.indexOf("logosdep1") === 0) {
+                var again = receiveCodesAgain
+                again[id] = value
+                receiveCodesAgain = again
+                receiveCodesAgainChanged()
+                if (receiveFocus === id && receiveResult === null)
+                    receiveResult = value
+                console.log("names_ui: receive: code shown again for", id)
+            }
+            receiveCheckSoon()
+        }, function(message, kind) {
+            receiveHold = false
+            if (kind !== "busy" && kind !== "missing" && kind !== "starting" && kind !== "stale") {
+                var all = receiveCodeRefusals
+                all[id] = Logic.receiveCodeRefused(message)
+                receiveCodeRefusals = all
+                receiveCodeRefusalsChanged()
+            }
+            console.log("names_ui: receive_request", id + ":", kind, message)
+            receiveCheckSoon()
+        }, 30000)
     }
     /// The denominations: read once per screen (it reads both chains), never polled.
     function loadReceiveRegistry() {
@@ -1110,12 +1163,35 @@ Item {
 
     /// The deposit code for the chosen amount and account. A public account only after the person
     /// has read the "not private" line (the module refuses it without "true").
-    function makeReceive() {
-        if (receiveAsking || receiveAccountNow === "" || !receivePublicOk)
+    function makeReceive(switched) {
+        if (receiveAsking || receiveAccountNow === "" || !receivePublicOk || receiveHoldNow !== "")
             return
         receiveAccount = receiveAccountNow
         receiveAsking = true
         receiveError = ""
+        // New codes are made on the bundled bridge's default (v4): a claim file for another vault
+        // may have switched the bridge, so it is switched back first (once).
+        var dep = bridgeConfig && bridgeConfig.deployment ? String(bridgeConfig.deployment.name || "") : ""
+        if (dep !== "" && dep !== Logic.RECEIVE_DEPLOYMENT) {
+            if (switched === true) {
+                receiveAsking = false
+                receiveError = "The LEZ Bridge stays on " + dep + ", not the new vault. Nothing was made."
+                return
+            }
+            bridgeCall("use_deployment", [Logic.RECEIVE_DEPLOYMENT], function(config) {
+                receiveAsking = false
+                var next = Object.assign({}, bridgeConfig)
+                next.deployment = config && config.deployment ? config.deployment : { name: Logic.RECEIVE_DEPLOYMENT }
+                bridgeConfig = next
+                console.log("names_ui: receive: the bridge switched from", dep, "to", next.deployment.name)
+                makeReceive(true)
+            }, function(message, kind) {
+                receiveAsking = false
+                receiveError = sentence(kind === "busy" ? "The LEZ Bridge is still answering an earlier call. Try again." : message)
+                console.log("names_ui: receive: use_deployment:", kind, message)
+            }, 30000, false)
+            return
+        }
         bridgeCall("make_public_deposit_request", [receiveToken, String(receiveDenom), receiveAccount, "true"], function(value) {
             receiveAsking = false
             var r = Logic.receiveReply(value)
@@ -1730,11 +1806,13 @@ Item {
         var withOptions = claimCheckWith
         var checked = function(value) {
             // A file for the other built-in bridge: the module is switched to it and checks again.
-            if (value && !value.ok && value.error && value.error.code === "other_vault" && !switched && claimDeployment) {
-                var other = Logic.otherDeployment(claimDeployment.name)
+            var tried = Array.isArray(switched) ? switched : []
+            var other = claimDeployment ? Logic.otherDeployment(claimDeployment.name, tried) : ""
+            if (value && !value.ok && value.error && value.error.code === "other_vault" && other !== "" && tried.length < 2) {
+                var was = claimDeployment.name
                 bridgeCall("use_deployment", [other], function(config) {
                     claimDeployment = config && config.deployment ? config.deployment : { name: other }
-                    checkClaimFile(source, true)
+                    checkClaimFile(source, tried.concat([was]))
                 }, function(message) {
                     claimChecking = false
                     claimCheck = value
@@ -9223,6 +9301,10 @@ Item {
                     spacing: 12
                     readonly property var stepNow: root.receiveStepsNow.filter(function(x) { return x.state === "now" })[0] || null
                     readonly property var result: root.receiveResult
+                    // The account the code pays: the code's own (one shown again), else the one chosen.
+                    readonly property string resultAccount: result !== null && result.account ? String(result.account) : root.receiveAccount
+                    readonly property var refusal: root.receiveFocus !== "" ? (root.receiveCodeRefusals[root.receiveFocus] || null) : null
+                    readonly property var releaseNotice: root.bridgeConfig !== null && root.bridgeConfig.notices && root.bridgeConfig.notices.release && root.bridgeConfig.notices.release.text ? root.bridgeConfig.notices.release : null
                     readonly property var p: root.receiveFocusProgress
                     // The receive followed has no deposit seen yet: its code (when made here) is the step.
                     readonly property bool depositing: root.receiveFocus === "" || p.stage === "waiting" || p.stage === "checking"
@@ -9314,7 +9396,8 @@ Item {
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.receivePublicOk = !root.receivePublicOk }
                             }
                         }
-                        Action { label: root.receiveAsking ? "Making the code…" : "Make the deposit code"; strong: true; enabledNow: !root.receiveAsking && root.receivePublicOk && root.receiveAccountNow !== ""; onPressed: root.makeReceive() }
+                        Hint { visible: root.receiveHoldNow !== ""; color: root.brass; text: root.receiveHoldNow }
+                        Action { visible: root.receiveHoldNow === ""; label: root.receiveAsking ? "Making the code…" : "Make the deposit code"; strong: true; enabledNow: !root.receiveAsking && root.receivePublicOk && root.receiveAccountNow !== ""; onPressed: root.makeReceive() }
                     }
                     Hint { visible: root.receiveNeeds !== null && !root.appInline; text: "Answer it in the sheet." }
                     // This screen's own question to the wallet, answered here (not in a sheet over it).
@@ -9328,7 +9411,14 @@ Item {
                         Hint {
                             color: root.ink
                             text: receiveScreen.result === null ? "" : receiveScreen.result.bridge_fee && receiveScreen.result.bridge_fee.text ? receiveScreen.result.bridge_fee.text
-                                : String(receiveScreen.result.denom_text || "") + " " + String(receiveScreen.result.symbol || "") + " into " + Logic.idShort(root.receiveAccount) + ". The deposit page shows the bridge fee."
+                                : (receiveScreen.result.denom_text ? String(receiveScreen.result.denom_text) + " " + String(receiveScreen.result.symbol || "") : String(receiveScreen.result.amount_text || receiveScreen.result.symbol || ""))
+                                  + " into " + Logic.idShort(receiveScreen.resultAccount) + ". The deposit page shows the bridge fee."
+                        }
+                        // A code shown again that was made for an older vault.
+                        Hint {
+                            visible: receiveScreen.result !== null && !!receiveScreen.result.deployment && String(receiveScreen.result.deployment) !== Logic.RECEIVE_DEPLOYMENT
+                            color: root.brass
+                            text: "This code is for an older vault. For the new one (v4), make another code."
                         }
                         Action { label: root.receiveLinkCopied ? "Copied." : "Copy the link"; strong: true; onPressed: root.copyDepositLink(receiveScreen.result.request_url) }
                         Hint { font.pixelSize: root.px(15); text: "Paste it into your browser." }
@@ -9392,7 +9482,9 @@ Item {
                         Hint {
                             visible: receiveScreen.p.stage === "waiting" && receiveScreen.result === null
                             font.pixelSize: root.px(15)
-                            text: "Its page link shows only when the code is made. If you haven't deposited yet, make another code."
+                            text: receiveScreen.refusal !== null ? receiveScreen.refusal.line + " If you haven't deposited yet, make another code."
+                                : Logic.bridgeCan(root.bridgeFeatures, "receive_request") && root.receiveHold ? "Getting its code…"
+                                : "Its page link shows only when the code is made. If you haven't deposited yet, make another code."
                         }
                         ReceiveCheckLine { visible: receiveScreen.p.stage !== "claimed" && receiveScreen.p.stage !== "claimable" }
                     }
@@ -9417,7 +9509,10 @@ Item {
                         Hint { font.pixelSize: root.px(15); text: "The wallet makes this deposit's secret from your account's own key; this app never sees it. The page gets only a code: the amount, the vault and a commitment that hides which account receives it." }
                         Hint { visible: root.bridgeConfig !== null && !!root.bridgeConfig.notices && !!root.bridgeConfig.notices.not_private; font.pixelSize: root.px(15); text: root.bridgeConfig !== null && root.bridgeConfig.notices && root.bridgeConfig.notices.not_private ? String(root.bridgeConfig.notices.not_private.text || "") : "" }
                         Hint { font.pixelSize: root.px(15); text: "Private accounts can't receive on the bridge test network yet: their claim needs a proof that hasn't run there." }
-                        Fact { visible: receiveScreen.result !== null; label: "Into"; code: true; value: root.receiveAccount; full: root.receiveAccount }
+                        Fact { visible: receiveScreen.result !== null; label: "Into"; code: true; value: receiveScreen.resultAccount; full: receiveScreen.resultAccount }
+                        Hint { visible: receiveScreen.refusal !== null && receiveScreen.refusal.detail !== ""; font.pixelSize: root.px(15); text: receiveScreen.refusal !== null ? receiveScreen.refusal.detail : "" }
+                        Hint { visible: receiveScreen.releaseNotice !== null; font.pixelSize: root.px(15); text: receiveScreen.releaseNotice !== null ? String(receiveScreen.releaseNotice.text) : "" }
+                        Hint { visible: receiveScreen.releaseNotice !== null && !!receiveScreen.releaseNotice.detail; font.pixelSize: root.px(15); text: receiveScreen.releaseNotice !== null ? String(receiveScreen.releaseNotice.detail || "") : "" }
                         Hint { visible: receiveScreen.result !== null; font.pixelSize: root.px(15); text: "Text copied in Names may not reach another computer through Screen Sharing: paste the link in a browser on this computer, use the QR (On your phone), or select it below." }
                         // The link as text that can be selected by hand.
                         TextEdit {

@@ -33,11 +33,14 @@ pub const RPC: &str = "https://lez.nameswallet.app/";
 pub const DEFAULT_BRIDGE_PROGRAM: &str = "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7";
 /// The fixed bridge (v3), deployed beside v2 on 2026-11-14.
 pub const BRIDGE_V3_PROGRAM: &str = "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr";
-/// The bridges read when none is set: v2 and v3.
-pub const DEFAULT_BRIDGE_PROGRAMS: [&str; 2] = [DEFAULT_BRIDGE_PROGRAM, BRIDGE_V3_PROGRAM];
+/// The bridge of the vault that releases by proof (v4), deployed 2026-11-15: the bridge module's
+/// default deployment since 0343cb0.
+pub const BRIDGE_V4_PROGRAM: &str = "BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf";
+/// The bridges read when none is set: v2, v3 and v4.
+pub const DEFAULT_BRIDGE_PROGRAMS: [&str; 3] = [DEFAULT_BRIDGE_PROGRAM, BRIDGE_V3_PROGRAM, BRIDGE_V4_PROGRAM];
 /// What each known bridge is called on a balance row, by its program: the names of the
-/// deployments (rfp-022's v2 and its fixed v3). Another bridge shows its short program ID.
-pub const BRIDGE_LABELS: [(&str, &str); 2] = [(DEFAULT_BRIDGE_PROGRAM, "bridge v2"), (BRIDGE_V3_PROGRAM, "bridge v3")];
+/// deployments (rfp-022's v2, its fixed v3 and v4). Another bridge shows its short program ID.
+pub const BRIDGE_LABELS: [(&str, &str); 3] = [(DEFAULT_BRIDGE_PROGRAM, "bridge v2"), (BRIDGE_V3_PROGRAM, "bridge v3"), (BRIDGE_V4_PROGRAM, "bridge v4")];
 
 /// The label of the bridge `program` (`BRIDGE_LABELS`), or None.
 pub fn bridge_label(program: &str) -> Option<&'static str> {
@@ -727,6 +730,8 @@ mod tests {
         assert_eq!(name("def-weth-v3.json").as_deref(), Some("Wrapped Sepolia ETH (demo v3)"));
         assert_eq!(name("def-dusdc-v3.json").as_deref(), Some("Wrapped dUSDC (demo v3)"));
         assert_eq!((bridge_label(DEFAULT_BRIDGE_PROGRAM), bridge_label(BRIDGE_V3_PROGRAM), bridge_label("x")), (Some("bridge v2"), Some("bridge v3"), None));
+        assert_eq!(bridge_label(BRIDGE_V4_PROGRAM), Some("bridge v4"));
+        assert!(DEFAULT_BRIDGE_PROGRAMS.len() <= MAX_BRIDGES && DEFAULT_BRIDGE_PROGRAMS.contains(&BRIDGE_V4_PROGRAM));
     }
 
     #[test]

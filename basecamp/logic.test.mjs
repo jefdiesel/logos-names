@@ -190,7 +190,10 @@ check("cli status same network", mergeCliStatus(onNet({ wallet: true, public: "P
   // Which bridge, and whether this wallet reads it.
   check("bridge v3 read", claimBridge(V3, [V2, V3], labels), { label: "bridge v3", problem: "" });
   check("bridge not read", claimBridge(V2, [V3], labels).problem.startsWith("This claim file is for bridge v2"), true);
-  check("other deployment", [otherDeployment("bridge-test-network-v3"), otherDeployment("bridge-test-network")], ["bridge-test-network", "bridge-test-network-v3"]);
+  check("other deployment, newest first", [otherDeployment("bridge-test-network-v3"), otherDeployment("bridge-test-network"), otherDeployment("bridge-test-network-v4")],
+    ["bridge-test-network-v4", "bridge-test-network-v4", "bridge-test-network-v3"]);
+  check("other deployment: the ones tried are skipped", [otherDeployment("bridge-test-network-v3", ["bridge-test-network-v4"]), otherDeployment("bridge-test-network", ["bridge-test-network-v4", "bridge-test-network-v3"])],
+    ["bridge-test-network", ""]);
   // A claim already running or done for this file is found, never started twice.
   const jobs = [{ id: "j2", state: "done", account: "Public/A", leaf_index: 7 }, { id: "j1", state: "running", check: "rc-0" }];
   check("job for this file", claimJobFor(jobs, ok).id, "j2");
@@ -628,7 +631,8 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("receiveReply", [receiveReply({ needs: "secret" }).kind, receiveReply({ request: "logosdep1qq" }).kind, receiveReply({ deposit: {} }).kind], ["needs", "code", "old"]);
   check("receivesFrom keeps the unclaimed receives",
     receivesFrom({ receives: [{ id: "dep-1", symbol: "ETH", denom_text: "0.1", account: "A", account_kind: "public", stage: "deposited" }, { id: "dep-2", claimed: true }, { id: "dep-3", stage: "claimed" }] }),
-    [{ id: "dep-1", symbol: "ETH", amount: "0.1", account: "A", account_kind: "public", stage: "deposited" }]);
+    [{ id: "dep-1", symbol: "ETH", amount: "0.1", account: "A", account_kind: "public", stage: "deposited", compare: null }]);
+  check("receivesFrom keeps the row's compare words", receivesFrom({ receives: [{ id: "d", compare: { words: ["a", "b", "c", "d"] } }] })[0].compare.words.length, 4);
   check("receivesFrom: the amount from denom and decimals", receivesFrom({ receives: [{ id: "d", symbol: "ETH", denom: "100000000000000000", decimals: 18 }] })[0].amount, "0.1");
   const { bridgeCan } = await import("./qml/logic.mjs");
   check("bridgeCan", [bridgeCan(["receive", "receives"], "receives"), bridgeCan(undefined, "receives"), bridgeCan([], "receive")], [true, false, false]);
@@ -783,6 +787,22 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
 {
   const { WHATS_NEW } = await import("./qml/logic.mjs");
   check("what's new: three short lines", [WHATS_NEW.length, WHATS_NEW.every((l) => l.length > 0 && l.length <= 110)], [3, true]);
+}
+
+{
+  const { bridgesToAdd, BRIDGE_V4_PROGRAM, receiveHoldLine, receiveCodeRefused, RECEIVE_DEPLOYMENT, BUNDLED_BRIDGE } = await import("./qml/logic.mjs");
+  const V2 = "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", V3 = "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr";
+  check("v4 added to a saved list without it", bridgesToAdd([V2, V3]), [V2, V3, BRIDGE_V4_PROGRAM]);
+  check("nothing to add", [bridgesToAdd([V2, V3, BRIDGE_V4_PROGRAM]), bridgesToAdd([]), bridgesToAdd(null), bridgesToAdd(["a", "b", "c", "d"])], [null, null, null, null]);
+  check("Receive's deployment is v4", RECEIVE_DEPLOYMENT, "bridge-test-network-v4");
+  const now = { build: { commit: BUNDLED_BRIDGE[0].build }, deployment: { name: "bridge-test-network-v4", bridge_program: BRIDGE_V4_PROGRAM } };
+  check("no hold with the shipped bridge read", receiveHoldLine(now, [V2, V3, BRIDGE_V4_PROGRAM]), "");
+  check("hold with an older bridge", receiveHoldLine({ build: { commit: "5cad169x" }, deployment: now.deployment }, [V2, V3]).startsWith("New codes come from the new LEZ Bridge"), true);
+  check("hold with a bridge the wallet doesn't read", receiveHoldLine(now, [V2, V3]).startsWith("This wallet doesn't read"), true);
+  check("no config, no hold", receiveHoldLine(null, []), "");
+  check("refused: an older build", receiveCodeRefused("The deposit code of dep-1 can't be shown again: it was made by an older build of this module, which did not keep the vault it was for. Nothing was guessed").line,
+    "This code can't be shown again: an older LEZ Bridge made it and didn't keep what's needed.");
+  check("refused: other reasons, the reason kept for Details", [receiveCodeRefused("there is no deposit dep-9 on this computer").line, receiveCodeRefused("x").detail], ["This code can't be shown again.", "x"]);
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");

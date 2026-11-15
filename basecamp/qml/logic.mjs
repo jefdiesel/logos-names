@@ -1241,9 +1241,51 @@ export function claimInput(text) {
     return { kind: "other", problem: "Paste the whole claim file (it starts with {), or choose the file." }
 }
 
-/// The other built-in deployment of the bridge module (after `other_vault`: the file is for it).
-export function otherDeployment(name) {
-    return name === "bridge-test-network" ? "bridge-test-network-v3" : "bridge-test-network"
+/// The bridge module's built-in deployments, newest first: v4 (the vault that releases by proof,
+/// the bundled bridge's default since 0343cb0), v3, v2.
+export const BRIDGE_DEPLOYMENTS = ["bridge-test-network-v4", "bridge-test-network-v3", "bridge-test-network"]
+/// The deployment Receive makes new codes on: the bundled bridge's default (v4).
+export const RECEIVE_DEPLOYMENT = BRIDGE_DEPLOYMENTS[0]
+/// The next built-in deployment to try after `other_vault` (the file is for another vault): the
+/// newest one that is neither `name` nor in `tried`; "" when none is left.
+export function otherDeployment(name, tried) {
+    var done = (Array.isArray(tried) ? tried : []).concat([name])
+    return BRIDGE_DEPLOYMENTS.filter(function(d) { return done.indexOf(d) < 0 })[0] || ""
+}
+
+/// The v4 bridge program on LEZ 0.4 (rfp-022 deployments.json, bridge-test-network-v4).
+export const BRIDGE_V4_PROGRAM = "BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf"
+/// The bridges the wallet must read for the bundled bridge's claims, from get_config's
+/// `bridge_programs`: the list with v4 added when a saved list lacks it (room for 4), else null
+/// (nothing to change). Built in here, never taken from the bridge's own answer.
+export function bridgesToAdd(programs) {
+    if (!Array.isArray(programs) || programs.length === 0 || programs.indexOf(BRIDGE_V4_PROGRAM) >= 0 || programs.length >= 4)
+        return null
+    return programs.concat([BRIDGE_V4_PROGRAM])
+}
+
+/// Why Receive can't make a new code yet with the running bridge, or "". `config`: its config();
+/// `programs`: the bridges the wallet reads. An older bridge than the one shipped makes codes for
+/// the old vault; a bridge the wallet doesn't read would have its claim refused.
+export function receiveHoldLine(config, programs) {
+    if (!config || typeof config !== "object")
+        return ""
+    if (bridgeBehind(config))
+        return "New codes come from the new LEZ Bridge. Update it first (above)."
+    var program = config.deployment && config.deployment.bridge_program ? String(config.deployment.bridge_program) : ""
+    if (program !== "" && Array.isArray(programs) && programs.length > 0 && programs.indexOf(program) < 0)
+        return "This wallet doesn't read the LEZ Bridge's network yet. Close the Names tab and open Names again."
+    return ""
+}
+
+/// The line for a code that can't be shown again (`receive_request` refused): {line, detail}.
+/// Never promises the link; the module's own reason goes under Details.
+export function receiveCodeRefused(message) {
+    var m = String(message || "")
+    var older = /older build/i.test(m)
+    return { line: older ? "This code can't be shown again: an older LEZ Bridge made it and didn't keep what's needed."
+                         : "This code can't be shown again.",
+             detail: m }
 }
 
 // ── The LEZ Bridge package, installed from inside Names (one click) ──
@@ -1603,7 +1645,7 @@ export function receivesFrom(value) {
     return rows.filter(function(d) { return d && d.id && d.claimed !== true && d.stage !== "claimed" }).map(function(d) {
         var amount = d.denom_text || d.amount_text || (d.denom !== undefined && d.decimals !== undefined ? withDecimals(d.denom, d.decimals) : "")
         return { id: String(d.id), symbol: String(d.symbol || ""), amount: String(amount), account: String(d.account || ""), account_kind: String(d.account_kind || ""),
-                 stage: String(d.stage || "unknown") }
+                 stage: String(d.stage || "unknown"), compare: d.compare && typeof d.compare === "object" ? d.compare : null }
     })
 }
 
@@ -1794,9 +1836,9 @@ export function bridgeSetupState(s) {
 
 // ── What's new: three lines at the top of Settings after an update (change them with each build) ──
 export const WHATS_NEW = [
+    "Receive from Ethereum uses the new vault (v4). A code made earlier shows again, with its four words.",
     "Deposits from Ethereum have their own panel on the Wallet card: the minutes left, then Claim.",
-    "Claim and Receive show their steps in a row, and the wallet's questions are answered on the screen.",
-    "Copy the link replaces Open the deposit page: Basecamp can't open web pages."
+    "Settings → Backup: one encrypted file of your wallets, checked after it's made."
 ]
 
 // ── Settings → Backup ──
