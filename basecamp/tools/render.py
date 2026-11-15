@@ -744,6 +744,10 @@ MOCKS["receive-deposited-light"] = MOCKS["receive-deposited"]
 MOCKS["card-arriving-none"] = {"bridge": {}}
 MOCKS["receive-needs-inline"] = MOCKS["receive-needs"]
 SCENARIOS["receive-code-words"] = SCENARIOS["receive-code"]
+# After Copy the link: "Copied." on the button for a moment.
+SCENARIOS["receive-code-copied"] = SCENARIOS["receive-code"].replace("root.makeReceive() })", "root.makeReceive(); root.againAfter(100, function() { root.receiveLinkCopied = true }) })")
+MOCKS["receive-code-copied"] = MOCKS["receive-code-words"]
+SCENARIOS["receive-code-details"] = SCENARIOS["receive-code-details"]
 # The bridge 5cad169's code: the four words, large; the digits under Details.
 import copy as _copy
 MOCKS["receive-code-words"] = _copy.deepcopy(MOCKS["receive-code"])
