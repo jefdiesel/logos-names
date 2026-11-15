@@ -910,6 +910,17 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("names_update said plainly", [sendBackBurnHeld({ needs: "names_update" }), sendBackBurnHeld({ stage: "approve" })], ["This Names Wallet can't sign a burn yet. Nothing was signed or sent.", ""]);
   const read = { bridges: [{}, {}], accounts: [{ account: "Public/A", found: true, native: "0", tokens: [{ symbol: "wETH", amount: "100000000000000000", decimals: 18, bridge: BRIDGE_V4_PROGRAM, bridge_label: "bridge v4", definition: "D" }] }] };
   const asset = bridgeNetRows(read, null)[0].assets[1];
+  const { sendBackSources } = await import("./qml/logic.mjs");
+  const blocks = [
+    { account: "Public/A", assets: [{ symbol: "LEZ", amount: "5" }, { symbol: "wETH", amount: "0.1", bridge: BRIDGE_V4_PROGRAM, base: "100000000000000000" }] },
+    { account: "Public/B", assets: [{ symbol: "wETH", amount: "0.1", bridge: V3, base: "100000000000000000" }] },
+    { account: "Public/C", watched: true, assets: [{ symbol: "wETH", amount: "1", bridge: BRIDGE_V4_PROGRAM, base: "1000000000000000000" }] },
+    { account: "Public/D", viewOnly: true, assets: [{ symbol: "wETH", amount: "1", bridge: BRIDGE_V4_PROGRAM, base: "1000000000000000000" }] },
+    { account: "Public/E", assets: [{ symbol: "dUSDC", amount: "100", bridge: BRIDGE_V4_PROGRAM, base: "100000000" }, { symbol: "wETH", amount: "0.001", bridge: BRIDGE_V4_PROGRAM, base: "1000000000000000" }] },
+  ];
+  check("sources: own accounts with a v4 denomination, nothing else", sendBackSources(blocks).map((x) => x.key), ["Public/A|wETH", "Public/E|dUSDC"]);
+  check("sources: none", [sendBackSources([]).length, sendBackSources(null).length], [0, 0]);
+  check("step 1 asks for the account and the amount", sendBackSteps({ stage: "choose" })[0].title, "Choose the account and the amount");
   check("card asset rows carry what Send back needs", [asset.bridge === BRIDGE_V4_PROGRAM, asset.base, asset.decimals, sendBackOffer(asset)], [true, "100000000000000000", 18, true]);
 }
 

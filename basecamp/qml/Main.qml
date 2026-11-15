@@ -1435,6 +1435,15 @@ Item {
     property bool sbProverTried: false     // set_release_prover tried once in this window
     readonly property bool sbCan: Logic.bridgeCan(bridgeFeatures, "send_back")
     readonly property var sbAmounts: Logic.sendBackAmounts(receiveRegistry, sbAsset)
+    readonly property var sbSources: Logic.sendBackSources(bridgeNetBlocks)
+    /// Picks the account and token Send back starts from (a source row), or none.
+    function sbPick(source) {
+        sbAccount = source ? source.account : ""
+        sbAsset = source ? source.asset : null
+        sbDenom = -1
+        if (sbAmounts.length === 1)
+            sbDenom = sbAmounts[0].index
+    }
     readonly property var sbFocusRow: sbFocus !== "" ? (sendBacks.filter(function(x) { return x.id === sbFocus })[0] || null) : null
     readonly property var sbFocusStatus: sbFocus !== "" ? (sbStatuses[sbFocus] || (sbFocusRow !== null ? { stage: sbFocusRow.stage } : null)) : null
     readonly property var sbProgressNow: Logic.sendBackProgress(sbFocusStatus, receiveNow / 1000)
@@ -1464,6 +1473,9 @@ Item {
         sbFocus = typeof focusId === "string" ? focusId : ""
         if (sbFocus !== "" && sbFocusRow !== null)
             sbAccount = sbFocusRow.account
+        // Opened from the card's button: one account to send from is chosen for the person.
+        if (sbFocus === "" && sbAsset === null && sbSources.length === 1)
+            sbPick(sbSources[0])
         loadInstalled(checkBundle)
         receiveHold = true
         bridgeCall("config", [], function(value) {
@@ -1475,7 +1487,7 @@ Item {
                     loadReceiveRegistry()
                 else
                     sbNextAt = 0
-                if (sbFocus === "" && sbAmounts.length === 1)
+                if (sbFocus === "" && sbAsset !== null && sbAmounts.length === 1 && sbDenom < 0)
                     sbDenom = sbAmounts[0].index
             }, function(message, kind) {
                 receiveHold = false
@@ -1553,7 +1565,7 @@ Item {
                 return
             }
             if (!value || !value.id) {
-                sbError = "The LEZ Bridge gave no send-back. Nothing was done."
+                sbError = "The LEZ Bridge gave no answer to bridge it. Nothing was done."
                 return
             }
             var id = String(value.id)
@@ -5831,7 +5843,7 @@ Item {
             return ""
         var bridge = request.app === "lez_bridge"
         if (request.kind === "relayed_call" && request.sheet && request.sheet.burn)
-            return "Send " + request.sheet.burn.amount_text + " " + request.sheet.burn.symbol + " back to Ethereum?"
+            return "Bridge " + request.sheet.burn.amount_text + " " + request.sheet.burn.symbol + " to Ethereum?"
         if (request.kind === "relayed_call")
             return appForClaim && claimCheck.deposit ? "Claim " + claimCheck.deposit.amount_text + " from the bridge?" : request.app + " asks you to sign"
         // Adding one account to what the app already sees (grant_add_account): the others stay.
@@ -8576,6 +8588,7 @@ Item {
                             spacing: 10
                             Action { label: "Receive from Ethereum"; strong: !root.cardSetupBlocks && !arrivingPanel.anyClaim; onPressed: root.openEthReceive() }
                             Action { label: "Claim a bridge deposit"; onPressed: root.openClaim() }
+                            Action { label: "Bridge to Ethereum"; onPressed: root.openSendBack("", null) }
                         }
                         // Arriving from Ethereum: this wallet's receives in their own panel, in the
                         // third tone; amount large, the account short, the state under it; Claim
@@ -8637,11 +8650,11 @@ Item {
                             }
                             ReceiveCheckLine { visible: root.receiveHasStatus }
                         }
-                        // Going back to Ethereum: this wallet's send-backs, in the same tone; the wait
+                        // Bridging to Ethereum: this wallet's send-backs, in the same tone; the wait
                         // large. A row opens Send back at its stage.
                         UnderwayPanel {
                             visible: root.sbRowsNow.length > 0
-                            Text { text: "Going back to Ethereum"; color: root.underway; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold; font.capitalization: Font.AllUppercase; font.letterSpacing: 0.6 }
+                            Text { text: "Bridging to Ethereum"; color: root.underway; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold; font.capitalization: Font.AllUppercase; font.letterSpacing: 0.6 }
                             Repeater {
                                 model: root.sbRowsNow
                                 ColumnLayout {
@@ -8728,13 +8741,6 @@ Item {
                                             Text { text: netAsset.modelData.name; textFormat: Text.PlainText; color: root.dim; font.family: root.sans; font.pixelSize: root.px(13) }
                                         }
                                         Item { Layout.fillWidth: true }
-                                        Link {
-                                            visible: root.sbCan && !netAccount.modelData.viewOnly && !netAccount.modelData.watched && Logic.sendBackOffer(netAsset.modelData)
-                                            text: "Send back to Ethereum ›"
-                                            color: root.dim
-                                            font.pixelSize: root.px(14)
-                                            onPressed: root.openSendBack(String(netAccount.modelData.account), netAsset.modelData)
-                                        }
                                         Text {
                                             text: root.walletHidden ? "••••••" : netAsset.modelData.amount
                                             color: root.ink
@@ -8774,7 +8780,7 @@ Item {
                         }
                         Hint { visible: root.bridgeNetWatchProblem !== ""; font.pixelSize: root.px(14); color: root.alarm; text: root.bridgeNetWatchProblem }
                         Hint { font.pixelSize: root.px(14); text: "Private balances on the bridge test network are not shown yet." }
-                        Hint { font.pixelSize: root.px(14); text: "Sending on the bridge test network isn't in the wallet yet, apart from paying a name and sending back to Ethereum." }
+                        Hint { font.pixelSize: root.px(14); text: "Sending on the bridge test network isn't in the wallet yet, apart from paying a name and bridging to Ethereum." }
                     }
                     // What runs on LEZ 0.3 only, unavailable while LEZ 0.4 is shown.
                     ColumnLayout {
@@ -10122,7 +10128,7 @@ Item {
                     // The burn's approval is drawn here (appInline): it is the step, not the panel.
                     readonly property bool burning: root.appInline && root.sbFocus !== "" && (p.stage === "planned" || p.stage === "approve")
                     Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
-                    Text { text: "Send back to Ethereum"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
+                    Text { text: "Bridge to Ethereum"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
                     RunsOn { net: "0.4" }
                     BridgeSetupBox { then: "sendback" }
                     Hint { visible: !root.receiveMissing && root.bridgeSetupClear && root.bridgeConfig !== null && !root.sbCan; color: root.brass; text: "This LEZ Bridge can't send back yet. Update it." }
@@ -10152,8 +10158,24 @@ Item {
                         visible: sendBackScreen.shows && sendBackScreen.choosing && root.sbDenom < 0
                         Layout.fillWidth: true
                         spacing: 10
-                        Hint { color: root.ink; text: "From " + Logic.idShort(root.sbAccount) + ", which holds " + (root.sbAsset !== null ? root.sbAsset.amount + " " + root.sbAsset.symbol : "") + " on bridge v4." }
+                        // The accounts holding a token on bridge v4: short id, the token, what it holds.
                         Flow {
+                            visible: root.sbSources.length > 0
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Repeater {
+                                model: root.sbSources
+                                Action {
+                                    required property var modelData
+                                    label: Logic.idShort(modelData.account) + " · " + modelData.amount + " " + modelData.symbol
+                                    strong: root.sbAsset !== null && root.sbAccount === modelData.account && root.sbAsset.symbol === modelData.symbol
+                                    onPressed: root.sbPick(modelData)
+                                }
+                            }
+                        }
+                        // Then the amounts that account holds.
+                        Flow {
+                            visible: root.sbAsset !== null
                             Layout.fillWidth: true
                             spacing: 8
                             Repeater {
@@ -10161,7 +10183,13 @@ Item {
                                 Action { required property var modelData; label: modelData.text + " " + (root.sbAsset !== null ? root.sbAsset.symbol : ""); onPressed: root.sbDenom = modelData.index }
                             }
                         }
-                        Hint { visible: root.sbAmounts.length === 0; color: root.brass; text: "This account holds less than the smallest amount that can be sent back." }
+                        // Nothing to send back: said in one line, with the way to get some.
+                        RowLayout {
+                            visible: root.sbSources.length === 0
+                            spacing: 14
+                            Hint { Layout.fillWidth: false; color: root.ink; text: root.bridgeNet === null ? "Reading your accounts on the bridge test network…" : "None of your public accounts holds tokens on bridge v4 yet." }
+                            Action { visible: root.bridgeNet !== null; label: "Receive from Ethereum"; onPressed: root.openEthReceive() }
+                        }
                     }
 
                     // Step 2: the Ethereum address, from the bridge page: copy its link, connect there, paste its code.
@@ -10203,7 +10231,7 @@ Item {
                             }
                             RowLayout {
                                 spacing: 14
-                                Action { label: root.sbAsking ? "Getting it ready…" : "Send back"; strong: true; enabledNow: !root.sbAsking; onPressed: root.sbPlan() }
+                                Action { label: root.sbAsking ? "Getting it ready…" : "Bridge to Ethereum"; strong: true; enabledNow: !root.sbAsking; onPressed: root.sbPlan() }
                                 Link { visible: !root.sbAsking; text: "Another code"; color: root.dim; font.pixelSize: root.px(15); onPressed: { root.sbCheck = null; root.sbCodeInput = ""; sbCodeField.text = "" } }
                             }
                         }

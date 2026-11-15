@@ -2128,7 +2128,7 @@ export function sendBackProgress(status, nowSeconds, clock) {
         "The bridge team makes it by hand today and sends you the seal to paste here.", "wait", "seal")
     case "wrapped":
         return r("wrapped", later ? "Releasable at " + at(when) : "Releasable any minute now",
-            later ? "Releasable at " + at(when) + "." : "Releasable any minute now.", "The vault waits one hour after Ethereum records a send-back.", "wait")
+            later ? "Releasable at " + at(when) + "." : "Releasable any minute now.", "The vault waits one hour after Ethereum records it.", "wait")
     case "releasable": return r("releasable", "Ready to collect on Ethereum", "Ready: collect it on the bridge page.", "", "ready", "release")
     case "released": return r("released", "Received on Ethereum", "Received on Ethereum.", "", "done")
     }
@@ -2145,7 +2145,7 @@ export function sendBacksFrom(value) {
     })
 }
 
-/// The card's "Going back to Ethereum" rows, newest first: every one not received yet, and the
+/// The card's "Bridging to Ethereum" rows, newest first: every one not received yet, and the
 /// ones received in the last 30 min (`receivedAt`: id → ms, while Names was open).
 export function sendBackRowsShown(list, statuses, receivedAt, nowMs) {
     var st = statuses || {}, at = receivedAt || {}
@@ -2164,7 +2164,7 @@ export function sendBackSteps(s) {
     if (needs && extras.indexOf(needs) < 0)
         extras = extras.concat([needs])
     var keys = ["choose", "address"].concat(extras, ["burn", "back"])
-    var titles = { choose: "Choose the amount", address: "Give the Ethereum address", connect: "Let the bridge see this account",
+    var titles = { choose: "Choose the account and the amount", address: "Give the Ethereum address", connect: "Let the bridge see this account",
                    programs: "Allow the bridge's programs", public_account: "Give the bridge this account",
                    secret: "Allow the bridge's exit keys", burn: "Approve the burn", back: st.stage === "released" ? "Received on Ethereum" : "Back to Ethereum" }
     var stage = String(st.stage || "choose")
@@ -2194,4 +2194,19 @@ export const RELEASE_PROVER = "/Volumes/exos162/logos/rfp-022/v4/release-prover.
 /// a wait, not a failure.
 export function rateLimited(message) {
     return /\b429\b|too many requests|rate.?limit|endpoint is busy/i.test(String(message || ""))
+}
+
+/// The accounts Send back can start from: each of the wallet's own public accounts on the card
+/// (bridgeNetRows: not view-only, not watched) with a token on bridge v4 it holds at least one
+/// denomination of. [{key, account, symbol, amount, asset}], in the card's order.
+export function sendBackSources(blocks) {
+    var out = []
+    ;(Array.isArray(blocks) ? blocks : []).forEach(function(b) {
+        if (!b || b.viewOnly || b.watched) return
+        ;(b.assets || []).forEach(function(a) {
+            if (sendBackOffer(a))
+                out.push({ key: String(b.account) + "|" + a.symbol, account: String(b.account), symbol: a.symbol, amount: a.amount, asset: a })
+        })
+    })
+    return out
 }

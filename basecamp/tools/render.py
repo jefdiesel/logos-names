@@ -839,6 +839,9 @@ def sb_mock(status=None, **bridge):
 SB_CARD = 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.bridgeConfig = %s; root.loadBridgeNet(); %s }) })' % (json.dumps(SB_CONFIG), "%s")
 SB_ASSET = '{ symbol: "wETH", name: "Wrapped Sepolia ETH (demo v4)", amount: "0.15", bridge: "%s", base: "150000000000000000", decimals: 18 }' % V4
 SB_OPEN = SB_CARD % ('root.openSendBack("%s", %s)' % (OWNER, SB_ASSET) + '; %s')
+# From the card's button: the accounts read from the bridge test network (NET04_V4: one holds v4 wETH).
+SB_BUTTON = SB_CARD % 'root.againAfter(150, function() { root.openSendBack("", null) })'
+
 _SB_FOCUS = SB_CARD % ('root.sendBacksLoaded = true; root.sendBacks = [{ id: "sb-e2ba7765d0fbf247", amount: "0.01 ETH", account: "%s", recipient: "%s", words: "maple · tiger · seven · lamp", stage: "burned" }]; root.openSendBack("", null, "sb-e2ba7765d0fbf247"); root.sbStatuses = { "sb-e2ba7765d0fbf247": @VIEW@ }; root.sbCheckedAt = Date.now() - 4000; root.sbNextAt = Date.now() + 56000; %s' % (OWNER, SB_RECIPIENT, "%s"))
 def sb_focus(view, js=""):
     return _SB_FOCUS.replace("@VIEW@", json.dumps(view).replace('"@SOON@"', "Math.floor(Date.now() / 1000) + 1500").replace('"@HOUR@"', "Math.floor(Date.now() / 1000) + 3400")) % js
@@ -878,6 +881,8 @@ for _name, _js, _mock in [
         'root.appRequests = [{ id: "r5", kind: "secret", app: "lez_bridge", account: "%s", scope: "RFP022/exit", explanation: "lez_bridge asks for keys of its own, made from this account key: the wallet can make the same ones again after a restore, and they cannot sign or spend", created: Date.now(), expires: Date.now() + 600000, publisher: null, choices: [{ account: "%s", account_kind: "public", label: "Names wallet, main public account", granted: true }] }]; root.appChosen = ["%s"] }) }) })') % (SB_CODE, OWNER, OWNER, OWNER),
         sb_mock(send_back_plan={"needs": "secret", "request": {"request": "r5", "state": "pending"}, "message": "Approve \"RFP022/exit\" in the Names app: your wallet makes this app's exit secrets from your account, so a send-back can be released after you restore the wallet."})),
     ("sendback-busy", sb_focus(sb_view("burned", busy=True, note="The bridge's endpoint is busy; trying again shortly.")), sb_mock(sb_view("burned"))),
+    ("sendback-from-button", SB_BUTTON, sb_mock()),
+    ("sendback-none", SB_CARD % 'root.againAfter(150, function() { root.openSendBack("", null) })', dict(sb_mock(), bridgeNet=NET04)),
     ("sendback-unavailable", SB_OPEN % '', sb_mock(send_back_link=dict(SB_LINK, available=False, why="this bridge's vault can't release (bridge v3); send back works on bridge v4"))),
 ]:
     SCENARIOS[_name] = _js
