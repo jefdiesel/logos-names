@@ -1352,7 +1352,9 @@ Item {
                 }
                 next(i + 1)
             }, function(message, kind) {
-                failedAny = true
+                // The endpoint's "too many requests" after the bridge's own retries: a wait.
+                if (!Logic.rateLimited(message))
+                    failedAny = true
                 console.log("names_ui: receive_status", id + ":", kind, message)
                 next(i + 1)
             }, 60000, false)
@@ -1694,7 +1696,8 @@ Item {
                 next(i + 1)
             }, function(message, kind) {
                 console.log("names_ui: send_back_status", id + ":", kind, message)
-                failedAny = true
+                if (!Logic.rateLimited(message))
+                    failedAny = true
                 next(i + 1)
             }, 90000, false)
         }

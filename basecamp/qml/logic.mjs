@@ -1368,11 +1368,12 @@ export function receiveCodeRefused(message) {
 /// module first: the app depends on it.
 export const BUNDLED_BRIDGE = [
     { name: "lez_bridge", file: "lez_bridge.lgx", label: "LEZ Bridge module",
-      sha256: "e81def8b782b947a9fd40fd8ee6d891ded4fde2641f3895cf9ae1e1050e306dd",
-      root: "a9d9575bb749ffd588546b2e825d1baf66a54d083181054cf22538297e9667ff",
+      sha256: "fd30279b4093acd98a0f141067de9c4aaa24aa9e22cb5aa3ecb0ce48078f99c5",
+      root: "307e71a17e7d848329595ea337a479d3ff2ed81acc95b58764e567133664fbde",
       // The commit the shipped bridge says it was built from (its config().build.commit): rfp-022
-      // f09a174 (send-back: send_back_*, the installed release prover; everything in 0acf483).
-      build: "f09a174" }
+      // 33fde5c (send-back on the public endpoint: LEZ reads back off on 429; send_back_*, the
+      // installed release prover; everything in 0acf483).
+      build: "33fde5c" }
 ]
 
 /// The LEZ 0.4 names tool this app ships in qml/bundled/ (built without in-process proving, so
@@ -2115,7 +2116,7 @@ export function sendBackProgress(status, nowSeconds, clock) {
     case "approve":
         // Approved and signed, but the bridge's relay refused or didn't answer (`note`): its words,
         // and the bridge tries again at each check.
-        if (s.note) return r("approve", "Signed · the bridge's relay hasn't sent it", "Signed, but the bridge's relay hasn't sent it yet.", String(s.note), "plain")
+        if (s.note && s.busy !== true) return r("approve", "Signed · the bridge's relay hasn't sent it", "Signed, but the bridge's relay hasn't sent it yet.", String(s.note), "plain")
         return r("approve", "Waiting for your approval", "Waiting for your approval.", "", "ready")
     case "burning": return r("burning", "Sending the burn · about 15 s", "Sending the burn: about 15 s.", "", "wait")
     case "burned": return r("burned", "Burned · waiting for Ethereum to record it", "Waiting for Ethereum to record it.",
@@ -2188,3 +2189,9 @@ export function sendBackBurnHeld(value) {
 /// release-prover.sh): set in the LEZ Bridge (`set_release_prover`) the first time "Make the
 /// proof" finds none set, if it is there; the bridge refuses a path with no program.
 export const RELEASE_PROVER = "/Volumes/exos162/logos/rfp-022/v4/release-prover.sh"
+
+/// A check that answered "too many requests" (the endpoint's 429, after the bridge's own retries):
+/// a wait, not a failure.
+export function rateLimited(message) {
+    return /\b429\b|too many requests|rate.?limit|endpoint is busy/i.test(String(message || ""))
+}
