@@ -1157,6 +1157,9 @@ Item {
                     receiveStatusesChanged()
                 }
                 receiveFocus = id
+                // Not checked yet: "Next check in 60 s", not an earlier check of another code.
+                receiveCheckedAt = 0
+                receiveCheckFailed = false
                 receiveNextAt = Date.now() + 60000
                 console.log("names_ui: receive: code made for", id)
             }
