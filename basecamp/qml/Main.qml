@@ -197,6 +197,20 @@ Item {
     readonly property color noticeFill: Qt.rgba(brass.r, brass.g, brass.b, 0.14)
     readonly property color ownBubble: Qt.rgba(brass.r, brass.g, brass.b, 0.24)
 
+    // ── One look for status, steps, headers and buttons (STYLE.md beside this file) ──
+    // brass is the primary button's fill, focus and a chosen choice; nothing else. Status lines
+    // carry the only other colours: waitTone (amber) for waiting, alarm (red) for a problem, good
+    // for done, dim for working. The one exception: cautionTone on the consent box of a call the
+    // wallet truly cannot decode (marked "!", not the clock).
+    readonly property color waitTone: Theme.isDark ? "#F5A524" : "#A15C00"
+    readonly property color cautionTone: waitTone
+    function kindColor(kind) {
+        return kind === "problem" ? alarm : kind === "waiting" ? waitTone : kind === "done" ? good : dim
+    }
+    // The text size of every status line, and the width of every page below the wallet.
+    function statusPx() { return px(16) }
+    readonly property int pageWidth: 680
+
     // Text sizes follow the theme's text size setting (1 where the host's
     // theme has none).
     function px(size) { return Math.round(size * (Theme.typography.scale || 1)) }
@@ -420,10 +434,16 @@ Item {
         return false
     }
 
-    function say(message, isError) {
+    /// Says one line in the page's status line. `how`: true for a failure (shown as a problem, or
+    /// as a wait when its words are one: busy, no answer, starting), false for a plain result
+    /// (done), or a kind said outright ("working", "waiting"). noticeIsError keeps meaning "it
+    /// failed" (an app's request is answered with it), whatever colour the line has.
+    function say(message, how) {
         notice = sentence(message)
-        noticeIsError = !!isError
+        noticeIsError = how === true
+        noticeKind = Logic.noticeKind(notice, how)
     }
+    property string noticeKind: ""
 
     // ── Reading ─────────────────────────────────────────────────────────
 
@@ -871,6 +891,21 @@ Item {
     property bool claimDetails: false
     readonly property string claimRetryLeft: Logic.durationWords(Math.max(1, Math.round((claimRetryAt - claimClock) / 1000)))
     readonly property string claimSummaryNow: Logic.claimSummary(claimCheck, claimBridgeNow.label)
+    // A claim line's kind: busy and no answer are waits (Logic.noticeKind), the rest problems.
+    readonly property string claimErrorKind: Logic.noticeKind(claimError, true)
+    // A refusal or failure's kind and its ONE next action (Logic.claimNext).
+    readonly property var claimNextNow: Logic.claimNext(claimStageNow === "failed" && depositClaimJob !== null && depositClaimJob.error ? depositClaimJob.error.code
+        : claimCheck !== null && claimCheck.error ? claimCheck.error.code : "", claimStageNow === "failed", claimSource !== "" && claimSource.indexOf("deposit:") !== 0)
+    function claimNextAction(action) {
+        if (action === "back")
+            leaveClaim()
+        else if (action === "another") {
+            leaveClaim(); openClaim()
+        } else if (action === "retry" && claimSource === "") {
+            leaveClaim(); openClaim()
+        } else
+            checkAgain()
+    }
     readonly property string claimRefusalLine: claimCheck !== null && claimCheck.ok === false && claimCheck.error ? Logic.claimErrorLine(claimCheck.error.code, claimCheck.error) : ""
     Timer {
         interval: 1000
@@ -2403,7 +2438,8 @@ Item {
                     startClaim(false)
             } else if (claimNeedsState === "rejected" || claimNeedsState === "expired" || claimNeedsState === "cancelled") {
                 claimNeeds = null
-                claimError = "Nothing was signed or sent: the request was " + claimNeedsState + "."
+                claimError = claimNeedsState === "expired" ? "Nobody answered the request within 10 minutes, so nothing was signed or sent."
+                    : "The request was " + claimNeedsState + ", so nothing was signed or sent."
                 claimAgain = true
             }
         }, function() { claimNeedsPolling = false }, 120000)
@@ -4063,7 +4099,7 @@ Item {
     function publishAccount(name, account) {
         if (account === "")
             return
-        say("Publishing the account people pay " + name + " at…", false)
+        say("Publishing the account people pay " + name + " at…", "working")
         askLater("set_account", [name, account], function() {
             say("People can pay " + name + " at your account " + Logic.idShort(account) + ".", false)
             loadMine()
@@ -4368,11 +4404,11 @@ Item {
         }
         var job = { name: name, settled: settled, done: done, sent: false, tries: 0 }
         pending = job
-        say("Asking the wallet to sign.", false)
+        say("Asking the wallet to sign…", "working")
         askLater(method, args, function(value) {
             job.sent = true
             job.result = value
-            say("Sent. Waiting for it to be confirmed.", false)
+            say("Sent. Waiting for it to be confirmed.", "waiting")
         }, function(message) {
             pending = null
             say(message, true)
@@ -4436,12 +4472,12 @@ Item {
         }
         var job = { name: name, kind: method, settled: settled, done: done, cli: true, id: "", asking: false, started: Date.now() }
         pending = job
-        say("Starting the names CLI.", false)
+        say("Starting the names CLI…", "working")
         askLater(cliMethod, args, function(value) {
             job.id = value.id
             job.started = value.started || Date.now()
             var skipped = value.skipped && value.skipped.length > 0 ? " (The avatar was left as it is: give the full path of a PNG file to change it.)" : ""
-            say(savingText(job) + skipped, false)
+            say(savingText(job) + skipped, "waiting")
         }, function(message) {
             pending = null
             say(message, true)
@@ -4499,7 +4535,7 @@ Item {
             if (pending !== job)
                 return
             if (value.state === "running") {
-                say(savingText(job), false)
+                say(savingText(job), "waiting")
                 return
             }
             pending = null
@@ -4586,14 +4622,14 @@ Item {
         if (busy)
             return
         pending = { name: name, sent: false }
-        say("Asking the wallet to sign.", false)
+        say("Asking the wallet to sign…", "working")
         // On LEZ 0.4 private payments are off: a name is registered public-only, with no private
         // receiving keys ("auto" would make a private account and publish its keys).
         if (namesNet === "0.4" && moduleFeatures.indexOf("app_note") >= 0)
             askLater("app_note", ["publish:" + name, publishOnRegister ? "yes" : "no"], function() {}, function() {}, 10000)
         askLater("register_name", [name, owner, namesNet === "0.4" ? "" : "auto"], function(value) {
             pending = null
-            say("Committed. The reveal goes out by itself in about 15 minutes while Names is open; Wallet, Names shows when.", false)
+            say("Committed. The reveal goes out by itself in about 15 minutes while Names is open; Wallet, Names shows when.", "waiting")
             missing = ""
             loadMine()
         }, function(message) {
@@ -5962,6 +5998,19 @@ Item {
     function appSheetWarnSoft(request) {
         return request !== null && request.kind === "programs" && !appPublisherFailed(request)
     }
+    /// The one amber thing that isn't a wait: the consent box of a call the wallet truly cannot
+    /// decode (a relayed call that isn't a decoded burn; provider_public.rs says so in its sheet).
+    function appSheetCaution(request) {
+        if (request === null || request === undefined)
+            return false
+        if (request.kind === "relayed_call")
+            return !(request.sheet && request.sheet.burn)
+        return request.kind === "call"
+    }
+    /// Why Approve is disabled, said under it (Logic.approveWhy).
+    function appApproveWhy() {
+        return Logic.approveWhy({ request: appRequest, busy: appBusy, chosen: appChosen, risky: appRequest !== null && appRequestRisky(appRequest), understood: appUnderstood })
+    }
     function appSheetWarning(request) {
         if (request === null || !appRequestRisky(request))
             return ""
@@ -5975,11 +6024,12 @@ Item {
         // A burn the wallet decoded: its one warning (it can't be undone).
         if (request.kind === "relayed_call" && request.sheet && request.sheet.burn && (request.sheet.warnings || []).length > 0)
             return String(request.sheet.warnings[0])
-        return "This wallet can't read what the call does. Approve only if you trust " + (request.app === "lez_bridge" ? "the bridge" : request.app) + "."
+        return "The wallet can't decode this call; it shows only its hash. Tick to approve it anyway, if you trust " + (request.app === "lez_bridge" ? "the bridge" : request.app) + "."
     }
     property bool appBusy: false          // an answer is on its way to the module
     property bool appNeedsChoice: false   // no account could be ticked for this request: the short sheet shows the choice
     property string appError: ""
+    property string appErrorKind: "problem"   // "waiting" when appError is a busy / no-answer
     property var appGrants: []            // [{app, accounts, since}]
     readonly property var appRequest: appRequests.length > 0 ? appRequests[0] : null
 
@@ -6137,13 +6187,13 @@ Item {
             appBusy = false
             if (approve && appIsToken(request))
                 say("Sending " + appSends(request) + " to " + request.destination + " for " + request.app + ". "
-                    + (Logic.tokenSendProves(/^Private\//.test(chosen[0] || ""), request.destination) ? "It's proven on this computer first: 7-12 minutes." : "One block, about 30 seconds."), false)
+                    + (Logic.tokenSendProves(/^Private\//.test(chosen[0] || ""), request.destination) ? "It's proven on this computer first: 7-12 minutes." : "One block, about 30 seconds."), "waiting")
             else if (approve && request.kind === "transfer")
-                say("Sending " + grouped(request.amount) + " " + request.asset + " to " + request.destination + " for " + request.app + ". It takes a few minutes.", false)
+                say("Sending " + grouped(request.amount) + " " + request.asset + " to " + request.destination + " for " + request.app + ". It takes a few minutes.", "waiting")
             else if (approve && request.kind === "call")
                 say("Sent for " + request.app + ".", false)
             else if (approve && request.kind === "private_call")
-                say("Proving it for " + request.app + " on this computer: about 11 minutes.", false)
+                say("Proving it for " + request.app + " on this computer: about 11 minutes.", "waiting")
             else if (approve && request.kind === "secret")
                 say(request.app + " can now get its own values from " + accountShort(request.account) + ".", false)
             else if (approve && request.kind === "token_source")
@@ -6159,6 +6209,7 @@ Item {
         }, function(message) {
             appBusy = false
             appError = sentence(message)
+            appErrorKind = Logic.noticeKind(appError, true)
             loadAppRequests()
         }, approve && request.kind === "call" ? 180000 : 30000)
     }
@@ -6439,14 +6490,14 @@ Item {
         property bool enabledNow: true
         property color tint: root.brass
         readonly property bool live: enabledNow && !(changes && root.busy)
-        readonly property color fill: grave ? root.alarm : tint
+        readonly property color fill: tint
         signal pressed()
         implicitWidth: actionText.implicitWidth + 28
         implicitHeight: 38
         radius: 6
         color: !live ? "transparent" : strong ? (actionArea.containsMouse ? Qt.lighter(fill, 1.08) : fill) : (actionArea.containsMouse ? root.raised : "transparent")
         border.width: strong && live ? 0 : 1
-        border.color: activeFocus ? root.brass : grave ? root.alarm : root.line
+        border.color: activeFocus ? root.brass : root.line
         opacity: live ? 1 : 0.55
         activeFocusOnTab: live
         Keys.onReturnPressed: if (live) action.pressed()
@@ -6455,7 +6506,7 @@ Item {
             id: actionText
             anchors.centerIn: parent
             text: action.label
-            color: action.strong && action.live ? root.slate : action.grave ? root.alarm : root.ink
+            color: action.strong && action.live ? root.slate : root.ink
             font.family: root.sans
             font.pixelSize: root.px(18)
             font.weight: Font.DemiBold
@@ -6477,7 +6528,7 @@ Item {
         property string kind: ""
         property bool boxed: false
         property bool grave: false
-        readonly property color tint: iconArea.containsMouse || activeFocus ? (grave ? root.alarm : root.brass) : root.ink
+        readonly property color tint: iconArea.containsMouse || activeFocus ? root.brass : root.ink
         signal pressed()
         implicitWidth: boxed ? 36 : 26
         implicitHeight: boxed ? 36 : 26
@@ -6968,26 +7019,12 @@ Item {
         }
         Hint { visible: root.appSheetCompact; color: root.ink; textFormat: Text.PlainText; text: root.appSheetLine(sheetBody.request) }
         Hint { visible: root.appSheetCompact && root.publisherChecking(sheetBody.request); font.pixelSize: root.px(15); text: root.publisherShown(sheetBody.request) !== null ? root.publisherShown(sheetBody.request).text : "" }
-        RowLayout {
+        Tick {
             visible: root.appSheetCompact && root.appSheetWarning(sheetBody.request) !== ""
-            Layout.fillWidth: true
-            spacing: 10
-            Rectangle {
-                Layout.preferredWidth: 18
-                Layout.preferredHeight: 18
-                Layout.alignment: Qt.AlignTop
-                radius: 4
-                color: root.appUnderstood ? (root.appSheetWarnSoft(sheetBody.request) ? root.brass : root.alarm) : "transparent"
-                border.width: 2
-                border.color: root.appSheetWarnSoft(sheetBody.request) ? root.brass : root.alarm
-                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.appUnderstood = !root.appUnderstood }
-            }
-            Hint {
-                color: root.ink
-                textFormat: Text.PlainText
-                text: root.appSheetWarning(sheetBody.request)
-                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.appUnderstood = !root.appUnderstood }
-            }
+            checked: root.appUnderstood
+            caution: root.appSheetCaution(sheetBody.request)
+            text: root.appSheetWarning(sheetBody.request)
+            onToggled: root.appUnderstood = !root.appUnderstood
         }
         // No account could be ticked for the person: the choice is here, not only under Details.
         ColumnLayout {
@@ -7001,23 +7038,23 @@ Item {
         Hint {
             readonly property var burnSheet: sheetBody.request !== null && sheetBody.request.kind === "relayed_call" && sheetBody.request.sheet && sheetBody.request.sheet.burn ? sheetBody.request.sheet : null
             visible: root.appSheetCompact && burnSheet !== null && (burnSheet.warnings || []).length > 0 && root.appSheetWarning(sheetBody.request) === ""
-            color: root.brass
+            color: root.ink
             textFormat: Text.PlainText
             text: burnSheet !== null && (burnSheet.warnings || []).length > 0 ? String(burnSheet.warnings[0]) : ""
         }
-        Hint { visible: root.appSheetCompact && root.appError !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.appError }
-        Hint { visible: root.appSheetCompact && root.appBusy; color: root.brass; text: "One moment…" }
         RowLayout {
             visible: root.appSheetCompact
             spacing: 10
             Action {
-                label: sheetBody.request !== null && sheetBody.request.checking === true ? "Waiting for the check…" : "Approve"
+                label: root.appBusy ? "Answering…" : sheetBody.request !== null && sheetBody.request.checking === true ? "Waiting for the check…" : "Approve"
                 strong: true
                 enabledNow: root.appCanApprove()
                 onPressed: root.answerAppRequest(true)
             }
-            Action { label: "Not now"; enabledNow: !root.appBusy; onPressed: root.answerAppRequest(false) }
+            Action { label: "Reject"; enabledNow: !root.appBusy; onPressed: root.answerAppRequest(false) }
         }
+        WhyLine { visible: root.appSheetCompact && text !== "" && !root.appBusy; text: root.appApproveWhy() }
+        StatusLine { visible: root.appSheetCompact && root.appError !== ""; kind: root.appErrorKind; text: root.appError }
         Link {
             visible: root.appSheetCompact
             text: root.appSheetDetails ? "Details ▾" : "Details ▸"
@@ -7053,7 +7090,7 @@ Item {
             Layout.fillWidth: true
             text: line === null ? "" : line.text
             textFormat: Text.PlainText
-            color: line === null ? root.dim : line.tone === "good" ? root.good : line.tone === "warn" ? root.alarm : root.dim
+            color: line === null ? root.dim : line.tone === "good" ? root.good : line.tone === "warn" ? root.ink : root.dim
             font.family: root.sans
             font.pixelSize: root.px(16)
             font.weight: line !== null && line.tone !== "plain" ? Font.DemiBold : Font.Normal
@@ -7113,13 +7150,13 @@ Item {
                     ? "Proven on this computer first: 7-12 minutes"
                     : "One block, about 30 seconds; public: everyone sees who sent it"
             }
-            Hint { visible: root.appIsToken(sheetBody.request) && Logic.tokenSendProves(/^Private\//.test(root.appChosen[0] || ""), sheetBody.request.destination) && root.proofWarning !== ""; color: root.alarm; text: root.proofWarning }
+            Hint { visible: root.appIsToken(sheetBody.request) && Logic.tokenSendProves(/^Private\//.test(root.appChosen[0] || ""), sheetBody.request.destination) && root.proofWarning !== ""; color: root.ink; text: root.proofWarning }
             Repeater {
                 model: root.appIsToken(sheetBody.request) ? (sheetBody.request.warnings || []) : []
                 Hint {
                     required property string modelData
                     textFormat: Text.PlainText
-                    color: root.alarm
+                    color: root.ink
                     text: "!  " + modelData
                 }
             }
@@ -7186,7 +7223,7 @@ Item {
                 Hint {
                     required property string modelData
                     textFormat: Text.PlainText
-                    color: root.alarm
+                    color: root.ink
                     text: "!  " + modelData
                 }
             }
@@ -7207,10 +7244,9 @@ Item {
             readonly property var sheet: sheetBody.kind === "private_call" && sheetBody.request.sheet ? sheetBody.request.sheet : null
             Fact { visible: root.zoneFact(sheetBody.request) !== ""; label: "Zone"; value: root.zoneFact(sheetBody.request) }
             Fact { label: "From"; code: true; value: sheetBody.kind === "private_call" ? root.accountShort(sheetBody.request.account) : ""; full: sheetBody.kind === "private_call" ? sheetBody.request.account : "" }
-            Hint {
+            StatusLine {
                 visible: sheetBody.kind === "private_call" && sheetBody.request.check !== "ready"
-                color: sheetBody.kind === "private_call" && sheetBody.request.check === "failed" ? root.alarm : root.brass
-                textFormat: Text.PlainText
+                kind: sheetBody.kind === "private_call" && sheetBody.request.check === "failed" ? "problem" : "working"
                 text: sheetBody.kind !== "private_call" ? ""
                     : sheetBody.request.check === "failed" ? "The wallet couldn't simulate it, so it can't be approved: " + (sheetBody.request.check_problem || "")
                     : "Simulating it against the chain to see what it really does…"
@@ -7222,7 +7258,7 @@ Item {
             }
             Repeater {
                 model: parent.sheet ? parent.sheet.refusals : []
-                Hint { required property string modelData; textFormat: Text.PlainText; color: root.alarm; text: "✕  " + modelData }
+                StatusLine { required property string modelData; kind: "problem"; text: modelData }
             }
             Part { visible: parent.sheet !== null; text: "Programs" }
             Repeater {
@@ -7246,11 +7282,11 @@ Item {
             }
             Repeater {
                 model: parent.sheet ? parent.sheet.warnings : []
-                Hint { required property string modelData; textFormat: Text.PlainText; color: root.alarm; text: "!  " + modelData }
+                Hint { required property string modelData; textFormat: Text.PlainText; color: root.ink; text: "!  " + modelData }
             }
             Fact { label: "Data"; value: sheetBody.kind === "private_call" ? sheetBody.request.message_len + " bytes, proven, not published" : "" }
-            Hint { visible: sheetBody.kind === "private_call"; textFormat: Text.PlainText; color: root.brass; text: sheetBody.kind === "private_call" ? sheetBody.request.prove_expect : "" }
-            Hint { visible: sheetBody.kind === "private_call" && root.proofWarning !== ""; color: root.alarm; text: root.proofWarning }
+            Hint { visible: sheetBody.kind === "private_call"; textFormat: Text.PlainText; color: root.ink; text: sheetBody.kind === "private_call" ? sheetBody.request.prove_expect : "" }
+            Hint { visible: sheetBody.kind === "private_call" && root.proofWarning !== ""; color: root.ink; text: root.proofWarning }
             Hint {
                 visible: sheetBody.kind === "private_call" && sheetBody.request.app_summary !== ""
                 textFormat: Text.PlainText
@@ -7282,14 +7318,14 @@ Item {
             }
             Repeater {
                 model: relayedBox.shown.warnings
-                Hint { required property var modelData; textFormat: Text.PlainText; color: root.brass; text: modelData }
+                Hint { required property var modelData; textFormat: Text.PlainText; color: root.ink; text: "!  " + modelData }
             }
             Hint { textFormat: Text.PlainText; color: root.ink; text: "Privacy: " + relayedBox.shown.privacy }
             Hint { textFormat: Text.PlainText; text: relayedBox.shown.after }
             Hint { visible: relayedBox.shown.says !== ""; textFormat: Text.PlainText; text: "The app describes it as: “" + relayedBox.shown.says + "” (its own words, not checked)" }
             Repeater {
                 model: relayedBox.shown.why
-                Hint { required property var modelData; textFormat: Text.PlainText; color: root.alarm; text: "Refused: " + modelData }
+                StatusLine { required property var modelData; kind: "problem"; text: "Refused: " + modelData }
             }
         }
 
@@ -7315,7 +7351,7 @@ Item {
             }
             Repeater {
                 model: sheetBody.kind === "programs" && sheetBody.request.sheet ? sheetBody.request.sheet.warnings : []
-                Hint { required property var modelData; textFormat: Text.PlainText; color: root.brass; text: Logic.clean(modelData) }
+                Hint { required property var modelData; textFormat: Text.PlainText; color: root.ink; text: "!  " + Logic.clean(modelData) }
             }
             Hint { visible: sheetBody.kind === "programs" && sheetBody.request.app_summary !== ""; textFormat: Text.PlainText; text: sheetBody.kind === "programs" ? "The app says why: “" + Logic.clean(sheetBody.request.app_summary) + "” (its own words, not checked)" : "" }
             Hint { visible: sheetBody.kind === "programs"; textFormat: Text.PlainText; color: root.ink; text: "Approving signs nothing. It lets this app ask you to sign calls to these programs only, each of them shown to you first. Settings → Connected apps takes it back." }
@@ -7341,9 +7377,9 @@ Item {
         // The account to use.
         Part { text: sheetBody.kind === "connect" ? "Accounts it may see" : sheetBody.kind === "call" || sheetBody.kind === "relayed_call" ? "Sign with" : sheetBody.kind === "private_call" || sheetBody.kind === "secret" ? "Account" : sheetBody.kind === "token_source" || sheetBody.kind === "programs" ? "Confirm" : "Pay from" }
         AccountChoices { request: sheetBody.request; kind: sheetBody.kind }
-        Hint {
+        StatusLine {
             visible: sheetBody.request !== null && (sheetBody.request.choices || []).length === 0
-            color: root.alarm
+            kind: "problem"
             text: sheetBody.kind === "call" ? "No account can sign this yet. Your wallet's public accounts are being read; if none shows, create your wallet first (Welcome, Create my wallet)."
                 : "Your wallet has no accounts yet. Create your wallet first (Welcome, Create my wallet)."
         }
@@ -7351,35 +7387,21 @@ Item {
         }
 
         // A risky call needs a second, deliberate tick.
-        RowLayout {
+        Tick {
             visible: !root.appSheetCompact && sheetBody.request !== null && root.appRequestRisky(sheetBody.request)
-            Layout.fillWidth: true
-            spacing: 10
-            Rectangle {
-                Layout.preferredWidth: 18
-                Layout.preferredHeight: 18
-                Layout.alignment: Qt.AlignTop
-                radius: 4
-                color: root.appUnderstood ? root.alarm : "transparent"
-                border.width: 2
-                border.color: root.alarm
-                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.appUnderstood = !root.appUnderstood }
-            }
-            Hint {
-                color: root.ink
-                text: root.appIsToken(sheetBody.request) ? "I've read the warnings above and still want to send this token."
-                    : "I've read the warnings above and trust " + (sheetBody.request !== null ? sheetBody.request.app : "this app") + " with this account."
-                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.appUnderstood = !root.appUnderstood }
-            }
+            checked: root.appUnderstood
+            caution: root.appSheetCaution(sheetBody.request)
+            text: root.appIsToken(sheetBody.request) ? "I've read the warnings above and still want to send this token."
+                : "I've read the warnings above and trust " + (sheetBody.request !== null ? sheetBody.request.app : "this app") + " with this account."
+            onToggled: root.appUnderstood = !root.appUnderstood
         }
 
         ColumnLayout {
             visible: sheetBody.request !== null && sheetBody.request.zone_in_use === false
             Layout.fillWidth: true
             spacing: 8
-            Hint {
-                textFormat: Text.PlainText
-                color: root.alarm
+            StatusLine {
+                kind: "problem"
                 text: sheetBody.request === null || sheetBody.request.zone_in_use !== false ? ""
                     : sheetBody.request.zone_removed ? "This was asked for a zone that has been removed since. Reject it, and the app can ask again."
                     : "This was asked for " + sheetBody.request.zone_name + ", and the wallet is using " + root.zoneName + " now. Switch to " + sheetBody.request.zone_name + " to approve it, or reject it."
@@ -7390,10 +7412,8 @@ Item {
                 enabledNow: !root.zoneBusy && !root.appBusy
                 onPressed: root.zoneUse(sheetBody.request.zone)
             }
-            Hint { visible: root.zoneNoteBad; color: root.alarm; font.pixelSize: root.px(15); textFormat: Text.PlainText; text: root.zoneNote }
+            StatusLine { visible: root.zoneNoteBad; kind: "problem"; text: root.zoneNote }
         }
-        Hint { visible: !root.appSheetCompact && root.appError !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.appError }
-        Hint { visible: !root.appSheetCompact && root.appBusy; color: root.brass; text: sheetBody.kind === "call" ? "Trying it, then signing and sending it. This waits for its block, up to two minutes…" : "One moment…" }
         RowLayout {
             visible: !root.appSheetCompact
             Layout.topMargin: 8
@@ -7410,6 +7430,9 @@ Item {
                 onPressed: root.answerAppRequest(false)
             }
         }
+        WhyLine { visible: !root.appSheetCompact && text !== "" && !root.appBusy; text: root.appApproveWhy() }
+        StatusLine { visible: !root.appSheetCompact && root.appBusy; kind: sheetBody.kind === "call" ? "waiting" : "working"; text: sheetBody.kind === "call" ? "Trying it, then signing and sending it. This waits for its block, up to two minutes…" : "Answering it…" }
+        StatusLine { visible: !root.appSheetCompact && root.appError !== ""; kind: root.appErrorKind; text: root.appError }
     }
 
     /// The steps in one row, "✓ Arrived  ✓ Checked  3 Approve  4 Claim": done ones ticked, the
@@ -7436,12 +7459,12 @@ Item {
                     radius: height / 2
                     color: now ? root.raised : "transparent"
                     border.width: now ? 2 : 1
-                    border.color: now ? root.ink : stepCell.modelData.state === "done" ? Qt.rgba(root.good.r, root.good.g, root.good.b, 0.5) : root.line
+                    border.color: now ? root.ink : root.line
                     Text {
                         id: stepLabel
                         anchors.centerIn: parent
                         text: (stepCell.modelData.state === "done" ? "✓ " : stepCell.modelData.n + " ") + stepCell.modelData.short
-                        color: stepCell.modelData.state === "done" ? root.good : parent.now ? root.ink : root.dim
+                        color: stepCell.modelData.state === "done" ? root.ink : parent.now ? root.ink : root.dim
                         font.family: root.sans
                         font.pixelSize: root.px(15)
                         font.weight: parent.now ? Font.Bold : Font.Medium
@@ -7458,10 +7481,9 @@ Item {
         Layout.fillWidth: true
         implicitHeight: underwayColumn.implicitHeight + 36
         radius: 10
-        color: root.underwayFill
+        color: root.raised
         border.width: 1
-        border.color: root.underwayLine
-        Rectangle { x: 0; y: 0; width: 5; height: parent.height; radius: 2; color: root.underway }
+        border.color: root.line
         ColumnLayout {
             id: underwayColumn
             x: 24
@@ -7741,6 +7763,284 @@ Item {
             font.family: root.sans
             font.pixelSize: root.px(14)
             text: root.netProblem !== "" ? root.netProblem : "Switching…"
+        }
+    }
+
+    /// The mark at the start of a status line, drawn (no font has all four): working three dots,
+    /// waiting a clock, problem a cross in a ring, done a tick; `caution` an "!" (STYLE.md).
+    component StatusMark: Canvas {
+        id: statusMark
+        property string kind: "working"
+        readonly property color tint: kind === "caution" ? root.cautionTone : root.kindColor(kind)
+        implicitWidth: root.px(16)
+        implicitHeight: root.px(16)
+        onKindChanged: requestPaint()
+        onTintChanged: requestPaint()
+        onPaint: {
+            var ctx = getContext("2d")
+            ctx.reset()
+            var w = width, h = height, c = w / 2
+            ctx.strokeStyle = tint
+            ctx.fillStyle = tint
+            ctx.lineWidth = Math.max(1.5, w / 10)
+            ctx.lineCap = "round"
+            ctx.lineJoin = "round"
+            if (kind === "working") {
+                for (var i = 0; i < 3; i++) {
+                    ctx.beginPath()
+                    ctx.arc(w * (0.2 + i * 0.3), c, w / 11, 0, Math.PI * 2)
+                    ctx.fill()
+                }
+                return
+            }
+            if (kind === "done") {
+                ctx.beginPath()
+                ctx.moveTo(w * 0.14, h * 0.55)
+                ctx.lineTo(w * 0.40, h * 0.80)
+                ctx.lineTo(w * 0.88, h * 0.22)
+                ctx.stroke()
+                return
+            }
+            ctx.beginPath()
+            ctx.arc(c, c, c - ctx.lineWidth / 2, 0, Math.PI * 2)
+            ctx.stroke()
+            ctx.beginPath()
+            if (kind === "waiting") {
+                ctx.moveTo(c, h * 0.24)
+                ctx.lineTo(c, c)
+                ctx.lineTo(w * 0.72, h * 0.62)
+                ctx.stroke()
+            } else if (kind === "problem") {
+                ctx.moveTo(w * 0.34, h * 0.34)
+                ctx.lineTo(w * 0.66, h * 0.66)
+                ctx.moveTo(w * 0.66, h * 0.34)
+                ctx.lineTo(w * 0.34, h * 0.66)
+                ctx.stroke()
+            } else {
+                ctx.moveTo(c, h * 0.26)
+                ctx.lineTo(c, h * 0.58)
+                ctx.stroke()
+                ctx.beginPath()
+                ctx.arc(c, h * 0.74, w / 14, 0, Math.PI * 2)
+                ctx.fill()
+            }
+        }
+    }
+
+    /// A status line: one of four kinds (Logic.STATUS_KINDS), one colour, one mark, one size,
+    /// directly under the control or step it belongs to. `kind` "" draws a plain line (no mark,
+    /// no colour) for a note that is none of the four. A problem offers its one next action as a
+    /// button (`actionLabel`, signal `act`); a wait may too (Check again).
+    component StatusLine: ColumnLayout {
+        id: statusLine
+        property string kind: "working"
+        property string text: ""
+        property string actionLabel: ""
+        property bool actionStrong: false
+        property bool actionEnabled: true
+        signal act()
+        Layout.fillWidth: true
+        spacing: 8
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+            StatusMark {
+                visible: statusLine.kind !== ""
+                kind: statusLine.kind
+                Layout.alignment: Qt.AlignTop
+                Layout.topMargin: root.px(3)
+                Layout.preferredWidth: root.px(16)
+                Layout.preferredHeight: root.px(16)
+            }
+            Text {
+                Layout.fillWidth: true
+                text: statusLine.text
+                textFormat: Text.PlainText
+                color: statusLine.kind === "" ? root.ink : statusLine.kind === "working" ? root.dim : root.kindColor(statusLine.kind)
+                font.family: root.sans
+                font.weight: statusLine.kind === "" || statusLine.kind === "working" ? Font.Medium : Font.DemiBold
+                font.pixelSize: root.statusPx()
+                lineHeight: 1.25
+                wrapMode: Text.Wrap
+            }
+        }
+        Action {
+            visible: statusLine.actionLabel !== ""
+            Layout.leftMargin: statusLine.kind !== "" ? root.px(24) : 0
+            label: statusLine.actionLabel
+            strong: statusLine.actionStrong
+            enabledNow: statusLine.actionEnabled
+            onPressed: statusLine.act()
+        }
+    }
+
+    /// The line under a disabled button that says why it can't be pressed (STYLE.md: a disabled
+    /// button always has its reason). Hidden when there is none.
+    component WhyLine: Text {
+        Layout.fillWidth: true
+        visible: text !== ""
+        textFormat: Text.PlainText
+        color: root.dim
+        font.family: root.sans
+        font.pixelSize: root.px(15)
+        wrapMode: Text.Wrap
+    }
+
+    /// The way back from a page: a real button, the same place and size on every page.
+    component BackButton: Rectangle {
+        id: back
+        property string label: "Wallet"
+        signal pressed()
+        implicitWidth: backText.implicitWidth + root.px(28)
+        implicitHeight: root.px(36)
+        radius: 6
+        color: backArea.pressed ? root.hover : backArea.containsMouse ? root.raised : "transparent"
+        border.width: 1
+        border.color: activeFocus ? root.brass : root.line
+        activeFocusOnTab: true
+        Accessible.role: Accessible.Button
+        Accessible.name: "Back to " + label
+        Keys.onReturnPressed: back.pressed()
+        Keys.onSpacePressed: back.pressed()
+        Text {
+            id: backText
+            anchors.centerIn: parent
+            text: "‹  " + back.label
+            color: root.ink
+            font.family: root.sans
+            font.pixelSize: root.px(17)
+            font.weight: Font.DemiBold
+        }
+        MouseArea {
+            id: backArea
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: back.pressed()
+        }
+    }
+
+    /// Every page below the wallet starts with this: the back button, the title (one size) and,
+    /// when given, the network the page runs on.
+    component PageHeader: ColumnLayout {
+        id: pageHeader
+        property string title: ""
+        property string backLabel: "Wallet"
+        property string net: ""
+        signal back()
+        Layout.fillWidth: true
+        spacing: 10
+        BackButton { label: pageHeader.backLabel; onPressed: pageHeader.back() }
+        Text {
+            Layout.topMargin: 4
+            Layout.fillWidth: true
+            text: pageHeader.title
+            color: root.ink
+            font.family: root.sans
+            font.pixelSize: root.px(28)
+            font.weight: Font.DemiBold
+            wrapMode: Text.WordWrap
+        }
+        RunsOn { visible: pageHeader.net !== ""; net: pageHeader.net !== "" ? pageHeader.net : root.namesNet }
+    }
+
+    /// The step row and the current step's title, the same on Claim, Receive and Send back.
+    /// Done pills ticked, the current one outlined, later ones dim; the title says the current
+    /// step (never with a tick unless the whole flow is done).
+    component StepHeader: ColumnLayout {
+        id: stepHeader
+        property var steps: []
+        readonly property var current: {
+            var now = stepHeader.steps.filter(function(x) { return x.state === "now" })[0]
+            return now !== undefined ? now : stepHeader.steps.length > 0 ? stepHeader.steps[stepHeader.steps.length - 1] : null
+        }
+        readonly property bool finished: current !== null && current.state === "done"
+        Layout.fillWidth: true
+        spacing: 12
+        StepRow { steps: stepHeader.steps }
+        Text {
+            visible: stepHeader.current !== null
+            Layout.fillWidth: true
+            text: stepHeader.current === null ? "" : "Step " + stepHeader.current.n + " of " + stepHeader.current.total + " · " + stepHeader.current.title
+            color: root.ink
+            font.family: root.sans
+            font.pixelSize: root.px(22)
+            font.weight: Font.DemiBold
+            wrapMode: Text.WordWrap
+        }
+    }
+
+    /// One choice among a few (a token, an amount, an account): a chip, outlined in brass when
+    /// chosen. Never a filled button: the screen's one primary is the action after the choice.
+    component Choice: Rectangle {
+        id: choice
+        property string label: ""
+        property bool chosen: false
+        signal pressed()
+        implicitWidth: choiceText.implicitWidth + root.px(30)
+        implicitHeight: root.px(38)
+        radius: 6
+        color: chosen ? root.raised : choiceArea.containsMouse ? root.hover : "transparent"
+        border.width: chosen ? 2 : 1
+        border.color: chosen ? root.brass : activeFocus ? root.brass : root.line
+        activeFocusOnTab: true
+        Accessible.role: Accessible.RadioButton
+        Accessible.name: label
+        Accessible.checked: chosen
+        Keys.onReturnPressed: choice.pressed()
+        Keys.onSpacePressed: choice.pressed()
+        Text {
+            id: choiceText
+            anchors.centerIn: parent
+            text: (choice.chosen ? "● " : "") + choice.label
+            color: root.ink
+            font.family: root.sans
+            font.pixelSize: root.px(17)
+            font.weight: choice.chosen ? Font.DemiBold : Font.Medium
+        }
+        MouseArea {
+            id: choiceArea
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: choice.pressed()
+        }
+    }
+
+    /// A consent tick box: an ordinary box with plain words. `caution` (the amber border and an
+    /// "!") only when the wallet truly cannot decode what is approved. Never red.
+    component Tick: RowLayout {
+        id: tick
+        property bool checked: false
+        property string text: ""
+        property bool caution: false
+        signal toggled()
+        Layout.fillWidth: true
+        spacing: 10
+        Rectangle {
+            Layout.preferredWidth: root.px(20)
+            Layout.preferredHeight: root.px(20)
+            Layout.alignment: Qt.AlignTop
+            Layout.topMargin: root.px(1)
+            radius: 4
+            color: tick.checked ? (tick.caution ? root.cautionTone : root.brass) : "transparent"
+            border.width: 2
+            border.color: tick.caution ? root.cautionTone : tick.checked ? root.brass : root.dim
+            Text { anchors.centerIn: parent; visible: tick.checked; text: "✓"; color: root.slate; font.family: root.sans; font.pixelSize: root.px(14); font.weight: Font.Bold }
+            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: tick.toggled() }
+        }
+        StatusMark { visible: tick.caution; kind: "caution"; Layout.alignment: Qt.AlignTop; Layout.topMargin: root.px(3); Layout.preferredWidth: root.px(16); Layout.preferredHeight: root.px(16) }
+        Text {
+            Layout.fillWidth: true
+            text: tick.text
+            textFormat: Text.PlainText
+            color: root.ink
+            font.family: root.sans
+            font.weight: Font.Medium
+            font.pixelSize: root.px(17)
+            lineHeight: 1.25
+            wrapMode: Text.Wrap
+            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: tick.toggled() }
         }
     }
 
@@ -9805,9 +10105,7 @@ Item {
                     Layout.fillWidth: true
                     Layout.maximumWidth: 680
                     spacing: 12
-                    Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.leaveClaim() }
-                    Text { text: "Claim a bridge deposit"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
-                    RunsOn { net: "0.4" }
+                    PageHeader { title: "Claim a bridge deposit"; net: "0.4"; onBack: root.leaveClaim() }
 
                     // The LEZ Bridge's setup, the same box as on Receive and the card (Logic.bridgeSetupState):
                     // Install, Update, the Unload step, a reopen; after it, back here.
@@ -9815,11 +10113,11 @@ Item {
                     RowLayout {
                         visible: root.claimStageNow === "missing" && root.bridgeSetup.state === ""
                         spacing: 12
-                        Hint { Layout.fillWidth: false; color: root.brass; text: root.installedList === null || root.bridgeBundle === "" ? "Looking for the LEZ Bridge…" : "The LEZ Bridge doesn't answer yet." }
+                        StatusLine { Layout.fillWidth: false; kind: root.installedList === null || root.bridgeBundle === "" ? "working" : "waiting"; text: root.installedList === null || root.bridgeBundle === "" ? "Looking for the LEZ Bridge…" : "The LEZ Bridge doesn't answer yet." }
                         Link { text: "Look again"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.openClaim() }
                     }
 
-                    Hint { visible: root.claimStageNow === "looking"; text: "Looking for the LEZ Bridge…" }
+                    StatusLine { visible: root.claimStageNow === "looking"; kind: "working"; text: "Looking for the LEZ Bridge…" }
 
                     // The claim as numbered steps: finished ones one line with a tick, the current
                     // one large with its one action, later ones grey; everything else under Details.
@@ -9827,18 +10125,7 @@ Item {
                         needs: root.claimNeeds !== null ? root.claimNeeds.needs : "", job: root.depositClaimJob, summary: root.claimSummaryNow })
                     readonly property var stepNow: steps.filter(function(x) { return x.state === "now" })[0] || null
                     readonly property bool stepsShown: root.claimStageNow !== "missing" && root.claimStageNow !== "looking" && root.bridgeSetupClear
-                    StepRow { visible: claimScreen.stepsShown || root.claimStageNow === "done"; steps: claimScreen.steps }
-                    Text {
-                        visible: claimScreen.stepsShown && claimScreen.stepNow !== null || root.claimStageNow === "done"
-                        Layout.fillWidth: true
-                        readonly property var step: root.claimStageNow === "done" ? claimScreen.steps[claimScreen.steps.length - 1] : claimScreen.stepNow
-                        text: step === null || step === undefined ? "" : (root.claimStageNow === "done" ? "✓ " : "") + "Step " + step.n + " of " + step.total + " · " + step.title
-                        color: root.claimStageNow === "done" ? root.good : root.ink
-                        font.family: root.sans
-                        font.pixelSize: root.px(22)
-                        font.weight: Font.DemiBold
-                        wrapMode: Text.WordWrap
-                    }
+                    StepHeader { visible: claimScreen.stepsShown || root.claimStageNow === "done"; steps: claimScreen.steps }
 
                     // Step: the file.
                     Hint { visible: root.claimStageNow === "start"; text: "Use the claim file the deposit page gave you." }
@@ -9851,55 +10138,68 @@ Item {
                         Field { id: claimPasteField; Layout.fillWidth: true; secret: true; hint: "or paste it here"; onTextChanged: root.claimPaste = text }
                         Action { visible: claimPasteField.text.trim() !== ""; label: "Check"; onPressed: { var text = claimPasteField.text; claimPasteField.text = ""; root.checkClaimFile(text) } }
                     }
-                    Hint { visible: root.claimNote !== ""; color: root.brass; text: root.claimNote }
+                    StatusLine { visible: root.claimNote !== ""; kind: ""; text: root.claimNote }
 
                     // Step: the check.
                     Hint { visible: root.claimStageNow === "ready" || root.claimStageNow === "elsewhere" || root.claimStageNow === "wrong_bridge"; color: root.ink; text: root.claimSummaryNow }
-                    Hint { visible: root.claimStageNow === "refused"; color: root.claimCheck !== null && root.claimCheck.error && Logic.claimIsWait(root.claimCheck.error.code) ? root.brass : root.alarm; text: root.claimRefusalLine }
-                    Hint { visible: root.claimStageNow === "elsewhere"; color: root.alarm; text: root.claimAccountProblemNow }
-                    Hint { visible: root.claimStageNow === "wrong_bridge"; color: root.alarm; text: root.claimBridgeNow.problem }
-                    Hint { visible: root.claimStageNow === "ready" && root.claimCheck !== null && !!root.claimCheck.privacy; color: root.brass; font.pixelSize: root.px(15); text: "Public claim: links this deposit to this account." }
-                    // Approve (next) is the real action: this only goes on to it.
-                    Action { visible: root.claimStageNow === "ready"; label: "Continue"; strong: true; onPressed: root.startClaim(false) }
-                    Hint { visible: root.claimStageNow === "ready"; font.pixelSize: root.px(15); text: "The bridge pays the fee." }
+                    StatusLine { visible: root.claimStageNow === "elsewhere"; kind: "problem"; text: root.claimAccountProblemNow }
+                    StatusLine { visible: root.claimStageNow === "wrong_bridge"; kind: "problem"; text: root.claimBridgeNow.problem }
+                    Hint { visible: root.claimStageNow === "ready" && root.claimCheck !== null && !!root.claimCheck.privacy; color: root.ink; font.pixelSize: root.px(15); text: "Public claim: links this deposit to this account. The bridge pays the fee." }
+                    // Approve (next) is the real action: this only goes on to it. While a "try
+                    // again" wait shows under it, it is the one button (no second primary).
+                    Action { visible: root.claimStageNow === "ready"; label: root.claimAsking ? "Asking the wallet…" : "Continue"; strong: true; enabledNow: !root.claimAsking; onPressed: root.startClaim(false) }
+                    Hint { visible: root.claimStageNow === "ready" && !(root.claimCheck !== null && !!root.claimCheck.privacy); font.pixelSize: root.px(15); text: "The bridge pays the fee." }
 
                     // The wallet's questions for this claim, answered here as the step itself.
                     Hint {
+                        visible: false
+                    }
+                    StatusLine {
                         visible: !root.appInline && (root.claimStageNow === "asking" || root.claimStageNow === "needs" || (root.claimStageNow === "running" && claimScreen.stepNow !== null && claimScreen.stepNow.key === "approve"))
-                        text: root.claimStageNow === "asking" ? "Asking your wallet…" : root.appRequest !== null ? "Answer it in the sheet." : "Asking your wallet…"
+                        kind: root.claimStageNow === "asking" || root.appRequest === null ? "working" : "waiting"
+                        text: root.claimStageNow === "asking" ? "Asking the wallet…" : root.appRequest !== null ? "Waiting for your answer in the approval sheet." : "Asking the wallet…"
                     }
                     ApproveBody { visible: root.appInline && root.walletView === "claim"; inline: true }
-                    Hint { visible: root.claimStageNow === "uncertain"; color: root.brass; text: "No answer from your wallet. If a claim sheet is open, reject it, then press Continue." }
+                    StatusLine { visible: root.claimStageNow === "uncertain"; kind: "waiting"; text: "No answer from the wallet yet. If an approval for this claim is open, reject it, then press Continue." }
                     Action { visible: root.claimStageNow === "uncertain"; label: "Continue"; strong: true; onPressed: root.startClaim(true) }
 
                     // The last step: sending, then done.
-                    Hint {
+                    StatusLine {
                         visible: root.claimStageNow === "running" && claimScreen.stepNow !== null && claimScreen.stepNow.key === "done"
-                        text: root.depositClaimJob !== null && root.depositClaimJob.phase === "confirm" ? "Waiting for its block…" : "The bridge's relay is sending it…"
+                        kind: "waiting"
+                        text: root.depositClaimJob !== null && root.depositClaimJob.phase === "confirm" ? "Waiting for its block (about 30 s)…" : "The bridge's relay is sending it…"
                     }
                     Action { visible: root.claimStageNow === "running" && root.depositClaimJob !== null && root.depositClaimJob.can_cancel === true; label: "Cancel"; onPressed: root.cancelClaim() }
-                    Hint {
-                        visible: root.claimStageNow === "done" && root.depositClaimJob !== null && root.depositClaimJob.result && !!root.depositClaimJob.result.balance_text
-                        color: root.ink
-                        text: root.depositClaimJob !== null && root.depositClaimJob.result ? "Now in the account: " + root.depositClaimJob.result.balance_text + " (wrapped)." : ""
+                    StatusLine {
+                        visible: root.claimStageNow === "done"
+                        kind: "done"
+                        text: (root.depositClaimJob !== null && root.depositClaimJob.block !== undefined ? "Claimed in block " + root.depositClaimJob.block : "Claimed")
+                            + (root.depositClaimJob !== null && root.depositClaimJob.result && root.depositClaimJob.result.balance_text ? " · Now in the account: " + root.depositClaimJob.result.balance_text + " (wrapped)." : ".")
                     }
-                    Hint { visible: root.claimStageNow === "failed"; color: root.depositClaimJob !== null && root.depositClaimJob.error && Logic.claimIsWait(root.depositClaimJob.error.code) ? root.brass : root.alarm; text: root.depositClaimJob !== null && root.depositClaimJob.error ? Logic.claimErrorLine(root.depositClaimJob.error.code, root.depositClaimJob.error) : "The claim stopped. Try again." }
-                    Hint { visible: root.claimError !== ""; color: root.alarm; text: root.claimError }
+                    // A refusal (the check) or a failure (the claim): one line in its kind, and its one
+                    // next action (Logic.claimNext): Check again only where it can change anything.
+                    StatusLine {
+                        visible: (root.claimStageNow === "refused" || root.claimStageNow === "failed") && !root.claimChecking
+                        kind: root.claimNextNow.kind
+                        text: root.claimStageNow === "refused" ? root.claimRefusalLine
+                            : root.depositClaimJob !== null && root.depositClaimJob.error ? Logic.claimErrorLine(root.depositClaimJob.error.code, root.depositClaimJob.error) : "The claim stopped."
+                        actionLabel: root.claimNextNow.label
+                        actionStrong: true
+                        onAct: root.claimNextAction(root.claimNextNow.action)
+                    }
+                    // A proposal that didn't go through: its line under Continue (the one button), or,
+                    // with no check to continue from, a way back to one.
+                    StatusLine {
+                        visible: root.claimError !== ""
+                        kind: root.claimErrorKind
+                        text: root.claimError
+                        actionLabel: root.claimCheck === null && root.claimStageNow !== "refused" && root.claimStageNow !== "failed" ? (root.claimSource !== "" ? "Check again" : "Choose a file") : ""
+                        onAct: if (root.claimSource !== "") root.checkAgain(); else { root.leaveClaim(); root.openClaim() }
+                    }
 
                     // Not ready yet: the same file is checked again (by itself when there is a time).
                     Hint { visible: root.claimRetryAt > 0; font.pixelSize: root.px(15); text: "Checking again by itself in " + root.claimRetryLeft + "." }
-                    RowLayout {
-                        visible: !root.claimChecking && (root.claimStageNow === "refused" || root.claimStageNow === "failed" || (root.claimError !== "" && root.claimCheck === null))
-                        spacing: 14
-                        // The same file again (still in memory); after leaving the screen, the file is chosen again.
-                        Action {
-                            label: root.claimSource === "" ? "Choose file" : root.claimStageNow === "failed" ? "Try again" : "Check again"
-                            strong: true
-                            onPressed: if (root.claimSource !== "") root.checkAgain(); else { root.leaveClaim(); root.openClaim(); root.pickClaimFile() }
-                        }
-                        Link { visible: root.claimSource !== ""; text: "Choose another file"; font.pixelSize: root.px(15); onPressed: { root.leaveClaim(); root.openClaim() } }
-                    }
-                    Action { visible: root.claimError !== "" && root.claimAgain && root.claimCheck !== null && root.claimCheck.ok && root.depositClaimJob === null; label: "Try again"; strong: true; onPressed: root.startClaim(false) }
+                    Link { visible: !root.claimChecking && root.claimSource !== "" && root.claimSource.indexOf("deposit:") !== 0 && root.claimStageNow === "refused" && root.claimNextNow.action !== "another"; text: "Choose another file"; font.pixelSize: root.px(15); onPressed: { root.leaveClaim(); root.openClaim() } }
 
                     // Details, closed by default: every fact the screen used to show.
                     Link {
@@ -9972,15 +10272,13 @@ Item {
                     // The receive followed has no deposit seen yet: its code (when made here) is the step.
                     readonly property bool depositing: root.receiveFocus === "" || p.stage === "waiting" || p.stage === "checking"
                     readonly property bool shows: !root.receiveMissing && root.bridgeReceives && root.bridgeSetupClear
-                    Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
-                    Text { text: "Receive from Ethereum"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
-                    RunsOn { net: "0.4" }
+                    PageHeader { title: "Receive from Ethereum"; net: "0.4"; onBack: root.walletView = "home" }
                     // The LEZ Bridge's setup, the same box as on the claim screen and the card.
                     BridgeSetupBox { then: "receive" }
                     RowLayout {
                         visible: root.receiveMissing && root.bridgeSetup.state === ""
                         spacing: 12
-                        Hint { Layout.fillWidth: false; color: root.brass; text: root.installedList === null || root.bridgeBundle === "" ? "Looking for the LEZ Bridge…" : "The LEZ Bridge doesn't answer yet." }
+                        StatusLine { Layout.fillWidth: false; kind: root.installedList === null || root.bridgeBundle === "" ? "working" : "waiting"; text: root.installedList === null || root.bridgeBundle === "" ? "Looking for the LEZ Bridge…" : "The LEZ Bridge doesn't answer yet." }
                         Link { text: "Look again"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.openEthReceive(root.receiveFocus === "" ? undefined : root.receiveFocus) }
                     }
                     // A receive opened again (or on its way when Receive opened): said first.
@@ -9990,24 +10288,13 @@ Item {
                         text: Logic.receiveOnItsWay(root.receiveFocusRow, root.receiveStatuses[root.receiveFocus])
                         color: root.ink
                         font.family: root.sans
-                        font.pixelSize: root.px(20)
+                        font.pixelSize: root.px(17)
                         wrapMode: Text.WordWrap
                     }
 
                     // The steps in a row (done ticked, the current one marked, later ones dim); under
                     // it only the current step.
-                    StepRow { visible: receiveScreen.shows; steps: root.receiveStepsNow }
-                    Text {
-                        readonly property var step: receiveScreen.stepNow !== null ? receiveScreen.stepNow : root.receiveStepsNow[root.receiveStepsNow.length - 1]
-                        visible: receiveScreen.shows && step !== undefined
-                        Layout.fillWidth: true
-                        text: step === undefined ? "" : (step.state === "done" ? "✓ " : "") + "Step " + step.n + " of " + step.total + " · " + step.title
-                        color: step !== undefined && step.state === "done" ? root.good : root.ink
-                        font.family: root.sans
-                        font.pixelSize: root.px(22)
-                        font.weight: Font.DemiBold
-                        wrapMode: Text.WordWrap
-                    }
+                    StepHeader { visible: receiveScreen.shows; steps: root.receiveStepsNow }
 
                     // Step: amount and account.
                     ColumnLayout {
@@ -10019,7 +10306,7 @@ Item {
                             spacing: 8
                             Repeater {
                                 model: root.receiveTokenList
-                                Action { required property var modelData; label: modelData.symbol; strong: root.receiveToken === modelData.symbol; onPressed: root.receiveToken = modelData.symbol }
+                                Choice { required property var modelData; label: modelData.symbol; chosen: root.receiveToken === modelData.symbol; onPressed: root.receiveToken = modelData.symbol }
                             }
                         }
                         Flow {
@@ -10027,42 +10314,29 @@ Item {
                             spacing: 8
                             Repeater {
                                 model: (root.receiveTokenList.filter(function(t) { return t.symbol === root.receiveToken })[0] || { denoms: [] }).denoms
-                                Action { required property var modelData; label: modelData.text + " " + root.receiveToken; strong: root.receiveDenom === modelData.index; onPressed: root.receiveDenom = modelData.index }
+                                Choice { required property var modelData; label: modelData.text + " " + root.receiveToken; chosen: root.receiveDenom === modelData.index; onPressed: root.receiveDenom = modelData.index }
                             }
                         }
-                        Hint { visible: root.receiveAccountList.length === 0; color: root.alarm; text: "No public account on LEZ 0.4 yet. Make one in Settings, then come back." }
+                        StatusLine { visible: root.receiveAccountList.length === 0; kind: "problem"; text: "No public account on LEZ 0.4 yet. Make one in Settings, then come back."; actionLabel: "Open Settings"; onAct: root.go("settings") }
                         Flow {
                             Layout.fillWidth: true
                             spacing: 8
                             Repeater {
                                 model: root.receiveAccountList
-                                Action { required property var modelData; label: "Into " + Logic.idShort(modelData); strong: root.receiveAccountNow === modelData; onPressed: root.receiveAccount = modelData }
+                                Choice { required property var modelData; label: "Into " + Logic.idShort(modelData); chosen: root.receiveAccountNow === modelData; onPressed: root.receiveAccount = modelData }
                             }
                         }
                         // The one thing to read first: a public account links the deposit to it.
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 10
-                            Rectangle {
-                                Layout.preferredWidth: 18
-                                Layout.preferredHeight: 18
-                                Layout.alignment: Qt.AlignTop
-                                radius: 4
-                                color: root.receivePublicOk ? root.brass : "transparent"
-                                border.width: 2
-                                border.color: root.brass
-                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.receivePublicOk = !root.receivePublicOk }
-                            }
-                            Hint {
-                                color: root.ink
-                                text: "Not private: the claim links this deposit to this account for good."
-                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.receivePublicOk = !root.receivePublicOk }
-                            }
+                        Tick {
+                            checked: root.receivePublicOk
+                            text: "Not private: the claim links this deposit to this account for good."
+                            onToggled: root.receivePublicOk = !root.receivePublicOk
                         }
-                        Hint { visible: root.receiveHoldNow !== ""; color: root.brass; text: root.receiveHoldNow }
+                        StatusLine { visible: root.receiveHoldNow !== ""; kind: ""; text: root.receiveHoldNow }
                         Action { visible: root.receiveHoldNow === ""; label: root.receiveAsking ? "Making the code…" : "Make the deposit code"; strong: true; enabledNow: !root.receiveAsking && root.receivePublicOk && root.receiveAccountNow !== ""; onPressed: root.makeReceive() }
+                        WhyLine { visible: root.receiveHoldNow === "" && text !== ""; text: Logic.receiveMakeWhy({ asking: root.receiveAsking, ticked: root.receivePublicOk, account: root.receiveAccountNow }) }
                     }
-                    Hint { visible: root.receiveNeeds !== null && !root.appInline; text: "Answer it in the sheet." }
+                    StatusLine { visible: root.receiveNeeds !== null && !root.appInline; kind: "waiting"; text: "Waiting for your answer in the approval sheet." }
                     // This screen's own question to the wallet, answered here (not in a sheet over it).
                     ApproveBody { visible: root.appInline && root.walletView === "ethreceive"; inline: true }
 
@@ -10078,9 +10352,9 @@ Item {
                                   + " into " + Logic.idShort(receiveScreen.resultAccount) + ". The deposit page shows the bridge fee."
                         }
                         // A code shown again that was made for an older vault.
-                        Hint {
+                        StatusLine {
                             visible: Logic.codeOlderVault(receiveScreen.result)
-                            color: root.brass
+                            kind: ""
                             text: "This code is for an older vault. For the new one (v4), make another code."
                         }
                         Action { label: root.receiveLinkCopied ? "Copied." : "Copy the link"; strong: true; onPressed: root.copyDepositLink(receiveScreen.result.request_url) }
@@ -10121,14 +10395,12 @@ Item {
                     // here), claimed. The wait is the headline, in the third tone.
                     UnderwayPanel {
                         visible: receiveScreen.shows && root.receiveFocus !== "" && root.receiveHasStatus
-                        Text {
-                            Layout.fillWidth: true
-                            text: (receiveScreen.p.stage === "claimed" ? "✓ " : "") + receiveScreen.p.headline
-                            color: receiveScreen.p.tone === "done" ? root.good : receiveScreen.p.tone === "plain" ? root.dim : receiveScreen.p.tone === "ready" ? root.ink : root.underway
-                            font.family: root.sans
-                            font.pixelSize: root.px(26)
-                            font.weight: Font.DemiBold
-                            wrapMode: Text.WordWrap
+                        StatusLine {
+                            kind: Logic.toneKind(receiveScreen.p.tone)
+                            text: receiveScreen.p.stage === "claimed" ? receiveScreen.p.headline.replace(/\.$/, "")
+                                + (root.receiveFocusRow !== null && /now holds/.test(Logic.receiveBalanceLine(root.bridgeNetBlocks, root.receiveFocusRow.account, root.receiveFocusRow.symbol))
+                                   ? " · " + Logic.receiveBalanceLine(root.bridgeNetBlocks, root.receiveFocusRow.account, root.receiveFocusRow.symbol) : ".")
+                                : receiveScreen.p.headline
                         }
                         Hint { visible: receiveScreen.p.detail !== ""; font.pixelSize: root.px(15); text: receiveScreen.p.detail }
                         Hint {
@@ -10138,7 +10410,7 @@ Item {
                         }
                         Action { visible: receiveScreen.p.claim; label: "Claim"; strong: true; onPressed: root.claimReceive(root.receiveFocus) }
                         Hint {
-                            visible: receiveScreen.p.stage === "claimed" && root.receiveFocusRow !== null
+                            visible: receiveScreen.p.stage === "claimed" && root.receiveFocusRow !== null && !/now holds/.test(text)
                             font.pixelSize: root.px(15)
                             text: root.receiveFocusRow === null ? "" : Logic.receiveBalanceLine(root.bridgeNetBlocks, root.receiveFocusRow.account, root.receiveFocusRow.symbol)
                         }
@@ -10154,8 +10426,13 @@ Item {
                     RowLayout {
                         visible: root.receiveError !== ""
                         spacing: 12
-                        Hint { Layout.fillWidth: true; color: root.alarm; text: root.receiveError }
-                        Action { visible: root.receiveResult === null && root.receiveNeeds === null && !root.receiveAsking; label: "Try again"; onPressed: root.makeReceive() }
+                        StatusLine {
+                            Layout.fillWidth: true
+                            kind: Logic.noticeKind(root.receiveError, true)
+                            text: root.receiveError
+                            actionLabel: root.receiveResult === null && root.receiveNeeds === null && !root.receiveAsking ? "Try again" : ""
+                            onAct: root.makeReceive()
+                        }
                     }
 
                     Link {

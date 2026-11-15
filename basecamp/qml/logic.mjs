@@ -1264,10 +1264,10 @@ export function claimPhases(job) {
 /// blindly: look at the confirmation first.
 export function claimFailure(text) {
     var t = String(text || "")
-    if (/Names Wallet is busy/i.test(t)) return { line: "Your Names Wallet was busy; nothing was sent. Press Claim again.", again: true }
-    if (/didn't answer/i.test(t)) return { line: "Your Names Wallet didn't answer in time, so a claim may be waiting for you. Look at the confirmation in this app first; don't press Claim again until it is answered or gone.", again: false }
-    if (/still answering an earlier call/i.test(t)) return { line: "The LEZ Bridge module is still answering an earlier call; nothing new was sent. Try again in a moment.", again: true }
-    return { line: t, again: true }
+    if (/Names Wallet is busy/i.test(t)) return { line: "The wallet was busy, so nothing was sent. Press Continue to try again.", again: true, kind: "waiting" }
+    if (/didn't answer/i.test(t)) return { line: "No answer from the wallet yet: an approval for this claim may still come. If one shows on this page, answer it; if none does within a minute, press Continue.", again: false, kind: "waiting" }
+    if (/still answering an earlier call/i.test(t)) return { line: "The LEZ Bridge module is still answering an earlier call; nothing new was sent. Try again in a moment.", again: true, kind: "waiting" }
+    return { line: t, again: true, kind: "problem" }
 }
 
 /// The claim's refusal title (rfp-022 logic.mjs relayErrorTitle, the codes the check and the job
@@ -1578,7 +1578,7 @@ export function stepShort(key, state) {
 var STEP_TITLES = {
     file: "Choose the claim file", arrived: "Your deposit arrived", check: "Check", connect: "Let the bridge see this account",
     programs: "Allow the bridge's programs", public_account: "Give the bridge this account",
-    secret: "Allow the bridge's deposit keys", approve: "Approve in your wallet", done: "Claim"
+    secret: "Allow the bridge's deposit keys", approve: "Approve the claim", done: "Claim"
 }
 var STEP_DONE = {
     file: "Claim file read", arrived: "", connect: "The bridge sees this account", programs: "The bridge's programs allowed",
@@ -1618,9 +1618,9 @@ export function claimSteps(s) {
         var state = i < at || (stage === "done" && k === "done") ? "done" : i === at ? "now" : "later"
         var title = STEP_TITLES[k]
         if (k === "check" && state === "now")
-            title = stage === "checking" ? "Checking…" : stage === "ready" ? "Checked ✓" : "Check"
+            title = stage === "checking" ? "Checking…" : stage === "ready" ? "Checked" : "Check"
         if (k === "done")
-            title = stage === "done" ? "Done: claimed in block " + (job && job.block !== undefined ? job.block : "?") : state === "now" ? (stage === "failed" ? "Claim stopped" : "Claiming…") : "Claim"
+            title = stage === "done" ? "Claimed" : state === "now" ? (stage === "failed" ? "Claim stopped" : "Claiming…") : "Claim"
         if (k === "approve" && state === "now" && stage === "failed")
             title = "Not approved"
         var line = state !== "done" ? "" : k === "check" ? String(st.summary || "Checked") : k === "done" ? "" : STEP_DONE[k] || ""
@@ -1640,14 +1640,14 @@ export function claimErrorLine(code, error) {
     var e = error || {}
     var min = e.eta_s ? Math.max(1, Math.ceil(Number(e.eta_s) / 60)) : e.final_in_min ? Number(e.final_in_min) : 0
     var lines = {
-        relay_cap: "The bridge's relay has reached today's limit. Nothing was sent. Try again later.",
+        relay_cap: "The bridge's relay can't pay this claim right now (its daily limit, or fees above what it pays). Nothing was sent. Try again later.",
         rate_limited: "Too many claims from here today. Nothing was sent. Try again later.",
         relay_busy: "The relay is busy. Try again.", busy: "The relay is busy. Try again.",
         relay_unavailable: "The relay isn't answering. Nothing was sent. Try again later.",
         relay_funds: "The relay is out of funds. Nothing was sent. Try again later.",
         relay_once: "The relay already sent this claim.",
         relay_refused: "The relay refused the claim. Nothing was sent. Try again.",
-        reverted: "The claim was refused on the bridge test network. Try again.",
+        reverted: "The claim was included but didn't apply (claims may be paused). Nothing reached your account. Try again later.",
         not_final: min ? "Not final on Ethereum yet: about " + min + " min." : "Not final on Ethereum yet. Try again in a few minutes.",
         root_not_attested: "Not recorded on the bridge yet. Try again in about a minute.",
         already_claimed: "This deposit was already claimed.",
@@ -1659,7 +1659,7 @@ export function claimErrorLine(code, error) {
         // The bridge's own words say which: no, nobody answered within 10 minutes, or cancelled.
         wallet_rejected: /didn't answer|Nobody answered/i.test(String(e.message || "")) ? "The approval wasn't answered within 10 minutes. Nothing was sent. Try again."
             : /^Cancelled/i.test(String(e.message || "")) ? "The approval was cancelled. Nothing was sent. Try again."
-            : /rejected/i.test(String(e.message || "")) ? "You said no in your wallet. Nothing was sent. Try again."
+            : /rejected/i.test(String(e.message || "")) ? "The approval was rejected, so nothing was signed or sent."
             : "The approval ended without a yes. Nothing was sent. Try again.",
         wallet_no_answer: "Your wallet didn't answer. Look for its sheet, then try again.",
         landed_or_used: "Your account changed since you approved. Try again.",
@@ -1918,7 +1918,7 @@ export function receiveBalanceLine(blocks, account, symbol) {
     var held = all.filter(function(a) { return !/^0(\.0*)?$/.test(String(a.amount || "0")) })
     var asset = ofBridge[0] || held[0] || all[0] || null
     if (asset) return idShort(id) + " now holds " + asset.amount + " " + asset.symbol + "."
-    return "It shows under " + idShort(id) + " below once the network is read again."
+    return "The balance of " + idShort(id) + " shows on the Wallet card once the network is read again."
 }
 
 /// The Receive screen's steps: [{key, n, total, title, short, state, line}]. `s`: {stage ("choose" |
@@ -1937,7 +1937,7 @@ export function receiveSteps(s) {
     var titles = { choose: "Choose the amount and account", connect: "Let the bridge see this account", public_account: "Give the bridge this account",
                    private_account: "Give the bridge this account", secret: "Allow the bridge's deposit keys",
                    deposit: "Deposit on the page", wait: "Waiting for Ethereum",
-                   claim: st.stage === "claimable" ? "Arrived: claim it" : st.stage === "noclaim" ? "Arrived" : st.stage === "claimed" ? "Claimed" + (st.claimedBlock ? " in block " + st.claimedBlock : "") : "Claim" }
+                   claim: st.stage === "claimable" ? "Arrived: claim it" : st.stage === "noclaim" ? "Arrived" : st.stage === "claimed" ? "Claimed" : "Claim" }
     var now = st.stage === "code" || st.stage === "waiting" || st.stage === "checking" || st.stage === "lost" ? "deposit" : st.stage === "deposited" || st.stage === "final" ? "wait"
         : st.stage === "claimable" || st.stage === "noclaim" ? "claim" : st.stage === "needs" ? (needs || "choose") : "choose"
     var at = st.stage === "claimed" ? keys.length : keys.indexOf(now)
@@ -2157,8 +2157,9 @@ export function clockShown(seconds) {
 /// headline (the big line; the wait itself while waiting), card (the card row's state), detail,
 /// tone ("wait" | "ready" | "done" | "plain"), action ("" | "burn" | "prove" | "seal" |
 /// "release")}. `clock`: seconds → "14:32" (clockShown). Times are only the bridge's: the update on
-/// Ethereum has none (the operator posts it by hand today), the proof about 20 s, the wrapper about
-/// 3 min, the release at the vault's own `releasable_at`.
+/// Ethereum has none (the operator posts it by hand today), the proof about 20 s, the wrapper none
+/// (made by hand today), the release at the vault's own `releasable_at`. tone "problem": something
+/// went wrong that the person should look at (shown red, StatusLine "problem").
 export function sendBackProgress(status, nowSeconds, clock) {
     var s = status || {}
     var at = clock || clockShown
@@ -2171,16 +2172,16 @@ export function sendBackProgress(status, nowSeconds, clock) {
     case "approve":
         // Approved and signed, but the bridge's relay refused or didn't answer (`note`): its words,
         // and the bridge tries again at each check.
-        if (s.note && s.busy !== true) return r("approve", "Signed · the bridge's relay hasn't sent it", "Signed, but the bridge's relay hasn't sent it yet.", String(s.note), "plain")
+        if (s.note && s.busy !== true) return r("approve", "Signed · the bridge's relay hasn't sent it", "Signed; the bridge's relay hasn't sent it yet and tries again at each check.", String(s.note), "wait")
         return r("approve", "Waiting for your approval", "Waiting for your approval.", "", "ready")
     case "burning": return r("burning", "Sending the burn · about 15 s", "Sending the burn: about 15 s.", "", "wait")
     case "burned": return r("burned", "Burned · waiting for Ethereum to record it", "Waiting for Ethereum to record it.",
         "The bridge team posts these updates to Ethereum by hand today, so this can take from minutes to hours.", "wait")
-    case "burn_unclear": return r("burn_unclear", "The burn may have been refused", "The burn may have been refused.", String(s.text || ""), "plain")
+    case "burn_unclear": return r("burn_unclear", "The burn may have been refused", "The burn may have been refused.", String(s.text || ""), "problem")
     case "recorded": return r("recorded", "Recorded on Ethereum · make the proof", "Recorded on Ethereum: make the release proof.", until, "ready", "prove")
     case "proving": return r("proving", "Making the release proof · about 20 s", "Making the release proof on this computer: about 20 s.", until, "wait")
-    case "proved": return r("proved", "Waiting for the proof's Ethereum wrapper", "Waiting for the proof's Ethereum wrapper: about 3 min.",
-        "The bridge team makes it by hand today and sends you the seal to paste here.", "wait", "seal")
+    case "proved": return r("proved", "Waiting for the proof's Ethereum wrapper", "Waiting for the bridge team to send the seal.",
+        "The proof's Ethereum wrapper is made by hand today; paste the seal here when it comes.", "wait", "seal")
     case "wrapped":
         return r("wrapped", later ? "Releasable at " + at(when) : "Releasable any minute now",
             later ? "Releasable at " + at(when) + "." : "Releasable any minute now.", "The vault waits one hour after Ethereum records it.", "wait")
@@ -2270,4 +2271,94 @@ export function sendBackSources(blocks) {
 /// "Check now"; `asked`: pressed, waiting for a call under way to end first.
 export function checkButton(polling, asked) {
     return polling || asked ? { label: "Checking…", enabled: false } : { label: "Check now", enabled: true }
+}
+
+// ── One look for every status line (basecamp/qml/STYLE.md) ──
+
+/// The four kinds of status line, the only ones on any page: working (this app is doing it, the
+/// control is disabled), waiting (something outside takes time: amber), problem (it failed or was
+/// refused: red, one next action), done (what happened and what is now true: the success colour).
+export const STATUS_KINDS = ["working", "waiting", "problem", "done"]
+
+/// Messages that are waits, not failures: the module busy, no answer yet, the wallet starting,
+/// an endpoint rate-limiting. Never red.
+export function isWaitMessage(message) {
+    var t = String(message || "")
+    return /^The wallet is busy|^No answer from the wallet yet|^Starting… the wallet is still loading|still answering an earlier call|gave no answer yet|didn't answer in time|was busy, so nothing was sent/i.test(t) || rateLimited(t)
+}
+
+/// The kind of a notice said with `say(message, how)`: `how` true is a failure (a problem, unless
+/// its words are a wait), false is a plain result (done), or one of STATUS_KINDS said outright.
+export function noticeKind(message, how) {
+    if (String(message || "") === "")
+        return ""
+    if (STATUS_KINDS.indexOf(how) >= 0)
+        return how
+    if (how === true)
+        return isWaitMessage(message) ? "waiting" : "problem"
+    return "done"
+}
+
+/// A bridge progress tone ("wait" | "ready" | "done" | "plain" | "problem") as a status kind; ""
+/// for a plain line (no colour, no mark) and for "ready" (the next action is the button).
+export function toneKind(tone) {
+    return tone === "wait" ? "waiting" : tone === "done" ? "done" : tone === "problem" ? "problem" : ""
+}
+
+/// The bridge setup box's state (Logic.bridgeSetupState) as a status kind.
+export function setupKind(state) {
+    return state === "failed" || state === "stuck" ? "problem" : state === "busy" ? "waiting" : state === "done" ? "done" : ""
+}
+
+/// A claim refusal or failure: its kind (waits amber, the rest red) and the ONE next action:
+/// {kind, label, action ("check" | "retry" | "back" | "another")}. `fromFile`: the claim came from a
+/// file still in memory (a deposit that arrived has none). A refusal that no retry can change
+/// (already claimed, a private account, a file that isn't one) offers the way out instead.
+export function claimNext(code, failed, fromFile) {
+    var c = String(code || "")
+    if (claimIsWait(c))
+        return { kind: "waiting", label: "Check again", action: "check" }
+    if (c === "already_claimed" || c === "private_account" || c === "relay_once")
+        return { kind: "problem", label: "Back to the wallet", action: "back" }
+    if (c === "bad_file" || c === "wrong_leaf")
+        return { kind: "problem", label: "Choose another file", action: "another" }
+    if (failed)
+        return { kind: "problem", label: "Try again", action: "retry" }
+    return { kind: "problem", label: fromFile ? "Check again" : "Try again", action: fromFile ? "check" : "retry" }
+}
+
+/// Why the approval's Approve can't be pressed now, in one line ("" when it can). `s`: as
+/// canApprove's, plus `checkingWhat` for a Program Registry check.
+export function approveWhy(s) {
+    var st = s || {}
+    var request = st.request
+    if (!request || canApprove(st))
+        return ""
+    if (st.busy)
+        return "Answering it…"
+    if (request.zone_in_use === false)
+        return "Switch to the zone it was asked for first (above)."
+    if (request.checking === true)
+        return "Waiting for the Program Registry's answer."
+    if (!Array.isArray(st.chosen) || st.chosen.length === 0)
+        return "Choose the account above."
+    if (st.risky && !st.understood)
+        return "Tick the box above to approve."
+    if (request.kind === "private_call" && request.check !== "ready")
+        return request.check === "failed" ? "The wallet couldn't simulate it, so it can't be approved." : "Waiting for the wallet's simulation."
+    if ((request.kind === "private_call" || request.kind === "relayed_call") && (!request.sheet || request.sheet.refused))
+        return request.sheet ? "The wallet refuses this call (see why above)." : "Waiting for the wallet to build it."
+    return ""
+}
+
+/// Why "Make the deposit code" can't be pressed ("" when it can): {asking, ticked, account}.
+export function receiveMakeWhy(s) {
+    var st = s || {}
+    if (st.asking)
+        return ""
+    if (!st.account)
+        return "Choose the account above."
+    if (!st.ticked)
+        return "Tick “Not private” above to make the code."
+    return ""
 }

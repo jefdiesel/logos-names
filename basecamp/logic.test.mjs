@@ -206,7 +206,10 @@ check("cli status same network", mergeCliStatus(onNet({ wallet: true, public: "P
   // Busy (nothing sent: Claim again) vs no answer (a request may be waiting: look first).
   check("busy again", claimFailure("Your Names Wallet is busy; nothing was sent; try again.").again, true);
   const silent = claimFailure("Your Names Wallet didn't answer in time (x). Nothing was sent; try again.");
-  check("no answer: look first", [silent.again, silent.line.includes("Look at the confirmation")], [false, true]);
+  check("no answer: look first, as a wait", [silent.again, silent.line.includes("If one shows on this page, answer it"), silent.kind], [false, true, "waiting"]);
+  // The buttons the lines name are the ones on the screen (Continue), never a "Claim" that isn't there.
+  check("busy names Continue, a wait", [claimFailure("Your Names Wallet is busy; nothing was sent; try again.").line.includes("Press Continue"), claimFailure("Your Names Wallet is busy").kind], [true, "waiting"]);
+  check("no claim line names a missing Claim button", [claimFailure("Your Names Wallet is busy").line, silent.line].some((l) => /press Claim/i.test(l)), false);
   check("module busy", claimFailure("still answering an earlier call").again, true);
   check("error titles", [claimErrorTitle("already_claimed"), claimErrorTitle("other_vault"), claimErrorTitle("zzz")], ["Already claimed", "This deposit went to another vault", "The claim can't go on"]);
   check("claim input", ["", "{\"format\":\"logos-bridge-claim\"}", "{}", "/tmp/c.json", "file:///c.json", "hello"].map((t) => claimInput(t).kind + (claimInput(t).problem ? "!" : "")),
@@ -603,14 +606,14 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     [[], ["public_account"], ["connect", "programs"], []]);
   const view = (steps) => steps.map((x) => x.n + "/" + x.total + " " + x.state + " " + x.title + (x.line ? " — " + x.line : ""));
   check("steps: choose the file (4 steps)", view(claimSteps({ stage: "start", extras: [] })),
-    ["1/4 now Choose the claim file", "2/4 later Check", "3/4 later Approve in your wallet", "4/4 later Claim"]);
+    ["1/4 now Choose the claim file", "2/4 later Check", "3/4 later Approve the claim", "4/4 later Claim"]);
   check("steps: checked, first claim (6 steps)", view(claimSteps({ stage: "ready", extras: ["connect", "programs"], summary: "0.1 ETH → your account CCVd76…pKnk (bridge v3)" })),
-    ["1/6 done Choose the claim file — Claim file read", "2/6 now Checked ✓", "3/6 later Let the bridge see this account", "4/6 later Allow the bridge's programs", "5/6 later Approve in your wallet", "6/6 later Claim"]);
+    ["1/6 done Choose the claim file — Claim file read", "2/6 now Checked", "3/6 later Let the bridge see this account", "4/6 later Allow the bridge's programs", "5/6 later Approve the claim", "6/6 later Claim"]);
   check("steps: the connect sheet", view(claimSteps({ stage: "needs", needs: "connect", extras: ["connect", "programs"], summary: "S" }))[2], "3/6 now Let the bridge see this account");
   check("steps: an unexpected needs adds a step", claimSteps({ stage: "needs", needs: "programs", extras: [], summary: "S" }).map((x) => x.key), ["file", "check", "programs", "approve", "done"]);
   check("steps: approve, then sending, then done",
     [view(claimSteps({ stage: "running", job: { phase: "approve" }, extras: [] }))[2], view(claimSteps({ stage: "running", job: { phase: "relay" }, extras: [] }))[3], view(claimSteps({ stage: "done", job: { phase: "done", state: "done", block: 5249 }, extras: [] }))[3]],
-    ["3/4 now Approve in your wallet", "4/4 now Claiming…", "4/4 done Done: claimed in block 5249"]);
+    ["3/4 now Approve the claim", "4/4 now Claiming…", "4/4 done Claimed"]);
   check("steps: the row's words", claimSteps({ first: "arrived", stage: "running", job: { phase: "approve" }, extras: [] }).map((x) => x.short + " " + x.state),
     ["Arrived done", "Checked done", "Approve now", "Claim later"]);
   const { claimRetryAfter } = await import("./qml/logic.mjs");
@@ -618,10 +621,10 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   const { claimIsWait } = await import("./qml/logic.mjs");
   check("claimIsWait", [claimIsWait("not_final"), claimIsWait("root_not_attested"), claimIsWait("relay_cap"), claimIsWait("already_claimed"), claimIsWait("bad_file")], [true, true, true, false, false]);
   check("steps: a received deposit, its keys first", claimSteps({ first: "arrived", stage: "needs", needs: "secret", extras: [] }).map((x) => x.state + " " + x.title),
-    ["done Your deposit arrived", "now Allow the bridge's deposit keys", "later Check", "later Approve in your wallet", "later Claim"]);
+    ["done Your deposit arrived", "now Allow the bridge's deposit keys", "later Check", "later Approve the claim", "later Claim"]);
   check("claimSummary", claimSummary({ ok: true, deposit: { amount_text: "0.1 ETH", account: A } }, "bridge v3"), "0.1 ETH → your account CCVd76…pKnk (bridge v3)");
   check("claimErrorLine", [claimErrorLine("relay_cap"), claimErrorLine("not_final", { eta_s: 330 }), claimErrorLine("relay_busy"), claimErrorLine("nonsense")],
-    ["The bridge's relay has reached today's limit. Nothing was sent. Try again later.", "Not final on Ethereum yet: about 6 min.", "The relay is busy. Try again.", "The claim can't go on."]);
+    ["The bridge's relay can't pay this claim right now (its daily limit, or fees above what it pays). Nothing was sent. Try again later.", "Not final on Ethereum yet: about 6 min.", "The relay is busy. Try again.", "The claim can't go on."]);
 }
 
 {
@@ -650,7 +653,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("receiveSteps: deposited", steps({ stage: "deposited", extras: ["public_account", "secret"] }).slice(3), ["4/6 done Deposited", "5/6 now Waiting for Ethereum", "6/6 later Claim"]);
   check("receiveSteps: final", steps({ stage: "final", extras: [] }).slice(1), ["2/4 done Deposited", "3/4 now Waiting for Ethereum", "4/4 later Claim"]);
   check("receiveSteps: claimable", steps({ stage: "claimable", extras: ["secret"] }).slice(2), ["3/5 done Deposited", "4/5 done Waiting for Ethereum", "5/5 now Arrived: claim it"]);
-  check("receiveSteps: claimed", steps({ stage: "claimed", claimedBlock: 6054, extras: [] }), ["1/4 done Choose the amount and account", "2/4 done Deposited", "3/4 done Waiting for Ethereum", "4/4 done Claimed in block 6054"]);
+  check("receiveSteps: claimed", steps({ stage: "claimed", claimedBlock: 6054, extras: [] }), ["1/4 done Choose the amount and account", "2/4 done Deposited", "3/4 done Waiting for Ethereum", "4/4 done Claimed"]);
   check("receiveSteps: waiting is the deposit step", [steps({ stage: "waiting", extras: [] })[1], steps({ stage: "checking", extras: [] })[1]], ["2/4 now Deposit on the page", "2/4 now Deposit on the page"]);
   check("receiveSteps: the row's words", receiveSteps({ stage: "deposited", extras: ["secret"] }).map((x) => x.short), ["Amount", "Keys", "Deposited", "Wait", "Claim"]);
 }
@@ -679,7 +682,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   const blocks = [{ account: "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", found: true, assets: [{ symbol: "LEZ", amount: "0" }, { symbol: "ETH", amount: "0.1" }] }];
   check("receiveBalanceLine: wrapped symbol", receiveBalanceLine([{ account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", assets: [{ symbol: "wETH", amount: "0.2" }] }], "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "ETH"), "CCVd76…pKnk now holds 0.2 wETH.");
   check("receiveBalanceLine", [receiveBalanceLine(blocks, "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "ETH"), receiveBalanceLine([], "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "ETH")],
-    ["CCVd76…pKnk now holds 0.1 ETH.", "It shows under CCVd76…pKnk below once the network is read again."]);
+    ["CCVd76…pKnk now holds 0.1 ETH.", "The balance of CCVd76…pKnk shows on the Wallet card once the network is read again."]);
   // The receiving account stays in view even when the network has nothing for it yet.
   const rows = [{ account: "AAA", found: true }, { account: "BBB", found: false }, { account: "CCC", found: false }];
   check("bridgeNetShown keeps a receive's account", [bridgeNetShown(rows, false, ["Public/BBB"]).shown.map((r) => r.account), bridgeNetShown(rows, false, ["Public/BBB"]).empty, bridgeNetShown(rows, false).empty],
@@ -850,7 +853,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     claimErrorLine("wallet_rejected", { message: "You rejected it in the Names app; nothing was signed or sent." }),
     claimErrorLine("wallet_rejected", {})],
     ["The approval wasn't answered within 10 minutes. Nothing was sent. Try again.", "The approval was cancelled. Nothing was sent. Try again.",
-     "You said no in your wallet. Nothing was sent. Try again.", "The approval ended without a yes. Nothing was sent. Try again."]);
+     "The approval was rejected, so nothing was signed or sent.", "The approval ended without a yes. Nothing was sent. Try again."]);
   const { canApprove } = await import("./qml/logic.mjs");
   const progs = { kind: "programs", app: "lez_bridge", choices: two.choices, sheet: { warnings: ["no label"] } };
   check("programs: ticked box + the claim's account enables Approve", canApprove({ request: progs, chosen: preTicked(progs, false, "BBB"), risky: true, understood: true }), true);
@@ -887,14 +890,14 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("code titles", ["other_vault", "other_chain", "bad_code:checksum", "x"].map(sendBackCodeTitle), ["This code is for another bridge vault", "This code is for another chain", "That is not a usable code", "The code was refused"]);
   const at = (s) => "T" + s;
   const stages = ["planned", "approve", "burning", "burned", "burn_unclear", "recorded", "proving", "proved", "wrapped", "releasable", "released", undefined];
-  check("stage tones", stages.map((stage) => sendBackProgress(stage ? { stage } : null, 0, at).tone), ["ready", "ready", "wait", "wait", "plain", "ready", "wait", "wait", "wait", "ready", "done", "plain"]);
+  check("stage tones", stages.map((stage) => sendBackProgress(stage ? { stage } : null, 0, at).tone), ["ready", "ready", "wait", "wait", "problem", "ready", "wait", "wait", "wait", "ready", "done", "plain"]);
   check("stage actions", stages.map((stage) => sendBackProgress({ stage }, 0, at).action), ["burn", "", "", "", "", "prove", "", "seal", "", "release", "", ""]);
   check("burned: the honest wait, no time promised", [sendBackProgress({ stage: "burned" }, 0, at).headline, sendBackProgress({ stage: "burned" }, 0, at).detail],
     ["Waiting for Ethereum to record it.", "The bridge team posts these updates to Ethereum by hand today, so this can take from minutes to hours."]);
   check("wrapped: releasable at the vault's time", [sendBackProgress({ stage: "wrapped", releasable_at: 5000 }, 4000, at).headline, sendBackProgress({ stage: "wrapped", releasable_at: 5000 }, 5000, at).headline], ["Releasable at T5000.", "Releasable any minute now."]);
   check("recorded: the earliest release under it", sendBackProgress({ stage: "recorded", releasable_at: 5000 }, 1000, at).detail, "Releasable at T5000 at the earliest (the vault's one-hour delay).");
-  check("proof and wrapper times", [sendBackProgress({ stage: "proving" }, 0, at).headline, sendBackProgress({ stage: "proved" }, 0, at).headline], ["Making the release proof on this computer: about 20 s.", "Waiting for the proof's Ethereum wrapper: about 3 min."]);
-  check("approved, the relay refused: its words, not a wait for approval", [sendBackProgress({ stage: "approve", note: "The bridge's relay refused the burn: cap. Nothing was sent." }, 0, at).headline, sendBackProgress({ stage: "approve", note: "x" }, 0, at).tone], ["Signed, but the bridge's relay hasn't sent it yet.", "plain"]);
+  check("proof and wrapper times", [sendBackProgress({ stage: "proving" }, 0, at).headline, sendBackProgress({ stage: "proved" }, 0, at).headline], ["Making the release proof on this computer: about 20 s.", "Waiting for the bridge team to send the seal."]);
+  check("approved, the relay refused: its words, not a wait for approval", [sendBackProgress({ stage: "approve", note: "The bridge's relay refused the burn: cap. Nothing was sent." }, 0, at).headline, sendBackProgress({ stage: "approve", note: "x" }, 0, at).tone], ["Signed; the bridge's relay hasn't sent it yet and tries again at each check.", "wait"]);
   check("the endpoint busy is not a relay refusal", sendBackProgress({ stage: "approve", busy: true, note: "The bridge's endpoint is busy; trying again shortly." }, 0, at).headline, "Waiting for your approval.");
   const { rateLimited } = await import("./qml/logic.mjs");
   check("429 words are a wait", [rateLimited("HTTP 429 Too Many Requests"), rateLimited("can't reach the bridge test network: too many requests"), rateLimited("The bridge's endpoint is busy; trying again shortly."), rateLimited("no such receive")], [true, true, true, false]);
@@ -951,6 +954,38 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("Check now: pressable when idle, Checking… at once when pressed or while a check runs", [checkButton(false, false), checkButton(false, true), checkButton(true, false)],
     [{ label: "Check now", enabled: true }, { label: "Checking…", enabled: false }, { label: "Checking…", enabled: false }]);
   check("every stage has a mode", stages.every((stage) => ["none", "job", "gentle", "at"].indexOf(sendBackAutoMode({ stage }).mode) >= 0), true);
+}
+
+{
+  // The uniform status lines (qml/STYLE.md): four kinds, waits never red.
+  const { noticeKind, isWaitMessage, toneKind, setupKind, claimNext, approveWhy, receiveMakeWhy, STATUS_KINDS, claimErrorLine } = await import("./qml/logic.mjs");
+  check("four kinds", STATUS_KINDS, ["working", "waiting", "problem", "done"]);
+  const busy = "The wallet is busy; still working.";
+  const noAnswer = "No answer from the wallet yet: it may still be working on it. Look before trying again.";
+  const starting = "Starting… the wallet is still loading (up to half a minute after Basecamp opens).";
+  check("busy, no answer and starting are waits, not problems", [noticeKind(busy, true), noticeKind(noAnswer, true), noticeKind(starting, true)], ["waiting", "waiting", "waiting"]);
+  check("a real failure is a problem", noticeKind("That is not a program ID.", true), "problem");
+  check("a plain result is done; a said kind is kept; nothing is nothing", [noticeKind("Added Gold to your wallet.", false), noticeKind("Sending 5 LEZ…", "waiting"), noticeKind("Asking the wallet to sign.", "working"), noticeKind("", true)], ["done", "waiting", "working", ""]);
+  check("the bridge module busy and the 429 are waits", [isWaitMessage("The LEZ Bridge module is still answering an earlier call."), isWaitMessage("HTTP 429 Too Many Requests"), isWaitMessage("the relay refused")], [true, true, false]);
+  check("tones", ["wait", "done", "problem", "ready", "plain"].map(toneKind), ["waiting", "done", "problem", "", ""]);
+  check("setup states", ["failed", "stuck", "busy", "done", "install", "unload"].map(setupKind), ["problem", "problem", "waiting", "done", "", ""]);
+  // A refusal no retry can change never offers Check again (it was a dead loop on "already claimed").
+  check("already claimed: the way out", claimNext("already_claimed", false, true), { kind: "problem", label: "Back to the wallet", action: "back" });
+  check("not final: a wait with Check again", claimNext("not_final", false, true), { kind: "waiting", label: "Check again", action: "check" });
+  check("failed claim from an arrived deposit: Try again, not Choose file", claimNext("relay_refused", true, false), { kind: "problem", label: "Try again", action: "retry" });
+  check("a bad file: choose another", claimNext("bad_file", false, true).label, "Choose another file");
+  // relay_cap is also the bridge's answer for fees above what the relay pays (relayed.rs:684).
+  check("relay_cap doesn't promise it is today's limit", /today's limit/.test(claimErrorLine("relay_cap")), false);
+  check("reverted says it was included", claimErrorLine("reverted").includes("included"), true);
+  check("rejected doesn't say who said no", /You said no|in your wallet/.test(claimErrorLine("wallet_rejected", { message: "You rejected it in the Names app; nothing was signed or sent." })), false);
+  // A disabled Approve always says why.
+  const req = { kind: "relayed_call", sheet: { warnings: ["x"] } };
+  check("approveWhy: the tick", approveWhy({ request: req, busy: false, chosen: ["Public/A"], risky: true, understood: false }), "Tick the box above to approve.");
+  check("approveWhy: nothing when it can be approved", approveWhy({ request: req, busy: false, chosen: ["Public/A"], risky: true, understood: true }), "");
+  check("approveWhy: no account", approveWhy({ request: { kind: "connect" }, busy: false, chosen: [] }), "Choose the account above.");
+  check("approveWhy: registry check", approveWhy({ request: { kind: "call", checking: true }, chosen: ["a"] }), "Waiting for the Program Registry's answer.");
+  check("receiveMakeWhy", [receiveMakeWhy({ account: "A", ticked: false }), receiveMakeWhy({ account: "", ticked: true }), receiveMakeWhy({ account: "A", ticked: true }), receiveMakeWhy({ asking: true })],
+    ["Tick “Not private” above to make the code.", "Choose the account above.", "", ""]);
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
