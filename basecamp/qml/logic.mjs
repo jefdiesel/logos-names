@@ -1517,14 +1517,21 @@ export function receiveReply(value) {
     return { kind: "old", value: value }
 }
 
-/// This wallet's receives, from the bridge's `deposits()` list: rows it made for the Names Wallet
-/// (`derivation: "names-app"`) and not claimed yet: [{id, symbol, amount, account}].
+/// This wallet's receives, from the bridge's `receives()` (no chain read; newest first), not
+/// claimed yet: [{id, symbol, amount, account, account_kind, stage, text}]. `stage` is what
+/// receive_status last saw ("unknown" before its first call).
 export function receivesFrom(value) {
-    var rows = value && Array.isArray(value.deposits) ? value.deposits : Array.isArray(value) ? value : []
-    return rows.filter(function(d) { return d && d.id && d.derivation === "names-app" && d.claimed !== true && d.stage !== "claimed" }).map(function(d) {
+    var rows = value && Array.isArray(value.receives) ? value.receives : Array.isArray(value) ? value : []
+    return rows.filter(function(d) { return d && d.id && d.claimed !== true && d.stage !== "claimed" }).map(function(d) {
         var amount = d.denom_text || d.amount_text || (d.denom !== undefined && d.decimals !== undefined ? withDecimals(d.denom, d.decimals) : "")
-        return { id: String(d.id), symbol: String(d.symbol || ""), amount: String(amount), account: String(d.account || ""), account_kind: String(d.account_kind || "") }
+        return { id: String(d.id), symbol: String(d.symbol || ""), amount: String(amount), account: String(d.account || ""), account_kind: String(d.account_kind || ""),
+                 stage: String(d.stage || "unknown") }
     })
+}
+
+/// What the installed LEZ Bridge can do, from `config().features` (none: an older pair).
+export function bridgeCan(features, what) {
+    return Array.isArray(features) && features.indexOf(what) >= 0
 }
 
 /// A receive's line on the card, from `receive_status(id)`: {line, tone ("plain" | "ready" |
@@ -1533,7 +1540,11 @@ export function receiveStatusLine(status) {
     var s = status || {}
     switch (s.stage) {
     case "requested": return { line: "Not deposited yet", tone: "plain", claim: false }
-    case "deposited": return { line: "On Ethereum" + (s.final_in_min !== undefined && s.final_in_min !== null ? ": final in about " + Math.max(1, Math.ceil(Number(s.final_in_min))) + " min" : ", waiting for finality (about 15 min)"), tone: "plain", claim: false }
+    case "deposited": {
+        // An upper bound in whole Sepolia epochs; past it, any minute now (never a stuck zero).
+        var m = s.final_in_min !== undefined && s.final_in_min !== null ? Math.ceil(Number(s.final_in_min)) : null
+        return { line: "On Ethereum" + (m === null ? ": final in up to about 20 min" : m > 0 ? ": final in up to about " + m + " min" : ": final any minute now"), tone: "plain", claim: false }
+    }
     case "final": return { line: "Final: waiting for the bridge to record it (about a minute)", tone: "plain", claim: false }
     case "claimable": return { line: "Arrived", tone: "ready", claim: true }
     case "claimed": return { line: "Claimed" + (s.claimed_block ? " in block " + s.claimed_block : ""), tone: "done", claim: false }

@@ -621,12 +621,15 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("receiveTokens from registry", receiveTokens({ tokens: [{ symbol: "ETH", denoms: [{ index: 0, value: "10000000000000000", text: "0.01" }] }] }), [{ symbol: "ETH", frozen: false, denoms: [{ index: 0, text: "0.01" }] }]);
   check("receiveTokens fallback", receiveTokens(null), RECEIVE_FALLBACK);
   check("receiveReply", [receiveReply({ needs: "secret" }).kind, receiveReply({ request: "logosdep1qq" }).kind, receiveReply({ deposit: {} }).kind], ["needs", "code", "old"]);
-  check("receivesFrom keeps this wallet's unclaimed rows",
-    receivesFrom({ deposits: [{ id: "dep-1", derivation: "names-app", symbol: "ETH", denom_text: "0.1", account: "A" }, { id: "dep-2", derivation: "names-app", claimed: true }, { id: "dep-3", source: "page" }] }),
-    [{ id: "dep-1", symbol: "ETH", amount: "0.1", account: "A", account_kind: "" }]);
-  check("receivesFrom: the amount from denom and decimals", receivesFrom({ deposits: [{ id: "d", derivation: "names-app", symbol: "ETH", denom: "100000000000000000", decimals: 18 }] })[0].amount, "0.1");
+  check("receivesFrom keeps the unclaimed receives",
+    receivesFrom({ receives: [{ id: "dep-1", symbol: "ETH", denom_text: "0.1", account: "A", account_kind: "public", stage: "deposited" }, { id: "dep-2", claimed: true }, { id: "dep-3", stage: "claimed" }] }),
+    [{ id: "dep-1", symbol: "ETH", amount: "0.1", account: "A", account_kind: "public", stage: "deposited" }]);
+  check("receivesFrom: the amount from denom and decimals", receivesFrom({ receives: [{ id: "d", symbol: "ETH", denom: "100000000000000000", decimals: 18 }] })[0].amount, "0.1");
+  const { bridgeCan } = await import("./qml/logic.mjs");
+  check("bridgeCan", [bridgeCan(["receive", "receives"], "receives"), bridgeCan(undefined, "receives"), bridgeCan([], "receive")], [true, false, false]);
+  check("deposited: up to about N min, then any minute now", [receiveStatusLine({ stage: "deposited", final_in_min: 7 }).line, receiveStatusLine({ stage: "deposited", final_in_min: 0 }).line], ["On Ethereum: final in up to about 7 min", "On Ethereum: final any minute now"]);
   check("receiveStatusLine", ["requested", "deposited", "final", "claimable", "claimed"].map((stage) => receiveStatusLine({ stage, final_in_min: 6, claimed_block: 812 }).line),
-    ["Not deposited yet", "On Ethereum: final in about 6 min", "Final: waiting for the bridge to record it (about a minute)", "Arrived", "Claimed in block 812"]);
+    ["Not deposited yet", "On Ethereum: final in up to about 6 min", "Final: waiting for the bridge to record it (about a minute)", "Arrived", "Claimed in block 812"]);
   check("receiveSteps", receiveSteps({ stage: "code", extras: ["public_account", "secret"] }).map((x) => x.n + "/" + x.total + " " + x.state + " " + x.title),
     ["1/5 done Choose the amount and account", "2/5 done Give the bridge this account", "3/5 done Allow the bridge's deposit keys", "4/5 now Deposit on the page", "5/5 later Claim when it arrives"]);
 }

@@ -901,6 +901,9 @@ Item {
     //    (no claim file); the card then follows each receive and offers its claim. The secret never
     //    reaches this app. ──
     property var receiveRegistry: null
+    property var bridgeConfig: null        // the LEZ Bridge's config(): its features and notices (null until read)
+    readonly property var bridgeFeatures: bridgeConfig !== null && Array.isArray(bridgeConfig.features) ? bridgeConfig.features : []
+    readonly property bool bridgeReceives: Logic.bridgeCan(bridgeFeatures, "receive") && Logic.bridgeCan(bridgeFeatures, "public_receive")
     readonly property var receiveTokenList: Logic.receiveTokens(receiveRegistry)
     property string receiveToken: "ETH"
     property int receiveDenom: 1
@@ -918,7 +921,7 @@ Item {
     property var receives: []              // this wallet's receives: [{id, symbol, amount, account}]
     property var receiveStatuses: ({})     // receive_status(id) by id
     property bool receivesLoaded: false
-    property bool receiveHasStatus: true   // the installed LEZ Bridge has receive_status
+    readonly property bool receiveHasStatus: bridgeConfig === null || (Logic.bridgeCan(bridgeFeatures, "receive_status") && Logic.bridgeCan(bridgeFeatures, "receives"))
     property bool receivePolling: false
     readonly property var receiveAccountList: Logic.publicAccounts(cliBalance, cliAccounts)
     // The account chosen, else the first public account (the one the card shows first).
@@ -939,8 +942,11 @@ Item {
             receiveAccount = receiveAccountList.length > 0 ? receiveAccountList[0] : ""
         // Is the bridge module here (config answers at once), then its denominations (the
         // registry reads the chains; without it, the bridge test network's known list).
-        bridgeCall("config", [], function() {
-            bridgeCall("registry", [], function(value) { receiveRegistry = value }, function() {}, 60000, false)
+        bridgeCall("config", [], function(value) {
+            bridgeConfig = value
+            // The denominations: read once per screen (it reads both chains), never polled.
+            if (bridgeReceives)
+                bridgeCall("registry", [], function(value) { receiveRegistry = value }, function() {}, 60000, false)
         }, function(message, kind) {
             if (kind === "missing" || kind === "starting" || kind === "busy")
                 receiveMissing = true
@@ -1010,15 +1016,32 @@ Item {
     function pollReceives() {
         if (receivePolling || !bridgeReady)
             return
-        if (!receivesLoaded) {
+        if (bridgeConfig === null) {
             receivePolling = true
-            bridgeCall("deposits", [], function(value) {
+            bridgeCall("config", [], function(value) {
+                receivePolling = false
+                bridgeConfig = value
+                if (receiveHasStatus)
+                    pollReceives()
+            }, function() { receivePolling = false }, 10000, false)
+            return
+        }
+        if (!receiveHasStatus)
+            return
+        if (!receivesLoaded) {
+            // The list (no chain read): what receive_status last saw for each, newest first.
+            receivePolling = true
+            bridgeCall("receives", [], function(value) {
                 receivePolling = false
                 receivesLoaded = true
                 var found = Logic.receivesFrom(value)
                 receives = found.concat(receives.filter(function(x) { return !found.some(function(f) { return f.id === x.id }) }))
+                var all = receiveStatuses
+                found.forEach(function(x) { if (!all[x.id] && x.stage !== "unknown") all[x.id] = { stage: x.stage } })
+                receiveStatuses = all
+                receiveStatusesChanged()
                 pollReceives()
-            }, function() { receivePolling = false }, 120000, false)
+            }, function() { receivePolling = false }, 30000, false)
             return
         }
         var open = receives.filter(function(x) { var st = receiveStatuses[x.id]; return !st || st.stage !== "claimed" })
@@ -1036,12 +1059,7 @@ Item {
                 receiveStatuses = all
                 receiveStatusesChanged()
                 next(i + 1)
-            }, function(message, kind) {
-                if (kind === "missing" || /method not found|unknown method|no such method/i.test(String(message))) {
-                    receiveHasStatus = false
-                    receivePolling = false
-                    return
-                }
+            }, function() {
                 next(i + 1)
             }, 60000, false)
         }
@@ -1082,6 +1100,7 @@ Item {
         })
         bridgeCall("config", [], function(value) {
             claimBridgeAnswers = true
+            bridgeConfig = value
             claimDeployment = value && value.deployment ? value.deployment : null
             bridgeCall("relayed_claims", [], function(value) {
                 var job = Logic.runningClaimJob(Array.isArray(value) ? value : value && value.jobs ? value.jobs : [])
@@ -6861,7 +6880,7 @@ Item {
                             }
                         }
                         RowLayout {
-                            visible: !root.receiveHasStatus && root.receives.length > 0
+                            visible: !root.receiveHasStatus && root.bridgeConfig !== null && root.receives.length > 0
                             spacing: 10
                             Hint { Layout.fillWidth: false; font.pixelSize: root.px(15); text: "This LEZ Bridge can't tell when a deposit arrives." }
                             Link { visible: root.bridgeBundle === "ok"; text: "Update"; color: root.brass; font.pixelSize: root.px(15); onPressed: root.installBridge(true) }
@@ -8062,13 +8081,19 @@ Item {
                     Text { text: "Receive from Ethereum"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
                     RunsOn { net: "0.4" }
                     Hint { visible: root.receiveMissing; color: root.ink; text: "The LEZ Bridge isn't running or installed. Open Claim a bridge deposit to set it up." }
+                    RowLayout {
+                        visible: !root.receiveMissing && root.bridgeConfig !== null && !root.bridgeReceives
+                        spacing: 10
+                        Hint { Layout.fillWidth: false; color: root.ink; text: "This LEZ Bridge can't receive yet." }
+                        Link { visible: root.bridgeBundle === "ok"; text: "Update"; color: root.brass; font.pixelSize: root.px(17); onPressed: root.installBridge(true) }
+                    }
 
                     Repeater {
-                        model: root.receiveMissing ? [] : root.receiveStepsNow.filter(function(x) { return x.state === "done" })
+                        model: root.receiveMissing || !root.bridgeReceives ? [] : root.receiveStepsNow.filter(function(x) { return x.state === "done" })
                         Hint { required property var modelData; font.pixelSize: root.px(15); color: root.good; text: "✓ Step " + modelData.n + " of " + modelData.total + " · " + modelData.title }
                     }
                     Text {
-                        visible: !root.receiveMissing && receiveScreen.stepNow !== null
+                        visible: !root.receiveMissing && root.bridgeReceives && receiveScreen.stepNow !== null
                         Layout.fillWidth: true
                         text: receiveScreen.stepNow === null ? "" : "Step " + receiveScreen.stepNow.n + " of " + receiveScreen.stepNow.total + " · " + receiveScreen.stepNow.title
                         color: root.ink
@@ -8080,7 +8105,7 @@ Item {
 
                     // Step: amount and account.
                     ColumnLayout {
-                        visible: !root.receiveMissing && root.receiveResult === null && root.receiveNeeds === null
+                        visible: !root.receiveMissing && root.bridgeReceives && root.receiveResult === null && root.receiveNeeds === null
                         Layout.fillWidth: true
                         spacing: 10
                         Flow {
@@ -8179,6 +8204,7 @@ Item {
                         Layout.fillWidth: true
                         spacing: 10
                         Hint { font.pixelSize: root.px(15); text: "The wallet makes this deposit's secret from your account's own key; this app never sees it. The page gets only a code: the amount, the vault and a commitment that hides which account receives it." }
+                        Hint { visible: root.bridgeConfig !== null && !!root.bridgeConfig.notices && !!root.bridgeConfig.notices.not_private; font.pixelSize: root.px(15); text: root.bridgeConfig !== null && root.bridgeConfig.notices && root.bridgeConfig.notices.not_private ? String(root.bridgeConfig.notices.not_private.text || "") : "" }
                         Hint { font.pixelSize: root.px(15); text: "Private accounts can't receive on the bridge test network yet: their claim needs a proof that hasn't run there." }
                         Fact { visible: receiveScreen.result !== null; label: "Into"; code: true; value: root.receiveAccount; full: root.receiveAccount }
                         Fact { visible: receiveScreen.result !== null; label: "Link"; code: true; value: receiveScreen.result !== null ? String(receiveScreen.result.request_url || "") : ""; full: receiveScreen.result !== null ? String(receiveScreen.result.request_url || "") : "" }
@@ -8190,7 +8216,7 @@ Item {
                         Hint { visible: root.receiveNeeds !== null && !!root.receiveNeeds.message; font.pixelSize: root.px(15); text: root.receiveNeeds !== null ? String(root.receiveNeeds.message || "") : "" }
                     }
                     Repeater {
-                        model: root.receiveMissing ? [] : root.receiveStepsNow.filter(function(x) { return x.state === "later" })
+                        model: root.receiveMissing || !root.bridgeReceives ? [] : root.receiveStepsNow.filter(function(x) { return x.state === "later" })
                         Hint { required property var modelData; font.pixelSize: root.px(15); color: root.faint; text: "Step " + modelData.n + " of " + modelData.total + " · " + modelData.title }
                     }
                     Link { visible: receiveScreen.result !== null; text: "Make another code"; font.pixelSize: root.px(15); onPressed: root.openEthReceive() }
