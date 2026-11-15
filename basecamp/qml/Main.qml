@@ -830,7 +830,7 @@ Item {
     readonly property string claimAccount: claimCheck !== null && claimCheck.ok && claimCheck.deposit ? String(claimCheck.deposit.account || "") : ""
     readonly property string claimAccountProblemNow: cliAccounts === null ? "" : Logic.claimAccountProblem(claimAccount, cliAccounts)
     readonly property var claimBridgeNow: Logic.claimBridge(claimCheck !== null && claimCheck.call ? claimCheck.call.program : "", bridgePrograms, bridgeLabels)
-    readonly property string claimStageNow: Logic.claimStage({ missing: claimMissing, job: depositClaimJob, uncertain: claimUncertain, needs: claimNeeds,
+    readonly property string claimStageNow: Logic.claimStage({ missing: claimMissing, looking: claimBridgeAnswers === null, job: depositClaimJob, uncertain: claimUncertain, needs: claimNeeds,
         asking: claimAsking, checking: claimChecking, check: claimCheck, accountProblem: claimAccountProblemNow, bridgeProblem: claimBridgeNow.problem })
 
     /// Calls the lez_bridge module. A read the module host wasn't ready for, or that met it busy
@@ -7513,6 +7513,7 @@ Item {
                         Link { text: "Update the LEZ Bridge package"; color: root.brass; font.pixelSize: root.px(15); onPressed: root.installBridge(true) }
                     }
 
+                    Hint { visible: root.claimStageNow === "looking"; text: "Looking for the LEZ Bridge…" }
                     // The file.
                     Hint { visible: root.claimStageNow === "start"; text: "Choose the claim file the deposit page gave you, or paste its text. The first claim asks two extra questions; later ones don't." }
                     RowLayout {

@@ -1101,6 +1101,7 @@ export function bridgeReply(reply) {
 }
 
 /// What the claim screen shows, from what it knows. One of: "missing" (no LEZ Bridge package),
+/// "looking" (the bridge module not heard from yet),
 /// "start" (choose or paste the file), "checking", "refused" (the check's refusal), "elsewhere"
 /// (the account isn't in this LEZ 0.4 wallet), "wrong_bridge" (a bridge the wallet doesn't read),
 /// "ready" (Claim), "asking" (relayed_claim on its way), "needs" (a wallet sheet is up),
@@ -1108,6 +1109,9 @@ export function bridgeReply(reply) {
 export function claimStage(state) {
     var s = state || {}
     if (s.missing) return "missing"
+    // The bridge module not heard from yet (it answers at once when it runs; a module that isn't
+    // running takes the host's 10 s to say so).
+    if (s.looking && !s.job && !s.check) return "looking"
     if (s.job) {
         if (s.job.state === "done") return "done"
         if (s.job.state === "failed" || s.job.state === "cancelled") return "failed"

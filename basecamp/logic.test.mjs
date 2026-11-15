@@ -582,6 +582,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("installReply: no reply is a timeout, not a failure", [installReply(undefined).timeout, installReply("").timeout, installReply({ error: "Timed out waiting" }).timeout], [true, true, true]);
   check("installReply: in {success, value}", installReply({ success: true, value: { path: "/p" } }).ok, true);
   check("intentAnswer", [intentAnswer({ ok: true }), intentAnswer({ ok: false, error: "cancelled" }), intentAnswer({ ok: false, error: "not_declared" }), intentAnswer(null)], ["ok", "cancelled", "not_declared", "other"]);
+  check("claimStage: looking until the bridge module is heard from", [claimStage({ looking: true }), claimStage({ looking: true, missing: true }), claimStage({ looking: true, check: { ok: true } })], ["looking", "missing", "ready"]);
   check("publisherWaitLine counts down",
     [publisherWaitLine(1000, 1000, 15000), publisherWaitLine(1000, 9500, 15000), publisherWaitLine(1000, 16500, 15000)],
     ["Checking who publishes this app… about 15 s", "Checking who publishes this app… about 7 s", "Checking who publishes this app… a few more seconds"]);
