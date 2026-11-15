@@ -2065,8 +2065,14 @@ impl Client {
             let mut config = saved.clone();
             config.gas_limit = limit;
             self.wallet.set_config(config);
+            // Unchecked, the wallet's own run before sending is skipped too: it runs only when
+            // the limit or the cap is left to it, so both are pinned (and put back after).
+            if !prover::can_run() {
+                self.wallet.set_fee_params(wallet::FeeParams { gas_limit: Some(limit), max_fee: Some(max_fee_for(limit)), ..wallet::FeeParams::default() });
+            }
             let sent = self.wallet.send_pub_tx(mentions, 0, message).await;
             self.wallet.set_config(saved);
+            self.wallet.set_fee_params(wallet::FeeParams::default());
             sent.context("the sequencer did not accept the transaction")?
         };
         println!("submitted {hash}");
