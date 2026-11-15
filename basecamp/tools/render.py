@@ -787,6 +787,19 @@ MOCKS["receive-old-code-refused"] = _arriving({"stage": "requested"})
 MOCKS["receive-old-code-refused"]["bridge"]["receive_request"] = {"__error": "The deposit code of dep-1 can't be shown again: it was made by an older build of this module, which did not keep the vault it was for. Nothing was guessed; the code is in the reply that first made it (its export text), or make a new deposit request."}
 MOCKS["card-arriving-0acf483"] = {"bridge": {"receives": {"receives": []}, "receive_status": {"__error": "busy"}}}
 MOCKS["receive-noclaim"] = {"bridge": {"receives": {"receives": []}, "receive_status": {"stage": "claimable", "relay": False, "text": "Arrived: 0.1 ETH is ready to claim on bridge v3 (an older vault). The bridge's relay now serves bridge v4 only, so this claim pays its own fee, which the Names Wallet can't send yet. It stays claimable on bridge v3.", "deployment": {"id": "bridge-test-network-v3", "label": "bridge v3", "current": False}}, "receive_request": {"__error": "no"}}}
+# 15 Nov: the programs step when two accounts are shared with the bridge. Nothing ticked: the
+# accounts on the short sheet (no dead Approve); with the claim's account: it is ticked.
+_PROGS = ('{"id": "r9", "kind": "programs", "app": "lez_bridge", "created": 0, "expires": 4102444800000, "programs": ["BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf", "5w6nTkftFFDy8mtdpnKpZVetGQJ2WCKdhmpJsAYArbU7"], '
+          '"sheet": {"lines": [], "warnings": ["The Program Registry isn\'t installed, so who wrote this program and whether its source is verified is unknown."]}, '
+          '"choices": [{"account": "Public/BawxwquWtPEVcrwSFftD6jS3XFxZNv4qYrV8pkyo9mu7", "account_kind": "public", "label": "Names wallet, public account", "granted": true}, '
+          '{"account": "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "account_kind": "public", "label": "Names wallet, public account", "granted": true}], "publisher": null}')
+SCENARIOS["claim-programs-choose"] = SCENARIOS["claim-approve-sheet"].split("root.appRequests = ")[0] + "root.appRequests = [" + _PROGS + "]; root.appChosen = []; root.appNeedsChoice = true }) }) })"
+SCENARIOS["claim-programs-ticked"] = SCENARIOS["claim-approve-sheet"].split("root.appRequests = ")[0] + "root.appRequests = [" + _PROGS + "]; root.appChosen = [\"Public/BawxwquWtPEVcrwSFftD6jS3XFxZNv4qYrV8pkyo9mu7\"]; root.appNeedsChoice = false; root.appUnderstood = true }) }) })"
+MOCKS["claim-programs-choose"] = MOCKS["claim-approve-sheet"]
+MOCKS["claim-programs-ticked"] = MOCKS["claim-approve-sheet"]
+# Register → Check while the wallet is busy: "Checking…", the amber line under it.
+SCENARIOS["register-check-busy"] = 'root.openRegister(); Qt.callLater(function() { registerField.text = "jef04"; root.checkRegister("jef04") })'
+MOCKS["register-check-busy"] = {"busy": ["normalize", "resolve"]}
 MOCKS["receive-hold-old-bridge"] = {"bridge": {"config": {"build": {"commit": "5cad169"}, "deployment": {"name": "bridge-test-network-v3", "bridge_program": "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr"},
     "features": ["relayed_claim", "relayed_claim_check_with", "receive", "deposit_code", "public_receive", "receive_status", "receives", "relayed_claim_check_deposit"]}},
     "packages": [{"name": "lez_bridge", "version": "0.1.0", "hashes": {"root": "d55b06acb191406f1a785d7606abc949b3552c7bd5973882f2089846f65cd6b7"}}]}
