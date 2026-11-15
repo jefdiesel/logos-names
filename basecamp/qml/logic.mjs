@@ -1677,7 +1677,7 @@ export function claimRetryAfter(code, error) {
     if (code === "not_final")
         return e.eta_s ? Math.max(15, Number(e.eta_s)) : e.final_in_min ? Number(e.final_in_min) * 60 : 0
     if (code === "root_not_attested")
-        return 60
+        return 150
     return 0
 }
 
@@ -1839,13 +1839,68 @@ export function receiveOnItsWay(row, status) {
 /// check is under way; `checkedAt`/`nextAt`: ms (0: never); `failed`: the last check got no answer.
 export function receiveCheckLine(polling, checkedAt, nextAt, now, failed) {
     if (polling) return "Checking…"
-    var next = Math.min(60, Math.max(0, Math.ceil((Number(nextAt) - Number(now)) / 1000)))
-    var after = nextAt > 0 ? (next > 0 ? "next check in " + next + " s" : "checking again now") : ""
+    // Only a gentle check (minutes away) is announced; a job's quick checks and none at all say nothing.
+    var left = Number(nextAt) - Number(now)
+    var after = nextAt > 0 && left >= 60000 ? "next check in " + Math.ceil(left / 60000) + " min" : ""
     if (failed) return "Couldn't check just now" + (after ? " · " + after.replace("next check", "next try") : "")
     if (!checkedAt) return after ? after.charAt(0).toUpperCase() + after.slice(1) : ""
     var ago = Math.max(0, Number(now) - Number(checkedAt))
     var when = ago < 15000 ? "just now" : ago < 90000 ? Math.round(ago / 1000) + " s ago" : Math.round(ago / 60000) + " min ago"
     return "Checked " + when + (after ? " · " + after : "")
+}
+
+// ── When the bridge things are checked (the owner, 15 Nov: "put a check now button so if they
+// ignore it, we ignore it"): when the person asks (Check now), once when a panel or screen comes
+// into view, and by itself only in these cases. ──
+
+/// A job that moves only when its status is asked (a burn being approved, sent, a proof being
+/// made): every 5 s while it is shown, until it ends.
+export const CHECK_JOB_MS = 5000
+/// A wait whose answer changes by itself soon (a deposit becoming final): every 2.5 min, only on
+/// its own screen, open and in front.
+export const CHECK_GENTLE_MS = 150000
+
+/// How a receive is checked by itself, from its receive_status: "gentle" while it becomes final on
+/// Sepolia (deposited, final), else "none" (Check now, and once on view).
+export function receiveAutoMode(status) {
+    var stage = status && status.stage
+    return stage === "deposited" || stage === "final" ? "gentle" : "none"
+}
+
+/// How a send-back is checked by itself, from its send_back_status: "job" while the burn is being
+/// approved or sent, or the proof made (each check moves it: the bridge hands an approved burn to
+/// the relay only when asked); "at" with `at` (ms) when its releasable time is known; "gentle"
+/// while the endpoint is busy; "none" while it waits on the operator's update, the seal, or the
+/// person (Check now).
+export function sendBackAutoMode(status) {
+    var s = status || {}
+    if (s.busy === true) return { mode: "gentle" }
+    switch (s.stage) {
+    case "approve": return { mode: s.note ? "none" : "job" }
+    case "burning": case "proving": return { mode: "job" }
+    case "wrapped": return s.releasable_at ? { mode: "at", at: Number(s.releasable_at) * 1000 + 5000 } : { mode: "none" }
+    }
+    return { mode: "none" }
+}
+
+/// When the next check by itself is due (ms), or 0 for none. `s`: {now, visible (a bridge panel or
+/// screen shows), frontmost (Basecamp is in front), screen ("card" | "receive" | "sendback"),
+/// items: [{mode, at, focused (the one its screen shows)}]}. Jobs go on while shown, in front or
+/// not; everything else only in front, and only on the item's own screen.
+export function bridgeNextCheck(s) {
+    var st = s || {}
+    if (!st.visible) return 0
+    var now = Number(st.now) || 0
+    var due = 0
+    var take = function(t) { if (t > 0 && (due === 0 || t < due)) due = t }
+    ;(st.items || []).forEach(function(it) {
+        var m = it && it.mode
+        if (m === "job") take(now + CHECK_JOB_MS)
+        if (!st.frontmost || st.screen === "card" || !it.focused) return
+        if (m === "gentle") take(now + CHECK_GENTLE_MS)
+        if (m === "at" && Number(it.at) > now) take(Number(it.at))
+    })
+    return due
 }
 
 /// Where a claimed receive's tokens are now, from the card's account blocks (bridgeNetRows):
@@ -2209,4 +2264,10 @@ export function sendBackSources(blocks) {
         })
     })
     return out
+}
+
+/// The Check now button: "Checking…" (and not pressable) from the press until the answer, else
+/// "Check now"; `asked`: pressed, waiting for a call under way to end first.
+export function checkButton(polling, asked) {
+    return polling || asked ? { label: "Checking…", enabled: false } : { label: "Check now", enabled: true }
 }

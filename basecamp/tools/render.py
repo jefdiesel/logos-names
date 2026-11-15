@@ -305,7 +305,7 @@ def zone_request(in_use, removed=False):
 CARD_04 = 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.receivesLoaded = true; root.receives = %s; root.receiveStatuses = %s; %s }) })'
 RECEIVE_04 = CARD_04
 ARR = '[{ id: "dep-1", symbol: "ETH", amount: "0.1", account: "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR" }]'
-CHECKED = 'root.receiveCheckedAt = Date.now() - 3000; root.receiveNextAt = Date.now() + 57000'
+CHECKED = 'root.receiveCheckedAt = Date.now() - 3000; root.receiveNextAt = 0; root.againAfter(50, function() { root.receiveAskNow = false; root.sbAskNow = false })'
 SCENARIOS = {
     'card-update-ready': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() {  }) })',
     'receive-update-ready': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive() }) })',
@@ -842,7 +842,7 @@ SB_OPEN = SB_CARD % ('root.openSendBack("%s", %s)' % (OWNER, SB_ASSET) + '; %s')
 # From the card's button: the accounts read from the bridge test network (NET04_V4: one holds v4 wETH).
 SB_BUTTON = SB_CARD % 'root.againAfter(150, function() { root.openSendBack("", null) })'
 
-_SB_FOCUS = SB_CARD % ('root.sendBacksLoaded = true; root.sendBacks = [{ id: "sb-e2ba7765d0fbf247", amount: "0.01 ETH", account: "%s", recipient: "%s", words: "maple · tiger · seven · lamp", stage: "burned" }]; root.openSendBack("", null, "sb-e2ba7765d0fbf247"); root.sbStatuses = { "sb-e2ba7765d0fbf247": @VIEW@ }; root.sbCheckedAt = Date.now() - 4000; root.sbNextAt = Date.now() + 56000; %s' % (OWNER, SB_RECIPIENT, "%s"))
+_SB_FOCUS = SB_CARD % ('root.sendBacksLoaded = true; root.sendBacks = [{ id: "sb-e2ba7765d0fbf247", amount: "0.01 ETH", account: "%s", recipient: "%s", words: "maple · tiger · seven · lamp", stage: "burned" }]; root.openSendBack("", null, "sb-e2ba7765d0fbf247"); root.sbStatuses = { "sb-e2ba7765d0fbf247": @VIEW@ }; root.sbCheckedAt = Date.now() - 4000; root.againAfter(50, function() { root.sbAskNow = false; root.receiveAskNow = false; root.sbScheduleNext() }); %s' % (OWNER, SB_RECIPIENT, "%s"))
 def sb_focus(view, js=""):
     return _SB_FOCUS.replace("@VIEW@", json.dumps(view).replace('"@SOON@"', "Math.floor(Date.now() / 1000) + 1500").replace('"@HOUR@"', "Math.floor(Date.now() / 1000) + 3400")) % js
 SB_BURN_SHEET = ('root.appRequests = [{"id": "r9", "kind": "relayed_call", "app": "lez_bridge", "created": 0, "expires": 4102444800000, "account": "%s", "program": "5w6nTkftFFDy8mtdpnKpZVetGQJ2WCKdhmpJsAYArbU7", "check": "ready", "message_len": 145, '
@@ -883,10 +883,18 @@ for _name, _js, _mock in [
     ("sendback-busy", sb_focus(sb_view("burned", busy=True, note="The bridge's endpoint is busy; trying again shortly.")), sb_mock(sb_view("burned"))),
     ("sendback-from-button", SB_BUTTON, sb_mock()),
     ("sendback-none", SB_CARD % 'root.againAfter(150, function() { root.openSendBack("", null) })', dict(sb_mock(), bridgeNet=NET04)),
+    ("sendback-checking", sb_focus(sb_view("burned"), 'root.againAfter(120, function() { root.sbAskNow = true })'), sb_mock(sb_view("burned"))),
     ("sendback-unavailable", SB_OPEN % '', sb_mock(send_back_link=dict(SB_LINK, available=False, why="this bridge's vault can't release (bridge v3); send back works on bridge v4"))),
 ]:
     SCENARIOS[_name] = _js
     MOCKS[_name] = _mock
+
+# Checks on demand: Receive with a deposit becoming final, its one gentle check announced in minutes;
+# the card while a check runs.
+SCENARIOS["receive-deposited-gentle"] = RECEIVE_04 % (ARR, '({ "dep-1": { stage: "deposited", confirmations: 20, final_in_min: 14 } })', 'root.receiveCheckedAt = Date.now() - 3000; root.openEthReceive("dep-1"); root.againAfter(200, function() { root.receiveAskNow = false; root.receiveCheckedAt = Date.now() - 3000; root.receiveNextAt = Date.now() + 147000 })')
+MOCKS["receive-deposited-gentle"] = MOCKS.get("receive-deposited", {})
+SCENARIOS["card-arriving-checking"] = CARD_04 % (ARR, '({ "dep-1": { stage: "deposited", confirmations: 20, final_in_min: 7 } })', CHECKED + '; root.againAfter(120, function() { root.receiveAskNow = true })')
+MOCKS["card-arriving-checking"] = MOCKS.get("card-arriving-waiting", {})
 
 def main():
     qml, out_dir = sys.argv[1], sys.argv[2]

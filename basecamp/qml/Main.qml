@@ -875,7 +875,8 @@ Item {
     Timer {
         interval: 1000
         repeat: true
-        running: root.claimRetryAt > 0
+        // Only while the claim screen is open and in front; coming back, it checks when due.
+        running: root.claimRetryAt > 0 && root.section === "wallet" && root.walletView === "claim" && root.receiveFrontmost
         onTriggered: {
             root.claimClock = Date.now()
             if (root.claimClock >= root.claimRetryAt) {
@@ -985,9 +986,13 @@ Item {
     onWalletViewChanged: {
         if (bridgeDone !== "" && walletView !== bridgeDoneView)
             bridgeDone = ""
-        // Back on the card: one check of the receives now (not again within 10 s).
-        if (walletView === "home")
-            receiveCheckSoon()
+        // A bridge panel or screen came into view: one check now (not again within 10 s), and
+        // what is due by itself recomputed for this view.
+        if (receiveWatching) {
+            bridgeCheckOnView()
+            receiveScheduleNext()
+            sbScheduleNext()
+        }
     }
     // The bridge needs a step first (Update, Unload, a reopen…): Receive's and Claim's own steps
     // wait under it, so nobody runs into a failure the setup line already explains.
@@ -1050,7 +1055,8 @@ Item {
     // One check of every receive a minute, one call at a time (the bridge's notes), plus one when
     // the card or Receive opens, when Names comes back to the front, and on "Check now".
     property double receiveCheckedAt: 0
-    property double receiveNextAt: 0
+    property double receiveNextAt: 0       // the next check by itself (Logic.bridgeNextCheck), 0: none
+    property bool receiveAskNow: false      // a check asked for (Check now, or the screen came into view)
     property bool receiveCheckFailed: false
     property double receiveNow: Date.now()
     // A config/registry call of Receive's own is under way: no check meanwhile (one call at a time).
@@ -1148,17 +1154,25 @@ Item {
         if (receiveRegistry === null && bridgeReceives && !receivePolling)
             loadReceiveRegistry()
     }
-    /// One check at the next tick, unless one finished in the last 10 s.
+    /// One check at the next tick (a panel or screen came into view), unless one finished in the
+    /// last 10 s.
     function receiveCheckSoon() {
         if (Date.now() - receiveCheckedAt > 10000)
-            receiveNextAt = 0
+            receiveAskNow = true
     }
-    /// "Check now": one call for the receive on the Receive screen, a round on the card; nothing
-    /// while a call is under way.
+    /// "Check now": one call for the receive on the Receive screen, a round on the card; asked
+    /// at once, or as soon as the call under way has answered.
     function receiveCheckNow() {
-        if (receivePolling || receiveHold)
-            return
-        pollReceives(walletView === "ethreceive" ? receiveFocus : "")
+        receiveAskNow = true
+        if (!receivePolling && !receiveHold)
+            pollReceives(walletView === "ethreceive" ? receiveFocus : "")
+    }
+    /// The next receive check by itself: only a deposit becoming final, on the Receive screen, in
+    /// front (Logic.bridgeNextCheck); otherwise none: Check now, and once on view.
+    function receiveScheduleNext() {
+        var onScreen = walletView === "ethreceive"
+        var items = onScreen && receiveFocus !== "" ? [{ mode: Logic.receiveAutoMode(receiveStatuses[receiveFocus]), focused: true }] : []
+        receiveNextAt = Logic.bridgeNextCheck({ now: Date.now(), visible: receiveWatching, frontmost: receiveFrontmost, screen: onScreen ? "receive" : "card", items: items })
     }
 
     /// The deposit code for the chosen amount and account. A public account only after the person
@@ -1226,7 +1240,7 @@ Item {
                 extras[id] = receiveExtras.slice()
                 receiveCodeExtras = extras
                 receiveCodeExtrasChanged()
-                // Nothing can be on Ethereum yet: the first check comes a minute from now.
+                // Nothing can be on Ethereum yet: checked when the person comes back from the page.
                 if (!receiveStatuses[id]) {
                     var all = receiveStatuses
                     all[id] = { stage: "requested" }
@@ -1234,10 +1248,10 @@ Item {
                     receiveStatusesChanged()
                 }
                 receiveFocus = id
-                // Not checked yet: "Next check in 60 s", not an earlier check of another code.
+                // Not checked yet (not an earlier check of another code); none by itself.
                 receiveCheckedAt = 0
                 receiveCheckFailed = false
-                receiveNextAt = Date.now() + 60000
+                receiveNextAt = 0
                 console.log("names_ui: receive: code made for", id)
             }
         }, function(message, kind) {
@@ -1279,6 +1293,7 @@ Item {
     function pollReceives(onlyId) {
         if (receivePolling || receiveHold || !bridgeReady || receiveAsking || receiveNeeds !== null || sbPolling || sbAsking || sbNeeds !== null)
             return
+        receiveAskNow = false
         if (bridgeConfig === null) {
             receivePolling = true
             bridgeCall("config", [], function(value) {
@@ -1286,11 +1301,11 @@ Item {
                 bridgeAnswered(value)
                 if (receiveHasStatus)
                     pollReceives(onlyId)
-            }, function(message, kind) { receivePolling = false; bridgeSilent(kind); receiveNextAt = Date.now() + 60000 }, 10000, false)
+            }, function(message, kind) { receivePolling = false; bridgeSilent(kind); receiveScheduleNext() }, 10000, false)
             return
         }
         if (!receiveHasStatus) {
-            receiveNextAt = Date.now() + 60000
+            receiveNextAt = 0
             return
         }
         if (!receivesLoaded) {
@@ -1308,7 +1323,7 @@ Item {
                 pollReceives(onlyId)
             }, function(message, kind) {
                 receivePolling = false
-                receiveNextAt = Date.now() + 60000
+                receiveScheduleNext()
                 console.log("names_ui: receives:", kind, message)
             }, 30000, false)
             return
@@ -1317,7 +1332,8 @@ Item {
         if (receiveFocus !== "")
             open = open.filter(function(x) { return x.id === receiveFocus }).concat(open.filter(function(x) { return x.id !== receiveFocus }))
         if (open.length === 0) {
-            receiveNextAt = Date.now() + 60000
+            receiveCheckedAt = Date.now()
+            receiveNextAt = 0
             return
         }
         receivePolling = true
@@ -1327,7 +1343,7 @@ Item {
                 receivePolling = false
                 receiveCheckedAt = Date.now()
                 receiveCheckFailed = failedAny
-                receiveNextAt = Date.now() + 60000
+                receiveScheduleNext()
                 return
             }
             var id = open[i].id
@@ -1361,24 +1377,47 @@ Item {
         }
         next(0)
     }
-    // The clock of the checks: a tick a second while the card or Receive shows (it moves the
-    // "next check in N s" line), and a check whenever one is due.
-    // Not gated on Basecamp being the front app: the person deposits in a browser beside it and
-    // the wait must move meanwhile. Coming back to the front only adds a check.
+    // When the bridge things are checked (the owner, 15 Nov: "put a check now button so if they
+    // ignore it, we ignore it"): when the person asks (Check now); once when the card, Receive or
+    // Bridge to Ethereum comes into view or Basecamp comes back to the front; and by itself only as
+    // Logic.bridgeNextCheck says (a job in progress every 5 s while shown; on its own open screen,
+    // in front, a deposit becoming final every 2.5 min, a releasable time once when it passes).
+    // Nothing while the person is elsewhere.
     readonly property bool receiveWatching: bridgeReady && namesNet === "0.4" && section === "wallet"
         && (walletView === "home" || walletView === "ethreceive" || walletView === "sendback")
-    onReceiveWatchingChanged: if (receiveWatching) receiveCheckSoon()
+    function bridgeCheckOnView() {
+        receiveCheckSoon()
+        if (Date.now() - sbCheckedAt > 10000)
+            sbAskNow = true
+    }
+    onReceiveWatchingChanged: if (receiveWatching) bridgeCheckOnView(); else { receiveNextAt = 0; sbNextAt = 0 }
     readonly property bool receiveFrontmost: Qt.application.state === Qt.ApplicationActive
-    onReceiveFrontmostChanged: if (receiveFrontmost && receiveWatching) receiveCheckSoon()
+    onReceiveFrontmostChanged: {
+        if (!receiveWatching)
+            return
+        if (receiveFrontmost)
+            bridgeCheckOnView()
+        else {
+            // Away: only a job in progress goes on.
+            receiveAskNow = false
+            sbAskNow = false
+            receiveScheduleNext()
+            sbScheduleNext()
+        }
+    }
+    // The clock: a tick a second while something is due or shown in front (it moves the "Checked
+    // N s ago" line); a check only when asked or due.
     Timer {
         interval: 1000
         repeat: true
-        running: root.receiveWatching
+        running: root.receiveWatching && (root.receiveFrontmost || root.receiveNextAt > 0 || root.sbNextAt > 0 || root.receiveAskNow || root.sbAskNow)
         onTriggered: {
             root.receiveNow = Date.now()
-            if (root.receiveNow >= root.receiveNextAt && root.walletView !== "sendback")
+            var receiveDue = root.receiveAskNow || (root.receiveNextAt > 0 && root.receiveNow >= root.receiveNextAt)
+            var sbDue = root.sbAskNow || (root.sbNextAt > 0 && root.receiveNow >= root.sbNextAt)
+            if (receiveDue && root.walletView !== "sendback")
                 root.pollReceives(root.walletView === "ethreceive" ? root.receiveFocus : "")
-            else if (root.receiveNow >= root.sbNextAt && root.walletView !== "ethreceive")
+            else if (sbDue && root.walletView !== "ethreceive")
                 root.pollSendBacks()
         }
     }
@@ -1422,7 +1461,8 @@ Item {
     property var sendBacks: []             // Logic.sendBacksFrom rows
     property bool sendBacksLoaded: false
     property bool sbPolling: false
-    property double sbNextAt: 0
+    property double sbNextAt: 0            // the next check by itself (Logic.bridgeNextCheck), 0: none
+    property bool sbAskNow: false
     property double sbCheckedAt: 0
     property bool sbCheckFailed: false
     property var sbReceivedAt: ({})        // id → when it was seen released, for the card
@@ -1486,7 +1526,7 @@ Item {
                 if (sbFocus === "" && receiveRegistry === null)
                     loadReceiveRegistry()
                 else
-                    sbNextAt = 0
+                    sbAskNow = true
                 if (sbFocus === "" && sbAsset !== null && sbAmounts.length === 1 && sbDenom < 0)
                     sbDenom = sbAmounts[0].index
             }, function(message, kind) {
@@ -1606,7 +1646,7 @@ Item {
             all[id] = value
             sbStatuses = all
             sbStatusesChanged()
-            sbNextAt = Date.now() + 5000
+            sbScheduleNext()
             console.log("names_ui: send back:", id, value && value.stage)
         }, function(message, kind) {
             sbAsking = false
@@ -1640,14 +1680,32 @@ Item {
         running: root.sbNeeds !== null && (root.sbNeedsState === "" || root.sbNeedsState === "pending")
         onTriggered: root.pollSbNeeds()
     }
+    /// "Check now" on a send-back: asked at once, or as soon as the call under way has answered.
+    function sbCheckNow() {
+        sbAskNow = true
+        if (!sbPolling && !sbAsking)
+            pollSendBacks()
+    }
+    /// The next send-back check by itself (Logic.sendBackAutoMode, bridgeNextCheck): a job in
+    /// progress every 5 s while shown; on its own screen in front, a busy endpoint gently and a
+    /// releasable time once; otherwise none.
+    function sbScheduleNext() {
+        var onScreen = walletView === "sendback"
+        var rows = onScreen ? sendBacks.filter(function(x) { return x.id === sbFocus }) : sendBacks
+        var items = rows.map(function(x) {
+            var m = Logic.sendBackAutoMode(sbStatuses[x.id] || { stage: x.stage })
+            return { mode: m.mode, at: m.at, focused: onScreen && x.id === sbFocus }
+        })
+        sbNextAt = Logic.bridgeNextCheck({ now: Date.now(), visible: receiveWatching, frontmost: receiveFrontmost, screen: onScreen ? "sendback" : "card", items: items })
+    }
     /// The send-backs: the bridge's list once, then send_back_status of each one under way, one
-    /// call at a time, never beside a receive check. Every 60 s; every 5 s while the screen's
-    /// send-back waits for an approval or its block.
+    /// call at a time, never beside a receive check; when asked or due (sbScheduleNext).
     function pollSendBacks() {
         if (sbPolling || receivePolling || receiveHold || !bridgeReady || receiveAsking || sbAsking || receiveNeeds !== null || sbNeeds !== null)
             return
+        sbAskNow = false
         if (!sbCan) {
-            sbNextAt = Date.now() + 60000
+            sbNextAt = 0
             return
         }
         if (!sendBacksLoaded) {
@@ -1657,10 +1715,11 @@ Item {
                 sendBacksLoaded = true
                 var found = Logic.sendBacksFrom(value)
                 sendBacks = found.concat(sendBacks.filter(function(x) { return !found.some(function(f) { return f.id === x.id }) }))
-                sbNextAt = 0
+                sbAskNow = true
             }, function(message, kind) {
                 sbPolling = false
-                sbNextAt = Date.now() + 60000
+                sbCheckFailed = !Logic.rateLimited(message)
+                sbScheduleNext()
                 console.log("names_ui: send_backs:", kind, message)
             }, 30000, false)
             return
@@ -1671,7 +1730,8 @@ Item {
             return st !== "released" && (st !== "planned" || x.id === onScreen) && (onScreen === "" || x.id === onScreen)
         })
         if (open.length === 0) {
-            sbNextAt = Date.now() + 60000
+            sbCheckedAt = Date.now()
+            sbNextAt = 0
             return
         }
         sbPolling = true
@@ -1681,9 +1741,7 @@ Item {
                 sbPolling = false
                 sbCheckedAt = Date.now()
                 sbCheckFailed = failedAny
-                // Quick while it moves by itself; never while the relay refuses (each check tries it again).
-                var quick = onScreen !== "" && sbStatuses[onScreen] && ["approve", "burning", "proving"].indexOf(sbStatuses[onScreen].stage) >= 0 && !sbStatuses[onScreen].note
-                sbNextAt = Date.now() + (quick ? 5000 : 60000)
+                sbScheduleNext()
                 return
             }
             var id = open[i].id
@@ -1758,7 +1816,7 @@ Item {
             all[id] = Object.assign({}, all[id] || {}, { stage: value && value.stage ? value.stage : "proving" })
             sbStatuses = all
             sbStatusesChanged()
-            sbNextAt = Date.now() + 5000
+            sbScheduleNext()
         }, function(message, kind) {
             sbAsking = false
             sbError = sentence(message)
@@ -7386,11 +7444,17 @@ Item {
             spacing: 10
         }
     }
-    /// "Checked just now · next check in 42 s" and Check now (one call; nothing while one runs).
+    /// Check now (a button: "Checking…" at once, then the answer) and "Checked just now", with
+    /// "next check in N min" only when a check by itself is due (Logic.bridgeNextCheck).
     component ReceiveCheckLine: RowLayout {
         spacing: 12
-        Text { text: root.receiveCheckLine; visible: text !== ""; color: root.receiveCheckFailed && !root.receivePolling ? root.brass : root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
-        Link { visible: !root.receivePolling && !root.receiveHold; text: "Check now"; color: root.dim; font.pixelSize: root.px(14); onPressed: root.receiveCheckNow() }
+        Action { readonly property var b: Logic.checkButton(root.receivePolling, root.receiveAskNow); label: b.label; enabledNow: b.enabled; onPressed: root.receiveCheckNow() }
+        Text { text: root.receiveCheckLine; visible: text !== "" && text !== "Checking…"; color: root.receiveCheckFailed && !root.receivePolling ? root.brass : root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
+    }
+    component SendBackCheckLine: RowLayout {
+        spacing: 12
+        Action { readonly property var b: Logic.checkButton(root.sbPolling, root.sbAskNow); label: b.label; enabledNow: b.enabled && !root.sbAsking; onPressed: root.sbCheckNow() }
+        Text { text: Logic.receiveCheckLine(root.sbPolling, root.sbCheckedAt, root.sbNextAt, root.receiveNow, root.sbCheckFailed); visible: text !== "" && text !== "Checking…"; color: root.sbCheckFailed && !root.sbPolling ? root.brass : root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
     }
 
     component BridgeSetupBox: RowLayout {
@@ -8690,6 +8754,7 @@ Item {
                                     }
                                 }
                             }
+                            SendBackCheckLine { visible: root.sbRowsNow.some(function(x) { return x.progress.stage !== "released" }) }
                         }
                         BridgeSetupBox { visible: root.walletView === "home" && root.bridgeSetup.state !== ""; primary: root.cardSetupBlocks }
                         Hint {
@@ -10315,12 +10380,7 @@ Item {
                             Hint { font.pixelSize: root.px(15); text: "Open it in your browser and press Release with the Ethereum wallet you connected." }
                         }
                         Hint { visible: sendBackScreen.st !== null && !!sendBackScreen.st.note && sendBackScreen.p.detail !== String(sendBackScreen.st.note); font.pixelSize: root.px(15); color: root.brass; text: sendBackScreen.st !== null && sendBackScreen.st.note ? root.sentence(String(sendBackScreen.st.note)) : "" }
-                        RowLayout {
-                            visible: sendBackScreen.p.stage !== "released"
-                            spacing: 12
-                            Text { text: Logic.receiveCheckLine(root.sbPolling, root.sbCheckedAt, root.sbNextAt, root.receiveNow, root.sbCheckFailed); visible: text !== ""; color: root.sbCheckFailed && !root.sbPolling ? root.brass : root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
-                            Link { visible: !root.sbPolling && !root.sbAsking; text: "Check now"; color: root.dim; font.pixelSize: root.px(14); onPressed: root.sbNextAt = 0 }
-                        }
+                        SendBackCheckLine { visible: sendBackScreen.p.stage !== "released" }
                     }
                     RowLayout {
                         visible: root.sbError !== ""

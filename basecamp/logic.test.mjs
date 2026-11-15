@@ -614,7 +614,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("steps: the row's words", claimSteps({ first: "arrived", stage: "running", job: { phase: "approve" }, extras: [] }).map((x) => x.short + " " + x.state),
     ["Arrived done", "Checked done", "Approve now", "Claim later"]);
   const { claimRetryAfter } = await import("./qml/logic.mjs");
-  check("claimRetryAfter", [claimRetryAfter("not_final", { eta_s: 330 }), claimRetryAfter("not_final", {}), claimRetryAfter("root_not_attested"), claimRetryAfter("relay_cap")], [330, 0, 60, 0]);
+  check("claimRetryAfter", [claimRetryAfter("not_final", { eta_s: 330 }), claimRetryAfter("not_final", {}), claimRetryAfter("root_not_attested"), claimRetryAfter("relay_cap")], [330, 0, 150, 0]);
   const { claimIsWait } = await import("./qml/logic.mjs");
   check("claimIsWait", [claimIsWait("not_final"), claimIsWait("root_not_attested"), claimIsWait("relay_cap"), claimIsWait("already_claimed"), claimIsWait("bad_file")], [true, true, true, false, false]);
   check("steps: a received deposit, its keys first", claimSteps({ first: "arrived", stage: "needs", needs: "secret", extras: [] }).map((x) => x.state + " " + x.title),
@@ -673,7 +673,9 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     ["You have a deposit on its way: 0.1 ETH · final on Sepolia in up to about 14 min", "You have a deposit on its way: 0.1 ETH · arriving any minute now", "Your 0.1 ETH deposit has arrived.", "Your code for 0.1 ETH is waiting for a deposit."]);
   check("receiveCheckLine", [receiveCheckLine(false, now - 3000, now + 57000, now, false), receiveCheckLine(false, now - 40000, now + 20000, now, false), receiveCheckLine(true, 0, 0, now, false),
     receiveCheckLine(false, now - 3000, now + 57000, now, true), receiveCheckLine(false, 0, now + 60000, now, false), receiveCheckLine(false, now - 61000, now - 1000, now, false)],
-    ["Checked just now · next check in 57 s", "Checked 40 s ago · next check in 20 s", "Checking…", "Couldn't check just now · next try in 57 s", "Next check in 60 s", "Checked 61 s ago · checking again now"]);
+    ["Checked just now", "Checked 40 s ago", "Checking…", "Couldn't check just now", "Next check in 1 min", "Checked 61 s ago"]);
+  check("receiveCheckLine: a gentle check in minutes", [receiveCheckLine(false, now - 3000, now + 147000, now, false), receiveCheckLine(false, now - 3000, 0, now, false), receiveCheckLine(false, now - 3000, now + 147000, now, true)],
+    ["Checked just now · next check in 3 min", "Checked just now", "Couldn't check just now · next try in 3 min"]);
   const blocks = [{ account: "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", found: true, assets: [{ symbol: "LEZ", amount: "0" }, { symbol: "ETH", amount: "0.1" }] }];
   check("receiveBalanceLine: wrapped symbol", receiveBalanceLine([{ account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", assets: [{ symbol: "wETH", amount: "0.2" }] }], "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "ETH"), "CCVd76…pKnk now holds 0.2 wETH.");
   check("receiveBalanceLine", [receiveBalanceLine(blocks, "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "ETH"), receiveBalanceLine([], "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "ETH")],
@@ -922,6 +924,33 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("sources: none", [sendBackSources([]).length, sendBackSources(null).length], [0, 0]);
   check("step 1 asks for the account and the amount", sendBackSteps({ stage: "choose" })[0].title, "Choose the account and the amount");
   check("card asset rows carry what Send back needs", [asset.bridge === BRIDGE_V4_PROGRAM, asset.base, asset.decimals, sendBackOffer(asset)], [true, "100000000000000000", 18, true]);
+}
+
+// ── Checks on demand (15 Nov): when asked, once on view, by itself only for jobs and short waits ──
+{
+  const { receiveAutoMode, sendBackAutoMode, bridgeNextCheck, CHECK_JOB_MS, CHECK_GENTLE_MS } = await import("./qml/logic.mjs");
+  const now = 1_000_000;
+  check("receive modes", ["requested", "deposited", "final", "claimable", "claimed", undefined].map((stage) => receiveAutoMode(stage ? { stage } : null)), ["none", "gentle", "gentle", "none", "none", "none"]);
+  check("send-back modes", ["planned", "approve", "burning", "burned", "recorded", "proving", "proved", "releasable", "released", "burn_unclear"].map((stage) => sendBackAutoMode({ stage }).mode),
+    ["none", "job", "job", "none", "none", "job", "none", "none", "none", "none"]);
+  check("send-back: a relay refusal is not polled, a busy endpoint gently", [sendBackAutoMode({ stage: "approve", note: "refused" }).mode, sendBackAutoMode({ stage: "burned", busy: true, note: "busy" }).mode], ["none", "gentle"]);
+  check("send-back: releasable time known", sendBackAutoMode({ stage: "wrapped", releasable_at: 2000 }), { mode: "at", at: 2005000 });
+  const gentle = { mode: "gentle", focused: true }, job = { mode: "job", focused: false }, none = { mode: "none", focused: true };
+  check("no timer when nothing shows", [bridgeNextCheck({ now, visible: false, frontmost: true, screen: "receive", items: [gentle, job] })], [0]);
+  check("not in front: only a job goes on", [bridgeNextCheck({ now, visible: true, frontmost: false, screen: "receive", items: [gentle] }), bridgeNextCheck({ now, visible: true, frontmost: false, screen: "card", items: [job] })], [0, now + CHECK_JOB_MS]);
+  check("the card checks by itself only for a job", [bridgeNextCheck({ now, visible: true, frontmost: true, screen: "card", items: [gentle, none] }), bridgeNextCheck({ now, visible: true, frontmost: true, screen: "card", items: [gentle, job] })], [0, now + CHECK_JOB_MS]);
+  check("a waiting screen: gently, its own item only", [bridgeNextCheck({ now, visible: true, frontmost: true, screen: "receive", items: [gentle] }), bridgeNextCheck({ now, visible: true, frontmost: true, screen: "receive", items: [{ mode: "gentle", focused: false }] })], [now + CHECK_GENTLE_MS, 0]);
+  check("an operator wait: nothing by itself", bridgeNextCheck({ now, visible: true, frontmost: true, screen: "sendback", items: [none] }), 0);
+  check("a known time: once when it passes", [bridgeNextCheck({ now, visible: true, frontmost: true, screen: "sendback", items: [{ mode: "at", at: now + 600000, focused: true }] }), bridgeNextCheck({ now, visible: true, frontmost: true, screen: "sendback", items: [{ mode: "at", at: now - 1, focused: true }] })], [now + 600000, 0]);
+  check("a job in progress still advances, quickly", bridgeNextCheck({ now, visible: true, frontmost: true, screen: "sendback", items: [{ mode: "job", focused: true }, gentle] }), now + CHECK_JOB_MS);
+  check("gentle is 2-3 min, a job 5 s", [CHECK_GENTLE_MS >= 120000 && CHECK_GENTLE_MS <= 180000, CHECK_JOB_MS], [true, 5000]);
+  // Check now works in every state: the line always offers it (Main.qml shows the button unless a
+  // check runs), and asking is never refused by a mode: every stage maps to a mode, none throws.
+  const stages = ["planned", "approve", "burning", "burned", "burn_unclear", "recorded", "proving", "proved", "wrapped", "releasable", "released", "x", undefined];
+  const { checkButton } = await import("./qml/logic.mjs");
+  check("Check now: pressable when idle, Checking… at once when pressed or while a check runs", [checkButton(false, false), checkButton(false, true), checkButton(true, false)],
+    [{ label: "Check now", enabled: true }, { label: "Checking…", enabled: false }, { label: "Checking…", enabled: false }]);
+  check("every stage has a mode", stages.every((stage) => ["none", "job", "gentle", "at"].indexOf(sendBackAutoMode({ stage }).mode) >= 0), true);
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
