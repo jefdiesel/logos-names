@@ -927,7 +927,7 @@ Item {
     property bool bridgeNoteRead: false
     // The one bridge setup state the claim screen, Receive and the card all show (Logic.bridgeSetupState).
     readonly property var bridgeSetup: Logic.bridgeSetupState({ list: installedList, bundle: bridgeBundle, answers: bridgeAnswers,
-        stuck: bridgeFails >= 2, stale: bridgeStale, features: bridgeFeatures, install: bridgeInstall,
+        stuck: bridgeFails >= 2, stale: bridgeStale, features: bridgeFeatures, config: bridgeConfig, install: bridgeInstall,
         done: bridgeDone !== "" && walletView === bridgeDoneView ? bridgeDone : "" })
     onWalletViewChanged: if (bridgeDone !== "" && walletView !== bridgeDoneView) bridgeDone = ""
     function bridgeAnswered(value) {
@@ -1303,7 +1303,7 @@ Item {
         bridgeCall("config", [], function(value) {
             bridgeRestartAsking = false
             bridgeAnswered(value)
-            if (Logic.bridgeCan(bridgeFeatures, "receives") && (bridgeInstall !== null || bridgePending !== ""))
+            if (!Logic.bridgeBehind(bridgeConfig) && (bridgeInstall !== null || bridgePending !== ""))
                 bridgeSetupDone()
         }, function(message, kind) {
             bridgeRestartAsking = false
@@ -1350,7 +1350,7 @@ Item {
             loadInstalled(checkBundle)
             bridgeCall("config", [], function(value) {
                 bridgeAnswered(value)
-                if (Logic.bridgeCan(bridgeFeatures, "receives"))
+                if (!Logic.bridgeBehind(bridgeConfig))
                     bridgeSetupDone()
             }, function(message, kind) { bridgeSilent(kind) }, 10000)
         }, function() {}, 10000)
