@@ -1381,12 +1381,12 @@ export function needsStep(needs) {
 }
 
 var STEP_TITLES = {
-    file: "Choose the claim file", check: "Check", connect: "Let the bridge see this account",
+    file: "Choose the claim file", arrived: "Your deposit arrived", check: "Check", connect: "Let the bridge see this account",
     programs: "Allow the bridge's programs", public_account: "Give the bridge this account",
     secret: "Allow the bridge's deposit keys", approve: "Approve in your wallet", done: "Claim"
 }
 var STEP_DONE = {
-    file: "Claim file read", connect: "The bridge sees this account", programs: "The bridge's programs allowed",
+    file: "Claim file read", arrived: "", connect: "The bridge sees this account", programs: "The bridge's programs allowed",
     public_account: "Account given to the bridge", secret: "Deposit keys allowed", approve: "Approved"
 }
 
@@ -1399,19 +1399,25 @@ export function claimSteps(s) {
     var needs = needsStep(st.needs)
     if (needs && extras.indexOf(needs) < 0)
         extras = extras.concat([needs])
-    var keys = ["file", "check"].concat(extras, ["approve", "done"])
+    var first = st.first === "arrived" ? "arrived" : "file"
+    // The deposit keys are asked before a received deposit's check; the rest after the check.
+    var before = extras.filter(function(k) { return k === "secret" })
+    var after = extras.filter(function(k) { return k !== "secret" })
+    var keys = [first].concat(before, ["check"], after, ["approve", "done"])
     var done = (st.extrasDone || []).map(needsStep)
     var job = st.job || null
     var stage = st.stage || "start"
     var now
-    if (stage === "start") now = "file"
+    if (stage === "start") now = first
     else if (["checking", "refused", "elsewhere", "wrong_bridge", "ready"].indexOf(stage) >= 0) now = "check"
     else if (stage === "needs") now = needs || "approve"
     else if (stage === "asking") now = extras.filter(function(k) { return done.indexOf(k) < 0 })[0] || "approve"
     else if (stage === "uncertain") now = "approve"
     else if (stage === "running" || stage === "failed") now = job && job.phase && job.phase !== "approve" ? "done" : "approve"
     else if (stage === "done") now = "done"
-    else now = "file"
+    else now = first
+    // A received deposit's own first-time question comes during its check.
+    if (first === "arrived" && stage === "needs" && needs) now = needs
     var at = keys.indexOf(now)
     return keys.map(function(k, i) {
         var state = i < at || (stage === "done" && k === "done") ? "done" : i === at ? "now" : "later"
@@ -1480,4 +1486,75 @@ export function claimRetryAfter(code, error) {
 /// yet, the relay busy or at its limit, a network not answering just now.
 export function claimIsWait(code) {
     return ["not_final", "root_not_attested", "relay_busy", "busy", "relay_cap", "rate_limited", "relay_unavailable", "unreachable", "eth_unreachable"].indexOf(String(code || "")) >= 0
+}
+
+// ── Receive from Ethereum (rfp-022 modules/NAMES-RECEIVE.md, "Built on receive-flow") ──
+
+/// The bridge test network's denominations when the bridge's registry can't be read (v3).
+export const RECEIVE_FALLBACK = [
+    { symbol: "ETH", denoms: [{ index: 0, text: "0.01" }, { index: 1, text: "0.1" }, { index: 2, text: "1" }] },
+    { symbol: "dUSDC", denoms: [{ index: 0, text: "100" }, { index: 1, text: "1,000" }, { index: 2, text: "10,000" }] }
+]
+
+/// The tokens and denominations to offer, from the bridge's `registry()` value (`tokens[].denoms[]`
+/// with `index` and `text`), else RECEIVE_FALLBACK.
+export function receiveTokens(registry) {
+    var list = registry && Array.isArray(registry.tokens) ? registry.tokens : []
+    var out = list.filter(function(t) { return t && t.symbol && Array.isArray(t.denoms) && t.denoms.length > 0 }).map(function(t) {
+        return { symbol: String(t.symbol), frozen: !!(t.freeze && t.freeze.eth_deposits === true),
+                 denoms: t.denoms.map(function(d, i) { return { index: d.index !== undefined ? Number(d.index) : i, text: String(d.text || d.value || "") } }) }
+    })
+    return out.length > 0 ? out : RECEIVE_FALLBACK
+}
+
+/// A deposit request's reply: {kind: "needs" | "code" | "old", value}. "old": a LEZ Bridge that
+/// makes no deposit code yet (no `request`).
+export function receiveReply(value) {
+    if (value && typeof value === "object" && value.needs)
+        return { kind: "needs", value: value }
+    if (value && typeof value === "object" && typeof value.request === "string" && value.request.indexOf("logosdep1") === 0)
+        return { kind: "code", value: value }
+    return { kind: "old", value: value }
+}
+
+/// This wallet's receives, from the bridge's `deposits()` list: rows it made for the Names Wallet
+/// (`derivation: "names-app"`) and not claimed yet: [{id, symbol, amount, account}].
+export function receivesFrom(value) {
+    var rows = value && Array.isArray(value.deposits) ? value.deposits : Array.isArray(value) ? value : []
+    return rows.filter(function(d) { return d && d.id && d.derivation === "names-app" && d.claimed !== true && d.stage !== "claimed" }).map(function(d) {
+        var amount = d.denom_text || d.amount_text || (d.denom !== undefined && d.decimals !== undefined ? withDecimals(d.denom, d.decimals) : "")
+        return { id: String(d.id), symbol: String(d.symbol || ""), amount: String(amount), account: String(d.account || ""), account_kind: String(d.account_kind || "") }
+    })
+}
+
+/// A receive's line on the card, from `receive_status(id)`: {line, tone ("plain" | "ready" |
+/// "done"), claim (true when it can be claimed)}.
+export function receiveStatusLine(status) {
+    var s = status || {}
+    switch (s.stage) {
+    case "requested": return { line: "Not deposited yet", tone: "plain", claim: false }
+    case "deposited": return { line: "On Ethereum" + (s.final_in_min !== undefined && s.final_in_min !== null ? ": final in about " + Math.max(1, Math.ceil(Number(s.final_in_min))) + " min" : ", waiting for finality (about 15 min)"), tone: "plain", claim: false }
+    case "final": return { line: "Final: waiting for the bridge to record it (about a minute)", tone: "plain", claim: false }
+    case "claimable": return { line: "Arrived", tone: "ready", claim: true }
+    case "claimed": return { line: "Claimed" + (s.claimed_block ? " in block " + s.claimed_block : ""), tone: "done", claim: false }
+    }
+    return { line: "Checking…", tone: "plain", claim: false }
+}
+
+/// The Receive screen's steps: [{key, n, total, title, state, line}]. `s`: {stage ("choose" |
+/// "asking" | "needs" | "code"), needs, extras (first-time questions seen)}.
+export function receiveSteps(s) {
+    var st = s || {}
+    var extras = (st.extras || []).map(needsStep)
+    var needs = needsStep(st.needs)
+    if (needs && extras.indexOf(needs) < 0)
+        extras = extras.concat([needs])
+    var keys = ["choose"].concat(extras, ["deposit", "arrive"])
+    var titles = { choose: "Choose the amount and account", connect: "Let the bridge see this account", public_account: "Give the bridge this account",
+                   private_account: "Give the bridge this account", secret: "Allow the bridge's deposit keys", deposit: "Deposit on the page", arrive: "Claim when it arrives" }
+    var now = st.stage === "code" ? "deposit" : st.stage === "needs" ? (needs || "choose") : "choose"
+    var at = keys.indexOf(now)
+    return keys.map(function(k, i) {
+        return { key: k, n: i + 1, total: keys.length, title: titles[k] || k, state: i < at ? "done" : i === at ? "now" : "later", line: "" }
+    })
 }

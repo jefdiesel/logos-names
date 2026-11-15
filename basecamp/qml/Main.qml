@@ -822,6 +822,7 @@ Item {
     // an automatic check again when the refusal gives a time; Details open or not.
     property var claimExtras: []
     property var claimExtrasDone: []
+    property string claimNeedsAfter: "claim"  // what an approved sheet leads to: the claim, or the check again
     property string claimSource: ""
     property double claimRetryAt: 0
     property double claimClock: Date.now()
@@ -844,7 +845,9 @@ Item {
     /// The same claim file checked again (it is still in memory): nothing to pick again.
     function checkAgain() {
         claimRetryAt = 0
-        if (claimSource !== "")
+        if (claimSource.indexOf("deposit:") === 0)
+            checkDeposit(claimSource.substr(8))
+        else if (claimSource !== "")
             checkClaimFile(claimSource, false)
     }
     property var bridgePrograms: []        // get_config bridge_programs: the bridges this wallet reads
@@ -890,6 +893,175 @@ Item {
         t.interval = ms
         t.triggered.connect(function() { t.destroy(); fn() })
         t.start()
+    }
+
+
+    // ── Receive from Ethereum (rfp-022 modules/NAMES-RECEIVE.md): the bridge module makes the
+    //    deposit's secret from this wallet's own values and gives back a code for the deposit page
+    //    (no claim file); the card then follows each receive and offers its claim. The secret never
+    //    reaches this app. ──
+    property var receiveRegistry: null
+    readonly property var receiveTokenList: Logic.receiveTokens(receiveRegistry)
+    property string receiveToken: "ETH"
+    property int receiveDenom: 1
+    property string receiveAccount: ""
+    property bool receivePublicOk: false
+    property bool receiveAsking: false
+    property var receiveNeeds: null
+    property string receiveNeedsState: ""
+    property bool receiveNeedsPolling: false
+    property var receiveExtras: []
+    property var receiveResult: null
+    property string receiveError: ""
+    property bool receiveMissing: false
+    property bool receiveDetails: false
+    property var receives: []              // this wallet's receives: [{id, symbol, amount, account}]
+    property var receiveStatuses: ({})     // receive_status(id) by id
+    property bool receivesLoaded: false
+    property bool receiveHasStatus: true   // the installed LEZ Bridge has receive_status
+    property bool receivePolling: false
+    readonly property var receiveAccountList: Logic.publicAccounts(cliBalance, cliAccounts)
+    // The account chosen, else the first public account (the one the card shows first).
+    readonly property string receiveAccountNow: receiveAccountList.indexOf(receiveAccount) >= 0 ? receiveAccount : receiveAccountList.length > 0 ? receiveAccountList[0] : ""
+    readonly property var receiveStepsNow: Logic.receiveSteps({ stage: receiveResult !== null ? "code" : receiveNeeds !== null ? "needs" : "choose",
+        needs: receiveNeeds !== null ? receiveNeeds.needs : "", extras: receiveExtras })
+
+    function openEthReceive() {
+        walletView = "ethreceive"
+        receiveResult = null
+        receiveError = ""
+        receiveNeeds = null
+        receiveExtras = []
+        receiveDetails = false
+        receivePublicOk = false
+        receiveMissing = false
+        if (receiveAccount === "" || receiveAccountList.indexOf(receiveAccount) < 0)
+            receiveAccount = receiveAccountList.length > 0 ? receiveAccountList[0] : ""
+        // Is the bridge module here (config answers at once), then its denominations (the
+        // registry reads the chains; without it, the bridge test network's known list).
+        bridgeCall("config", [], function() {
+            bridgeCall("registry", [], function(value) { receiveRegistry = value }, function() {}, 60000, false)
+        }, function(message, kind) {
+            if (kind === "missing" || kind === "starting" || kind === "busy")
+                receiveMissing = true
+        }, 10000, false)
+    }
+
+    /// The deposit code for the chosen amount and account. A public account only after the person
+    /// has read the "not private" line (the module refuses it without "true").
+    function makeReceive() {
+        if (receiveAsking || receiveAccountNow === "" || !receivePublicOk)
+            return
+        receiveAccount = receiveAccountNow
+        receiveAsking = true
+        receiveError = ""
+        bridgeCall("make_public_deposit_request", [receiveToken, String(receiveDenom), receiveAccount, "true"], function(value) {
+            receiveAsking = false
+            var r = Logic.receiveReply(value)
+            if (r.kind === "needs") {
+                var key = Logic.needsStep(value.needs)
+                if (receiveExtras.indexOf(key) < 0)
+                    receiveExtras = receiveExtras.concat([key])
+                receiveNeeds = value
+                receiveNeedsState = value.request && value.request.state ? value.request.state : "pending"
+                return
+            }
+            if (r.kind === "old") {
+                receiveError = "This LEZ Bridge can't make deposit codes yet. Update it."
+                return
+            }
+            receiveResult = value
+            if (value.deposit && value.deposit.id && !receives.some(function(x) { return x.id === value.deposit.id }))
+                receives = receives.concat([{ id: String(value.deposit.id), symbol: String(value.symbol || ""), amount: String(value.denom_text || ""), account: receiveAccount }])
+        }, function(message, kind) {
+            receiveAsking = false
+            if (kind === "missing")
+                receiveMissing = true
+            else
+                receiveError = sentence(kind === "busy" ? "The LEZ Bridge is still answering an earlier call. Try again." : message)
+        }, 120000, false)
+    }
+    function pollReceiveNeeds() {
+        var id = receiveNeeds && receiveNeeds.request ? String(receiveNeeds.request.request || "") : ""
+        if (id === "" || receiveNeedsPolling)
+            return
+        receiveNeedsPolling = true
+        bridgeCall("wallet_request", [id], function(value) {
+            receiveNeedsPolling = false
+            receiveNeedsState = value && value.state ? value.state : ""
+            if (receiveNeedsState === "approved" || receiveNeedsState === "done") {
+                receiveNeeds = null
+                makeReceive()
+            } else if (receiveNeedsState === "rejected" || receiveNeedsState === "expired" || receiveNeedsState === "cancelled") {
+                receiveNeeds = null
+                receiveError = "Nothing was made: you said no in the sheet."
+            }
+        }, function() { receiveNeedsPolling = false }, 120000)
+    }
+    Timer {
+        interval: 2500
+        repeat: true
+        running: root.receiveNeeds !== null && (root.receiveNeedsState === "" || root.receiveNeedsState === "pending")
+        onTriggered: root.pollReceiveNeeds()
+    }
+
+    /// The card's receives: the bridge's own list once, then receive_status of each, one call at
+    /// a time, every 60 s while the LEZ 0.4 wallet shows (it never asks Names anything).
+    function pollReceives() {
+        if (receivePolling || !bridgeReady)
+            return
+        if (!receivesLoaded) {
+            receivePolling = true
+            bridgeCall("deposits", [], function(value) {
+                receivePolling = false
+                receivesLoaded = true
+                var found = Logic.receivesFrom(value)
+                receives = found.concat(receives.filter(function(x) { return !found.some(function(f) { return f.id === x.id }) }))
+                pollReceives()
+            }, function() { receivePolling = false }, 120000, false)
+            return
+        }
+        var open = receives.filter(function(x) { var st = receiveStatuses[x.id]; return !st || st.stage !== "claimed" })
+        if (open.length === 0 || !receiveHasStatus)
+            return
+        receivePolling = true
+        var next = function(i) {
+            if (i >= open.length) {
+                receivePolling = false
+                return
+            }
+            bridgeCall("receive_status", [open[i].id], function(value) {
+                var all = receiveStatuses
+                all[open[i].id] = value
+                receiveStatuses = all
+                receiveStatusesChanged()
+                next(i + 1)
+            }, function(message, kind) {
+                if (kind === "missing" || /method not found|unknown method|no such method/i.test(String(message))) {
+                    receiveHasStatus = false
+                    receivePolling = false
+                    return
+                }
+                next(i + 1)
+            }, 60000, false)
+        }
+        next(0)
+    }
+    Timer {
+        interval: 60000
+        repeat: true
+        triggeredOnStart: true
+        running: root.bridgeReady && root.namesNet === "0.4" && (root.walletView === "home" || root.walletView === "ethreceive")
+        onTriggered: root.pollReceives()
+    }
+
+    /// Claims a receive that arrived: the claim screen, with the deposit instead of a file.
+    function claimReceive(id) {
+        leaveClaim()
+        walletView = "claim"
+        claimSource = "deposit:" + id
+        claimBridgeAnswers = true
+        checkDeposit(id)
     }
 
     /// Opens the claim screen: is the LEZ Bridge package here, and is a claim already running?
@@ -1097,6 +1269,61 @@ Item {
         }
     }
 
+    /// A check's answer (a file's or a received deposit's): shown, its first-time questions
+    /// foreseen, checked again by itself when not ready with a time, and a claim already started
+    /// for it shown rather than started twice.
+    function takeClaimCheck(value) {
+        claimChecking = false
+        claimCheck = value
+        if (value && value.ok) {
+            var extras = Logic.claimExtras(appGrants, value.deposit ? value.deposit.account : "")
+            claimExtras = claimSource.indexOf("deposit:") === 0 ? claimExtras.concat(extras.filter(function(k) { return claimExtras.indexOf(k) < 0 })) : extras
+            claimExtrasDone = claimSource.indexOf("deposit:") === 0 ? claimExtrasDone : []
+        }
+        if (value && !value.ok && value.error) {
+            var wait = Logic.claimRetryAfter(value.error.code, value.error)
+            if (wait > 0)
+                claimRetryAt = Date.now() + wait * 1000
+        }
+        if (value && value.ok)
+            bridgeCall("relayed_claims", [], function(list) {
+                var job = Logic.claimJobFor(Array.isArray(list) ? list : list && list.jobs ? list.jobs : [], value)
+                if (job !== null)
+                    depositClaimJob = job
+            })
+    }
+
+    /// A received deposit's six checks, with its key from this wallet's values (no file): the
+    /// same answer as a file's check. Its first `needs: "secret"` is a sheet first, then this again.
+    function checkDeposit(id) {
+        claimError = ""
+        claimRetryAt = 0
+        claimCheck = null
+        depositClaimJob = null
+        claimNeeds = null
+        claimUncertain = null
+        claimChecking = true
+        bridgeCall("relayed_claim_check_deposit", [id, JSON.stringify({ wallet_hint: false })], function(value) {
+            if (value && value.needs) {
+                claimChecking = false
+                var key = Logic.needsStep(value.needs)
+                if (claimExtras.indexOf(key) < 0)
+                    claimExtras = claimExtras.concat([key])
+                claimNeedsAfter = "check"
+                claimNeeds = value
+                claimNeedsState = value.request && value.request.state ? value.request.state : "pending"
+                return
+            }
+            takeClaimCheck(value)
+        }, function(message, kind) {
+            claimChecking = false
+            if (kind === "missing")
+                claimError = "This LEZ Bridge can't claim a received deposit yet. Update it."
+            else
+                claimError = sentence(kind === "busy" ? "The LEZ Bridge is still answering an earlier call. Check again." : message)
+        }, 90000, false)
+    }
+
     /// The six checks (nothing is proposed, signed or sent). A pasted file leaves the field at once.
     function checkClaimFile(source, switched) {
         var given = Logic.claimInput(source)
@@ -1133,25 +1360,7 @@ Item {
                 })
                 return
             }
-            claimChecking = false
-            claimCheck = value
-            if (value && value.ok) {
-                claimExtras = Logic.claimExtras(appGrants, value.deposit ? value.deposit.account : "")
-                claimExtrasDone = []
-            }
-            // Not ready yet, with a time: checked again by itself then (the same file).
-            if (value && !value.ok && value.error) {
-                var wait = Logic.claimRetryAfter(value.error.code, value.error)
-                if (wait > 0)
-                    claimRetryAt = Date.now() + wait * 1000
-            }
-            // A claim already started or finished for this file is shown, never started twice.
-            if (value && value.ok)
-                bridgeCall("relayed_claims", [], function(list) {
-                    var job = Logic.claimJobFor(Array.isArray(list) ? list : list && list.jobs ? list.jobs : [], value)
-                    if (job !== null)
-                        depositClaimJob = job
-                })
+            takeClaimCheck(value)
         }
         var refused = function(message, kind) {
             if (withOptions && kind !== "busy") {
@@ -1190,6 +1399,7 @@ Item {
                 return
             }
             if (value && value.needs) {
+                claimNeedsAfter = "claim"
                 if (claimExtras.indexOf(Logic.needsStep(value.needs)) < 0)
                     claimExtras = claimExtras.concat([Logic.needsStep(value.needs)])
                 claimNeeds = value
@@ -1216,7 +1426,12 @@ Item {
             if (claimNeedsState === "approved" || claimNeedsState === "done") {
                 claimExtrasDone = claimExtrasDone.concat([Logic.needsStep(claimNeeds.needs)])
                 claimNeeds = null
-                startClaim(false)
+                var after = claimNeedsAfter
+                claimNeedsAfter = "claim"
+                if (after === "check")
+                    checkAgain()
+                else
+                    startClaim(false)
             } else if (claimNeedsState === "rejected" || claimNeedsState === "expired" || claimNeedsState === "cancelled") {
                 claimNeeds = null
                 claimError = "Nothing was signed or sent: the request was " + claimNeedsState + "."
@@ -3409,6 +3624,21 @@ Item {
             + "</style>"
     }
 
+    /// Opens the deposit page (https only) in the browser; when Basecamp doesn't, says to copy it.
+    function openDepositPage(link) {
+        var url = String(link || "")
+        if (!/^https:\/\/[^\s"'<>]+$/i.test(url))
+            return
+        var opened = false
+        try {
+            opened = Qt.openUrlExternally(url)
+        } catch (error) {
+            opened = false
+        }
+        if (!opened)
+            say("Basecamp didn't open the page. Copy the link and open it in your browser.", true)
+    }
+
     /// Opens the link last pressed in the page in the browser, if it is an
     /// http(s) address (the module lets no other kind through) and Basecamp
     /// lets this app open one.
@@ -5447,6 +5677,30 @@ Item {
         }
     }
 
+    /// A QR code drawn from the module's rows of "0"/"1" (QML has no QR library), with its quiet zone.
+    component QrCode: Canvas {
+        id: qr
+        property var rows: []
+        property real side: 180
+        implicitWidth: side
+        implicitHeight: side
+        onRowsChanged: requestPaint()
+        onPaint: {
+            var ctx = getContext("2d")
+            ctx.fillStyle = "#ffffff"
+            ctx.fillRect(0, 0, width, height)
+            var n = rows && rows.length ? rows.length : 0
+            if (n === 0)
+                return
+            var cell = width / (n + 8)
+            ctx.fillStyle = "#000000"
+            for (var y = 0; y < n; y++)
+                for (var x = 0; x < rows[y].length; x++)
+                    if (rows[y].charAt(x) === "1")
+                        ctx.fillRect((x + 4) * cell, (y + 4) * cell, Math.ceil(cell), Math.ceil(cell))
+        }
+    }
+
     component Tab: Rectangle {
         id: tab
         property string label: ""
@@ -6581,7 +6835,37 @@ Item {
                             Text { text: "LEZ 0.4"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
                         }
                         Hint { font.pixelSize: root.px(15); text: "Our own chain for the bridge, where bridged Sepolia tokens arrive. It is reset now and then." }
-                        Action { label: "Claim a bridge deposit"; strong: true; onPressed: root.openClaim() }
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: 10
+                            Action { label: "Receive from Ethereum"; strong: true; onPressed: root.openEthReceive() }
+                            Action { label: "Claim a bridge deposit"; onPressed: root.openClaim() }
+                        }
+                        // This wallet's receives: each one's state, and Claim once it has arrived.
+                        Repeater {
+                            model: root.receives.filter(function(x) { var st = root.receiveStatuses[x.id]; return !st || st.stage !== "claimed" })
+                            RowLayout {
+                                id: receiveRow
+                                required property var modelData
+                                readonly property var status: Logic.receiveStatusLine(root.receiveStatuses[modelData.id])
+                                Layout.fillWidth: true
+                                spacing: 10
+                                Hint {
+                                    Layout.fillWidth: true
+                                    font.pixelSize: root.px(15)
+                                    color: root.receiveHasStatus && receiveRow.status.tone === "ready" ? root.good : root.ink
+                                    text: receiveRow.modelData.amount + " " + receiveRow.modelData.symbol + " to " + Logic.idShort(receiveRow.modelData.account)
+                                        + " · " + (root.receiveHasStatus ? receiveRow.status.line : "sent from Ethereum?")
+                                }
+                                Action { visible: root.receiveHasStatus && receiveRow.status.claim; label: "Claim"; strong: true; onPressed: root.claimReceive(receiveRow.modelData.id) }
+                            }
+                        }
+                        RowLayout {
+                            visible: !root.receiveHasStatus && root.receives.length > 0
+                            spacing: 10
+                            Hint { Layout.fillWidth: false; font.pixelSize: root.px(15); text: "This LEZ Bridge can't tell when a deposit arrives." }
+                            Link { visible: root.bridgeBundle === "ok"; text: "Update"; color: root.brass; font.pixelSize: root.px(15); onPressed: root.installBridge(true) }
+                        }
                         Hint {
                             font.pixelSize: root.px(15)
                             color: root.bridgeNetStatusNow.tone === "bad" ? root.alarm : root.bridgeNetStatusNow.tone === "warn" ? root.brass : root.dim
@@ -7617,7 +7901,7 @@ Item {
 
                     // The claim as numbered steps: finished ones one line with a tick, the current
                     // one large with its one action, later ones grey; everything else under Details.
-                    readonly property var steps: Logic.claimSteps({ stage: root.claimStageNow, extras: root.claimExtras, extrasDone: root.claimExtrasDone,
+                    readonly property var steps: Logic.claimSteps({ first: root.claimSource.indexOf("deposit:") === 0 ? "arrived" : "file", stage: root.claimStageNow, extras: root.claimExtras, extrasDone: root.claimExtrasDone,
                         needs: root.claimNeeds !== null ? root.claimNeeds.needs : "", job: root.depositClaimJob, summary: root.claimSummaryNow })
                     readonly property var stepNow: steps.filter(function(x) { return x.state === "now" })[0] || null
                     readonly property bool stepsShown: root.claimStageNow !== "missing" && root.claimStageNow !== "looking"
@@ -7763,6 +8047,153 @@ Item {
                         font.pixelSize: root.px(15)
                         onPressed: { root.leaveClaim(); root.openClaim() }
                     }
+                }
+
+                // ── Receive from Ethereum ──
+                ColumnLayout {
+                    id: receiveScreen
+                    visible: root.walletView === "ethreceive"
+                    Layout.fillWidth: true
+                    Layout.maximumWidth: 680
+                    spacing: 12
+                    readonly property var stepNow: root.receiveStepsNow.filter(function(x) { return x.state === "now" })[0] || null
+                    readonly property var result: root.receiveResult
+                    Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
+                    Text { text: "Receive from Ethereum"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
+                    RunsOn { net: "0.4" }
+                    Hint { visible: root.receiveMissing; color: root.ink; text: "The LEZ Bridge isn't running or installed. Open Claim a bridge deposit to set it up." }
+
+                    Repeater {
+                        model: root.receiveMissing ? [] : root.receiveStepsNow.filter(function(x) { return x.state === "done" })
+                        Hint { required property var modelData; font.pixelSize: root.px(15); color: root.good; text: "✓ Step " + modelData.n + " of " + modelData.total + " · " + modelData.title }
+                    }
+                    Text {
+                        visible: !root.receiveMissing && receiveScreen.stepNow !== null
+                        Layout.fillWidth: true
+                        text: receiveScreen.stepNow === null ? "" : "Step " + receiveScreen.stepNow.n + " of " + receiveScreen.stepNow.total + " · " + receiveScreen.stepNow.title
+                        color: root.ink
+                        font.family: root.sans
+                        font.pixelSize: root.px(22)
+                        font.weight: Font.DemiBold
+                        wrapMode: Text.WordWrap
+                    }
+
+                    // Step: amount and account.
+                    ColumnLayout {
+                        visible: !root.receiveMissing && root.receiveResult === null && root.receiveNeeds === null
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Repeater {
+                                model: root.receiveTokenList
+                                Action { required property var modelData; label: modelData.symbol; strong: root.receiveToken === modelData.symbol; onPressed: root.receiveToken = modelData.symbol }
+                            }
+                        }
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Repeater {
+                                model: (root.receiveTokenList.filter(function(t) { return t.symbol === root.receiveToken })[0] || { denoms: [] }).denoms
+                                Action { required property var modelData; label: modelData.text + " " + root.receiveToken; strong: root.receiveDenom === modelData.index; onPressed: root.receiveDenom = modelData.index }
+                            }
+                        }
+                        Hint { visible: root.receiveAccountList.length === 0; color: root.alarm; text: "No public account on LEZ 0.4 yet. Make one in Settings, then come back." }
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Repeater {
+                                model: root.receiveAccountList
+                                Action { required property var modelData; label: "Into " + Logic.idShort(modelData); strong: root.receiveAccountNow === modelData; onPressed: root.receiveAccount = modelData }
+                            }
+                        }
+                        // The one thing to read first: a public account links the deposit to it.
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 10
+                            Rectangle {
+                                Layout.preferredWidth: 18
+                                Layout.preferredHeight: 18
+                                Layout.alignment: Qt.AlignTop
+                                radius: 4
+                                color: root.receivePublicOk ? root.brass : "transparent"
+                                border.width: 2
+                                border.color: root.brass
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.receivePublicOk = !root.receivePublicOk }
+                            }
+                            Hint {
+                                color: root.ink
+                                text: "Not private: the claim links this deposit to this account for good."
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.receivePublicOk = !root.receivePublicOk }
+                            }
+                        }
+                        Action { label: root.receiveAsking ? "Making the code…" : "Make the deposit code"; strong: true; enabledNow: !root.receiveAsking && root.receivePublicOk && root.receiveAccountNow !== ""; onPressed: root.makeReceive() }
+                    }
+                    Hint { visible: root.receiveNeeds !== null; text: "Answer it in the sheet." }
+
+                    // Step: the code, for the deposit page.
+                    ColumnLayout {
+                        visible: receiveScreen.result !== null
+                        Layout.fillWidth: true
+                        spacing: 12
+                        Hint {
+                            color: root.ink
+                            text: receiveScreen.result === null ? "" : receiveScreen.result.bridge_fee && receiveScreen.result.bridge_fee.text ? receiveScreen.result.bridge_fee.text
+                                : String(receiveScreen.result.denom_text || "") + " " + String(receiveScreen.result.symbol || "") + " into " + Logic.idShort(root.receiveAccount) + ". The deposit page shows the bridge fee."
+                        }
+                        Action { label: "Open the deposit page"; strong: true; onPressed: root.openDepositPage(receiveScreen.result.request_url) }
+                        Text {
+                            Layout.fillWidth: true
+                            text: receiveScreen.result === null || !receiveScreen.result.compare ? "" : "The page must show a commitment starting " + receiveScreen.result.compare.first + " and ending " + receiveScreen.result.compare.last + "."
+                            color: root.ink
+                            font.family: root.sans
+                            font.pixelSize: root.px(20)
+                            font.weight: Font.DemiBold
+                            wrapMode: Text.WordWrap
+                        }
+                        Hint { font.pixelSize: root.px(15); text: "No file to save: this wallet keeps what it needs. The card shows when it arrives." }
+                        RowLayout {
+                            spacing: 18
+                            QrCode { rows: receiveScreen.result !== null && receiveScreen.result.request_qr ? receiveScreen.result.request_qr.rows : []; side: root.px(180) }
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Hint { font.pixelSize: root.px(15); text: "On your phone: scan this, or copy the link." }
+                                Link { text: "Copy the link"; font.pixelSize: root.px(15); onPressed: root.copy(receiveScreen.result.request_url, "The link") }
+                                Link { text: "Copy the code"; font.pixelSize: root.px(15); onPressed: root.copy(receiveScreen.result.request, "The code") }
+                            }
+                        }
+                    }
+                    Hint { visible: root.receiveError !== ""; color: root.alarm; text: root.receiveError }
+
+                    Link {
+                        visible: !root.receiveMissing
+                        text: root.receiveDetails ? "Details ▾" : "Details ▸"
+                        color: root.dim
+                        font.pixelSize: root.px(15)
+                        onPressed: root.receiveDetails = !root.receiveDetails
+                    }
+                    ColumnLayout {
+                        visible: root.receiveDetails && !root.receiveMissing
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Hint { font.pixelSize: root.px(15); text: "The wallet makes this deposit's secret from your account's own key; this app never sees it. The page gets only a code: the amount, the vault and a commitment that hides which account receives it." }
+                        Hint { font.pixelSize: root.px(15); text: "Private accounts can't receive on the bridge test network yet: their claim needs a proof that hasn't run there." }
+                        Fact { visible: receiveScreen.result !== null; label: "Into"; code: true; value: root.receiveAccount; full: root.receiveAccount }
+                        Fact { visible: receiveScreen.result !== null; label: "Link"; code: true; value: receiveScreen.result !== null ? String(receiveScreen.result.request_url || "") : ""; full: receiveScreen.result !== null ? String(receiveScreen.result.request_url || "") : "" }
+                        Fact { visible: receiveScreen.result !== null; label: "Code"; code: true; value: receiveScreen.result !== null ? String(receiveScreen.result.request || "") : ""; full: receiveScreen.result !== null ? String(receiveScreen.result.request || "") : "" }
+                        Fact { visible: receiveScreen.result !== null && !!receiveScreen.result.commitment; label: "Commitment"; code: true; value: receiveScreen.result !== null ? String(receiveScreen.result.commitment || "") : ""; full: receiveScreen.result !== null ? String(receiveScreen.result.commitment || "") : "" }
+                        Hint { visible: receiveScreen.result !== null && !!receiveScreen.result.not_private; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.not_private ? String(receiveScreen.result.not_private.text || "") : "" }
+                        Hint { visible: receiveScreen.result !== null && !!receiveScreen.result.bridge_fee && !!receiveScreen.result.bridge_fee.error; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.bridge_fee && receiveScreen.result.bridge_fee.error ? String(receiveScreen.result.bridge_fee.error) : "" }
+                        Hint { visible: receiveScreen.result !== null && !!receiveScreen.result.compare; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.compare ? String(receiveScreen.result.compare.text || "") : "" }
+                        Hint { visible: root.receiveNeeds !== null && !!root.receiveNeeds.message; font.pixelSize: root.px(15); text: root.receiveNeeds !== null ? String(root.receiveNeeds.message || "") : "" }
+                    }
+                    Repeater {
+                        model: root.receiveMissing ? [] : root.receiveStepsNow.filter(function(x) { return x.state === "later" })
+                        Hint { required property var modelData; font.pixelSize: root.px(15); color: root.faint; text: "Step " + modelData.n + " of " + modelData.total + " · " + modelData.title }
+                    }
+                    Link { visible: receiveScreen.result !== null; text: "Make another code"; font.pixelSize: root.px(15); onPressed: root.openEthReceive() }
                 }
 
                 // ── Add a token by its address ──

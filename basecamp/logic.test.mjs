@@ -609,9 +609,26 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("claimRetryAfter", [claimRetryAfter("not_final", { eta_s: 330 }), claimRetryAfter("not_final", {}), claimRetryAfter("root_not_attested"), claimRetryAfter("relay_cap")], [330, 0, 60, 0]);
   const { claimIsWait } = await import("./qml/logic.mjs");
   check("claimIsWait", [claimIsWait("not_final"), claimIsWait("root_not_attested"), claimIsWait("relay_cap"), claimIsWait("already_claimed"), claimIsWait("bad_file")], [true, true, true, false, false]);
+  check("steps: a received deposit, its keys first", claimSteps({ first: "arrived", stage: "needs", needs: "secret", extras: [] }).map((x) => x.state + " " + x.title),
+    ["done Your deposit arrived", "now Allow the bridge's deposit keys", "later Check", "later Approve in your wallet", "later Claim"]);
   check("claimSummary", claimSummary({ ok: true, deposit: { amount_text: "0.1 ETH", account: A } }, "bridge v3"), "0.1 ETH → your account CCVd76…pKnk (bridge v3)");
   check("claimErrorLine", [claimErrorLine("relay_cap"), claimErrorLine("not_final", { eta_s: 330 }), claimErrorLine("relay_busy"), claimErrorLine("nonsense")],
     ["The bridge's relay has reached today's limit. Nothing was sent. Try again later.", "Not final on Ethereum yet: about 6 min.", "The relay is busy. Try again.", "The claim can't go on."]);
+}
+
+{
+  const { receiveTokens, receiveReply, receivesFrom, receiveStatusLine, receiveSteps, RECEIVE_FALLBACK } = await import("./qml/logic.mjs");
+  check("receiveTokens from registry", receiveTokens({ tokens: [{ symbol: "ETH", denoms: [{ index: 0, value: "10000000000000000", text: "0.01" }] }] }), [{ symbol: "ETH", frozen: false, denoms: [{ index: 0, text: "0.01" }] }]);
+  check("receiveTokens fallback", receiveTokens(null), RECEIVE_FALLBACK);
+  check("receiveReply", [receiveReply({ needs: "secret" }).kind, receiveReply({ request: "logosdep1qq" }).kind, receiveReply({ deposit: {} }).kind], ["needs", "code", "old"]);
+  check("receivesFrom keeps this wallet's unclaimed rows",
+    receivesFrom({ deposits: [{ id: "dep-1", derivation: "names-app", symbol: "ETH", denom_text: "0.1", account: "A" }, { id: "dep-2", derivation: "names-app", claimed: true }, { id: "dep-3", source: "page" }] }),
+    [{ id: "dep-1", symbol: "ETH", amount: "0.1", account: "A", account_kind: "" }]);
+  check("receivesFrom: the amount from denom and decimals", receivesFrom({ deposits: [{ id: "d", derivation: "names-app", symbol: "ETH", denom: "100000000000000000", decimals: 18 }] })[0].amount, "0.1");
+  check("receiveStatusLine", ["requested", "deposited", "final", "claimable", "claimed"].map((stage) => receiveStatusLine({ stage, final_in_min: 6, claimed_block: 812 }).line),
+    ["Not deposited yet", "On Ethereum: final in about 6 min", "Final: waiting for the bridge to record it (about a minute)", "Arrived", "Claimed in block 812"]);
+  check("receiveSteps", receiveSteps({ stage: "code", extras: ["public_account", "secret"] }).map((x) => x.n + "/" + x.total + " " + x.state + " " + x.title),
+    ["1/5 done Choose the amount and account", "2/5 done Give the bridge this account", "3/5 done Allow the bridge's deposit keys", "4/5 now Deposit on the page", "5/5 later Claim when it arrives"]);
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
