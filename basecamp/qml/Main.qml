@@ -817,6 +817,36 @@ Item {
     property bool claimPolling: false      // one call at a time: the module answers one at a time
     property bool claimNeedsPolling: false
     property bool claimCheckWith: true     // the installed lez_bridge has relayed_claim_check_with (probed)
+    // The claim as steps: the first-time questions expected (from the wallet's grants) and those
+    // answered; the file checked, kept in memory only, to check again without picking it again;
+    // an automatic check again when the refusal gives a time; Details open or not.
+    property var claimExtras: []
+    property var claimExtrasDone: []
+    property string claimSource: ""
+    property double claimRetryAt: 0
+    property double claimClock: Date.now()
+    property bool claimDetails: false
+    readonly property string claimRetryLeft: Logic.durationWords(Math.max(1, Math.round((claimRetryAt - claimClock) / 1000)))
+    readonly property string claimSummaryNow: Logic.claimSummary(claimCheck, claimBridgeNow.label)
+    readonly property string claimRefusalLine: claimCheck !== null && claimCheck.ok === false && claimCheck.error ? Logic.claimErrorLine(claimCheck.error.code, claimCheck.error) : ""
+    Timer {
+        interval: 1000
+        repeat: true
+        running: root.claimRetryAt > 0
+        onTriggered: {
+            root.claimClock = Date.now()
+            if (root.claimClock >= root.claimRetryAt) {
+                root.claimRetryAt = 0
+                root.checkAgain()
+            }
+        }
+    }
+    /// The same claim file checked again (it is still in memory): nothing to pick again.
+    function checkAgain() {
+        claimRetryAt = 0
+        if (claimSource !== "")
+            checkClaimFile(claimSource, false)
+    }
     property var bridgePrograms: []        // get_config bridge_programs: the bridges this wallet reads
     // The LEZ Bridge package, installed from here: what Basecamp has installed (package_manager,
     // read only; null until read for sure), whether the bridge module answered, whether the copy
@@ -1003,7 +1033,7 @@ Item {
                 return
             }
             if (update) {
-                bridgeInstall = { phase: "updated", line: "Updated. The LEZ Bridge running now keeps its old version until it restarts: in Basecamp, Settings (the gear) → Module Inspector → LEZ Bridge → Unload, then come back here and press Start the LEZ Bridge. Or restart Basecamp." }
+                bridgeInstall = { phase: "updated", line: "Updated. To use it now: Settings (the gear) → Module Inspector → LEZ Bridge → Unload, then Start here." }
                 return
             }
             againAfter(1500, startBridge)
@@ -1045,6 +1075,11 @@ Item {
         claimUncertain = null
         claimError = ""
         claimPaste = ""
+        claimSource = ""
+        claimRetryAt = 0
+        claimDetails = false
+        claimExtras = []
+        claimExtrasDone = []
         if (depositClaimJob !== null && depositClaimJob.state !== "running")
             depositClaimJob = null
         walletView = "home"
@@ -1074,6 +1109,8 @@ Item {
         claimPaste = ""
         claimNote = ""
         claimError = ""
+        claimSource = String(source)
+        claimRetryAt = 0
         claimCheck = null
         depositClaimJob = null
         claimNeeds = null
@@ -1098,6 +1135,16 @@ Item {
             }
             claimChecking = false
             claimCheck = value
+            if (value && value.ok) {
+                claimExtras = Logic.claimExtras(appGrants, value.deposit ? value.deposit.account : "")
+                claimExtrasDone = []
+            }
+            // Not ready yet, with a time: checked again by itself then (the same file).
+            if (value && !value.ok && value.error) {
+                var wait = Logic.claimRetryAfter(value.error.code, value.error)
+                if (wait > 0)
+                    claimRetryAt = Date.now() + wait * 1000
+            }
             // A claim already started or finished for this file is shown, never started twice.
             if (value && value.ok)
                 bridgeCall("relayed_claims", [], function(list) {
@@ -1143,6 +1190,8 @@ Item {
                 return
             }
             if (value && value.needs) {
+                if (claimExtras.indexOf(Logic.needsStep(value.needs)) < 0)
+                    claimExtras = claimExtras.concat([Logic.needsStep(value.needs)])
                 claimNeeds = value
                 claimNeedsState = value.request && value.request.state ? value.request.state : "pending"
                 return
@@ -1165,6 +1214,7 @@ Item {
             claimNeedsPolling = false
             claimNeedsState = value && value.state ? value.state : ""
             if (claimNeedsState === "approved" || claimNeedsState === "done") {
+                claimExtrasDone = claimExtrasDone.concat([Logic.needsStep(claimNeeds.needs)])
                 claimNeeds = null
                 startClaim(false)
             } else if (claimNeedsState === "rejected" || claimNeedsState === "expired" || claimNeedsState === "cancelled") {
@@ -4426,6 +4476,49 @@ Item {
     property var appChosen: []            // the accounts ticked on the sheet
     property string appChosenFor: ""      // which request, in which state, those ticks are for (Logic.requestTickKey)
     property bool appUnderstood: false    // an unverified program's warning was read
+    property bool appSheetDetails: false  // the short sheet's Details open
+    // The short sheet: what is approved in a few words, one line of who and which account, one
+    // warning line with its tick when one is required, Approve / Not now; every other fact the
+    // sheet has stays under Details. For the bridge's claim flow and the other one-step asks.
+    readonly property bool appSheetCompact: appRequest !== null && ["relayed_call", "programs", "secret", "connect"].indexOf(appRequest.kind) >= 0
+        && (appRequest.kind !== "connect" || appChosen.length > 0) && appRequest.zone_in_use !== false
+    // This app's own claim screen is what asked (the bridge, for the file being claimed).
+    readonly property bool appForClaim: appRequest !== null && appRequest.app === "lez_bridge" && walletView === "claim" && claimCheck !== null && claimCheck.ok === true
+    function appSheetTitle(request) {
+        if (request === null)
+            return ""
+        var bridge = request.app === "lez_bridge"
+        if (request.kind === "relayed_call")
+            return appForClaim && claimCheck.deposit ? "Claim " + claimCheck.deposit.amount_text + " from the bridge?" : request.app + " asks you to sign"
+        if (request.kind === "connect")
+            return bridge ? "Let the bridge see this account?" : request.app + " asks to see an account"
+        if (request.kind === "programs")
+            return bridge ? "Allow the bridge's programs?" : request.app + " asks to allow its programs"
+        if (request.kind === "secret")
+            return bridge ? "Allow the bridge's deposit keys?" : request.app + " asks for keys of its own"
+        return appRequestTitle(request)
+    }
+    function appSheetLine(request) {
+        if (request === null)
+            return ""
+        if (request.kind === "relayed_call")
+            return appForClaim ? "Into your account " + Logic.idShort(claimAccount) + " · the bridge pays the fee"
+                : "Signs with your account " + Logic.idShort(request.account || (appChosen[0] || "")) + " · another account pays the fee"
+        if (request.kind === "connect")
+            return "Account " + appChosen.map(Logic.idShort).join(", ") + " · asked by " + request.app
+        if (request.kind === "programs")
+            return "So it can ask you to sign its claims · asked by " + request.app
+        if (request.kind === "secret")
+            return "From your account " + Logic.idShort(request.account || "") + " · asked by " + request.app
+        return ""
+    }
+    function appSheetWarning(request) {
+        if (request === null || !appRequestRisky(request))
+            return ""
+        if (appPublisherFailed(request))
+            return "This app may not be who it says. Approve only if you trust it."
+        return "This wallet can't read what the call does. Approve only if you trust " + (request.app === "lez_bridge" ? "the bridge" : request.app) + "."
+    }
     property bool appBusy: false          // an answer is on its way to the module
     property string appError: ""
     property var appGrants: []            // [{app, accounts, since}]
@@ -4485,6 +4578,7 @@ Item {
                     console.log("names_ui: request " + request.id + " sheet changed: " + key)
                 appChosenFor = key
                 appUnderstood = false
+                appSheetDetails = false
                 appError = ""
                 // Access for the bridge while this app's claim screen has its file: that account only.
                 appChosen = Logic.preTicked(request, appPublisherFailed(request), request.app === "lez_bridge" ? claimAccount : "")
@@ -4607,7 +4701,7 @@ Item {
             else if (approve && request.kind === "token_source")
                 say("Its tokens now show in your holdings.", false)
             else if (approve && request.kind === "relayed_call")
-                say("Signed for " + request.app + ": it has the transaction to hand to whoever pays. Your wallet sent nothing and paid nothing.", false)
+                say("Signed for " + request.app + ". Its relay sends it and pays the fee.", false)
             else if (approve && request.kind === "programs")
                 say(request.app + " may now ask you to sign calls to these programs; you approve each call.", false)
             else if (approve)
@@ -7475,6 +7569,7 @@ Item {
 
                 // ── Claim a bridge deposit ──
                 ColumnLayout {
+                    id: claimScreen
                     visible: root.walletView === "claim"
                     Layout.fillWidth: true
                     Layout.maximumWidth: 680
@@ -7488,17 +7583,22 @@ Item {
                     Hint {
                         visible: root.claimStageNow === "missing" && root.bridgeInstall === null
                         color: root.ink
-                        text: root.bridgeSetupNow === "absent" && root.bridgeBundle === "ok" ? "Claims go through the LEZ Bridge package, which isn't installed. It comes with Names: one click installs it. Basecamp asks you to confirm, and says it isn't signed yet."
-                            : root.bridgeSetupNow === "idle" ? "The LEZ Bridge is installed but not running. Basecamp starts it when its app opens: Names opens it for a moment, then comes back."
+                        text: root.bridgeSetupNow === "absent" && root.bridgeBundle === "ok" ? "The LEZ Bridge package isn't installed. It comes with Names."
+                            : root.bridgeSetupNow === "idle" ? "The LEZ Bridge isn't running."
                             : root.bridgeSetupNow === "absent" && root.bridgeBundle === "" ? "Looking for the LEZ Bridge package…"
                             : "Install the LEZ Bridge package: Package Manager (the cube icon) → Install Local Package"
                     }
                     RowLayout {
                         visible: root.claimStageNow === "missing" && (root.bridgeInstall === null || root.bridgeInstall.phase === "failed")
                         spacing: 12
-                        Action { visible: root.bridgeSetupNow === "absent" && root.bridgeBundle === "ok"; label: "Install the LEZ Bridge package"; strong: true; onPressed: root.installBridge(false) }
-                        Action { visible: root.bridgeSetupNow === "idle"; label: "Start the LEZ Bridge"; strong: true; onPressed: root.startBridge() }
+                        Action { visible: root.bridgeSetupNow === "absent" && root.bridgeBundle === "ok"; label: "Install"; strong: true; onPressed: root.installBridge(false) }
+                        Action { visible: root.bridgeSetupNow === "idle"; label: "Start"; strong: true; onPressed: root.startBridge() }
                         Link { visible: root.bridgeSetupNow === "idle" || root.bridgeSetupNow === "unknown"; text: "Look again"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.openClaim() }
+                    }
+                    Hint {
+                        visible: root.claimStageNow === "missing" && root.bridgeInstall === null && ((root.bridgeSetupNow === "absent" && root.bridgeBundle === "ok") || root.bridgeSetupNow === "idle")
+                        font.pixelSize: root.px(15)
+                        text: root.bridgeSetupNow === "idle" ? "Names opens its app for a moment, then comes back." : "Basecamp asks you to confirm."
                     }
                     Hint {
                         visible: root.bridgeInstall !== null
@@ -7510,39 +7610,116 @@ Item {
                         visible: !root.claimMissing && root.bridgeSetupNow === "older" && root.bridgeBundle === "ok" && (root.bridgeInstall === null || root.bridgeInstall.phase === "failed")
                         spacing: 10
                         Hint { Layout.fillWidth: false; font.pixelSize: root.px(15); text: "A newer LEZ Bridge comes with Names." }
-                        Link { text: "Update the LEZ Bridge package"; color: root.brass; font.pixelSize: root.px(15); onPressed: root.installBridge(true) }
+                        Link { text: "Update"; color: root.brass; font.pixelSize: root.px(15); onPressed: root.installBridge(true) }
                     }
 
                     Hint { visible: root.claimStageNow === "looking"; text: "Looking for the LEZ Bridge…" }
-                    // The file.
-                    Hint { visible: root.claimStageNow === "start"; text: "Choose the claim file the deposit page gave you, or paste its text. The first claim asks two extra questions; later ones don't." }
-                    RowLayout {
-                        visible: root.claimStageNow === "start"
-                        spacing: 12
-                        Action { label: "Choose the claim file"; strong: true; onPressed: root.pickClaimFile() }
+
+                    // The claim as numbered steps: finished ones one line with a tick, the current
+                    // one large with its one action, later ones grey; everything else under Details.
+                    readonly property var steps: Logic.claimSteps({ stage: root.claimStageNow, extras: root.claimExtras, extrasDone: root.claimExtrasDone,
+                        needs: root.claimNeeds !== null ? root.claimNeeds.needs : "", job: root.depositClaimJob, summary: root.claimSummaryNow })
+                    readonly property var stepNow: steps.filter(function(x) { return x.state === "now" })[0] || null
+                    readonly property bool stepsShown: root.claimStageNow !== "missing" && root.claimStageNow !== "looking"
+                    Repeater {
+                        model: claimScreen.stepsShown ? claimScreen.steps.filter(function(x) { return x.state === "done" && x.key !== "done" }) : []
+                        Hint {
+                            required property var modelData
+                            font.pixelSize: root.px(15)
+                            color: root.good
+                            text: "✓ Step " + modelData.n + " of " + modelData.total + " · " + modelData.title + (modelData.line ? ": " + modelData.line : "")
+                        }
                     }
+                    Text {
+                        visible: claimScreen.stepsShown && claimScreen.stepNow !== null || root.claimStageNow === "done"
+                        Layout.fillWidth: true
+                        readonly property var step: root.claimStageNow === "done" ? claimScreen.steps[claimScreen.steps.length - 1] : claimScreen.stepNow
+                        text: step === null || step === undefined ? "" : (root.claimStageNow === "done" ? "✓ " : "") + "Step " + step.n + " of " + step.total + " · " + step.title
+                        color: root.claimStageNow === "done" ? root.good : root.ink
+                        font.family: root.sans
+                        font.pixelSize: root.px(22)
+                        font.weight: Font.DemiBold
+                        wrapMode: Text.WordWrap
+                    }
+
+                    // Step: the file.
+                    Hint { visible: root.claimStageNow === "start"; text: "Use the claim file the deposit page gave you." }
                     RowLayout {
                         visible: root.claimStageNow === "start"
                         Layout.fillWidth: true
                         spacing: 10
+                        Action { label: "Choose file"; strong: true; onPressed: root.pickClaimFile() }
                         // Shown as dots: the file holds the claim's secret. It leaves the field when checked.
-                        Field { id: claimPasteField; Layout.fillWidth: true; secret: true; hint: "…or paste the claim file here"; onTextChanged: root.claimPaste = text }
-                        Action { label: "Check"; enabledNow: claimPasteField.text.trim() !== ""; onPressed: { var text = claimPasteField.text; claimPasteField.text = ""; root.checkClaimFile(text) } }
+                        Field { id: claimPasteField; Layout.fillWidth: true; secret: true; hint: "or paste it here"; onTextChanged: root.claimPaste = text }
+                        Action { visible: claimPasteField.text.trim() !== ""; label: "Check"; onPressed: { var text = claimPasteField.text; claimPasteField.text = ""; root.checkClaimFile(text) } }
                     }
                     Hint { visible: root.claimNote !== ""; color: root.brass; text: root.claimNote }
-                    Hint { visible: root.claimStageNow === "checking"; text: "Checking the claim file on Sepolia and the bridge test network… nothing is signed or sent." }
 
-                    // What the file is, and the six checks.
-                    Card {
-                        visible: root.claimCheck !== null && root.claimCheck.ok === true
+                    // Step: the check.
+                    Hint { visible: root.claimStageNow === "ready" || root.claimStageNow === "elsewhere" || root.claimStageNow === "wrong_bridge"; color: root.ink; text: root.claimSummaryNow }
+                    Hint { visible: root.claimStageNow === "refused"; color: root.alarm; text: root.claimRefusalLine }
+                    Hint { visible: root.claimStageNow === "elsewhere"; color: root.alarm; text: root.claimAccountProblemNow }
+                    Hint { visible: root.claimStageNow === "wrong_bridge"; color: root.alarm; text: root.claimBridgeNow.problem }
+                    Hint { visible: root.claimStageNow === "ready" && root.claimCheck !== null && !!root.claimCheck.privacy; color: root.brass; font.pixelSize: root.px(15); text: "Public claim: links this deposit to this account." }
+                    Action { visible: root.claimStageNow === "ready"; label: "Claim"; strong: true; onPressed: root.startClaim(false) }
+                    Hint { visible: root.claimStageNow === "ready"; font.pixelSize: root.px(15); text: "The bridge pays the fee." }
+
+                    // Steps answered in a sheet over this screen.
+                    Hint {
+                        visible: root.claimStageNow === "asking" || root.claimStageNow === "needs" || (root.claimStageNow === "running" && claimScreen.stepNow !== null && claimScreen.stepNow.key === "approve")
+                        text: root.claimStageNow === "asking" ? "Asking your wallet…" : "Answer it in the sheet."
+                    }
+                    Hint { visible: root.claimStageNow === "uncertain"; color: root.brass; text: "No answer from your wallet. If a claim sheet is open, reject it, then press Continue." }
+                    Action { visible: root.claimStageNow === "uncertain"; label: "Continue"; strong: true; onPressed: root.startClaim(true) }
+
+                    // The last step: sending, then done.
+                    Hint {
+                        visible: root.claimStageNow === "running" && claimScreen.stepNow !== null && claimScreen.stepNow.key === "done"
+                        text: root.depositClaimJob !== null && root.depositClaimJob.phase === "confirm" ? "Waiting for its block…" : "The bridge's relay is sending it…"
+                    }
+                    Action { visible: root.claimStageNow === "running" && root.depositClaimJob !== null && root.depositClaimJob.can_cancel === true; label: "Cancel"; onPressed: root.cancelClaim() }
+                    Hint {
+                        visible: root.claimStageNow === "done" && root.depositClaimJob !== null && root.depositClaimJob.result && !!root.depositClaimJob.result.balance_text
+                        color: root.ink
+                        text: root.depositClaimJob !== null && root.depositClaimJob.result ? "Now in the account: " + root.depositClaimJob.result.balance_text + " (wrapped)." : ""
+                    }
+                    Hint { visible: root.claimStageNow === "failed"; color: root.alarm; text: root.depositClaimJob !== null && root.depositClaimJob.error ? Logic.claimErrorLine(root.depositClaimJob.error.code, root.depositClaimJob.error) : "The claim stopped. Try again." }
+                    Hint { visible: root.claimError !== ""; color: root.alarm; text: root.claimError }
+
+                    // Not ready yet: the same file is checked again (by itself when there is a time).
+                    Hint { visible: root.claimRetryAt > 0; font.pixelSize: root.px(15); text: "Checking again by itself in " + root.claimRetryLeft + "." }
+                    RowLayout {
+                        visible: !root.claimChecking && (root.claimStageNow === "refused" || root.claimStageNow === "failed" || (root.claimError !== "" && root.claimCheck === null))
+                        spacing: 14
+                        // The same file again (still in memory); after leaving the screen, the file is chosen again.
+                        Action {
+                            label: root.claimSource === "" ? "Choose file" : root.claimStageNow === "failed" ? "Try again" : "Check again"
+                            strong: true
+                            onPressed: if (root.claimSource !== "") root.checkAgain(); else { root.leaveClaim(); root.openClaim(); root.pickClaimFile() }
+                        }
+                        Link { visible: root.claimSource !== ""; text: "Choose another file"; font.pixelSize: root.px(15); onPressed: { root.leaveClaim(); root.openClaim() } }
+                    }
+                    Action { visible: root.claimError !== "" && root.claimAgain && root.claimCheck !== null && root.claimCheck.ok && root.depositClaimJob === null; label: "Try again"; strong: true; onPressed: root.startClaim(false) }
+
+                    // Details, closed by default: every fact the screen used to show.
+                    Link {
+                        visible: claimScreen.stepsShown && root.claimStageNow !== "start"
+                        text: root.claimDetails ? "Details ▾" : "Details ▸"
+                        color: root.dim
+                        font.pixelSize: root.px(15)
+                        onPressed: root.claimDetails = !root.claimDetails
+                    }
+                    ColumnLayout {
+                        visible: root.claimDetails && claimScreen.stepsShown && root.claimStageNow !== "start"
                         Layout.fillWidth: true
-                        Part { Layout.topMargin: 0; text: root.claimCheck !== null && root.claimCheck.deposit ? "Claim " + root.claimCheck.deposit.amount_text : "" }
-                        Hint { font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.ok ? String(root.claimCheck.network || "LEZ 0.4 · bridge test network") : "" }
-                        Fact { label: "Into"; code: true; value: root.claimAccount; full: root.claimAccount }
-                        Fact { label: "Bridge"; value: root.claimBridgeNow.label }
-                        Fact { label: "From"; value: root.claimCheck !== null && root.claimCheck.deposit ? "Sepolia deposit, leaf " + root.claimCheck.deposit.leaf_index + " of " + root.claimCheck.deposit.leaves + " (final)" : "" }
-                        Fact { label: "Signs"; value: "Your wallet, after you approve its sheet here. It sends nothing and pays nothing." }
-                        Fact { label: "Sends and pays"; value: root.claimCheck !== null && root.claimCheck.relay ? "The bridge's relay, at most " + root.grouped(root.claimCheck.relay.max_fee) + " LEZ of its own" : "" }
+                        spacing: 10
+                        Hint { visible: root.claimStageNow === "checking"; font.pixelSize: root.px(15); text: "Checking the claim file on Sepolia and the bridge test network. Nothing is signed or sent." }
+                        Hint { visible: root.claimCheck !== null && root.claimCheck.ok === true; font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.ok ? String(root.claimCheck.network || "LEZ 0.4 · bridge test network") : "" }
+                        Fact { visible: root.claimCheck !== null && root.claimCheck.ok === true; label: "Into"; code: true; value: root.claimAccount; full: root.claimAccount }
+                        Fact { visible: root.claimCheck !== null && root.claimCheck.ok === true; label: "Bridge"; value: root.claimBridgeNow.label }
+                        Fact { visible: root.claimCheck !== null && root.claimCheck.ok === true; label: "From"; value: root.claimCheck !== null && root.claimCheck.deposit ? "Sepolia deposit, leaf " + root.claimCheck.deposit.leaf_index + " of " + root.claimCheck.deposit.leaves + " (final)" : "" }
+                        Fact { visible: root.claimCheck !== null && root.claimCheck.ok === true; label: "Signs"; value: "Your wallet signs. The bridge's relay sends it." }
+                        Fact { visible: root.claimCheck !== null && root.claimCheck.ok === true && !!root.claimCheck.relay; label: "Fee"; value: root.claimCheck !== null && root.claimCheck.relay ? "Paid by the bridge's relay, at most " + root.grouped(root.claimCheck.relay.max_fee) + " LEZ" + (root.claimCheck.relay.payer ? " (" + root.accountShort(root.claimCheck.relay.payer) + ")" : "") : "" }
                         Repeater {
                             model: root.claimCheck !== null && Array.isArray(root.claimCheck.checks) ? root.claimCheck.checks : []
                             Hint {
@@ -7552,72 +7729,37 @@ Item {
                                 text: (modelData.ok ? "✓ " : "✗ ") + modelData.text
                             }
                         }
-                        Hint { visible: root.claimCheck !== null && !!root.claimCheck.privacy; font.pixelSize: root.px(15); color: root.alarm; text: root.claimCheck !== null && root.claimCheck.privacy ? root.claimCheck.privacy + " A private deposit is claimed in the LEZ Bridge app instead." : "" }
+                        Hint { visible: root.claimCheck !== null && !!root.claimCheck.privacy; font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.privacy ? root.claimCheck.privacy + " Private claims aren't in this wallet yet." : "" }
+                        Hint { visible: root.claimCheck !== null && !!root.claimCheck.approval; font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.approval ? root.claimCheck.approval : "" }
+                        Hint { visible: root.claimCheck !== null && root.claimCheck.ok === false && !!root.claimCheck.error; font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.error ? Logic.claimErrorTitle(root.claimCheck.error.code) + ": " + String(root.claimCheck.error.message || "") : "" }
+                        Repeater {
+                            model: root.depositClaimJob !== null ? Logic.claimPhases(root.depositClaimJob) : []
+                            Hint {
+                                required property var modelData
+                                font.pixelSize: root.px(15)
+                                color: modelData.done ? root.good : modelData.now ? root.brass : root.dim
+                                text: (modelData.done ? "✓ " : modelData.now ? "… " : "· ") + modelData.word + ": " + modelData.hint
+                            }
+                        }
+                        Hint { visible: root.depositClaimJob !== null && !!root.depositClaimJob.note; font.pixelSize: root.px(15); text: root.depositClaimJob !== null && root.depositClaimJob.note ? root.depositClaimJob.note : "" }
+                        Hint { visible: root.depositClaimJob !== null && !!root.depositClaimJob.error; font.pixelSize: root.px(15); text: root.depositClaimJob !== null && root.depositClaimJob.error ? Logic.claimErrorTitle(root.depositClaimJob.error.code) + ": " + String(root.depositClaimJob.error.message || "") : "" }
+                        Hint { visible: root.claimUncertain !== null; font.pixelSize: root.px(15); text: root.claimUncertain !== null ? String(root.claimUncertain.message || "") : "" }
+                        Hint { visible: root.claimNeeds !== null && !!root.claimNeeds.message; font.pixelSize: root.px(15); text: root.claimNeeds !== null ? String(root.claimNeeds.message || "") : "" }
                     }
-                    // A refusal from the check.
-                    Card {
-                        visible: root.claimStageNow === "refused"
-                        Layout.fillWidth: true
-                        Part { Layout.topMargin: 0; text: root.claimCheck !== null && root.claimCheck.error ? Logic.claimErrorTitle(root.claimCheck.error.code) : "" }
-                        Hint { text: root.claimCheck !== null && root.claimCheck.error ? String(root.claimCheck.error.message || "") : "" }
-                    }
-                    Hint { visible: root.claimStageNow === "elsewhere"; color: root.alarm; text: root.claimAccountProblemNow }
-                    Hint { visible: root.claimStageNow === "wrong_bridge"; color: root.alarm; text: root.claimBridgeNow.problem }
 
-                    // Claim.
-                    Hint { visible: root.claimStageNow === "ready" && root.claimCheck !== null && !!root.claimCheck.approval; text: root.claimCheck !== null && root.claimCheck.approval ? root.claimCheck.approval : "" }
-                    Action { visible: root.claimStageNow === "ready"; label: "Claim"; strong: true; onPressed: root.startClaim(false) }
-                    Hint { visible: root.claimStageNow === "ready"; font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.wording ? root.claimCheck.wording : "" }
-                    Hint { visible: root.claimStageNow === "asking"; text: "Asking your wallet…" }
-                    Hint {
-                        visible: root.claimStageNow === "needs"
-                        color: root.brass
-                        text: root.claimNeeds === null ? "" : (root.claimNeeds.needs === "connect" ? "First, let the LEZ Bridge see the account this deposit is for: answer the sheet in this app."
-                            : root.claimNeeds.needs === "programs" ? "First, approve the bridge's programs: answer the sheet in this app. This is asked once."
-                            : root.claimNeeds.needs === "public_account" ? "First, give the LEZ Bridge the account this deposit is for: answer the sheet in this app."
-                            : String(root.claimNeeds.message || "Answer the sheet in this app."))
-                    }
-                    Hint {
-                        visible: root.claimStageNow === "uncertain"
-                        color: root.brass
-                        text: root.claimUncertain === null ? "" : String(root.claimUncertain.message || "") + " Requests from the LEZ Bridge waiting here now: " + root.appRequests.filter(function(r) { return r.app === "lez_bridge" }).length + "."
-                    }
-                    Action { visible: root.claimStageNow === "uncertain"; label: "Continue"; onPressed: root.startClaim(true) }
-
-                    // Progress.
+                    // Later steps, grey.
                     Repeater {
-                        model: root.depositClaimJob !== null ? Logic.claimPhases(root.depositClaimJob) : []
+                        model: claimScreen.stepsShown ? claimScreen.steps.filter(function(x) { return x.state === "later" }) : []
                         Hint {
                             required property var modelData
-                            font.pixelSize: root.px(16)
-                            color: modelData.done ? root.good : modelData.now ? root.brass : root.dim
-                            text: (modelData.done ? "✓ " : modelData.now ? "… " : "· ") + modelData.word + ": " + modelData.hint
+                            font.pixelSize: root.px(15)
+                            color: root.faint
+                            text: "Step " + modelData.n + " of " + modelData.total + " · " + modelData.title
                         }
                     }
-                    Hint { visible: root.claimStageNow === "running" && root.depositClaimJob !== null && !!root.depositClaimJob.note; font.pixelSize: root.px(15); text: root.depositClaimJob !== null && root.depositClaimJob.note ? root.depositClaimJob.note : "" }
-                    Action { visible: root.claimStageNow === "running" && root.depositClaimJob !== null && root.depositClaimJob.can_cancel === true; label: "Cancel the claim"; onPressed: root.cancelClaim() }
-                    Text {
-                        visible: root.claimStageNow === "done"
-                        Layout.fillWidth: true
-                        text: root.depositClaimJob !== null ? "✓ Claimed in block " + root.depositClaimJob.block + (root.depositClaimJob.result && root.depositClaimJob.result.balance_text ? ". Now in the account: " + root.depositClaimJob.result.balance_text + " (wrapped)." : ".") : ""
-                        color: root.good
-                        font.family: root.sans
-                        font.pixelSize: root.px(20)
-                        font.weight: Font.DemiBold
-                        wrapMode: Text.WordWrap
-                    }
-                    Card {
-                        visible: root.claimStageNow === "failed"
-                        Layout.fillWidth: true
-                        Part { Layout.topMargin: 0; text: root.depositClaimJob !== null && root.depositClaimJob.error ? Logic.claimErrorTitle(root.depositClaimJob.error.code) : "The claim stopped" }
-                        Hint { text: root.depositClaimJob !== null && root.depositClaimJob.error ? String(root.depositClaimJob.error.message || "") : String(root.depositClaimJob !== null ? root.depositClaimJob.state : "") }
-                    }
-
-                    Hint { visible: root.claimError !== ""; color: root.alarm; text: root.claimError }
-                    Action { visible: root.claimError !== "" && root.claimAgain && root.claimCheck !== null && root.claimCheck.ok && root.depositClaimJob === null; label: "Try again"; onPressed: root.startClaim(false) }
                     Link {
-                        visible: root.claimStageNow !== "start" && root.claimStageNow !== "missing" && root.claimStageNow !== "running" && root.claimStageNow !== "asking" && root.claimStageNow !== "needs"
-                        text: "Check another claim file"
+                        visible: root.claimStageNow === "done"
+                        text: "Claim another deposit"
                         font.pixelSize: root.px(15)
                         onPressed: { root.leaveClaim(); root.openClaim() }
                     }
@@ -10277,7 +10419,68 @@ Item {
                 width: Math.min(appSheet.width - root.px(64), root.px(760))
                 x: (appSheet.width - width) / 2
                 y: Math.max(root.px(32), (appSheet.height - implicitHeight) / 2)
+                // The short sheet (appSheetCompact): everything a person needs to decide, above the fold.
                 Text {
+                    visible: root.appSheetCompact
+                    Layout.fillWidth: true
+                    text: root.appSheetTitle(appSheet.request)
+                    textFormat: Text.PlainText
+                    color: root.ink
+                    font.family: root.sans
+                    font.pixelSize: root.px(24)
+                    font.weight: Font.DemiBold
+                    wrapMode: Text.WordWrap
+                }
+                Hint { visible: root.appSheetCompact; color: root.ink; textFormat: Text.PlainText; text: root.appSheetLine(appSheet.request) }
+                Hint { visible: root.appSheetCompact && root.publisherChecking(appSheet.request); font.pixelSize: root.px(15); text: root.publisherShown(appSheet.request) !== null ? root.publisherShown(appSheet.request).text : "" }
+                RowLayout {
+                    visible: root.appSheetCompact && root.appSheetWarning(appSheet.request) !== ""
+                    Layout.fillWidth: true
+                    spacing: 10
+                    Rectangle {
+                        Layout.preferredWidth: 18
+                        Layout.preferredHeight: 18
+                        Layout.alignment: Qt.AlignTop
+                        radius: 4
+                        color: root.appUnderstood ? root.alarm : "transparent"
+                        border.width: 2
+                        border.color: root.alarm
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.appUnderstood = !root.appUnderstood }
+                    }
+                    Hint {
+                        color: root.ink
+                        textFormat: Text.PlainText
+                        text: root.appSheetWarning(appSheet.request)
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.appUnderstood = !root.appUnderstood }
+                    }
+                }
+                Hint { visible: root.appSheetCompact && root.appError !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.appError }
+                Hint { visible: root.appSheetCompact && root.appBusy; color: root.brass; text: "One moment…" }
+                RowLayout {
+                    visible: root.appSheetCompact
+                    spacing: 10
+                    Action {
+                        label: appSheet.request !== null && appSheet.request.checking === true ? "Waiting for the check…" : "Approve"
+                        strong: true
+                        enabledNow: root.appCanApprove()
+                        onPressed: root.answerAppRequest(true)
+                    }
+                    Action { label: "Not now"; enabledNow: !root.appBusy; onPressed: root.answerAppRequest(false) }
+                }
+                Link {
+                    visible: root.appSheetCompact
+                    text: root.appSheetDetails ? "Details ▾" : "Details ▸"
+                    color: root.dim
+                    font.pixelSize: root.px(15)
+                    onPressed: root.appSheetDetails = !root.appSheetDetails
+                }
+                // The full sheet: shown as it is, or under Details on the short sheet.
+                ColumnLayout {
+                    visible: !root.appSheetCompact || root.appSheetDetails
+                    Layout.fillWidth: true
+                    spacing: 14
+                Text {
+                    visible: !root.appSheetCompact
                     Layout.fillWidth: true
                     text: root.appRequestTitle(appSheet.request)
                     textFormat: Text.PlainText
@@ -10627,9 +10830,11 @@ Item {
                         : "Your wallet has no accounts yet. Create your wallet first (Welcome, Create my wallet)."
                 }
 
+                }
+
                 // A risky call needs a second, deliberate tick.
                 RowLayout {
-                    visible: appSheet.request !== null && root.appRequestRisky(appSheet.request)
+                    visible: !root.appSheetCompact && appSheet.request !== null && root.appRequestRisky(appSheet.request)
                     Layout.fillWidth: true
                     spacing: 10
                     Rectangle {
@@ -10669,13 +10874,14 @@ Item {
                     }
                     Hint { visible: root.zoneNoteBad; color: root.alarm; font.pixelSize: root.px(15); textFormat: Text.PlainText; text: root.zoneNote }
                 }
-                Hint { visible: root.appError !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.appError }
-                Hint { visible: root.appBusy; color: root.brass; text: appSheet.kind === "call" ? "Trying it, then signing and sending it. This waits for its block, up to two minutes…" : "One moment…" }
+                Hint { visible: !root.appSheetCompact && root.appError !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.appError }
+                Hint { visible: !root.appSheetCompact && root.appBusy; color: root.brass; text: appSheet.kind === "call" ? "Trying it, then signing and sending it. This waits for its block, up to two minutes…" : "One moment…" }
                 RowLayout {
+                    visible: !root.appSheetCompact
                     Layout.topMargin: 8
                     spacing: 10
                     Action {
-                        label: appSheet.request !== null && appSheet.request.checking === true ? "Waiting for the check…" : appSheet.kind === "connect" ? "Share" : appSheet.kind === "call" ? "Approve and sign" : appSheet.kind === "private_call" ? "Approve, prove and send" : appSheet.kind === "secret" ? "Allow" : appSheet.kind === "token_source" ? "Show these tokens" : appSheet.kind === "relayed_call" ? "Sign, send nothing" : appSheet.kind === "programs" ? "Allow these programs" : "Approve and send"
+                        label: appSheet.request !== null && appSheet.request.checking === true ? "Waiting for the check…" : appSheet.kind === "connect" ? "Share" : appSheet.kind === "call" ? "Approve and sign" : appSheet.kind === "private_call" ? "Approve, prove and send" : appSheet.kind === "secret" ? "Allow" : appSheet.kind === "token_source" ? "Show these tokens" : appSheet.kind === "relayed_call" ? "Approve" : appSheet.kind === "programs" ? "Allow these programs" : "Approve and send"
                         strong: true
                         enabledNow: root.appCanApprove()
                         onPressed: root.answerAppRequest(true)

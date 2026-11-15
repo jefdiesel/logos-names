@@ -588,5 +588,29 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     ["Checking who publishes this app… about 15 s", "Checking who publishes this app… about 7 s", "Checking who publishes this app… a few more seconds"]);
 }
 
+{
+  const { idShort, claimExtras, claimSteps, claimSummary, claimErrorLine } = await import("./qml/logic.mjs");
+  const A = "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk";
+  check("idShort", [idShort(A), idShort("short")], ["CCVd76…pKnk", "short"]);
+  check("claimExtras: none / another account / no grant",
+    [claimExtras([{ app: "lez_bridge", accounts: [A] }], A), claimExtras([{ app: "lez_bridge", accounts: ["Public/x"] }], A), claimExtras([], A), claimExtras([{ app: "lez_bridge", accounts: [{ account: A }] }], A)],
+    [[], ["public_account"], ["connect", "programs"], []]);
+  const view = (steps) => steps.map((x) => x.n + "/" + x.total + " " + x.state + " " + x.title + (x.line ? " — " + x.line : ""));
+  check("steps: choose the file (4 steps)", view(claimSteps({ stage: "start", extras: [] })),
+    ["1/4 now Choose the claim file", "2/4 later Check", "3/4 later Approve in your wallet", "4/4 later Claim"]);
+  check("steps: checked, first claim (6 steps)", view(claimSteps({ stage: "ready", extras: ["connect", "programs"], summary: "0.1 ETH → your account CCVd76…pKnk (bridge v3)" })),
+    ["1/6 done Choose the claim file — Claim file read", "2/6 now Checked ✓", "3/6 later Let the bridge see this account", "4/6 later Allow the bridge's programs", "5/6 later Approve in your wallet", "6/6 later Claim"]);
+  check("steps: the connect sheet", view(claimSteps({ stage: "needs", needs: "connect", extras: ["connect", "programs"], summary: "S" }))[2], "3/6 now Let the bridge see this account");
+  check("steps: an unexpected needs adds a step", claimSteps({ stage: "needs", needs: "programs", extras: [], summary: "S" }).map((x) => x.key), ["file", "check", "programs", "approve", "done"]);
+  check("steps: approve, then sending, then done",
+    [view(claimSteps({ stage: "running", job: { phase: "approve" }, extras: [] }))[2], view(claimSteps({ stage: "running", job: { phase: "relay" }, extras: [] }))[3], view(claimSteps({ stage: "done", job: { phase: "done", state: "done", block: 5249 }, extras: [] }))[3]],
+    ["3/4 now Approve in your wallet", "4/4 now Claiming…", "4/4 done Done: claimed in block 5249"]);
+  const { claimRetryAfter } = await import("./qml/logic.mjs");
+  check("claimRetryAfter", [claimRetryAfter("not_final", { eta_s: 330 }), claimRetryAfter("not_final", {}), claimRetryAfter("root_not_attested"), claimRetryAfter("relay_cap")], [330, 0, 60, 0]);
+  check("claimSummary", claimSummary({ ok: true, deposit: { amount_text: "0.1 ETH", account: A } }, "bridge v3"), "0.1 ETH → your account CCVd76…pKnk (bridge v3)");
+  check("claimErrorLine", [claimErrorLine("relay_cap"), claimErrorLine("not_final", { eta_s: 330 }), claimErrorLine("relay_busy"), claimErrorLine("nonsense")],
+    ["The bridge's relay has reached today's limit. Nothing was sent. Try again later.", "Not final on Ethereum yet: about 6 min.", "The relay is busy. Try again.", "The claim can't go on."]);
+}
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);

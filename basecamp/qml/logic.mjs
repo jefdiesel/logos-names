@@ -1350,3 +1350,128 @@ export function publisherWaitLine(since, now, total) {
     var left = Math.ceil(((since || now) + (total || 15000) - now) / 1000)
     return left >= 1 ? "Checking who publishes this app… about " + left + " s" : "Checking who publishes this app… a few more seconds"
 }
+
+// ── The claim as numbered steps (one action per step; the rest under Details) ──
+
+/// An account ID as its first 6 and last 4 characters ("CCVd76…pKnk"), without its kind.
+export function idShort(account) {
+    var id = String(account || "").replace(/^(Public|Private)\//, "")
+    return id.length > 12 ? id.substr(0, 6) + "…" + id.substr(id.length - 4) : id
+}
+
+/// The first-time questions a claim into `account` will ask, from the wallet's app grants
+/// (`app_grants`: [{app, accounts}]): none when the bridge already sees the account; "public_account"
+/// when it sees others; "connect" then "programs" when it sees none.
+export function claimExtras(grants, account, app) {
+    var grant = (grants || []).filter(function(g) { return g && g.app === (app || "lez_bridge") })[0]
+    if (!grant)
+        return ["connect", "programs"]
+    var want = String(account || "").replace(/^(Public|Private)\//, "")
+    var sees = (grant.accounts || []).some(function(a) {
+        var id = typeof a === "string" ? a : a && (a.account || a.id) ? String(a.account || a.id) : ""
+        return id.replace(/^(Public|Private)\//, "") === want
+    })
+    return sees ? [] : ["public_account"]
+}
+
+/// A `needs` the module answered, as a step key.
+export function needsStep(needs) {
+    var n = String(needs || "")
+    return n === "declare" ? "programs" : n
+}
+
+var STEP_TITLES = {
+    file: "Choose the claim file", check: "Check", connect: "Let the bridge see this account",
+    programs: "Allow the bridge's programs", public_account: "Give the bridge this account",
+    secret: "Allow the bridge's deposit keys", approve: "Approve in your wallet", done: "Claim"
+}
+var STEP_DONE = {
+    file: "Claim file read", connect: "The bridge sees this account", programs: "The bridge's programs allowed",
+    public_account: "Account given to the bridge", secret: "Deposit keys allowed", approve: "Approved"
+}
+
+/// The claim's steps: [{key, n, total, title, state ("done" | "now" | "later"), line}]. `s`: {stage
+/// (claimStage), extras (claimExtras), extrasDone, needs (the module's needs now), job, summary
+/// (the checked deposit in one line)}.
+export function claimSteps(s) {
+    var st = s || {}
+    var extras = (st.extras || []).map(needsStep)
+    var needs = needsStep(st.needs)
+    if (needs && extras.indexOf(needs) < 0)
+        extras = extras.concat([needs])
+    var keys = ["file", "check"].concat(extras, ["approve", "done"])
+    var done = (st.extrasDone || []).map(needsStep)
+    var job = st.job || null
+    var stage = st.stage || "start"
+    var now
+    if (stage === "start") now = "file"
+    else if (["checking", "refused", "elsewhere", "wrong_bridge", "ready"].indexOf(stage) >= 0) now = "check"
+    else if (stage === "needs") now = needs || "approve"
+    else if (stage === "asking") now = extras.filter(function(k) { return done.indexOf(k) < 0 })[0] || "approve"
+    else if (stage === "uncertain") now = "approve"
+    else if (stage === "running" || stage === "failed") now = job && job.phase && job.phase !== "approve" ? "done" : "approve"
+    else if (stage === "done") now = "done"
+    else now = "file"
+    var at = keys.indexOf(now)
+    return keys.map(function(k, i) {
+        var state = i < at || (stage === "done" && k === "done") ? "done" : i === at ? "now" : "later"
+        var title = STEP_TITLES[k]
+        if (k === "check" && state === "now")
+            title = stage === "checking" ? "Checking…" : stage === "ready" ? "Checked ✓" : "Check"
+        if (k === "done")
+            title = stage === "done" ? "Done: claimed in block " + (job && job.block !== undefined ? job.block : "?") : state === "now" ? (stage === "failed" ? "Claim stopped" : "Claiming…") : "Claim"
+        if (k === "approve" && state === "now" && stage === "failed")
+            title = "Not approved"
+        var line = state !== "done" ? "" : k === "check" ? String(st.summary || "Checked") : k === "done" ? "" : STEP_DONE[k] || ""
+        return { key: k, n: i + 1, total: keys.length, title: title, state: state, line: line }
+    })
+}
+
+/// The checked deposit in one line: "0.1 ETH → your account CCVd76…pKnk (bridge v3)".
+export function claimSummary(check, bridgeLabel) {
+    if (!check || !check.ok || !check.deposit)
+        return ""
+    return String(check.deposit.amount_text || "") + " → your account " + idShort(check.deposit.account) + (bridgeLabel ? " (" + bridgeLabel + ")" : "")
+}
+
+/// A refusal or failure as ONE line that says what to do (the full message goes under Details).
+export function claimErrorLine(code, error) {
+    var e = error || {}
+    var min = e.eta_s ? Math.max(1, Math.ceil(Number(e.eta_s) / 60)) : e.final_in_min ? Number(e.final_in_min) : 0
+    var lines = {
+        relay_cap: "The bridge's relay has reached today's limit. Nothing was sent. Try again later.",
+        rate_limited: "Too many claims from here today. Nothing was sent. Try again later.",
+        relay_busy: "The relay is busy. Try again.", busy: "The relay is busy. Try again.",
+        relay_unavailable: "The relay isn't answering. Nothing was sent. Try again later.",
+        relay_funds: "The relay is out of funds. Nothing was sent. Try again later.",
+        relay_once: "The relay already sent this claim.",
+        relay_refused: "The relay refused the claim. Nothing was sent. Try again.",
+        reverted: "The claim was refused on the bridge test network. Try again.",
+        not_final: min ? "Not final on Ethereum yet: about " + min + " min." : "Not final on Ethereum yet. Try again in a few minutes.",
+        root_not_attested: "Not recorded on the bridge yet. Try again in about a minute.",
+        already_claimed: "This deposit was already claimed.",
+        private_account: "This deposit is for a private account. Private claims aren't in this wallet yet.",
+        bad_file: "That isn't a claim file. Choose the file the deposit page gave you.",
+        not_in_vault: "No such deposit in the vault yet. Check the file, or try again later.",
+        unreachable: "The bridge test network can't be reached. Try again.",
+        eth_unreachable: "Sepolia can't be read just now. Try again.",
+        wallet_rejected: "You said no in your wallet. Nothing was sent.",
+        wallet_no_answer: "Your wallet didn't answer. Look for its sheet, then try again.",
+        landed_or_used: "Your account changed since you approved. Try again.",
+        minting_frozen: "Claims are paused on the bridge. Try again later.",
+        minting_frozen_token: "Claims of this token are paused. Try again later."
+    }
+    return lines[code] || (claimErrorTitle(code) + ".")
+}
+
+/// Seconds until a not-ready claim is checked again by itself: the time the refusal gives for
+/// finality, about a minute for a root not recorded yet (the bridge records one about every
+/// minute); 0 (no automatic check, the person presses Check again) for anything else.
+export function claimRetryAfter(code, error) {
+    var e = error || {}
+    if (code === "not_final")
+        return e.eta_s ? Math.max(15, Number(e.eta_s)) : e.final_in_min ? Number(e.final_in_min) * 60 : 0
+    if (code === "root_not_attested")
+        return 60
+    return 0
+}
