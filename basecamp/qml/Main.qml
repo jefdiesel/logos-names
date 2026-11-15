@@ -4211,7 +4211,7 @@ Item {
                     record = null
                     page = null
                     missing = ""
-                    say("That account has no name.", false)
+                    say("That account has no name.", "plain")
                     return
                 }
                 text = known.name
@@ -5189,7 +5189,7 @@ Item {
         }
         if (target !== "" && payForwardSeen !== to + "→" + target) {
             payForwardSeen = to + "→" + target
-            say(to + " forwards to " + target + ", so the payment goes to " + target + ". Press Pay again to send it.", false)
+            say(to + " forwards to " + target + ", so the payment goes to " + target + ". Press Pay again to send it.", "plain")
             return
         }
         payForwardSeen = ""
@@ -11505,7 +11505,7 @@ Item {
                                     Link {
                                         readonly property bool liked: root.boardLiked.indexOf(postCard.p.id) >= 0
                                         text: (liked ? "♥ " : "♡ ") + Math.max(liked ? 1 : 0, postCard.p.likes)
-                                        color: liked ? root.alarm : root.faint
+                                        color: liked ? root.brass : root.faint
                                         font.pixelSize: root.px(14)
                                         font.underline: false
                                         onPressed: root.boardToggleLike(postCard.p.id)
@@ -12488,7 +12488,7 @@ Item {
                             text: root.cliBalance === undefined ? "Checking your private account…"
                                 : root.cliBalance === null || !root.cliBalance.account ? "No private account found. Run names setup in a terminal first."
                                 : "From your private account (balance " + root.grouped(root.cliBalance.balance) + ")"
-                            color: root.cliBalance === null || !root.cliCanPay() ? root.alarm : root.dim
+                            color: root.dim
                             font.family: root.sans
                             font.pixelSize: root.px(15)
                             wrapMode: Text.Wrap
@@ -13292,7 +13292,7 @@ Item {
                                     Link {
                                         readonly property bool liked: root.boardLiked.indexOf(authorCard.modelData.id) >= 0
                                         text: (liked ? "♥ " : "♡ ") + Math.max(liked ? 1 : 0, authorCard.modelData.likes)
-                                        color: liked ? root.alarm : root.faint
+                                        color: liked ? root.brass : root.faint
                                         font.pixelSize: root.px(14)
                                         font.underline: false
                                         onPressed: root.boardToggleLike(authorCard.modelData.id)
@@ -13585,7 +13585,7 @@ Item {
                     Layout.fillWidth: true
                     text: line === null ? "" : line.text
                     textFormat: Text.PlainText
-                    color: line === null ? root.dim : line.tone === "good" ? root.good : line.tone === "warn" ? root.alarm : root.dim
+                    color: line === null ? root.dim : line.tone === "good" ? root.good : line.tone === "warn" ? root.ink : root.dim
                     font.family: root.sans
                     font.pixelSize: root.px(16)
                     font.weight: line !== null && line.tone !== "plain" ? Font.DemiBold : Font.Normal
@@ -13710,6 +13710,14 @@ Item {
                         enabledNow: !root.inscribeBusy
                         onPressed: root.answerInscribeRequest(false)
                     }
+                }
+                // A disabled Approve says why (STYLE.md).
+                WhyLine {
+                    visible: !root.inscribeBusy && !root.inscribeCanApprove() && text !== ""
+                    text: root.publisherChecking(root.inscribeRequest) ? "Waiting for the Program Registry's answer."
+                        : root.inscribeFrom === "" ? "Choose the account that pays above."
+                        : root.inscribeRequest !== null && root.appPublisherFailed(root.inscribeRequest) && !root.inscribeUnderstood ? "Tick the box above to inscribe anyway."
+                        : root.inscribeProblem !== "" ? "See the problem above." : ""
                 }
             }
         }

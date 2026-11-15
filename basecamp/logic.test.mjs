@@ -974,6 +974,9 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   const starting = "Starting… the wallet is still loading (up to half a minute after Basecamp opens).";
   check("busy, no answer and starting are waits, not problems", [noticeKind(busy, true), noticeKind(noAnswer, true), noticeKind(starting, true)], ["waiting", "waiting", "waiting"]);
   check("a real failure is a problem", noticeKind("That is not a program ID.", true), "problem");
+  // sayRead says the starting line with `false` (say(shown, shown !== moduleStarting)): still a wait.
+  check("starting said with false is a wait, not a green tick", noticeKind(starting, false), "waiting");
+  check("a plain note has no kind", noticeKind("That account has no name.", "plain"), "");
   check("a plain result is done; a said kind is kept; nothing is nothing", [noticeKind("Added Gold to your wallet.", false), noticeKind("Sending 5 LEZ…", "waiting"), noticeKind("Asking the wallet to sign.", "working"), noticeKind("", true)], ["done", "waiting", "working", ""]);
   check("the bridge module busy and the 429 are waits", [isWaitMessage("The LEZ Bridge module is still answering an earlier call."), isWaitMessage("HTTP 429 Too Many Requests"), isWaitMessage("the relay refused")], [true, true, false]);
   check("tones", ["wait", "done", "problem", "ready", "plain"].map(toneKind), ["waiting", "done", "problem", "", ""]);
@@ -1008,6 +1011,9 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("no button says Not now for a reject", /label: "Not now"/.test(qml), false);
   check("the global notice says its kind", (qml.match(/root\.noticeIsError \? root\.alarm/g) || []).length, 0);
   check("every sub-page has the shared header", (qml.match(/PageHeader \{ title:/g) || []).length >= 9, true);
+  // "If they ignore it, we ignore it": no timer reads the card's balances; the setup poll runs only on view.
+  check("no 30 s card balance timer", /id: bridgeNetPoll/.test(qml), false);
+  check("the setup poll waits for its step to be on screen", /"stuck"\) && root\.bridgeSetupOnView/.test(qml), true);
 }
 
 {

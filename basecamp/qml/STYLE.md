@@ -65,6 +65,17 @@ is `Layout.maximumWidth: root.pageWidth` (680). (test: no "‹ Wallet" / "← Ba
 An ordinary box with plain words. `caution: true` (amber border and "!") only when the wallet
 cannot decode the call (`appSheetCaution`). Never red; never coloured before it is ticked.
 
+## Known exceptions (left on purpose, small)
+
+- Red inline labels for a state that failed: a name's "lapsed", a registration's "didn't
+  register", a post over 1,024 characters (the counter), the activity and group rows' "bad" tone,
+  the network switch's problem line. They are problems; they are not yet `StatusLine`s.
+- Brass as a link colour: chip links, "+ New group", Follow, a chat sender's name, link hover.
+- The "Checked … · next check" text beside Check now turns amber without a mark when a check
+  failed (it is a wait; the row is the other worker's shared check line).
+- The notice on the name page and on the wallet home still sits where it was (under the search
+  box / above the cards), coloured by kind, not under the exact button that caused it.
+
 ## Times
 
 One place per number: send-back `Logic.SEND_BACK_TIMES` (burn about 15 s, release proof about

@@ -2296,16 +2296,20 @@ export function isWaitMessage(message) {
     return /^The wallet is busy|^No answer from the wallet yet|^Starting… the wallet is still loading|still answering an earlier call|gave no answer yet|didn't answer in time|was busy, so nothing was sent/i.test(t) || rateLimited(t)
 }
 
-/// The kind of a notice said with `say(message, how)`: `how` true is a failure (a problem, unless
-/// its words are a wait), false is a plain result (done), or one of STATUS_KINDS said outright.
+/// The kind of a notice said with `say(message, how)`: `how` true is a failure (a problem), false a
+/// result (done), "plain" a note (no kind), or one of STATUS_KINDS said outright. Words that are a
+/// wait (busy, no answer, starting) are a wait however they were said.
 export function noticeKind(message, how) {
     if (String(message || "") === "")
         return ""
     if (STATUS_KINDS.indexOf(how) >= 0)
         return how
-    if (how === true)
-        return isWaitMessage(message) ? "waiting" : "problem"
-    return "done"
+    if (how === "plain")
+        return ""
+    // A wait is a wait whichever way it was said (the starting line comes with `false`).
+    if (isWaitMessage(message))
+        return "waiting"
+    return how === true ? "problem" : "done"
 }
 
 /// A bridge progress tone ("wait" | "ready" | "done" | "plain" | "problem") as a status kind; ""
