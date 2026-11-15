@@ -1250,8 +1250,8 @@ export function otherDeployment(name) {
 /// module first: the app depends on it.
 export const BUNDLED_BRIDGE = [
     { name: "lez_bridge", file: "lez_bridge.lgx", label: "LEZ Bridge module",
-      sha256: "a0cf4c6e0dfe4b8a4dc4cac95a7326f17df5832a63f6bb5739882024cea2c606",
-      root: "2113fa9dcbc6780897df9ff027b83808944731fd9e84060cb4d928ddaa861797",
+      sha256: "29a69b5de6414fd2abb99091b4a48cd525e30e7d59f2a9fb138c004b0e65b3c4",
+      root: "0a6f86b78a4145fd36f412e59e72c6559250bb669c5c9158aeb588a802bb82e7",
       // What the running bridge's config() shows when it is this build or a later one: a feature
       // ("feature:x") or a marker in config().scaffold ("scaffold:x"). One missing: it is older.
       has: ["feature:receives", "scaffold:try-lock"] }
