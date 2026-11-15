@@ -877,6 +877,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("dUSDC on v4 from 100", [sendBackOffer({ symbol: "dUSDC", bridge: BRIDGE_V4_PROGRAM, base: "100000000" }), sendBackOffer({ symbol: "LEZ", bridge: BRIDGE_V4_PROGRAM, base: "999" })], [true, false]);
   check("amounts held only", sendBackAmounts(null, weth(BRIDGE_V4_PROGRAM, "150000000000000000")).map((d) => d.text + "@" + d.index), ["0.01@0", "0.1@1"]);
   check("amounts from the registry", sendBackAmounts({ tokens: [{ symbol: "ETH", denoms: [{ index: 0, value: "10000000000000000" }, { index: 1, value: "100000000000000000" }, { index: 2, value: "1000000000000000000" }] }] }, weth(BRIDGE_V4_PROGRAM, "1000000000000000000")).map((d) => d.text), ["0.01", "0.1", "1"]);
+  check("a registry without values falls back", sendBackAmounts({ tokens: [{ symbol: "ETH", denoms: [] }] }, weth(BRIDGE_V4_PROGRAM, "10000000000000000")).map((d) => d.text), ["0.01"]);
   check("no amounts below the smallest", sendBackAmounts(null, weth(BRIDGE_V4_PROGRAM, "1")), []);
   check("symbol for the bridge", [sendBackSymbol("wETH"), sendBackSymbol("dUSDC"), sendBackSymbol("X")], ["ETH", "dUSDC", "X"]);
   const code = "logoswd1qyqqqqqqqqqzr7dm2wcgqnmxn3uq7c2yupx7qfguwl6zcw0d2ej8zhwpsa8x4a5xg9ws3xcqp";

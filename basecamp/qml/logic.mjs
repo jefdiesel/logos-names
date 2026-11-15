@@ -2059,7 +2059,9 @@ export function sendBackAmounts(registry, asset) {
     if (!known) return []
     var listed = registry && Array.isArray(registry.tokens) ? registry.tokens.filter(function(t) { return t && t.symbol === known.symbol && Array.isArray(t.denoms) })[0] : null
     var denoms = listed ? listed.denoms.map(function(d, i) { return { index: d.index !== undefined ? Number(d.index) : i, value: String(d.value || "") } })
-        : known.denoms.map(function(v, i) { return { index: i, value: v } })
+        .filter(function(d) { return /^[0-9]+$/.test(d.value) }) : []
+    if (denoms.length === 0)
+        denoms = known.denoms.map(function(v, i) { return { index: i, value: v } })
     return denoms.filter(function(d) { return /^[0-9]+$/.test(d.value) && atLeast(String(asset.base || "0"), d.value) })
         .map(function(d) { return { index: d.index, value: d.value, text: withDecimals(d.value, known.decimals) } })
 }
