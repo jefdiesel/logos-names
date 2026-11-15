@@ -904,8 +904,10 @@ def main():
     marker = "Item {\n    id: root\n"
     assert marker in source, "Main.qml no longer starts the way the harness expects"
     os.makedirs(out_dir, exist_ok=True)
-    for scenario in wanted:
-        out = os.path.join(out_dir, scenario + ".png")
+    for shown in wanted:
+        out = os.path.join(out_dir, shown + ".png")
+        # Any scenario in the light palette: "<scenario>-light" when it has no light one of its own.
+        scenario = shown[:-6] if shown.endswith("-light") and shown not in SCENARIOS else shown
         bridge = BRIDGE % {
             "names": json.dumps([{"name": n, "owner": o} for n, o in NAMES]),
             "alice": ALICE, "bob": BOB, "carol": CAROL, "pages": json.dumps(PAGES), "avatar": json.dumps(JEF_PIXELS),
@@ -924,7 +926,7 @@ def main():
         with tempfile.NamedTemporaryFile("w", suffix=".qml", delete=False, dir=os.path.join(HERE, "..", "qml")) as handle:
             # A "-light" scenario reads the light palette directly. Never through Theme.settings:
             # that is design-system.ini, shared by every Logos app and render on the machine.
-            themed = source.replace("Theme.palette", "Theme.lightTheme").replace("Theme.isDark", "false") if scenario.endswith("-light") else source
+            themed = source.replace("Theme.palette", "Theme.lightTheme").replace("Theme.isDark", "false") if shown.endswith("-light") else source
             handle.write(themed.replace(marker, marker + bridge, 1))
         try:
             result = subprocess.run([qml, handle.name], capture_output=True, text=True, timeout=60)
@@ -935,6 +937,6 @@ def main():
         finally:
             os.unlink(handle.name)  # never leave it beside Main.qml: the package build copies qml/ whole
         problems = [line for line in result.stderr.splitlines() if "qt.qpa.fonts" not in line and line.strip()]
-        print(scenario, "ok" if os.path.exists(out) else "FAILED", *problems[:6], sep="\n  " if problems else " ")
+        print(shown, "ok" if os.path.exists(out) else "FAILED", *problems[:6], sep="\n  " if problems else " ")
 
 main()
