@@ -607,6 +607,8 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     ["3/4 now Approve in your wallet", "4/4 now Claiming…", "4/4 done Done: claimed in block 5249"]);
   const { claimRetryAfter } = await import("./qml/logic.mjs");
   check("claimRetryAfter", [claimRetryAfter("not_final", { eta_s: 330 }), claimRetryAfter("not_final", {}), claimRetryAfter("root_not_attested"), claimRetryAfter("relay_cap")], [330, 0, 60, 0]);
+  const { claimIsWait } = await import("./qml/logic.mjs");
+  check("claimIsWait", [claimIsWait("not_final"), claimIsWait("root_not_attested"), claimIsWait("relay_cap"), claimIsWait("already_claimed"), claimIsWait("bad_file")], [true, true, true, false, false]);
   check("claimSummary", claimSummary({ ok: true, deposit: { amount_text: "0.1 ETH", account: A } }, "bridge v3"), "0.1 ETH → your account CCVd76…pKnk (bridge v3)");
   check("claimErrorLine", [claimErrorLine("relay_cap"), claimErrorLine("not_final", { eta_s: 330 }), claimErrorLine("relay_busy"), claimErrorLine("nonsense")],
     ["The bridge's relay has reached today's limit. Nothing was sent. Try again later.", "Not final on Ethereum yet: about 6 min.", "The relay is busy. Try again.", "The claim can't go on."]);

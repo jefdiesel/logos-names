@@ -7657,7 +7657,7 @@ Item {
 
                     // Step: the check.
                     Hint { visible: root.claimStageNow === "ready" || root.claimStageNow === "elsewhere" || root.claimStageNow === "wrong_bridge"; color: root.ink; text: root.claimSummaryNow }
-                    Hint { visible: root.claimStageNow === "refused"; color: root.alarm; text: root.claimRefusalLine }
+                    Hint { visible: root.claimStageNow === "refused"; color: root.claimCheck !== null && root.claimCheck.error && Logic.claimIsWait(root.claimCheck.error.code) ? root.brass : root.alarm; text: root.claimRefusalLine }
                     Hint { visible: root.claimStageNow === "elsewhere"; color: root.alarm; text: root.claimAccountProblemNow }
                     Hint { visible: root.claimStageNow === "wrong_bridge"; color: root.alarm; text: root.claimBridgeNow.problem }
                     Hint { visible: root.claimStageNow === "ready" && root.claimCheck !== null && !!root.claimCheck.privacy; color: root.brass; font.pixelSize: root.px(15); text: "Public claim: links this deposit to this account." }
@@ -7683,7 +7683,7 @@ Item {
                         color: root.ink
                         text: root.depositClaimJob !== null && root.depositClaimJob.result ? "Now in the account: " + root.depositClaimJob.result.balance_text + " (wrapped)." : ""
                     }
-                    Hint { visible: root.claimStageNow === "failed"; color: root.alarm; text: root.depositClaimJob !== null && root.depositClaimJob.error ? Logic.claimErrorLine(root.depositClaimJob.error.code, root.depositClaimJob.error) : "The claim stopped. Try again." }
+                    Hint { visible: root.claimStageNow === "failed"; color: root.depositClaimJob !== null && root.depositClaimJob.error && Logic.claimIsWait(root.depositClaimJob.error.code) ? root.brass : root.alarm; text: root.depositClaimJob !== null && root.depositClaimJob.error ? Logic.claimErrorLine(root.depositClaimJob.error.code, root.depositClaimJob.error) : "The claim stopped. Try again." }
                     Hint { visible: root.claimError !== ""; color: root.alarm; text: root.claimError }
 
                     // Not ready yet: the same file is checked again (by itself when there is a time).

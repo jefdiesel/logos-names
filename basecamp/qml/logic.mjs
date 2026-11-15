@@ -1475,3 +1475,9 @@ export function claimRetryAfter(code, error) {
         return 60
     return 0
 }
+
+/// Whether a claim refusal is a wait (shown plainly, not as an error): not final or not recorded
+/// yet, the relay busy or at its limit, a network not answering just now.
+export function claimIsWait(code) {
+    return ["not_final", "root_not_attested", "relay_busy", "busy", "relay_cap", "rate_limited", "relay_unavailable", "unreachable", "eth_unreachable"].indexOf(String(code || "")) >= 0
+}
