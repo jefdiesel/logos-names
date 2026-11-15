@@ -7447,7 +7447,12 @@ impl Names {
             "tag": ask.tag, "first": ask.first, "count": ask.count,
         });
         let output = cli::run_with_input(&setup, vec!["module".into(), "app-secret".into()], &input.to_string(), SECRET_PATIENCE)
-            .map_err(|_| "the wallet couldn't make the values (is this account in the names wallet?)".to_owned())?;
+            .map_err(|why| {
+                // The tool's own reason, said plainly (it used to be hidden behind a guess).
+                let what = if ask.scope.starts_with("RFP022/deposit") { "deposit keys" } else { "the values this app asks for" };
+                let why = why.trim().trim_start_matches("Error: ").to_owned();
+                format!("This wallet can't make {what} for {account}: {why}")
+            })?;
         let answer: Value = serde_json::from_str(cli::last_line(&output)).map_err(|_| "the names CLI gave no values".to_owned())?;
         let values: Vec<String> = answer["values"].as_array().map(Vec::as_slice).unwrap_or_default().iter().filter_map(|v| v.as_str().map(str::to_owned)).collect();
         if values.len() as u64 != ask.count || answer["account"] != account.as_str() || values.iter().any(|v| v.len() != 64) {

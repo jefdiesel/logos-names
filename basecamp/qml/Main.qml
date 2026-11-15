@@ -959,6 +959,9 @@ Item {
         stuck: bridgeFails >= 2, stale: bridgeStale, notLoaded: bridgeNotLoaded, features: bridgeFeatures, config: bridgeConfig, install: bridgeInstall,
         done: bridgeDone !== "" && walletView === bridgeDoneView ? bridgeDone : "" })
     onWalletViewChanged: if (bridgeDone !== "" && walletView !== bridgeDoneView) bridgeDone = ""
+    // The bridge needs a step first (Update, Unload, a reopen…): Receive's and Claim's own steps
+    // wait under it, so nobody runs into a failure the setup line already explains.
+    readonly property bool bridgeSetupClear: bridgeSetup.state === "" || bridgeSetup.state === "done"
     function bridgeAnswered(value) {
         bridgeConfig = value
         bridgeAnswers = true
@@ -1039,6 +1042,7 @@ Item {
             var r = Logic.receiveReply(value)
             if (r.kind === "needs" && Logic.needsWithoutRequest(value) !== "") {
                 receiveError = sentence(Logic.needsWithoutRequest(value))
+                console.log("names_ui: receive:", receiveError)
                 return
             }
             if (r.kind === "needs") {
@@ -1062,6 +1066,7 @@ Item {
                 receiveMissing = true
             else
                 receiveError = sentence(kind === "busy" ? "The LEZ Bridge is still answering an earlier call. Try again." : message)
+            console.log("names_ui: receive:", kind, message)
         }, 120000, false)
     }
     function pollReceiveNeeds() {
@@ -1195,6 +1200,7 @@ Item {
             claimMissing = kind === "missing" || kind === "starting" || kind === "busy" || kind === "stale"
             if (!claimMissing)
                 claimError = sentence(message)
+            console.log("names_ui: claim:", kind, message)
         }, 10000, false)
     }
 
@@ -1485,6 +1491,7 @@ Item {
             if (Logic.needsWithoutRequest(value) !== "") {
                 claimChecking = false
                 claimError = sentence(Logic.needsWithoutRequest(value))
+                console.log("names_ui: claim:", claimError)
                 return
             }
             if (value && value.needs) {
@@ -1504,6 +1511,7 @@ Item {
                 claimError = "This LEZ Bridge can't claim a received deposit yet. Update it."
             else
                 claimError = sentence(kind === "busy" ? "The LEZ Bridge is still answering an earlier call. Check again." : message)
+            console.log("names_ui: claim:", kind, message)
         }, 90000, false)
     }
 
@@ -1560,6 +1568,7 @@ Item {
                 claimMissing = true
             else
                 claimError = sentence(message)
+            console.log("names_ui: claim:", kind, message)
         }
         if (withOptions)
             bridgeCall("relayed_claim_check_with", [source, JSON.stringify({ wallet_hint: false })], checked, refused, 90000)
@@ -1583,6 +1592,7 @@ Item {
             }
             if (Logic.needsWithoutRequest(value) !== "") {
                 claimError = sentence(Logic.needsWithoutRequest(value))
+                console.log("names_ui: claim:", claimError)
                 claimAgain = true
                 return
             }
@@ -1599,6 +1609,7 @@ Item {
             claimAsking = false
             var failure = Logic.claimFailure(kind === "busy" ? "still answering an earlier call" : message)
             claimError = failure.line
+            console.log("names_ui: claim:", claimError)
             claimAgain = failure.again
         }, 240000, false)
     }
@@ -1655,7 +1666,7 @@ Item {
     function cancelClaim() {
         if (depositClaimJob === null)
             return
-        bridgeCall("relayed_claim_cancel", [depositClaimJob.id], function(value) { depositClaimJob = value }, function(message) { claimError = sentence(message) }, 120000, false)
+        bridgeCall("relayed_claim_cancel", [depositClaimJob.id], function(value) { depositClaimJob = value }, function(message) { claimError = sentence(message); console.log("names_ui: claim:", claimError) }, 120000, false)
     }
 
     /// Watches (or stops watching) a public account on the bridge test network.
@@ -8279,7 +8290,7 @@ Item {
                     readonly property var steps: Logic.claimSteps({ first: root.claimSource.indexOf("deposit:") === 0 ? "arrived" : "file", stage: root.claimStageNow, extras: root.claimExtras, extrasDone: root.claimExtrasDone,
                         needs: root.claimNeeds !== null ? root.claimNeeds.needs : "", job: root.depositClaimJob, summary: root.claimSummaryNow })
                     readonly property var stepNow: steps.filter(function(x) { return x.state === "now" })[0] || null
-                    readonly property bool stepsShown: root.claimStageNow !== "missing" && root.claimStageNow !== "looking"
+                    readonly property bool stepsShown: root.claimStageNow !== "missing" && root.claimStageNow !== "looking" && root.bridgeSetupClear
                     Repeater {
                         model: claimScreen.stepsShown ? claimScreen.steps.filter(function(x) { return x.state === "done" && x.key !== "done" }) : []
                         Hint {
@@ -8450,7 +8461,7 @@ Item {
                         Hint { required property var modelData; font.pixelSize: root.px(15); color: root.good; text: "✓ Step " + modelData.n + " of " + modelData.total + " · " + modelData.title }
                     }
                     Text {
-                        visible: !root.receiveMissing && root.bridgeReceives && receiveScreen.stepNow !== null
+                        visible: !root.receiveMissing && root.bridgeReceives && root.bridgeSetupClear && receiveScreen.stepNow !== null
                         Layout.fillWidth: true
                         text: receiveScreen.stepNow === null ? "" : "Step " + receiveScreen.stepNow.n + " of " + receiveScreen.stepNow.total + " · " + receiveScreen.stepNow.title
                         color: root.ink
@@ -8462,7 +8473,7 @@ Item {
 
                     // Step: amount and account.
                     ColumnLayout {
-                        visible: !root.receiveMissing && root.bridgeReceives && root.receiveResult === null && root.receiveNeeds === null
+                        visible: !root.receiveMissing && root.bridgeReceives && root.bridgeSetupClear && root.receiveResult === null && root.receiveNeeds === null
                         Layout.fillWidth: true
                         spacing: 10
                         Flow {

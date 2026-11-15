@@ -577,8 +577,8 @@ impl Client {
     }
 
     /// `names module app-secret`: the values an app asks for (`app_secret.rs`), from this
-    /// wallet's own account key. Only accounts of the recovery phrase's key trees: an imported
-    /// key isn't restored from the phrase, so values made from it wouldn't come back.
+    /// wallet's own account key. An imported account's values come from its imported key: they
+    /// come back by importing that key again or from a Backup, never from the recovery phrase.
     pub fn app_secret(&self, request: &serde_json::Value) -> Result<()> {
         let field = |key: &str| request[key].as_str().ok_or_else(|| anyhow!("no {key}"));
         let context = hex::decode(field("context").unwrap_or_default()).context("the context is not hex")?;
@@ -602,21 +602,16 @@ impl Client {
 }
 
 /// An account's own 32-byte secret, the input of its app secrets: a public account's signing
-/// key, a private account's authorization secret key. Only for accounts of the recovery
-/// phrase's key trees (a chain index): an imported key isn't restored from the phrase.
+/// key, a private account's authorization secret key. An account of the recovery phrase's key
+/// trees, or an imported one (its values then come back with the imported key, not the phrase;
+/// the bridge's deposits into an imported account rely on it, 15 Nov). Another wallet's account
+/// is refused.
 pub fn account_secret<C: wallet::WalletSequencerClient>(wallet: &wallet::WalletCore<C>, private: bool, id: AccountId) -> Result<[u8; 32], String> {
     let key_chain = wallet.storage().key_chain();
-    let not_restorable = "it isn't an account of this wallet's recovery phrase, so values made from it couldn't be restored";
     if private {
-        if !key_chain.private_account_ids().any(|(found, index)| found == id && index.is_some()) {
-            return Err(not_restorable.to_owned());
-        }
         let found = key_chain.private_account(id).ok_or("this wallet has no such private account")?;
         Ok(found.key_chain.private_key_holder.authorization_secret_key.0)
     } else {
-        if !key_chain.public_account_ids().any(|(found, index)| found == id && index.is_some()) {
-            return Err(not_restorable.to_owned());
-        }
         Ok(*key_chain.pub_account_signing_key(id).ok_or("this wallet has no such public account")?.value())
     }
 }
@@ -667,6 +662,16 @@ mod tests {
         }
         // Another wallet's account is refused here, not derived from.
         assert!(account_secret(&original, true, others[1].1).is_err());
+        assert!(account_secret(&original, false, others[0].1).is_err());
+        // An imported public account works, and importing the same key elsewhere gives the same
+        // values (that, or a Backup, is how they come back: not the phrase).
+        let key = lee::PrivateKey::try_new([7u8; 32]).unwrap();
+        let imported = AccountId::from(&lee::PublicKey::new_from_private_key(&key));
+        original.storage_mut().key_chain_mut().add_imported_public_account(key.clone());
+        other.storage_mut().key_chain_mut().add_imported_public_account(key);
+        let here = crate::app_secret::values(&account_secret(&original, false, imported).unwrap(), imported.value(), &ask);
+        let there = crate::app_secret::values(&account_secret(&other, false, imported).unwrap(), imported.value(), &ask);
+        assert_eq!(here, there);
         let _ = std::fs::remove_dir_all(root);
     }
 

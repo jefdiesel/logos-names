@@ -2632,7 +2632,9 @@ impl Client {
 /// asked. Otherwise payments go to its private keys.
 fn pays_publicly(profile: &Profile, public: bool, private: bool) -> bool {
     let has_keys = profile.npk.is_some() && !profile.vpk.is_empty();
-    public || (!private && !has_keys && profile.account.is_some())
+    // A build that can't prove (the LEZ 0.4 tool shipped inside Names) pays a name's published
+    // account rather than refusing: a private payment would need a proof.
+    public || (!private && profile.account.is_some() && (!has_keys || !prover::can_prove()))
 }
 
 /// The name's private receiving keys as a payment destination. A credit to them stays

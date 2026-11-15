@@ -201,6 +201,11 @@ pub fn can_run() -> bool {
     !SETTLED.get().is_some_and(|settled| settled.bare)
 }
 
+/// Whether a private change can be proved here (the proof engine settled at start).
+pub fn can_prove() -> bool {
+    SETTLED.get().is_some_and(|settled| settled.prover.is_ok() && !settled.bare)
+}
+
 /// `names prover-status`: what this build can do on this computer, as JSON (`run`: public
 /// calls are tried first; `prove`: private changes can be proved).
 pub fn status() -> serde_json::Value {
