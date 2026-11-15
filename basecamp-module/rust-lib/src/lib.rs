@@ -446,6 +446,32 @@ pub trait NamesModule: Send + 'static {
     /// as used, and a new private account. Tokens are not carried over.
     fn cli_restore_wallet(&mut self, phrase: String) -> String;
 
+    /// Settings → Backup: `{last: {at, networks, file} | null, networks: [{id, shown, folder,
+    /// has_wallet, reachable, accounts, uncovered}], folder}`; `uncovered` counts the accounts no
+    /// recovery phrase brings back (imported ones). Reads no key out. Names app only.
+    fn backup_status(&mut self) -> String;
+
+    /// Makes ONE encrypted backup file of the wallet folders of `networks` (`lez-0.3`, `lez-0.4`,
+    /// comma-separated) under `password` (at least 10 characters): Argon2id (64 MiB, 3 passes)
+    /// and AES-256-GCM, mode 600, at `path` (a `.lnsbackup` file; "" = `~/Documents/Names Wallet
+    /// Backups/` with a dated name), never over a file that is there. Then opens it again and
+    /// compares it with the wallets: `{file, networks, accounts, check}`. Names app only.
+    fn backup_make(&mut self, networks: String, password: String, path: String) -> String;
+
+    /// Opens backup `path` with `password` in memory and compares it with the wallets here:
+    /// `{opens, created, networks: [{id, accounts, matches, differs}]}`. Writes nothing. Names app only.
+    fn backup_check(&mut self, path: String, password: String) -> String;
+
+    /// What backup `path` holds (opened in memory with `password`) and where each network would
+    /// go: `{created, networks: [{id, shown, accounts, folder, has_wallet, can_restore}]}`. Writes
+    /// nothing. Names app only.
+    fn backup_open(&mut self, path: String, password: String) -> String;
+
+    /// Restores `network` from backup `path` into this computer's wallet folder for it, only
+    /// when that folder holds no wallet (never over one): `{network, folder, files, accounts}`.
+    /// Names app only.
+    fn backup_restore(&mut self, path: String, password: String, network: String) -> String;
+
     /// The names the CLI's wallet holds, as `names mine` lists them: `[{name,
     /// display, signer, state, lapsed}]`, `signer` being `cli`. A wallet
     /// directory with no wallet in it holds none (and the CLI is not run, so
@@ -1825,6 +1851,38 @@ fn lez04_install_problem(log: &str, done: bool) -> String {
     }
 }
 
+/// The networks a backup asks for: `lez-0.3`, `lez-0.4`, comma-separated, each once.
+fn backup_nets(text: &str) -> Result<Vec<Net>, String> {
+    let mut out = Vec::new();
+    for part in text.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let net = Net::parse(part).ok_or("the networks are lez-0.3 and lez-0.4")?;
+        if !out.contains(&net) {
+            out.push(net);
+        }
+    }
+    if out.is_empty() {
+        return Err("choose which wallet to back up".to_owned());
+    }
+    Ok(out)
+}
+
+/// A time (seconds, UTC) as `20261114-1950`, for a backup's file name.
+fn stamp(seconds: u64) -> String {
+    let days = (seconds / 86_400) as i64;
+    let (h, m) = ((seconds % 86_400) / 3600, (seconds % 3600) / 60);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(mo <= 2);
+    format!("{y:04}{mo:02}{d:02}-{h:02}{m:02}")
+}
+
 /// Failing to save is not an error for the caller: the memory still serves
 /// this run.
 /// Makes `dir`, and the files and folders directly in it and in its `jobs`, readable
@@ -2105,6 +2163,32 @@ impl Names {
                 self.parked = json!(NET_KEYS.iter().map(|key| (key.to_string(), saved[*key].clone())).collect::<Map<String, Value>>());
             }
         }
+    }
+
+    /// The wallet folder of `net` here: the one in use, or the other network's.
+    fn wallet_dir_of(&self, net: Net) -> Option<std::path::PathBuf> {
+        if net == self.net {
+            self.resolve_wallet(self.cli_wallet.as_deref())
+        } else {
+            self.other_wallet()
+        }
+    }
+
+    /// A sealed backup opened in memory and compared with the wallets here, file by file:
+    /// `{opens, created, networks: [{id, accounts, matches, differs}]}`.
+    fn backup_compare(&self, sealed: &[u8], password: &str) -> Result<Value, String> {
+        use sha2::{Digest, Sha256};
+        let payload = backup::open(sealed, password)?;
+        let networks: Vec<Value> = payload["networks"].as_array().cloned().unwrap_or_default().iter().map(|n| {
+            let files = backup::files_of(n).unwrap_or_default();
+            let dir = n["id"].as_str().and_then(Net::parse).and_then(|net| self.wallet_dir_of(net));
+            let differs: Vec<String> = files.iter().filter(|(name, bytes)| {
+                let live = dir.as_ref().and_then(|d| std::fs::read(d.join(name)).ok());
+                live.map_or(true, |live| Sha256::digest(&live) != Sha256::digest(bytes))
+            }).map(|(name, _)| name.clone()).collect();
+            json!({ "id": n["id"], "accounts": n["accounts"], "matches": differs.is_empty(), "differs": differs })
+        }).collect();
+        Ok(json!({ "opens": true, "created": payload["created"], "networks": networks }))
     }
 
     /// The other names network's wallet folder, so neither network's CLI is ever given
@@ -4355,6 +4439,113 @@ impl NamesModule for Names {
             cli::write_private(&file, &cli::fetch_snapshot(url, deadline.left())?).map_err(|error| format!("cannot keep the list of names: {error}"))?;
             Ok((cli::claim_args(name, &file)?, Some(file), Value::Null))
         })
+    }
+
+    fn backup_status(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let last = config_dir().map(|dir| load_object(&dir.join("backup.json"))).filter(|m| !m.is_empty()).map(Value::Object).unwrap_or(Value::Null);
+        let networks: Vec<Value> = [Net::Lez03, Net::Lez04].into_iter().map(|net| {
+            let folder = self.wallet_dir_of(net);
+            let store = folder.as_ref().and_then(|dir| std::fs::read(dir.join(cli::STORAGE_FILE)).ok());
+            let accounts = store.as_deref().map(backup::accounts_of).unwrap_or_default();
+            let uncovered = accounts.iter().filter(|a| a["imported"] == true).count();
+            json!({
+                "id": net.id(), "shown": net.shown(), "folder": folder.as_ref().map(|d| d.display().to_string()),
+                "has_wallet": store.is_some(), "reachable": folder.as_ref().is_some_and(|d| d.is_dir()),
+                "accounts": accounts, "uncovered": uncovered,
+            })
+        }).collect();
+        reply(Ok(json!({ "last": last, "networks": networks, "in_use": self.net.id(),
+            "folder": backup::default_folder().map(|d| d.display().to_string()), "min_password": backup::MIN_PASSWORD })))
+    }
+
+    fn backup_make(&mut self, networks: String, password: String, path: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let nets = backup_nets(&networks)?;
+            let mut parts = Vec::new();
+            for net in &nets {
+                let dir = self.wallet_dir_of(*net).ok_or_else(|| format!("{} has no wallet folder here", net.shown()["version"].as_str().unwrap_or("")))?;
+                parts.push(backup::Part { network: net.id().to_owned(), files: backup::wallet_files(&dir)? });
+            }
+            let created = now();
+            let file = if path.trim().is_empty() {
+                backup::default_folder().ok_or("no home folder to put the backup in")?.join(format!("names-wallet-backup-{}.lnsbackup", stamp(created)))
+            } else {
+                std::path::PathBuf::from(path.trim().trim_start_matches("file://"))
+            };
+            if !file.is_absolute() {
+                return Err("a backup goes to a full path".to_owned());
+            }
+            let sealed = backup::seal(&parts, &password, created)?;
+            drop(parts);
+            backup::write_file(&file, &sealed)?;
+            drop(sealed);
+            // Checked as it will be used: the file read back from disk, opened with the password,
+            // and compared with the wallets file by file.
+            let check = self.backup_compare(&backup::read_file(&file)?, &password)?;
+            let ids: Vec<&str> = nets.iter().map(|n| n.id()).collect();
+            if let Some(dir) = config_dir() {
+                let mut last = Map::new();
+                last.insert("at".into(), Value::from(created));
+                last.insert("networks".into(), json!(ids));
+                last.insert("file".into(), Value::from(file.display().to_string()));
+                save_object(&dir.join("backup.json"), &last);
+            }
+            Ok(json!({ "file": file.display().to_string(), "networks": ids, "created": created, "check": check }))
+        })())
+    }
+
+    fn backup_check(&mut self, path: String, password: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let file = backup::read_file(std::path::Path::new(path.trim().trim_start_matches("file://")))?;
+            self.backup_compare(&file, &password)
+        })())
+    }
+
+    fn backup_open(&mut self, path: String, password: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let file = backup::read_file(std::path::Path::new(path.trim().trim_start_matches("file://")))?;
+            let payload = backup::open(&file, &password)?;
+            let networks: Vec<Value> = payload["networks"].as_array().cloned().unwrap_or_default().iter().map(|n| {
+                let net = n["id"].as_str().and_then(Net::parse);
+                let folder = net.and_then(|net| self.wallet_dir_of(net));
+                let has_wallet = folder.as_ref().is_some_and(|d| d.join(cli::STORAGE_FILE).exists());
+                json!({ "id": n["id"], "shown": net.map(Net::shown), "accounts": n["accounts"],
+                        "folder": folder.as_ref().map(|d| d.display().to_string()), "has_wallet": has_wallet,
+                        "can_restore": net.is_some() && folder.is_some() && !has_wallet })
+            }).collect();
+            Ok(json!({ "created": payload["created"], "networks": networks }))
+        })())
+    }
+
+    fn backup_restore(&mut self, path: String, password: String, network: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let net = Net::parse(&network).ok_or("the networks are lez-0.3 and lez-0.4")?;
+            let file = backup::read_file(std::path::Path::new(path.trim().trim_start_matches("file://")))?;
+            let payload = backup::open(&file, &password)?;
+            let part = payload["networks"].as_array().and_then(|list| list.iter().find(|n| n["id"] == net.id())).ok_or("this backup holds no wallet for that network")?;
+            let files = backup::files_of(part)?;
+            let dir = self.wallet_dir_of(net).ok_or("there is no wallet folder for that network here")?;
+            let written = backup::restore_into(&dir, &files)?;
+            drop(files);
+            self.forget_mine();
+            cli::forget_balance();
+            Ok(json!({ "network": net.id(), "folder": dir.display().to_string(), "files": written, "accounts": part["accounts"] }))
+        })())
     }
 
     fn cli_restore_wallet(&mut self, phrase: String) -> String {
@@ -10359,6 +10550,50 @@ mod tests {
         as_caller(logos_rust_sdk::LogosCaller::Module { name: "evil_ui".into(), instance: None });
         assert_eq!(parsed(&names.cli_install_bundled("x".into(), "y".into()))["success"], false);
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_wallet_backup_round_trips_through_the_module_and_never_over_a_wallet() {
+        let (mut names, dir) = with_fake_cli("backup", "true");
+        let wallet = dir.join("wallet");
+        let store = json!({ "key_chain": { "accounts": [
+            { "Public": { "account_id": "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "data": { "k": "MARKER-b4c1-key" } } },
+            { "ImportedPublic": { "account_id": "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", "pub_sign_key": "MARKER-b4c1-key" } } ] } });
+        std::fs::write(wallet.join(cli::STORAGE_FILE), store.to_string()).unwrap();
+        std::fs::write(wallet.join("wallet_config.json"), "{}").unwrap();
+        let status = parsed(&names.backup_status());
+        let here = status["value"]["networks"].as_array().unwrap().iter().find(|n| n["id"] == "lez-0.3").unwrap().clone();
+        assert_eq!((here["has_wallet"].as_bool(), here["uncovered"].as_u64()), (Some(true), Some(1)), "{status}");
+        assert_eq!(here["accounts"][0]["account"], "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk");
+        let file = dir.join("out").join("b.lnsbackup");
+        let made = parsed(&names.backup_make("lez-0.3".into(), "a long password".into(), file.to_string_lossy().into_owned()));
+        assert_eq!(made["success"], true, "{made}");
+        assert_eq!(made["value"]["check"]["networks"][0]["matches"], true, "checked at once: {made}");
+        assert!(!made.to_string().contains("a long password") && !made.to_string().contains("MARKER-b4c1"), "nothing secret in the reply");
+        assert!(!std::fs::read(&file).unwrap().windows(15).any(|w| w == b"MARKER-b4c1-key"));
+        assert_eq!(parsed(&names.backup_check(file.to_string_lossy().into_owned(), "wrong password".into()))["success"], false);
+        // A wallet there: shown, and never written over.
+        let opened = parsed(&names.backup_open(file.to_string_lossy().into_owned(), "a long password".into()));
+        assert_eq!(opened["value"]["networks"][0]["can_restore"], false, "{opened}");
+        let refused = parsed(&names.backup_restore(file.to_string_lossy().into_owned(), "a long password".into(), "lez-0.3".into()));
+        assert!(refused["error"].as_str().unwrap().contains("already"), "{refused}");
+        // Into an empty folder: the same bytes back.
+        let moved = dir.join("wallet-was");
+        std::fs::rename(&wallet, &moved).unwrap();
+        let restored = parsed(&names.backup_restore(file.to_string_lossy().into_owned(), "a long password".into(), "lez-0.3".into()));
+        assert_eq!(restored["success"], true, "{restored}");
+        for name in [cli::STORAGE_FILE, "wallet_config.json"] {
+            assert_eq!(std::fs::read(wallet.join(name)).unwrap(), std::fs::read(moved.join(name)).unwrap(), "{name}");
+        }
+        // Another app gets nothing.
+        as_caller(logos_rust_sdk::LogosCaller::Module { name: "evil_ui".into(), instance: None });
+        for answer in [names.backup_status(), names.backup_open(file.to_string_lossy().into_owned(), "a long password".into()),
+                       names.backup_make("lez-0.3".into(), "a long password".into(), String::new())] {
+            assert!(answer.contains("only the Names app"), "{answer}");
+        }
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert_eq!(stamp(1_794_700_200), "20261114-2350");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

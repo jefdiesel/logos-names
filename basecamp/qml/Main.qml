@@ -485,6 +485,7 @@ Item {
             loadRunningJobs()
             loadAppGrants()
             loadInstalled(checkBundle)
+            loadBackupStatus()
             return true
         }
         if (bridgeReady && logos.callModuleAsync) {
@@ -2686,6 +2687,106 @@ Item {
     /// A wallet from before LEZ 0.4, which no longer opens.
     readonly property bool oldWallet: cliStatus !== null && !!cliStatus.old_wallet
     property bool restoreOpen: false    // Welcome: "Restore from my recovery phrase" was chosen
+
+    // ── Settings → Backup: one encrypted file of the wallet folders (names module backup_*).
+    //    The password is read from its field at the moment of the call and the field is cleared;
+    //    it is never kept in this app's state, a log or the last reply. ──
+    property var backupStatus: null
+    property string backupMode: ""          // "" | "make" | "restore"
+    property string backupWhich: "both"     // "this" | "both"
+    property string backupWhere: ""         // a chosen file path; "" = the default folder
+    property bool backupBusy: false
+    property string backupError: ""
+    property var backupMade: null           // backup_make's value
+    property string restoreFile: ""
+    property var restoreInside: null        // backup_open's value
+    property var restoreResult: null
+    property bool backupDetails: false
+    function backupWhen(seconds) {
+        return Qt.formatDateTime(new Date(Number(seconds) * 1000), "d MMM, hh:mm")
+    }
+    function loadBackupStatus() {
+        askLater("backup_status", [], function(value) { backupStatus = value }, function(message) {
+            console.log("names_ui: backup_status:", message)
+        })
+    }
+    function openBackup(mode) {
+        go("settings")
+        backupMode = mode
+        backupError = ""
+        backupMade = null
+        restoreInside = null
+        restoreResult = null
+        backupDetails = false
+        loadBackupStatus()
+    }
+    function chooseBackupWhere() {
+        try {
+            var d = Qt.createQmlObject('import QtQuick.Dialogs; FileDialog { title: "Save the backup as"; fileMode: FileDialog.SaveFile; defaultSuffix: "lnsbackup"; nameFilters: ["Names Wallet backups (*.lnsbackup)"] }', root, "backupSave")
+            d.accepted.connect(function() { backupWhere = String(d.selectedFile).replace(/^file:\/\//, ""); d.destroy() })
+            d.rejected.connect(function() { d.destroy() })
+            d.open()
+        } catch (error) {
+            backupWhere = ""
+            backupError = "This Basecamp has no save dialog here: the backup goes to the folder shown."
+        }
+    }
+    function makeBackup(password) {
+        var nets = Logic.backupNetworks(backupWhich, namesNet === "0.4" ? "lez-0.4" : "lez-0.3", backupStatus)
+        if (backupBusy || nets === "")
+            return
+        backupBusy = true
+        backupError = ""
+        backupMade = null
+        askLater("backup_make", [nets, password, backupWhere], function(value) {
+            backupBusy = false
+            backupMade = value
+            loadBackupStatus()
+        }, function(message) {
+            backupBusy = false
+            backupError = sentence(message)
+        }, 120000)
+    }
+    function chooseRestoreFile() {
+        try {
+            var d = Qt.createQmlObject('import QtQuick.Dialogs; FileDialog { title: "Choose the backup file"; nameFilters: ["Names Wallet backups (*.lnsbackup)", "All files (*)"] }', root, "backupOpen")
+            d.accepted.connect(function() { restoreFile = String(d.selectedFile).replace(/^file:\/\//, ""); restoreInside = null; d.destroy() })
+            d.rejected.connect(function() { d.destroy() })
+            d.open()
+        } catch (error) {
+            backupError = "This Basecamp has no file dialog here: paste the backup file's full path."
+        }
+    }
+    function openRestoreFile(password) {
+        if (backupBusy || restoreFile === "")
+            return
+        backupBusy = true
+        backupError = ""
+        restoreInside = null
+        askLater("backup_open", [restoreFile, password], function(value) {
+            backupBusy = false
+            restoreInside = value
+        }, function(message) {
+            backupBusy = false
+            backupError = sentence(message)
+        }, 60000)
+    }
+    function restoreFromBackup(password, network) {
+        if (backupBusy)
+            return
+        backupBusy = true
+        backupError = ""
+        askLater("backup_restore", [restoreFile, password, network], function(value) {
+            backupBusy = false
+            restoreResult = value
+            restoreInside = null
+            loadBackupStatus()
+            loadConfig()
+        }, function(message) {
+            backupBusy = false
+            backupError = sentence(message)
+        }, 60000)
+    }
     /// A names program from before LEZ 0.4, which can't sign for this app.
     readonly property bool cliOutdated: cliStatus !== null && !!cliStatus.outdated
     property bool restoreBusy: false
@@ -6551,6 +6652,12 @@ Item {
                         font.pixelSize: root.px(16)
                         onPressed: root.restoreOpen = true
                     }
+                    Link {
+                        visible: !root.hasCliWallet && !root.oldWallet && root.cliPath !== ""
+                        text: "Restore from a backup file"
+                        font.pixelSize: root.px(16)
+                        onPressed: root.openBackup("restore")
+                    }
                     Field {
                         id: restorePhraseField
                         visible: root.oldWallet || (root.restoreOpen && !root.hasCliWallet)
@@ -9647,6 +9754,136 @@ Item {
                             Action { label: "Cancel"; enabledNow: !root.zoneBusy; onPressed: root.zoneAdding = false }
                         }
                     }
+                    Part { text: "Backup" }
+                    Hint { color: root.ink; text: Logic.backupLastLine(root.backupStatus !== null ? root.backupStatus.last : null, root.backupWhen) }
+                    Hint { visible: Logic.backupUncoveredLine(root.backupStatus) !== ""; color: root.brass; text: Logic.backupUncoveredLine(root.backupStatus) }
+                    RowLayout {
+                        visible: root.backupMode === ""
+                        spacing: 14
+                        Action { label: "Back up now"; strong: true; onPressed: root.openBackup("make") }
+                        Link { text: "Restore from a backup file"; font.pixelSize: root.px(15); onPressed: root.openBackup("restore") }
+                    }
+
+                    // Back up: what, a password, where.
+                    ColumnLayout {
+                        visible: root.backupMode === "make" && root.backupMade === null
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Hint { color: root.ink; text: "Step 1 of 3 · What to back up" }
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Action { label: "Both wallets"; strong: root.backupWhich === "both"; onPressed: root.backupWhich = "both" }
+                            Action { label: "This network's wallet (" + (root.namesNet === "0.4" ? "LEZ 0.4" : "LEZ 0.3") + ")"; strong: root.backupWhich === "this"; onPressed: root.backupWhich = "this" }
+                        }
+                        Hint { color: root.ink; text: "Step 2 of 3 · A password for the file" }
+                        Field { id: backupPw1; Layout.fillWidth: true; secret: true; hint: "Password" }
+                        Field { id: backupPw2; Layout.fillWidth: true; secret: true; hint: "The same password again" }
+                        readonly property var pwHint: Logic.backupPasswordHint(backupPw1.text, backupPw2.text, root.backupStatus !== null ? root.backupStatus.min_password : 10)
+                        Hint { font.pixelSize: root.px(15); color: parent.pwHint.ok || backupPw1.text === "" ? root.dim : root.brass; text: parent.pwHint.text }
+                        Hint { color: root.ink; text: "Step 3 of 3 · Where it goes" }
+                        Hint {
+                            font.pixelSize: root.px(15)
+                            text: root.backupWhere !== "" ? root.backupWhere : (root.backupStatus !== null && root.backupStatus.folder ? root.backupStatus.folder + "/" : "~/Documents/Names Wallet Backups/")
+                        }
+                        RowLayout {
+                            spacing: 14
+                            Link { text: "Choose where"; font.pixelSize: root.px(15); onPressed: root.chooseBackupWhere() }
+                            Link { text: "Copy"; font.pixelSize: root.px(15); onPressed: root.copy(root.backupWhere !== "" ? root.backupWhere : String(root.backupStatus !== null && root.backupStatus.folder ? root.backupStatus.folder : ""), "The folder") }
+                        }
+                        RowLayout {
+                            spacing: 14
+                            Action {
+                                label: root.backupBusy ? "Backing up…" : "Back up now"
+                                strong: true
+                                enabledNow: !root.backupBusy && parent.parent.pwHint.ok
+                                onPressed: { var pw = backupPw1.text; backupPw1.text = ""; backupPw2.text = ""; root.makeBackup(pw) }
+                            }
+                            Link { text: "Cancel"; font.pixelSize: root.px(15); onPressed: { backupPw1.text = ""; backupPw2.text = ""; root.backupMode = "" } }
+                        }
+                    }
+                    // Made, and checked at once.
+                    ColumnLayout {
+                        visible: root.backupMode === "make" && root.backupMade !== null
+                        Layout.fillWidth: true
+                        spacing: 8
+                        readonly property var checked: Logic.backupCheckedLine(root.backupMade !== null ? root.backupMade.check : null)
+                        Hint { color: parent.checked.ok ? root.good : root.brass; text: (parent.checked.ok ? "✓ " : "") + parent.checked.text }
+                        RowLayout {
+                            spacing: 14
+                            Hint { Layout.fillWidth: false; font.pixelSize: root.px(15); text: root.backupMade !== null ? root.backupMade.file : "" }
+                            Link { text: "Copy"; font.pixelSize: root.px(15); onPressed: root.copy(root.backupMade.file, "The path") }
+                        }
+                        Hint { font.pixelSize: root.px(15); text: "Keep it somewhere else too (a USB stick, another computer). Without the password it can't be opened." }
+                        Link { text: root.backupDetails ? "Details ▾" : "Details ▸"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.backupDetails = !root.backupDetails }
+                        Repeater {
+                            model: root.backupDetails && root.backupMade !== null && root.backupMade.check ? root.backupMade.check.networks : []
+                            Hint {
+                                required property var modelData
+                                font.pixelSize: root.px(14)
+                                text: modelData.id + ": " + (modelData.accounts || []).map(function(a) { return (a.account || "an imported private account") + (a.imported ? " (imported)" : "") }).join(", ")
+                            }
+                        }
+                        Hint { visible: root.backupDetails; font.pixelSize: root.px(14); text: "Encrypted with AES-256-GCM under a key made from your password with Argon2id (64 MiB, 3 passes). It holds each wallet folder's store and settings files; not program files or logs." }
+                        Link { text: "Done"; font.pixelSize: root.px(15); onPressed: root.backupMode = "" }
+                    }
+
+                    // Restore: the file, its password, what is inside, then one confirmation.
+                    ColumnLayout {
+                        visible: root.backupMode === "restore" && root.restoreResult === null
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Hint { color: root.ink; text: "Step 1 of 3 · The backup file" }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 10
+                            Action { label: "Choose file"; strong: root.restoreFile === ""; onPressed: root.chooseRestoreFile() }
+                            Field { id: restorePathField; Layout.fillWidth: true; hint: "or paste its full path"; text: root.restoreFile; onTextChanged: if (text !== root.restoreFile) { root.restoreFile = text; root.restoreInside = null } }
+                        }
+                        Hint { color: root.ink; text: "Step 2 of 3 · Its password" }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 10
+                            Field { id: restorePw; Layout.fillWidth: true; secret: true; hint: "The backup's password" }
+                            Action { label: root.backupBusy && root.restoreInside === null ? "Opening…" : "Open"; enabledNow: !root.backupBusy && root.restoreFile !== "" && restorePw.text !== ""; onPressed: root.openRestoreFile(restorePw.text) }
+                        }
+                        Hint { color: root.ink; visible: root.restoreInside !== null; text: "Step 3 of 3 · What it holds" }
+                        Hint { visible: root.restoreInside !== null; font.pixelSize: root.px(15); text: root.restoreInside !== null ? "Made " + root.backupWhen(root.restoreInside.created) + "." : "" }
+                        Repeater {
+                            model: root.restoreInside !== null ? root.restoreInside.networks : []
+                            ColumnLayout {
+                                id: restoreNet
+                                required property var modelData
+                                Layout.fillWidth: true
+                                spacing: 6
+                                Hint {
+                                    color: root.ink
+                                    text: (restoreNet.modelData.shown ? restoreNet.modelData.shown.version : restoreNet.modelData.id) + " wallet · " + (restoreNet.modelData.accounts || []).length + " accounts: "
+                                        + (restoreNet.modelData.accounts || []).map(function(a) { return a.account ? Logic.idShort(a.account) : "an imported private account" }).join(", ")
+                                }
+                                Hint {
+                                    font.pixelSize: root.px(15)
+                                    color: restoreNet.modelData.can_restore ? root.dim : root.brass
+                                    text: restoreNet.modelData.can_restore ? "Goes to " + restoreNet.modelData.folder + "." : "A wallet is there already, so it can't be restored over it."
+                                }
+                                Action {
+                                    visible: restoreNet.modelData.can_restore
+                                    label: root.backupBusy ? "Restoring…" : "Restore"
+                                    strong: true
+                                    enabledNow: !root.backupBusy && restorePw.text !== ""
+                                    onPressed: { var pw = restorePw.text; restorePw.text = ""; root.restoreFromBackup(pw, restoreNet.modelData.id) }
+                                }
+                            }
+                        }
+                        Link { text: "Cancel"; font.pixelSize: root.px(15); onPressed: { restorePw.text = ""; root.backupMode = ""; root.restoreInside = null } }
+                    }
+                    Hint {
+                        visible: root.backupMode === "restore" && root.restoreResult !== null
+                        color: root.good
+                        text: root.restoreResult !== null ? "✓ Restored: " + (root.restoreResult.accounts || []).length + " accounts into " + root.restoreResult.folder + "." : ""
+                    }
+                    Hint { visible: root.backupError !== ""; color: root.alarm; text: root.backupError }
+
                     Part { text: "Bridge" }
                     Hint { text: "Moving tokens from your Logos Blockchain node into LEZ is in the Wallet. One way for now; about 12 hours to arrive." }
                     Action {

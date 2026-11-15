@@ -1676,3 +1676,52 @@ export function bridgeSetupState(s) {
     // Once, where the person lands after a setup step finished: "LEZ Bridge updated." (`done`).
     return st.done ? t("done", String(st.done)) : t("", "")
 }
+
+// ── Settings → Backup ──
+
+/// The one line of backup state: "Last backup: never" / "Last backup: 14 Nov, 19:50 · both wallets".
+export function backupLastLine(last, clock) {
+    if (!last || !last.at)
+        return "Last backup: never"
+    var nets = Array.isArray(last.networks) ? last.networks : []
+    var what = nets.length >= 2 ? "both wallets" : nets[0] === "lez-0.4" ? "the LEZ 0.4 wallet" : "the LEZ 0.3 wallet"
+    return "Last backup: " + clock(Number(last.at)) + " · " + what
+}
+
+/// The line that shows only when true: accounts no recovery phrase brings back.
+export function backupUncoveredLine(status) {
+    var nets = status && Array.isArray(status.networks) ? status.networks : []
+    var n = nets.reduce(function(sum, x) { return sum + (Number(x.uncovered) || 0) }, 0)
+    if (n === 0)
+        return ""
+    return "This wallet has " + n + (n === 1 ? " account" : " accounts") + " your recovery phrase doesn't cover. A backup file is the only way to recover " + (n === 1 ? "it." : "them.")
+}
+
+/// The password's hint line: {text, ok}. At least `min` characters; the two must match.
+export function backupPasswordHint(first, second, min) {
+    var a = String(first || ""), b = String(second || ""), m = Number(min) || 10
+    if (a.length === 0) return { text: "At least " + m + " characters. If you forget it, the backup can't be opened.", ok: false }
+    if (a.length < m) return { text: "Too short: at least " + m + " characters.", ok: false }
+    if (b.length > 0 && a !== b) return { text: "The two don't match.", ok: false }
+    if (b.length === 0) return { text: "Type it again below.", ok: false }
+    return { text: a.length >= 16 ? "Strong. If you forget it, the backup can't be opened." : "OK; longer is stronger. If you forget it, the backup can't be opened.", ok: true }
+}
+
+/// The networks to back up: "this" (the one in use) or "both", as the module takes them.
+export function backupNetworks(which, inUse, status) {
+    var have = (status && Array.isArray(status.networks) ? status.networks : []).filter(function(n) { return n.has_wallet }).map(function(n) { return n.id })
+    var want = which === "both" ? ["lez-0.3", "lez-0.4"] : [inUse]
+    return want.filter(function(id) { return have.indexOf(id) >= 0 }).join(",")
+}
+
+/// After a backup: "Backup checked: it opens with your password and holds these 5 accounts."
+export function backupCheckedLine(check) {
+    var nets = check && Array.isArray(check.networks) ? check.networks : []
+    var n = nets.reduce(function(sum, x) { return sum + (Array.isArray(x.accounts) ? x.accounts.length : 0) }, 0)
+    var same = nets.every(function(x) { return x.matches === true })
+    if (!check || check.opens !== true)
+        return { text: "The backup didn't open again. Make another one.", ok: false }
+    if (!same)
+        return { text: "The backup opens, but its files differ from the wallet now (it keeps syncing). Make another one to be sure.", ok: false }
+    return { text: "Backup checked: it opens with your password and holds " + (n === 1 ? "this account." : "these " + n + " accounts."), ok: true }
+}

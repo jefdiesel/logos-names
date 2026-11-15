@@ -698,5 +698,20 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("tool file", BUNDLED_TOOL.file, "names-lez04");
 }
 
+{
+  const { backupLastLine, backupUncoveredLine, backupPasswordHint, backupNetworks, backupCheckedLine } = await import("./qml/logic.mjs");
+  const clock = () => "14 Nov, 19:50";
+  check("backupLastLine", [backupLastLine(null, clock), backupLastLine({ at: 1, networks: ["lez-0.3", "lez-0.4"] }, clock), backupLastLine({ at: 1, networks: ["lez-0.4"] }, clock)],
+    ["Last backup: never", "Last backup: 14 Nov, 19:50 · both wallets", "Last backup: 14 Nov, 19:50 · the LEZ 0.4 wallet"]);
+  check("backupUncoveredLine", [backupUncoveredLine({ networks: [{ uncovered: 0 }, { uncovered: 1 }] }), backupUncoveredLine({ networks: [{ uncovered: 0 }] })],
+    ["This wallet has 1 account your recovery phrase doesn't cover. A backup file is the only way to recover it.", ""]);
+  check("backupPasswordHint", [backupPasswordHint("", "", 10).ok, backupPasswordHint("short", "", 10).text, backupPasswordHint("long enough!", "long enoug", 10).text, backupPasswordHint("long enough!", "long enough!", 10).ok],
+    [false, "Too short: at least 10 characters.", "The two don't match.", true]);
+  const st = { networks: [{ id: "lez-0.3", has_wallet: true }, { id: "lez-0.4", has_wallet: true }] };
+  check("backupNetworks", [backupNetworks("this", "lez-0.4", st), backupNetworks("both", "lez-0.4", st), backupNetworks("both", "lez-0.4", { networks: [{ id: "lez-0.4", has_wallet: true }] })], ["lez-0.4", "lez-0.3,lez-0.4", "lez-0.4"]);
+  check("backupCheckedLine", [backupCheckedLine({ opens: true, networks: [{ matches: true, accounts: [1, 2, 3] }, { matches: true, accounts: [4, 5] }] }).text, backupCheckedLine({ opens: true, networks: [{ matches: false, accounts: [] }] }).ok],
+    ["Backup checked: it opens with your password and holds these 5 accounts.", false]);
+}
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);
