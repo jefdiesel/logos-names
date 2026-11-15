@@ -780,5 +780,10 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("compare vectors: the same from the words alone", VECTORS.map(([words]) => compareWords({ words })), VECTORS.map(([, text]) => text));
 }
 
+{
+  const { WHATS_NEW } = await import("./qml/logic.mjs");
+  check("what's new: three short lines", [WHATS_NEW.length, WHATS_NEW.every((l) => l.length > 0 && l.length <= 110)], [3, true]);
+}
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);

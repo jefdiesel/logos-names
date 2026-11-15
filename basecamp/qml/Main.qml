@@ -457,6 +457,7 @@ Item {
             buildCommit = config.build_commit && config.build_commit !== "dev" ? String(config.build_commit) : ""
             moduleFeatures = Array.isArray(config.features) ? config.features : []
             readBridgeNote()
+            readWhatsNew()
             machineMemory = Number(config.memory_bytes) || 0
             // Every 0.17.0 says 0.17.0: the reveal driver needs a build that has `reveal_name`.
             if (versionAtLeast(loaded, neededModule) && !(Array.isArray(config.features) && config.features.indexOf("reveal_name") >= 0))
@@ -1546,6 +1547,33 @@ Item {
         if (moduleFeatures.indexOf("app_note") >= 0)
             askLater("app_note", ["bridge_setup", value], function() {}, function() {}, 10000)
     }
+    /// "What's new" at the top of Settings: shown until "Got it", which the names module keeps in
+    /// memory (`app_note`), so it shows again after the next update (the module starts afresh) or
+    /// Basecamp start. `whatsNewSeen`: "?" until read, else the build it was seen for ("" none).
+    property string whatsNewSeen: "?"
+    readonly property bool whatsNewShown: Logic.WHATS_NEW.length > 0 && (whatsNewSeen === "" || (whatsNewSeen !== "?" && whatsNewSeen !== buildCommit))
+    property bool whatsNewRead: false
+    function readWhatsNew() {
+        if (whatsNewRead)
+            return
+        whatsNewRead = true
+        if (moduleFeatures.indexOf("app_note") < 0) {
+            whatsNewSeen = ""
+            return
+        }
+        // app_note answers the old value and forgets it when given "": read, then keep it again.
+        askLater("app_note", ["whats_new", ""], function(value) {
+            whatsNewSeen = String(value || "")
+            if (whatsNewSeen !== "")
+                askLater("app_note", ["whats_new", whatsNewSeen], function() {}, function() {}, 10000)
+        }, function() { whatsNewSeen = "" }, 10000)
+    }
+    function whatsNewDone() {
+        whatsNewSeen = buildCommit !== "" ? buildCommit : "dev"
+        if (moduleFeatures.indexOf("app_note") >= 0)
+            askLater("app_note", ["whats_new", whatsNewSeen], function() {}, function() {}, 10000)
+    }
+
     /// When Names opens: a setup step noted before the reopen is finished here once the new bridge
     /// answers (its line shows once); otherwise it stays noted for the next look.
     function readBridgeNote() {
@@ -10292,6 +10320,18 @@ Item {
                     Layout.fillWidth: true
                     spacing: 14
                     Text { text: "Settings"; color: root.ink; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(28) }
+                    // What this build brings, three lines, after an update (until "Got it").
+                    ColumnLayout {
+                        visible: root.whatsNewShown
+                        Layout.fillWidth: true
+                        spacing: 6
+                        Part { text: "What's new in Names 0.17.0" + (root.buildCommit !== "" ? " (" + root.buildCommit + ")" : "") }
+                        Repeater {
+                            model: Logic.WHATS_NEW
+                            Hint { required property var modelData; color: root.ink; text: "· " + modelData }
+                        }
+                        Link { text: "Got it"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.whatsNewDone() }
+                    }
                     Part { text: "Main name" }
                     Hint { text: "Payments, messages and your profile are made as this name." }
                     Flow {
@@ -10767,7 +10807,9 @@ Item {
                                 Hint {
                                     visible: restoreNet.modelData.settings === true
                                     font.pixelSize: root.px(15)
-                                    text: "Its settings come back too" + (restoreNet.modelData.sequencer ? ": it reads " + restoreNet.modelData.sequencer + "." : ".")
+                                    // The wallet's own wallet_config.json comes back, but which network Names uses
+                                    // is Names' setting (every call passes the network: the CLI's --rpc), not that file's.
+                                    text: "Its wallet settings come back too. The network Names uses stays as set here."
                                 }
                                 Action {
                                     visible: restoreNet.modelData.can_restore

@@ -1792,6 +1792,13 @@ export function bridgeSetupState(s) {
     return st.done ? t("done", String(st.done)) : t("", "")
 }
 
+// ── What's new: three lines at the top of Settings after an update (change them with each build) ──
+export const WHATS_NEW = [
+    "Deposits from Ethereum have their own panel on the Wallet card: the minutes left, then Claim.",
+    "Claim and Receive show their steps in a row, and the wallet's questions are answered on the screen.",
+    "Copy the link replaces Open the deposit page: Basecamp can't open web pages."
+]
+
 // ── Settings → Backup ──
 
 /// The one line of backup state: "Last backup: never" / "Last backup: 14 Nov, 19:50 · both wallets".
