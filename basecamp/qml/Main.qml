@@ -10299,7 +10299,7 @@ Item {
                     Hint {
                         visible: root.namesNet === "0.4"
                         color: root.brass
-                        text: "Registering privately stays off on LEZ 0.4 until real proofs have been run there. Register from a public account below (the name is still paid into a private account of its own), or switch to LEZ 0.3."
+                        text: "Registering privately stays off on LEZ 0.4 until real proofs have been run there. Register from a public account below, or switch to LEZ 0.3."
                     }
                     Card {
                         visible: root.namesNet === "0.3" && root.cliPath !== "" && !(root.deposit !== null && root.deposit.tier === "locked")
@@ -10407,7 +10407,7 @@ Item {
                         Accounts {}
                         Hint {
                             color: root.cliPath !== "" ? root.dim : root.brass
-                            text: "Anyone who knows the name can find this account, and so its balance and history." + (root.cliPath !== "" ? "" : " To hide it, install the names CLI and register privately.") + " Payments to the name still go to your private account."
+                            text: "Anyone who knows the name can find this account, and so its balance and history." + (root.namesNet === "0.4" ? "" : (root.cliPath !== "" ? "" : " To hide it, install the names CLI and register privately.") + " Payments to the name still go to your private account.")
                         }
                         RowLayout {
                             visible: root.namesNet === "0.4"
