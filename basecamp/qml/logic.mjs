@@ -212,12 +212,65 @@ export function preTicked(request, publisherFailed, hint) {
     if (request.kind === "connect" && typeof hinted === "string" && offered(hinted))
         return [hinted]
     var given = choices.filter(function(choice) { return choice.granted })
-    if (request.kind === "programs" || request.kind === "token_source")
+    if (request.kind === "programs" || request.kind === "token_source") {
+        // The claim this app's own screen is running for: its account, when it is shared with the
+        // app (a wallet that shares two accounts with the bridge ticked none, and Approve stayed
+        // dim with the choice hidden under Details: the owner's first v4 claim, 15 Nov).
+        var bare = function(a) { return String(a || "").replace(/^(Public|Private)\//, "") }
+        var hintedGiven = typeof hinted === "string" && hinted !== "" ? given.filter(function(choice) { return bare(choice.account) === bare(hinted) }) : []
+        if (hintedGiven.length === 1)
+            return [hintedGiven[0].account]
         return given.length === 1 ? [given[0].account] : []
+    }
     // Anything else, access, payments and calls included: only an account the app named is
     // ticked; otherwise the person chooses (the wallet's main account is not necessarily the one
     // the app is for: an imported account comes after it). SF-4.
     return []
+}
+
+/// Whether the request sheet's Approve can be pressed. `s`: {request, busy, chosen (the ticked
+/// accounts), risky (the request needs the warning's tick), understood (that tick)}. An account
+/// must be ticked for every kind; when none could be ticked for the person, the short sheet shows
+/// the accounts (appNeedsChoice), so Approve is never dim with nothing to do on the screen.
+export function canApprove(s) {
+    var st = s || {}
+    var request = st.request
+    if (!request || st.busy || !Array.isArray(st.chosen) || st.chosen.length === 0)
+        return false
+    // Asked for another zone than the one in use: the same account ID is another account there.
+    if (request.zone_in_use === false)
+        return false
+    // The Program Registry is still being asked about it (the module refuses it too, M-2).
+    if (request.checking === true)
+        return false
+    if (st.risky && !st.understood)
+        return false
+    // A private call can be approved only once the wallet has simulated it and found nothing it
+    // refuses (docs/wallet/BRIDGE-SDK.md).
+    if (request.kind === "private_call" && (request.check !== "ready" || !request.sheet || request.sheet.refused))
+        return false
+    // A call someone else pays for: only what the wallet built and didn't refuse.
+    if (request.kind === "relayed_call" && (!request.sheet || request.sheet.refused))
+        return false
+    return true
+}
+
+/// Whether the Add box's failure says the name isn't this wallet's (not registered, or held by
+/// someone else): then the box offers Register instead of the CLI's words.
+export function addNameNotYours(line) {
+    return /doesn't hold|does not hold|is not registered|isn't registered|not registered/i.test(String(line || ""))
+}
+
+/// The accounts a request's sheet offers. A program declaration for the claim this app's own
+/// screen is running offers only the claim's account (`hint`) when the wallet offers it: another
+/// one can't be the claim's (15 Nov, the owner picked another and the claim didn't go on).
+export function sheetChoices(request, hint) {
+    var choices = request && Array.isArray(request.choices) ? request.choices : []
+    if (!request || request.kind !== "programs" || typeof hint !== "string" || hint === "")
+        return choices
+    var bare = function(a) { return String(a || "").replace(/^(Public|Private)\//, "") }
+    var only = choices.filter(function(c) { return bare(c.account) === bare(hint) })
+    return only.length > 0 ? only : choices
 }
 
 // What the request sheet's ticks were set for: the request, and what the wallet knows about it
@@ -1169,6 +1222,9 @@ export function claimJobFor(jobs, check) {
     var list = Array.isArray(jobs) ? jobs : []
     for (var i = 0; i < list.length; i++) {
         var j = list[i]
+        // A cancelled or failed job is history: a new claim may start (the check id is the same
+        // for every check of one deposit, so matching it forever looped "Try again", 15 Nov).
+        if (j.state === "failed" || j.state === "cancelled") continue
         if (j.check === check.id) return j
         if (j.account === check.deposit.account && j.leaf_index !== undefined && j.leaf_index === check.deposit.leaf_index && j.state !== "failed" && j.state !== "cancelled") return j
     }
@@ -1591,7 +1647,11 @@ export function claimErrorLine(code, error) {
         not_in_vault: "No such deposit in the vault yet. Check the file, or try again later.",
         unreachable: "The bridge test network can't be reached. Try again.",
         eth_unreachable: "Sepolia can't be read just now. Try again.",
-        wallet_rejected: "You said no in your wallet. Nothing was sent.",
+        // The bridge's own words say which: no, nobody answered within 10 minutes, or cancelled.
+        wallet_rejected: /didn't answer|Nobody answered/i.test(String(e.message || "")) ? "The approval wasn't answered within 10 minutes. Nothing was sent. Try again."
+            : /^Cancelled/i.test(String(e.message || "")) ? "The approval was cancelled. Nothing was sent. Try again."
+            : /rejected/i.test(String(e.message || "")) ? "You said no in your wallet. Nothing was sent. Try again."
+            : "The approval ended without a yes. Nothing was sent. Try again.",
         wallet_no_answer: "Your wallet didn't answer. Look for its sheet, then try again.",
         landed_or_used: "Your account changed since you approved. Try again.",
         minting_frozen: "Claims are paused on the bridge. Try again later.",
@@ -1865,7 +1925,7 @@ export function bridgeSetupState(s) {
 
 // ── What's new: three lines at the top of Settings after an update (change them with each build) ──
 export const WHATS_NEW = [
-    "Receive from Ethereum uses the new vault (v4). A code made earlier shows again, with its four words.",
+    "Receive from Ethereum uses the new vault (v4); a claim that stopped can be tried again.",
     "Deposits from Ethereum have their own panel on the Wallet card: the minutes left, then Claim.",
     "Settings → Backup: one encrypted file of your wallets, checked after it's made."
 ]

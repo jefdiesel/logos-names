@@ -824,5 +824,42 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("receivesFrom keeps the deployment", receivesFrom({ receives: [{ id: "a", deployment: v3 }] })[0].deployment.label, "bridge v3");
 }
 
+{
+  // 15 Nov, the owner's first v4 claim: the programs step's Approve stayed dim (two accounts shared
+  // with the bridge, none ticked, the choice hidden), then "Try again" looped on the cancelled job.
+  const { preTicked, sheetChoices, claimJobFor, claimErrorLine, addNameNotYours } = await import("./qml/logic.mjs");
+  const two = { kind: "programs", app: "lez_bridge", choices: [{ account: "Public/AAA", granted: true }, { account: "Public/BBB", granted: true }, { account: "Public/CCC" }] };
+  check("programs: the claim's account is ticked", preTicked(two, false, "BBB"), ["Public/BBB"]);
+  check("programs: the claim's account with its prefix too", preTicked(two, false, "Public/BBB"), ["Public/BBB"]);
+  check("programs: no hint, two shared: none (the sheet then shows the choice)", preTicked(two, false, ""), []);
+  check("programs: one shared, no hint", preTicked({ kind: "programs", choices: [{ account: "Public/AAA", granted: true }] }, false, ""), ["Public/AAA"]);
+  check("programs: an app that may be a fake: none", preTicked(two, true, "BBB"), []);
+  check("programs: only the claim's account is offered", sheetChoices(two, "BBB").map((c) => c.account), ["Public/BBB"]);
+  check("programs: without a claim, every account", sheetChoices(two, "").length, 3);
+  check("other kinds keep their choices", sheetChoices({ kind: "connect", choices: two.choices }, "BBB").length, 3);
+  const chk = { id: "rc-1", deposit: { account: "Public/BBB", leaf_index: 2 } };
+  check("a cancelled job of this check is history", claimJobFor([{ id: "j1", check: "rc-1", state: "cancelled" }], chk), null);
+  check("a failed one too", claimJobFor([{ id: "j1", check: "rc-1", state: "failed" }], chk), null);
+  check("a running one is found", claimJobFor([{ id: "j2", check: "rc-1", state: "running" }, { id: "j1", check: "rc-1", state: "cancelled" }], chk).id, "j2");
+  check("a done one is found", claimJobFor([{ id: "j3", check: "rc-1", state: "done" }], chk).id, "j3");
+  check("wallet_rejected says which", [
+    claimErrorLine("wallet_rejected", { message: "Nobody answered it in the Names app within 10 minutes; nothing was signed or sent." }),
+    claimErrorLine("wallet_rejected", { message: "Cancelled; nothing was signed or sent." }),
+    claimErrorLine("wallet_rejected", { message: "You rejected it in the Names app; nothing was signed or sent." }),
+    claimErrorLine("wallet_rejected", {})],
+    ["The approval wasn't answered within 10 minutes. Nothing was sent. Try again.", "The approval was cancelled. Nothing was sent. Try again.",
+     "You said no in your wallet. Nothing was sent. Try again.", "The approval ended without a yes. Nothing was sent. Try again."]);
+  const { canApprove } = await import("./qml/logic.mjs");
+  const progs = { kind: "programs", app: "lez_bridge", choices: two.choices, sheet: { warnings: ["no label"] } };
+  check("programs: ticked box + the claim's account enables Approve", canApprove({ request: progs, chosen: preTicked(progs, false, "BBB"), risky: true, understood: true }), true);
+  check("programs: the box not ticked: dim", canApprove({ request: progs, chosen: ["Public/BBB"], risky: true, understood: false }), false);
+  check("programs: no account ticked: dim (the short sheet then shows the accounts)", canApprove({ request: progs, chosen: [], risky: true, understood: true }), false);
+  check("relayed call: its account and a built sheet", canApprove({ request: { kind: "relayed_call", account: "Public/BBB", sheet: { warnings: [] } }, chosen: ["Public/BBB"], risky: false }), true);
+  check("relayed call refused by the wallet: dim", canApprove({ request: { kind: "relayed_call", sheet: { refused: true } }, chosen: ["Public/BBB"] }), false);
+  check("connect with the hint ticked", canApprove({ request: { kind: "connect", choices: two.choices }, chosen: preTicked({ kind: "connect", choices: two.choices, account_hint: "Public/BBB" }, false, ""), risky: false }), true);
+  check("secret with its account", canApprove({ request: { kind: "secret", account: "Public/AAA", choices: [{ account: "Public/AAA" }] }, chosen: preTicked({ kind: "secret", account: "Public/AAA", choices: [{ account: "Public/AAA" }] }, false, ""), risky: false }), true);
+  check("Add: a name not yours", [addNameNotYours("Adding the name didn't finish: this wallet doesn't hold jef04, so it isn't added."), addNameNotYours("Adding the name didn't finish: Error: jef04 is not registered"), addNameNotYours("Adding the name didn't finish: couldn't reach the sequencer")], [true, true, false]);
+}
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);

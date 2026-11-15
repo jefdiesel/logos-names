@@ -3697,6 +3697,8 @@ Item {
         tool = ""
         settingsOpen = false
         registerTaken = ""
+        if (!registerChecking)
+            registerWait = ""
         registering = true
         registerField.text = ""
         registerField.forceActiveFocus()
@@ -3704,25 +3706,63 @@ Item {
 
     /// Checks the name typed on the "Register a name" screen: a free one opens
     /// its registration, a held one is said to be taken.
-    function checkRegister(typed) {
+    /// Never a call that holds the screen: the button says "Checking…" at once, a busy wallet is
+    /// said in amber under it and asked again by itself once, and the answer ends it.
+    property bool registerChecking: false
+    property string registerWait: ""       // amber, under Check: the wallet is busy, or didn't answer
+    function checkRegister(typed, again) {
         var text = String(typed).trim()
-        if (text === "")
+        if (text === "" || (registerChecking && again !== true))
             return
         say("", false)
-        try {
-            var name = normalized(text)
-            if (name === "") {
-                say("A name is 1 to 32 characters of a-z, 0-9 or a hyphen, such as jef.", true)
+        registerTaken = ""
+        registerChecking = true
+        if (again !== true)
+            registerWait = ""
+        var failed = function(message, notTaken) {
+            if ((message === moduleBusy || message === moduleNoAnswer) && again !== true) {
+                registerWait = "The wallet is busy with another task. Checking again in a moment…"
+                againAfter(4000, function() { checkRegister(text, true) })
                 return
             }
-            if (ask("resolve", [name]) !== null) {
-                registerTaken = name
-                return
-            }
-            show(name)
-        } catch (error) {
-            sayRead(error.message)
+            registerChecking = false
+            registerWait = message === moduleBusy || message === moduleNoAnswer
+                ? "The wallet is still busy with another task. Press Check again in a minute."
+                : readFailed(message)
         }
+        var lookUp = function(name) {
+            askLater("resolve", [name], function(record) {
+                registerChecking = false
+                registerWait = ""
+                if (record !== null && record !== undefined) {
+                    registerTaken = name
+                    return
+                }
+                show(name)
+            }, failed, 30000)
+        }
+        if (!bridgeReady || !logos.callModuleAsync) {
+            failed("This screen needs to run inside Basecamp.")
+            return
+        }
+        logos.callModuleAsync("names", "normalize", [text], function(raw) {
+            lastReply = shownReply("names.normalize", raw)
+            var answer = Logic.normalizedReply(raw)
+            if (answer.kind === "missing") {
+                failed(moduleMissing)
+                return
+            }
+            if (answer.kind !== "ok") {
+                failed(answer.notTaken ? moduleBusy : moduleNoAnswer)
+                return
+            }
+            if (answer.value === "") {
+                registerChecking = false
+                registerWait = "A name is 1 to 32 characters of a-z, 0-9 or a hyphen, such as jef."
+                return
+            }
+            lookUp(answer.value)
+        }, 15000)
     }
 
     function show(name) {
@@ -3971,14 +4011,24 @@ Item {
                 }
                 say(settled ? (typeof job.done === "function" ? job.done(null) : job.done)
                     : "The names CLI finished, but the change does not show yet. Look the name up again in a moment.", !settled)
+            } else if (job.kind === "add_name") {
+                // Said under the Add box, not at the top: a name that isn't this wallet's yet
+                // (typed there to register it) gets the way to register it.
+                var problem = sentence(Logic.jobProblem(value, "Adding the name didn't finish"))
+                addNameResult = { name: job.name, line: problem, notYours: Logic.addNameNotYours(problem) }
+                say("", false)
             } else {
                 say(sentence(Logic.jobProblem(value, "The names CLI could not save it")), true)
             }
+            if (job.kind === "add_name" && value.state === "done")
+                addNameResult = { name: job.name, line: "Added " + job.name + ": this wallet holds it.", notYours: false, done: true }
         }, function(message) {
             job.asking = false
             console.log("names_ui: job:", message)
         })
     }
+    property var addNameResult: null       // the Add box's last answer: {name, line, notYours, done}
+    property bool addNameOpen: false       // "Hold a name that isn't listed? ▸"
 
     function lastLogLine(text) {
         var lines = String(text || "").split("\n")
@@ -5400,14 +5450,25 @@ Item {
             return "From your account " + Logic.idShort(request.account || "") + " · asked by " + request.app
         return ""
     }
+    /// The short sheet's tick is an ordinary one (brass) for a declaration; red only when the app
+    /// may be a fake or a call can't be read.
+    function appSheetWarnSoft(request) {
+        return request !== null && request.kind === "programs" && !appPublisherFailed(request)
+    }
     function appSheetWarning(request) {
         if (request === null || !appRequestRisky(request))
             return ""
         if (appPublisherFailed(request))
             return "This app may not be who it says. Approve only if you trust it."
+        // A declaration signs nothing: it lets the app ask later, each call shown first. The
+        // warning is that the Program Registry can't vouch for the programs, not that a call is
+        // unreadable.
+        if (request.kind === "programs")
+            return "Allow " + (request.app === "lez_bridge" ? "the LEZ Bridge's" : request.app + "'s") + " programs to ask this wallet to sign claims. Only allow programs you trust."
         return "This wallet can't read what the call does. Approve only if you trust " + (request.app === "lez_bridge" ? "the bridge" : request.app) + "."
     }
     property bool appBusy: false          // an answer is on its way to the module
+    property bool appNeedsChoice: false   // no account could be ticked for this request: the short sheet shows the choice
     property string appError: ""
     property var appGrants: []            // [{app, accounts, since}]
     readonly property var appRequest: appRequests.length > 0 ? appRequests[0] : null
@@ -5470,6 +5531,9 @@ Item {
                 appError = ""
                 // Access for the bridge while this app's claim screen has its file: that account only.
                 appChosen = Logic.preTicked(request, appPublisherFailed(request), request.app === "lez_bridge" ? claimAccount : "")
+                // Nothing could be ticked for the person: the accounts show on the short sheet
+                // itself, so Approve never waits on a choice hidden under Details.
+                appNeedsChoice = appChosen.length === 0 && (request.choices || []).length > 0
             }
             if (request.kind === "transfer")
                 loadFee()
@@ -5508,24 +5572,7 @@ Item {
 
     /// Whether the sheet's request may be approved as it stands.
     function appCanApprove() {
-        if (appRequest === null || appBusy || appChosen.length === 0)
-            return false
-        // Asked for another zone than the one in use: the same account ID is another account there.
-        if (appRequest.zone_in_use === false)
-            return false
-        // The Program Registry is still being asked about it (the module refuses it too, M-2).
-        if (appRequest.checking === true)
-            return false
-        if (appRequestRisky(appRequest) && !appUnderstood)
-            return false
-        // A private call can be approved only once the wallet has simulated it and found
-        // nothing it refuses (docs/wallet/BRIDGE-SDK.md).
-        if (appRequest.kind === "private_call" && (appRequest.check !== "ready" || !appRequest.sheet || appRequest.sheet.refused))
-            return false
-        // A call someone else pays for: only what the wallet built and didn't refuse.
-        if (appRequest.kind === "relayed_call" && (!appRequest.sheet || appRequest.sheet.refused))
-            return false
-        return true
+        return Logic.canApprove({ request: appRequest, busy: appBusy, chosen: appChosen, risky: appRequest !== null && appRequestRisky(appRequest), understood: appUnderstood })
     }
 
     /// A program call, or a token transfer, with warnings: its program's
@@ -6341,6 +6388,52 @@ Item {
     /// What a request asks the wallet, and Approve / Not now: the sheet over everything for
     /// another app's request, or, for this app's own Claim and Receive (`inline`), the step itself
     /// on that screen (root.appInline). The same request, checks and answer either way.
+    // The accounts a request offers, one row each (ticked ones in brass); on the full sheet and,
+    // when nothing could be ticked, on the short one.
+    component AccountChoices: ColumnLayout {
+        id: choicesBox
+        property var request: null
+        property string kind: ""
+        Layout.fillWidth: true
+        spacing: 8
+            Repeater {
+                model: Logic.sheetChoices(choicesBox.request, choicesBox.request !== null && choicesBox.request.app === "lez_bridge" ? root.claimAccount : "")
+                Rectangle {
+                    id: choiceRow
+                    required property var modelData
+                    readonly property bool ticked: root.appChosen.indexOf(modelData.account) >= 0
+                    Layout.fillWidth: true
+                    implicitHeight: root.px(44)
+                    radius: 6
+                    color: ticked ? root.raised : "transparent"
+                    border.width: 1
+                    border.color: ticked ? root.brass : root.line
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
+                        spacing: 10
+                        Rectangle {
+                            Layout.preferredWidth: 18
+                            Layout.preferredHeight: 18
+                            radius: choicesBox.kind === "connect" ? 4 : 9
+                            color: choiceRow.ticked ? root.brass : "transparent"
+                            border.width: 2
+                            border.color: choiceRow.ticked ? root.brass : root.dim
+                        }
+                        Text { text: root.accountShort(choiceRow.modelData.account); color: root.ink; font.family: root.mono; font.pixelSize: root.px(16) }
+                        Text { text: choiceRow.modelData.label; color: root.dim; font.family: root.sans; font.pixelSize: root.px(15); elide: Text.ElideRight; Layout.fillWidth: true }
+                        Text { visible: !!choiceRow.modelData.granted; text: "Shared with this app"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(14) }
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.chooseAppAccount(choiceRow.modelData.account)
+                    }
+                }
+            }
+    }
+
     component ApproveBody: ColumnLayout {
         id: sheetBody
         property bool inline: false
@@ -6371,9 +6464,9 @@ Item {
                 Layout.preferredHeight: 18
                 Layout.alignment: Qt.AlignTop
                 radius: 4
-                color: root.appUnderstood ? root.alarm : "transparent"
+                color: root.appUnderstood ? (root.appSheetWarnSoft(sheetBody.request) ? root.brass : root.alarm) : "transparent"
                 border.width: 2
-                border.color: root.alarm
+                border.color: root.appSheetWarnSoft(sheetBody.request) ? root.brass : root.alarm
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.appUnderstood = !root.appUnderstood }
             }
             Hint {
@@ -6382,6 +6475,14 @@ Item {
                 text: root.appSheetWarning(sheetBody.request)
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.appUnderstood = !root.appUnderstood }
             }
+        }
+        // No account could be ticked for the person: the choice is here, not only under Details.
+        ColumnLayout {
+            visible: root.appSheetCompact && root.appNeedsChoice
+            Layout.fillWidth: true
+            spacing: 8
+            Hint { color: root.ink; text: "Choose the account:" }
+            AccountChoices { request: sheetBody.request; kind: sheetBody.kind }
         }
         Hint { visible: root.appSheetCompact && root.appError !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.appError }
         Hint { visible: root.appSheetCompact && root.appBusy; color: root.brass; text: "One moment…" }
@@ -6718,42 +6819,7 @@ Item {
 
         // The account to use.
         Part { text: sheetBody.kind === "connect" ? "Accounts it may see" : sheetBody.kind === "call" || sheetBody.kind === "relayed_call" ? "Sign with" : sheetBody.kind === "private_call" || sheetBody.kind === "secret" ? "Account" : sheetBody.kind === "token_source" || sheetBody.kind === "programs" ? "Confirm" : "Pay from" }
-        Repeater {
-            model: sheetBody.request !== null ? (sheetBody.request.choices || []) : []
-            Rectangle {
-                id: choiceRow
-                required property var modelData
-                readonly property bool ticked: root.appChosen.indexOf(modelData.account) >= 0
-                Layout.fillWidth: true
-                implicitHeight: root.px(44)
-                radius: 6
-                color: ticked ? root.raised : "transparent"
-                border.width: 1
-                border.color: ticked ? root.brass : root.line
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: 12
-                    anchors.rightMargin: 12
-                    spacing: 10
-                    Rectangle {
-                        Layout.preferredWidth: 18
-                        Layout.preferredHeight: 18
-                        radius: sheetBody.kind === "connect" ? 4 : 9
-                        color: choiceRow.ticked ? root.brass : "transparent"
-                        border.width: 2
-                        border.color: choiceRow.ticked ? root.brass : root.dim
-                    }
-                    Text { text: root.accountShort(choiceRow.modelData.account); color: root.ink; font.family: root.mono; font.pixelSize: root.px(16) }
-                    Text { text: choiceRow.modelData.label; color: root.dim; font.family: root.sans; font.pixelSize: root.px(15); elide: Text.ElideRight; Layout.fillWidth: true }
-                    Text { visible: !!choiceRow.modelData.granted; text: "Shared with this app"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(14) }
-                }
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.chooseAppAccount(choiceRow.modelData.account)
-                }
-            }
-        }
+        AccountChoices { request: sheetBody.request; kind: sheetBody.kind }
         Hint {
             visible: sheetBody.request !== null && (sheetBody.request.choices || []).length === 0
             color: root.alarm
@@ -9041,20 +9107,47 @@ Item {
                         // A name this wallet holds that isn't listed (handed to it, or registered
                         // before public registrations were listed): the CLI checks the chain first.
                         // The chain can't list a wallet's names by account, so it is typed.
-                        Hint { font.pixelSize: root.px(15); text: root.cliOutdated ? "Hold a name that isn't listed? The names program set for this network is too old to add one; LEZ 0.4's can." : "Hold a name that isn't listed? Type it: the wallet checks on chain that it holds it, then lists it." }
+                        // A name this wallet holds but doesn't list: behind an arrow, so it is never
+                        // taken for Register (15 Nov: a new name typed here "didn't finish").
+                        Link {
+                            text: root.addNameOpen ? "Hold a name that isn't listed? ▾" : "Hold a name that isn't listed? ▸"
+                            color: root.dim
+                            font.pixelSize: root.px(15)
+                            onPressed: root.addNameOpen = !root.addNameOpen
+                        }
+                        Hint { visible: root.addNameOpen; font.pixelSize: root.px(15); text: root.cliOutdated ? "The names program set for this network is too old to add one; LEZ 0.4's can." : "Type it: the wallet checks on chain that it holds it, then lists it. To get a new name, use Register a name." }
                         RowLayout {
-                            visible: !root.cliOutdated
+                            visible: root.addNameOpen && !root.cliOutdated
                             Layout.fillWidth: true
                             spacing: 10
                             Field { id: addNameField; Layout.fillWidth: true; hint: "Name you hold" }
                             Action {
-                                label: "Add"
+                                readonly property bool adding: root.pending !== null && root.pending.kind === "add_name"
+                                label: adding ? "Checking…" : "Add"
                                 enabledNow: root.pending === null && addNameField.text.trim() !== "" && root.zoneHome && !root.cliOutdated
                                 onPressed: {
                                     var typed = addNameField.text.trim().toLowerCase().replace(/\.lez$/, "")
+                                    root.addNameResult = null
                                     root.cliChange("add_name", [typed], typed, function() { return true }, "Added " + typed + ": this wallet holds it.")
                                     addNameField.text = ""
                                 }
+                            }
+                        }
+                        Hint { visible: root.addNameOpen && root.pending !== null && root.pending.kind === "add_name"; color: root.brass; text: "Checking on chain that this wallet holds " + (root.pending !== null ? root.pending.name : "") + "…" }
+                        RowLayout {
+                            visible: root.addNameOpen && root.addNameResult !== null
+                            Layout.fillWidth: true
+                            spacing: 12
+                            Hint {
+                                Layout.fillWidth: true
+                                color: root.addNameResult !== null && root.addNameResult.done ? root.good : root.brass
+                                text: root.addNameResult === null ? "" : root.addNameResult.notYours ? root.addNameResult.name + " isn't yours yet. To make it yours, register it." : root.addNameResult.line
+                            }
+                            Action {
+                                visible: root.addNameResult !== null && root.addNameResult.notYours
+                                label: "Register " + (root.addNameResult !== null ? root.addNameResult.name : "")
+                                strong: true
+                                onPressed: { var n = root.addNameResult.name; root.addNameResult = null; root.openRegister(); registerField.text = n; root.checkRegister(n) }
                             }
                         }
                     }
@@ -11160,12 +11253,13 @@ Item {
                             onAccepted: root.checkRegister(registerField.text)
                         }
                         Action {
-                            label: "Check"
+                            label: root.registerChecking ? "Checking…" : "Check"
                             strong: true
-                            enabledNow: registerField.text.trim() !== ""
+                            enabledNow: registerField.text.trim() !== "" && !root.registerChecking
                             onPressed: root.checkRegister(registerField.text)
                         }
                     }
+                    Hint { visible: root.registerWait !== ""; color: root.brass; text: root.registerWait }
                     RowLayout {
                         visible: root.registerTaken !== ""
                         spacing: 12
