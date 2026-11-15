@@ -12263,7 +12263,10 @@ mod tests {
         assert!(!names.set_cli_wallet(wallet03.to_string_lossy().into_owned()), "LEZ 0.3's wallet is refused on LEZ 0.4");
         names.cli_wallet = Some(wallet03.to_string_lossy().into_owned());
         assert!(names.cli_setup().err().unwrap().contains("each network keeps its own wallet"));
-        assert!(parsed(&names.cli_install())["error"].as_str().unwrap().contains("no names CLI for LEZ 0.4 is published"));
+        // A working LEZ 0.4 tool is set: the one-click install leaves it as it is.
+        names.cli_wallet = Some(lez04_wallet_dir(&config).to_string_lossy().into_owned());
+        let install = parsed(&names.cli_install());
+        assert_eq!((install["value"]["installed"].as_bool(), install["value"]["path"].as_str()), (Some(true), new.to_str()), "{install}");
         assert!(parsed(&names.zone_add(String::new(), "http://127.0.0.1:9".into()))["error"].as_str().unwrap().contains("zones are kept on LEZ 0.3"));
     }
 
