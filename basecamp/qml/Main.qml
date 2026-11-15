@@ -38,6 +38,10 @@ Item {
     property string editTab: "profile"   // the Edit screen's tab: profile, page or giveup
     property bool publicRegisterOpen: false
     property bool registering: false       // the "Register a name" screen is open
+    // LEZ 0.4: a name registered from a public account publishes that account, so people can pay
+    // it (the bridge page and `names pay` pay a name's published account). Ticked by default.
+    property bool publishOnRegister: true
+    property string publishAsk: ""         // the name whose "Let people pay it" is being confirmed
     // Get tokens: bridging from the person's Logos Blockchain node into LEZ (`cli_bridge`).
     property bool gettingTokens: false     // the "Get tokens" screen is open
     property string bridgeKey: ""          // the Logos Blockchain public key last bridged from, as the module keeps it
@@ -3230,6 +3234,8 @@ Item {
                 revealing = false
                 if (value && value.stage === "registered") {
                     say(item.name + " is yours.", false)
+                    if (root.namesNet === "0.4")
+                        publishAfterRegister(item.name, item.owner)
                     loadMine()
                     if (record !== null && record.name === item.name)
                         read(item.name)
@@ -3251,6 +3257,31 @@ Item {
         }
     }
     property real revealAskedAt: 0
+
+    /// LEZ 0.4, a name just registered: its holder account published as its public account, unless
+    /// the person unticked that when registering (kept in the module: `publish:<name>`).
+    function publishAfterRegister(name, owner) {
+        var go = function() { publishAccount(name, owner) }
+        if (moduleFeatures.indexOf("app_note") < 0)
+            return go()
+        askLater("app_note", ["publish:" + name, ""], function(value) {
+            if (String(value || "") !== "no")
+                go()
+        }, go, 10000)
+    }
+    /// Publishes `account` as the public account of `name` (set_account), so it can be paid.
+    function publishAccount(name, account) {
+        if (account === "")
+            return
+        say("Publishing the account people pay " + name + " at…", false)
+        askLater("set_account", [name, account], function() {
+            say("People can pay " + name + " at your account " + Logic.idShort(account) + ".", false)
+            loadMine()
+        }, function(message) {
+            say("The account of " + name + " wasn't published: " + sentence(message) + " Names → Let people pay it, to try again.", true)
+            loadMine()
+        }, 180000)
+    }
     // Names whose reveal the module refused this session, and when to ask again (SF-A).
     property var revealRefused: ({})
 
@@ -3718,6 +3749,8 @@ Item {
         say("Asking the wallet to sign.", false)
         // On LEZ 0.4 private payments are off: a name is registered public-only, with no private
         // receiving keys ("auto" would make a private account and publish its keys).
+        if (namesNet === "0.4" && moduleFeatures.indexOf("app_note") >= 0)
+            askLater("app_note", ["publish:" + name, publishOnRegister ? "yes" : "no"], function() {}, function() {}, 10000)
         askLater("register_name", [name, owner, namesNet === "0.4" ? "" : "auto"], function(value) {
             pending = null
             say("Committed. The reveal goes out by itself in about 15 minutes while Names is open; Wallet, Names shows when.", false)
@@ -8096,6 +8129,9 @@ Item {
                                     elide: Text.ElideRight
                                 }
                                 Link { visible: myName.modelData["private"] !== false && root.namesNet !== "0.4"; text: "Make public…"; font.pixelSize: root.px(15); onPressed: { root.go("settings"); root.loadAccounts() } }
+                                Link { visible: root.namesNet === "0.4" && !myName.modelData.account && root.publishAsk !== myName.modelData.name; text: "Let people pay it…"; font.pixelSize: root.px(15); onPressed: root.publishAsk = myName.modelData.name }
+                                Link { visible: root.publishAsk === myName.modelData.name; text: "Publish " + Logic.idShort(myName.modelData.owner || ""); font.pixelSize: root.px(15); onPressed: { root.publishAsk = ""; root.publishAccount(myName.modelData.name, myName.modelData.owner || "") } }
+                                Link { visible: root.publishAsk === myName.modelData.name; text: "Cancel"; font.pixelSize: root.px(15); onPressed: root.publishAsk = "" }
                                 Link { visible: myName.modelData.name !== root.mainName; text: "Make main"; font.pixelSize: root.px(15); onPressed: root.setMain(myName.modelData.name) }
                                 Link { text: "Open"; font.pixelSize: root.px(15); onPressed: { root.go("search"); root.show(myName.modelData.name) } }
                                 Link { text: "Copy"; font.pixelSize: root.px(15); onPressed: root.copy(myName.modelData.name, "Your name") }
@@ -10167,7 +10203,7 @@ Item {
                     }
                     Hint {
                         font.pixelSize: root.px(15)
-                        text: "1 to 32 letters, digits or hyphens. " + (root.lockedUpTo > 0 ? "Names of up to " + root.lockedUpTo + " characters, and a reserved list, are placed by the registry's admin." : "Some short names are reserved.")
+                        text: root.lockedUpTo > 0 ? (root.lockedUpTo + 1) + " to 32 letters, digits or hyphens. Shorter names, and a reserved list, are placed by the registry's admin." : "1 to 32 letters, digits or hyphens. Some short names are reserved."
                     }
                 }
 
@@ -10372,6 +10408,26 @@ Item {
                         Hint {
                             color: root.cliPath !== "" ? root.dim : root.brass
                             text: "Anyone who knows the name can find this account, and so its balance and history." + (root.cliPath !== "" ? "" : " To hide it, install the names CLI and register privately.") + " Payments to the name still go to your private account."
+                        }
+                        RowLayout {
+                            visible: root.namesNet === "0.4"
+                            Layout.fillWidth: true
+                            spacing: 10
+                            Rectangle {
+                                Layout.preferredWidth: 18
+                                Layout.preferredHeight: 18
+                                Layout.alignment: Qt.AlignTop
+                                radius: 4
+                                color: root.publishOnRegister ? root.brass : "transparent"
+                                border.width: 2
+                                border.color: root.brass
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.publishOnRegister = !root.publishOnRegister }
+                            }
+                            Hint {
+                                color: root.ink
+                                text: "People can pay " + (root.missing || "the name") + " at your account " + Logic.idShort(root.wallet.length > root.fromIndex ? root.wallet[root.fromIndex].account : "") + "."
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.publishOnRegister = !root.publishOnRegister }
+                            }
                         }
                         Hint { visible: text !== ""; color: root.brass; font.pixelSize: root.px(15); text: Logic.uncheckedLine(root.toolNow, ["commit", "register"]) }
                         Action {

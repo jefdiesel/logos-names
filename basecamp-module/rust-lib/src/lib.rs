@@ -4097,6 +4097,8 @@ impl NamesModule for Names {
                                 "name": name,
                                 "display": format!("{name}{}", registry::NAME_SUFFIX),
                                 "owner": registry::account_text(holder),
+                                // The public account the name publishes for payments, or null.
+                                "account": resolved.profile.account.as_ref().map(registry::account_text),
                                 "expires": resolved.expires_json(),
                                 "never": resolved.never_expires(),
                                 "lapsed": resolved.lapsed(registry::local_now()),
