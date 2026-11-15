@@ -1186,25 +1186,39 @@ Item {
 
     /// Checks the LEZ Bridge files shipped inside Names against the hashes built into this app,
     /// before anything offers to install them (the names module reads the files).
+    property int bundleTries: 0          // checks of the shipped bridge the names module didn't answer
+    property bool bundleChecking: false
     function checkBundle() {
-        if (bridgeBundle !== "" || installedList === null)
+        if (bridgeBundle !== "" || installedList === null || bundleChecking)
             return
         if (moduleFeatures.indexOf("file_sha256") < 0) {
             bridgeBundle = "bad"
             return
         }
-        var left = Logic.BUNDLED_BRIDGE.length, good = true
+        // A check the module didn't answer (busy reading the wallet as Names opens) is no verdict:
+        // the bundle stays unchecked and is asked again, up to 6 times, 10 s apart.
+        var left = Logic.BUNDLED_BRIDGE.length, good = true, unanswered = false
+        bundleChecking = true
         Logic.BUNDLED_BRIDGE.forEach(function(b) {
             var path = Logic.bundledPath(installedList, b.file)
             var settle = function(ok) {
                 good = good && ok
-                if (--left === 0)
-                    bridgeBundle = good ? "ok" : "bad"
+                if (--left > 0)
+                    return
+                bundleChecking = false
+                if (unanswered && bundleTries < 6) {
+                    bundleTries = bundleTries + 1
+                    againAfter(10000, checkBundle)
+                    return
+                }
+                bridgeBundle = good && !unanswered ? "ok" : "bad"
             }
             if (path === "")
                 return settle(false)
             askLater("file_sha256", [path], function(sha) { settle(sha === b.sha256) }, function(message) {
                 console.log("names_ui: the shipped", b.file, "can't be checked:", message)
+                if (message === moduleNoAnswer || message === moduleBusy)
+                    unanswered = true
                 settle(false)
             }, 30000)
         })
@@ -2740,7 +2754,11 @@ Item {
             loadCliStatus()
         }, function(message) {
             installJob = null
-            installProblem = sentence(message)
+            // Opening Names with no tool: a module that didn't answer is asked again next time.
+            if (auto && (message === moduleNoAnswer || message === moduleBusy))
+                toolAutoTried = false
+            else
+                installProblem = sentence(message)
         }, 60000)
     }
 
