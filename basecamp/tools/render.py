@@ -59,10 +59,10 @@ BRIDGE = r"""
             if (module === "package_manager" && method === "getInstalledPackages") {
                 var me = { name: "names_ui", version: "0.17.0", installDir: "/Users/you/Library/Application Support/Logos/LogosBasecamp/plugins/names_ui" }
                 var pk = (%(mock)s).packages
-                return JSON.stringify(pk ? [me].concat(pk) : [me, { name: "lez_bridge", version: "0.1.0", hashes: { root: "d55b06acb191406f1a785d7606abc949b3552c7bd5973882f2089846f65cd6b7" } }, { name: "lez_bridge_ui", version: "0.1.0", hashes: { root: "ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9" } }])
+                return JSON.stringify(pk ? [me].concat(pk) : [me, { name: "lez_bridge", version: "0.1.0", hashes: { root: "cbb7a03cf6beacdf95bc5cb7813328ca0c10d60b21b5d477ceaa6906f35819a7" } }, { name: "lez_bridge_ui", version: "0.1.0", hashes: { root: "ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9" } }])
             }
             if (module === "names" && method === "file_sha256")
-                return ok(String(args[0]).indexOf("lez_bridge_ui") >= 0 ? "0d7e317c1fbef3e9c9d4155c10746256af8e9ed2b5a8156413823fbc568ea270" : "a364ffbad43ba2c3c7ad9c989a712084af3bf83a0692ec2dc1d898128c00280f")
+                return ok(String(args[0]).indexOf("lez_bridge_ui") >= 0 ? "0d7e317c1fbef3e9c9d4155c10746256af8e9ed2b5a8156413823fbc568ea270" : "9ae6d4a730364b0e86f8b885f5b90ee6f133b813518b3e6820582dedef2a1b20")
             if (module === "lez_bridge") {
                 var lb = (%(mock)s).bridge
                 if (!lb) return JSON.stringify({ error: "Method not found" })
@@ -73,8 +73,9 @@ BRIDGE = r"""
                     root.mockCalls[method] = n + 1
                     answer = answer.__seq[Math.min(n, answer.__seq.length - 1)]
                 }
+                if (answer && answer.__error) return JSON.stringify(JSON.stringify({ success: false, value: null, error: answer.__error }))
                 if (answer === undefined && method !== "config" && method !== "relayed_claims" && method !== "relayed_claim_forget" && method !== "receives") return JSON.stringify({ error: "Method not found" })
-                if (answer === undefined) answer = method === "config" ? { build: { commit: "5cad169" }, deployment: { name: "bridge-test-network-v3", bridge_program: "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr" }, features: ["relayed_claim", "relayed_claim_check_with", "relayed_claim_build", "relayed_claim_submit", "account_hint", "receive", "deposit_code", "public_receive", "receive_status", "receives", "relayed_claim_check_deposit"], notices: { not_private: { title: "Not private", text: "A public claim publishes the claim secret and links the Sepolia deposit to this account, for good. A private account keeps them apart (its claim needs a proof)." } } } : method === "relayed_claims" ? [] : method === "receives" ? { receives: [] } : null
+                if (answer === undefined) answer = method === "config" ? { build: { commit: "652ee7a" }, deployment: { name: "bridge-test-network-v4", bridge_program: "BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf" }, features: ["relayed_claim", "relayed_claim_check_with", "relayed_claim_build", "relayed_claim_submit", "account_hint", "receive", "deposit_code", "public_receive", "receive_status", "receives", "receive_request", "relayed_claim_check_deposit"], notices: { release: (%(mock)s).release || null, not_private: { title: "Not private", text: "A public claim publishes the claim secret and links the Sepolia deposit to this account, for good. A private account keeps them apart (its claim needs a proof)." } } } : method === "relayed_claims" ? [] : method === "receives" ? { receives: [] } : null
                 return JSON.stringify(JSON.stringify({ success: true, value: answer, error: null }))
             }
             if (module === "chat_module") {
@@ -110,7 +111,7 @@ BRIDGE = r"""
             }
             // The names network: set_names_network moves it, get_config says it.
             if (method === "set_names_network") { root.mockNet = String(args[0]); method = "get_config"; var wrapNet = true }
-            if (method === "get_config") return (function(c) { return wrapNet ? ok(c) : JSON.stringify(c) })({ features: ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note"], bridge_programs: ["JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr"], names_network: { id: root.mockNet || "lez-0.3" }, zone: (%(mock)s).zone || { id: "home", name: "Home", channel: "%(home_channel)s", home: true }, names_sequencer: "http://127.0.0.1:3040", registry: %(registry)s, sequencer: (%(mock)s).zone ? "http://127.0.0.1:3041" : "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json", cli: "/Users/you/.local/bin/names", cli_wallet: "/Users/you/.lee/wallet", bridge_key: "%(bridge_key)s", bridge_node: null, module_version: root.neededModule })
+            if (method === "get_config") return (function(c) { return wrapNet ? ok(c) : JSON.stringify(c) })({ features: ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note"], bridge_programs: ["JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr", "BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf"], names_network: { id: root.mockNet || "lez-0.3" }, zone: (%(mock)s).zone || { id: "home", name: "Home", channel: "%(home_channel)s", home: true }, names_sequencer: "http://127.0.0.1:3040", registry: %(registry)s, sequencer: (%(mock)s).zone ? "http://127.0.0.1:3041" : "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json", cli: "/Users/you/.local/bin/names", cli_wallet: "/Users/you/.lee/wallet", bridge_key: "%(bridge_key)s", bridge_node: null, module_version: root.neededModule })
             if (method === "normalize") return String(args[0]).toLowerCase().replace(/\.lez$/, "")
             if (method === "mine") return ok({ names: names.filter(function(entry) { return !(%(mock)s).noNames && entry.owner === "%(alice)s" }).map(function(entry) {
                 return { name: entry.name, display: entry.name + ".lez", owner: entry.owner, expires: null, never: true, lapsed: false } }), pending: ((%(mock)s).pending || []).map(function(p) {
@@ -332,6 +333,12 @@ SCENARIOS = {
     'receive-claimable': RECEIVE_04 % (ARR, '({ "dep-1": { stage: "claimable" } })', CHECKED + '; root.openEthReceive("dep-1")'),
     'receive-claimed': RECEIVE_04 % (ARR, '({ "dep-1": { stage: "claimed", claimed_block: 6054 } })', CHECKED + '; root.openEthReceive("dep-1")'),
     'receive-old-code': RECEIVE_04 % (ARR, '({ "dep-1": { stage: "requested" } })', CHECKED + '; root.openEthReceive("dep-1")'),
+    # A code of an earlier session shown again (receive_request), made for the old vault (v3).
+    'receive-old-code-shown': RECEIVE_04 % (ARR, '({ "dep-1": { stage: "requested" } })', CHECKED + '; root.openEthReceive("dep-1")'),
+    # The bridge can't show it again (an older build kept no vault): one line, the reason under Details.
+    'receive-old-code-refused': RECEIVE_04 % (ARR, '({ "dep-1": { stage: "requested" } })', CHECKED + '; root.openEthReceive("dep-1"); root.receiveDetails = true'),
+    # An older bridge still runs: no new code until it is updated.
+    'receive-hold-old-bridge': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive() }) })',
     # Opening Receive with a deposit on its way: that first, "Make another code" under it.
     'receive-entry-onitsway': RECEIVE_04 % (ARR, '({ "dep-1": { stage: "deposited", confirmations: 20, final_in_min: 7 } })', CHECKED + '; root.openEthReceive()'),
     # The code just made, then the deposit seen: step 4 done by itself, step 5 the wait.
@@ -369,7 +376,7 @@ SCENARIOS = {
     'claim-updated': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openClaim(); Qt.callLater(function() { Qt.callLater(function() { root.claimCheckWith = false; root.bridgeInstall = { phase: "updated", line: "Updated. To use it now: Settings (the gear) → Module Inspector → LEZ Bridge → Unload, then Start here." } }) }) }) })',
     'approve-checking-publisher': 'root.appRequests = [{ id: "r7", kind: "connect", app: "lez_bridge", reason: "To claim bridge deposits into your public account", created: Date.now(), expires: Date.now() + 600000, checking: true, checking_what: "who publishes lez_bridge", choices: [{ account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", label: "Names wallet, main public account", granted: false }], publisher: { status: "checking" } }]; root.publisherSince = { r7: Date.now() - 4000 }; root.publisherNow = Date.now()',
     'wallet-starting': 'root.openWallet("home"); root.sayRead(root.moduleNoAnswer)',
-    'setup-card-stuck': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.installedList = [{ name: "names_ui", installDir: "/x" }, { name: "lez_bridge", hashes: { root: "d55b06acb191406f1a785d7606abc949b3552c7bd5973882f2089846f65cd6b7" } }]; root.bridgeAnswers = false; root.bridgeFails = 2 }) })',
+    'setup-card-stuck': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.installedList = [{ name: "names_ui", installDir: "/x" }, { name: "lez_bridge", hashes: { root: "cbb7a03cf6beacdf95bc5cb7813328ca0c10d60b21b5d477ceaa6906f35819a7" } }]; root.bridgeAnswers = false; root.bridgeFails = 2 }) })',
     'setup-receive-unload': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive(); root.againAfter(300, function() { root.bridgeInstall = { phase: "unload" } }) }) })',
     'setup-claim-stale': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openClaim(); root.againAfter(300, function() { root.bridgeAnswers = false; root.bridgeStale = true; root.claimMissing = true }) }) })',
     'setup-receive-done': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive(); root.againAfter(300, function() { root.bridgeDoneView = "ethreceive"; root.bridgeDone = "LEZ Bridge updated." }) }) })',
@@ -597,8 +604,8 @@ MOCKS = {
     'setup-receive-install': {'packages': []},
     'card-update-ready': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'a2c6c3117443a92f2a5b2a1a2267175f4f82ed209a3dae8e554461bd09df0d18'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': '788f2f0dde4bd7ae'}}], 'bridge': {'config': {'deployment': {'name': 'bridge-test-network-v3', 'bridge_program': '4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr'}}}},
     'receive-update-ready': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'a2c6c3117443a92f2a5b2a1a2267175f4f82ed209a3dae8e554461bd09df0d18'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': '788f2f0dde4bd7ae'}}], 'bridge': {'config': {'deployment': {'name': 'bridge-test-network-v3', 'bridge_program': '4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr'}}}},
-    'receive-restart-needed': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'd55b06acb191406f1a785d7606abc949b3552c7bd5973882f2089846f65cd6b7'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}], 'bridge': {'config': {'deployment': {'name': 'bridge-test-network-v3', 'bridge_program': '4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr'}}}},
-    'card-restart-needed': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'd55b06acb191406f1a785d7606abc949b3552c7bd5973882f2089846f65cd6b7'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}], 'bridge': {'config': {'deployment': {'name': 'bridge-test-network-v3', 'bridge_program': '4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr'}}}},
+    'receive-restart-needed': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'cbb7a03cf6beacdf95bc5cb7813328ca0c10d60b21b5d477ceaa6906f35819a7'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}], 'bridge': {'config': {'deployment': {'name': 'bridge-test-network-v3', 'bridge_program': '4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr'}}}},
+    'card-restart-needed': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'cbb7a03cf6beacdf95bc5cb7813328ca0c10d60b21b5d477ceaa6906f35819a7'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}], 'bridge': {'config': {'deployment': {'name': 'bridge-test-network-v3', 'bridge_program': '4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr'}}}},
     'receive-choose': {'bridge': {}},
     'receive-ready-to-make': {'bridge': {}},
     'receive-needs': {'bridge': {'make_public_deposit_request': {'needs': 'secret', 'request': {'request': 'r5', 'state': 'pending'}, 'message': 'Approve "RFP022/deposit" in the Names app…'}, 'wallet_request': {'state': 'pending'}}},
@@ -626,8 +633,8 @@ MOCKS = {
     'claim-installing': {'packages': []},
     'claim-install-slow': {'packages': []},
     'claim-install-failed': {'packages': []},
-    'claim-idle': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'd55b06acb191406f1a785d7606abc949b3552c7bd5973882f2089846f65cd6b7'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}]},
-    'claim-starting': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'd55b06acb191406f1a785d7606abc949b3552c7bd5973882f2089846f65cd6b7'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}]},
+    'claim-idle': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'cbb7a03cf6beacdf95bc5cb7813328ca0c10d60b21b5d477ceaa6906f35819a7'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}]},
+    'claim-starting': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'cbb7a03cf6beacdf95bc5cb7813328ca0c10d60b21b5d477ceaa6906f35819a7'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}]},
     'claim-older': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'a2c6c3117443a92f2a5b2a1a2267175f4f82ed209a3dae8e554461bd09df0d18'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': '788f2f0dde4bd7ae'}}], 'bridge': {}},
     'claim-updated': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'a2c6c3117443a92f2a5b2a1a2267175f4f82ed209a3dae8e554461bd09df0d18'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': '788f2f0dde4bd7ae'}}], 'bridge': {}},
     'approve-checking-publisher': {},
@@ -763,7 +770,20 @@ MOCKS["receive-code-then-deposited"] = {"bridge": dict(MOCKS["receive-code"]["br
 # After Copy the link: "Copied." on the button for a moment.
 SCENARIOS["receive-code-copied"] = SCENARIOS["receive-code"].replace("root.makeReceive() })", "root.makeReceive(); root.againAfter(100, function() { root.receiveLinkCopied = true }) })")
 MOCKS["receive-code-copied"] = MOCKS["receive-code-words"]
-MOCKS["receive-code-details"] = MOCKS["receive-code-words"]
+MOCKS["receive-code-details"] = _copy.deepcopy(MOCKS["receive-code-words"])
+# v4's notice as the bridge 652ee7a gives it (rfp-022 v4-live deployments.json), under Details.
+MOCKS["receive-code-details"]["release"] = {"text": "Withdrawals back to Ethereum are checked by proof on Ethereum. The first proofs are being set up; until then a burn waits.", "detail": ""}
+_shown = MOCKS["receive-code-words"]["bridge"]["make_public_deposit_request"]
+MOCKS["receive-old-code-shown"] = _arriving({"stage": "requested"})
+MOCKS["receive-old-code-shown"]["bridge"]["receive_request"] = {"id": "dep-1", "request": _shown["request"], "link": _shown["request_url"], "request_url": _shown["request_url"], "request_qr": _shown["request_qr"],
+    "compare": _shown["compare"], "commitment": _shown["commitment"], "symbol": "ETH", "denom": "100000000000000000", "denom_text": "0.1", "amount_text": "0.1 ETH", "denom_index": 1,
+    "chain_id": 11155111, "vault": "0x26af59855b99a8af199361289A5Ed6088729E60E", "deployment": "bridge-test-network-v3", "network": "LEZ 0.4 · bridge test network",
+    "account": "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", "account_kind": "public", "claimed": False, "stage": "requested", "text": None, "as_of": None}
+MOCKS["receive-old-code-refused"] = _arriving({"stage": "requested"})
+MOCKS["receive-old-code-refused"]["bridge"]["receive_request"] = {"__error": "The deposit code of dep-1 can't be shown again: it was made by an older build of this module, which did not keep the vault it was for. Nothing was guessed; the code is in the reply that first made it (its export text), or make a new deposit request."}
+MOCKS["receive-hold-old-bridge"] = {"bridge": {"config": {"build": {"commit": "5cad169"}, "deployment": {"name": "bridge-test-network-v3", "bridge_program": "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr"},
+    "features": ["relayed_claim", "relayed_claim_check_with", "receive", "deposit_code", "public_receive", "receive_status", "receives", "relayed_claim_check_deposit"]}},
+    "packages": [{"name": "lez_bridge", "version": "0.1.0", "hashes": {"root": "d55b06acb191406f1a785d7606abc949b3552c7bd5973882f2089846f65cd6b7"}}]}
 
 def main():
     qml, out_dir = sys.argv[1], sys.argv[2]
