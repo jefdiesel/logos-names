@@ -852,8 +852,8 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     claimErrorLine("wallet_rejected", { message: "Cancelled; nothing was signed or sent." }),
     claimErrorLine("wallet_rejected", { message: "You rejected it in the Names app; nothing was signed or sent." }),
     claimErrorLine("wallet_rejected", {})],
-    ["The approval wasn't answered within 10 minutes. Nothing was sent. Try again.", "The approval was cancelled. Nothing was sent. Try again.",
-     "The approval was rejected, so nothing was signed or sent.", "The approval ended without a yes. Nothing was sent. Try again."]);
+    ["Nobody answered the approval within 10 minutes, so nothing was signed or sent.", "The approval was cancelled, so nothing was signed or sent.",
+     "The approval was rejected, so nothing was signed or sent.", "The approval ended without a yes, so nothing was signed or sent."]);
   const { canApprove } = await import("./qml/logic.mjs");
   const progs = { kind: "programs", app: "lez_bridge", choices: two.choices, sheet: { warnings: ["no label"] } };
   check("programs: ticked box + the claim's account enables Approve", canApprove({ request: progs, chosen: preTicked(progs, false, "BBB"), risky: true, understood: true }), true);
@@ -891,12 +891,21 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   const at = (s) => "T" + s;
   const stages = ["planned", "approve", "burning", "burned", "burn_unclear", "recorded", "proving", "proved", "wrapped", "releasable", "released", undefined];
   check("stage tones", stages.map((stage) => sendBackProgress(stage ? { stage } : null, 0, at).tone), ["ready", "ready", "wait", "wait", "problem", "ready", "wait", "wait", "wait", "ready", "done", "plain"]);
-  check("stage actions", stages.map((stage) => sendBackProgress({ stage }, 0, at).action), ["burn", "", "", "", "", "prove", "", "seal", "", "release", "", ""]);
+  check("stage actions", stages.map((stage) => sendBackProgress({ stage }, 0, at).action), ["burn", "", "", "", "check", "prove", "", "seal", "", "release", "", ""]);
   check("burned: the honest wait, no time promised", [sendBackProgress({ stage: "burned" }, 0, at).headline, sendBackProgress({ stage: "burned" }, 0, at).detail],
-    ["Waiting for Ethereum to record it.", "The bridge team posts these updates to Ethereum by hand today, so this can take from minutes to hours."]);
+    ["Waiting for Ethereum to record it.", ""]);
+  {
+    // The hand steps are said once, in one place (SEND_BACK_BY_HAND), and the times come from one constant.
+    const { SEND_BACK_TIMES, SEND_BACK_BY_HAND, sendBackByHand } = await import("./qml/logic.mjs");
+    check("by hand: said for the stages that wait on it", ["burning", "burned", "recorded", "proving", "proved", "wrapped"].map(sendBackByHand), [false, true, false, false, true, false]);
+    check("by hand: the one line names both hand steps", [/update/.test(SEND_BACK_BY_HAND), /wrapper/.test(SEND_BACK_BY_HAND)], [true, true]);
+    check("no stage repeats the by-hand line", ["burned", "proved"].map((stage) => /by hand/.test(sendBackProgress({ stage }, 0, at).detail + sendBackProgress({ stage }, 0, at).headline)), [false, false]);
+    check("times from one place", [sendBackProgress({ stage: "proving" }, 0, at).headline.includes(SEND_BACK_TIMES.proof), sendBackProgress({ stage: "proved" }, 0, at).headline.includes(SEND_BACK_TIMES.wrap), sendBackProgress({ stage: "burning" }, 0, at).headline.includes(SEND_BACK_TIMES.burn)], [true, true, true]);
+    check("burn unclear: a problem with Check again, never 'look in the Names app'", (() => { const x = sendBackProgress({ stage: "burn_unclear", text: "Included in a block, but the account's balance did not go down: it may have been refused. Look in the Names app." }, 0, at); return [x.tone, x.action, /Names app/.test(x.detail)] })(), ["problem", "check", false]);
+  }
   check("wrapped: releasable at the vault's time", [sendBackProgress({ stage: "wrapped", releasable_at: 5000 }, 4000, at).headline, sendBackProgress({ stage: "wrapped", releasable_at: 5000 }, 5000, at).headline], ["Releasable at T5000.", "Releasable any minute now."]);
   check("recorded: the earliest release under it", sendBackProgress({ stage: "recorded", releasable_at: 5000 }, 1000, at).detail, "Releasable at T5000 at the earliest (the vault's one-hour delay).");
-  check("proof and wrapper times", [sendBackProgress({ stage: "proving" }, 0, at).headline, sendBackProgress({ stage: "proved" }, 0, at).headline], ["Making the release proof on this computer: about 20 s.", "Waiting for the bridge team to send the seal."]);
+  check("proof and wrapper times", [sendBackProgress({ stage: "proving" }, 0, at).headline, sendBackProgress({ stage: "proved" }, 0, at).headline], ["Making the release proof on this computer: about 20 s.", "Waiting for the proof's Ethereum wrapper (about 3 min once it is run)."]);
   check("approved, the relay refused: its words, not a wait for approval", [sendBackProgress({ stage: "approve", note: "The bridge's relay refused the burn: cap. Nothing was sent." }, 0, at).headline, sendBackProgress({ stage: "approve", note: "x" }, 0, at).tone], ["Signed; the bridge's relay hasn't sent it yet and tries again at each check.", "wait"]);
   check("the endpoint busy is not a relay refusal", sendBackProgress({ stage: "approve", busy: true, note: "The bridge's endpoint is busy; trying again shortly." }, 0, at).headline, "Waiting for your approval.");
   const { rateLimited } = await import("./qml/logic.mjs");
@@ -912,7 +921,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("steps: a first-time question stays in the row", sendBackSteps({ stage: "burned", extras: ["secret"] }).map((x) => x.short + ":" + x.state), ["Amount:done", "Address:done", "Keys:done", "Approved:done", "Ethereum:now"]);
   check("steps: received, all done", sendBackSteps({ stage: "released" }).map((x) => x.state), ["done", "done", "done", "done"]);
   check("steps: the last title", sendBackSteps({ stage: "released" })[3].title, "Received on Ethereum");
-  check("names_update said plainly", [sendBackBurnHeld({ needs: "names_update" }), sendBackBurnHeld({ stage: "approve" })], ["This Names Wallet can't sign a burn yet. Nothing was signed or sent.", ""]);
+  check("names_update said plainly", [sendBackBurnHeld({ needs: "names_update" }), sendBackBurnHeld({ stage: "approve" })], ["This Names Wallet can't sign a burn yet: it needs a newer Names build. Nothing was signed or sent.", ""]);
   const read = { bridges: [{}, {}], accounts: [{ account: "Public/A", found: true, native: "0", tokens: [{ symbol: "wETH", amount: "100000000000000000", decimals: 18, bridge: BRIDGE_V4_PROGRAM, bridge_label: "bridge v4", definition: "D" }] }] };
   const asset = bridgeNetRows(read, null)[0].assets[1];
   const { sendBackSources } = await import("./qml/logic.mjs");
@@ -986,6 +995,29 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("approveWhy: registry check", approveWhy({ request: { kind: "call", checking: true }, chosen: ["a"] }), "Waiting for the Program Registry's answer.");
   check("receiveMakeWhy", [receiveMakeWhy({ account: "A", ticked: false }), receiveMakeWhy({ account: "", ticked: true }), receiveMakeWhy({ account: "A", ticked: true }), receiveMakeWhy({ asking: true })],
     ["Tick “Not private” above to make the code.", "Choose the account above.", "", ""]);
+}
+
+{
+  // The page itself keeps to STYLE.md: red only in problem lines, no red boxes, no violet text, one
+  // back button, an honest Reject.
+  const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  check("no red borders (tick boxes, buttons)", (qml.match(/border\.color:[^\n]*root\.alarm/g) || []).length, 0);
+  check("no red Hint: problems go through StatusLine", qml.split("\n").filter((l) => /\bHint \{[^\n]*root\.alarm/.test(l)).length, 0);
+  check("no violet under-way text tone", /root\.underway\b/.test(qml), false);
+  check("one back button: no tiny ‹ Wallet / ← Back links", [/"‹ Wallet"/.test(qml), /"← Back"/.test(qml)], [false, false]);
+  check("no button says Not now for a reject", /label: "Not now"/.test(qml), false);
+  check("the global notice says its kind", (qml.match(/root\.noticeIsError \? root\.alarm/g) || []).length, 0);
+  check("every sub-page has the shared header", (qml.match(/PageHeader \{ title:/g) || []).length >= 9, true);
+}
+
+{
+  // "Not now" rejected for good and the app then said "You said no": one label (Reject), and the
+  // after-state never says who said no (the module also rejects when access was taken back).
+  const { approvalEndedLine, approvalEnded, claimNext } = await import("./qml/logic.mjs");
+  check("ended lines", ["rejected", "expired", "cancelled"].map(approvalEndedLine), ["The approval was rejected, so nothing was signed or sent.", "Nobody answered the approval within 10 minutes, so nothing was signed or sent.", "The approval was cancelled, so nothing was signed or sent."]);
+  check("none says who said no", ["rejected", "expired", "cancelled"].map(approvalEndedLine).some((l) => /you said|in your wallet/i.test(l)), false);
+  check("they offer Start again", ["rejected", "expired", "cancelled"].map((x) => approvalEnded(approvalEndedLine(x))), [true, true, true]);
+  check("a rejected claim: Start again", claimNext("wallet_rejected", true, false), { kind: "problem", label: "Start again", action: "retry" });
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");

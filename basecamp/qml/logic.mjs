@@ -1657,10 +1657,10 @@ export function claimErrorLine(code, error) {
         unreachable: "The bridge test network can't be reached. Try again.",
         eth_unreachable: "Sepolia can't be read just now. Try again.",
         // The bridge's own words say which: no, nobody answered within 10 minutes, or cancelled.
-        wallet_rejected: /didn't answer|Nobody answered/i.test(String(e.message || "")) ? "The approval wasn't answered within 10 minutes. Nothing was sent. Try again."
-            : /^Cancelled/i.test(String(e.message || "")) ? "The approval was cancelled. Nothing was sent. Try again."
-            : /rejected/i.test(String(e.message || "")) ? "The approval was rejected, so nothing was signed or sent."
-            : "The approval ended without a yes. Nothing was sent. Try again.",
+        wallet_rejected: /didn't answer|Nobody answered/i.test(String(e.message || "")) ? approvalEndedLine("expired")
+            : /^Cancelled/i.test(String(e.message || "")) ? approvalEndedLine("cancelled")
+            : /rejected/i.test(String(e.message || "")) ? approvalEndedLine("rejected")
+            : "The approval ended without a yes, so nothing was signed or sent.",
         wallet_no_answer: "Your wallet didn't answer. Look for its sheet, then try again.",
         landed_or_used: "Your account changed since you approved. Try again.",
         minting_frozen: "Claims are paused on the bridge. Try again later.",
@@ -2157,9 +2157,18 @@ export function clockShown(seconds) {
 /// headline (the big line; the wait itself while waiting), card (the card row's state), detail,
 /// tone ("wait" | "ready" | "done" | "plain"), action ("" | "burn" | "prove" | "seal" |
 /// "release")}. `clock`: seconds → "14:32" (clockShown). Times are only the bridge's: the update on
-/// Ethereum has none (the operator posts it by hand today), the proof about 20 s, the wrapper none
-/// (made by hand today), the release at the vault's own `releasable_at`. tone "problem": something
-/// went wrong that the person should look at (shown red, StatusLine "problem").
+/// Ethereum has none (the operator posts it by hand today), the proof and the wrapper SEND_BACK_TIMES,
+/// the release at the vault's own `releasable_at`. tone "problem": something went wrong that the
+/// person should look at (shown red, StatusLine "problem").
+/// The send-back's times, said in one place: the burn's block, the release proof on this computer,
+/// and the proof's Ethereum wrapper once it is run.
+export const SEND_BACK_TIMES = { burn: "about 15 s", proof: "about 20 s", wrap: "about 3 min" }
+/// What is done by hand today, said once (under the send-back's panel while it waits on it).
+export const SEND_BACK_BY_HAND = "Today the bridge's operator posts the update to Ethereum and runs the proof's wrapper by hand, so these waits can take from minutes to hours."
+/// The stages that wait on those hand steps.
+export function sendBackByHand(stage) {
+    return stage === "burned" || stage === "proved"
+}
 export function sendBackProgress(status, nowSeconds, clock) {
     var s = status || {}
     var at = clock || clockShown
@@ -2174,14 +2183,14 @@ export function sendBackProgress(status, nowSeconds, clock) {
         // and the bridge tries again at each check.
         if (s.note && s.busy !== true) return r("approve", "Signed · the bridge's relay hasn't sent it", "Signed; the bridge's relay hasn't sent it yet and tries again at each check.", String(s.note), "wait")
         return r("approve", "Waiting for your approval", "Waiting for your approval.", "", "ready")
-    case "burning": return r("burning", "Sending the burn · about 15 s", "Sending the burn: about 15 s.", "", "wait")
-    case "burned": return r("burned", "Burned · waiting for Ethereum to record it", "Waiting for Ethereum to record it.",
-        "The bridge team posts these updates to Ethereum by hand today, so this can take from minutes to hours.", "wait")
-    case "burn_unclear": return r("burn_unclear", "The burn may have been refused", "The burn may have been refused.", String(s.text || ""), "problem")
+    case "burning": return r("burning", "Sending the burn · " + SEND_BACK_TIMES.burn, "Sending the burn: " + SEND_BACK_TIMES.burn + ".", "", "wait")
+    case "burned": return r("burned", "Burned · waiting for Ethereum to record it", "Waiting for Ethereum to record it.", "", "wait")
+    // The bridge's words, without its "Look in the Names app" (this is the Names app).
+    case "burn_unclear": return r("burn_unclear", "The burn may have been refused", "The burn may have been refused.", String(s.text || "").replace(/\s*Look in the Names app\.?/i, "").trim(), "problem", "check")
     case "recorded": return r("recorded", "Recorded on Ethereum · make the proof", "Recorded on Ethereum: make the release proof.", until, "ready", "prove")
-    case "proving": return r("proving", "Making the release proof · about 20 s", "Making the release proof on this computer: about 20 s.", until, "wait")
-    case "proved": return r("proved", "Waiting for the proof's Ethereum wrapper", "Waiting for the bridge team to send the seal.",
-        "The proof's Ethereum wrapper is made by hand today; paste the seal here when it comes.", "wait", "seal")
+    case "proving": return r("proving", "Making the release proof · " + SEND_BACK_TIMES.proof, "Making the release proof on this computer: " + SEND_BACK_TIMES.proof + ".", until, "wait")
+    case "proved": return r("proved", "Waiting for the proof's Ethereum wrapper", "Waiting for the proof's Ethereum wrapper (" + SEND_BACK_TIMES.wrap + " once it is run).",
+        "Paste its seal here when it comes.", "wait", "seal")
     case "wrapped":
         return r("wrapped", later ? "Releasable at " + at(when) : "Releasable any minute now",
             later ? "Releasable at " + at(when) + "." : "Releasable any minute now.", "The vault waits one hour after Ethereum records it.", "wait")
@@ -2237,7 +2246,7 @@ export function sendBackSteps(s) {
 /// (an older Names Wallet), the bridge's own message otherwise.
 export function sendBackBurnHeld(value) {
     if (value && value.needs === "names_update")
-        return "This Names Wallet can't sign a burn yet. Nothing was signed or sent."
+        return "This Names Wallet can't sign a burn yet: it needs a newer Names build. Nothing was signed or sent."
     return ""
 }
 
@@ -2322,6 +2331,8 @@ export function claimNext(code, failed, fromFile) {
         return { kind: "problem", label: "Back to the wallet", action: "back" }
     if (c === "bad_file" || c === "wrong_leaf")
         return { kind: "problem", label: "Choose another file", action: "another" }
+    if (c === "wallet_rejected")
+        return { kind: "problem", label: "Start again", action: "retry" }
     if (failed)
         return { kind: "problem", label: "Try again", action: "retry" }
     return { kind: "problem", label: fromFile ? "Check again" : "Try again", action: fromFile ? "check" : "retry" }
@@ -2361,4 +2372,19 @@ export function receiveMakeWhy(s) {
     if (!st.ticked)
         return "Tick “Not private” above to make the code."
     return ""
+}
+
+/// An approval that ended without a yes, said without claiming who said no: the module marks a
+/// request "rejected" for a Reject press and also when an app's access was taken back after it
+/// asked (lib.rs reject paths), "expired" after 10 minutes, "cancelled" by the asking app.
+export function approvalEndedLine(state) {
+    if (state === "expired")
+        return "Nobody answered the approval within 10 minutes, so nothing was signed or sent."
+    if (state === "cancelled")
+        return "The approval was cancelled, so nothing was signed or sent."
+    return "The approval was rejected, so nothing was signed or sent."
+}
+/// Whether a line is one of those (its one next action is Start again).
+export function approvalEnded(line) {
+    return /^(The approval was (rejected|cancelled)|Nobody answered the approval|The approval wasn't answered|The approval ended without)/.test(String(line || ""))
 }

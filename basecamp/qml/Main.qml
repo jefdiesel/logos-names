@@ -194,7 +194,7 @@ Item {
     readonly property color underway: Theme.isDark ? "#B9A2EE" : "#6F4FB0"
     readonly property color underwayFill: Qt.rgba(underway.r, underway.g, underway.b, Theme.isDark ? 0.13 : 0.07)
     readonly property color underwayLine: Qt.rgba(underway.r, underway.g, underway.b, Theme.isDark ? 0.45 : 0.35)
-    readonly property color noticeFill: Qt.rgba(brass.r, brass.g, brass.b, 0.14)
+    readonly property color noticeFill: raised   // a boxed note: neutral (colour belongs to status lines)
     readonly property color ownBubble: Qt.rgba(brass.r, brass.g, brass.b, 0.24)
 
     // ── One look for status, steps, headers and buttons (STYLE.md beside this file) ──
@@ -1324,7 +1324,7 @@ Item {
                 makeReceive()
             } else if (receiveNeedsState === "rejected" || receiveNeedsState === "expired" || receiveNeedsState === "cancelled") {
                 receiveNeeds = null
-                receiveError = "Nothing was made: you said no in the sheet."
+                receiveError = Logic.approvalEndedLine(receiveNeedsState)
             }
         }, function() { receiveNeedsPolling = false }, 120000)
     }
@@ -1729,7 +1729,7 @@ Item {
                     sbBurn()
             } else if (sbNeedsState === "rejected" || sbNeedsState === "expired" || sbNeedsState === "cancelled") {
                 sbNeeds = null
-                sbError = "Nothing was done: you said no."
+                sbError = Logic.approvalEndedLine(sbNeedsState)
             }
         }, function() { sbNeedsPolling = false }, 120000)
     }
@@ -2438,8 +2438,7 @@ Item {
                     startClaim(false)
             } else if (claimNeedsState === "rejected" || claimNeedsState === "expired" || claimNeedsState === "cancelled") {
                 claimNeeds = null
-                claimError = claimNeedsState === "expired" ? "Nobody answered the request within 10 minutes, so nothing was signed or sent."
-                    : "The request was " + claimNeedsState + ", so nothing was signed or sent."
+                claimError = Logic.approvalEndedLine(claimNeedsState)
                 claimAgain = true
             }
         }, function() { claimNeedsPolling = false }, 120000)
@@ -6939,7 +6938,7 @@ Item {
                 text: act.line.state
                 wrapMode: Text.WordWrap
                 horizontalAlignment: Text.AlignRight
-                color: act.line.tone === "good" ? root.good : act.line.tone === "bad" ? root.alarm : act.line.tone === "warn" ? root.brass : root.dim
+                color: act.line.tone === "good" ? root.good : act.line.tone === "bad" ? root.alarm : act.line.tone === "warn" ? root.waitTone : root.dim
                 font.family: root.sans
                 font.pixelSize: root.px(12)
             }
@@ -7474,8 +7473,8 @@ Item {
         }
     }
 
-    /// A panel in the third tone (root.underway): something of yours under way. Tinted, with a
-    /// rule down its left side.
+    /// A panel for something of yours under way (a receive, a bridge to Ethereum): a neutral box;
+    /// its status lines carry the colour (STYLE.md).
     component UnderwayPanel: Rectangle {
         default property alias content: underwayColumn.data
         Layout.fillWidth: true
@@ -7497,12 +7496,12 @@ Item {
     component ReceiveCheckLine: RowLayout {
         spacing: 12
         Action { readonly property var b: Logic.checkButton(root.receivePolling, root.receiveAskNow); label: b.label; enabledNow: b.enabled; onPressed: root.receiveCheckNow() }
-        Text { text: root.receiveCheckLine; visible: text !== "" && text !== "Checking…"; color: root.receiveCheckFailed && !root.receivePolling ? root.brass : root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
+        Text { text: root.receiveCheckLine; visible: text !== "" && text !== "Checking…"; color: root.receiveCheckFailed && !root.receivePolling ? root.waitTone : root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
     }
     component SendBackCheckLine: RowLayout {
         spacing: 12
         Action { readonly property var b: Logic.checkButton(root.sbPolling, root.sbAskNow); label: b.label; enabledNow: b.enabled && !root.sbAsking; onPressed: root.sbCheckNow() }
-        Text { text: Logic.receiveCheckLine(root.sbPolling, root.sbCheckedAt, root.sbNextShown, root.receiveNow, root.sbCheckFailed); visible: text !== "" && text !== "Checking…"; color: root.sbCheckFailed && !root.sbPolling ? root.brass : root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
+        Text { text: Logic.receiveCheckLine(root.sbPolling, root.sbCheckedAt, root.sbNextShown, root.receiveNow, root.sbCheckFailed); visible: text !== "" && text !== "Checking…"; color: root.sbCheckFailed && !root.sbPolling ? root.waitTone : root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
     }
 
     component BridgeSetupBox: RowLayout {
@@ -7515,10 +7514,9 @@ Item {
         Layout.fillWidth: true
         spacing: 12
         visible: setupBox.setup.state !== ""
-        Hint {
+        StatusLine {
             Layout.fillWidth: true
-            color: setupBox.setup.state === "failed" ? root.alarm : setupBox.setup.state === "done" ? root.good
-                : ["busy", "reopen", "unload", "stuck", "stale"].indexOf(setupBox.setup.state) >= 0 ? root.brass : root.ink
+            kind: Logic.setupKind(setupBox.setup.state)
             text: setupBox.setup.line
         }
         Action {
@@ -7658,7 +7656,7 @@ Item {
                     Text {
                         Layout.fillWidth: true
                         text: stepRow.modelData.title + "  ·  " + (stepRow.now && steps.note !== "" ? steps.note : stepRow.modelData.time)
-                        color: stepRow.now ? root.brass : root.ink
+                        color: stepRow.now ? root.waitTone : root.ink
                         font.family: root.sans
                         font.pixelSize: root.px(17)
                         font.weight: Font.DemiBold
@@ -8103,7 +8101,7 @@ Item {
                     Text {
                         visible: !!accountRow.modelData.isPrivate
                         text: "Private"
-                        color: root.brass
+                        color: root.dim
                         font.family: root.sans
                         font.pixelSize: root.px(16)
                     }
@@ -8318,7 +8316,7 @@ Item {
                         text: root.networkName()
                         textFormat: Text.PlainText
                         elide: Text.ElideRight
-                        color: root.zoneHome ? root.faint : root.brass
+                        color: root.zoneHome ? root.faint : root.dim
                         font.family: root.sans
                         font.pixelSize: root.px(14)
                         MouseArea { anchors.fill: parent; enabled: root.zonesMany; cursorShape: Qt.PointingHandCursor; onClicked: root.go("settings") }
@@ -8372,19 +8370,19 @@ Item {
                         Hint {
                             visible: root.installJob !== null
                             Layout.fillWidth: true
-                            color: root.brass
+                            color: root.waitTone
                             font.pixelSize: root.px(16)
                             text: root.installJob === null ? "" : root.installJob.line
                         }
                     }
-                    Hint { visible: root.installProblem !== ""; color: root.alarm; text: root.installProblem }
+                    StatusLine { visible: root.installProblem !== ""; kind: Logic.noticeKind(root.installProblem, true); text: root.installProblem }
                     Hint {
                         visible: root.cliPath !== ""
                         text: "Installed." + (root.cliStatus !== null && root.cliStatus.cli ? " " + root.cliStatus.cli : "")
                         font.pixelSize: root.px(15)
                         wrapMode: Text.WrapAnywhere
                     }
-                    Hint { visible: root.installWarning !== ""; color: root.alarm; font.pixelSize: root.px(15); text: root.installWarning }
+                    StatusLine { visible: root.installWarning !== ""; kind: Logic.noticeKind(root.installWarning, true); text: root.installWarning }
                     Link {
                         visible: root.cliPath !== "" && root.installWarning !== ""
                         text: "Install the prover"
@@ -8427,14 +8425,14 @@ Item {
                     Layout.fillWidth: true
                     opacity: root.cliPath !== "" ? 1 : 0.5
                     StepHead { number: 2; done: root.hasCliWallet && !root.oldWallet; title: "Create my wallet" }
-                    Hint {
+                    StatusLine {
                         visible: root.cliOutdated
-                        color: root.alarm
+                        kind: "problem"
                         text: Logic.cliOutdatedLine(root.namesNet, root.cliStatus !== null && root.cliStatus.cli_line ? String(root.cliStatus.cli_line) : "")
                     }
-                    Hint {
+                    StatusLine {
                         visible: root.oldWallet
-                        color: root.alarm
+                        kind: "problem"
                         text: "Your " + (root.namesNet === "0.4" ? "LEZ 0.4" : "LEZ 0.3") + " wallet was made for an earlier version of that network and no longer opens. Enter its recovery phrase to bring its accounts back. The old files are kept. Tokens don't carry over."
                     }
                     // No wallet here yet: making a new one, or the same accounts as a wallet you have
@@ -8469,7 +8467,7 @@ Item {
                         enabledNow: !root.restoreBusy
                         onPressed: { root.restoreWallet(restorePhraseField.text); restorePhraseField.text = "" }
                     }
-                    Hint { visible: root.restoreError !== ""; color: root.alarm; text: root.restoreError }
+                    StatusLine { visible: root.restoreError !== ""; kind: Logic.noticeKind(root.restoreError, true); text: root.restoreError }
                     Hint { visible: root.restoreDone !== ""; text: root.restoreDone }
                     Hint {
                         visible: !root.hasCliWallet
@@ -8482,7 +8480,7 @@ Item {
                         enabledNow: root.cliPath !== "" && !root.walletBusy
                         onPressed: root.createWallet()
                     }
-                    Hint { visible: root.walletError !== ""; color: root.alarm; text: root.walletError }
+                    StatusLine { visible: root.walletError !== ""; kind: Logic.noticeKind(root.walletError, true); text: root.walletError }
                     Fact {
                         visible: root.hasCliWallet
                         label: "Public account"
@@ -8517,10 +8515,10 @@ Item {
                     Hint {
                         visible: root.faucetSent && !root.canShield
                         font.pixelSize: root.px(16)
-                        color: root.brass
+                        color: root.waitTone
                         text: "Sent. They arrive in a minute or two; this checks by itself."
                     }
-                    Hint { visible: root.faucetError !== ""; color: root.alarm; font.pixelSize: root.px(16); text: root.faucetError }
+                    StatusLine { visible: root.faucetError !== ""; kind: Logic.noticeKind(root.faucetError, true); text: root.faucetError }
                     RowLayout {
                         visible: root.hasCliWallet
                         spacing: 18
@@ -8542,7 +8540,7 @@ Item {
                     Hint {
                         visible: root.hasCliWallet && root.cliPublic !== null && !root.canShield && root.shieldJob === null && !root.hasPrivateFunds
                         font.pixelSize: root.px(16)
-                        color: root.brass
+                        color: root.ink
                         text: root.cliPublic === null ? "" : "Your public account holds " + root.grouped(root.cliPublic.balance) + ". It needs at least " + root.grouped(root.shieldMinimum) + " first: "
                             + (root.cliOutdated ? "a few names' deposits." : "a name's 1,000,000 deposit plus two private transactions' fees, about 5,100,000 each.")
                     }
@@ -8552,8 +8550,8 @@ Item {
                         enabledNow: root.hasCliWallet && root.canShield && root.shieldJob === null
                         onPressed: root.moveToPrivate()
                     }
-                    Hint { visible: root.shieldJob !== null; color: root.brass; font.pixelSize: root.px(16); text: root.shieldLine() }
-                    Hint { visible: root.shieldProblem !== "" && root.shieldJob === null; color: root.alarm; text: root.shieldProblem }
+                    Hint { visible: root.shieldJob !== null; color: root.waitTone; font.pixelSize: root.px(16); text: root.shieldLine() }
+                    StatusLine { visible: root.shieldProblem !== "" && root.shieldJob === null; kind: Logic.noticeKind(root.shieldProblem, true); text: root.shieldProblem }
                     Hint {
                         visible: root.hasPrivateFunds && root.shieldJob === null
                         font.pixelSize: root.px(16)
@@ -8658,7 +8656,7 @@ Item {
                         id: chatDown
                         x: 14; y: 12
                         width: parent.width - 28
-                        Text { Layout.fillWidth: true; text: "Messaging isn't running yet. Open the Chat app once, then come back."; color: root.brass; font.family: root.sans; font.pixelSize: root.px(15); wrapMode: Text.Wrap }
+                        Text { Layout.fillWidth: true; text: "Messaging isn't running yet. Open the Chat app once, then come back."; color: root.ink; font.family: root.sans; font.pixelSize: root.px(15); wrapMode: Text.Wrap }
                         Action { label: "Open Chat"; onPressed: if (logos.request) logos.request("basecamp.apps.launch", { app: "chat_ui" }, function() { root.chatLoad() }) }
                     }
                 }
@@ -8688,7 +8686,7 @@ Item {
                 }
                 Hint {
                     visible: root.chatError === "" && root.chatMine === "" && root.chatState !== ""
-                    color: root.brass
+                    color: root.waitTone
                     text: "Messaging is starting up (network: " + root.chatState + "). Once it's connected you can turn on messages for " + (root.mainName !== "" ? root.mainName : "your name") + "."
                 }
                 Hint {
@@ -8696,9 +8694,9 @@ Item {
                     font.pixelSize: root.px(14)
                     text: "Messages are on: anyone who looks up " + root.mainName + " can message you here."
                 }
-                Hint {
+                StatusLine {
                     visible: root.notice !== "" && root.section === "messages"
-                    color: root.noticeIsError ? root.alarm : root.dim
+                    kind: root.noticeKind
                     text: root.notice
                 }
                 RowLayout {
@@ -8875,7 +8873,7 @@ Item {
                 ColumnLayout {
                     visible: root.walletView === "home"
                     Layout.fillWidth: true
-                    Layout.maximumWidth: 680
+                    Layout.maximumWidth: root.pageWidth
                     spacing: 14
                     RowLayout {
                         Layout.fillWidth: true
@@ -8942,9 +8940,9 @@ Item {
                     }
                     // A configured wallet folder or CLI that isn't reachable (a drive not
                     // connected): said plainly; no other wallet is used meanwhile (SF-B).
-                    Hint {
+                    StatusLine {
                         visible: root.cliStatus !== null && typeof root.cliStatus.unavailable === "string"
-                        color: root.alarm
+                        kind: "problem"
                         text: root.cliStatus !== null && root.cliStatus.unavailable ? root.sentence(root.cliStatus.unavailable) : ""
                     }
                     // A wallet with no name yet: a name is offered, never required (the bridge needs none).
@@ -8989,7 +8987,7 @@ Item {
                                 : { rows: root.receives.map(function(x) { return { id: x.id, symbol: x.symbol, amount: x.amount, account: x.account, progress: { stage: "old", card: "The LEZ Bridge here can't follow it: update it.", tone: "plain", claim: false } } }), hidden: 0 }
                             readonly property bool anyClaim: view.rows.some(function(x) { return x.progress.claim })
                             visible: view.rows.length > 0 || view.hidden > 0
-                            Text { text: "Arriving from Ethereum"; color: root.underway; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold; font.capitalization: Font.AllUppercase; font.letterSpacing: 0.6 }
+                            Text { text: "Arriving from Ethereum"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold; font.capitalization: Font.AllUppercase; font.letterSpacing: 0.6 }
                             Repeater {
                                 model: arrivingPanel.view.rows
                                 ColumnLayout {
@@ -8999,7 +8997,7 @@ Item {
                                     readonly property var p: modelData.progress
                                     Layout.fillWidth: true
                                     spacing: 4
-                                    Rectangle { visible: arrivingRow.index > 0; Layout.fillWidth: true; Layout.bottomMargin: 8; implicitHeight: 1; color: root.underwayLine }
+                                    Rectangle { visible: arrivingRow.index > 0; Layout.fillWidth: true; Layout.bottomMargin: 8; implicitHeight: 1; color: root.line }
                                     RowLayout {
                                         Layout.fillWidth: true
                                         spacing: 14
@@ -9011,14 +9009,9 @@ Item {
                                                 Text { text: arrivingRow.modelData.amount + " " + arrivingRow.modelData.symbol; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.Bold }
                                                 Text { Layout.alignment: Qt.AlignBaseline; text: "into " + Logic.idShort(arrivingRow.modelData.account) + (arrivingRow.modelData.where ? " · " + arrivingRow.modelData.where : ""); color: root.dim; font.family: root.sans; font.pixelSize: root.px(15) }
                                             }
-                                            Text {
-                                                Layout.fillWidth: true
-                                                text: (arrivingRow.p.stage === "claimed" ? "✓ " : "") + arrivingRow.p.card
-                                                color: arrivingRow.p.tone === "done" ? root.good : arrivingRow.p.tone === "plain" ? root.dim : arrivingRow.p.tone === "ready" ? root.ink : root.underway
-                                                font.family: root.sans
-                                                font.pixelSize: root.px(20)
-                                                font.weight: Font.DemiBold
-                                                wrapMode: Text.WordWrap
+                                            StatusLine {
+                                                kind: Logic.toneKind(arrivingRow.p.tone)
+                                                text: arrivingRow.p.card
                                             }
                                             Hint {
                                                 visible: arrivingRow.p.stage === "claimed"
@@ -9044,7 +9037,7 @@ Item {
                         // large. A row opens Send back at its stage.
                         UnderwayPanel {
                             visible: root.sbRowsNow.length > 0
-                            Text { text: "Bridging to Ethereum"; color: root.underway; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold; font.capitalization: Font.AllUppercase; font.letterSpacing: 0.6 }
+                            Text { text: "Bridging to Ethereum"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold; font.capitalization: Font.AllUppercase; font.letterSpacing: 0.6 }
                             Repeater {
                                 model: root.sbRowsNow
                                 ColumnLayout {
@@ -9054,7 +9047,7 @@ Item {
                                     readonly property var p: modelData.progress
                                     Layout.fillWidth: true
                                     spacing: 4
-                                    Rectangle { visible: backRow.index > 0; Layout.fillWidth: true; Layout.bottomMargin: 8; implicitHeight: 1; color: root.underwayLine }
+                                    Rectangle { visible: backRow.index > 0; Layout.fillWidth: true; Layout.bottomMargin: 8; implicitHeight: 1; color: root.line }
                                     RowLayout {
                                         Layout.fillWidth: true
                                         spacing: 14
@@ -9066,14 +9059,9 @@ Item {
                                                 Text { text: backRow.modelData.amount; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.Bold }
                                                 Text { Layout.alignment: Qt.AlignBaseline; text: "from " + Logic.idShort(backRow.modelData.account) + " to " + Logic.idShort(backRow.modelData.recipient); color: root.dim; font.family: root.sans; font.pixelSize: root.px(15) }
                                             }
-                                            Text {
-                                                Layout.fillWidth: true
-                                                text: (backRow.p.stage === "released" ? "✓ " : "") + backRow.p.card
-                                                color: backRow.p.tone === "done" ? root.good : backRow.p.tone === "plain" ? root.dim : backRow.p.tone === "ready" ? root.ink : root.underway
-                                                font.family: root.sans
-                                                font.pixelSize: root.px(20)
-                                                font.weight: Font.DemiBold
-                                                wrapMode: Text.WordWrap
+                                            StatusLine {
+                                                kind: Logic.toneKind(backRow.p.tone)
+                                                text: backRow.p.card
                                             }
                                         }
                                         Link { text: "Open ›"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.openSendBack("", null, backRow.modelData.id) }
@@ -9083,16 +9071,21 @@ Item {
                             SendBackCheckLine { visible: root.sbRowsNow.some(function(x) { return x.progress.stage !== "released" }) }
                         }
                         BridgeSetupBox { visible: root.walletView === "home" && root.bridgeSetup.state !== ""; primary: root.cardSetupBlocks }
-                        Hint {
-                            font.pixelSize: root.px(15)
-                            color: root.bridgeNetStatusNow.tone === "bad" ? root.alarm : root.bridgeNetStatusNow.tone === "warn" ? root.brass : root.dim
+                        StatusLine {
+                            visible: root.bridgeNetStatusNow.tone === "bad" || root.bridgeNetStatusNow.tone === "warn"
+                            kind: root.bridgeNetStatusNow.tone === "bad" ? "problem" : "waiting"
                             text: root.bridgeNetProblem !== "" ? root.bridgeNetProblem : root.bridgeNetStatusNow.line
                         }
-                        Hint { visible: root.bridgeNetStatusNow.reset !== ""; font.pixelSize: root.px(15); color: root.brass; text: root.bridgeNetStatusNow.reset }
+                        Hint {
+                            visible: !(root.bridgeNetStatusNow.tone === "bad" || root.bridgeNetStatusNow.tone === "warn")
+                            font.pixelSize: root.px(15)
+                            text: root.bridgeNetProblem !== "" ? root.bridgeNetProblem : root.bridgeNetStatusNow.line
+                        }
+                        Hint { visible: root.bridgeNetStatusNow.reset !== ""; font.pixelSize: root.px(15); color: root.ink; text: root.bridgeNetStatusNow.reset }
                         Hint {
                             visible: root.bridgeNet !== null && root.bridgeNet.read && root.bridgeNet.read.token_problem
                             font.pixelSize: root.px(15)
-                            color: root.brass
+                            color: root.ink
                             text: root.bridgeNet !== null && root.bridgeNet.read && root.bridgeNet.read.token_problem ? "Can't read the bridge's token list, so bridged tokens aren't shown." : ""
                         }
                         Hint {
@@ -9169,7 +9162,7 @@ Item {
                             Field { id: bridgeNetWatchField; Layout.fillWidth: true; size: 15; code: true; hint: "Watch a public account: paste its ID"; onAccepted: root.bridgeNetWatch(bridgeNetWatchField.text, true) }
                             Action { label: "Watch"; onPressed: root.bridgeNetWatch(bridgeNetWatchField.text, true) }
                         }
-                        Hint { visible: root.bridgeNetWatchProblem !== ""; font.pixelSize: root.px(14); color: root.alarm; text: root.bridgeNetWatchProblem }
+                        StatusLine { visible: root.bridgeNetWatchProblem !== ""; kind: Logic.noticeKind(root.bridgeNetWatchProblem, true); text: root.bridgeNetWatchProblem }
                         Hint { font.pixelSize: root.px(14); text: "Private balances on the bridge test network are not shown yet." }
                         Hint { font.pixelSize: root.px(14); text: "Sending on the bridge test network isn't in the wallet yet, apart from paying a name and bridging to Ethereum." }
                     }
@@ -9196,7 +9189,7 @@ Item {
                         spacing: 10
                         Hint {
                             textFormat: Text.PlainText
-                            color: root.zoneHome ? root.dim : root.brass
+                            color: root.zoneHome ? root.dim : root.ink
                             font.pixelSize: root.px(15)
                             text: "Zone in use: " + root.zoneName + (root.zoneHome ? "" : ". LEZ balances and sends here are on it; your names stay on " + root.homeName + ".")
                         }
@@ -9207,10 +9200,10 @@ Item {
                         Layout.fillWidth: true
                         Hint { textFormat: Text.PlainText; color: root.ink; text: root.zoneName + " has no wallet yet. A zone's wallet is its own: new accounts, and a recovery phrase of its own to write down." }
                         Action { label: root.walletBusy ? "Making it…" : "Make this zone's wallet"; strong: true; enabledNow: !root.walletBusy && root.cliPath !== ""; onPressed: root.createWallet() }
-                        Hint { visible: root.walletError !== ""; color: root.alarm; font.pixelSize: root.px(15); text: root.walletError }
+                        StatusLine { visible: root.walletError !== ""; kind: Logic.noticeKind(root.walletError, true); text: root.walletError }
                     }
-                    Hint { visible: root.sendingLine() !== ""; color: root.brass; font.pixelSize: root.px(16); text: root.sendingLine() }
-                    Hint { visible: root.notice !== "" && root.sendingLine() === ""; color: root.noticeIsError ? root.alarm : root.dim; font.pixelSize: root.px(16); text: root.notice }
+                    StatusLine { visible: root.sendingLine() !== ""; kind: "waiting"; text: root.sendingLine() }
+                    StatusLine { visible: root.notice !== "" && root.sendingLine() === ""; kind: root.noticeKind; text: root.notice }
                     // Payments to your names' private keys wait until you claim them (SC-1).
                     Card {
                         visible: root.walletNet === "0.3" && (root.waitingPayments !== null || root.receiveJob !== null || root.receiveProblem !== "")
@@ -9228,11 +9221,11 @@ Item {
                             enabledNow: root.receiveJob === null
                             onPressed: root.claimPayments()
                         }
-                        Hint { visible: root.receiveJob !== null; color: root.brass; font.pixelSize: root.px(15); text: "Proving the claim on this computer. Several minutes for each payment." }
-                        Hint { visible: root.receiveProblem !== "" && root.receiveJob === null; color: root.alarm; font.pixelSize: root.px(15); text: root.receiveProblem }
+                        Hint { visible: root.receiveJob !== null; color: root.waitTone; font.pixelSize: root.px(15); text: "Proving the claim on this computer. Several minutes for each payment." }
+                        StatusLine { visible: root.receiveProblem !== "" && root.receiveJob === null; kind: Logic.noticeKind(root.receiveProblem, true); text: root.receiveProblem }
                     }
                     // A read the sequencer only partly answered, or why it failed: never "no balances".
-                    Hint { visible: root.walletNet === "0.3" && root.balanceNote !== "" && root.cliBalance !== undefined; color: root.brass; font.pixelSize: root.px(15); text: root.balanceNote }
+                    Hint { visible: root.walletNet === "0.3" && root.balanceNote !== "" && root.cliBalance !== undefined; color: root.ink; font.pixelSize: root.px(15); text: root.balanceNote }
                     Hint {
                         visible: root.walletNet === "0.3" && root.walletGroups.length === 0 && (root.balanceNote === "" || root.cliBalance === undefined)
                         text: root.cliBalance === undefined ? "Reading your balances…" : "No balances yet. Make a wallet in Settings, or start your node in Basecamp's Blockchain app."
@@ -9457,7 +9450,7 @@ Item {
                                             onPressed: root.chainAccountNew(chainNewLabel.text)
                                         }
                                     }
-                                    Hint { visible: root.chainAccountNote !== ""; font.pixelSize: root.px(15); color: root.chainAccountNoteIsError ? root.alarm : root.dim; textFormat: Text.PlainText; text: root.chainAccountNote }
+                                    StatusLine { visible: root.chainAccountNote !== ""; kind: root.chainAccountNoteIsError ? Logic.noticeKind(root.chainAccountNote, true) : ""; text: root.chainAccountNote }
                                 }
                             }
                         }
@@ -9507,14 +9500,12 @@ Item {
                 ColumnLayout {
                     visible: root.walletView === "send"
                     Layout.fillWidth: true
-                    Layout.maximumWidth: 680
+                    Layout.maximumWidth: root.pageWidth
                     spacing: 12
-                    Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
-                    Text { text: root.sendKind === "chain" ? "Send on the Logos Blockchain" : "Send " + root.sendTitle; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
-                    RunsOn { net: root.sendKind === "chain" ? "chain" : root.namesNet }
+                    PageHeader { title: root.sendKind === "chain" ? "Send on the Logos Blockchain" : "Send " + root.sendTitle; net: root.sendKind === "chain" ? "chain" : root.namesNet; onBack: root.walletView = "home" }
                     Hint {
                         visible: root.sendKind !== "chain" && root.namesNet === "0.4"
-                        color: root.brass
+                        color: root.ink
                         text: "On LEZ 0.4 the wallet pays only a name's public account, from your public account: the chain shows both accounts and the amount. Paying a name's private keys stays off there until real proofs have been run on LEZ 0.4, and other sends aren't in the wallet yet."
                     }
 
@@ -9575,12 +9566,10 @@ Item {
                         font.pixelSize: root.px(15)
                         text: "A name is always paid from your private account."
                     }
-                    Hint {
+                    StatusLine {
                         readonly property string problem: root.sendProblem() !== "" ? root.sendProblem() : root.sendKind === "chain" ? root.chainProblem : root.sendKind === "token" ? root.tokenProblem : ""
                         visible: problem !== ""
-                        color: root.alarm
-                        font.pixelSize: root.px(16)
-                        textFormat: Text.PlainText
+                        kind: "problem"
                         text: problem
                     }
                     Action {
@@ -9618,24 +9607,23 @@ Item {
                             Action { label: "Change something"; onPressed: root.sendReviewing = false }
                         }
                     }
-                    Hint { visible: root.sendingLine() !== ""; color: root.brass; font.pixelSize: root.px(16); text: root.sendingLine() }
+                    StatusLine { visible: root.sendingLine() !== ""; kind: "waiting"; text: root.sendingLine() }
                     Hint {
                         visible: root.sendKind === "chain" && root.chainSent !== null && root.chainSent.state === "in_block"
                         color: root.good
                         font.pixelSize: root.px(16)
                         text: root.chainSent === null ? "" : "Sent " + root.grouped(root.chainSent.amount) + ": it's in a block." + (root.chainSent.fee ? " The fee was " + root.grouped(root.chainSent.fee) + "." : "")
                     }
-                    Hint { visible: root.notice !== "" && root.sendingLine() === ""; color: root.noticeIsError ? root.alarm : root.dim; font.pixelSize: root.px(16); text: root.notice }
+                    StatusLine { visible: root.notice !== "" && root.sendingLine() === ""; kind: root.noticeKind; text: root.notice }
                 }
 
                 // ── Receive ──
                 ColumnLayout {
                     visible: root.walletView === "receive"
                     Layout.fillWidth: true
+                    Layout.maximumWidth: root.pageWidth
                     spacing: 14
-                    Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
-                    Text { text: root.receiveKind === "chain" ? "Receive on the Logos Blockchain" : "Receive LEZ and tokens"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
-                    RunsOn { net: root.receiveKind === "chain" ? "chain" : "0.3" }
+                    PageHeader { title: root.receiveKind === "chain" ? "Receive on the Logos Blockchain" : "Receive LEZ and tokens"; net: root.receiveKind === "chain" ? "chain" : "0.3"; onBack: root.walletView = "home" }
 
                     Card {
                         visible: root.receiveKind !== "chain"
@@ -9647,7 +9635,7 @@ Item {
                                 required property var modelData
                                 spacing: 14
                                 Text { text: modelData.name; color: root.ink; font.family: root.sans; font.pixelSize: root.px(26); font.weight: Font.Bold }
-                                Text { visible: modelData.name === root.mainName; text: "main"; color: root.brass; font.family: root.sans; font.pixelSize: root.px(14) }
+                                Text { visible: modelData.name === root.mainName; text: "main"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
                                 Link { text: "Copy"; onPressed: root.copy(modelData.name, "Your name") }
                             }
                         }
@@ -9700,9 +9688,9 @@ Item {
                             Hint { font.pixelSize: root.px(15); text: "Tokens sent to this key are staked: they join the leader lottery at the next epoch." }
                         }
                     }
-                    Hint {
+                    StatusLine {
                         visible: root.receiveKind === "chain" && root.chainAccounts === null
-                        color: root.alarm
+                        kind: root.chainError !== "" ? Logic.noticeKind(root.chainError, true) : "working"
                         text: root.chainError !== "" ? root.chainError : "Reading your node…"
                     }
                 }
@@ -9713,16 +9701,11 @@ Item {
                     readonly property var table: Logic.stakeTable(root.chainStake, root.chainAccounts)
                     id: stakePage
                     Layout.fillWidth: true
+                    Layout.maximumWidth: root.pageWidth
                     spacing: 14
-                    Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Text { text: "Staking"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
-                        Item { Layout.fillWidth: true }
-                        Link { text: root.chainReading ? "Reading…" : "Refresh"; color: root.faint; font.pixelSize: root.px(15); onPressed: root.loadChain() }
-                    }
-                    RunsOn { net: "chain" }
-                    Hint { visible: root.chainError !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.chainError }
+                    PageHeader { title: "Staking"; net: "chain"; onBack: root.walletView = "home" }
+                    Link { text: root.chainReading ? "Reading…" : "Refresh"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.loadChain() }
+                    StatusLine { visible: root.chainError !== ""; kind: Logic.noticeKind(root.chainError, true); text: root.chainError }
                     Action {
                         visible: /isn't running|didn't answer/.test(root.chainError)
                         label: "Open the Blockchain app"
@@ -9806,7 +9789,7 @@ Item {
                     }
                     Hint {
                         visible: text !== "" && stakePage.table !== null && stakePage.table.vouchers > 0
-                        color: root.chainClaimPlan !== null && root.chainClaimPlan.warning ? root.alarm : root.dim
+                        color: root.chainClaimPlan !== null && root.chainClaimPlan.warning ? root.ink : root.dim
                         font.pixelSize: root.px(14)
                         text: Logic.claimFeeLine(root.chainClaimPlan)
                     }
@@ -9878,24 +9861,23 @@ Item {
                                     width: parent.width - root.px(32)
                                     spacing: 10
                                     Text { text: "Bridge to LEZ"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold }
-                                    Hint { font.pixelSize: root.px(14); color: root.brass; text: "One way for now: LEZ can't send back to the Logos Blockchain yet. Arrives in about 12 hours." }
+                                    Hint { font.pixelSize: root.px(14); color: root.ink; text: "One way for now: LEZ can't send back to the Logos Blockchain yet. Arrives in about 12 hours." }
                                     Action { label: "Bridge…"; onPressed: root.openGetTokens() }
                                 }
                             }
                         }
                     }
-                    Hint { visible: root.chainProblem !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.chainProblem }
-                    Hint { visible: root.notice !== ""; color: root.noticeIsError ? root.alarm : root.dim; font.pixelSize: root.px(16); text: root.notice }
+                    StatusLine { visible: root.chainProblem !== ""; kind: Logic.noticeKind(root.chainProblem, true); text: root.chainProblem }
+                    StatusLine { visible: root.notice !== ""; kind: root.noticeKind; text: root.notice }
                 }
 
                 // ── Names: register one, and the ones you hold ──
                 ColumnLayout {
                     visible: root.walletView === "names"
                     Layout.fillWidth: true
-                    Layout.maximumWidth: 680
+                    Layout.maximumWidth: root.pageWidth
                     spacing: 14
-                    Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
-                    Text { text: "Names"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
+                    PageHeader { title: "Names"; onBack: root.walletView = "home" }
                     NetSwitch {}
                     RunsOn {}
                     // Public registrations under way: when each reveal goes out, and by when it must.
@@ -9904,7 +9886,7 @@ Item {
                         Hint {
                             required property var modelData
                             Layout.fillWidth: true
-                            color: root.brass
+                            color: root.waitTone
                             font.pixelSize: root.px(16)
                             text: root.revealRefused[modelData.name] ? modelData.name + ": this registration didn't land; register it again." : Logic.revealLine(modelData, Math.max(root.clockTick, Date.now()), root.clock)
                         }
@@ -9917,7 +9899,7 @@ Item {
                         border.color: root.brass
                         Hint { textFormat: Text.PlainText; color: root.ink; text: "Names are kept on " + root.homeName + ", and the wallet is using " + root.zoneName + " now. They are listed here; to register, change or pay one, switch to " + root.homeName + "." }
                         Action { label: root.zoneBusy ? "Switching…" : "Switch to " + root.homeName; strong: true; enabledNow: !root.zoneBusy; onPressed: root.zoneUse("home") }
-                        Hint { visible: root.zoneNoteBad; color: root.alarm; font.pixelSize: root.px(15); textFormat: Text.PlainText; text: root.zoneNote }
+                        StatusLine { visible: root.zoneNoteBad; kind: Logic.noticeKind(root.zoneNote, true); text: root.zoneNote }
                     }
 
                     Card {
@@ -9930,7 +9912,7 @@ Item {
                     Card {
                         Layout.fillWidth: true
                         Part { Layout.topMargin: 0; text: "My names" }
-                        Hint { visible: root.namesNote !== ""; color: root.brass; text: root.namesNote }
+                        Hint { visible: root.namesNote !== ""; color: root.ink; text: root.namesNote }
                         Hint { visible: root.allMine.length === 0 && root.cliPending.length === 0; text: root.cliKnown ? "None yet." : "Reading your names…" }
                         Repeater {
                             model: root.allMine
@@ -9940,10 +9922,10 @@ Item {
                                 Layout.fillWidth: true
                                 spacing: 14
                                 Text { text: myName.modelData.name; color: root.ink; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.Bold }
-                                Text { visible: myName.modelData.name === root.mainName; text: "main"; color: root.brass; font.family: root.sans; font.pixelSize: root.px(14) }
+                                Text { visible: myName.modelData.name === root.mainName; text: "main"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
                                 Text {
                                     text: myName.modelData["private"] === false ? "Public" : "Private"
-                                    color: myName.modelData["private"] === false ? root.dim : root.brass
+                                    color: myName.modelData["private"] === false ? root.dim : root.dim
                                     font.family: root.sans
                                     font.pixelSize: root.px(14)
                                 }
@@ -9971,7 +9953,7 @@ Item {
                                 required property var modelData
                                 spacing: 14
                                 Text { text: modelData.name; color: root.dim; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.Bold }
-                                Text { text: modelData.failed ? "didn't register" : "registering"; color: modelData.failed ? root.alarm : root.brass; font.family: root.sans; font.pixelSize: root.px(14) }
+                                Text { text: modelData.failed ? "didn't register" : "registering"; color: modelData.failed ? root.alarm : root.waitTone; font.family: root.sans; font.pixelSize: root.px(14) }
                             }
                         }
                         // A name this wallet holds that isn't listed (handed to it, or registered
@@ -10003,14 +9985,14 @@ Item {
                                 }
                             }
                         }
-                        Hint { visible: root.addNameOpen && root.pending !== null && root.pending.kind === "add_name"; color: root.brass; text: "Checking on chain that this wallet holds " + (root.pending !== null ? root.pending.name : "") + "…" }
+                        Hint { visible: root.addNameOpen && root.pending !== null && root.pending.kind === "add_name"; color: root.waitTone; text: "Checking on chain that this wallet holds " + (root.pending !== null ? root.pending.name : "") + "…" }
                         RowLayout {
                             visible: root.addNameOpen && root.addNameResult !== null
                             Layout.fillWidth: true
                             spacing: 12
                             Hint {
                                 Layout.fillWidth: true
-                                color: root.addNameResult !== null && root.addNameResult.done ? root.good : root.brass
+                                color: root.addNameResult !== null && root.addNameResult.done ? root.good : root.waitTone
                                 text: root.addNameResult === null ? "" : root.addNameResult.notYours ? root.addNameResult.name + " isn't yours yet. To make it yours, register it." : root.addNameResult.line
                             }
                             Action {
@@ -10040,7 +10022,7 @@ Item {
                             hint: "Public/… or Private/…, or a pasted account address"
                             onTextChanged: root.transferConfirm = false
                         }
-                        Hint { visible: root.transferProblem() !== ""; color: root.alarm; font.pixelSize: root.px(14); text: root.transferProblem() }
+                        StatusLine { visible: root.transferProblem() !== ""; kind: Logic.noticeKind(root.transferProblem(), true); text: root.transferProblem() }
                         RowLayout {
                             visible: !root.transferConfirm
                             spacing: 8
@@ -10091,11 +10073,11 @@ Item {
                     }
                     Hint {
                         visible: root.boardJob !== null && /^cli_(transfer|receive_privately)$/.test(root.boardJob.kind)
-                        color: root.brass
+                        color: root.waitTone
                         font.pixelSize: root.px(15)
                         text: root.boardJob === null ? "" : root.boardJob.label + ": proving it on this computer. Usually 5–12 min, " + Math.max(0, Math.floor((Math.max(root.clockTick, Date.now()) - root.boardJob.started) / 60000)) + " so far."
                     }
-                    Hint { visible: root.notice !== "" && root.walletView === "names"; color: root.noticeIsError ? root.alarm : root.good; font.pixelSize: root.px(15); text: root.notice }
+                    StatusLine { visible: root.notice !== "" && root.walletView === "names"; kind: root.noticeKind; text: root.notice }
                 }
 
                 // ── Claim a bridge deposit ──
@@ -10103,7 +10085,7 @@ Item {
                     id: claimScreen
                     visible: root.walletView === "claim"
                     Layout.fillWidth: true
-                    Layout.maximumWidth: 680
+                    Layout.maximumWidth: root.pageWidth
                     spacing: 12
                     PageHeader { title: "Claim a bridge deposit"; net: "0.4"; onBack: root.leaveClaim() }
 
@@ -10260,7 +10242,7 @@ Item {
                     id: receiveScreen
                     visible: root.walletView === "ethreceive"
                     Layout.fillWidth: true
-                    Layout.maximumWidth: 680
+                    Layout.maximumWidth: root.pageWidth
                     spacing: 12
                     readonly property var stepNow: root.receiveStepsNow.filter(function(x) { return x.state === "now" })[0] || null
                     readonly property var result: root.receiveResult
@@ -10430,7 +10412,7 @@ Item {
                             Layout.fillWidth: true
                             kind: Logic.noticeKind(root.receiveError, true)
                             text: root.receiveError
-                            actionLabel: root.receiveResult === null && root.receiveNeeds === null && !root.receiveAsking ? "Try again" : ""
+                            actionLabel: root.receiveResult === null && root.receiveNeeds === null && !root.receiveAsking ? (Logic.approvalEnded(root.receiveError) ? "Start again" : "Try again") : ""
                             onAct: root.makeReceive()
                         }
                     }
@@ -10483,7 +10465,7 @@ Item {
                     id: sendBackScreen
                     visible: root.walletView === "sendback"
                     Layout.fillWidth: true
-                    Layout.maximumWidth: 680
+                    Layout.maximumWidth: root.pageWidth
                     spacing: 12
                     readonly property var stepNow: root.sbStepsNow.filter(function(x) { return x.state === "now" })[0] || null
                     readonly property var p: root.sbProgressNow
@@ -10495,31 +10477,19 @@ Item {
                     readonly property bool choosing: root.sbFocus === "" && root.sbNeeds === null
                     // The burn's approval is drawn here (appInline): it is the step, not the panel.
                     readonly property bool burning: root.appInline && root.sbFocus !== "" && (p.stage === "planned" || p.stage === "approve")
-                    Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
-                    Text { text: "Bridge to Ethereum"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
-                    RunsOn { net: "0.4" }
+                    PageHeader { title: "Bridge to Ethereum"; net: "0.4"; onBack: root.walletView = "home" }
                     BridgeSetupBox { then: "sendback" }
-                    Hint { visible: !root.receiveMissing && root.bridgeSetupClear && root.bridgeConfig !== null && !root.sbCan; color: root.brass; text: "This LEZ Bridge can't send back yet. Update it." }
+                    StatusLine { visible: !root.receiveMissing && root.bridgeSetupClear && root.bridgeConfig !== null && !root.sbCan; kind: ""; text: "This LEZ Bridge can't bridge to Ethereum yet. Update it (above)." }
                     RowLayout {
                         visible: root.receiveMissing && root.bridgeSetup.state === ""
                         spacing: 12
-                        Hint { Layout.fillWidth: false; color: root.brass; text: "The LEZ Bridge doesn't answer yet." }
+                        StatusLine { Layout.fillWidth: false; kind: "waiting"; text: "The LEZ Bridge doesn't answer yet." }
                         Link { text: "Look again"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.openSendBack(root.sbAccount, root.sbAsset, root.sbFocus === "" ? undefined : root.sbFocus) }
                     }
-                    Hint { visible: !root.receiveMissing && sendBackScreen.closed; color: root.brass; text: root.sbLink !== null && root.sbLink.why ? root.sentence(String(root.sbLink.why)) : "" }
+                    // A bridge whose vault can't release: said plainly (a fact, not a wait), with the way back.
+                    StatusLine { visible: !root.receiveMissing && sendBackScreen.closed; kind: ""; text: root.sbLink !== null && root.sbLink.why ? root.sentence(String(root.sbLink.why)) : ""; actionLabel: "Back to the wallet"; onAct: root.walletView = "home" }
 
-                    StepRow { visible: sendBackScreen.shows; steps: root.sbStepsNow }
-                    Text {
-                        readonly property var step: sendBackScreen.stepNow !== null ? sendBackScreen.stepNow : root.sbStepsNow[root.sbStepsNow.length - 1]
-                        visible: sendBackScreen.shows && step !== undefined
-                        Layout.fillWidth: true
-                        text: step === undefined ? "" : (step.state === "done" ? "✓ " : "") + "Step " + step.n + " of " + step.total + " · " + step.title
-                        color: step !== undefined && step.state === "done" ? root.good : root.ink
-                        font.family: root.sans
-                        font.pixelSize: root.px(22)
-                        font.weight: Font.DemiBold
-                        wrapMode: Text.WordWrap
-                    }
+                    StepHeader { visible: sendBackScreen.shows; steps: root.sbStepsNow }
 
                     // Step 1: the amount, one denomination this account holds.
                     ColumnLayout {
@@ -10533,10 +10503,10 @@ Item {
                             spacing: 8
                             Repeater {
                                 model: root.sbSources
-                                Action {
+                                Choice {
                                     required property var modelData
                                     label: Logic.idShort(modelData.account) + " · " + modelData.amount + " " + modelData.symbol
-                                    strong: root.sbAsset !== null && root.sbAccount === modelData.account && root.sbAsset.symbol === modelData.symbol
+                                    chosen: root.sbAsset !== null && root.sbAccount === modelData.account && root.sbAsset.symbol === modelData.symbol
                                     onPressed: root.sbPick(modelData)
                                 }
                             }
@@ -10548,14 +10518,14 @@ Item {
                             spacing: 8
                             Repeater {
                                 model: root.sbAmounts
-                                Action { required property var modelData; label: modelData.text + " " + (root.sbAsset !== null ? root.sbAsset.symbol : ""); onPressed: root.sbDenom = modelData.index }
+                                Choice { required property var modelData; label: modelData.text + " " + (root.sbAsset !== null ? root.sbAsset.symbol : ""); onPressed: root.sbDenom = modelData.index }
                             }
                         }
                         // Nothing to send back: said in one line, with the way to get some.
                         RowLayout {
                             visible: root.sbSources.length === 0
                             spacing: 14
-                            Hint { Layout.fillWidth: false; color: root.ink; text: root.bridgeNet === null ? "Reading your accounts on the bridge test network…" : "None of your public accounts holds tokens on bridge v4 yet." }
+                            StatusLine { Layout.fillWidth: false; kind: root.bridgeNet === null ? "working" : ""; text: root.bridgeNet === null ? "Reading your accounts on the bridge test network…" : "None of your public accounts holds tokens on bridge v4 yet." }
                             Action { visible: root.bridgeNet !== null; label: "Receive from Ethereum"; onPressed: root.openEthReceive() }
                         }
                     }
@@ -10582,7 +10552,8 @@ Item {
                                 Field { id: sbCodeField; Layout.fillWidth: true; size: 15; code: true; hint: "logoswd1…"; onTextChanged: root.sbCodeInput = text; onAccepted: root.sbCheckCode() }
                                 Action { label: root.sbAsking ? "Reading…" : "Read the code"; enabledNow: !root.sbAsking && Logic.sendBackCode(root.sbCodeInput) !== ""; onPressed: root.sbCheckCode() }
                             }
-                            Hint { visible: root.sbCheckError !== ""; color: root.alarm; text: root.sbCheckError }
+                            WhyLine { visible: !root.sbAsking && Logic.sendBackCode(root.sbCodeInput) === "" && root.sbCheckError === ""; text: "Paste the code from the bridge page to read it." }
+                            StatusLine { visible: root.sbCheckError !== ""; kind: Logic.noticeKind(root.sbCheckError, true); text: root.sbCheckError }
                         }
                         // The address the code names, and its four words: the same as on the page.
                         ColumnLayout {
@@ -10595,7 +10566,7 @@ Item {
                             Text { Layout.fillWidth: true; text: root.sbCheck !== null ? String(root.sbCheck.words_text || "") : ""; color: root.ink; font.family: root.sans; font.pixelSize: root.px(30); font.weight: Font.Bold; wrapMode: Text.WordWrap }
                             Repeater {
                                 model: root.sbCheck !== null && Array.isArray(root.sbCheck.warnings) ? root.sbCheck.warnings : []
-                                Hint { required property var modelData; color: root.brass; text: String(modelData) }
+                                Hint { required property var modelData; color: root.ink; text: "!  " + String(modelData) }
                             }
                             RowLayout {
                                 spacing: 14
@@ -10605,7 +10576,7 @@ Item {
                         }
                     }
 
-                    Hint { visible: root.sbNeeds !== null && !root.appInline; text: "Answer it in the sheet." }
+                    StatusLine { visible: root.sbNeeds !== null && !root.appInline; kind: "waiting"; text: "Waiting for your answer in the approval sheet." }
                     // The burn's approval: where it goes first (the burn carries only a commitment, so
                     // the wallet's own sheet can't show the address), then the approval itself.
                     ColumnLayout {
@@ -10622,16 +10593,15 @@ Item {
                     // Step 3 and on: where the send-back is. The wait is the headline.
                     UnderwayPanel {
                         visible: sendBackScreen.shows && root.sbFocus !== "" && !sendBackScreen.burning && !(root.sbNamesOld && sendBackScreen.p.stage === "planned")
-                        Text {
-                            Layout.fillWidth: true
-                            text: (sendBackScreen.p.stage === "released" ? "✓ " : "") + sendBackScreen.p.headline
-                            color: sendBackScreen.p.tone === "done" ? root.good : sendBackScreen.p.tone === "plain" ? root.dim : sendBackScreen.p.tone === "ready" ? root.ink : root.underway
-                            font.family: root.sans
-                            font.pixelSize: root.px(26)
-                            font.weight: Font.DemiBold
-                            wrapMode: Text.WordWrap
+                        StatusLine {
+                            kind: Logic.toneKind(sendBackScreen.p.tone)
+                            text: sendBackScreen.p.headline
+                            actionLabel: sendBackScreen.p.action === "check" && !root.sbPolling ? "Check again" : ""
+                            onAct: root.sbCheckNow()
                         }
                         Hint { visible: sendBackScreen.p.detail !== ""; font.pixelSize: root.px(15); text: sendBackScreen.p.detail }
+                        // The steps done by hand today, said once, here.
+                        Hint { visible: Logic.sendBackByHand(sendBackScreen.p.stage); font.pixelSize: root.px(15); text: Logic.SEND_BACK_BY_HAND }
                         Hint {
                             visible: root.sbFocusRow !== null
                             color: root.ink
@@ -10647,7 +10617,7 @@ Item {
                             visible: root.sbWitness !== null && (sendBackScreen.p.stage === "recorded" || sendBackScreen.p.stage === "proving")
                             Layout.fillWidth: true
                             spacing: 8
-                            Hint { color: root.ink; text: "This computer has no prover set up yet: the proof runs from one command (about 30 s)." }
+                            Hint { color: root.ink; text: "This computer has no prover set up yet: the proof runs from one command (" + Logic.SEND_BACK_TIMES.proof + ")." }
                             Action { label: root.sbCommandCopied ? "Copied." : "Copy the command"; strong: true; onPressed: { root.sbCommandCopied = true; root.againAfter(2500, function() { root.sbCommandCopied = false }); root.copy(root.sbWitness !== null ? (Array.isArray(root.sbWitness.command) ? root.sbWitness.command.join(" ") : String(root.sbWitness.command || "")) : "", "The command") } }
                             TextEdit {
                                 Layout.fillWidth: true
@@ -10682,14 +10652,23 @@ Item {
                             Action { label: root.sbLinkCopied ? "Copied." : root.sbAsking ? "Getting the link…" : "Copy the link"; strong: true; enabledNow: !root.sbAsking; onPressed: root.sbCopyRelease() }
                             Hint { font.pixelSize: root.px(15); text: "Open it in your browser and press Release with the Ethereum wallet you connected." }
                         }
-                        Hint { visible: sendBackScreen.st !== null && !!sendBackScreen.st.note && sendBackScreen.p.detail !== String(sendBackScreen.st.note); font.pixelSize: root.px(15); color: root.brass; text: sendBackScreen.st !== null && sendBackScreen.st.note ? root.sentence(String(sendBackScreen.st.note)) : "" }
+                        StatusLine { visible: sendBackScreen.st !== null && !!sendBackScreen.st.note && sendBackScreen.p.detail !== String(sendBackScreen.st.note); kind: Logic.isWaitMessage(sendBackScreen.st !== null ? sendBackScreen.st.note : "") ? "waiting" : ""; text: sendBackScreen.st !== null && sendBackScreen.st.note ? root.sentence(String(sendBackScreen.st.note)) : "" }
                         SendBackCheckLine { visible: sendBackScreen.p.stage !== "released" }
                     }
                     RowLayout {
                         visible: root.sbError !== ""
                         spacing: 12
-                        Hint { Layout.fillWidth: true; color: root.alarm; text: root.sbError }
-                        Action { visible: root.sbFocus !== "" && sendBackScreen.p.action === "burn" && !root.sbAsking && !root.sbNamesOld; label: "Try again"; onPressed: root.sbBurn() }
+                        // A refusal of the burn: its one next action (Try again), or, when this Names
+                        // can't sign burns at all, the way back.
+                        StatusLine {
+                            Layout.fillWidth: true
+                            kind: Logic.noticeKind(root.sbError, true)
+                            text: root.sbError
+                            actionLabel: root.sbNamesOld ? "Back to the wallet" : root.sbAsking ? ""
+                                : root.sbFocus !== "" && sendBackScreen.p.action === "burn" ? (Logic.approvalEnded(root.sbError) ? "Start again" : "Try again")
+                                : root.sbFocus === "" && Logic.approvalEnded(root.sbError) ? "Start again" : ""
+                            onAct: if (root.sbNamesOld) root.walletView = "home"; else if (root.sbFocus !== "") root.sbBurn(); else root.sbPlan()
+                        }
                     }
 
                     Link {
@@ -10705,7 +10684,6 @@ Item {
                         spacing: 10
                         Hint { font.pixelSize: root.px(15); text: "The wallet burns the wrapped tokens on the bridge test network; the bridge's relay pays the LEZ fee. Ethereum then records the burn, this computer proves it, and the vault releases the ETH to the address you connected, after its one-hour delay." }
                         Hint { font.pixelSize: root.px(15); text: "The burn carries an exit commitment, not the address: the address stays hidden until the release. Your wallet makes the exit's secret from your account's key; this app never sees it." }
-                        Hint { font.pixelSize: root.px(15); text: "Today the bridge team posts the update to Ethereum and makes the proof's wrapper by hand." }
                         Hint { font.pixelSize: root.px(15); text: "Text copied in Names may not reach another computer through Screen Sharing: open the link in a browser on this computer, or select it below." }
                         TextEdit {
                             visible: root.sbLink !== null && !!root.sbLink.link && root.sbFocus === ""
@@ -10744,10 +10722,9 @@ Item {
                 ColumnLayout {
                     visible: root.walletView === "add"
                     Layout.fillWidth: true
+                    Layout.maximumWidth: root.pageWidth
                     spacing: 12
-                    Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
-                    Text { text: "Add a token"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
-                    RunsOn { net: "0.3" }
+                    PageHeader { title: "Add a token"; net: "0.3"; onBack: root.walletView = "home" }
                     Hint { text: "Paste the token's address, its ID on LEZ. It stays in your wallet from now on, even before you hold any." }
                     Part { text: "Token address" }
                     Field { id: addTokenField; Layout.fillWidth: true; size: 17; code: true; hint: "32 to 44 letters and digits" }
@@ -10772,7 +10749,7 @@ Item {
                         enabledNow: !root.addTokenBusy && addTokenField.text.trim() !== ""
                         onPressed: { root.tokenProgramEditing = false; root.addToken(addTokenField.text.trim(), addProgramField.text.trim()) }
                     }
-                    Hint { visible: root.addTokenProblem !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.addTokenProblem }
+                    StatusLine { visible: root.addTokenProblem !== ""; kind: Logic.noticeKind(root.addTokenProblem, true); text: root.addTokenProblem }
 
                     Part { visible: root.watchedTokens.length > 0; text: "Added by address" }
                     Repeater {
@@ -10805,9 +10782,9 @@ Item {
                     readonly property var send: root.sendState(row)
                     readonly property var mine: Logic.activityFor(root.activityRows, root.rowAccount(row), root.zoneId)
                     Layout.fillWidth: true
-                    Layout.maximumWidth: 680
+                    Layout.maximumWidth: root.pageWidth
                     spacing: 12
-                    Link { text: "‹ Wallet"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.walletView = "home" }
+                    BackButton { onPressed: root.walletView = "home" }
                     RunsOn { net: accountPage.row !== null && accountPage.row.kind === "chain" ? "chain" : "0.3" }
                     RowLayout {
                         Layout.fillWidth: true
@@ -10898,7 +10875,7 @@ Item {
                     Hint { visible: accountPage.send.reason !== ""; font.pixelSize: root.px(14); text: accountPage.send.reason }
                     Hint { visible: accountPage.row !== null && !!accountPage.row.later; font.pixelSize: root.px(14); text: Logic.chainLaterNote() }
                     Hint { visible: accountPage.send.switchFirst; font.pixelSize: root.px(14); text: "Send makes this the account payments come from, then opens the form." }
-                    Hint { visible: root.accountsError !== ""; color: root.alarm; font.pixelSize: root.px(14); text: root.accountsError }
+                    StatusLine { visible: root.accountsError !== ""; kind: Logic.noticeKind(root.accountsError, true); text: root.accountsError }
                     Part { text: "History" }
                     Hint { visible: accountPage.mine.length === 0; font.pixelSize: root.px(14); text: "Nothing sent or received here yet, as far as this app has seen." }
                     Repeater {
@@ -10911,16 +10888,9 @@ Item {
                 ColumnLayout {
                     visible: root.walletView === "bridge"
                     Layout.fillWidth: true
-                    Layout.maximumWidth: 680
+                    Layout.maximumWidth: root.pageWidth
                     spacing: 10
-                    Link {
-                        text: "‹ Wallet"
-                        color: root.dim
-                        font.pixelSize: root.px(15)
-                        onPressed: root.walletView = "home"
-                    }
-                    Text { text: "Bridge"; color: root.ink; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(28) }
-                    RunsOn { net: "both" }
+                    PageHeader { title: "Bridge"; net: "both"; onBack: root.walletView = "home" }
                     Hint { font.pixelSize: root.px(15); text: "Moves the native coin between the Logos Blockchain and LEZ. Tokens made on LEZ stay on LEZ: only the native coin crosses." }
                     ColumnLayout {
                         readonly property var bridges: root.activityRows.filter(function(e) { return e.kind === "bridge" || e.kind === "split" })
@@ -10972,10 +10942,9 @@ Item {
                             onPressed: { if (root.bridgeFromLez === "") root.bridgeFromLez = "LEZ"; root.bridgeFromOpen = false }
                         }
                     }
-                    Hint {
+                    StatusLine {
                         visible: root.chainAccounts === null || root.chainAccounts.length === 0
-                        color: root.alarm
-                        font.pixelSize: root.px(15)
+                        kind: root.chainReading ? "working" : "problem"
                         text: root.chainReading ? "Reading your node…" : "Your node isn't answering. Start it in Basecamp's Blockchain app, then come back."
                     }
 
@@ -11039,7 +11008,7 @@ Item {
                                 onPressed: { root.bridgeToNewAccount(); root.bridgeToOpen = false }
                             }
                         }
-                        Hint { visible: root.accountsError !== ""; color: root.alarm; font.pixelSize: root.px(14); text: root.accountsError }
+                        StatusLine { visible: root.accountsError !== ""; kind: Logic.noticeKind(root.accountsError, true); text: root.accountsError }
 
                         Part { text: "Amount" }
                         Field {
@@ -11052,18 +11021,17 @@ Item {
                             onAccepted: root.bridgeRun(false)
                         }
                         // Why Review stays off: "1,5" is no amount, never 15.
-                        Hint {
+                        StatusLine {
                             // Once Review said it below, it isn't said twice.
                             visible: bridgeAmountField.text.trim() !== "" && root.bridgeAsked()[0] === "" && root.bridgeError !== text
-                            color: root.alarm
-                            font.pixelSize: root.px(14)
+                            kind: "problem"
                             text: Logic.amountProblem(bridgeAmountField.text, Logic.CHAIN_AMOUNT_MAX)
                         }
                         // The node address: kept for the module call, no longer shown (one node: Basecamp's).
                         Field { id: bridgeNodeField; visible: false }
                         Hint {
                             visible: root.bridgeToPrivate && root.bridgeAmountShort()
-                            color: root.brass
+                            color: root.ink
                             font.pixelSize: root.px(14)
                             text: "Moving it to private costs a private fee of about 5,100,000 taken from what moves, so " + root.grouped(root.bridgeAsked()[0]) + " would leave next to nothing. Bridge at least " + root.grouped(root.shieldMinimum) + "."
                         }
@@ -11095,7 +11063,7 @@ Item {
                         }
                         Hint {
                             visible: root.bridgeSplitHash !== ""
-                            color: root.brass
+                            color: root.waitTone
                             font.pixelSize: root.px(15)
                             text: "Making the note: waiting for your node's next blocks. The bridge is checked again as soon as it lands."
                         }
@@ -11123,7 +11091,7 @@ Item {
                                 }
                             }
                         }
-                        Hint { visible: root.bridgeError !== ""; color: root.alarm; font.pixelSize: root.px(15); text: root.bridgeError }
+                        StatusLine { visible: root.bridgeError !== ""; kind: Logic.noticeKind(root.bridgeError, true); text: root.bridgeError }
                         Card {
                             visible: root.bridgeSent
                             Layout.fillWidth: true
@@ -11152,7 +11120,7 @@ Item {
                                 : root.cliBalance === undefined ? "Checking your accounts…"
                                 : root.hasCliWallet ? "Couldn't read your accounts just now."
                                 : "You don't have a wallet yet. Create one first: it's where bridged tokens land."
-                            color: root.cliBalance === undefined ? root.dim : root.alarm
+                            color: root.cliBalance === undefined ? root.dim : root.ink
                         }
                         Action {
                             visible: root.cliPath !== "" && root.cliBalance !== undefined && !root.hasCliWallet
@@ -11167,7 +11135,7 @@ Item {
                             font.pixelSize: root.px(15)
                             onPressed: root.loadCliBalance()
                         }
-                        Hint { visible: root.walletError !== ""; color: root.alarm; text: root.walletError }
+                        StatusLine { visible: root.walletError !== ""; kind: Logic.noticeKind(root.walletError, true); text: root.walletError }
                     }
 
                     // To private: exactly the amount typed, from the main public account.
@@ -11194,15 +11162,14 @@ Item {
                                 onPressed: root.moveToPrivate(root.privateMoveAmount())
                             }
                         }
-                        Hint {
+                        StatusLine {
                             visible: privateMoveField.text.trim() !== "" && root.privateMoveAmount() === ""
-                            color: root.alarm
-                            font.pixelSize: root.px(14)
+                            kind: "problem"
                             text: Logic.amountProblem(privateMoveField.text)
                         }
-                        Hint { visible: root.shieldJob !== null; color: root.brass; font.pixelSize: root.px(15); text: root.shieldLine() }
+                        Hint { visible: root.shieldJob !== null; color: root.waitTone; font.pixelSize: root.px(15); text: root.shieldLine() }
                         Hint { visible: root.shieldMoved && root.shieldJob === null; color: root.good; font.pixelSize: root.px(15); text: "Moved. Your private account is ready for names." }
-                        Hint { visible: root.shieldProblem !== "" && root.shieldJob === null; color: root.alarm; font.pixelSize: root.px(15); text: root.shieldProblem }
+                        StatusLine { visible: root.shieldProblem !== "" && root.shieldJob === null; kind: Logic.noticeKind(root.shieldProblem, true); text: root.shieldProblem }
                     }
                     // Gas and minimums, at the very bottom.
                     Rectangle {
@@ -11256,11 +11223,9 @@ Item {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 6
-                    Link {
+                    BackButton {
                         visible: root.boardView === "thread"
-                        text: "← Back"
-                        color: root.faint
-                        font.underline: false
+                        label: "Posts"
                         onPressed: root.boardShow("all")
                     }
                     Tab { visible: root.boardView !== "thread"; label: "Recent"; current: root.boardView === "all"; onPressed: root.boardShow("all") }
@@ -11303,7 +11268,7 @@ Item {
                             width: parent.width - 28
                             text: root.boardAs + " is being made public: it moves to its own public account, then gets its profile and page back. You can post as soon as that's done, about "
                                 + Math.max(1, 10 - Math.floor((Math.max(root.clockTick, Date.now()) - (root.boardJob ? root.boardJob.started : Date.now())) / 60000)) + " min."
-                            color: root.brass
+                            color: root.waitTone
                             font.family: root.sans
                             font.pixelSize: root.px(15)
                             wrapMode: Text.Wrap
@@ -11315,7 +11280,7 @@ Item {
                         Layout.fillWidth: true
                         text: root.heldPublicly(root.boardAs) ? "Public · about 30 seconds per post, a little gas"
                             : "Private · usually 5–12 minutes per post, free; the chain never learns your account"
-                        color: root.heldPublicly(root.boardAs) ? root.faint : root.brass
+                        color: root.heldPublicly(root.boardAs) ? root.faint : root.dim
                         font.family: root.sans
                         font.pixelSize: root.px(14)
                         wrapMode: Text.Wrap
@@ -11350,7 +11315,7 @@ Item {
                     RowLayout {
                         Layout.fillWidth: true
                         visible: root.boardReplyTo !== ""
-                        Text { Layout.fillWidth: true; text: "Replying to " + root.boardPreviewOf(root.boardReplyTo); color: root.brass; font.family: root.sans; font.pixelSize: root.px(15); elide: Text.ElideRight }
+                        Text { Layout.fillWidth: true; text: "Replying to " + root.boardPreviewOf(root.boardReplyTo); color: root.ink; font.family: root.sans; font.pixelSize: root.px(15); elide: Text.ElideRight }
                         Link { text: "Cancel"; color: root.faint; font.pixelSize: root.px(14); onPressed: root.boardReplyTo = "" }
                     }
                     Area {
@@ -11374,7 +11339,7 @@ Item {
                                 spacing: 4
                                 Text {
                                     text: modelData.word + (modelData.suggestions.length > 0 ? " →" : " (no suggestion)")
-                                    color: root.alarm
+                                    color: root.ink
                                     font.family: root.sans
                                     font.pixelSize: root.px(14)
                                     height: 34
@@ -11428,13 +11393,13 @@ Item {
 
                 Hint {
                     visible: root.boardJob !== null
-                    color: root.brass
+                    color: root.waitTone
                     font.pixelSize: root.px(16)
                     text: root.boardJob === null ? "" : root.boardJobLine(root.boardJob)
                 }
-                Hint {
+                StatusLine {
                     visible: root.boardJob === null && root.notice !== "" && root.section === "posts"
-                    color: root.noticeIsError ? root.alarm : root.dim
+                    kind: root.noticeKind
                     text: root.notice
                 }
                 Hint {
@@ -11654,7 +11619,7 @@ Item {
                             Layout.fillWidth: true
                             spacing: 12
                             Text { Layout.preferredWidth: 200; text: modelData.name; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); elide: Text.ElideRight }
-                            Text { Layout.fillWidth: true; text: root.pendingLine(modelData); color: modelData.failed ? root.alarm : root.brass; font.family: root.sans; font.pixelSize: root.px(14); elide: Text.ElideRight }
+                            Text { Layout.fillWidth: true; text: root.pendingLine(modelData); color: modelData.failed ? root.alarm : root.waitTone; font.family: root.sans; font.pixelSize: root.px(14); elide: Text.ElideRight }
                         }
                     }
                     Repeater {
@@ -11711,7 +11676,7 @@ Item {
                             }
                             Hint {
                                 visible: root.publicAsk === nameRow.modelData.name
-                                color: root.brass
+                                color: root.ink
                                 font.pixelSize: root.px(14)
                                 text: "About 9 minutes. It moves the name to a new public account and funds that with 10,000,000 for gas from your private account, so the chain can't see where the money came from."
                                     + (nameRow.isAnon ? " Keep the anon private in practice: never send between its account and your other public accounts, and don't make it public right after your main name." : "")
@@ -11720,7 +11685,7 @@ Item {
                     }
                     Hint {
                         visible: root.boardJob !== null && root.section === "settings"
-                        color: root.brass
+                        color: root.waitTone
                         text: root.boardJob === null ? "" : root.boardJob.label + ": about 9 min, " + Math.max(0, Math.floor((Math.max(root.clockTick, Date.now()) - root.boardJob.started) / 60000)) + " so far."
                     }
                     Action {
@@ -11731,7 +11696,7 @@ Item {
                     }
                     Part { text: "Accounts" }
                     // Which network this list is: never one network's accounts read as the other's.
-                    Hint { color: root.brass; font.pixelSize: root.px(15); text: "On " + (root.namesNet === "0.4" ? "LEZ 0.4 (the bridge test network)" : "LEZ 0.3 (the public Logos testnet)") + ": the accounts of that network's wallet. Switch networks at the top of the Wallet." }
+                    Hint { color: root.ink; font.pixelSize: root.px(15); text: "On " + (root.namesNet === "0.4" ? "LEZ 0.4 (the bridge test network)" : "LEZ 0.3 (the public Logos testnet)") + ": the accounts of that network's wallet. Switch networks at the top of the Wallet." }
                     Hint { visible: !root.cliOld || root.cliAccounts !== null; text: "Your wallet's accounts. The one marked Pays is where payments and new names come from, one private and one public. Names you hold stay with the accounts holding them, and payments to a name still go where the name points." }
                     Hint { visible: root.cliPath === ""; text: "Install Names on this computer first (Welcome) to see your accounts." }
                     Hint { visible: root.cliPath !== "" && root.cliAccounts === null && root.accountsError === ""; text: "Reading your accounts…" }
@@ -11803,7 +11768,7 @@ Item {
                             }
                             Hint {
                                 visible: accountRow.chosen && accountRow.empty
-                                color: root.brass
+                                color: root.ink
                                 font.pixelSize: root.px(14)
                                 text: accountRow.isPrivate ? "This account is empty, so payments and new names can't come from it until tokens are moved in. Pay into it from another account, or choose a funded one."
                                     : "This account is empty, so it can't pay fees. Get tokens into it, or choose a funded one."
@@ -11818,8 +11783,8 @@ Item {
                         font.pixelSize: root.px(15)
                         onPressed: root.walletShowEmpty = !root.walletShowEmpty
                     }
-                    Hint { visible: root.accountsError !== "" && !root.cliOld; color: root.alarm; text: root.accountsError }
-                    Hint { visible: root.accountsNote !== "" && root.accountsError === ""; color: root.brass; text: root.accountsNote }
+                    StatusLine { visible: root.accountsError !== "" && !root.cliOld; kind: Logic.noticeKind(root.accountsError, true); text: root.accountsError }
+                    Hint { visible: root.accountsNote !== "" && root.accountsError === ""; color: root.ink; text: root.accountsNote }
                     // An older names program: the two accounts it pays from, and why there's no more.
                     Fact {
                         visible: root.cliOld && root.cliAccounts === null && root.cliBalance !== undefined && root.cliBalance !== null
@@ -11936,9 +11901,8 @@ Item {
                                     visible: zoneRow.modelData.home && root.zoneOtherChain !== null
                                     Layout.fillWidth: true
                                     spacing: 8
-                                    Hint {
-                                        textFormat: Text.PlainText
-                                        color: root.alarm
+                                    StatusLine {
+                                        kind: "problem"
                                         text: root.zoneOtherChain === null ? "" : "That sequencer serves another chain (channel " + Logic.keyShown(root.zoneOtherChain.channel) + "). "
                                             + zoneRow.modelData.name + " would become that chain: your names and balances are read there from then on, and what you hold on the present chain stays behind on it. To keep both, add it as a zone instead."
                                     }
@@ -11968,7 +11932,7 @@ Item {
                             }
                         }
                     }
-                    Hint { visible: root.zoneNote !== ""; textFormat: Text.PlainText; color: root.zoneNoteBad ? root.alarm : root.good; font.pixelSize: root.px(15); text: root.zoneNote }
+                    StatusLine { visible: root.zoneNote !== ""; kind: root.zoneNoteBad ? "problem" : "done"; text: root.zoneNote }
                     Action {
                         visible: !root.zoneAdding
                         label: "+  Add a zone"
@@ -11990,7 +11954,7 @@ Item {
                     }
                     Part { text: "Backup" }
                     Hint { color: root.ink; text: Logic.backupLastLine(root.backupStatus !== null ? root.backupStatus.last : null, root.backupWhen) }
-                    Hint { visible: Logic.backupUncoveredLine(root.backupStatus) !== ""; color: root.brass; text: Logic.backupUncoveredLine(root.backupStatus) }
+                    Hint { visible: Logic.backupUncoveredLine(root.backupStatus) !== ""; color: root.ink; text: Logic.backupUncoveredLine(root.backupStatus) }
                     RowLayout {
                         visible: root.backupMode === ""
                         spacing: 14
@@ -12014,7 +11978,7 @@ Item {
                         Field { id: backupPw1; Layout.fillWidth: true; secret: true; hint: "Password" }
                         Field { id: backupPw2; Layout.fillWidth: true; secret: true; hint: "The same password again" }
                         readonly property var pwHint: Logic.backupPasswordHint(backupPw1.text, backupPw2.text, root.backupStatus !== null ? root.backupStatus.min_password : 10)
-                        Hint { font.pixelSize: root.px(15); color: parent.pwHint.ok || backupPw1.text === "" ? root.dim : root.brass; text: parent.pwHint.text }
+                        Hint { font.pixelSize: root.px(15); color: parent.pwHint.ok || backupPw1.text === "" ? root.dim : root.ink; text: parent.pwHint.text }
                         Hint { color: root.ink; text: "Step 3 of 3 · Where it goes" }
                         Hint {
                             font.pixelSize: root.px(15)
@@ -12042,7 +12006,7 @@ Item {
                         Layout.fillWidth: true
                         spacing: 8
                         readonly property var checked: Logic.backupCheckedLine(root.backupMade !== null ? root.backupMade.check : null)
-                        Hint { color: parent.checked.ok ? root.good : root.brass; text: (parent.checked.ok ? "✓ " : "") + parent.checked.text }
+                        Hint { color: parent.checked.ok ? root.good : root.ink; text: (parent.checked.ok ? "✓ " : "") + parent.checked.text }
                         Hint { font.pixelSize: root.px(15); text: root.backupMade !== null ? Logic.backupFoldersLine(root.backupMade.folders) : "" }
                         RowLayout {
                             spacing: 14
@@ -12098,7 +12062,7 @@ Item {
                                 }
                                 Hint {
                                     font.pixelSize: root.px(15)
-                                    color: restoreNet.modelData.can_restore ? root.dim : root.brass
+                                    color: restoreNet.modelData.can_restore ? root.dim : root.ink
                                     text: restoreNet.modelData.can_restore ? "Goes to " + restoreNet.modelData.folder + "." : "A wallet is there already, so it can't be restored over it."
                                 }
                                 Hint {
@@ -12124,7 +12088,7 @@ Item {
                         color: root.good
                         text: root.restoreResult !== null ? "✓ Restored: " + (root.restoreResult.accounts || []).length + " accounts into " + root.restoreResult.folder + "." : ""
                     }
-                    Hint { visible: root.backupError !== ""; color: root.alarm; text: root.backupError }
+                    StatusLine { visible: root.backupError !== ""; kind: Logic.noticeKind(root.backupError, true); text: root.backupError }
 
                     Part { text: "Bridge" }
                     Hint { text: "Moving tokens from your Logos Blockchain node into LEZ is in the Wallet. One way for now; about 12 hours to arrive." }
@@ -12244,7 +12208,7 @@ Item {
                     }
                     Part { text: "names CLI" }
                     Hint { text: "Names your names CLI holds privately are edited through it. Each change is proven on this machine and takes a few minutes." }
-                    Hint { visible: root.proofWarning !== ""; color: root.alarm; text: root.proofWarning }
+                    StatusLine { visible: root.proofWarning !== ""; kind: Logic.noticeKind(root.proofWarning, true); text: root.proofWarning }
                     Field {
                         id: cliPathField
                         Layout.fillWidth: true
@@ -12269,7 +12233,7 @@ Item {
                         spacing: 12
                         Action { label: root.installJob !== null ? "Installing…" : "Install the LEZ 0.4 names tool"; strong: true; enabledNow: root.installJob === null; onPressed: root.installCli() }
                         Link { visible: Logic.FULL_TOOL_DOWNLOAD && root.installJob === null; text: "Install the full tool, with proving"; font.pixelSize: root.px(15); onPressed: root.installFullTool() }
-                        Hint { visible: root.installJob !== null; Layout.fillWidth: true; color: root.brass; font.pixelSize: root.px(15); text: root.installJob === null ? "" : root.installJob.line }
+                        Hint { visible: root.installJob !== null; Layout.fillWidth: true; color: root.waitTone; font.pixelSize: root.px(15); text: root.installJob === null ? "" : root.installJob.line }
                     }
                     Link {
                         visible: root.lastReply !== ""
@@ -12291,15 +12255,10 @@ Item {
                     Rectangle { Layout.fillWidth: true; Layout.topMargin: 8; height: 1; color: root.line }
                 }
 
-                Text {
+                StatusLine {
                     visible: root.notice !== ""
-                    Layout.fillWidth: true
+                    kind: root.noticeKind
                     text: root.notice
-                    color: root.noticeIsError ? root.alarm : root.brass
-                    font.family: root.sans
-                    font.weight: Font.DemiBold
-                    font.pixelSize: root.px(18)
-                    wrapMode: Text.Wrap
                 }
 
                 // Nothing chosen yet.
@@ -12368,14 +12327,14 @@ Item {
                             onPressed: root.checkRegister(registerField.text)
                         }
                     }
-                    Hint { visible: root.registerWait !== ""; color: root.brass; text: root.registerWait }
+                    Hint { visible: root.registerWait !== ""; color: root.waitTone; text: root.registerWait }
                     RowLayout {
                         visible: root.registerTaken !== ""
                         spacing: 12
-                        Rectangle { width: 10; height: 10; radius: 5; color: root.alarm }
+                        Rectangle { width: 10; height: 10; radius: 5; color: root.dim }
                         Text {
                             text: root.registerTaken + " is taken. Try another."
-                            color: root.alarm
+                            color: root.ink
                             font.family: root.sans
                             font.pixelSize: root.px(18)
                         }
@@ -12407,19 +12366,18 @@ Item {
                         spacing: 10
                         readonly property bool reserved: root.deposit !== null && root.deposit.tier === "locked"
                         readonly property bool underway: root.registerStepOf(root.missing) > 0
-                        Rectangle { width: 10; height: 10; radius: 5; color: parent.reserved ? root.alarm : parent.underway ? root.brass : root.good }
+                        Rectangle { width: 10; height: 10; radius: 5; color: parent.reserved ? root.dim : parent.underway ? root.waitTone : root.good }
                         Text {
                             text: parent.underway ? "Registering privately for you" : parent.reserved ? "Reserved: names of one to four characters and the reserved list are placed by the registry's admin" : "Available"
-                            color: parent.reserved ? root.alarm : parent.underway ? root.brass : root.good
+                            color: parent.underway ? root.waitTone : root.ink
                             font.family: root.sans
                             font.pixelSize: root.px(19)
                         }
                     }
                     // A private registration through the names CLI, under way or stopped.
-                    Hint {
+                    StatusLine {
                         visible: root.cliPendingFor(root.missing) !== null && root.cliPendingFor(root.missing).failed
-                        font.pixelSize: root.px(18)
-                        color: root.alarm
+                        kind: "problem"
                         text: root.cliPendingFor(root.missing) === null ? "" : "It stopped: " + root.cliPendingFor(root.missing).state + "."
                     }
                     Card {
@@ -12467,9 +12425,9 @@ Item {
                             visible: root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode === "deposit"
                             text: "Refunded in full when you release the name. Testnet: names don't expire here, but to keep one on mainnet you claim it within 30 days of launch. Network fee extra."
                         }
-                        Hint {
+                        StatusLine {
                             visible: root.deposit !== null && root.deposit.claims_until !== null && root.deposit.claims_until !== undefined
-                            color: root.alarm
+                            kind: ""
                             text: "Until " + (root.deposit !== null && root.deposit.claims_until ? root.dated(root.deposit.claims_until) : "") + ", whoever held this name on the earlier chain can take it back. If they do, you lose the name, and your deposit goes to them when they release it."
                         }
                         Link {
@@ -12482,7 +12440,7 @@ Item {
                     }
                     Hint {
                         visible: root.namesNet === "0.4"
-                        color: root.brass
+                        color: root.ink
                         text: "Registering privately stays off on LEZ 0.4 until real proofs have been run there. Register from a public account below, or switch to LEZ 0.3."
                     }
                     Card {
@@ -12537,10 +12495,9 @@ Item {
                             font.pixelSize: root.px(15)
                             wrapMode: Text.Wrap
                         }
-                        Hint {
+                        StatusLine {
                             visible: root.cliBalance !== undefined && root.cliBalance !== null && !root.cliCanPay()
-                            color: root.alarm
-                            font.pixelSize: root.px(15)
+                            kind: "problem"
                             text: "That's less than the deposit. Add funds to this private account first."
                         }
                         Link {
@@ -12590,7 +12547,7 @@ Item {
                         title: root.cliPath !== "" ? "From a public account" : "Register it to"
                         Accounts {}
                         Hint {
-                            color: root.cliPath !== "" ? root.dim : root.brass
+                            color: root.cliPath !== "" ? root.dim : root.ink
                             text: "Anyone who knows the name can find this account, and so its balance and history." + (root.namesNet === "0.4" ? "" : (root.cliPath !== "" ? "" : " To hide it, install the names CLI and register privately.") + " Payments to the name still go to your private account.")
                         }
                         RowLayout {
@@ -12613,7 +12570,7 @@ Item {
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.publishOnRegister = !root.publishOnRegister }
                             }
                         }
-                        Hint { visible: text !== ""; color: root.brass; font.pixelSize: root.px(15); text: Logic.uncheckedLine(root.toolNow, ["commit", "register"]) }
+                        Hint { visible: text !== ""; color: root.ink; font.pixelSize: root.px(15); text: Logic.uncheckedLine(root.toolNow, ["commit", "register"]) }
                         Action {
                             label: "Register " + root.missing + " publicly"
                             strong: root.cliPath === ""
@@ -12683,7 +12640,7 @@ Item {
                                 visible: root.forwardedFrom !== "" && root.record !== null
                                 text: root.record === null ? "" : root.forwardedFrom + " → " + root.record.name + "  (" + root.forwardedFrom + " forwards here)"
                                 textFormat: Text.PlainText
-                                color: root.brass
+                                color: root.ink
                                 font.family: root.sans
                                 font.weight: Font.DemiBold
                                 font.pixelSize: root.px(16)
@@ -12767,11 +12724,9 @@ Item {
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 20
-                            Link {
+                            BackButton {
                                 visible: root.section !== "profile"
-                                text: "← Back"
-                                color: root.faint
-                                font.underline: false
+                                label: root.record !== null ? root.record.name : "Back"
                                 onPressed: root.tool = ""
                             }
                             Text {
@@ -12795,14 +12750,14 @@ Item {
                         }
                         Rectangle { Layout.fillWidth: true; height: 1; color: root.line }
 
-                        Hint {
+                        StatusLine {
                             visible: root.cliHeld && root.busy && root.notice !== ""
-                            color: root.noticeIsError ? root.alarm : root.brass
+                            kind: root.noticeKind
                             text: root.notice
                         }
                         Hint {
                             visible: root.cliHeld && !root.busy
-                            color: root.brass
+                            color: root.ink
                             text: root.record !== null && root.heldPublicly(root.record.name) ? "Saving takes about 30 seconds." : "Saving takes 5–12 minutes (private name); keep Basecamp open until it's done."
                         }
                         RowLayout {
@@ -12902,7 +12857,7 @@ Item {
                                     visible: profileRow.modelData.key === "avatar" && root.draftText("avatar") === "" && root.profileText("avatar") !== ""
                                     Layout.fillWidth: true
                                     spacing: 12
-                                    Text { text: root.cliHeld ? "Picture removed when you save, unless you give a PNG file below" : "Picture removed when you save"; color: root.alarm; font.family: root.sans; font.pixelSize: root.px(17); wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                                    Text { text: root.cliHeld ? "Picture removed when you save, unless you give a PNG file below" : "Picture removed when you save"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); wrapMode: Text.WordWrap; Layout.fillWidth: true }
                                     Link {
                                         text: "Undo"
                                         font.pixelSize: root.px(16)
@@ -12931,7 +12886,7 @@ Item {
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 8
-                            Hint { visible: text !== ""; color: root.brass; font.pixelSize: root.px(15); text: Logic.uncheckedLine(root.toolNow, ["change"]) }
+                            Hint { visible: text !== ""; color: root.ink; font.pixelSize: root.px(15); text: Logic.uncheckedLine(root.toolNow, ["change"]) }
                             Action {
                                 label: "Save profile"
                                 strong: true
@@ -13217,7 +13172,7 @@ Item {
                                         y: 12
                                         width: parent.width - 28
                                         text: root.record !== null && Logic.someAmount(root.record.deposit) ? "Your deposit of " + root.grouped(root.record.deposit) + " goes with the name. They get it back when they release it, not you." : "Any deposit goes with the name."
-                                        color: root.brass
+                                        color: root.ink
                                         font.family: root.sans
                                         font.pixelSize: root.px(15)
                                         wrapMode: Text.Wrap
@@ -13254,7 +13209,7 @@ Item {
                                     Text {
                                         visible: root.confirmingRelease
                                         text: "Release it?"
-                                        color: root.alarm
+                                        color: root.ink
                                         font.family: root.sans
                                         font.pixelSize: root.px(18)
                                         font.weight: Font.DemiBold
@@ -13712,15 +13667,14 @@ Item {
                         }
                     }
                 }
-                Hint {
+                StatusLine {
                     visible: inscribeSheet.nodeProblem !== ""
-                    color: root.alarm
-                    textFormat: Text.PlainText
+                    kind: "problem"
                     text: inscribeSheet.nodeProblem + " You can still reject this."
                 }
-                Hint {
+                StatusLine {
                     visible: inscribeSheet.request !== null && inscribeSheet.nodeProblem === "" && inscribeSheet.choices.length === 0
-                    color: root.alarm
+                    kind: "problem"
                     text: "Your node's wallet has no Logos Blockchain account yet. Add one on the Blockchain page; an inscription can't be paid from a LEZ account."
                 }
                 Fact {
@@ -13728,37 +13682,22 @@ Item {
                     label: "Network fee"
                     value: inscribeSheet.fee.text
                 }
-                Hint {
+                StatusLine {
                     visible: inscribeSheet.nodeProblem === "" && inscribeSheet.choices.length > 0 && inscribeSheet.fee.tone === "bad"
-                    color: root.alarm
-                    textFormat: Text.PlainText
+                    kind: "problem"
                     text: inscribeSheet.fee.text
                 }
 
                 // An app that may be a fake needs a second, deliberate tick.
-                RowLayout {
+                Tick {
                     visible: inscribeSheet.risky
-                    Layout.fillWidth: true
-                    spacing: 10
-                    Rectangle {
-                        Layout.preferredWidth: 18
-                        Layout.preferredHeight: 18
-                        Layout.alignment: Qt.AlignTop
-                        radius: 4
-                        color: root.inscribeUnderstood ? root.alarm : "transparent"
-                        border.width: 2
-                        border.color: root.alarm
-                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.inscribeUnderstood = !root.inscribeUnderstood }
-                    }
-                    Hint {
-                        color: root.ink
-                        text: "I've read the warning above and still want these words inscribed from my account."
-                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.inscribeUnderstood = !root.inscribeUnderstood }
-                    }
+                    checked: root.inscribeUnderstood
+                    text: "I've read the warning above and still want these words inscribed from my account."
+                    onToggled: root.inscribeUnderstood = !root.inscribeUnderstood
                 }
 
-                Hint { visible: root.inscribeError !== ""; color: root.alarm; textFormat: Text.PlainText; text: root.inscribeError }
-                Hint { visible: root.inscribeBusy; color: root.brass; text: "Signing it and sending it to your node. This can take a minute or two…" }
+                StatusLine { visible: root.inscribeError !== ""; kind: Logic.noticeKind(root.inscribeError, true); text: root.inscribeError }
+                StatusLine { visible: root.inscribeBusy; kind: "waiting"; text: "Signing it and sending it to your node. This can take a minute or two…" }
                 RowLayout {
                     Layout.topMargin: 8
                     spacing: 10
