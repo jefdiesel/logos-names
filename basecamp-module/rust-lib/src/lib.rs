@@ -970,6 +970,12 @@ pub trait NamesModule: Send + 'static {
     /// most 64 MiB; only the Names app may ask. get_config `features` lists `file_sha256`.
     fn file_sha256(&mut self, path: String) -> String;
 
+    /// A note the Names app keeps for itself across a reopen of its window (the module keeps
+    /// running): stores `value` under `key` ("" removes it) and answers the value it had ("" when
+    /// none). In memory only, gone when Basecamp quits; at most 32 keys of 64 characters, values of
+    /// 256. Only the Names app may ask. get_config `features` lists `app_note`.
+    fn app_note(&mut self, key: String, value: String) -> String;
+
     /// The accounts this app has been given: `{connected, accounts:
     /// [{account, account_kind}]}`, where `account` is `Public/<id>` or
     /// `Private/<id>` and `account_kind` is `public` or `private`. Asks nobody.
@@ -1240,6 +1246,8 @@ struct Names {
     token_info: HashMap<(AccountId, AccountId), (Value, std::time::Instant)>,
     /// What the Program Registry said about each asking app's publisher, and when (seconds).
     publishers: HashMap<String, (Value, u64)>,
+    /// The Names app's notes to itself that outlive its window (`app_note`), in memory only.
+    notes: HashMap<String, String>,
     /// The LEZ zones set up here and the one in use (`zones`). `sequencer`, `cli_wallet`
     /// and `token_program` above are the zone in use's, and are what every method reads;
     /// `program`, the registry, is always home's, where LNS names are kept.
@@ -1355,6 +1363,7 @@ impl Default for Names {
             token_program: None,
             token_info: HashMap::new(),
             publishers: HashMap::new(),
+            notes: HashMap::new(),
             zones: zones::Zones::new(bare_home(DEFAULT_SEQUENCER)),
             channel_asked: false,
             receipt_asks: Default::default(),
@@ -1390,8 +1399,9 @@ const NAMES_APP: &str = "names_ui";
 /// older module can still be the one loaded).
 const MODULE_VERSION: &str = "0.17.0";
 /// get_config's `features`: what an app may need beyond the version (`reveal_name`;
-/// `request_access_with` and its `account_hint`).
-const MODULE_FEATURES: [&str; 3] = ["reveal_name", "request_access_with", "file_sha256"];
+/// `request_access_with` and its `account_hint`; `grant_add_account`: a hint for an account
+/// the app wasn't given is a request to add it to the app's grant, not "approved").
+const MODULE_FEATURES: [&str; 5] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note"];
 
 /// What a private-name action answers on LEZ 0.4, where names are public only (S-B).
 const PRIVATE_OFF_04: &str = "on LEZ 0.4 names are public only: private payments and private holders are off there, so nothing was done";
@@ -4223,6 +4233,26 @@ impl NamesModule for Names {
         reply(lgx_sha256(&path).map(Value::from))
     }
 
+    fn app_note(&mut self, key: String, value: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let key = key.trim().to_owned();
+            if key.is_empty() || key.chars().count() > 64 {
+                return Err("a note's key is 1 to 64 characters".to_owned());
+            }
+            if value.chars().count() > 256 {
+                return Err("a note is at most 256 characters".to_owned());
+            }
+            if !value.is_empty() && !self.notes.contains_key(&key) && self.notes.len() >= 32 {
+                return Err("at most 32 notes".to_owned());
+            }
+            let had = if value.is_empty() { self.notes.remove(&key) } else { self.notes.insert(key, value) };
+            Ok(Value::from(had.unwrap_or_default()))
+        })())
+    }
+
     fn cli_claim(&mut self, name: String, snapshot: String) -> String {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
@@ -6169,6 +6199,16 @@ impl NamesModule for Names {
                         }
                     }
                 }
+                // A request to add an account to a grant offers that one account only (ticked first).
+                if request["adding"] == true {
+                    let hint = request["account_hint"].clone();
+                    offered.retain(|choice| choice["account"] == hint);
+                    if offered.is_empty() {
+                        if let Some(account) = hint.as_str() {
+                            offered.push(json!({ "account": account, "account_kind": kind_of(account), "pays": false, "label": "the account the app asked for", "granted": false }));
+                        }
+                    }
+                }
                 // An access request's hint is shown only when the wallet offers that account; it
                 // only says which box is ticked first (the person still chooses).
                 if request["account_hint"].is_string() && !offered.iter().any(|choice| choice["account"] == request["account_hint"]) {
@@ -6242,6 +6282,10 @@ impl NamesModule for Names {
             }
             request["state"] = json!("rejected");
             request["decided"] = json!(now);
+            if request["adding"] == true {
+                let hint = request["account_hint"].as_str().unwrap_or("that account").to_owned();
+                request["error"] = json!(format!("{hint} wasn't added (the person chose Not now); the app still sees the accounts it had"));
+            }
             let view = provider::app_view(request);
             store.save();
             Ok(view)
@@ -6533,7 +6577,11 @@ impl Names {
         let now = provider::now_ms();
         let store = self.store();
         let granted = store.granted(&app);
-        if !granted.is_empty() {
+        // An app that already sees some accounts and names one it doesn't see asks to ADD that one:
+        // a request, not "approved" (which the app couldn't act on: LEZ Bridge's receive into a
+        // public account it wasn't given waited forever, M2 2026-11-14).
+        let wants_new = hint.as_ref().is_some_and(|h| !granted.iter().any(|g| g == h));
+        if !granted.is_empty() && !wants_new {
             return Ok(json!({ "request": null, "kind": provider::CONNECT, "state": "approved", "accounts": granted }));
         }
         if let Some(waiting) = store.requests.iter().find(|r| r["app"] == app.as_str() && r["kind"] == provider::CONNECT && r["state"] == "pending") {
@@ -6548,15 +6596,37 @@ impl Names {
                 net["version"].as_str().unwrap_or("this network")
             ));
         }
+        // Adding to a grant: only an account the wallet holds (the sheet could offer nothing else).
+        let adding = !granted.is_empty();
+        if let Some(hint) = hint.as_deref().filter(|_| adding) {
+            if !self.wallet_holds(hint)? {
+                return Err(format!("the Names wallet doesn't hold {hint}, so it can't be added to this app's access"));
+            }
+        }
         let store = self.store();
         let mut request = provider::connect_request(&app, reason, now)?;
         if let Some(hint) = hint {
             request["account_hint"] = json!(hint);
         }
+        if adding {
+            // The sheet asks for that one account only; approving it leaves the others as they are.
+            request["adding"] = json!(true);
+        }
         let view = provider::app_view(&request);
         store.add(request, now)?;
         store.save();
         Ok(view)
+    }
+
+    /// Whether `account` is one an access request can offer from the wallet now (its main
+    /// public and private accounts, and its other public accounts): the background list first,
+    /// the wallet itself when that doesn't have it.
+    fn wallet_holds(&self, account: &str) -> Result<bool, String> {
+        if self.wallet_choices(&self.publics_read_lately()).iter().any(|choice| choice["account"] == account) {
+            return Ok(true);
+        }
+        let held = self.held()?;
+        Ok(self.wallet_choices(&held.public).iter().any(|choice| choice["account"] == account))
     }
 
     /// Adds a transaction request from `app`, which must have been given access.
@@ -6693,6 +6763,24 @@ impl Names {
         }
         if kind != provider::CONNECT && chosen.len() != 1 {
             return Err("choose one account".to_owned());
+        }
+        // A request to add an account is checked again now: only that account, and only while
+        // the app still has the access it is added to (taken back since, it can ask again).
+        if request["adding"] == true {
+            let hint = request["account_hint"].as_str().unwrap_or_default();
+            if chosen.len() != 1 || chosen[0] != hint {
+                return Err(format!("this request only asks for {hint}"));
+            }
+            if self.store().granted(&app).is_empty() {
+                let store = self.store();
+                if let Some(stored) = store.get_mut(id) {
+                    stored["state"] = json!("rejected");
+                    stored["decided"] = json!(now);
+                    stored["error"] = json!("this app's access was taken back after it asked; it can ask again");
+                }
+                store.save();
+                return Err("this app's access was taken back after it asked, so there is nothing to add to; it can ask again".to_owned());
+            }
         }
         // Checked against the wallet itself, not a list read earlier: a call
         // must be signed by an account the CLI's wallet holds now.
@@ -8190,6 +8278,7 @@ mod tests {
             token_program: None,
             token_info: HashMap::new(),
             publishers: HashMap::new(),
+            notes: HashMap::new(),
             zones: zones::Zones::new(bare_home(DEFAULT_SEQUENCER)),
             channel_asked: false,
             receipt_asks: Default::default(),
@@ -10149,6 +10238,26 @@ mod tests {
     }
 
     #[test]
+    fn app_notes_are_the_names_apps_own() {
+        let mut names = fresh();
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert_eq!(parsed(&names.app_note("bridge_update".into(), "receive".into()))["value"], "");
+        assert_eq!(parsed(&names.app_note("bridge_update".into(), "".into()))["value"], "receive");
+        assert_eq!(parsed(&names.app_note("bridge_update".into(), "".into()))["value"], "");
+        assert_eq!(parsed(&names.app_note("".into(), "x".into()))["success"], false);
+        assert_eq!(parsed(&names.app_note("k".into(), "x".repeat(257)))["success"], false);
+        for i in 0..32 {
+            assert_eq!(parsed(&names.app_note(format!("k{i}"), "x".into()))["success"], true);
+        }
+        assert_eq!(parsed(&names.app_note("one_more".into(), "x".into()))["success"], false);
+        assert_eq!(parsed(&names.app_note("k0".into(), "y".into()))["value"], "x", "a key it has can change");
+        assert!(parsed(&names.get_config())["features"].as_array().unwrap().contains(&json!("app_note")));
+        as_caller(logos_rust_sdk::LogosCaller::Module { name: "lez_bridge".into(), instance: None });
+        assert_eq!(parsed(&names.app_note("k0".into(), "".into()))["success"], false, "only the Names app");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+    }
+
+    #[test]
     fn file_sha256_reads_only_a_package_file() {
         let dir = std::env::temp_dir().join(format!("names-sha-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -10628,6 +10737,17 @@ mod tests {
         // Nothing is given without the person's choice.
         assert!(approve(&mut names, &id, "")["error"].as_str().unwrap_or_default().contains("choose an account"));
         assert_eq!(names.store().get(&id).unwrap()["state"], "pending");
+        // Once it sees that account, the same hint is "approved"; a hint for an account it doesn't
+        // see yet is a new request to add it (never "approved" with nothing to act on).
+        assert_eq!(approve(&mut names, &id, &format!("Public/{PUBLIC}"))["success"], true);
+        as_caller(app("lez_bridge"));
+        let again = parsed(&names.request_access_with("to claim deposits".into(), json!({ "account_hint": format!("Public/{PUBLIC}") }).to_string()));
+        assert_eq!((again["value"]["state"].as_str(), again["value"]["request"].is_null()), (Some("approved"), true), "{again}");
+        // (Adding an account the wallet can't be shown to hold is refused: here its CLI lists nothing.)
+        let more = parsed(&names.request_access_with("to receive".into(), json!({ "account_hint": format!("Public/{OTHER}") }).to_string()));
+        assert_eq!(more["success"], false, "{more}");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert!(names.store().requests.iter().all(|r| !(r["app"] == "lez_bridge" && r["state"] == "pending")));
         // A hint for an account the wallet doesn't hold is not shown.
         as_caller(app("other_ui"));
         parsed(&names.request_access_with("x".into(), json!({ "account_hint": format!("Public/{OTHER}") }).to_string()));
@@ -10641,6 +10761,82 @@ mod tests {
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
         let views = parsed(&names.pending_requests())["value"].clone();
         assert_eq!(views.as_array().unwrap().iter().find(|v| v["app"] == "plain_ui").unwrap()["reason"], "just text");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `grant_add_account`: an app that sees some accounts and names one it doesn't see asks to
+    /// add that one. The sheet offers it alone; approving adds it and keeps the others, Not now
+    /// keeps the grant and tells the app; an account the wallet doesn't hold is refused; and the
+    /// stored request is checked again when it is approved.
+    #[test]
+    fn an_app_asks_to_add_an_account_to_its_grant() {
+        let unlisted = registry::account_text(&[9; 32]);
+        let listing = |publics: &str| format!("case \"$*\" in *\"module accounts\"*) echo '{{\"public\":[{publics}],\"private\":[]}}' ;; esac");
+        let (mut names, dir) = with_wallet("provider-add", &listing(&format!("\"{PUBLIC}\",\"{OTHER}\"")));
+        assert!(parsed(&names.get_config())["features"].as_array().unwrap().contains(&json!("grant_add_account")));
+        let hint = |account: &str| json!({ "account_hint": account }).to_string();
+        let (public, private, other) = (format!("Public/{PUBLIC}"), format!("Private/{PRIVATE}"), format!("Public/{OTHER}"));
+        // The bridge was given its main public and private accounts.
+        as_caller(app("lez_bridge"));
+        let first = parsed(&names.request_access_with("to claim deposits".into(), hint(&public)));
+        let id = first["value"]["request"].as_str().unwrap_or_else(|| panic!("{first}")).to_owned();
+        assert_eq!(approve(&mut names, &id, &format!("{public},{private}"))["value"]["state"], "approved");
+        // A hint it already sees: approved, no request.
+        as_caller(app("lez_bridge"));
+        let same = parsed(&names.request_access_with("to claim deposits".into(), hint(&private)));
+        assert_eq!((same["value"]["state"].as_str(), same["value"]["request"].is_null()), (Some("approved"), true), "{same}");
+        // One the wallet doesn't hold: refused plainly, nothing asked.
+        let stray = parsed(&names.request_access_with("to receive".into(), hint(&format!("Public/{unlisted}"))));
+        assert!(stray["error"].as_str().unwrap_or_default().contains("doesn't hold"), "{stray}");
+        // One it holds and the bridge doesn't see: a request to add it, offering that one only.
+        let more = parsed(&names.request_access_with("to receive".into(), hint(&other)));
+        let add = more["value"]["request"].as_str().unwrap_or_else(|| panic!("{more}")).to_owned();
+        assert_eq!(more["value"]["state"], "pending");
+        let again = parsed(&names.request_access_with("to receive".into(), hint(&other)));
+        assert_eq!(again["value"]["request"], add.as_str(), "the waiting one is answered, not a second");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let shown = parsed(&names.pending_requests())["value"].as_array().unwrap().iter().find(|v| v["id"] == add.as_str()).cloned().unwrap();
+        assert_eq!(shown["adding"], true, "{shown}");
+        assert_eq!(shown["account_hint"], other.as_str());
+        let offered: Vec<&str> = shown["choices"].as_array().unwrap().iter().filter_map(|c| c["account"].as_str()).collect();
+        assert_eq!(offered, vec![other.as_str()], "{shown}");
+        assert_eq!(shown["granted"], json!([public, private]));
+        // Only that account can be approved; then it is added and the others stay.
+        assert!(approve(&mut names, &add, &public)["error"].as_str().unwrap_or_default().contains("only asks for"));
+        let approved = approve(&mut names, &add, &other);
+        assert_eq!(approved["value"]["state"], "approved", "{approved}");
+        assert_eq!(approved["value"]["accounts"], json!([public, private, other]));
+        assert_eq!(names.store().granted("lez_bridge"), vec![public.clone(), private.clone(), other.clone()]);
+        // Not now: the grant is as it was, and the app is told in words it can show.
+        connect(&mut names, "tips_ui", &public);
+        as_caller(app("tips_ui"));
+        let ask = parsed(&names.request_access_with("to receive".into(), hint(&other)));
+        let refused_id = ask["value"]["request"].as_str().unwrap_or_else(|| panic!("{ask}")).to_owned();
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        parsed(&names.reject_request(refused_id.clone()));
+        as_caller(app("tips_ui"));
+        let told = parsed(&names.request_status(refused_id))["value"].clone();
+        assert_eq!(told["state"], "rejected", "{told}");
+        assert!(told["error"].as_str().unwrap_or_default().contains("wasn't added"), "{told}");
+        assert_eq!(names.store().granted("tips_ui"), vec![public.clone()]);
+        assert_eq!(names.store().granted("lez_bridge").len(), 3);
+        // A stored request is checked again at approval: the account must still be in the wallet...
+        let ask = parsed(&names.request_access_with("to receive".into(), hint(&other)));
+        let later = ask["value"]["request"].as_str().unwrap_or_else(|| panic!("{ask}")).to_owned();
+        let script = std::path::PathBuf::from(names.cli.clone().unwrap());
+        let body = std::fs::read_to_string(&script).unwrap().replace(&format!(",\"{OTHER}\""), "");
+        std::fs::write(&script, body).unwrap();
+        let gone = approve(&mut names, &later, &other);
+        assert!(gone["error"].as_str().unwrap_or_default().contains("isn't one of the accounts"), "{gone}");
+        assert_eq!(names.store().granted("tips_ui"), vec![public.clone()]);
+        // ...and the app must still have the access it is added to.
+        let script_body = std::fs::read_to_string(&script).unwrap().replace(&format!("\"{PUBLIC}\""), &format!("\"{PUBLIC}\",\"{OTHER}\""));
+        std::fs::write(&script, script_body).unwrap();
+        assert_eq!(parsed(&names.revoke_app("tips_ui".into()))["value"]["revoked"], true);
+        let taken = approve(&mut names, &later, &other);
+        assert!(taken["error"].as_str().unwrap_or_default().contains("taken back"), "{taken}");
+        assert_eq!(names.store().get(&later).unwrap()["state"], "rejected");
+        assert!(names.store().granted("tips_ui").is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 

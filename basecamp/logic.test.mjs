@@ -551,9 +551,9 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   const { BUNDLED_BRIDGE, installedPackages, installedEntry, bundledPath, bridgeSetup, bridgeDiffers, installReply, intentAnswer, publisherWaitLine } = await import("./qml/logic.mjs");
   const me = { name: "names_ui", version: "0.17.0", installDir: "/Users/you/Library/Application Support/Logos/LogosBasecamp/plugins/names_ui" };
   const oldMod = { name: "lez_bridge", version: "0.1.0", hashes: { root: "a2c6c3117443a92f2a5b2a1a2267175f4f82ed209a3dae8e554461bd09df0d18" } };
-  const oldUi = { name: "lez_bridge_ui", version: "0.1.0", hashes: { root: "788f2f0dde4bd7ae" } };
+  const oldUi = { name: "lez_bridge_app_unused", version: "0.1.0" };
   const newMod = { name: "lez_bridge", version: "0.1.0", hashes: { root: BUNDLED_BRIDGE[0].root } };
-  const newUi = { name: "lez_bridge_ui", version: "0.1.0", hashes: { root: BUNDLED_BRIDGE[1].root } };
+  const newUi = { name: "lez_bridge_app_unused", version: "0.1.0" };
   const list = [{ name: "package_manager" }, me];
   check("installedPackages: the list, as text, twice, in {success, value}",
     [installedPackages(list), installedPackages(JSON.stringify(list)), installedPackages(JSON.stringify(JSON.stringify(list))), installedPackages({ success: true, value: list })].map((l) => l && l.length),
@@ -565,7 +565,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("bundledPath unknown folder", [bundledPath([{ name: "names_ui" }], "x.lgx"), bundledPath([{ name: "names_ui", installDir: "rel/dir" }], "x.lgx")], ["", ""]);
   check("bridgeSetup: list unread → unknown (manual line), unless the module answers",
     [bridgeSetup({ list: null }), bridgeSetup({ list: null, answers: false }), bridgeSetup({ list: null, answers: true })], ["unknown", "unknown", "ready"]);
-  check("bridgeSetup: a package missing → absent", [bridgeSetup({ list }), bridgeSetup({ list: list.concat([newMod]) }), bridgeSetup({ list: list.concat([newUi]), answers: true })], ["absent", "absent", "absent"]);
+  check("bridgeSetup: the module missing → absent (the bridge app doesn't count)", [bridgeSetup({ list }), bridgeSetup({ list: list.concat([newMod]) }), bridgeSetup({ list: list.concat([newUi]), answers: true })], ["absent", "unknown", "absent"]);
   check("bridgeSetup: installed, not answering → idle; not asked yet → unknown",
     [bridgeSetup({ list: list.concat([newMod, newUi]), answers: false }), bridgeSetup({ list: list.concat([newMod, newUi]) })], ["idle", "unknown"]);
   check("bridgeSetup: running", bridgeSetup({ list: list.concat([newMod, newUi]), answers: true, checkWith: true }), "ready");
@@ -575,6 +575,8 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
      bridgeSetup({ list: list.concat([newMod, newUi]), answers: true, features: [] }),
      bridgeSetup({ list: list.concat([oldMod, oldUi]), answers: true, checkWith: false })],
     ["older", "ready", "ready", "older"]);
+  check("bridgeSetup: the module alone is enough (no bridge app)", bridgeSetup({ list: list.concat([newMod]), answers: true, features: ["receives"] }), "ready");
+  check("stale token: its own kind", [replyKind("ModuleProxy: rejecting unauthorized call - auth token not recognized").kind, bridgeReply("auth token not recognized").kind], ["stale", "stale"]);
   check("bridgeDiffers", [bridgeDiffers(list.concat([oldMod, newUi])), bridgeDiffers(list.concat([newMod, newUi])), bridgeDiffers(list)], [true, false, false]);
   check("installReply: success has a path and no error",
     installReply(JSON.stringify({ name: "lez_bridge", path: "/x/modules/lez_bridge", isCoreModule: true, signatureStatus: "unsigned" })),
@@ -633,6 +635,47 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     ["Not deposited yet", "On Ethereum: final in up to about 6 min", "Final: waiting for the bridge to record it (about a minute)", "Arrived", "Claimed in block 812"]);
   check("receiveSteps", receiveSteps({ stage: "code", extras: ["public_account", "secret"] }).map((x) => x.n + "/" + x.total + " " + x.state + " " + x.title),
     ["1/5 done Choose the amount and account", "2/5 done Give the bridge this account", "3/5 done Allow the bridge's deposit keys", "4/5 now Deposit on the page", "5/5 later Claim when it arrives"]);
+}
+
+{
+  // One state machine for every entry point: the claim screen, Receive and the LEZ 0.4 card call
+  // bridgeSetupState with the same facts, so each shows the same line and button.
+  const { bridgeSetupState, BUNDLED_BRIDGE } = await import("./qml/logic.mjs");
+  const me = { name: "names_ui", installDir: "/x/plugins/names_ui" };
+  const oldMod = { name: "lez_bridge", hashes: { root: "a2c6c311" } };
+  const newMod = { name: "lez_bridge", hashes: { root: BUNDLED_BRIDGE[0].root } };
+  const FEAT = ["receive", "public_receive", "receive_status", "receives"];
+  const cases = [
+    ["not installed", { list: [me], bundle: "ok" }, "install", "Install"],
+    ["not installed, bundle bad", { list: [me], bundle: "bad" }, "manual", ""],
+    ["installing", { list: [me], bundle: "ok", install: { phase: "installing", line: "Installing the LEZ Bridge module…" } }, "busy", ""],
+    ["installed while Names open", { list: [me, newMod], bundle: "ok", install: { phase: "reopen" } }, "reopen", ""],
+    ["installed, not running", { list: [me, newMod], bundle: "ok", answers: false }, "reopen", ""],
+    ["installed, stuck", { list: [me, newMod], bundle: "ok", answers: false, stuck: true }, "stuck", "Open Settings"],
+    ["older running", { list: [me, oldMod], bundle: "ok", answers: true, features: [] }, "update", "Update"],
+    ["update installed, last step", { list: [me, newMod], bundle: "ok", answers: true, features: [], install: { phase: "unload" } }, "unload", "Open Settings"],
+    ["new files, old module running", { list: [me, newMod], bundle: "ok", answers: true, features: [] }, "unload", "Open Settings"],
+    ["ready", { list: [me, newMod], bundle: "ok", answers: true, features: FEAT }, "", ""],
+    ["stale token", { list: [me, newMod], bundle: "ok", answers: false, stale: true, stuck: true }, "stale", ""],
+    ["just updated, after reopen", { list: [me, newMod], bundle: "ok", answers: true, features: FEAT, done: "LEZ Bridge updated." }, "done", ""],
+    ["unread list", { list: null, bundle: "ok" }, "", ""],
+  ];
+  for (const entry of ["claim", "receive", "card"]) {
+    for (const [label, facts, state, button] of cases) {
+      const got = bridgeSetupState(facts);
+      check(`setup on ${entry}: ${label}`, [got.state, got.button], [state, button]);
+    }
+  }
+}
+
+{
+  // A `needs` with no request id has no sheet to wait for: its words, with Try again.
+  const { needsWithoutRequest } = await import("./qml/logic.mjs");
+  check("needs with a request", needsWithoutRequest({ needs: "public_account", request: { request: "r1", state: "pending" } }), "");
+  check("needs, no request, module words", needsWithoutRequest({ needs: "public_account", request: null, message: "Names refused: no wallet" }), "Names refused: no wallet");
+  check("needs, request without id", needsWithoutRequest({ needs: "connect", request: { error: "the Names wallet doesn't hold Public/x" } }), "the Names wallet doesn't hold Public/x");
+  check("needs, nothing said", needsWithoutRequest({ needs: "secret" }), "The LEZ Bridge needs an answer from this wallet but didn't ask for one.");
+  check("not a needs", needsWithoutRequest({ deposit: {} }), "");
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");

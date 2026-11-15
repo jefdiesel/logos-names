@@ -13,6 +13,14 @@
       "version": ">=0.17.0"
     }
   ],
+  "optional_dependencies": [
+    "lez_bridge"
+  ],
+  "dependency_overrides": {
+    "lez_bridge": {
+      "file": "lidl/lez_bridge.lidl"
+    }
+  },
   "provides": [
     {
       "intent": "names.open",

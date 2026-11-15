@@ -873,6 +873,10 @@ export function replyKind(reply) {
     if (parsed && typeof parsed === "object" && parsed.success !== undefined)
         return parsed.success ? { kind: "ok", value: parsed.value, error: "" } : { kind: "error", value: null, error: String(parsed.error) }
     var said = text !== "" ? text : JSON.stringify(parsed)
+    // After a module was unloaded or reinstalled, this open window's token is no longer
+    // recognised: every call is refused until Names is opened again.
+    if (/auth token|unauthori[sz]ed/i.test(said))
+        return { kind: "stale", value: null, error: said }
     // The host's own words for a module that isn't there (LogosQmlBridge: "Module not connected",
     // "Module not reachable", "Module not reachable yet"); "timeout" and no answer are busy.
     if (/module not connected|module not reachable|no such (module|method)|unknown (module|method)|method not found|module not found|not loaded|is not installed/i.test(said))
@@ -1084,6 +1088,8 @@ export function relayedSheet(sheet) {
 export function bridgeReply(reply) {
     if (reply === undefined || reply === null || String(reply) === "")
         return { ok: false, kind: "busy", error: "The LEZ Bridge module gave no answer yet." }
+    if (/auth token|unauthori[sz]ed/i.test(String(reply)))
+        return { ok: false, kind: "stale", error: "Reopen Names to reconnect to the bridge." }
     var r = reply
     for (var depth = 0; depth < 2 && typeof r === "string"; depth++) {
         try { r = JSON.parse(r) } catch (e) { return { ok: false, kind: "error", error: "The LEZ Bridge module answered something that isn't JSON." } }
@@ -1091,6 +1097,8 @@ export function bridgeReply(reply) {
     if (r && typeof r === "object" && "success" in r)
         return r.success ? { ok: true, value: r.value } : { ok: false, kind: "error", error: String(r.error || "The LEZ Bridge module did not say why.") }
     var said = r && typeof r === "object" ? String(r.error || "") : String(r)
+    if (/auth token|unauthori[sz]ed/i.test(said))
+        return { ok: false, kind: "stale", error: "Reopen Names to reconnect to the bridge." }
     if (/timeout/i.test(said))
         return { ok: false, kind: "busy", error: "The LEZ Bridge module is still answering an earlier call." }
     if (/method not found|unknown_method|no such (module|method)|module not found|not installed/i.test(said))
@@ -1242,11 +1250,8 @@ export function otherDeployment(name) {
 /// module first: the app depends on it.
 export const BUNDLED_BRIDGE = [
     { name: "lez_bridge", file: "lez_bridge.lgx", label: "LEZ Bridge module",
-      sha256: "5f8377e4989d85ba36b4ff4bc5bf807d482eafe0f0da6eb3f65f68f2b288faa6",
-      root: "02bfbd506d56bdab49be45c28583973a3e6d1c02019f61a3f09dd6fbe6992461" },
-    { name: "lez_bridge_ui", file: "lez_bridge_ui.lgx", label: "LEZ Bridge app",
-      sha256: "0d7e317c1fbef3e9c9d4155c10746256af8e9ed2b5a8156413823fbc568ea270",
-      root: "ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9" }
+      sha256: "a0cf4c6e0dfe4b8a4dc4cac95a7326f17df5832a63f6bb5739882024cea2c606",
+      root: "2113fa9dcbc6780897df9ff027b83808944731fd9e84060cb4d928ddaa861797" }
 ]
 
 /// package_manager.getInstalledPackages' list, out of whatever the host wrapped it in (JSON text,
@@ -1295,8 +1300,8 @@ export function bridgeSetup(s) {
     var st = s || {}
     if (!Array.isArray(st.list))
         return st.answers === true ? "ready" : "unknown"
-    var mod = installedEntry(st.list, "lez_bridge"), ui = installedEntry(st.list, "lez_bridge_ui")
-    if (!mod || !ui)
+    // Only the module: Names starts it as its own optional dependency (no bridge app).
+    if (!installedEntry(st.list, "lez_bridge"))
         return "absent"
     if (st.answers !== true)
         return st.answers === false ? "idle" : "unknown"
@@ -1378,6 +1383,18 @@ export function claimExtras(grants, account, app) {
 }
 
 /// A `needs` the module answered, as a step key.
+/// A `needs` reply with no wallet request to follow (no request id, so no sheet comes): the
+/// module's own words for one line with Try again; "" when there is a request.
+export function needsWithoutRequest(value) {
+    if (!value || typeof value !== "object" || !value.needs)
+        return ""
+    var request = value.request && typeof value.request === "object" ? value.request : null
+    if (request !== null && String(request.request || "") !== "")
+        return ""
+    var said = String(value.message || value.error || (request !== null ? request.error || "" : "") || "")
+    return said !== "" ? said : "The LEZ Bridge needs an answer from this wallet but didn't ask for one."
+}
+
 export function needsStep(needs) {
     var n = String(needs || "")
     return n === "declare" ? "programs" : n
@@ -1571,4 +1588,42 @@ export function receiveSteps(s) {
     return keys.map(function(k, i) {
         return { key: k, n: i + 1, total: keys.length, title: titles[k] || k, state: i < at ? "done" : i === at ? "now" : "later", line: "" }
     })
+}
+
+// ── The LEZ Bridge setup, one state machine for the claim screen, Receive and the LEZ 0.4 card ──
+
+/// What the bridge needs before Claim or Receive can go on, the same on every entry point:
+/// {state, line, button ("Install" | "Update" | "Open Settings" | ""), action}. `s`: {list
+/// (installedPackages, null unread), bundle ("ok"/"bad"/""), answers (the module answered config:
+/// true/false/null), stuck (it is installed and timed out twice), stale (its last reply was to an
+/// old token), features, install (the install/update under way: {phase, line} or null), done (the
+/// line shown once after a setup step finished, or "")}.
+export function bridgeSetupState(s) {
+    var st = s || {}
+    var t = function(state, line, button, action) { return { state: state, line: line, button: button || "", action: action || "" } }
+    var unload = "Settings → Module Inspector → LEZ Bridge → Unload All. Then open Names again."
+    if (st.install) {
+        var p = st.install.phase
+        if (p === "asking" || p === "installing" || p === "slow") return t("busy", st.install.line)
+        if (p === "reopen") return t("reopen", "Close and reopen Names to finish.")
+        if (p === "unload") return t("unload", "Last step: " + unload, "Open Settings", "settings")
+        if (p === "failed") return t("failed", st.install.line, st.bundle === "ok" ? "Install" : "", st.bundle === "ok" ? "install" : "")
+    }
+    if (!Array.isArray(st.list)) return t("", "")
+    var mod = installedEntry(st.list, "lez_bridge")
+    if (!mod)
+        return st.bundle === "ok" ? t("install", "The LEZ Bridge isn't installed. It comes with Names.", "Install", "install")
+            : st.bundle === "bad" ? t("manual", "Install the LEZ Bridge package: Package Manager (the cube icon) → Install Local Package") : t("", "")
+    // A reply to an old token (the bridge was reloaded under Names): only a reopen reconnects.
+    if (st.answers === false && st.stale)
+        return t("stale", "Reopen Names to reconnect to the bridge.")
+    if (st.answers === false)
+        return st.stuck ? t("stuck", "The LEZ Bridge doesn't answer. " + unload, "Open Settings", "settings")
+            : t("reopen", "The LEZ Bridge isn't running. Close and reopen Names to start it.")
+    if (st.answers !== true) return t("", "")
+    var receives = bridgeCan(st.features, "receives")
+    if (!receives && st.bundle === "ok" && bridgeDiffers(st.list)) return t("update", "LEZ Bridge update ready.", "Update", "update")
+    if (!receives && st.bundle === "ok" && !bridgeDiffers(st.list)) return t("unload", "The new LEZ Bridge is installed; Basecamp still runs the old one. " + unload, "Open Settings", "settings")
+    // Once, where the person lands after a setup step finished: "LEZ Bridge updated." (`done`).
+    return st.done ? t("done", String(st.done)) : t("", "")
 }
