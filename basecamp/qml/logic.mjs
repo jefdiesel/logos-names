@@ -1306,7 +1306,7 @@ export function claimInput(text) {
 
 /// The bridge module's built-in deployments, newest first: v4 (the vault that releases by proof,
 /// the bundled bridge's default since 0343cb0), v3, v2.
-export const BRIDGE_DEPLOYMENTS = ["bridge-test-network-v4", "bridge-test-network-v3", "bridge-test-network"]
+export const BRIDGE_DEPLOYMENTS = ["bridge-test-network-v5", "bridge-test-network-v4", "bridge-test-network-v3", "bridge-test-network"]
 /// The deployment Receive makes new codes on: the bundled bridge's default (v4).
 export const RECEIVE_DEPLOYMENT = BRIDGE_DEPLOYMENTS[0]
 /// The next built-in deployment to try after `other_vault` (the file is for another vault): the
@@ -1380,12 +1380,11 @@ export function receiveCodeRefused(message) {
 /// module first: the app depends on it.
 export const BUNDLED_BRIDGE = [
     { name: "lez_bridge", file: "lez_bridge.lgx", label: "LEZ Bridge module",
-      sha256: "fd30279b4093acd98a0f141067de9c4aaa24aa9e22cb5aa3ecb0ce48078f99c5",
-      root: "307e71a17e7d848329595ea337a479d3ff2ed81acc95b58764e567133664fbde",
+      sha256: "66f729866c2653815018356c6d89f872e45cbcda5c238b21bf2299173b688254",
+      root: "9b819e1fcc241fab7da36a55222d45c82a360fcf7589875b188c2b37976b972d",
       // The commit the shipped bridge says it was built from (its config().build.commit): rfp-022
-      // 33fde5c (send-back on the public endpoint: LEZ reads back off on 429; send_back_*, the
-      // installed release prover; everything in 0acf483).
-      build: "33fde5c" }
+      // ce40730 (v5, no release delay, the default deployment; everything in 33fde5c).
+      build: "ce40730" }
 ]
 
 /// The LEZ 0.4 names tool this app ships in qml/bundled/ (built without in-process proving, so

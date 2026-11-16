@@ -478,8 +478,8 @@ afterwards.
      A bridge's token program may be the root of exactly one shape: `BurnWithNotice` (variant
      10, 145 bytes: definition, amount u128 LE, notify account and program, a 32-byte memo E)
      of one denomination of a token registered in the Config of a bridge whose vault releases by
-     proof (built in: bridge v4 `BKXe3q5J…JBf` only; v2 and v3 share its token program and are
-     refused), notified to that bridge's Config PDA, declaring exactly
+     proof (built in: bridge v4 `BKXe3q5J…JBf` and v5 `CuV1ctZ2…DMA`; v2 and v3 share their token
+     program and are refused), notified to that bridge's Config PDA, declaring exactly
      `[{account: <definition>, program: <token program>}, {seed: <Config seed>, of: <bridge>,
      program: <bridge>}]` (not `new`), with privacy `bridge_public_burn`, burns not frozen. The
      wallet reads that Config at proposal, sheet, approval and re-sign (failing closed); its own

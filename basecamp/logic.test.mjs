@@ -190,9 +190,9 @@ check("cli status same network", mergeCliStatus(onNet({ wallet: true, public: "P
   // Which bridge, and whether this wallet reads it.
   check("bridge v3 read", claimBridge(V3, [V2, V3], labels), { label: "bridge v3", problem: "" });
   check("bridge not read", claimBridge(V2, [V3], labels).problem.startsWith("This claim file is for bridge v2"), true);
-  check("other deployment, newest first", [otherDeployment("bridge-test-network-v3"), otherDeployment("bridge-test-network"), otherDeployment("bridge-test-network-v4")],
-    ["bridge-test-network-v4", "bridge-test-network-v4", "bridge-test-network-v3"]);
-  check("other deployment: the ones tried are skipped", [otherDeployment("bridge-test-network-v3", ["bridge-test-network-v4"]), otherDeployment("bridge-test-network", ["bridge-test-network-v4", "bridge-test-network-v3"])],
+  check("other deployment, newest first", [otherDeployment("bridge-test-network-v3"), otherDeployment("bridge-test-network"), otherDeployment("bridge-test-network-v5"), otherDeployment("bridge-test-network-v4")],
+    ["bridge-test-network-v5", "bridge-test-network-v5", "bridge-test-network-v4", "bridge-test-network-v5"]);
+  check("other deployment: the ones tried are skipped", [otherDeployment("bridge-test-network-v3", ["bridge-test-network-v5", "bridge-test-network-v4"]), otherDeployment("bridge-test-network", ["bridge-test-network-v5", "bridge-test-network-v4", "bridge-test-network-v3"])],
     ["bridge-test-network", ""]);
   // A claim already running or done for this file is found, never started twice.
   const jobs = [{ id: "j2", state: "done", account: "Public/A", leaf_index: 7 }, { id: "j1", state: "running", check: "rc-0" }];
@@ -801,7 +801,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   const { BRIDGE_V5_PROGRAM } = await import("./qml/logic.mjs");
   check("nothing to add", [bridgesToAdd([V2, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM]), bridgesToAdd([]), bridgesToAdd(null), bridgesToAdd(["a", "b", "c", "d"])], [null, null, null, null]);
   check("v5 added; v2 makes room when full", [bridgesToAdd([V2, V3, BRIDGE_V4_PROGRAM]), bridgesToAdd([V2, V3, BRIDGE_V4_PROGRAM, "d"])], [[V2, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM], [BRIDGE_V5_PROGRAM, V3, BRIDGE_V4_PROGRAM, "d"]]);
-  check("Receive's deployment is v4", RECEIVE_DEPLOYMENT, "bridge-test-network-v4");
+  check("Receive's deployment is v5", RECEIVE_DEPLOYMENT, "bridge-test-network-v5");
   const now = { build: { commit: BUNDLED_BRIDGE[0].build }, deployment: { name: "bridge-test-network-v4", bridge_program: BRIDGE_V4_PROGRAM } };
   check("no hold with the shipped bridge read", receiveHoldLine(now, [V2, V3, BRIDGE_V4_PROGRAM]), "");
   check("hold with an older bridge", receiveHoldLine({ build: { commit: "5cad169x" }, deployment: now.deployment }, [V2, V3]).startsWith("New codes come from the new LEZ Bridge"), true);
@@ -826,7 +826,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   const shown = receiveRowsShown([{ id: "a", symbol: "ETH", amount: "0.1", account: "A", deployment: v3 }], { a: { stage: "deposited", final_in_min: 5 } }, {}, 0, true).rows[0];
   check("card row says the older vault", shown.where, "bridge v3");
   check("steps: lost sits on Deposit, noclaim on Claim", [receiveSteps({ stage: "lost" }).find((x) => x.state === "now").key, receiveSteps({ stage: "noclaim" }).find((x) => x.state === "now").key], ["deposit", "claim"]);
-  check("older-vault code", [codeOlderVault({ deployment: "bridge-test-network-v3" }), codeOlderVault({ deployment: "bridge-test-network-v4" }), codeOlderVault({}), codeOlderVault(null), codeOlderVault({ deployment: v3 })], [true, false, false, false, true]);
+  check("older-vault code", [codeOlderVault({ deployment: "bridge-test-network-v3" }), codeOlderVault({ deployment: "bridge-test-network-v5" }), codeOlderVault({}), codeOlderVault(null), codeOlderVault({ deployment: v3 }), codeOlderVault({ deployment: "bridge-test-network-v4" })], [true, false, false, false, true, true]);
   check("relay_other_bridge title", claimErrorTitle("relay_other_bridge"), "The relay no longer pays claims on this vault");
   check("receivesFrom keeps the deployment", receivesFrom({ receives: [{ id: "a", deployment: v3 }] })[0].deployment.label, "bridge v3");
 }

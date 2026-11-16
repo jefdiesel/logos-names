@@ -417,7 +417,7 @@ Item {
         var first = text.split(" ")[0]
         if (!/\.lez\b/i.test(first) && !isKnownName(first))
             text = text.charAt(0).toUpperCase() + text.substr(1)
-        return /[.?!]$/.test(text) ? text : text + "."
+        return /[.?!…]$/.test(text) ? text : text + "."
     }
 
     /// Whether `word` is a name on screen or in My names, so a sentence
@@ -4665,6 +4665,9 @@ Item {
         pending = null
         loadWallet(false)
         read(job.name)
+        // A registration's end is said on the page (its Register panel is gone by then).
+        if (job.kind === "register")
+            noticeAt = ""
         if (settled)
             say(typeof job.done === "function" ? job.done(job.result) : job.done, false)
         else
@@ -4699,7 +4702,8 @@ Item {
             askLater("app_note", ["publish:" + name, publishOnRegister ? "yes" : "no"], function() {}, function() {}, 10000)
         askLater("register_name", [name, owner, namesNet === "0.4" ? "" : "auto"], function(value) {
             pending = null
-            say("Committed. The reveal goes out by itself in about 15 minutes while Names is open.", "waiting")
+            // The Register panel goes away with the name chosen: said on the page.
+            say("Committed. The reveal goes out by itself in about 15 minutes while Names is open.", "waiting", "")
             missing = ""
             loadMine()
         }, function(message) {

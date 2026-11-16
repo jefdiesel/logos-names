@@ -1077,6 +1077,34 @@ pub(crate) mod tests {
         assert_eq!((checked.amount_text.as_str(), checked.symbol.as_str(), checked.exit.as_str()), ("0.01", "wETH", expected["exit_commitment"].as_str().unwrap()));
     }
 
+    /// v5 (no release delay, read live 2026-11-15): its wETH burn passes against its own Config;
+    /// a v5 burn told to v4's Config, or v4's wETH told to v5, is refused (same token program).
+    #[test]
+    fn a_burn_to_v5_passes_and_v4_v5_are_told_apart() {
+        const V5: &str = "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA";
+        const V5_WETH: &str = "Dx5tbzn54vKJiMYmjuYV3uuhi4eNwqnzZys7EqT3gj9z";
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/bridge-net/config-v5.json");
+        let reply: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let v5 = crate::bridge_net::decode_bridge_config(&crate::bridge_net::config_bytes_in(&reply["result"], &id(V5)).unwrap()).unwrap();
+        assert_eq!(registry::account_text(&v5.token_program), V4_TOKENS, "v5 shares the token program");
+        let call = |definition: &str, bridge: &str| {
+            json!({
+                "program": V4_TOKENS, "message": registry::hex(&burn_message(definition, CENT, bridge)), "privacy": BURN_PRIVACY,
+                "accounts": [{ "account": definition, "program": V4_TOKENS }, { "seed": crate::bridge_net::config_seed_hex(), "of": bridge, "program": bridge }],
+                "fee": { "payer": PAYER, "gas_limit": 250000, "tip": "0", "max_fee": "2500000" }
+            })
+            .to_string()
+        };
+        let declared = vec![V4_TOKENS.to_owned(), V4.to_owned(), V5.to_owned()];
+        let request = relayed_call_request("lez_bridge", ACCOUNT, &call(V5_WETH, V5), "", &declared, &own(), &[], 1).unwrap();
+        let burn = burn_check(&request, &id(V5), &v5).unwrap();
+        assert_eq!((burn.amount_text.as_str(), burn.symbol.as_str(), burn.bridge_label.as_str()), ("0.01", "wETH", "bridge v5"));
+        // Checked against the other bridge's Config: refused.
+        assert!(burn_check(&request, &id(V4), &v4_config()).is_err());
+        let v4_weth_to_v5 = relayed_call_request("lez_bridge", ACCOUNT, &call(V4_WETH, V5), "", &declared, &own(), &[], 1).unwrap();
+        assert!(burn_check(&v4_weth_to_v5, &id(V5), &v5).unwrap_err().contains("isn't a token of bridge v5"));
+    }
+
     #[test]
     fn amounts_read_as_a_person_reads_them() {
         assert_eq!(units_text(CENT, 18), "0.01");

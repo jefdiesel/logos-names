@@ -10,3 +10,8 @@ never seen (`null`). How to read them: public-demo/WALLET-READ.md in the bridge 
 one read-only `getAccount` (python urllib). Its token program is v3's (`5w6nTkft…ArbU7`); wrapped ETH
 `9tcLmjKixcGZJMnXS381Dhuzd8u9jPvQYF21F3vDhGE2` (denominations 0.01, 0.1, 1 ETH) and dUSDC
 `92PJXZ2E3QPupUFuhc5f4rgsRiAZKv62TpSYfZEgLeru`; burns not frozen. The send-back burn checks read it.
+
+`config-v5.json`: `getAccount` of the v5 bridge's Config PDA `FBWWSLgMgEtMs7PUNBfTGXccZdRSAeRHtMRP4nyZsrnW`
+(bridge `CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA`, vault `0xAFbDF192…eD10`, no release delay), read
+2026-11-15 evening the same way. Token program v3's and v4's (`5w6nTkft…ArbU7`); wrapped ETH
+`Dx5tbzn54vKJiMYmjuYV3uuhi4eNwqnzZys7EqT3gj9z` (0.01, 0.1, 1 ETH), dUSDC `8ctGbFACndG9C6AjzN34gBpi6kRcDhv9guA2sxBsXomT`.
