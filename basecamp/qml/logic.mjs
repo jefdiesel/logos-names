@@ -1318,13 +1318,25 @@ export function otherDeployment(name, tried) {
 
 /// The v4 bridge program on LEZ 0.4 (rfp-022 deployments.json, bridge-test-network-v4).
 export const BRIDGE_V4_PROGRAM = "BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf"
-/// The bridges the wallet must read for the bundled bridge's claims, from get_config's
-/// `bridge_programs`: the list with v4 added when a saved list lacks it (room for 4), else null
-/// (nothing to change). Built in here, never taken from the bridge's own answer.
+/// The v5 bridge (no release delay; deployed 2026-11-15 evening), the default from then on.
+export const BRIDGE_V5_PROGRAM = "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA"
+/// The bridges whose vault releases by proof: the ones a token can be bridged back from.
+export const BURN_BRIDGE_PROGRAMS = [BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM]
+var BRIDGE_V2_PROGRAM = "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7"
+/// The bridges the wallet must read for the bundled bridge's claims and burns, from get_config's
+/// `bridge_programs`: the list with v5 and v4 added when a saved list lacks them (at most 4: v2,
+/// whose vault is retired, makes room first), else null (nothing to change). Built in here, never
+/// taken from the bridge's own answer.
 export function bridgesToAdd(programs) {
-    if (!Array.isArray(programs) || programs.length === 0 || programs.indexOf(BRIDGE_V4_PROGRAM) >= 0 || programs.length >= 4)
+    if (!Array.isArray(programs) || programs.length === 0)
         return null
-    return programs.concat([BRIDGE_V4_PROGRAM])
+    var out = programs.slice()
+    ;[BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM].forEach(function(p) {
+        if (out.indexOf(p) >= 0) return
+        if (out.length < 4) out.push(p)
+        else if (out.indexOf(BRIDGE_V2_PROGRAM) >= 0) out[out.indexOf(BRIDGE_V2_PROGRAM)] = p
+    })
+    return out.join(",") === programs.join(",") ? null : out
 }
 
 /// Why Receive can't make a new code yet with the running bridge, or "". `config`: its config();
@@ -2102,7 +2114,7 @@ export const SEND_BACK_FALLBACK = {
 /// that releases by proof), at least its smallest denomination held. Never offered otherwise, so
 /// no button is dead.
 export function sendBackOffer(asset) {
-    if (!asset || asset.bridge !== BRIDGE_V4_PROGRAM) return false
+    if (!asset || BURN_BRIDGE_PROGRAMS.indexOf(asset.bridge) < 0) return false
     var known = SEND_BACK_FALLBACK[asset.symbol]
     return !!known && atLeast(String(asset.base || "0"), known.denoms[0])
 }
@@ -2176,7 +2188,7 @@ export function sendBackProgress(status, nowSeconds, clock) {
     var r = function(stage, card, headline, detail, tone, action) { return { stage: stage, card: card, headline: headline, detail: detail || "", tone: tone, action: action || "" } }
     var when = s.releasable_at ? Number(s.releasable_at) : 0
     var later = when > 0 && Number(nowSeconds) < when
-    var until = later ? "Releasable at " + at(when) + " at the earliest (the vault's one-hour delay)." : ""
+    var until = later ? "Releasable at " + at(when) + " at the earliest (the vault's delay)." : ""
     switch (s.stage) {
     case "planned": return r("planned", "Ready to send back · approve the burn", "Ready: approve the burn.", "", "ready", "burn")
     case "approve":
@@ -2195,7 +2207,7 @@ export function sendBackProgress(status, nowSeconds, clock) {
         "Paste its seal here when it comes.", "wait", "seal")
     case "wrapped":
         return r("wrapped", later ? "Releasable at " + at(when) : "Releasable any minute now",
-            later ? "Releasable at " + at(when) + "." : "Releasable any minute now.", "The vault waits one hour after Ethereum records it.", "wait")
+            later ? "Releasable at " + at(when) + "." : "Releasable any minute now.", "The vault releases it only after its delay from when Ethereum recorded it.", "wait")
     case "releasable": return r("releasable", "Ready to collect on Ethereum", "Ready: collect it on the bridge page.", "", "ready", "release")
     case "released": return r("released", "Received on Ethereum", "Received on Ethereum.", "", "done")
     }

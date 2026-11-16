@@ -797,8 +797,10 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
 {
   const { bridgesToAdd, BRIDGE_V4_PROGRAM, receiveHoldLine, receiveCodeRefused, RECEIVE_DEPLOYMENT, BUNDLED_BRIDGE } = await import("./qml/logic.mjs");
   const V2 = "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", V3 = "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr";
-  check("v4 added to a saved list without it", bridgesToAdd([V2, V3]), [V2, V3, BRIDGE_V4_PROGRAM]);
-  check("nothing to add", [bridgesToAdd([V2, V3, BRIDGE_V4_PROGRAM]), bridgesToAdd([]), bridgesToAdd(null), bridgesToAdd(["a", "b", "c", "d"])], [null, null, null, null]);
+  check("v4 and v5 added to a saved list without them", bridgesToAdd([V2, V3]), [V2, V3, BRIDGE_V4_PROGRAM, "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA"]);
+  const { BRIDGE_V5_PROGRAM } = await import("./qml/logic.mjs");
+  check("nothing to add", [bridgesToAdd([V2, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM]), bridgesToAdd([]), bridgesToAdd(null), bridgesToAdd(["a", "b", "c", "d"])], [null, null, null, null]);
+  check("v5 added; v2 makes room when full", [bridgesToAdd([V2, V3, BRIDGE_V4_PROGRAM]), bridgesToAdd([V2, V3, BRIDGE_V4_PROGRAM, "d"])], [[V2, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM], [BRIDGE_V5_PROGRAM, V3, BRIDGE_V4_PROGRAM, "d"]]);
   check("Receive's deployment is v4", RECEIVE_DEPLOYMENT, "bridge-test-network-v4");
   const now = { build: { commit: BUNDLED_BRIDGE[0].build }, deployment: { name: "bridge-test-network-v4", bridge_program: BRIDGE_V4_PROGRAM } };
   check("no hold with the shipped bridge read", receiveHoldLine(now, [V2, V3, BRIDGE_V4_PROGRAM]), "");
@@ -878,6 +880,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   const { sendBackOffer, sendBackAmounts, sendBackSymbol, sendBackCode, sendBackCodeTitle, sendBackProgress, sendBacksFrom, sendBackRowsShown, sendBackSteps, sendBackBurnHeld, clockShown, BRIDGE_V4_PROGRAM, bridgeNetRows } = await import("./qml/logic.mjs");
   const V3 = "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr";
   const weth = (bridge, base) => ({ symbol: "wETH", bridge, base, decimals: 18 });
+  check("offered on v5 too", sendBackOffer(weth("CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA", "10000000000000000")), true);
   check("offered on v4 with a denomination held", [sendBackOffer(weth(BRIDGE_V4_PROGRAM, "10000000000000000")), sendBackOffer(weth(BRIDGE_V4_PROGRAM, "9999999999999999")), sendBackOffer(weth(V3, "100000000000000000")), sendBackOffer(null)], [true, false, false, false]);
   check("dUSDC on v4 from 100", [sendBackOffer({ symbol: "dUSDC", bridge: BRIDGE_V4_PROGRAM, base: "100000000" }), sendBackOffer({ symbol: "LEZ", bridge: BRIDGE_V4_PROGRAM, base: "999" })], [true, false]);
   check("amounts held only", sendBackAmounts(null, weth(BRIDGE_V4_PROGRAM, "150000000000000000")).map((d) => d.text + "@" + d.index), ["0.01@0", "0.1@1"]);
@@ -904,7 +907,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     check("burn unclear: a problem with Check again, never 'look in the Names app'", (() => { const x = sendBackProgress({ stage: "burn_unclear", text: "Included in a block, but the account's balance did not go down: it may have been refused. Look in the Names app." }, 0, at); return [x.tone, x.action, /Names app/.test(x.detail)] })(), ["problem", "check", false]);
   }
   check("wrapped: releasable at the vault's time", [sendBackProgress({ stage: "wrapped", releasable_at: 5000 }, 4000, at).headline, sendBackProgress({ stage: "wrapped", releasable_at: 5000 }, 5000, at).headline], ["Releasable at T5000.", "Releasable any minute now."]);
-  check("recorded: the earliest release under it", sendBackProgress({ stage: "recorded", releasable_at: 5000 }, 1000, at).detail, "Releasable at T5000 at the earliest (the vault's one-hour delay).");
+  check("recorded: the earliest release under it", sendBackProgress({ stage: "recorded", releasable_at: 5000 }, 1000, at).detail, "Releasable at T5000 at the earliest (the vault's delay).");
   check("proof and wrapper times", [sendBackProgress({ stage: "proving" }, 0, at).headline, sendBackProgress({ stage: "proved" }, 0, at).headline], ["Making the release proof on this computer: about 20 s.", "Proof made. Next: its Ethereum wrapper (about 3 min once it is run), then the release."]);
   check("approved, the relay refused: its words, not a wait for approval", [sendBackProgress({ stage: "approve", note: "The bridge's relay refused the burn: cap. Nothing was sent." }, 0, at).headline, sendBackProgress({ stage: "approve", note: "x" }, 0, at).tone], ["Signed; the bridge's relay hasn't sent it yet and tries again at each check.", "wait"]);
   check("the endpoint busy is not a relay refusal", sendBackProgress({ stage: "approve", busy: true, note: "The bridge's endpoint is busy; trying again shortly." }, 0, at).headline, "Waiting for your approval.");

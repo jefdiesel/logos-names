@@ -1455,7 +1455,7 @@ const MODULE_VERSION: &str = "0.17.0";
 const MODULE_FEATURES: [&str; 8] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "bundled_tool", "relayed_bridge_burn", "test_lez_faucet"];
 
 /// What a call that says it is a burn answers when it isn't one to a bridge a burn may go to.
-const NOT_A_BURN_BRIDGE: &str = "the wallet signs a burn only to a bridge whose vault releases by proof (bridge v4), and this call isn't one to its token program";
+const NOT_A_BURN_BRIDGE: &str = "the wallet signs a burn only to a bridge whose vault releases by proof (bridge v4 or v5), and this call isn't one to its token program";
 
 /// What a private-name action answers on LEZ 0.4, where names are public only (S-B).
 const PRIVATE_OFF_04: &str = "on LEZ 0.4 names are public only: private payments and private holders are off there, so nothing was done";

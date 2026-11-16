@@ -979,7 +979,7 @@ Item {
     property string bridgeBundle: ""
     property var bridgeInstall: null       // {phase: "asking"|"installing"|"slow"|"starting"|"failed"|"updated", line}
     readonly property string bridgeSetupNow: Logic.bridgeSetup({ list: installedList, answers: claimBridgeAnswers, checkWith: claimCheckWith, features: bridgeConfig !== null ? bridgeFeatures : null })
-    readonly property var bridgeLabels: [["JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", "bridge v2"], ["4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr", "bridge v3"], [Logic.BRIDGE_V4_PROGRAM, "bridge v4"]]
+    readonly property var bridgeLabels: [["JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", "bridge v2"], ["4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr", "bridge v3"], [Logic.BRIDGE_V4_PROGRAM, "bridge v4"], [Logic.BRIDGE_V5_PROGRAM, "bridge v5"]]
     readonly property string claimAccount: claimCheck !== null && claimCheck.ok && claimCheck.deposit ? String(claimCheck.deposit.account || "") : ""
     readonly property string claimAccountProblemNow: cliAccounts === null ? "" : Logic.claimAccountProblem(claimAccount, cliAccounts)
     readonly property var claimBridgeNow: Logic.claimBridge(claimCheck !== null && claimCheck.call ? claimCheck.call.program : "", bridgePrograms, bridgeLabels)
@@ -10430,7 +10430,7 @@ Item {
                         StatusLine {
                             visible: Logic.codeOlderVault(receiveScreen.result)
                             kind: ""
-                            text: "This code is for an older vault. For the new one (v4), make another code."
+                            text: "This code is for an older vault. For the current one, make another code."
                         }
                         Action { label: root.receiveLinkCopied ? "Copied." : "Copy the link"; strong: true; onPressed: root.copyDepositLink(receiveScreen.result.request_url) }
                         Hint { font.pixelSize: root.px(15); text: "Paste it into your browser." }
@@ -10618,7 +10618,7 @@ Item {
                         RowLayout {
                             visible: root.sbSources.length === 0
                             spacing: 14
-                            StatusLine { Layout.fillWidth: false; kind: root.bridgeNet === null ? "working" : ""; text: root.bridgeNet === null ? "Reading your accounts on the bridge test network…" : "None of your public accounts holds tokens on bridge v4 yet." }
+                            StatusLine { Layout.fillWidth: false; kind: root.bridgeNet === null ? "working" : ""; text: root.bridgeNet === null ? "Reading your accounts on the bridge test network…" : "None of your public accounts holds bridged tokens that can go back to Ethereum yet (bridge v4 or v5)." }
                             Action { visible: root.bridgeNet !== null; label: "Receive from Ethereum"; onPressed: root.openEthReceive() }
                         }
                     }
@@ -10774,7 +10774,7 @@ Item {
                         visible: root.sbDetails && sendBackScreen.shows && !root.appInline
                         Layout.fillWidth: true
                         spacing: 10
-                        Hint { font.pixelSize: root.px(15); text: "The wallet burns the wrapped tokens on the bridge test network; the bridge's relay pays the LEZ fee. Ethereum then records the burn, this computer proves it, and the vault releases the ETH to the address you connected, after its one-hour delay." }
+                        Hint { font.pixelSize: root.px(15); text: "The wallet burns the wrapped tokens on the bridge test network; the bridge's relay pays the LEZ fee. Ethereum then records the burn, this computer proves it, and the vault releases the ETH to the address you connected, after its delay if it has one." }
                         Hint { font.pixelSize: root.px(15); text: "The burn carries an exit commitment, not the address: the address stays hidden until the release. Your wallet makes the exit's secret from your account's key; this app never sees it." }
                         Hint { font.pixelSize: root.px(15); text: "Text copied in Names may not reach another computer through Screen Sharing: open the link in a browser on this computer, or select it below." }
                         TextEdit {

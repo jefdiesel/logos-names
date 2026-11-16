@@ -36,11 +36,14 @@ pub const BRIDGE_V3_PROGRAM: &str = "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCv
 /// The bridge of the vault that releases by proof (v4), deployed 2026-11-15: the bridge module's
 /// default deployment since 0343cb0.
 pub const BRIDGE_V4_PROGRAM: &str = "BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf";
-/// The bridges read when none is set: v2, v3 and v4.
-pub const DEFAULT_BRIDGE_PROGRAMS: [&str; 3] = [DEFAULT_BRIDGE_PROGRAM, BRIDGE_V3_PROGRAM, BRIDGE_V4_PROGRAM];
+/// The bridge of the vault with no release delay (v5), deployed 2026-11-15 evening: the one the
+/// wallet uses by default from then on. Same token program as v3 and v4.
+pub const BRIDGE_V5_PROGRAM: &str = "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA";
+/// The bridges read when none is set: v2, v3, v4 and v5 (MAX_BRIDGES).
+pub const DEFAULT_BRIDGE_PROGRAMS: [&str; 4] = [DEFAULT_BRIDGE_PROGRAM, BRIDGE_V3_PROGRAM, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM];
 /// What each known bridge is called on a balance row, by its program: the names of the
 /// deployments (rfp-022's v2, its fixed v3 and v4). Another bridge shows its short program ID.
-pub const BRIDGE_LABELS: [(&str, &str); 3] = [(DEFAULT_BRIDGE_PROGRAM, "bridge v2"), (BRIDGE_V3_PROGRAM, "bridge v3"), (BRIDGE_V4_PROGRAM, "bridge v4")];
+pub const BRIDGE_LABELS: [(&str, &str); 4] = [(DEFAULT_BRIDGE_PROGRAM, "bridge v2"), (BRIDGE_V3_PROGRAM, "bridge v3"), (BRIDGE_V4_PROGRAM, "bridge v4"), (BRIDGE_V5_PROGRAM, "bridge v5")];
 
 /// The label of the bridge `program` (`BRIDGE_LABELS`), or None.
 pub fn bridge_label(program: &str) -> Option<&'static str> {
@@ -326,7 +329,7 @@ pub fn decode_bridge_config(bytes: &[u8]) -> Result<BridgeConfig, String> {
 /// The bridges a relayed burn may go to: the ones whose vault releases by proof (v4). Built in,
 /// not a setting: v2 and v3 share v4's token program, and a burn to them destroys the tokens for
 /// good (their vaults can never release). Never `set_bridge_programs`.
-pub const BURN_BRIDGES: [&str; 1] = [BRIDGE_V4_PROGRAM];
+pub const BURN_BRIDGES: [&str; 2] = [BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM];
 
 /// The bridge Config's seed, as a relayed call's program account names it (`seed`, hex).
 pub fn config_seed_hex() -> String {
@@ -900,6 +903,10 @@ mod tests {
         assert_eq!(name("def-dusdc-v3.json").as_deref(), Some("Wrapped dUSDC (demo v3)"));
         assert_eq!((bridge_label(DEFAULT_BRIDGE_PROGRAM), bridge_label(BRIDGE_V3_PROGRAM), bridge_label("x")), (Some("bridge v2"), Some("bridge v3"), None));
         assert_eq!(bridge_label(BRIDGE_V4_PROGRAM), Some("bridge v4"));
+        assert_eq!(bridge_label(BRIDGE_V5_PROGRAM), Some("bridge v5"));
+        // v5's Config, as deployed (the conductor's ids, 2026-11-15).
+        assert_eq!(registry::account_text(&config_address(&id(BRIDGE_V5_PROGRAM))), "FBWWSLgMgEtMs7PUNBfTGXccZdRSAeRHtMRP4nyZsrnW");
+        assert!(BURN_BRIDGES.contains(&BRIDGE_V4_PROGRAM) && BURN_BRIDGES.contains(&BRIDGE_V5_PROGRAM) && !BURN_BRIDGES.contains(&BRIDGE_V3_PROGRAM));
         assert!(DEFAULT_BRIDGE_PROGRAMS.len() <= MAX_BRIDGES && DEFAULT_BRIDGE_PROGRAMS.contains(&BRIDGE_V4_PROGRAM));
     }
 
