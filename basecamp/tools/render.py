@@ -963,6 +963,29 @@ MOCKS["settings-bridge-chosen"] = _br_mock(bridge_use={"active": _BR_V4["id"], "
 SCENARIOS["settings-bridge-old"] = 'root.section = "settings"; root.loadBridges()'
 MOCKS["settings-bridge-old"] = {"bridge": {}}
 
+# Bridge to Ethereum by a pasted address: read back in two halves, the four words, the one sentence;
+# and an address used before, offered first.
+_ADDR = "0x68B54942A37aE5ceBA34D47eFB8d33a293d3975d"
+_ADDR_CHECK = {"ok": True, "recipient": _ADDR, "recipient_short": "0x68B5…975d", "recipient_halves": [_ADDR[:22], _ADDR[22:]], "route": "address",
+               "code": SB_CODE, "address_warning": "Withdrawals to a wrong address can't be recovered.", "words": ["lens", "mushroom", "enjoy", "orient"],
+               "words_text": "lens · mushroom · enjoy · orient", "fee_choice": 0, "chain_id": 11155111, "vault": "0xAFbDF192434E9888Bb23DAE6f2D15Eea6246eD10", "warnings": []}
+def _sb_feat(m):
+    m = _copy.deepcopy(m)
+    m["bridge"].setdefault("config", _copy.deepcopy(SB_CONFIG))
+    m["bridge"]["config"]["features"] = list(m["bridge"]["config"].get("features", [])) + ["send_back_address", "send_back_recipients", "bridges"]
+    return m
+SCENARIOS["sendback-address"] = SB_OPEN % ('root.againAfter(200, function() { root.sbDenom = 0; root.sbCodeInput = "%s"; root.sbCheckCode() })' % _ADDR)
+MOCKS["sendback-address"] = _sb_feat(sb_mock(send_back_check=_ADDR_CHECK))
+SCENARIOS["sendback-address-field"] = SB_OPEN % 'root.againAfter(200, function() { root.sbDenom = 0 })'
+MOCKS["sendback-address-field"] = _sb_feat(sb_mock())
+SCENARIOS["sendback-address-lowercase"] = SB_OPEN % ('root.againAfter(200, function() { root.sbDenom = 0; root.sbCodeInput = "%s"; root.sbCheckCode() })' % _ADDR.lower())
+MOCKS["sendback-address-lowercase"] = _sb_feat(sb_mock(send_back_check={"ok": False, "error": {"code": "bad_address:no_checksum", "message": "This address is all in small (or all in capital) letters, so it has no checksum and a typo can't be caught. Copy it from your wallet, don't type it."}}))
+SCENARIOS["sendback-saved"] = SB_OPEN % 'root.againAfter(200, function() { root.sbDenom = 0 })'
+MOCKS["sendback-saved"] = _sb_feat(sb_mock(send_back_recipients={"recipients": [{"account": "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "chain_id": 11155111, "address": _ADDR, "short": "0x68B5…975d", "last_used": 1}], "chain_id": 11155111}))
+SCENARIOS["settings-bridge-saved"] = 'root.section = "settings"; root.loadBridges()'
+MOCKS["settings-bridge-saved"] = _br_mock(send_back_recipients={"recipients": [{"account": "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "chain_id": 11155111, "address": _ADDR, "short": "0x68B5…975d", "last_used": 1}], "chain_id": 11155111})
+_BR_FEATURES += ["send_back_address", "send_back_recipients"]
+
 def main():
     qml, out_dir = sys.argv[1], sys.argv[2]
     wanted = sys.argv[3:] or list(SCENARIOS)

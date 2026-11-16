@@ -2112,6 +2112,11 @@ export const SEND_BACK_ADDRESS_STEPS = [
     "Connect the wallet that should receive. The page shows a code and four words.",
     "Copy that code, paste it below and press Read the code."
 ]
+/// The other way in, said under the field: no page, the address itself (owner, 2026-11-16: a phone's
+/// Ethereum wallet can't hand the page's code back to Names on a Mac).
+export const SEND_BACK_ADDRESS_ROUTE = "Or paste the Ethereum address to receive it. Copy it from your wallet, don't type it."
+/// Once a pasted (or remembered) address is read: no page to compare with, so the address itself.
+export const SEND_BACK_ADDRESS_CONFIRM = "Check both halves are the address your Ethereum wallet shows. If they differ, stop. These four words stay with this withdrawal."
 /// Bridge to Ethereum, once the code is read: what to check, then the one button.
 export const SEND_BACK_CONFIRM_STEPS = [
     "Check the page shows these four words. If they differ, stop.",
@@ -2262,6 +2267,22 @@ export function sendBackCode(text) {
     return m ? m[1].toLowerCase() : ""
 }
 
+/// A pasted Ethereum address for Bridge to Ethereum (the route without the bridge page): `0x` and
+/// 40 hex digits, its case kept (the bridge checks the EIP-55 checksum, which lives in the case),
+/// else "".
+export function sendBackAddress(text) {
+    var t = String(text || "").replace(/[\s\u200b\u200c\u200d\ufeff]+/g, "")
+    var at = t.lastIndexOf("#")
+    if (at >= 0)
+        t = t.substr(at + 1)
+    return /^0[xX][0-9a-fA-F]{40}$/.test(t) ? "0x" + t.substr(2) : ""
+}
+/// An address in two halves, to read back before approving: ["0x68B5…(20)", "…(22)"].
+export function addressHalves(address) {
+    var a = String(address || "")
+    return a.length === 42 ? [a.substr(0, 22), a.substr(22)] : [a, ""]
+}
+
 /// A refused withdraw-to code, as a title: the bridge's `error.code` (`bad_code:<why>`,
 /// `other_chain`, `other_vault`).
 export function sendBackCodeTitle(code) {
@@ -2269,6 +2290,7 @@ export function sendBackCodeTitle(code) {
     if (c === "other_chain") return "This code is for another chain"
     if (c === "other_vault") return "This code is for another bridge vault"
     if (c.indexOf("bad_code") === 0) return "That is not a usable code"
+    if (c.indexOf("bad_address") === 0) return "That address can't be used"
     return "The code was refused"
 }
 

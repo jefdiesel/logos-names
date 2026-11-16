@@ -1112,6 +1112,17 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("bridge to Ethereum: the address step in order", numbered(SEND_BACK_ADDRESS_STEPS).length, 3);
 }
 
+{
+  const { sendBackAddress, sendBackCode, addressHalves, SEND_BACK_ADDRESS_ROUTE, sendBackCodeTitle } = await import("./qml/logic.mjs");
+  // Bridge to Ethereum by a pasted address (owner, 2026-11-16): its case kept (the checksum lives in it).
+  const A = "0x68B54942A37aE5ceBA34D47eFB8d33a293d3975d";
+  check("address: kept as pasted, from a link, with spaces", [sendBackAddress(" " + A + "\n"), sendBackAddress("https://x/#" + A), sendBackAddress("0X" + A.slice(2))], [A, A, A]);
+  check("address: not one", [sendBackAddress(A.slice(0, 41)), sendBackAddress("logoswd1abc"), sendBackAddress(""), sendBackCode(A)], ["", "", "", ""]);
+  check("address: two halves to read back", addressHalves(A), ["0x68B54942A37aE5ceBA34", "D47eFB8d33a293d3975d"]);
+  check("address: the route said plainly", SEND_BACK_ADDRESS_ROUTE, "Or paste the Ethereum address to receive it. Copy it from your wallet, don't type it.");
+  check("address: refusal title", sendBackCodeTitle("bad_address:no_checksum"), "That address can't be used");
+}
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);
 
