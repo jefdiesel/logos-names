@@ -1007,7 +1007,7 @@ pub(crate) mod tests {
     }
 
     /// A stored relayed call burning one cent of `definition`, notified to `bridge`'s Config.
-    pub(crate) fn burn_request(definition: &str, bridge: &str) -> Value {
+    pub(crate) fn burn_request_for(definition: &str, bridge: &str) -> Value {
         let call = json!({
             "program": V4_TOKENS, "message": registry::hex(&burn_message(definition, CENT, bridge)), "privacy": BURN_PRIVACY,
             "accounts": [{ "account": definition, "program": V4_TOKENS }, { "seed": crate::bridge_net::config_seed_hex(), "of": bridge, "program": bridge }],

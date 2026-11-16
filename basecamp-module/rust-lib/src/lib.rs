@@ -11898,18 +11898,18 @@ mod tests {
             (registry::parse_account(bridge_net::BRIDGE_V4_PROGRAM).unwrap(), v4),
             (registry::parse_account(bridge_net::BRIDGE_V5_PROGRAM).unwrap(), v5),
         ];
-        let v5_burn = provider_public::tests::burn_request(provider_public::tests::V5_WETH, bridge_net::BRIDGE_V5_PROGRAM);
+        let v5_burn = provider_public::tests::burn_request_for(provider_public::tests::V5_WETH, bridge_net::BRIDGE_V5_PROGRAM);
         let burn = Names::burn_gate_with(&v5_burn, &configs).unwrap().unwrap();
         assert_eq!(burn.bridge_label, "bridge v5");
-        let v4_burn = provider_public::tests::burn_request(provider_public::tests::V4_WETH, bridge_net::BRIDGE_V4_PROGRAM);
+        let v4_burn = provider_public::tests::burn_request_for(provider_public::tests::V4_WETH, bridge_net::BRIDGE_V4_PROGRAM);
         assert_eq!(Names::burn_gate_with(&v4_burn, &configs).unwrap().unwrap().bridge_label, "bridge v4");
         // Either order of the Configs.
         let reversed: Vec<_> = configs.iter().rev().cloned().collect();
         assert_eq!(Names::burn_gate_with(&v5_burn, &reversed).unwrap().unwrap().bridge_label, "bridge v5");
         // v4's wETH told to v5, and a burn told to v3 (not allowed): refused.
-        let crossed = provider_public::tests::burn_request(provider_public::tests::V4_WETH, bridge_net::BRIDGE_V5_PROGRAM);
+        let crossed = provider_public::tests::burn_request_for(provider_public::tests::V4_WETH, bridge_net::BRIDGE_V5_PROGRAM);
         assert!(Names::burn_gate_with(&crossed, &configs).unwrap_err().contains("isn't a token of bridge v5"));
-        let to_v3 = provider_public::tests::burn_request(provider_public::tests::V5_WETH, bridge_net::BRIDGE_V3_PROGRAM);
+        let to_v3 = provider_public::tests::burn_request_for(provider_public::tests::V5_WETH, bridge_net::BRIDGE_V3_PROGRAM);
         assert!(Names::burn_gate_with(&to_v3, &configs).unwrap_err().contains("another program"));
     }
 
