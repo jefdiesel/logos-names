@@ -1380,11 +1380,11 @@ export function receiveCodeRefused(message) {
 /// module first: the app depends on it.
 export const BUNDLED_BRIDGE = [
     { name: "lez_bridge", file: "lez_bridge.lgx", label: "LEZ Bridge module",
-      sha256: "66f729866c2653815018356c6d89f872e45cbcda5c238b21bf2299173b688254",
-      root: "9b819e1fcc241fab7da36a55222d45c82a360fcf7589875b188c2b37976b972d",
+      sha256: "76bbb04b1ba840f737f5f61959082bc40c334302d2967d9bf270bfd84f050fd2",
+      root: "5bfbe2e1dad0760fc014660bd8484b2501d2189239e2e5cf8ce0ca6885acb2f0",
       // The commit the shipped bridge says it was built from (its config().build.commit): rfp-022
-      // ce40730 (v5, no release delay, the default deployment; everything in 33fde5c).
-      build: "ce40730" }
+      // 7dd8a36 (the settlement service: send_back_settle, settle_offer; v5 the default).
+      build: "7dd8a36" }
 ]
 
 /// The LEZ 0.4 names tool this app ships in qml/bundled/ (built without in-process proving, so
@@ -1871,6 +1871,9 @@ export const CHECK_JOB_MS = 5000
 /// A wait whose answer changes by itself soon (a deposit becoming final): every 2.5 min, only on
 /// its own screen, open and in front.
 export const CHECK_GENTLE_MS = 150000
+/// A settlement the bridge's service runs (rfp-022 NAMES-SEND-BACK.md §4a): every 30 s, only on
+/// its own screen, open and in front.
+export const CHECK_SETTLE_MS = 30000
 
 /// How a receive is checked by itself, from its receive_status: "gentle" while it becomes final on
 /// Sepolia (deposited, final), else "none" (Check now, and once on view).
@@ -1887,6 +1890,7 @@ export function receiveAutoMode(status) {
 export function sendBackAutoMode(status) {
     var s = status || {}
     if (s.busy === true) return { mode: "gentle" }
+    if (settleRunning(s)) return { mode: "settle" }
     switch (s.stage) {
     case "approve": return { mode: s.note ? "none" : "job" }
     case "burning": case "proving": return { mode: "job" }
@@ -1910,6 +1914,7 @@ export function bridgeNextCheck(s) {
         if (m === "job") take(now + CHECK_JOB_MS)
         if (!st.frontmost || st.screen === "card" || !it.focused) return
         if (m === "gentle") take(now + CHECK_GENTLE_MS)
+        if (m === "settle") take(now + CHECK_SETTLE_MS)
         if (m === "at" && Number(it.at) > now) take(Number(it.at))
     })
     return due
@@ -2181,7 +2186,77 @@ export const SEND_BACK_BY_HAND = "Today the bridge's operator posts the update t
 export function sendBackByHand(stage) {
     return stage === "burned" || stage === "proved"
 }
+/// Its words for that stage: before the update only the update is by hand (the bridge's service,
+/// when offered, makes and wraps the proof once Ethereum has recorded the burn).
+export function sendBackByHandLine(stage) {
+    return stage === "burned" ? "Today the bridge's operator posts the update to Ethereum by hand, so this wait can take from minutes to hours." : SEND_BACK_BY_HAND
+}
 export function sendBackProgress(status, nowSeconds, clock) {
+    var p = sendBackProgressPlain(status, nowSeconds, clock)
+    var s = status || {}
+    var at = clock || clockShown
+    // The bridge's settlement service (§4a): while it runs, its stage is the headline; while it
+    // is offered, "Finish on Ethereum" is the one action and the by-hand path goes behind More.
+    if (s.stage !== "released" && settleRunning(s)) {
+        var line = settleLine(s.settle, at)
+        return { stage: "settling", card: "Finishing on Ethereum · " + line.replace(/\.$/, "").replace(/ \(about [^)]*\)/, ""), headline: line,
+                 detail: s.settle_note ? String(s.settle_note) : "", tone: "wait", action: "", more: "" }
+    }
+    p.more = ""
+    if (settleOffered(s)) {
+        p.more = p.action
+        p.action = "settle"
+        if (s.stage === "recorded") { p.card = "Recorded on Ethereum · finish it"; p.headline = "Recorded on Ethereum: finish it on Ethereum." }
+        if (s.stage === "proved") { p.card = "Proof made · finish it"; p.headline = "Proof made. Next: finish it on Ethereum." ; p.detail = "" }
+    }
+    if (s.settle && s.settle.stage === "failed" && s.stage !== "released") {
+        p.headline = "The bridge's service couldn't finish it."
+        p.detail = s.settle.error ? String(s.settle.error) : ""
+        p.tone = "problem"
+    }
+    if (s.stage === "released" && s.released_tx)
+        p.detail = "Sepolia transaction " + String(s.released_tx) + "."
+    return p
+}
+
+/// What the person reads before the exit secret goes to the bridge's settlement service, verbatim
+/// (rfp-022 NAMES-SEND-BACK.md §4a, the module's SETTLE_CONSENT).
+export const SETTLE_CONSENT = "This wallet has no proof helper, so the bridge's service will make the proof: it learns which burn pays which Ethereum address."
+/// The settlement service's stages in words (§4a).
+export const SETTLE_WORDS = {
+    queued: "Waiting its turn on the bridge's machine.",
+    proving: "Making the release proof (about 20 s).",
+    wrapping: "Wrapping the proof for Ethereum (about 4 min).",
+    releasable_at: "Waiting for the vault's delay.",
+    releasing: "Sending the release on Ethereum."
+}
+/// Whether the bridge's service is finishing this send-back now.
+export function settleRunning(status) {
+    var s = status || {}
+    return !!s.settle_id && !!s.settle && !!s.settle.stage && s.settle.stage !== "failed" && s.stage !== "released"
+}
+/// Whether "Finish on Ethereum" is offered: the module's `settle_offer.available`, none running.
+export function settleOffered(status) {
+    var s = status || {}
+    return !!s.settle_offer && s.settle_offer.available === true && !settleRunning(s)
+        && ["recorded", "proved", "wrapped", "releasable"].indexOf(String(s.stage)) >= 0
+}
+/// Why it isn't offered, in small text (`settle_offer.reason`), or "".
+export function settleNotOffered(status) {
+    var s = status || {}
+    if (!s.settle_offer || s.settle_offer.available === true || settleRunning(s)) return ""
+    if (["recorded", "proved", "wrapped", "releasable"].indexOf(String(s.stage)) < 0) return ""
+    return s.settle_offer.reason ? String(s.settle_offer.reason) : ""
+}
+/// The service's stage as one line: its own `text` when it has one, else SETTLE_WORDS.
+export function settleLine(settle, clock) {
+    var st = settle || {}
+    if (st.text) return String(st.text)
+    if (st.stage === "releasable_at" && st.releasable_at) return "Waiting for the vault's delay, until " + (clock || clockShown)(Number(st.releasable_at)) + "."
+    return SETTLE_WORDS[st.stage] || "With the bridge's service."
+}
+
+function sendBackProgressPlain(status, nowSeconds, clock) {
     var s = status || {}
     var at = clock || clockShown
     var r = function(stage, card, headline, detail, tone, action) { return { stage: stage, card: card, headline: headline, detail: detail || "", tone: tone, action: action || "" } }
@@ -2208,7 +2283,7 @@ export function sendBackProgress(status, nowSeconds, clock) {
         return r("wrapped", later ? "Releasable at " + at(when) : "Releasable any minute now",
             later ? "Releasable at " + at(when) + "." : "Releasable any minute now.", "The vault releases it only after its delay from when Ethereum recorded it.", "wait")
     case "releasable": return r("releasable", "Ready to collect on Ethereum", "Ready: collect it on the bridge page.", "", "ready", "release")
-    case "released": return r("released", "Received on Ethereum", "Received on Ethereum.", "", "done")
+    case "released": return r("released", "Released on Ethereum", "Released on Ethereum.", "", "done")
     }
     return r("checking", "Checking…", "Checking…", "", "plain")
 }

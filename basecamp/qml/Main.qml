@@ -1557,7 +1557,7 @@ Item {
     property var sbNeeds: null             // the bridge's first-time question (connect, programs, account, keys)
     property string sbNeedsState: ""
     property bool sbNeedsPolling: false
-    property string sbNeedsThen: ""        // what to ask again once it is answered: "plan" | "burn"
+    property string sbNeedsThen: ""        // what to ask again once it is answered: "plan" | "burn" | "settle"
     property var sbExtras: []
     property string sbError: ""
     property string sbFocus: ""            // the send-back on the screen
@@ -1577,6 +1577,9 @@ Item {
     property bool sbNamesOld: false        // send_back_burn said this Names Wallet can't sign a burn
     property bool sbCommandCopied: false
     property bool sbProverTried: false     // set_release_prover tried once in this window
+    property bool sbSettleAsking: false    // "Finish on Ethereum": the consent sentence is on screen
+    property bool sbMoreOpen: false        // the by-hand path behind More, while the service is offered
+    onSbFocusChanged: { sbSettleAsking = false; sbMoreOpen = false }
     readonly property bool sbCan: Logic.bridgeCan(bridgeFeatures, "send_back")
     readonly property var sbAmounts: Logic.sendBackAmounts(receiveRegistry, sbAsset)
     readonly property var sbSources: Logic.sendBackSources(bridgeNetBlocks)
@@ -1772,6 +1775,8 @@ Item {
                 sbNeeds = null
                 if (sbNeedsThen === "plan")
                     sbPlan()
+                else if (sbNeedsThen === "settle")
+                    sbSettle(true)
                 else
                     sbBurn()
             } else if (sbNeedsState === "rejected" || sbNeedsState === "expired" || sbNeedsState === "cancelled") {
@@ -1929,6 +1934,41 @@ Item {
             sbAsking = false
             sbError = sentence(message)
             console.log("names_ui: send back: send_back_prove:", kind, message)
+        }, 120000, false)
+    }
+    /// "Finish on Ethereum" (rfp-022 NAMES-SEND-BACK.md §4a): the bridge's settlement service proves,
+    /// wraps and releases it. Without a proof helper here the exit secret goes, so the module asks
+    /// for consent first (`needs: "consent"`): the sentence is shown verbatim, and only "Continue"
+    /// sends `{"consent": true}`. May then need the exit keys (approved in Names, then asked again).
+    function sbSettle(consent) {
+        if (sbAsking || sbFocus === "")
+            return
+        sbAsking = true
+        sbError = ""
+        var id = sbFocus
+        bridgeCall("send_back_settle", [id, consent ? JSON.stringify({ consent: true }) : "{}"], function(value) {
+            sbAsking = false
+            if (value && value.needs === "consent") {
+                sbSettleAsking = true
+                return
+            }
+            sbSettleAsking = false
+            if (value && value.needs) {
+                sbNeedsReply(value, "settle")
+                return
+            }
+            if (value && value.stage) {
+                var all = sbStatuses
+                all[id] = value
+                sbStatuses = all
+                sbStatusesChanged()
+            }
+            sbScheduleNext()
+        }, function(message, kind) {
+            sbAsking = false
+            sbSettleAsking = false
+            sbError = sentence(message)
+            console.log("names_ui: send back: send_back_settle:", kind, message)
         }, 120000, false)
     }
     /// The seal the bridge team sends (today's stand-in for the wrap service), checked by the bridge
@@ -10567,6 +10607,9 @@ Item {
                     readonly property var stepNow: root.sbStepsNow.filter(function(x) { return x.state === "now" })[0] || null
                     readonly property var p: root.sbProgressNow
                     readonly property var st: root.sbFocusStatus
+                    // The action shown: the service's "Finish on Ethereum", and the by-hand one only
+                    // behind More while the service is offered.
+                    readonly property string act: p.action === "settle" ? (root.sbMoreOpen ? (p.more || "") : "") : p.action
                     // A bridge that can't send back now (send_back_link: its vault can't release) offers
                     // no new send-back; one already made is still followed.
                     readonly property bool closed: root.sbFocus === "" && root.sbLink !== null && root.sbLink.available === false
@@ -10696,7 +10739,7 @@ Item {
                         }
                         Hint { visible: sendBackScreen.p.detail !== ""; font.pixelSize: root.px(15); text: sendBackScreen.p.detail }
                         // The steps done by hand today, said once, here.
-                        Hint { visible: Logic.sendBackByHand(sendBackScreen.p.stage); font.pixelSize: root.px(15); text: Logic.SEND_BACK_BY_HAND }
+                        Hint { visible: Logic.sendBackByHand(sendBackScreen.p.stage) && sendBackScreen.p.action !== "settle"; font.pixelSize: root.px(15); text: Logic.sendBackByHandLine(sendBackScreen.p.stage) }
                         Hint {
                             visible: root.sbFocusRow !== null
                             color: root.ink
@@ -10706,8 +10749,24 @@ Item {
                         Hint { visible: root.sbFocusRow !== null && root.sbFocusRow.words !== ""; font.pixelSize: root.px(15); text: root.sbFocusRow !== null ? "Its words: " + root.sbFocusRow.words : "" }
                         // The burn not proposed yet (or proposed again after a no).
                         Action { visible: sendBackScreen.p.action === "burn" && !root.appInline && root.sbError === ""; label: root.sbAsking ? "Asking your wallet…" : "Approve the burn"; strong: true; enabledNow: !root.sbAsking; onPressed: root.sbBurn() }
+                        // The bridge's settlement service: one press, after its consent sentence when
+                        // the exit secret would go (no proof helper here).
+                        Action { visible: sendBackScreen.p.action === "settle" && !root.sbSettleAsking; label: root.sbAsking ? "Asking the bridge…" : "Finish on Ethereum"; strong: true; enabledNow: !root.sbAsking; onPressed: root.sbSettle(false) }
+                        ColumnLayout {
+                            visible: sendBackScreen.p.action === "settle" && root.sbSettleAsking
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Hint { color: root.ink; text: Logic.SETTLE_CONSENT }
+                            RowLayout {
+                                spacing: 10
+                                Action { label: root.sbAsking ? "Handing it over…" : "Continue"; strong: true; enabledNow: !root.sbAsking; onPressed: root.sbSettle(true) }
+                                Action { label: "Not now"; enabledNow: !root.sbAsking; onPressed: root.sbSettleAsking = false }
+                            }
+                        }
+                        Hint { visible: Logic.settleNotOffered(sendBackScreen.st) !== ""; font.pixelSize: root.px(15); text: root.sentence(Logic.settleNotOffered(sendBackScreen.st)) }
+                        Action { visible: sendBackScreen.p.action === "settle" && (sendBackScreen.p.more || "") !== "" && !root.sbSettleAsking; label: root.sbMoreOpen ? "Less" : "More"; onPressed: root.sbMoreOpen = !root.sbMoreOpen }
                         // Recorded: the release proof on this computer.
-                        Action { visible: sendBackScreen.p.action === "prove" && root.sbWitness === null; label: root.sbAsking ? "Starting…" : "Make the proof"; strong: true; enabledNow: !root.sbAsking; onPressed: root.sbProve() }
+                        Action { visible: sendBackScreen.act === "prove" && root.sbWitness === null; label: root.sbAsking ? "Starting…" : "Make the proof"; strong: sendBackScreen.p.action !== "settle"; enabledNow: !root.sbAsking; onPressed: root.sbProve() }
                         ColumnLayout {
                             visible: root.sbWitness !== null && (sendBackScreen.p.stage === "recorded" || sendBackScreen.p.stage === "proving")
                             Layout.fillWidth: true
@@ -10729,7 +10788,7 @@ Item {
                         }
                         // The proof's Ethereum wrapper, by hand today: the seal the bridge team sends.
                         ColumnLayout {
-                            visible: sendBackScreen.p.action === "seal"
+                            visible: sendBackScreen.act === "seal"
                             Layout.fillWidth: true
                             spacing: 8
                             RowLayout {
@@ -10742,10 +10801,10 @@ Item {
                         }
                         // Releasable: the link to collect it on the bridge page.
                         ColumnLayout {
-                            visible: sendBackScreen.p.action === "release"
+                            visible: sendBackScreen.act === "release"
                             Layout.fillWidth: true
                             spacing: 8
-                            Action { label: root.sbLinkCopied ? "Copied." : root.sbAsking ? "Getting the link…" : "Copy the link"; strong: true; enabledNow: !root.sbAsking; onPressed: root.sbCopyRelease() }
+                            Action { label: root.sbLinkCopied ? "Copied." : root.sbAsking ? "Getting the link…" : "Copy the link"; strong: sendBackScreen.p.action !== "settle"; enabledNow: !root.sbAsking; onPressed: root.sbCopyRelease() }
                             Hint { font.pixelSize: root.px(15); text: "Open it in your browser and press Release with the Ethereum wallet you connected." }
                         }
                         StatusLine { visible: sendBackScreen.st !== null && !!sendBackScreen.st.note && sendBackScreen.p.detail !== String(sendBackScreen.st.note); kind: Logic.isWaitMessage(sendBackScreen.st !== null ? sendBackScreen.st.note : "") ? "waiting" : ""; text: sendBackScreen.st !== null && sendBackScreen.st.note ? root.sentence(String(sendBackScreen.st.note)) : "" }

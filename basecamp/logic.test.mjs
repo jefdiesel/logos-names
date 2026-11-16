@@ -2,6 +2,7 @@
 // engine cannot run in CI. Run with: node basecamp/logic.test.mjs
 import { atLeast, someAmount, entryShown, amountRead, amountProblem, amountDigits, AMOUNT_MAX, CHAIN_AMOUNT_MAX, jobProblem, tokenToProblem, tokenSendProves, tokenShown, feeEstimate, feePaid, accountTitle, accountsShown, publisherLine, durationWords, keyShown, chainToProblem, stakeLines, rewardsLine, grouped, addDigits, walletAssets, subDigits, walletGroups, stakeTable, activityLine, activityFor, agoShown, readNote, chainKeyTitle, chainKeySub, chainUsable, chainLaterNote } from "./qml/logic.mjs";
 import { readFileSync } from "node:fs";
+import { SETTLE_CONSENT, settleNotOffered } from "./qml/logic.mjs";
 import { cliOutdatedLine, replyKind, revealNext, revealLine, mergeCliStatus, requestTickKey, normalizedReply, noWalletSaid, onNet, preTicked, sameNetAnswer, askAgainAfter, REVEAL_REFUSED_RETRY_MS } from "./qml/logic.mjs";
 import { bridgeReply, claimStage, claimAccountProblem, claimBridge, claimJobFor, runningClaimJob, claimPhases, claimFailure, claimErrorTitle, claimInput, otherDeployment } from "./qml/logic.mjs";
 import { publicAccounts, decimalShown, bridgeNetStatus, bridgeNetRows, bridgeNetShown, publicIdProblem, NET_03, NET_04, mergedAccounts } from "./qml/logic.mjs";
@@ -1011,7 +1012,8 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("no red Hint: problems go through StatusLine", qml.split("\n").filter((l) => /\bHint \{[^\n]*root\.alarm/.test(l)).length, 0);
   check("no violet under-way text tone", /root\.underway\b/.test(qml), false);
   check("one back button: no tiny ‹ Wallet / ← Back links", [/"‹ Wallet"/.test(qml), /"← Back"/.test(qml)], [false, false]);
-  check("no button says Not now for a reject", /label: "Not now"/.test(qml), false);
+  // "Not now" only where nothing is refused: the settlement's consent (§4a), which leaves it as it was.
+  check("no button says Not now for a reject", qml.split("\n").filter((l) => /label: "Not now"/.test(l) && !/sbSettleAsking = false/.test(l)).length, 0);
   check("the global notice says its kind", (qml.match(/root\.noticeIsError \? root\.alarm/g) || []).length, 0);
   check("every sub-page has the shared header", (qml.match(/PageHeader \{ title:/g) || []).length >= 9, true);
   // "If they ignore it, we ignore it": no timer reads the card's balances; the setup poll runs only on view.
@@ -1049,5 +1051,28 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     ["waiting", true, "problem", "The faucet is empty for now."]);
 }
 
+{
+  const { sendBackProgress, sendBackAutoMode, bridgeNextCheck } = await import("./qml/logic.mjs");
+  // The bridge's settlement service (rfp-022 NAMES-SEND-BACK.md §4a).
+  const offer = { available: true, consent_needed: true, consent_text: SETTLE_CONSENT };
+  const rec = sendBackProgress({ stage: "recorded", settle_offer: offer }, 0, () => "12:00");
+  check("settle: offered on recorded", [rec.action, rec.more, rec.headline], ["settle", "prove", "Recorded on Ethereum: finish it on Ethereum."]);
+  check("settle: not offered: the by-hand path as before", sendBackProgress({ stage: "recorded", settle_offer: { available: false, reason: "The service is paused." } }, 0).action, "prove");
+  check("settle: its reason in small text", settleNotOffered({ stage: "recorded", settle_offer: { available: false, reason: "The service is paused." } }), "The service is paused.");
+  const run = (stage, extra) => sendBackProgress(Object.assign({ stage: "recorded", settle_id: "s1", settle: Object.assign({ stage }, extra || {}) }), 0, () => "12:34");
+  check("settle: stage words", ["queued", "proving", "wrapping", "releasing"].map((x) => run(x).headline),
+    ["Waiting its turn on the bridge's machine.", "Making the release proof (about 20 s).", "Wrapping the proof for Ethereum (about 4 min).", "Sending the release on Ethereum."]);
+  check("settle: its own text wins", run("queued", { text: "Waiting for memory on the bridge's machine." }).headline, "Waiting for memory on the bridge's machine.");
+  check("settle: the vault's delay with a time", run("releasable_at", { releasable_at: 1 }).headline, "Waiting for the vault's delay, until 12:34.");
+  check("settle: running has no button and checks every 30 s", [run("proving").action, sendBackAutoMode({ stage: "recorded", settle_id: "s1", settle: { stage: "proving" } }).mode], ["", "settle"]);
+  check("settle: card", run("wrapping").card, "Finishing on Ethereum · Wrapping the proof for Ethereum");
+  const failed = sendBackProgress({ stage: "recorded", settle_id: "s1", settle: { stage: "failed", error: "The service lost it." }, settle_offer: offer }, 0);
+  check("settle: failed: its error, the button again", [failed.action, failed.detail, failed.tone], ["settle", "The service lost it.", "problem"]);
+  check("settle: released with its tx", [sendBackProgress({ stage: "released", released_tx: "0xabc" }, 0).headline, sendBackProgress({ stage: "released", released_tx: "0xabc" }, 0).detail], ["Released on Ethereum.", "Sepolia transaction 0xabc."]);
+  check("settle: the next check in 30 s on its own screen in front", bridgeNextCheck({ visible: true, frontmost: true, screen: "sendback", now: 1000, items: [{ mode: "settle", focused: true }] }), 31000);
+  check("settle: consent sentence verbatim", SETTLE_CONSENT, "This wallet has no proof helper, so the bridge's service will make the proof: it learns which burn pays which Ethereum address.");
+}
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);
+
