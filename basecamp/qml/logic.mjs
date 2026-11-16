@@ -2115,6 +2115,9 @@ export const SEND_BACK_ADDRESS_STEPS = [
 ]
 /// The other way in, said under the field: no page, the address itself (owner, 2026-11-16: a phone's
 /// Ethereum wallet can't hand the page's code back to Names on a Mac).
+/// An optional hint on the step that asks where to send (owner, 2026-11-16): privacy is the
+/// person's choice, so it suggests and never asks.
+export const SEND_BACK_PRIVATE_HINT = "Want it private? In your Ethereum wallet, add a new account and use that one. It needs no ETH: the bridge pays the gas."
 export const SEND_BACK_ADDRESS_ROUTE = "Or paste the Ethereum address to receive it. Copy it from your wallet, don't type it."
 /// Once a pasted (or remembered) address is read: no page to compare with, so the address itself.
 export const SEND_BACK_ADDRESS_CONFIRM = "Check both halves are the address your Ethereum wallet shows. If they differ, stop. These four words stay with this withdrawal."

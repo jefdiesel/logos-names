@@ -1121,6 +1121,8 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("address: two halves to read back", addressHalves(A), ["0x68B54942A37aE5ceBA34", "D47eFB8d33a293d3975d"]);
   check("address: the route said plainly", SEND_BACK_ADDRESS_ROUTE, "Or paste the Ethereum address to receive it. Copy it from your wallet, don't type it.");
   check("address: refusal title", sendBackCodeTitle("bad_address:no_checksum"), "That address can't be used");
+  const { SEND_BACK_PRIVATE_HINT } = await import("./qml/logic.mjs");
+  check("the privacy hint suggests, never requires", [SEND_BACK_PRIVATE_HINT.startsWith("Want it private?"), /must|need to|required/i.test(SEND_BACK_PRIVATE_HINT.split(":")[0])], [true, false]);
 }
 
 {

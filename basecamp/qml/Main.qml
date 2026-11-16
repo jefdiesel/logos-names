@@ -10878,6 +10878,7 @@ Item {
                             Hint { Layout.fillWidth: false; color: root.ink; text: (root.sbAmounts.filter(function(d) { return d.index === root.sbDenom })[0] || { text: "" }).text + " " + (root.sbAsset !== null ? root.sbAsset.symbol : "") + " from " + Logic.idShort(root.sbAccount) + "." }
                             Link { visible: root.sbAmounts.length > 1 && root.sbCheck === null; text: "Change"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.sbDenom = -1 }
                         }
+                        Hint { visible: root.sbCheck === null; font.pixelSize: root.px(15); text: Logic.SEND_BACK_PRIVATE_HINT }
                         // An address this account sent back to before: offered first, one press (it is still
                         // read back in full with its four words before anything is approved).
                         RowLayout {
