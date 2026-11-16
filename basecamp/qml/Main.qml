@@ -1025,6 +1025,143 @@ Item {
                 console.log("names_ui: set_bridge_programs refused", JSON.stringify(value))
         }, function(message) { console.log("names_ui: set_bridge_programs:", message) }, 15000)
     }
+    // ── Settings → Bridge: the bridge new receives and sends use (the LEZ Bridge's bridges(),
+    // rfp-022 NAMES-SEND-BACK.md §9). Read when Settings opens and after each change; never polled.
+    property var bridgeList: null          // bridges(): {active, active_row, list} (null until read)
+    property bool bridgeListAsking: false
+    property string bridgeListError: ""
+    property bool bridgeAddOpen: false     // the Add a bridge box
+    property string bridgeCodeText: ""
+    property bool bridgeChecking: false
+    property var bridgeCheckReply: null    // bridge_check's (or a refused bridge_add's) answer for the code pasted
+    property string bridgeActing: ""       // the bridge being chosen or removed ("add": the pasted one)
+    property string bridgeNote: ""         // what the last choice did, in one line
+    property string bridgeNoteKind: ""
+    property bool bridgeChecksOpen: false
+    readonly property bool bridgeChoosable: Logic.bridgeCan(bridgeFeatures, "bridges")
+    function loadBridges() {
+        if (bridgeListAsking || !bridgeReady)
+            return
+        bridgeListAsking = true
+        bridgeListError = ""
+        bridgeCall("config", [], function(value) {
+            bridgeAnswered(value)
+            if (!Logic.bridgeCan(bridgeFeatures, "bridges")) {
+                bridgeListAsking = false
+                return
+            }
+            bridgeCall("bridges", [], function(v) {
+                bridgeListAsking = false
+                bridgeList = v
+            }, function(message, kind) {
+                bridgeListAsking = false
+                bridgeListError = sentence(kind === "busy" ? "The LEZ Bridge is busy; open Settings again in a moment." : message)
+            }, 20000)
+        }, function(message, kind) {
+            bridgeListAsking = false
+            bridgeSilent(kind)
+            if (kind !== "missing" && kind !== "starting")
+                bridgeListError = sentence(kind === "busy" ? "The LEZ Bridge is busy; open Settings again in a moment." : message)
+        }, 10000, false)
+    }
+    /// Reads and checks the pasted code on both chains; nothing is kept until "Use this bridge".
+    function checkBridgeCode() {
+        var c = Logic.bridgeCodeInput(bridgeCodeText)
+        if (c.code === "" || bridgeChecking || bridgeActing !== "")
+            return
+        bridgeChecking = true
+        bridgeCheckReply = null
+        bridgeChecksOpen = false
+        bridgeNote = ""
+        bridgeCall("bridge_check", [c.code], function(v) {
+            bridgeChecking = false
+            bridgeCheckReply = v
+            console.log("names_ui: bridge code checked:", v && v.ok ? "ok " + v.id : JSON.stringify(v && v.error ? v.error : v))
+        }, function(message, kind) {
+            bridgeChecking = false
+            bridgeCheckReply = { ok: false, error: { code: kind === "busy" ? "busy" : "failed", message: kind === "busy" ? "The LEZ Bridge is busy; try again in a moment." : sentence(message) } }
+        }, 120000)
+    }
+    /// "Use this bridge": the bridge checks the code again, keeps it and chooses it.
+    function useCheckedBridge() {
+        var c = Logic.bridgeCodeInput(bridgeCodeText)
+        if (c.code === "" || bridgeActing !== "")
+            return
+        bridgeActing = "add"
+        bridgeNote = ""
+        bridgeCall("bridge_add", [c.code, JSON.stringify({ use: true })], function(v) {
+            bridgeActing = ""
+            if (!v || v.ok !== true) {
+                bridgeCheckReply = v
+                return
+            }
+            bridgeList = v.bridges
+            bridgeAddOpen = false
+            bridgeCheckReply = null
+            bridgeCodeText = ""
+            bridgeCodeField.text = ""
+            bridgeChosen(v.bridges ? v.bridges.active_row : null)
+        }, function(message, kind) {
+            bridgeActing = ""
+            bridgeCheckReply = { ok: false, error: { code: kind === "busy" ? "busy" : "failed", message: kind === "busy" ? "The LEZ Bridge is busy; nothing was added. Try again in a moment." : sentence(message) } }
+        }, 120000, false)
+    }
+    function useBridge(id) {
+        if (bridgeActing !== "")
+            return
+        bridgeActing = id
+        bridgeNote = ""
+        bridgeCall("bridge_use", [id], function(v) {
+            bridgeActing = ""
+            bridgeList = v
+            bridgeChosen(v ? v.active_row : null)
+        }, function(message, kind) {
+            bridgeActing = ""
+            bridgeNote = sentence(kind === "busy" ? "The LEZ Bridge is busy; nothing changed. Try again in a moment." : message)
+            bridgeNoteKind = Logic.noticeKind(bridgeNote, true)
+        }, 30000, false)
+    }
+    function removeBridge(id) {
+        if (bridgeActing !== "")
+            return
+        bridgeActing = id
+        bridgeNote = ""
+        bridgeCall("bridge_remove", [id], function(v) {
+            bridgeActing = ""
+            bridgeList = v
+            bridgeNote = "Removed. Its code adds it again."
+            bridgeNoteKind = "done"
+        }, function(message, kind) {
+            bridgeActing = ""
+            bridgeNote = sentence(kind === "busy" ? "The LEZ Bridge is busy; nothing changed. Try again in a moment." : message)
+            bridgeNoteKind = Logic.noticeKind(bridgeNote, true)
+        }, 30000, false)
+    }
+    /// After a choice: the bridge's config again (Receive and Bridge to Ethereum read it), and the
+    /// wallet told to read the chosen bridge (its list holds at most 4; v2 and v3 make room first).
+    function bridgeChosen(row) {
+        bridgeNote = row ? "New receives and sends to Ethereum now use " + String(row.label || row.id) + "." : "Chosen."
+        bridgeNoteKind = "done"
+        bridgeCall("config", [], function(value) { bridgeAnswered(value) }, function() {}, 10000)
+        var program = row && row.bridge_program ? String(row.bridge_program) : ""
+        var rows = bridgeList && Array.isArray(bridgeList.list) ? bridgeList.list : []
+        var keep = rows.filter(function(r) { return r.current || Number(r.items || 0) > 0 }).map(function(r) { return String(r.bridge_program || "") })
+        var list = Logic.bridgesWith(bridgePrograms, program, keep)
+        if (list === "full") {
+            bridgeNote = bridgeNote + " This wallet already reads 4 bridges with deposits on them, so it can't show this one's balances until one is finished."
+            bridgeNoteKind = "waiting"
+            return
+        }
+        if (!Array.isArray(list))
+            return
+        askLater("set_bridge_programs", [JSON.stringify(list)], function(value) {
+            if (value === true || value === "true") {
+                bridgePrograms = list
+                console.log("names_ui: the wallet now reads the bridge", program)
+            } else
+                console.log("names_ui: set_bridge_programs refused", JSON.stringify(value))
+        }, function(message) { console.log("names_ui: set_bridge_programs:", message) }, 15000)
+    }
     function againAfter(ms, fn) {
         var t = Qt.createQmlObject('import QtQuick; Timer { repeat: false }', root, "claimLater")
         t.interval = ms
@@ -1275,8 +1412,9 @@ Item {
         receiveError = ""
         // New codes are made on the bundled bridge's default (v4): a claim file for another vault
         // may have switched the bridge, so it is switched back first (once).
+        // A bridge with Settings → Bridge (`bridges`) keeps the person's choice: never switched here.
         var dep = bridgeConfig && bridgeConfig.deployment ? String(bridgeConfig.deployment.name || "") : ""
-        if (dep !== "" && dep !== Logic.RECEIVE_DEPLOYMENT) {
+        if (dep !== "" && dep !== Logic.RECEIVE_DEPLOYMENT && !bridgeChoosable) {
             if (switched === true) {
                 receiveAsking = false
                 receiveError = "The LEZ Bridge stays on " + dep + ", not the new vault. Nothing was made."
@@ -2441,7 +2579,7 @@ Item {
             // A file for the other built-in bridge: the module is switched to it and checks again.
             var tried = Array.isArray(switched) ? switched : []
             var other = claimDeployment ? Logic.otherDeployment(claimDeployment.name, tried) : ""
-            if (value && !value.ok && value.error && value.error.code === "other_vault" && other !== "" && tried.length < 2) {
+            if (value && !value.ok && value.error && value.error.code === "other_vault" && other !== "" && tried.length < 2 && !bridgeChoosable) {
                 var was = claimDeployment.name
                 bridgeCall("use_deployment", [other], function(config) {
                     claimDeployment = config && config.deployment ? config.deployment : { name: other }
@@ -8167,6 +8305,17 @@ Item {
         wrapMode: Text.Wrap
     }
 
+    /// One numbered thing to do, in order ("1. Copy the link …"): ink, a size above a hint.
+    component NumberLine: Text {
+        Layout.fillWidth: true
+        color: root.ink
+        font.family: root.sans
+        font.weight: Font.DemiBold
+        font.pixelSize: root.px(18)
+        lineHeight: 1.25
+        wrapMode: Text.Wrap
+    }
+
     /// The heading of one part of the edit panel.
     component Part: Text {
         Layout.topMargin: 10
@@ -8418,7 +8567,7 @@ Item {
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Messages"; current: root.section === "messages"; onPressed: { root.go("messages"); root.chatLoad() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Profile"; current: root.section === "profile"; onPressed: { root.say("", false); root.openProfile() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Search"; current: root.section === "search"; onPressed: { root.go("search"); searchField.forceActiveFocus() } }
-                Tab { Layout.fillWidth: true; alignLeft: true; label: "Settings"; current: root.section === "settings"; onPressed: { root.go("settings"); root.registering = false; root.gettingTokens = false; root.record = null; root.missing = ""; root.loadAccounts() } }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Settings"; current: root.section === "settings"; onPressed: { root.go("settings"); root.registering = false; root.gettingTokens = false; root.record = null; root.missing = ""; root.loadAccounts(); root.loadBridges() } }
 
                 Item { Layout.fillHeight: true }
 
@@ -10476,17 +10625,10 @@ Item {
                             kind: ""
                             text: "This code is for an older vault. For the current one, make another code."
                         }
+                        // What to do next, in order (owner, 2026-11-16): copy and open, compare, deposit and come back.
+                        NumberLine { text: "1. " + Logic.RECEIVE_DEPOSIT_STEPS[0] }
                         Action { label: root.receiveLinkCopied ? "Copied." : "Copy the link"; strong: true; onPressed: root.copyDepositLink(receiveScreen.result.request_url) }
-                        Hint { font.pixelSize: root.px(15); text: "Paste it into your browser." }
-                        Text {
-                            Layout.fillWidth: true
-                            text: Logic.compareLine(receiveScreen.result !== null ? receiveScreen.result.compare : null)
-                            color: root.ink
-                            font.family: root.sans
-                            font.pixelSize: root.px(20)
-                            font.weight: Font.DemiBold
-                            wrapMode: Text.WordWrap
-                        }
+                        NumberLine { text: "2. " + Logic.compareLine(receiveScreen.result !== null ? receiveScreen.result.compare : null) }
                         Text {
                             visible: text !== ""
                             Layout.fillWidth: true
@@ -10497,6 +10639,7 @@ Item {
                             font.weight: Font.Bold
                             wrapMode: Text.WordWrap
                         }
+                        NumberLine { text: "3. " + Logic.RECEIVE_DEPOSIT_STEPS[2] }
                         Hint { font.pixelSize: root.px(15); text: "No file to save: this wallet keeps what it needs." }
                         RowLayout {
                             spacing: 14
@@ -10684,8 +10827,10 @@ Item {
                             visible: root.sbCheck === null
                             Layout.fillWidth: true
                             spacing: 10
+                            NumberLine { text: "1. " + Logic.SEND_BACK_ADDRESS_STEPS[0] }
                             Action { label: root.sbLinkCopied ? "Copied." : "Copy the link"; strong: true; enabledNow: root.sbLink !== null && !!root.sbLink.link; onPressed: root.sbCopyLink() }
-                            Hint { font.pixelSize: root.px(15); text: "Open it in your browser, connect the Ethereum wallet that should receive, and paste the code it shows here." }
+                            NumberLine { text: "2. " + Logic.SEND_BACK_ADDRESS_STEPS[1] }
+                            NumberLine { text: "3. " + Logic.SEND_BACK_ADDRESS_STEPS[2] }
                             RowLayout {
                                 Layout.fillWidth: true
                                 spacing: 10
@@ -10702,12 +10847,13 @@ Item {
                             spacing: 8
                             Hint { color: root.ink; text: "To this Ethereum address:" }
                             Text { Layout.fillWidth: true; text: root.sbCheck !== null ? String(root.sbCheck.recipient || "") : ""; textFormat: Text.PlainText; color: root.ink; font.family: root.mono; font.pixelSize: root.px(16); wrapMode: Text.WrapAnywhere }
-                            Text { Layout.fillWidth: true; text: "Check these four words match the bridge page. If they differ, stop."; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold; wrapMode: Text.WordWrap }
+                            NumberLine { text: "1. " + Logic.SEND_BACK_CONFIRM_STEPS[0] }
                             Text { Layout.fillWidth: true; text: root.sbCheck !== null ? String(root.sbCheck.words_text || "") : ""; color: root.ink; font.family: root.sans; font.pixelSize: root.px(30); font.weight: Font.Bold; wrapMode: Text.WordWrap }
                             Repeater {
                                 model: root.sbCheck !== null && Array.isArray(root.sbCheck.warnings) ? root.sbCheck.warnings : []
                                 Hint { required property var modelData; color: root.ink; text: "!  " + String(modelData) }
                             }
+                            NumberLine { text: "2. " + Logic.SEND_BACK_CONFIRM_STEPS[1] }
                             RowLayout {
                                 spacing: 14
                                 Action { label: root.sbAsking ? "Getting it ready…" : "Bridge to Ethereum"; strong: true; enabledNow: !root.sbAsking; onPressed: root.sbPlan() }
@@ -10804,8 +10950,9 @@ Item {
                             visible: sendBackScreen.act === "release"
                             Layout.fillWidth: true
                             spacing: 8
+                            NumberLine { text: "1. " + Logic.SEND_BACK_RELEASE_STEPS[0] }
                             Action { label: root.sbLinkCopied ? "Copied." : root.sbAsking ? "Getting the link…" : "Copy the link"; strong: sendBackScreen.p.action !== "settle"; enabledNow: !root.sbAsking; onPressed: root.sbCopyRelease() }
-                            Hint { font.pixelSize: root.px(15); text: "Open it in your browser and press Release with the Ethereum wallet you connected." }
+                            NumberLine { text: "2. " + Logic.SEND_BACK_RELEASE_STEPS[1] }
                         }
                         StatusLine { visible: sendBackScreen.st !== null && !!sendBackScreen.st.note && sendBackScreen.p.detail !== String(sendBackScreen.st.note); kind: Logic.isWaitMessage(sendBackScreen.st !== null ? sendBackScreen.st.note : "") ? "waiting" : ""; text: sendBackScreen.st !== null && sendBackScreen.st.note ? root.sentence(String(sendBackScreen.st.note)) : "" }
                         SendBackCheckLine { visible: sendBackScreen.p.stage !== "released" }
@@ -12107,6 +12254,94 @@ Item {
                             Action { label: "Cancel"; enabledNow: !root.zoneBusy; onPressed: root.zoneAdding = false }
                         }
                     }
+                    Part { text: "Bridge" }
+                    StatusLine { visible: root.bridgeListAsking && root.bridgeList === null; kind: "working"; text: "Reading the bridges…" }
+                    Hint { visible: !root.bridgeListAsking && root.bridgeConfig !== null && !root.bridgeChoosable; text: "Update the LEZ Bridge to choose the bridge here (Wallet → Receive from Ethereum offers the update)." }
+                    Hint { visible: !root.bridgeListAsking && root.bridgeConfig === null && root.bridgeListError === ""; text: "The LEZ Bridge isn't running. It comes with Names: Wallet → Receive from Ethereum sets it up." }
+                    StatusLine { visible: root.bridgeListError !== ""; kind: Logic.noticeKind(root.bridgeListError, true); text: root.bridgeListError; actionLabel: "Try again"; onAct: root.loadBridges() }
+                    ColumnLayout {
+                        visible: root.bridgeChoosable && root.bridgeList !== null
+                        Layout.fillWidth: true
+                        spacing: 8
+                        // The bridge in use: its name, vault, its four words (the bridge page shows the same).
+                        Hint { color: root.ink; text: Logic.bridgeActiveLine(root.bridgeList) }
+                        Text {
+                            visible: text !== ""
+                            Layout.fillWidth: true
+                            text: root.bridgeList !== null && root.bridgeList.active_row && root.bridgeList.active_row.words_text ? String(root.bridgeList.active_row.words_text) : ""
+                            color: root.ink
+                            font.family: root.sans
+                            font.pixelSize: root.px(24)
+                            font.weight: Font.Bold
+                            wrapMode: Text.WordWrap
+                        }
+                        Hint { font.pixelSize: root.px(15); text: "Deposits and sends already made stay on their own bridge." }
+                        // The others: Use, and Remove for one added here.
+                        Repeater {
+                            model: root.bridgeList !== null && Array.isArray(root.bridgeList.list) ? root.bridgeList.list.filter(function(r) { return !r.current }) : []
+                            RowLayout {
+                                required property var modelData
+                                Layout.fillWidth: true
+                                spacing: 12
+                                Hint { Layout.fillWidth: true; color: root.ink; font.pixelSize: root.px(15); text: Logic.bridgeRowLine(modelData) }
+                                Action { label: root.bridgeActing === modelData.id ? "Choosing…" : "Use"; enabledNow: root.bridgeActing === "" && modelData.has_code !== false; onPressed: root.useBridge(modelData.id) }
+                                Link { visible: modelData.removable === true; text: root.bridgeActing === modelData.id ? "Removing…" : "Remove"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.removeBridge(modelData.id) }
+                            }
+                        }
+                        StatusLine { visible: root.bridgeNote !== "" && !root.bridgeAddOpen; kind: root.bridgeNoteKind; text: root.bridgeNote }
+                        Link {
+                            text: root.bridgeAddOpen ? "Add a bridge ▾" : "Add a bridge ▸"
+                            font.pixelSize: root.px(15)
+                            onPressed: { root.bridgeAddOpen = !root.bridgeAddOpen; root.bridgeCheckReply = null; root.bridgeNote = "" }
+                        }
+                        Card {
+                            id: bridgeAddCard
+                            visible: root.bridgeAddOpen
+                            Layout.fillWidth: true
+                            readonly property var input: Logic.bridgeCodeInput(root.bridgeCodeText)
+                            readonly property var shown: root.bridgeCheckReply !== null ? Logic.bridgeCheckShown(root.bridgeCheckReply) : null
+                            Hint { color: root.ink; text: Logic.BRIDGE_CODE_WARNING }
+                            Hint { font.pixelSize: root.px(15); text: "On the bridge's page: This bridge's code → Copy the code. Paste it here." }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 10
+                                Field { id: bridgeCodeField; Layout.fillWidth: true; size: 15; code: true; hint: "logosbr1…"; onTextChanged: { root.bridgeCodeText = text; root.bridgeCheckReply = null } onAccepted: root.checkBridgeCode() }
+                                Action { label: root.bridgeChecking ? "Checking…" : "Check the code"; strong: bridgeAddCard.shown === null; enabledNow: !root.bridgeChecking && root.bridgeActing === "" && bridgeAddCard.input.code !== ""; onPressed: root.checkBridgeCode() }
+                            }
+                            WhyLine { visible: !root.bridgeChecking && bridgeAddCard.input.code === ""; text: bridgeAddCard.input.problem !== "" ? bridgeAddCard.input.problem : "Paste a bridge code to check it." }
+                            StatusLine { visible: root.bridgeChecking; kind: "working"; text: "Checking it on Sepolia and on the bridge's network…" }
+                            // The answer: the four words to compare with the bridge's page, then the choice.
+                            StatusLine { visible: bridgeAddCard.shown !== null && !root.bridgeChecking; kind: bridgeAddCard.shown !== null ? bridgeAddCard.shown.kind : ""; text: bridgeAddCard.shown !== null ? bridgeAddCard.shown.line : "" }
+                            Text {
+                                visible: bridgeAddCard.shown !== null && bridgeAddCard.shown.words !== "" && !root.bridgeChecking
+                                Layout.fillWidth: true
+                                text: bridgeAddCard.shown !== null ? bridgeAddCard.shown.words : ""
+                                color: root.ink
+                                font.family: root.sans
+                                font.pixelSize: root.px(28)
+                                font.weight: Font.Bold
+                                wrapMode: Text.WordWrap
+                            }
+                            Hint { visible: bridgeAddCard.shown !== null && bridgeAddCard.shown.words !== "" && !root.bridgeChecking; color: root.ink; text: "Check the bridge's page shows these four words. If they differ, stop." }
+                            RowLayout {
+                                visible: bridgeAddCard.shown !== null && bridgeAddCard.shown.use && !root.bridgeChecking
+                                spacing: 10
+                                Action { label: root.bridgeActing === "add" ? "Adding…" : "Use this bridge"; strong: true; enabledNow: root.bridgeActing === ""; onPressed: root.useCheckedBridge() }
+                                Action { label: "Not now"; enabledNow: root.bridgeActing === ""; onPressed: { root.bridgeAddOpen = false; root.bridgeCheckReply = null; bridgeCodeField.text = ""; root.bridgeCodeText = "" } }
+                            }
+                            Link {
+                                visible: bridgeAddCard.shown !== null && bridgeAddCard.shown.checks.length > 0 && !root.bridgeChecking
+                                text: root.bridgeChecksOpen ? "What was checked ▾" : "What was checked ▸"
+                                color: root.dim
+                                font.pixelSize: root.px(15)
+                                onPressed: root.bridgeChecksOpen = !root.bridgeChecksOpen
+                            }
+                            Repeater {
+                                model: root.bridgeChecksOpen && bridgeAddCard.shown !== null ? bridgeAddCard.shown.checks : []
+                                Hint { required property var modelData; font.pixelSize: root.px(14); text: modelData }
+                            }
+                        }
+                    }
                     Part { text: "Backup" }
                     Hint { color: root.ink; text: Logic.backupLastLine(root.backupStatus !== null ? root.backupStatus.last : null, root.backupWhen) }
                     Hint { visible: Logic.backupUncoveredLine(root.backupStatus) !== ""; color: root.ink; text: Logic.backupUncoveredLine(root.backupStatus) }
@@ -12245,7 +12480,7 @@ Item {
                     }
                     StatusLine { visible: root.backupError !== ""; kind: Logic.noticeKind(root.backupError, true); text: root.backupError }
 
-                    Part { text: "Bridge" }
+                    Part { text: "Logos Blockchain bridge" }
                     Hint { text: "Moving tokens from your Logos Blockchain node into LEZ is in the Wallet. One way for now; about 12 hours to arrive." }
                     Action {
                         label: "Open the bridge"

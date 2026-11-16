@@ -779,7 +779,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
 {
   const { compareLine, compareWords, compareDigitsDetail } = await import("./qml/logic.mjs");
   const words = { words: ["maple", "tiger", "seven", "lamp"], first: "b95db8", last: "6b299d" };
-  check("words line", compareLine(words), "Check these four words match the deposit page. If they differ, stop.");
+  check("words line", compareLine(words), "Check the page shows these four words. If they differ, stop.");
   check("words", compareWords(words), "maple · tiger · seven · lamp");
   check("digits under details", compareDigitsDetail(words), "Commitment starts b95db8 and ends 6b299d.");
   check("older bridge", [compareLine({ first: "b95db8", last: "6b299d" }), compareWords({ first: "b95db8" })], ["The page must show a commitment starting b95db8 and ending 6b299d.", ""]);
@@ -1012,8 +1012,9 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("no red Hint: problems go through StatusLine", qml.split("\n").filter((l) => /\bHint \{[^\n]*root\.alarm/.test(l)).length, 0);
   check("no violet under-way text tone", /root\.underway\b/.test(qml), false);
   check("one back button: no tiny ‹ Wallet / ← Back links", [/"‹ Wallet"/.test(qml), /"← Back"/.test(qml)], [false, false]);
-  // "Not now" only where nothing is refused: the settlement's consent (§4a), which leaves it as it was.
-  check("no button says Not now for a reject", qml.split("\n").filter((l) => /label: "Not now"/.test(l) && !/sbSettleAsking = false/.test(l)).length, 0);
+  // "Not now" only where nothing is refused: the settlement's consent (§4a), which leaves it as it was,
+  // and a checked bridge code (Settings → Bridge, the owner's words: "Use this bridge / Not now"; nothing is kept).
+  check("no button says Not now for a reject", qml.split("\n").filter((l) => /label: "Not now"/.test(l) && !/sbSettleAsking = false/.test(l) && !/bridgeAddOpen = false/.test(l)).length, 0);
   check("the global notice says its kind", (qml.match(/root\.noticeIsError \? root\.alarm/g) || []).length, 0);
   check("every sub-page has the shared header", (qml.match(/PageHeader \{ title:/g) || []).length >= 9, true);
   // "If they ignore it, we ignore it": no timer reads the card's balances; the setup poll runs only on view.
@@ -1071,6 +1072,44 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("settle: released with its tx", [sendBackProgress({ stage: "released", released_tx: "0xabc" }, 0).headline, sendBackProgress({ stage: "released", released_tx: "0xabc" }, 0).detail], ["Released on Ethereum.", "Sepolia transaction 0xabc."]);
   check("settle: the next check in 30 s on its own screen in front", bridgeNextCheck({ visible: true, frontmost: true, screen: "sendback", now: 1000, items: [{ mode: "settle", focused: true }] }), 31000);
   check("settle: consent sentence verbatim", SETTLE_CONSENT, "This wallet has no proof helper, so the bridge's service will make the proof: it learns which burn pays which Ethereum address.");
+}
+
+{
+  const { bridgeCodeInput, bridgeRowLine, bridgeActiveLine, bridgeCheckShown, bridgesWith, BRIDGE_CODE_WARNING, codeOlderVault, numbered,
+          RECEIVE_DEPOSIT_STEPS, SEND_BACK_ADDRESS_STEPS, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM } = await import("./qml/logic.mjs");
+  // Settings → Bridge (rfp-022 NAMES-SEND-BACK.md §9): the code box, the list, the check's answer.
+  check("bridge code: pasted with spaces, or in the page's link", [bridgeCodeInput(" logosbr1abc\n").code, bridgeCodeInput("https://nameswallet.app/bridge/#logosbr1xyz").code, bridgeCodeInput("LOGOSBR1ABC").code], ["logosbr1abc", "logosbr1xyz", "LOGOSBR1ABC"]);
+  check("bridge code: another kind of code, or nothing", [bridgeCodeInput("logoswd1abc").problem, bridgeCodeInput("hello").problem, bridgeCodeInput("").problem, bridgeCodeInput("logosdep1q").code],
+    ["That is another kind of code. A bridge code starts logosbr1.", "This is not a bridge code. A bridge code starts logosbr1.", "", ""]);
+  check("bridge warning: one plain sentence", BRIDGE_CODE_WARNING, "A bridge code decides where your deposits go: take it only from the bridge's own page.");
+  const v5 = { id: "bridge-test-network-v5", label: "bridge v5", kind: "built in", vault_short: "0xAFbD…eD10", current: true };
+  const v6 = { id: "added-abc", label: "bridge v6", kind: "added", vault_short: "0x6666…6666", endpoint_host: "lez.example.org" };
+  check("bridge rows", [bridgeRowLine(v5), bridgeRowLine(v6), bridgeRowLine(null)], ["bridge v5 · vault 0xAFbD…eD10 · built in", "bridge v6 · vault 0x6666…6666 · added · lez.example.org", ""]);
+  check("the chosen bridge in a sentence", [bridgeActiveLine({ active_row: v5 }), bridgeActiveLine(null)], ["New receives and sends to Ethereum use bridge v5 (vault 0xAFbD…eD10, built in).", ""]);
+  const checked = { ok: true, id: "added-abc", label: "bridge v6", vault_short: "0x6666…6666", endpoint_host: "lez.example.org", words_text: "a · b · c · d", checks: [{ ok: true, text: "The vault matches." }] };
+  check("bridge check: a new bridge, checked", bridgeCheckShown(checked), { kind: "done", line: "Checked on Sepolia and on lez.example.org: bridge v6, vault 0x6666…6666.", words: "a · b · c · d", use: true, checks: ["✓ The vault matches."] });
+  check("bridge check: built in, and already chosen", [bridgeCheckShown({ ok: true, builtin: true, label: "bridge v4", words_text: "w" }).line, bridgeCheckShown({ ok: true, builtin: true, current: true, label: "bridge v5" }).use],
+    ["This is bridge v4, built into this app.", false]);
+  check("bridge check: a mismatch is a problem, a network that can't be read a wait", [
+    bridgeCheckShown({ ok: false, error: { code: "mismatch", message: "The deposit desk sends deposits elsewhere. Refused: nothing was added." }, checks: [{ ok: false, text: "desk" }] }),
+    bridgeCheckShown({ ok: false, error: { code: "unreachable", message: "Sepolia can't be read now." } }).kind],
+    [{ kind: "problem", line: "The deposit desk sends deposits elsewhere. Refused: nothing was added.", words: "", use: false, checks: ["✕ desk"] }, "waiting"]);
+  // The wallet reads the chosen bridge: added to its list (at most 4), v2 and v3 make room first.
+  const V2 = "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", V3 = "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr", V6 = "Six6", V7 = "Seven7";
+  check("bridge list: added with room, unchanged when there", [bridgesWith([V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM], V6, []), bridgesWith([V2, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM], BRIDGE_V5_PROGRAM, [])],
+    [[V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM, V6], null]);
+  check("bridge list: a fifth bridge takes v2's place, then v3's", [bridgesWith([V2, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM], V6, [BRIDGE_V5_PROGRAM]), bridgesWith([V6, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM], V7, [V6])],
+    [[V6, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM], [V6, V7, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM]]);
+  check("bridge list: a bridge with deposits on it is kept; full when all are", [bridgesWith([V2, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM], V6, [V2, V3, BRIDGE_V5_PROGRAM]), bridgesWith(["a", "b", "c", "d"], V6, ["a", "b", "c", "d"])],
+    [[V2, V3, V6, BRIDGE_V5_PROGRAM], "full"]);
+  // A code made on another bridge than the one chosen now is "for an older vault"; the bridge says which is current.
+  check("older vault: the bridge's current flag wins", [codeOlderVault({ deployment: { id: "added-abc", current: true } }), codeOlderVault({ deployment: { id: "bridge-test-network-v5", current: false } })], [false, true]);
+  // What to do next, numbered (owner, 2026-11-16).
+  check("receive: the deposit step in order", numbered(RECEIVE_DEPOSIT_STEPS), [
+    "1. Copy the link and open it in the browser with your Ethereum wallet.",
+    "2. Check the page shows these four words. If they differ, stop.",
+    "3. Deposit there, then come back here and press Check now."]);
+  check("bridge to Ethereum: the address step in order", numbered(SEND_BACK_ADDRESS_STEPS).length, 3);
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");

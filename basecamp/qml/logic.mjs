@@ -1323,6 +1323,7 @@ export const BRIDGE_V5_PROGRAM = "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA"
 /// The bridges whose vault releases by proof: the ones a token can be bridged back from.
 export const BURN_BRIDGE_PROGRAMS = [BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM]
 var BRIDGE_V2_PROGRAM = "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7"
+var BRIDGE_V3_PROGRAM = "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr"
 /// The bridges the wallet must read for the bundled bridge's claims and burns, from get_config's
 /// `bridge_programs`: the list with v5 and v4 added when a saved list lacks them (at most 4: v2,
 /// whose vault is retired, makes room first), else null (nothing to change). Built in here, never
@@ -1353,13 +1354,93 @@ export function receiveHoldLine(config, programs) {
     return ""
 }
 
-/// Whether a code (a receive_request reply) was made for another vault than Receive's: its
-/// `deployment` (a name, or {id, current}) is not RECEIVE_DEPLOYMENT. A fresh code has none: false.
+/// Whether a code (a receive_request reply) was made for another vault than the one new receives
+/// use: its `deployment` ({id, current} from the bridge, which knows the bridge chosen in Settings →
+/// Bridge) is not current; a bare name (an older bridge) is compared with RECEIVE_DEPLOYMENT. A
+/// fresh code has none: false.
 export function codeOlderVault(code) {
     var d = code ? code.deployment : null
     if (d && typeof d === "object")
-        return d.current === false || (!!d.id && d.id !== RECEIVE_DEPLOYMENT)
+        return typeof d.current === "boolean" ? d.current === false : (!!d.id && d.id !== RECEIVE_DEPLOYMENT)
     return typeof d === "string" && d !== "" && d !== RECEIVE_DEPLOYMENT
+}
+
+// ── Settings → Bridge: the bridge new receives and sends use (the LEZ Bridge's bridges()) ──
+
+/// Said once, where a bridge code is pasted.
+export const BRIDGE_CODE_WARNING = "A bridge code decides where your deposits go: take it only from the bridge's own page."
+
+/// A pasted bridge code (or the bridge page's link with it): {code, problem}. `code` is "" until it
+/// looks like one; the bridge reads and checks it, this only spares a call for something else.
+export function bridgeCodeInput(text) {
+    var t = String(text || "").replace(/[\s\u200b\u200c\u200d\ufeff]+/g, "")
+    var at = t.lastIndexOf("#")
+    if (at >= 0)
+        t = t.substr(at + 1)
+    if (t === "")
+        return { code: "", problem: "" }
+    if (t.toLowerCase().indexOf("logosbr1") !== 0)
+        return { code: "", problem: /^logos(wd|rel|dep)1/i.test(t) ? "That is another kind of code. A bridge code starts logosbr1." : "This is not a bridge code. A bridge code starts logosbr1." }
+    return { code: t, problem: "" }
+}
+
+/// One bridge in a line: "bridge v4 · vault 0xC2c6…54Ed · built in" ("added · lez.example.org").
+export function bridgeRowLine(row) {
+    if (!row || typeof row !== "object")
+        return ""
+    var kind = row.kind === "added" ? "added" + (row.endpoint_host ? " · " + row.endpoint_host : "") : "built in"
+    return String(row.label || row.id || "") + " · vault " + String(row.vault_short || "") + " · " + kind
+}
+
+/// The chosen bridge in a sentence, from bridges(): "New receives and sends to Ethereum use
+/// bridge v5 (vault 0xAFbD…eD10, built in)."; "" until read.
+export function bridgeActiveLine(list) {
+    var row = list && list.active_row ? list.active_row : null
+    if (!row)
+        return ""
+    return "New receives and sends to Ethereum use " + String(row.label || row.id) + " (vault " + String(row.vault_short || "") + ", " + (row.kind === "added" ? "added" : "built in") + ")."
+}
+
+/// What a bridge_check (or a refused bridge_add) answer says, for the Add a bridge box: {kind
+/// ("done" | "problem" | "waiting"), line, words, use (whether "Use this bridge" is offered),
+/// checks (each check's line, for Details)}. Never says more than the bridge answered.
+export function bridgeCheckShown(reply) {
+    var r = reply && typeof reply === "object" ? reply : {}
+    var checks = Array.isArray(r.checks) ? r.checks.map(function(c) { return (c.ok ? "✓ " : "✕ ") + String(c.text || "") }) : []
+    if (r.ok !== true) {
+        var e = r.error && typeof r.error === "object" ? r.error : {}
+        var wait = e.code === "unreachable" || e.code === "busy"
+        return { kind: wait ? "waiting" : "problem", line: String(e.message || "The bridge code was refused."), words: "", use: false, checks: checks }
+    }
+    var where = r.builtin ? "This is " + String(r.label || r.id) + ", built into this app."
+        : "Checked on Sepolia and on " + String(r.endpoint_host || "its network") + ": " + String(r.label || "") + ", vault " + String(r.vault_short || "") + "."
+    if (r.current)
+        return { kind: "done", line: where + " New receives already use it.", words: String(r.words_text || ""), use: false, checks: checks }
+    return { kind: "done", line: where, words: String(r.words_text || ""), use: true, checks: checks }
+}
+
+/// The bridges the wallet must read so a chosen bridge's claims and burns aren't refused
+/// (get_config `bridge_programs`, at most 4): `programs` with `program` added, or null when it is
+/// there already, or "full" when no bridge can make room. Room is made from v2 and v3 first (their
+/// vaults can't pay out), then from a bridge not in `keep` (the chosen one and every bridge this
+/// computer has deposits or sends on).
+export function bridgesWith(programs, program, keep) {
+    if (!Array.isArray(programs) || !program)
+        return null
+    if (programs.indexOf(program) >= 0)
+        return null
+    var out = programs.slice()
+    if (out.length < 4) {
+        out.push(program)
+        return out
+    }
+    var kept = Array.isArray(keep) ? keep : []
+    var order = [BRIDGE_V2_PROGRAM, BRIDGE_V3_PROGRAM].filter(function(p) { return out.indexOf(p) >= 0 && kept.indexOf(p) < 0 })
+        .concat(out.filter(function(p) { return p !== BRIDGE_V2_PROGRAM && p !== BRIDGE_V3_PROGRAM && kept.indexOf(p) < 0 }))
+    if (order.length === 0)
+        return "full"
+    out[out.indexOf(order[0])] = program
+    return out
 }
 
 /// The line for a code that can't be shown again (`receive_request` refused): {line, detail}.
@@ -2013,10 +2094,38 @@ export function bridgeSetupState(s) {
 
 // ── What's new: three lines at the top of Settings after an update (change them with each build) ──
 export const WHATS_NEW = [
-    "Receive from Ethereum uses the new vault (v4); a claim that stopped can be tried again.",
-    "Deposits from Ethereum have their own panel on the Wallet card: the minutes left, then Claim.",
-    "Settings → Backup: one encrypted file of your wallets, checked after it's made."
+    "Settings → Bridge: choose the bridge new receives use, or add a new one from its bridge code.",
+    "Receive from Ethereum and Bridge to Ethereum say what to do next, step by step.",
+    "Bridge to Ethereum: Finish on Ethereum hands the last steps to the bridge's service."
 ]
+
+/// Receive from Ethereum, the deposit step: what to do, in order (owner, 2026-11-16: "this page
+/// doesnt tell me what to do next"). The words to check are shown under step 2.
+export const RECEIVE_DEPOSIT_STEPS = [
+    "Copy the link and open it in the browser with your Ethereum wallet.",
+    "Check the page shows these four words. If they differ, stop.",
+    "Deposit there, then come back here and press Check now."
+]
+/// Bridge to Ethereum, the address step: what to do, in order, before the code is pasted.
+export const SEND_BACK_ADDRESS_STEPS = [
+    "Copy the link and open it in the browser with your Ethereum wallet.",
+    "Connect the wallet that should receive. The page shows a code and four words.",
+    "Copy that code, paste it below and press Read the code."
+]
+/// Bridge to Ethereum, once the code is read: what to check, then the one button.
+export const SEND_BACK_CONFIRM_STEPS = [
+    "Check the page shows these four words. If they differ, stop.",
+    "Press Bridge to Ethereum. Your wallet then asks you to approve the burn."
+]
+/// Bridge to Ethereum, releasable by hand: the link, then Release on the page.
+export const SEND_BACK_RELEASE_STEPS = [
+    "Copy the link and open it in the browser with your Ethereum wallet.",
+    "Press Release there. Your Ethereum wallet pays a little Sepolia ETH for gas."
+]
+/// Numbered lines: ["1. …", "2. …"].
+export function numbered(lines) {
+    return (Array.isArray(lines) ? lines : []).map(function(l, i) { return String(i + 1) + ". " + String(l) })
+}
 
 // ── Settings → Backup ──
 
@@ -2035,7 +2144,7 @@ export function compareLine(compare) {
     if (!compare)
         return ""
     if (Array.isArray(compare.words) && compare.words.length > 0)
-        return "Check these four words match the deposit page. If they differ, stop."
+        return "Check the page shows these four words. If they differ, stop."
     return "The page must show a commitment starting " + compare.first + " and ending " + compare.last + "."
 }
 /// The four words, large: "maple · tiger · seven · lamp" (as the module returns them, never made here).

@@ -75,7 +75,7 @@ BRIDGE = r"""
                 }
                 if (answer && answer.__error) return JSON.stringify(JSON.stringify({ success: false, value: null, error: answer.__error }))
                 if (answer === undefined && method !== "config" && method !== "relayed_claims" && method !== "relayed_claim_forget" && method !== "receives") return JSON.stringify({ error: "Method not found" })
-                if (answer === undefined) answer = method === "config" ? { build: { commit: "7dd8a36" }, deployment: { name: "bridge-test-network-v4", bridge_program: "BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf" }, features: ["relayed_claim", "relayed_claim_check_with", "relayed_claim_build", "relayed_claim_submit", "account_hint", "receive", "deposit_code", "public_receive", "receive_status", "receives", "receive_request", "relayed_claim_check_deposit"], notices: { release: (%(mock)s).release || null, not_private: { title: "Not private", text: "A public claim publishes the claim secret and links the Sepolia deposit to this account, for good. A private account keeps them apart (its claim needs a proof)." } } } : method === "relayed_claims" ? [] : method === "receives" ? { receives: [] } : null
+                if (answer === undefined) answer = method === "config" ? { build: { commit: "7dd8a36" }, deployment: { name: "bridge-test-network-v5", bridge_program: "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA" }, features: ["relayed_claim", "relayed_claim_check_with", "relayed_claim_build", "relayed_claim_submit", "account_hint", "receive", "deposit_code", "public_receive", "receive_status", "receives", "receive_request", "relayed_claim_check_deposit", "send_back", "send_back_settle", "bridges"], notices: { release: (%(mock)s).release || null, not_private: { title: "Not private", text: "A public claim publishes the claim secret and links the Sepolia deposit to this account, for good. A private account keeps them apart (its claim needs a proof)." } } } : method === "relayed_claims" ? [] : method === "receives" ? { receives: [] } : null
                 return JSON.stringify(JSON.stringify({ success: true, value: answer, error: null }))
             }
             if (module === "chat_module") {
@@ -111,7 +111,7 @@ BRIDGE = r"""
             }
             // The names network: set_names_network moves it, get_config says it.
             if (method === "set_names_network") { root.mockNet = String(args[0]); method = "get_config"; var wrapNet = true }
-            if (method === "get_config") return (function(c) { return wrapNet ? ok(c) : JSON.stringify(c) })({ features: ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "test_lez_faucet"], bridge_programs: ["JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr", "BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf"], names_network: { id: root.mockNet || "lez-0.3" }, zone: (%(mock)s).zone || { id: "home", name: "Home", channel: "%(home_channel)s", home: true }, names_sequencer: "http://127.0.0.1:3040", registry: %(registry)s, sequencer: (%(mock)s).zone ? "http://127.0.0.1:3041" : "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json", cli: "/Users/you/.local/bin/names", cli_wallet: "/Users/you/.lee/wallet", bridge_key: "%(bridge_key)s", bridge_node: null, module_version: root.neededModule })
+            if (method === "get_config") return (function(c) { return wrapNet ? ok(c) : JSON.stringify(c) })({ features: ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "test_lez_faucet"], bridge_programs: ["JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr", "BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf", "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA"], names_network: { id: root.mockNet || "lez-0.3" }, zone: (%(mock)s).zone || { id: "home", name: "Home", channel: "%(home_channel)s", home: true }, names_sequencer: "http://127.0.0.1:3040", registry: %(registry)s, sequencer: (%(mock)s).zone ? "http://127.0.0.1:3041" : "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json", cli: "/Users/you/.local/bin/names", cli_wallet: "/Users/you/.lee/wallet", bridge_key: "%(bridge_key)s", bridge_node: null, module_version: root.neededModule })
             if (method === "normalize") return String(args[0]).toLowerCase().replace(/\.lez$/, "")
             if (method === "mine") return ok({ names: names.filter(function(entry) { return !(%(mock)s).noNames && entry.owner === "%(alice)s" }).map(function(entry) {
                 return { name: entry.name, display: entry.name + ".lez", owner: entry.owner, expires: null, never: true, lapsed: false } }), pending: ((%(mock)s).pending || []).map(function(p) {
@@ -925,6 +925,44 @@ MOCKS["sendback-settle-closed"] = sb_mock(sb_view("recorded", settle_offer={"ava
 SCENARIOS["sendback-seal-wrong"] = sb_focus(sb_view("proved"), 'root.againAfter(60, function() { root.sbSealInput = "%s"; root.sbSeal() })' % SB_CODE)
 MOCKS["sendback-seal-wrong"] = sb_mock(sb_view("proved"))
 
+# Settings → Bridge (rfp-022 NAMES-SEND-BACK.md §9): the bridge in use with its four words, the
+# others to choose, Add a bridge (checked; refused; built in).
+_BR_FEATURES = ["relayed_claim", "relayed_claim_check_with", "relayed_claim_build", "relayed_claim_submit", "account_hint", "receive", "deposit_code", "public_receive",
+                "receive_status", "receives", "receive_request", "relayed_claim_check_deposit", "send_back", "send_back_settle", "bridges"]
+_BR_V5 = {"id": "bridge-test-network-v5", "label": "bridge v5", "kind": "built in", "current": True, "vault": "0xAFbDF192434E9888Bb23DAE6f2D15Eea6246eD10", "vault_short": "0xAFbD…eD10",
+          "bridge_program": "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA", "words_text": "toss · welcome · unaware · engage", "has_code": True, "items": 1, "removable": False}
+_BR_V4 = dict(_BR_V5, id="bridge-test-network-v4", label="bridge v4", current=False, vault="0xC2c6A059eAB928966B24FA5549d441A3B17B54Ed", vault_short="0xC2c6…54Ed",
+              bridge_program="BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf", words_text="faint · dish · hawk · jealous", items=0)
+_BR_V6 = dict(_BR_V5, id="added-3f2a91c07d55", label="bridge v6", kind="added", current=False, vault="0x6666666666666666666666666666666666666666", vault_short="0x6666…6666",
+              bridge_program="Six6", words_text="maple · tiger · seven · lamp", endpoint_host="lez.example.org", items=0, removable=True)
+def _br_mock(**more):
+    b = {"config": {"build": {"commit": "7dd8a36"}, "deployment": {"name": "bridge-test-network-v5", "bridge_program": _BR_V5["bridge_program"]}, "features": _BR_FEATURES},
+         "bridges": {"active": _BR_V5["id"], "active_row": _BR_V5, "list": [_BR_V5, _BR_V4, _BR_V6], "warning": "A bridge code decides where your deposits go. Take it only from the bridge's own page."}}
+    b.update(more)
+    return {"bridge": b}
+_BR_CODE = "logosbr1" + "q" * 60
+_BR_CHECKS = [{"key": "sepolia", "ok": True, "text": "Sepolia answers as chain 11155111."}, {"key": "vault", "ok": True, "text": "The vault 0x6666…6666 on Sepolia has this cfgId, bridge program, LEZ chain and zone."},
+              {"key": "desk", "ok": True, "text": "The deposit desk 0x6767…6767 sends deposits into this vault."}, {"key": "lez", "ok": True, "text": "On lez.example.org, the bridge's Config names this vault, cfgId, chain, token program and tokens."}]
+SCENARIOS["settings-bridge"] = 'root.section = "settings"; root.loadBridges()'
+MOCKS["settings-bridge"] = _br_mock()
+SCENARIOS["settings-bridge-add"] = 'root.section = "settings"; root.loadBridges(); root.bridgeAddOpen = true'
+MOCKS["settings-bridge-add"] = _br_mock()
+SCENARIOS["settings-bridge-checking"] = 'root.section = "settings"; root.loadBridges(); root.bridgeAddOpen = true; root.againAfter(150, function() { root.bridgeCodeText = "%s"; root.bridgeChecking = true })' % _BR_CODE
+MOCKS["settings-bridge-checking"] = _br_mock()
+SCENARIOS["settings-bridge-checked"] = 'root.section = "settings"; root.loadBridges(); root.bridgeAddOpen = true; root.againAfter(150, function() { root.bridgeCodeText = "%s"; root.checkBridgeCode(); root.againAfter(100, function() { root.bridgeChecksOpen = true }) })' % _BR_CODE
+MOCKS["settings-bridge-checked"] = _br_mock(bridge_check={"ok": True, "id": "added-9a0b1c2d3e4f", "builtin": False, "added": False, "current": False, "label": "bridge v7", "vault": "0x7777777777777777777777777777777777777777",
+    "vault_short": "0x7777…7777", "endpoint_host": "lez.example.org", "words_text": "cream · laugh · load · visual", "checks": _BR_CHECKS, "error": None})
+SCENARIOS["settings-bridge-refused"] = SCENARIOS["settings-bridge-checked"]
+MOCKS["settings-bridge-refused"] = _br_mock(bridge_check={"ok": False, "error": {"code": "mismatch", "message": "The deposit desk 0x6767…6767 sends deposits into 0x9999…9999, not this vault. Refused: nothing was added."},
+    "checks": [_BR_CHECKS[0], _BR_CHECKS[1], {"key": "desk", "ok": False, "text": "The deposit desk 0x6767…6767 sends deposits into 0x9999…9999, not this vault."}]})
+SCENARIOS["settings-bridge-builtin"] = SCENARIOS["settings-bridge-checked"]
+MOCKS["settings-bridge-builtin"] = _br_mock(bridge_check={"ok": True, "id": "bridge-test-network-v4", "builtin": True, "added": False, "current": False, "label": "bridge v4", "vault_short": "0xC2c6…54Ed",
+    "endpoint_host": "lez.nameswallet.app", "words_text": "faint · dish · hawk · jealous", "checks": _BR_CHECKS})
+SCENARIOS["settings-bridge-chosen"] = 'root.section = "settings"; root.loadBridges(); root.againAfter(200, function() { root.useBridge("bridge-test-network-v4") })'
+MOCKS["settings-bridge-chosen"] = _br_mock(bridge_use={"active": _BR_V4["id"], "active_row": dict(_BR_V4, current=True), "list": [dict(_BR_V5, current=False), dict(_BR_V4, current=True), _BR_V6]})
+SCENARIOS["settings-bridge-old"] = 'root.section = "settings"; root.loadBridges()'
+MOCKS["settings-bridge-old"] = {"bridge": {}}
+
 def main():
     qml, out_dir = sys.argv[1], sys.argv[2]
     wanted = sys.argv[3:] or list(SCENARIOS)
@@ -949,7 +987,7 @@ def main():
             "bridge_key": "" if scenario == "get-tokens" else "8e3b0f4a2c71d95e6a0b4c8d2f1e7a3954c6b0d8e2f4a6c8b0d2e4f6a8c0b2d4",
             "home_channel": HOME_CHANNEL,
             "bridge_net": json.dumps(NET04),
-            "scenario": (SCENARIOS[scenario] % dict(filled, zone_request=zone_request(scenario == "approve-zone"))) if "%(zone" in SCENARIOS[scenario] else SCENARIOS[scenario], "out": out, "height": 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "register-net04", "wallet-names-net04", "send-net04", "name", "settings-accounts", "settings-oldcli", "settings-account-new", "settings-network") or scenario.startswith("settings-zones") or scenario.startswith("backup") else 2000 if scenario.startswith("approve-private") or scenario.startswith("approve-relayed") else 1500 if scenario.startswith("card-sendback") or scenario.startswith("sendback-") else 1100 if scenario.startswith("approve-") and "zone" in scenario else 1500 if scenario.startswith("get-tokens") or scenario.startswith("wallet") or scenario.startswith("claim") or scenario.startswith("card-arriving") else 1100 if scenario.startswith("receive-") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1100 if scenario.startswith("inscribe") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
+            "scenario": (SCENARIOS[scenario] % dict(filled, zone_request=zone_request(scenario == "approve-zone"))) if "%(zone" in SCENARIOS[scenario] else SCENARIOS[scenario], "out": out, "height": 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "register-net04", "wallet-names-net04", "send-net04", "name", "settings-accounts", "settings-oldcli", "settings-account-new", "settings-network") or scenario.startswith("settings-zones") or scenario.startswith("settings-bridge") or scenario.startswith("backup") else 2000 if scenario.startswith("approve-private") or scenario.startswith("approve-relayed") else 1500 if scenario.startswith("card-sendback") or scenario.startswith("sendback-") else 1100 if scenario.startswith("approve-") and "zone" in scenario else 1500 if scenario.startswith("get-tokens") or scenario.startswith("wallet") or scenario.startswith("claim") or scenario.startswith("card-arriving") else 1100 if scenario.startswith("receive-") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1100 if scenario.startswith("inscribe") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
         }
         # Beside Main.qml, so its relative imports (logic.mjs) resolve.
         with tempfile.NamedTemporaryFile("w", suffix=".qml", delete=False, dir=os.path.join(HERE, "..", "qml")) as handle:
