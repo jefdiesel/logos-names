@@ -981,7 +981,8 @@ pub(crate) mod tests {
     const V4: &str = "BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf";
     const V3: &str = "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr";
     const V4_TOKENS: &str = "5w6nTkftFFDy8mtdpnKpZVetGQJ2WCKdhmpJsAYArbU7";
-    const V4_WETH: &str = "9tcLmjKixcGZJMnXS381Dhuzd8u9jPvQYF21F3vDhGE2";
+    pub(crate) const V4_WETH: &str = "9tcLmjKixcGZJMnXS381Dhuzd8u9jPvQYF21F3vDhGE2";
+    pub(crate) const V5_WETH: &str = "Dx5tbzn54vKJiMYmjuYV3uuhi4eNwqnzZys7EqT3gj9z";
     const V4_DUSDC: &str = "92PJXZ2E3QPupUFuhc5f4rgsRiAZKv62TpSYfZEgLeru";
     const CENT: u128 = 10_000_000_000_000_000;
 
@@ -995,6 +996,26 @@ pub(crate) mod tests {
         let reply: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         let bytes = crate::bridge_net::config_bytes_in(&reply["result"], &id(V4)).unwrap();
         crate::bridge_net::decode_bridge_config(&bytes).unwrap()
+    }
+
+    /// The v5 Config as our 0.4 holds it (testdata/bridge-net/config-v5.json, read 2026-11-15).
+    pub(crate) fn v5_config() -> crate::bridge_net::BridgeConfig {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/bridge-net/config-v5.json");
+        let reply: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let bytes = crate::bridge_net::config_bytes_in(&reply["result"], &id(crate::bridge_net::BRIDGE_V5_PROGRAM)).unwrap();
+        crate::bridge_net::decode_bridge_config(&bytes).unwrap()
+    }
+
+    /// A stored relayed call burning one cent of `definition`, notified to `bridge`'s Config.
+    pub(crate) fn burn_request(definition: &str, bridge: &str) -> Value {
+        let call = json!({
+            "program": V4_TOKENS, "message": registry::hex(&burn_message(definition, CENT, bridge)), "privacy": BURN_PRIVACY,
+            "accounts": [{ "account": definition, "program": V4_TOKENS }, { "seed": crate::bridge_net::config_seed_hex(), "of": bridge, "program": bridge }],
+            "fee": { "payer": PAYER, "gas_limit": 250000, "tip": "0", "max_fee": "2500000" }
+        })
+        .to_string();
+        let declared = vec![V4_TOKENS.to_owned(), crate::bridge_net::BRIDGE_V4_PROGRAM.to_owned(), crate::bridge_net::BRIDGE_V5_PROGRAM.to_owned(), bridge.to_owned()];
+        relayed_call_request("lez_bridge", ACCOUNT, &call, "", &declared, &own(), &[], 1).unwrap()
     }
 
     fn burn_message(definition: &str, amount: u128, bridge: &str) -> Vec<u8> {

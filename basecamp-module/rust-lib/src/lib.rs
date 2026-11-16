@@ -7928,10 +7928,16 @@ impl Names {
             return Ok(None);
         }
         let program = request["program"].as_str().unwrap_or_default();
-        let (bridge, config) = configs
-            .iter()
-            .find(|(_, config)| registry::account_text(&config.token_program) == program)
-            .ok_or(NOT_A_BURN_BRIDGE)?;
+        // Bridges can share a token program (v4 and v5 do): the burn is checked against the one
+        // allowed bridge it notifies, never just the first with that token program.
+        let same_tokens: Vec<&(AccountId, bridge_net::BridgeConfig)> =
+            configs.iter().filter(|(_, config)| registry::account_text(&config.token_program) == program).collect();
+        let first = *same_tokens.first().ok_or(NOT_A_BURN_BRIDGE)?;
+        let notified = registry::unhex(request["message"].as_str().unwrap_or_default())
+            .ok()
+            .and_then(|message| bridge_net::decode_burn(&message).ok())
+            .map(|burn| burn.notify_program);
+        let (bridge, config) = same_tokens.into_iter().find(|(bridge, _)| notified.as_ref() == Some(bridge)).unwrap_or(first);
         provider_public::burn_check(request, bridge, config).map(Some)
     }
 
@@ -11879,6 +11885,32 @@ mod tests {
         assert_eq!((resigned["transaction"].as_str(), resigned["resigns"].as_u64()), (Some("b0b1"), Some(1)), "{resigned}");
         BURN_CONFIGS.with(|configs| configs.borrow_mut().clear());
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+    }
+
+    /// v4 and v5 share a token program: the gate checks a burn against the bridge it notifies, so
+    /// a v5 burn passes with both Configs read (it was checked against v4's and refused, M2
+    /// 2026-11-16), and one notified to neither is still refused.
+    #[test]
+    fn the_burn_gate_picks_the_bridge_the_burn_notifies() {
+        let v4 = provider_public::tests::v4_config();
+        let v5 = provider_public::tests::v5_config();
+        let configs = vec![
+            (registry::parse_account(bridge_net::BRIDGE_V4_PROGRAM).unwrap(), v4),
+            (registry::parse_account(bridge_net::BRIDGE_V5_PROGRAM).unwrap(), v5),
+        ];
+        let v5_burn = provider_public::tests::burn_request(provider_public::tests::V5_WETH, bridge_net::BRIDGE_V5_PROGRAM);
+        let burn = Names::burn_gate_with(&v5_burn, &configs).unwrap().unwrap();
+        assert_eq!(burn.bridge_label, "bridge v5");
+        let v4_burn = provider_public::tests::burn_request(provider_public::tests::V4_WETH, bridge_net::BRIDGE_V4_PROGRAM);
+        assert_eq!(Names::burn_gate_with(&v4_burn, &configs).unwrap().unwrap().bridge_label, "bridge v4");
+        // Either order of the Configs.
+        let reversed: Vec<_> = configs.iter().rev().cloned().collect();
+        assert_eq!(Names::burn_gate_with(&v5_burn, &reversed).unwrap().unwrap().bridge_label, "bridge v5");
+        // v4's wETH told to v5, and a burn told to v3 (not allowed): refused.
+        let crossed = provider_public::tests::burn_request(provider_public::tests::V4_WETH, bridge_net::BRIDGE_V5_PROGRAM);
+        assert!(Names::burn_gate_with(&crossed, &configs).unwrap_err().contains("isn't a token of bridge v5"));
+        let to_v3 = provider_public::tests::burn_request(provider_public::tests::V5_WETH, bridge_net::BRIDGE_V3_PROGRAM);
+        assert!(Names::burn_gate_with(&to_v3, &configs).unwrap_err().contains("another program"));
     }
 
     /// A call someone else pays for (LEZ 0.4): only to a program the app declared, built by the
