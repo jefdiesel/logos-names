@@ -2115,6 +2115,25 @@ export const SEND_BACK_ADDRESS_STEPS = [
 ]
 /// The other way in, said under the field: no page, the address itself (owner, 2026-11-16: a phone's
 /// Ethereum wallet can't hand the page's code back to Names on a Mac).
+/// What a receiving account shows of its past (the LEZ Bridge's `history` on a pasted or remembered
+/// address: transactions SENT from it and its balance; owner, 2026-11-16): {kind ("" quiet,
+/// "caution", "unknown"), text}. A warning, never a block. It can't see an account that only
+/// received and was emptied by someone else, so it never calls an account new or unused.
+export function historyLine(h) {
+    if (!h || typeof h !== "object")
+        return { kind: "", text: "" }
+    if (h.checked !== true)
+        return { kind: "unknown", text: "Couldn't check this account's history." }
+    var sent = Number(h.sent || 0)
+    var holds = String(h.balance || "0").replace(/^0+/, "") !== ""
+    if (sent === 0 && !holds)
+        return { kind: "", text: "Nothing has been sent from this account and it holds nothing." }
+    var parts = []
+    if (sent > 0) parts.push(sent + (sent === 1 ? " transaction sent" : " transactions sent"))
+    if (holds) parts.push("holds " + String(h.balance_text || "some ETH"))
+    return { kind: "caution", text: "This account has been used before (" + parts.join(" / ") + "). Anyone can see its history. For privacy, add a new account in your wallet and use that one. Or carry on: it's your choice." }
+}
+
 /// An optional hint on the step that asks where to send (owner, 2026-11-16): privacy is the
 /// person's choice, so it suggests and never asks.
 export const SEND_BACK_PRIVATE_HINT = "Want it private? In your Ethereum wallet, add a new account and use that one. It needs no ETH: the bridge pays the gas."

@@ -10925,6 +10925,14 @@ Item {
                                 Text { required property var modelData; Layout.fillWidth: true; text: modelData; textFormat: Text.PlainText; color: root.ink; font.family: root.mono; font.pixelSize: root.px(22); font.weight: Font.DemiBold }
                             }
                             StatusLine { visible: parent.byAddress; kind: ""; text: root.sbCheck !== null && root.sbCheck.address_warning ? String(root.sbCheck.address_warning) : "Withdrawals to a wrong address can't be recovered." }
+                            // Its past (sent from / holds), a warning only: Bridge to Ethereum stays pressable.
+                            Hint {
+                                readonly property var h: Logic.historyLine(root.sbCheck !== null ? root.sbCheck.history : null)
+                                visible: parent.byAddress && h.text !== ""
+                                color: h.kind === "caution" ? root.waitTone : root.ink
+                                font.pixelSize: root.px(15)
+                                text: (h.kind === "caution" ? "!  " : "") + h.text
+                            }
                             NumberLine { text: "1. " + (parent.byAddress ? Logic.SEND_BACK_ADDRESS_CONFIRM : Logic.SEND_BACK_CONFIRM_STEPS[0]) }
                             Text { Layout.fillWidth: true; text: root.sbCheck !== null ? String(root.sbCheck.words_text || "") : ""; color: root.ink; font.family: root.sans; font.pixelSize: root.px(30); font.weight: Font.Bold; wrapMode: Text.WordWrap }
                             Repeater {

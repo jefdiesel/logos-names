@@ -1121,7 +1121,16 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("address: two halves to read back", addressHalves(A), ["0x68B54942A37aE5ceBA34", "D47eFB8d33a293d3975d"]);
   check("address: the route said plainly", SEND_BACK_ADDRESS_ROUTE, "Or paste the Ethereum address to receive it. Copy it from your wallet, don't type it.");
   check("address: refusal title", sendBackCodeTitle("bad_address:no_checksum"), "That address can't be used");
-  const { SEND_BACK_PRIVATE_HINT } = await import("./qml/logic.mjs");
+  const { SEND_BACK_PRIVATE_HINT, historyLine } = await import("./qml/logic.mjs");
+  // The receiving account's past: nothing sent and nothing held; sent from; holding; not read. Never "new".
+  check("history: zero/zero, sent, holds, unknown", [historyLine({ checked: true, sent: 0, balance: "0" }), historyLine({ checked: true, sent: 3, balance: "0" }).text,
+    historyLine({ checked: true, sent: 0, balance: "5000000000000000", balance_text: "0.005 ETH" }).text, historyLine({ checked: false }), historyLine(null).text],
+    [{ kind: "", text: "Nothing has been sent from this account and it holds nothing." },
+     "This account has been used before (3 transactions sent). Anyone can see its history. For privacy, add a new account in your wallet and use that one. Or carry on: it's your choice.",
+     "This account has been used before (holds 0.005 ETH). Anyone can see its history. For privacy, add a new account in your wallet and use that one. Or carry on: it's your choice.",
+     { kind: "unknown", text: "Couldn't check this account's history." }, ""]);
+  check("history: one sent and holding", historyLine({ checked: true, sent: 1, balance: "1", balance_text: "0.000000000000000001 ETH" }).text.indexOf("(1 transaction sent / holds 0.000000000000000001 ETH)") > 0, true);
+  check("history: never says new or unused", [historyLine({ checked: true, sent: 0, balance: "0" }).text, historyLine({ checked: true, sent: 2, balance: "0" }).text].some((t) => /\b(unused)\b|^New account/i.test(t)), false);
   check("the privacy hint suggests, never requires", [SEND_BACK_PRIVATE_HINT.startsWith("Want it private?"), /must|need to|required/i.test(SEND_BACK_PRIVATE_HINT.split(":")[0])], [true, false]);
 }
 
