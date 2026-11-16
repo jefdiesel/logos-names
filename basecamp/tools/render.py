@@ -967,7 +967,7 @@ MOCKS["settings-bridge-old"] = {"bridge": {}}
 # and an address used before, offered first.
 _ADDR = "0x68B54942A37aE5ceBA34D47eFB8d33a293d3975d"
 _ADDR_CHECK = {"ok": True, "recipient": _ADDR, "recipient_short": "0x68B5…975d", "recipient_halves": [_ADDR[:22], _ADDR[22:]], "route": "address",
-               "code": SB_CODE, "address_warning": "Withdrawals to a wrong address can't be recovered.", "words": ["lens", "mushroom", "enjoy", "orient"],
+               "code": SB_CODE, "address_warning": "Withdrawals to a wrong address can't be recovered.", "history": {"checked": True, "sent": 4, "balance": "20000000000000000", "balance_text": "0.02 ETH"}, "words": ["lens", "mushroom", "enjoy", "orient"],
                "words_text": "lens · mushroom · enjoy · orient", "fee_choice": 0, "chain_id": 11155111, "vault": "0xAFbDF192434E9888Bb23DAE6f2D15Eea6246eD10", "warnings": []}
 def _sb_feat(m):
     m = _copy.deepcopy(m)
