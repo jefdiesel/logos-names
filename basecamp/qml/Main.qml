@@ -1761,7 +1761,12 @@ Item {
     onSbFocusChanged: { sbSettleAsking = false; sbMoreOpen = false }
     readonly property bool sbCan: Logic.bridgeCan(bridgeFeatures, "send_back")
     readonly property var sbAmounts: Logic.sendBackAmounts(receiveRegistry, sbAsset)
-    readonly property var sbSources: Logic.sendBackSources(bridgeNetBlocks)
+    /// The bridge new send-backs are planned on (Settings → Bridge), from the LEZ Bridge's config;
+    /// null with an older bridge (then the built-in v4 and v5 balances are offered, as before).
+    readonly property var sbChosen: bridgeChoosable && bridgeConfig !== null && bridgeConfig.deployment && bridgeConfig.deployment.bridge_program
+        ? { program: String(bridgeConfig.deployment.bridge_program), release: String(bridgeConfig.deployment.release || "") } : null
+    readonly property var sbSources: Logic.sendBackSources(bridgeNetBlocks, sbChosen)
+    readonly property string sbElsewhere: Logic.sendBackElsewhere(bridgeNetBlocks, sbChosen)
     /// Picks the account and token Send back starts from (a source row), or none.
     function sbPick(source) {
         sbAccount = source ? source.account : ""
@@ -10843,6 +10848,7 @@ Item {
                                 }
                             }
                         }
+                        Hint { visible: root.sbSources.length > 0 && root.sbElsewhere !== ""; font.pixelSize: root.px(15); text: root.sbElsewhere }
                         // Then the amounts that account holds.
                         Flow {
                             visible: root.sbAsset !== null
@@ -10857,7 +10863,7 @@ Item {
                         RowLayout {
                             visible: root.sbSources.length === 0
                             spacing: 14
-                            StatusLine { Layout.fillWidth: false; kind: root.bridgeNet === null ? "working" : ""; text: root.bridgeNet === null ? "Reading your accounts on the bridge test network…" : "None of your public accounts holds bridged tokens that can go back to Ethereum yet (bridge v4 or v5)." }
+                            StatusLine { Layout.fillWidth: false; kind: root.bridgeNet === null ? "working" : ""; text: root.bridgeNet === null ? "Reading your accounts on the bridge test network…" : root.sbElsewhere !== "" ? root.sbElsewhere : "None of your public accounts holds bridged tokens that can go back to Ethereum yet" + (root.sbChosen !== null ? " on the bridge chosen in Settings → Bridge." : " (bridge v4 or v5).") }
                             Action { visible: root.bridgeNet !== null; label: "Receive from Ethereum"; onPressed: root.openEthReceive() }
                         }
                     }

@@ -1123,6 +1123,18 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("address: refusal title", sendBackCodeTitle("bad_address:no_checksum"), "That address can't be used");
 }
 
+{
+  const { sendBackOffer, sendBackSources, sendBackElsewhere, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM } = await import("./qml/logic.mjs");
+  // Send-backs are planned on the bridge chosen in Settings → Bridge: only its balances are offered
+  // (an added bridge's too); the others are named with where to choose them.
+  const weth = (bridge, base, label) => ({ symbol: "wETH", bridge, base, amount: "0.01", bridgeLabel: label || "" });
+  const v5 = { program: BRIDGE_V5_PROGRAM, release: "proof" }, v6 = { program: "Six6", release: "proof" };
+  check("chosen bridge: its balance only", [sendBackOffer(weth(BRIDGE_V5_PROGRAM, "10000000000000000"), v5), sendBackOffer(weth(BRIDGE_V4_PROGRAM, "10000000000000000"), v5), sendBackOffer(weth("Six6", "10000000000000000"), v6), sendBackOffer(weth("Six6", "10000000000000000"), { program: "Six6", release: "never" })], [true, false, true, false]);
+  const blocks = [{ account: "Public/A", assets: [weth(BRIDGE_V5_PROGRAM, "10000000000000000", "bridge v5")] }];
+  check("chosen bridge: the other bridge's balance is named", [sendBackSources(blocks, { program: BRIDGE_V4_PROGRAM, release: "proof" }).length, sendBackElsewhere(blocks, { program: BRIDGE_V4_PROGRAM, release: "proof" }), sendBackElsewhere(blocks, v5), sendBackElsewhere(blocks, null)],
+    [0, "0.01 wETH on bridge v5: choose bridge v5 in Settings → Bridge to send it back.", "", ""]);
+}
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);
 

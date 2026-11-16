@@ -1071,7 +1071,7 @@ export function bridgeNetRows(read, own) {
                 // "bridge v2" / "bridge v3" from the module (its built-in labels), else the short ID.
                 if (many && t.bridge) name += " · " + (t.bridge_label ? String(t.bridge_label) : "bridge " + keyShown(String(t.bridge)))
                 assets.push({ symbol: String(t.symbol || ""), name: name, amount: decimalShown(t.amount, t.decimals),
-                              bridge: String(t.bridge || ""), base: String(t.amount || "0"), decimals: Number(t.decimals) || 0, definition: String(t.definition || "") })
+                              bridge: String(t.bridge || ""), bridgeLabel: t.bridge_label ? String(t.bridge_label) : "", base: String(t.amount || "0"), decimals: Number(t.decimals) || 0, definition: String(t.definition || "") })
             })
         }
         var id = keyShown(String(a.account || "").replace(/^Public\//, ""))
@@ -2232,8 +2232,14 @@ export const SEND_BACK_FALLBACK = {
 /// Whether a card asset row (bridgeNetRows) can be sent back: wrapped on bridge v4 (the vault
 /// that releases by proof), at least its smallest denomination held. Never offered otherwise, so
 /// no button is dead.
-export function sendBackOffer(asset) {
-    if (!asset || BURN_BRIDGE_PROGRAMS.indexOf(asset.bridge) < 0) return false
+/// `chosen` ({program, release}: the LEZ Bridge's config().deployment, the bridge new send-backs use,
+/// built in or added in Settings → Bridge): only a balance on that bridge is offered, since a
+/// send-back is planned on it; without it (an older bridge) the built-in v4 and v5.
+export function sendBackOffer(asset, chosen) {
+    if (!asset) return false
+    if (chosen && chosen.program) {
+        if (asset.bridge !== chosen.program || chosen.release !== "proof") return false
+    } else if (BURN_BRIDGE_PROGRAMS.indexOf(asset.bridge) < 0) return false
     var known = SEND_BACK_FALLBACK[asset.symbol]
     return !!known && atLeast(String(asset.base || "0"), known.denoms[0])
 }
@@ -2484,16 +2490,37 @@ export function rateLimited(message) {
 /// The accounts Send back can start from: each of the wallet's own public accounts on the card
 /// (bridgeNetRows: not view-only, not watched) with a token on bridge v4 it holds at least one
 /// denomination of. [{key, account, symbol, amount, asset}], in the card's order.
-export function sendBackSources(blocks) {
+export function sendBackSources(blocks, chosen) {
     var out = []
     ;(Array.isArray(blocks) ? blocks : []).forEach(function(b) {
         if (!b || b.viewOnly || b.watched) return
         ;(b.assets || []).forEach(function(a) {
-            if (sendBackOffer(a))
+            if (sendBackOffer(a, chosen))
                 out.push({ key: String(b.account) + "|" + a.symbol, account: String(b.account), symbol: a.symbol, amount: a.amount, asset: a })
         })
     })
     return out
+}
+
+/// Bridged balances that could go back to Ethereum but sit on another bridge than the chosen one,
+/// in one line: "0.01 wETH on bridge v5: choose bridge v5 in Settings → Bridge to send it back."; "".
+export function sendBackElsewhere(blocks, chosen) {
+    if (!chosen || !chosen.program)
+        return ""
+    var seen = []
+    ;(Array.isArray(blocks) ? blocks : []).forEach(function(b) {
+        if (!b || b.viewOnly || b.watched) return
+        ;(b.assets || []).forEach(function(a) {
+            if (a.bridge && a.bridge !== chosen.program && BURN_BRIDGE_PROGRAMS.indexOf(a.bridge) >= 0 && sendBackOffer(a)) {
+                var where = a.bridgeLabel || "bridge " + keyShown(a.bridge)
+                seen.push(a.amount + " " + a.symbol + " on " + where)
+            }
+        })
+    })
+    if (seen.length === 0)
+        return ""
+    var label = seen[0].split(" on ")[1]
+    return seen.join(", ") + (seen.length === 1 ? ": choose " + label + " in Settings → Bridge to send it back." : ": choose its bridge in Settings → Bridge to send it back.")
 }
 
 /// The Check now button: "Checking…" (and not pressable) from the press until the answer, else
