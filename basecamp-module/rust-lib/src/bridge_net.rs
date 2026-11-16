@@ -1161,7 +1161,7 @@ mod tests {
         let url = registry::stub_rpc(|request| match request["method"].as_str().unwrap_or_default() {
             "bridge_faucetInfo" => registry::rpc_ok(json!({ "amount": "10000000", "per_account_hours": 24, "available": true, "reason": null })),
             "bridge_faucet" if request["params"][0] == "ab".repeat(32) => registry::rpc_ok(json!({ "ok": true, "tx": "cd".repeat(32), "block": 11222, "amount": "10000000", "account": "Public/X" })),
-            "bridge_faucet" if request["params"][0] == "ee".repeat(32) => registry::rpc_ok(json!({ "ok": false, "code": "already_today", "reason": "This account had test LEZ today\u{202E}.", "retry": false })),
+            "bridge_faucet" if request["params"][0] == "ee".repeat(32) => registry::rpc_ok(json!({ "ok": false, "code": "already_today", "reason": "This account had test LEZ today.\u{202E}", "retry": false })),
             "bridge_faucet" if request["params"][0] == "42".repeat(32) => (429, "slow down".to_owned()),
             "bridge_faucet" if request["params"][0] == "50".repeat(32) => (503, "".to_owned()),
             _ => (200, json!({ "jsonrpc": "2.0", "id": 1, "error": { "code": -32601, "message": "no such method" } }).to_string()),
