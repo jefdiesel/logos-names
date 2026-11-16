@@ -59,10 +59,10 @@ BRIDGE = r"""
             if (module === "package_manager" && method === "getInstalledPackages") {
                 var me = { name: "names_ui", version: "0.17.0", installDir: "/Users/you/Library/Application Support/Logos/LogosBasecamp/plugins/names_ui" }
                 var pk = (%(mock)s).packages
-                return JSON.stringify(pk ? [me].concat(pk) : [me, { name: "lez_bridge", version: "0.1.0", hashes: { root: "5bfbe2e1dad0760fc014660bd8484b2501d2189239e2e5cf8ce0ca6885acb2f0" } }, { name: "lez_bridge_ui", version: "0.1.0", hashes: { root: "ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9" } }])
+                return JSON.stringify(pk ? [me].concat(pk) : [me, { name: "lez_bridge", version: "0.1.0", hashes: { root: "fb9bc6192d7d842a12cd02cb2c0533304955ec1da54bce1eaaf15d30af02460d" } }, { name: "lez_bridge_ui", version: "0.1.0", hashes: { root: "ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9" } }])
             }
             if (module === "names" && method === "file_sha256")
-                return ok(String(args[0]).indexOf("lez_bridge_ui") >= 0 ? "0d7e317c1fbef3e9c9d4155c10746256af8e9ed2b5a8156413823fbc568ea270" : "76bbb04b1ba840f737f5f61959082bc40c334302d2967d9bf270bfd84f050fd2")
+                return ok(String(args[0]).indexOf("lez_bridge_ui") >= 0 ? "0d7e317c1fbef3e9c9d4155c10746256af8e9ed2b5a8156413823fbc568ea270" : "ac20fe642ef24a69887d0731dc6c47bbd458feee877c568b8125af6779207669")
             if (module === "lez_bridge") {
                 var lb = (%(mock)s).bridge
                 if (!lb) return JSON.stringify({ error: "Method not found" })
@@ -75,7 +75,7 @@ BRIDGE = r"""
                 }
                 if (answer && answer.__error) return JSON.stringify(JSON.stringify({ success: false, value: null, error: answer.__error }))
                 if (answer === undefined && method !== "config" && method !== "relayed_claims" && method !== "relayed_claim_forget" && method !== "receives") return JSON.stringify({ error: "Method not found" })
-                if (answer === undefined) answer = method === "config" ? { build: { commit: "7dd8a36" }, deployment: { name: "bridge-test-network-v5", bridge_program: "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA" }, features: ["relayed_claim", "relayed_claim_check_with", "relayed_claim_build", "relayed_claim_submit", "account_hint", "receive", "deposit_code", "public_receive", "receive_status", "receives", "receive_request", "relayed_claim_check_deposit", "send_back", "send_back_settle", "bridges"], notices: { release: (%(mock)s).release || null, not_private: { title: "Not private", text: "A public claim publishes the claim secret and links the Sepolia deposit to this account, for good. A private account keeps them apart (its claim needs a proof)." } } } : method === "relayed_claims" ? [] : method === "receives" ? { receives: [] } : null
+                if (answer === undefined) answer = method === "config" ? { build: { commit: "373e471" }, deployment: { name: "bridge-test-network-v5", bridge_program: "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA" }, features: ["relayed_claim", "relayed_claim_check_with", "relayed_claim_build", "relayed_claim_submit", "account_hint", "receive", "deposit_code", "public_receive", "receive_status", "receives", "receive_request", "relayed_claim_check_deposit", "send_back", "send_back_settle", "bridges"], notices: { release: (%(mock)s).release || null, not_private: { title: "Not private", text: "A public claim publishes the claim secret and links the Sepolia deposit to this account, for good. A private account keeps them apart (its claim needs a proof)." } } } : method === "relayed_claims" ? [] : method === "receives" ? { receives: [] } : null
                 return JSON.stringify(JSON.stringify({ success: true, value: answer, error: null }))
             }
             if (module === "chat_module") {
@@ -383,7 +383,7 @@ SCENARIOS = {
     'claim-updated': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openClaim(); Qt.callLater(function() { Qt.callLater(function() { root.claimCheckWith = false; root.bridgeInstall = { phase: "updated", line: "Updated. To use it now: Settings (the gear) → Module Inspector → LEZ Bridge → Unload, then Start here." } }) }) }) })',
     'approve-checking-publisher': 'root.appRequests = [{ id: "r7", kind: "connect", app: "lez_bridge", reason: "To claim bridge deposits into your public account", created: Date.now(), expires: Date.now() + 600000, checking: true, checking_what: "who publishes lez_bridge", choices: [{ account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", label: "Names wallet, main public account", granted: false }], publisher: { status: "checking" } }]; root.publisherSince = { r7: Date.now() - 4000 }; root.publisherNow = Date.now()',
     'wallet-starting': 'root.openWallet("home"); root.sayRead(root.moduleNoAnswer)',
-    'setup-card-stuck': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.installedList = [{ name: "names_ui", installDir: "/x" }, { name: "lez_bridge", hashes: { root: "5bfbe2e1dad0760fc014660bd8484b2501d2189239e2e5cf8ce0ca6885acb2f0" } }]; root.bridgeAnswers = false; root.bridgeFails = 2 }) })',
+    'setup-card-stuck': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.installedList = [{ name: "names_ui", installDir: "/x" }, { name: "lez_bridge", hashes: { root: "fb9bc6192d7d842a12cd02cb2c0533304955ec1da54bce1eaaf15d30af02460d" } }]; root.bridgeAnswers = false; root.bridgeFails = 2 }) })',
     'setup-receive-unload': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive(); root.againAfter(300, function() { root.bridgeInstall = { phase: "unload" } }) }) })',
     'setup-claim-stale': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openClaim(); root.againAfter(300, function() { root.bridgeAnswers = false; root.bridgeStale = true; root.claimMissing = true }) }) })',
     'setup-receive-done': 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive(); root.againAfter(300, function() { root.bridgeDoneView = "ethreceive"; root.bridgeDone = "LEZ Bridge updated." }) }) })',
@@ -611,8 +611,8 @@ MOCKS = {
     'setup-receive-install': {'packages': []},
     'card-update-ready': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'a2c6c3117443a92f2a5b2a1a2267175f4f82ed209a3dae8e554461bd09df0d18'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': '788f2f0dde4bd7ae'}}], 'bridge': {'config': {'deployment': {'name': 'bridge-test-network-v3', 'bridge_program': '4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr'}}}},
     'receive-update-ready': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'a2c6c3117443a92f2a5b2a1a2267175f4f82ed209a3dae8e554461bd09df0d18'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': '788f2f0dde4bd7ae'}}], 'bridge': {'config': {'deployment': {'name': 'bridge-test-network-v3', 'bridge_program': '4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr'}}}},
-    'receive-restart-needed': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': '5bfbe2e1dad0760fc014660bd8484b2501d2189239e2e5cf8ce0ca6885acb2f0'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}], 'bridge': {'config': {'deployment': {'name': 'bridge-test-network-v3', 'bridge_program': '4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr'}}}},
-    'card-restart-needed': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': '5bfbe2e1dad0760fc014660bd8484b2501d2189239e2e5cf8ce0ca6885acb2f0'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}], 'bridge': {'config': {'deployment': {'name': 'bridge-test-network-v3', 'bridge_program': '4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr'}}}},
+    'receive-restart-needed': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'fb9bc6192d7d842a12cd02cb2c0533304955ec1da54bce1eaaf15d30af02460d'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}], 'bridge': {'config': {'deployment': {'name': 'bridge-test-network-v3', 'bridge_program': '4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr'}}}},
+    'card-restart-needed': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'fb9bc6192d7d842a12cd02cb2c0533304955ec1da54bce1eaaf15d30af02460d'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}], 'bridge': {'config': {'deployment': {'name': 'bridge-test-network-v3', 'bridge_program': '4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr'}}}},
     'receive-choose': {'bridge': {}},
     'receive-ready-to-make': {'bridge': {}},
     'receive-needs': {'bridge': {'make_public_deposit_request': {'needs': 'secret', 'request': {'request': 'r5', 'state': 'pending'}, 'message': 'Approve "RFP022/deposit" in the Names app…'}, 'wallet_request': {'state': 'pending'}}},
@@ -640,8 +640,8 @@ MOCKS = {
     'claim-installing': {'packages': []},
     'claim-install-slow': {'packages': []},
     'claim-install-failed': {'packages': []},
-    'claim-idle': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': '5bfbe2e1dad0760fc014660bd8484b2501d2189239e2e5cf8ce0ca6885acb2f0'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}]},
-    'claim-starting': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': '5bfbe2e1dad0760fc014660bd8484b2501d2189239e2e5cf8ce0ca6885acb2f0'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}]},
+    'claim-idle': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'fb9bc6192d7d842a12cd02cb2c0533304955ec1da54bce1eaaf15d30af02460d'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}]},
+    'claim-starting': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'fb9bc6192d7d842a12cd02cb2c0533304955ec1da54bce1eaaf15d30af02460d'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': 'ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9'}}]},
     'claim-older': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'a2c6c3117443a92f2a5b2a1a2267175f4f82ed209a3dae8e554461bd09df0d18'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': '788f2f0dde4bd7ae'}}], 'bridge': {}},
     'claim-updated': {'packages': [{'name': 'lez_bridge', 'version': '0.1.0', 'hashes': {'root': 'a2c6c3117443a92f2a5b2a1a2267175f4f82ed209a3dae8e554461bd09df0d18'}}, {'name': 'lez_bridge_ui', 'version': '0.1.0', 'hashes': {'root': '788f2f0dde4bd7ae'}}], 'bridge': {}},
     'approve-checking-publisher': {},
@@ -818,7 +818,7 @@ NET04_V4 = dict(NET04, read=dict(NET04_READ, tokens=_v4_tokens, bridges=[{"progr
     accounts=[{"account": OWNER, "found": True, "native": "0", "tokens": [dict(_v4_tokens[0], amount="0"), dict(_v4_tokens[1], amount="150000000000000000")], "other_tokens": 0},
               {"account": "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", "found": False, "native": "0", "tokens": [dict(_v4_tokens[0], amount="0"), dict(_v4_tokens[1], amount="0")], "other_tokens": 0}]))
 SB_FEATURES = ["relayed_claim", "relayed_claim_check_with", "relayed_claim_build", "relayed_claim_submit", "account_hint", "receive", "deposit_code", "public_receive", "receive_status", "receives", "receive_request", "relayed_claim_check_deposit", "send_back"]
-SB_CONFIG = {"build": {"commit": "7dd8a36"}, "deployment": {"name": "bridge-test-network-v4", "bridge_program": V4}, "features": SB_FEATURES, "notices": {}}
+SB_CONFIG = {"build": {"commit": "373e471"}, "deployment": {"name": "bridge-test-network-v4", "bridge_program": V4}, "features": SB_FEATURES, "notices": {}}
 SB_LINK = {"link": "https://nameswallet.app/bridge/#withdraw", "deployment": "bridge-test-network-v4", "vault": "0xC2c6A059eAB928966B24FA5549d441A3B17B54Ed", "chain_id": 11155111, "available": True, "why": None}
 SB_CODE = "logoswd1qyqqqqqqqqqzr7dm2wcgqnmxn3uq7c2yupx7qfguwl6zcw0d2ej8zhwpsa8x4a5xg9ws3xcqp"
 SB_RECIPIENT = "0xE2C4857976b346F8F9b3a7be714Cd92d0bF68680"
@@ -936,7 +936,7 @@ _BR_V4 = dict(_BR_V5, id="bridge-test-network-v4", label="bridge v4", current=Fa
 _BR_V6 = dict(_BR_V5, id="added-3f2a91c07d55", label="bridge v6", kind="added", current=False, vault="0x6666666666666666666666666666666666666666", vault_short="0x6666…6666",
               bridge_program="Six6", words_text="maple · tiger · seven · lamp", endpoint_host="lez.example.org", items=0, removable=True)
 def _br_mock(**more):
-    b = {"config": {"build": {"commit": "7dd8a36"}, "deployment": {"name": "bridge-test-network-v5", "bridge_program": _BR_V5["bridge_program"]}, "features": _BR_FEATURES},
+    b = {"config": {"build": {"commit": "373e471"}, "deployment": {"name": "bridge-test-network-v5", "bridge_program": _BR_V5["bridge_program"]}, "features": _BR_FEATURES},
          "bridges": {"active": _BR_V5["id"], "active_row": _BR_V5, "list": [_BR_V5, _BR_V4, _BR_V6], "warning": "A bridge code decides where your deposits go. Take it only from the bridge's own page."}}
     b.update(more)
     return {"bridge": b}
