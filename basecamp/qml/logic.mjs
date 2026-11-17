@@ -2115,6 +2115,18 @@ export const SEND_BACK_ADDRESS_STEPS = [
 ]
 /// The other way in, said under the field: no page, the address itself (owner, 2026-11-16: a phone's
 /// Ethereum wallet can't hand the page's code back to Names on a Mac).
+/// Wei (decimal text) as ETH with at most 4 decimals, rounded down, trailing zeros dropped:
+/// "4885795182198553171" → "4.8857"; under 0.0001 but not zero → "less than 0.0001".
+export function ethAtMost4(wei) {
+    var w = String(wei || "0").replace(/^0+/, "")
+    if (w === "") return "0"
+    var padded = w.length <= 18 ? "0".repeat(19 - w.length) + w : w
+    var whole = padded.slice(0, padded.length - 18)
+    var frac = padded.slice(padded.length - 18, padded.length - 14).replace(/0+$/, "")
+    if (whole.replace(/^0+/, "") === "" && frac === "") return "less than 0.0001"
+    return grouped(whole.replace(/^0+(?=\d)/, "")) + (frac !== "" ? "." + frac : "")
+}
+
 /// What a receiving account shows of its past (the LEZ Bridge's `history` on a pasted or remembered
 /// address: transactions SENT from it and its balance; owner, 2026-11-16): {kind ("" quiet,
 /// "caution", "unknown"), text}. A warning, never a block. It can't see an account that only
@@ -2130,7 +2142,7 @@ export function historyLine(h) {
         return { kind: "", text: "Nothing has been sent from this account and it holds nothing." }
     var parts = []
     if (sent > 0) parts.push(sent + (sent === 1 ? " transaction sent" : " transactions sent"))
-    if (holds) parts.push("holds " + String(h.balance_text || "some ETH"))
+    if (holds) parts.push("holds " + ethAtMost4(String(h.balance || "0")) + " ETH")
     return { kind: "caution", text: "This account has been used before (" + parts.join(" / ") + "). Anyone can see its history. For privacy, add a new account in your wallet and use that one. Or carry on: it's your choice." }
 }
 

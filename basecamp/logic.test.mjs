@@ -1129,7 +1129,9 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
      "This account has been used before (3 transactions sent). Anyone can see its history. For privacy, add a new account in your wallet and use that one. Or carry on: it's your choice.",
      "This account has been used before (holds 0.005 ETH). Anyone can see its history. For privacy, add a new account in your wallet and use that one. Or carry on: it's your choice.",
      { kind: "unknown", text: "Couldn't check this account's history." }, ""]);
-  check("history: one sent and holding", historyLine({ checked: true, sent: 1, balance: "1", balance_text: "0.000000000000000001 ETH" }).text.indexOf("(1 transaction sent / holds 0.000000000000000001 ETH)") > 0, true);
+  check("history: one sent and holding a speck", historyLine({ checked: true, sent: 1, balance: "1" }).text.indexOf("(1 transaction sent / holds less than 0.0001 ETH)") > 0, true);
+  const { ethAtMost4 } = await import("./qml/logic.mjs");
+  check("history: at most 4 decimals", ["4885795182198553171", "5000000000000000", "1000000000000000000", "1234567000000000000000", "0", "99999999999999"].map(ethAtMost4), ["4.8857", "0.005", "1", "1,234.567", "0", "less than 0.0001"]);
   check("history: never says new or unused", [historyLine({ checked: true, sent: 0, balance: "0" }).text, historyLine({ checked: true, sent: 2, balance: "0" }).text].some((t) => /\b(unused)\b|^New account/i.test(t)), false);
   check("the privacy hint suggests, never requires", [SEND_BACK_PRIVATE_HINT.startsWith("Want it private?"), /must|need to|required/i.test(SEND_BACK_PRIVATE_HINT.split(":")[0])], [true, false]);
 }
