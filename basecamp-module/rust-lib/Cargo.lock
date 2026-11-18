@@ -506,6 +506,7 @@ dependencies = [
  "bs58",
  "ed25519-dalek",
  "getrandom",
+ "libc",
  "logos-rust-sdk",
  "png",
  "serde_json",

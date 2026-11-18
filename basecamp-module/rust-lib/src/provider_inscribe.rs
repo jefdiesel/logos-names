@@ -231,6 +231,34 @@ mod tests {
         assert!(parsed(&names.approve_inscription(id, FROM.into()))["error"].as_str().unwrap().contains("done already"));
     }
 
+    /// The 2026-11-18 hang, (1): blockchain_module not loaded at all (not just its node stopped).
+    /// The sheet's poll answers at once every time, the request listed with the node's
+    /// "isn't running" line, and nothing is sent to the node; before, each poll waited 15 s.
+    #[test]
+    fn waiting_requests_are_listed_at_once_while_the_node_module_is_not_loaded() {
+        solo_node("x");
+        let mut names = Names::default();
+        as_app("testimonial_ui");
+        let id = parsed(&names.propose_inscription("still waiting".into()))["value"]["request"].as_str().unwrap().to_owned();
+        as_app("host");
+        crate::peer::stand_in::set_down(crate::chain::MODULE, true);
+        crate::node::ASKED.with(|asked| asked.borrow_mut().clear());
+        let started = std::time::Instant::now();
+        for _ in 0..20 {
+            let pending = parsed(&names.pending_inscriptions());
+            assert_eq!(pending["success"], true, "{pending}");
+            let shown = &pending["value"][0];
+            assert_eq!(shown["id"].as_str(), Some(id.as_str()), "{pending}");
+            assert_eq!(shown["choices"], json!([]));
+            assert_eq!(shown["node"], crate::node::NOT_LOADED);
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "{:?}", started.elapsed());
+        assert!(crate::node::ASKED.with(|asked| asked.borrow().is_empty()), "nothing was sent");
+        // Turned down as ever, the node still not loaded.
+        assert_eq!(parsed(&names.reject_request(id))["value"]["state"], "rejected");
+        crate::peer::stand_in::set_down(crate::chain::MODULE, false);
+    }
+
     /// pending-inscriptions-fails-node-stopped: with the node stopped, pending_inscriptions
     /// failed outright, so the sheet couldn't list (or reject) a waiting request.
     #[test]

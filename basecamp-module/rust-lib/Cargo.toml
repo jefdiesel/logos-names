@@ -27,6 +27,9 @@ bs58 = "0.5"
 # A testimonial inscribed on the Logos Blockchain is signed with Ed25519 (chain_inscribe.rs).
 ed25519-dalek = "=2.2.0"
 getrandom = "0.2"
+# The SIGTERM backstop (sigterm.rs) and the main-thread check (peer.rs). Already in the lock
+# through getrandom, so nothing new is fetched.
+libc = "0.2"
 # Decodes a name's avatar for apps that may not load `data:` URLs (avatar.rs).
 png = "0.18"
 serde_json = "1"

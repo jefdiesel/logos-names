@@ -10,6 +10,14 @@ may still be working on it. Look before trying again."), because the call may ha
 Polls and reads ask again after either one (`waitAgain`). Actions show the line; a busy action is
 safe to press again.
 
+Since `names-hang-fix` (2026-11-18), a module that isn't loaded is never waited for, so it can't
+make the wallet busy (`basecamp-module/rust-lib/src/peer.rs`). The module finds out from its
+endpoint, which takes microseconds and needs no client. A chain method then answers at once with
+`code: "module_not_loaded"` and "…isn't running…": the node-off line, with Open the Blockchain
+app. A node that is loaded but gave no answer is not asked again for 30 s. The Program Registry
+and package_manager are asked without waiting. Busy is left only for a call that arrives while
+another one waits on a module that is loaded (a send being proven, say).
+
 The table lists every site in `basecamp/qml/Main.qml` that calls the names module, with what it
 does on busy. It was generated from the source at the commit that adds this file.
 

@@ -44,6 +44,7 @@ mod changes;
 mod cli;
 mod deposit;
 mod page_view;
+mod peer;
 mod app_secret;
 mod provider;
 mod provider_inscribe;
@@ -53,6 +54,7 @@ mod spell;
 mod text;
 mod registry;
 mod shortlist;
+mod sigterm;
 mod wallet;
 mod zones;
 use text::is_http_url;
@@ -1318,6 +1320,12 @@ struct Names {
     /// What each LEZ 0.4 tool said it can do (`cli::prover_status`), by path and modification
     /// time; null for one too old to say.
     tool_status: std::sync::Mutex<HashMap<std::path::PathBuf, (std::time::SystemTime, Value)>>,
+    /// The LEZ 0.4 reads behind a relayed call's sheet (each bridge's token program, the burn
+    /// bridges' Configs), read on their own thread for the sheet that `pending_requests` shows on
+    /// every poll: those are network reads (8 s each at worst), and they ran on the module's
+    /// one thread, where the 2026-11-18 sample of the stuck host found it. Approving still reads
+    /// them afresh.
+    sheet_reads: SheetReads,
     /// When LEZ last answered about each followed bridge's receipt (seconds), so each is
     /// asked on its schedule (`activity::receipt_due`), not on every balance read.
     receipt_asks: std::sync::Mutex<std::collections::BTreeMap<AccountId, u64>>,
@@ -1355,6 +1363,76 @@ fn config_dir() -> Option<std::path::PathBuf> {
 fn config_dir() -> Option<std::path::PathBuf> {
     let thread = format!("{:?}", std::thread::current().id()).chars().filter(char::is_ascii_digit).collect::<String>();
     Some(std::env::temp_dir().join(format!("logos-names-test-config-{}-{thread}", std::process::id())))
+}
+
+/// How often a sheet's background LEZ 0.4 reads are made again (`SheetReads`).
+const SHEET_READ_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A sheet shown before its first background read is back: refused, and says so.
+const STILL_READING: &str = "the wallet is still reading which program holds your bridged tokens on LEZ 0.4, so it signs nothing yet; this updates in a moment";
+
+/// The background reads behind relayed-call sheets (`Names::sheet_reads`).
+#[derive(Default)]
+struct SheetReads {
+    tokens: Background<Vec<String>>,
+    burns: Background<Vec<(AccountId, bridge_net::BridgeConfig)>>,
+}
+
+/// One value read on a thread of its own and kept: `get` answers at once with the last one
+/// (None before the first is back) and starts a newer read when the last is `every` old. A read
+/// for another `key` (another network, other bridges) starts over. In unit tests the read is
+/// made on the spot, every time, unless the test asks for a thread (`threaded`).
+struct Background<T> {
+    slot: std::sync::Arc<std::sync::Mutex<BackgroundSlot<T>>>,
+    inline: bool,
+}
+
+struct BackgroundSlot<T> {
+    key: String,
+    value: Option<Result<T, String>>,
+    read_at: Option<std::time::Instant>,
+    updating: bool,
+}
+
+impl<T> Default for Background<T> {
+    fn default() -> Self {
+        Background {
+            slot: std::sync::Arc::new(std::sync::Mutex::new(BackgroundSlot { key: String::new(), value: None, read_at: None, updating: false })),
+            inline: cfg!(test),
+        }
+    }
+}
+
+impl<T: Clone + Send + 'static> Background<T> {
+    #[cfg(test)]
+    fn threaded() -> Self {
+        Background { inline: false, ..Background::default() }
+    }
+
+    fn get(&self, key: &str, every: std::time::Duration, read: impl FnOnce() -> Result<T, String> + Send + 'static) -> Option<Result<T, String>> {
+        if self.inline {
+            return Some(read());
+        }
+        let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.key != key {
+            *slot = BackgroundSlot { key: key.to_owned(), value: None, read_at: None, updating: false };
+        }
+        if !slot.updating && slot.read_at.is_none_or(|at| at.elapsed() >= every) {
+            slot.updating = true;
+            let shared = std::sync::Arc::clone(&self.slot);
+            let key = key.to_owned();
+            std::thread::spawn(move || {
+                let value = read();
+                let mut slot = shared.lock().unwrap_or_else(|e| e.into_inner());
+                if slot.key == key {
+                    slot.value = Some(value);
+                    slot.read_at = Some(std::time::Instant::now());
+                    slot.updating = false;
+                }
+            });
+        }
+        slot.value.clone()
+    }
 }
 
 /// The installer `cli_install` runs: the official one, built in.
@@ -1421,6 +1499,7 @@ impl Default for Names {
             bridge_programs: Vec::new(),
             cli_lines: Default::default(),
             tool_status: Default::default(),
+            sheet_reads: SheetReads::default(),
         };
         // Files saved by versions before 0.10 were readable by every account on the
         // machine; this closes them up once.
@@ -1727,6 +1806,11 @@ fn reply_coded(outcome: Result<Value, (String, &str)>) -> String {
 fn reply(outcome: Result<Value, String>) -> String {
     match outcome {
         Ok(value) => json!({ "success": true, "value": value, "error": null }),
+        // A module names needs isn't loaded: typed, so an app can tell it from any other
+        // failure without reading the words (`code`, and which module).
+        Err(error) if error.contains(node::NOT_LOADED) => {
+            json!({ "success": false, "value": null, "error": error, "code": "module_not_loaded", "module": chain::MODULE })
+        }
         Err(error) => json!({ "success": false, "value": null, "error": error }),
     }
     .to_string()
@@ -6594,7 +6678,7 @@ impl NamesModule for Names {
                 view["sheet"] = sheet;
             }
             if view["kind"] == provider_public::RELAYED_CALL {
-                let sheet = self.relayed_sheet(view);
+                let sheet = self.relayed_sheet(view, false);
                 view["sheet"] = sheet;
                 view["choices"] = json!([{ "account": view["account"], "account_kind": "public", "pays": false, "label": "the account the app asked for", "granted": true }]);
                 if let Some(fields) = view.as_object_mut() {
@@ -7680,7 +7764,7 @@ impl Names {
             if !self.store().private.declared_of(&app).contains(&program) {
                 return Err("this app no longer has that program declared; reject it".to_owned());
             }
-            let sheet = self.relayed_sheet(request);
+            let sheet = self.relayed_sheet(request, true);
             if sheet["refused"] == true {
                 return Err("the wallet refuses this call (see why on the sheet); reject it".to_owned());
             }
@@ -7872,8 +7956,13 @@ impl Names {
     /// the bridge reads fails, nothing is signed: the error is returned and the caller refuses
     /// (fail closed).
     fn root_only(&mut self) -> Result<Vec<(String, &'static str)>, String> {
-        let mut list: Vec<(String, &'static str)> = Vec::new();
         let bridged = self.bridge_tokens_programs().map_err(|why| format!("the wallet couldn't check {why} just now, so it signs nothing; try again"))?;
+        Ok(self.root_only_from(bridged))
+    }
+
+    /// `root_only` from the bridge token programs `bridged`.
+    fn root_only_from(&mut self, bridged: Vec<String>) -> Vec<(String, &'static str)> {
+        let mut list: Vec<(String, &'static str)> = Vec::new();
         let sources = self.known_token_programs();
         for id in bridged
             .into_iter()
@@ -7887,30 +7976,65 @@ impl Names {
                 list.push((id, "bridged_tokens"));
             }
         }
-        Ok(list)
+        list
     }
 
     /// The Configs of the bridges a relayed burn may go to (`bridge_net::BURN_BRIDGES`, built in),
     /// read now; a bridge with no Config on this chain is left out. Any failed read is an error:
     /// the caller signs nothing (fail closed).
     fn burn_configs(&self) -> Result<Vec<(AccountId, bridge_net::BridgeConfig)>, String> {
+        (self.burn_configs_reader())()
+    }
+
+    /// The LEZ 0.4 reads of `burn_configs`, as a job that owns what it needs (see
+    /// `bridge_tokens_reader`).
+    fn burn_configs_reader(&self) -> impl FnOnce() -> Result<Vec<(AccountId, bridge_net::BridgeConfig)>, String> + Send + 'static {
         #[cfg(not(test))]
         let url = std::env::var("LOGOS_NAMES_BRIDGE_RPC").ok().filter(|url| !url.trim().is_empty()).unwrap_or_else(|| self.lez04_rpc());
-        let mut out = Vec::new();
-        for text in bridge_net::BURN_BRIDGES {
-            let program = registry::parse_account(text)?;
-            #[cfg(not(test))]
-            let read = bridge_net::config_of(&url, &program);
-            // Tests set the Config the chain would give (`BURN_CONFIGS`); unset, none.
-            #[cfg(test)]
-            let read = tests::BURN_CONFIGS.with(|configs| configs.borrow().get(text).cloned()).unwrap_or(Ok(None));
-            match read {
-                Ok(Some(config)) => out.push((program, config)),
-                Ok(None) => {}
-                Err(why) => return Err(format!("the wallet couldn't read the Config of {} just now ({why}), so it signs no burn; try again", bridge_net::bridge_label(text).unwrap_or(text))),
+        // Tests set the Config the chain would give (`BURN_CONFIGS`); unset, none.
+        #[cfg(test)]
+        let said: HashMap<String, Result<Option<bridge_net::BridgeConfig>, String>> = tests::BURN_CONFIGS.with(|configs| configs.borrow().clone());
+        move || {
+            let mut out = Vec::new();
+            for text in bridge_net::BURN_BRIDGES {
+                let program = registry::parse_account(text)?;
+                #[cfg(not(test))]
+                let read = bridge_net::config_of(&url, &program);
+                #[cfg(test)]
+                let read = said.get(text).cloned().unwrap_or(Ok(None));
+                match read {
+                    Ok(Some(config)) => out.push((program, config)),
+                    Ok(None) => {}
+                    Err(why) => return Err(format!("the wallet couldn't read the Config of {} just now ({why}), so it signs no burn; try again", bridge_net::bridge_label(text).unwrap_or(text))),
+                }
             }
+            Ok(out)
         }
-        Ok(out)
+    }
+
+    /// `root_only` for a sheet a poll shows: the bridge reads come from the last background read
+    /// (`SheetReads`), never made here. Until one is back: an error (the sheet is refused).
+    fn root_only_kept(&mut self) -> Result<Vec<(String, &'static str)>, String> {
+        let key = format!("{}|{:?}", self.lez04_rpc(), self.bridge_programs_now());
+        let read = self.sheet_reads.tokens.get(&key, SHEET_READ_EVERY, self.bridge_tokens_reader());
+        let read_now = match read {
+            None => return Err(STILL_READING.to_owned()),
+            Some(read) => read.map_err(|why| format!("the wallet couldn't check {why} just now, so it signs nothing; try again"))?,
+        };
+        let bridged = self.bridge_tokens_with(read_now).map_err(|why| format!("the wallet couldn't check {why} just now, so it signs nothing; try again"))?;
+        Ok(self.root_only_from(bridged))
+    }
+
+    /// `burn_gate` for a sheet a poll shows, from the last background read of the Configs.
+    fn burn_gate_kept(&self, request: &Value) -> Result<Option<provider_public::BridgeBurn>, String> {
+        if request["privacy"] != provider_public::BURN_PRIVACY {
+            return Ok(None);
+        }
+        let key = self.lez04_rpc();
+        match self.sheet_reads.burns.get(&key, SHEET_READ_EVERY, self.burn_configs_reader()) {
+            None => Err(STILL_READING.to_owned()),
+            Some(configs) => Self::burn_gate_with(request, &configs?),
+        }
     }
 
     /// A relayed call that says it is a burn to a bridge (privacy `bridge_public_burn`), checked
@@ -7979,29 +8103,48 @@ impl Names {
     /// with no Config on that chain adds nothing new. An error, naming the bridge, when any one
     /// Config can't be read: the caller signs nothing.
     fn bridge_tokens_programs(&self) -> Result<Vec<String>, String> {
+        let read_now = (self.bridge_tokens_reader())()?;
+        self.bridge_tokens_with(read_now)
+    }
+
+    /// The LEZ 0.4 reads of `bridge_tokens_programs`, as a job that owns what it needs, so it
+    /// can run now or on a thread of its own (`root_only_kept`).
+    fn bridge_tokens_reader(&self) -> impl FnOnce() -> Result<Vec<String>, String> + Send + 'static {
         #[cfg(not(test))]
         let url = std::env::var("LOGOS_NAMES_BRIDGE_RPC").ok().filter(|url| !url.trim().is_empty()).unwrap_or_else(|| self.lez04_rpc());
-        #[cfg(not(test))]
-        let read = |program: &AccountId| bridge_net::token_program_of(&url, program);
         // Tests set what the chain would say for each bridge (`BRIDGE_CONFIGS`); unset, no Config.
+        // Taken now, on the test's thread, so the job can run anywhere.
         #[cfg(test)]
-        let read = |program: &AccountId| -> Result<Option<AccountId>, String> {
-            let answer = tests::BRIDGE_CONFIGS.with(|configs| configs.borrow().get(&registry::account_text(program)).cloned()).unwrap_or(Ok(None))?;
-            answer.map(|id| registry::parse_account(&id)).transpose()
-        };
-        let mut read_now: Vec<String> = Vec::new();
-        for program in self.bridge_programs_now() {
-            match read(&program) {
-                // A Config naming a bridge itself as its token program would make every claim to
-                // that bridge refused for good once kept: refused now, and not kept.
-                Ok(Some(token_program)) if self.bridge_programs_now().contains(&token_program) => {
-                    return Err(format!("the token program of bridge {} (its Config names a bridge program as its token program)", registry::account_text(&program)));
+        let said: HashMap<String, Result<Option<String>, String>> = tests::BRIDGE_CONFIGS.with(|configs| configs.borrow().clone());
+        let programs = self.bridge_programs_now();
+        move || {
+            #[cfg(not(test))]
+            let read = |program: &AccountId| bridge_net::token_program_of(&url, program);
+            #[cfg(test)]
+            let read = |program: &AccountId| -> Result<Option<AccountId>, String> {
+                let answer = said.get(&registry::account_text(program)).cloned().unwrap_or(Ok(None))?;
+                answer.map(|id| registry::parse_account(&id)).transpose()
+            };
+            let mut read_now: Vec<String> = Vec::new();
+            for program in &programs {
+                match read(program) {
+                    // A Config naming a bridge itself as its token program would make every claim
+                    // to that bridge refused for good once kept: refused now, and not kept.
+                    Ok(Some(token_program)) if programs.contains(&token_program) => {
+                        return Err(format!("the token program of bridge {} (its Config names a bridge program as its token program)", registry::account_text(program)));
+                    }
+                    Ok(Some(token_program)) => read_now.push(registry::account_text(&token_program)),
+                    Ok(None) => {}
+                    Err(why) => return Err(format!("the token program of bridge {} ({why})", registry::account_text(program))),
                 }
-                Ok(Some(token_program)) => read_now.push(registry::account_text(&token_program)),
-                Ok(None) => {}
-                Err(why) => return Err(format!("the token program of bridge {} ({why})", registry::account_text(&program))),
             }
+            Ok(read_now)
         }
+    }
+
+    /// `bridge_tokens_programs` from the reads `read_now`: kept for good, and added to the ones
+    /// known without a read.
+    fn bridge_tokens_with(&self, read_now: Vec<String>) -> Result<Vec<String>, String> {
         if let Some(dir) = config_dir() {
             bridge_net::keep_token_programs(&dir, &read_now);
         }
@@ -8032,13 +8175,21 @@ impl Names {
 
     /// The approval sheet of a relayed call (`provider_public::sheet`), with the program's
     /// Program Registry label and the network as the site names it.
-    fn relayed_sheet(&mut self, request: &Value) -> Value {
+    /// `fresh`: the LEZ 0.4 reads are made now (approving). Otherwise (the sheet a poll shows)
+    /// they come from the last background read and never wait: until the first one is back the
+    /// sheet is refused, saying it is still reading (fail closed, as for a failed read).
+    fn relayed_sheet(&mut self, request: &Value, fresh: bool) -> Value {
         let label = request["program"].as_str().and_then(program_registry::label);
         // The network the call was asked for, not the one in use now.
         let shown = request["network"].as_str().and_then(Net::parse).unwrap_or(self.net).shown();
         let network = format!("{} · {}", shown["version"].as_str().unwrap_or_default(), shown["name"].as_str().unwrap_or_default());
         let own = self.own_programs();
-        match self.root_only().and_then(|root_only| self.burn_gate(request).map(|burn| (root_only, burn))) {
+        let checked = if fresh {
+            self.root_only().and_then(|root_only| self.burn_gate(request).map(|burn| (root_only, burn)))
+        } else {
+            self.root_only_kept().and_then(|root_only| self.burn_gate_kept(request).map(|burn| (root_only, burn)))
+        };
+        match checked {
             Ok((root_only, burn)) => {
                 provider_public::sheet(request, &request["report"], label.as_ref(), &network, &own, &Self::root_only_for(root_only, burn.as_ref()), burn.as_ref())
             }
@@ -8261,11 +8412,13 @@ impl Looked {
 
 #[cfg(not(test))]
 mod program_registry {
-    use super::{json, Looked, Value};
-    use logos_rust_sdk::LogosModuleSDK;
+    use super::{json, peer, Looked, Value};
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
     use std::time::Duration;
+
+    const MODULE: &str = "program_registry";
 
     /// How long one ask may wait for the module (the host may wait longer to learn it's absent).
     const LOOK: Duration = Duration::from_secs(3);
@@ -8283,24 +8436,35 @@ mod program_registry {
     /// When the module was last found absent, by kind: a slow label never hides publisher checks.
     static ABSENT_AT: Mutex<Option<HashMap<&'static str, u64>>> = Mutex::new(None);
 
-    /// The kept answer for `key`, never waiting: when none is kept, an ask starts on its own thread
-    /// (one per key at a time) and this answers Checking until it is back. A call never blocks on
-    /// the registry. The ask's thread holds no lock across the call; the host carries the call to
-    /// its main thread, which serves it when it is free or inside a names call's nested event
-    /// loop, and the answer is only stored for a later call to read.
+    /// What is kept for `slot`, while it is fresh: Known, or Missing for a failed ask.
+    fn kept(slot: &str, now: u64) -> Option<Looked> {
+        let known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
+        let looked = match known.as_ref()?.get(slot)? {
+            (Some(value), at) if now.saturating_sub(*at) < KEEP_S => Some(Looked::Known(value.clone())),
+            (None, at) if now.saturating_sub(*at) < FAILED_S => Some(Looked::Missing),
+            _ => None,
+        };
+        looked
+    }
+
+    /// The kept answer for `key`, never waiting: when none is kept, an ask is sent (one per key
+    /// at a time) and this answers Checking until it is back. A call never blocks on the
+    /// registry: the ask is asynchronous (`peer::ask`), sent from the module's call thread and
+    /// answered later by the host's event loop, and the answer is only stored for a later call
+    /// to read. No thread is spawned for it: a thread that calls another module waits on the
+    /// host's main thread (peer.rs), and four such threads were the 2026-11-18 hang. No lock is
+    /// held across the ask, whose answer may come back at once (not loaded) or inside another
+    /// call's wait.
     fn kept_or_ask(kind: &'static str, key: &str, method: &'static str, wait: Duration) -> Looked {
         let now = super::now();
         let slot = format!("{kind}:{key}");
-        if let Some((value, at)) = KNOWN.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).get(&slot) {
-            match value {
-                Some(value) if now.saturating_sub(*at) < KEEP_S => return Looked::Known(value.clone()),
-                None if now.saturating_sub(*at) < FAILED_S => return Looked::Missing,
-                _ => {}
-            }
+        if let Some(looked) = kept(&slot, now) {
+            return looked;
         }
-        // Not installed at all (package_manager's own list says so): said at once, rather than
-        // after the host's wait for a module that will never come (about 15 s).
-        if installed() == Some(false) {
+        // Not installed at all (package_manager's own list says so), or installed but not
+        // loaded (nothing listens at its endpoint): said at once, rather than after the
+        // host's wait for a module that isn't there (about 15 s).
+        if installed() == Some(false) || peer::presence(MODULE) == peer::Presence::Down {
             return Looked::Missing;
         }
         let absent_at = ABSENT_AT.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).get(kind).copied().unwrap_or(0);
@@ -8315,36 +8479,44 @@ mod program_registry {
             }
             asking.insert(slot.clone(), now);
         }
-        let key = key.to_owned();
-        std::thread::spawn(move || {
-            let answer = LogosModuleSDK::new().plugin("program_registry").call_json_with_timeout(method, &json!([key]), wait);
-            let now = super::now();
-            let value = match answer {
-                Ok(answer) => {
-                    // It answers `{success, value, error}`, perhaps as JSON text.
-                    let answer = match answer.as_str().map(serde_json::from_str::<Value>) {
-                        Some(Ok(parsed)) => parsed,
-                        _ => answer,
-                    };
-                    (answer["success"] == true).then(|| answer["value"].clone()).filter(Value::is_object)
-                }
-                Err(_) => {
-                    ABSENT_AT.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(kind, now);
-                    None
-                }
-            };
-            KNOWN.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(slot.clone(), (value, now));
-            ASKING.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).remove(&slot);
-        });
-        Looked::Checking
+        let stored = slot.clone();
+        peer::ask(
+            MODULE,
+            method,
+            &json!([key]),
+            wait,
+            Box::new(move |answer| {
+                let now = super::now();
+                let value = match answer {
+                    Ok(answer) => {
+                        // It answers `{success, value, error}`, perhaps as JSON text.
+                        let answer = match answer.as_str().map(serde_json::from_str::<Value>) {
+                            Some(Ok(parsed)) => parsed,
+                            _ => answer,
+                        };
+                        (answer["success"] == true).then(|| answer["value"].clone()).filter(Value::is_object)
+                    }
+                    Err(_) => {
+                        ABSENT_AT.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(kind, now);
+                        None
+                    }
+                };
+                KNOWN.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(stored.clone(), (value, now));
+                ASKING.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).remove(&stored);
+            }),
+        );
+        // An ask refused at once (not loaded, held) was answered inside `ask`.
+        kept(&slot, now).unwrap_or(Looked::Checking)
     }
 
     /// Whether the program_registry package is installed, from package_manager's list of
     /// installed modules (it reads its folders, at once): `Some(false)` only when that list was
     /// read and holds this names module but not program_registry; None while unknown (asked
-    /// as before). Kept a minute; asked again on its own thread, never waited for.
+    /// as before). Kept a minute; asked again without waiting.
     static INSTALLED: Mutex<Option<(Option<bool>, u64)>> = Mutex::new(None);
-    static INSTALLED_ASKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    /// When the list was last asked for (0: not on its way). An ask whose answer never comes
+    /// is given up after a minute.
+    static INSTALLED_ASKED_AT: AtomicU64 = AtomicU64::new(0);
 
     fn installed() -> Option<bool> {
         let kept = *INSTALLED.lock().unwrap_or_else(|e| e.into_inner());
@@ -8354,19 +8526,28 @@ mod program_registry {
         kept.and_then(|(listed, _)| listed)
     }
 
-    /// Asks package_manager (on its own thread) whether program_registry is installed, so the
-    /// first sheet after Names opens already knows. Called when the Names app reads its config.
+    /// Asks package_manager whether program_registry is installed, without waiting, so the first
+    /// sheet after Names opens already knows. Called when the Names app reads its config.
     pub fn warm() {
-        use std::sync::atomic::Ordering;
-        if INSTALLED_ASKING.swap(true, Ordering::SeqCst) {
+        let now = super::now();
+        let asked = INSTALLED_ASKED_AT.load(Ordering::SeqCst);
+        if asked != 0 && now.saturating_sub(asked) < 60 {
             return;
         }
-        std::thread::spawn(|| {
-            let answer = LogosModuleSDK::new().plugin("package_manager").call_json_with_timeout("getInstalledModules", &json!([]), Duration::from_secs(5));
-            let listed = answer.ok().and_then(|answer| super::package_listed(&answer, "program_registry"));
-            *INSTALLED.lock().unwrap_or_else(|e| e.into_inner()) = Some((listed, super::now()));
-            INSTALLED_ASKING.store(false, Ordering::SeqCst);
-        });
+        if INSTALLED_ASKED_AT.compare_exchange(asked, now.max(1), Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            return;
+        }
+        peer::ask(
+            "package_manager",
+            "getInstalledModules",
+            &json!([]),
+            Duration::from_secs(5),
+            Box::new(|answer| {
+                let listed = answer.ok().and_then(|answer| super::package_listed(&answer, MODULE));
+                *INSTALLED.lock().unwrap_or_else(|e| e.into_inner()) = Some((listed, super::now()));
+                INSTALLED_ASKED_AT.store(0, Ordering::SeqCst);
+            }),
+        );
     }
 
     /// `program_label`'s value for `program` (base58), as far as is known now (`kept_or_ask`).
@@ -8595,11 +8776,11 @@ fn chain_claim_fee_about() -> Value {
     chain_fee::claim_estimate(&held, |request| node::call("wallet_fund_tx", json!([request]), node::QUICK)).map_or(Value::Null, |fee| Value::from(fee.to_string()))
 }
 
-/// Basecamp's Logos Blockchain node (`blockchain_module`), for the chain methods.
-#[cfg(not(test))]
+/// Basecamp's Logos Blockchain node (`blockchain_module`), for the chain methods. Asked through
+/// `peer` (peer.rs): when the module isn't loaded the call fails at once, in words that say
+/// nothing was sent, never after a 15 s wait on the module's one thread.
 mod node {
-    use super::{chain, Value};
-    use logos_rust_sdk::LogosModuleSDK;
+    use super::{chain, peer, Value};
     use std::time::Duration;
 
     /// A read: the node answers from its own state.
@@ -8607,36 +8788,41 @@ mod node {
     /// A transfer or claim, which the node proves before it answers.
     pub const PROVING: Duration = Duration::from_secs(180);
 
+    /// The node isn't loaded: nothing was sent. Says "isn't running", which the Names app
+    /// reads as the node being off (its "Open the Blockchain app" line), and never "didn't
+    /// answer", which the chain methods read as "it may have been taken".
+    pub const NOT_LOADED: &str = "Basecamp's Logos Blockchain node isn't running (blockchain_module isn't loaded). Start it in Basecamp's Blockchain app, then try again. Nothing was sent.";
+    /// It gave no answer a moment ago, so it wasn't asked: nothing was sent.
+    pub const HELD: &str = "Basecamp's Logos Blockchain node isn't running or isn't answering: it gave no answer to the last ask, so it isn't asked again for half a minute. Nothing was sent.";
+    /// Asked from a thread names spawned, which could freeze the module: refused, nothing sent.
+    pub const OFF_THREAD: &str = "the Logos Blockchain node can only be asked from the module's own call thread, so it wasn't asked. Nothing was sent.";
+    /// Sent, no answer: it may have been taken (the chain methods rely on these words).
+    pub const NO_ANSWER: &str = "Basecamp's Logos Blockchain node didn't answer. Install the Blockchain app and start its node.";
+
     pub fn call(method: &str, args: Value, wait: Duration) -> Result<Value, String> {
-        let answer = LogosModuleSDK::new()
-            .plugin(chain::MODULE)
-            .call_json_with_timeout(method, &args, wait)
-            .map_err(|_| "Basecamp's Logos Blockchain node didn't answer. Install the Blockchain app and start its node.".to_owned())?;
+        let answer = peer::call(chain::MODULE, method, &args, wait).map_err(|failure| match failure {
+            peer::Failure::NotLoaded => NOT_LOADED.to_owned(),
+            peer::Failure::Held => HELD.to_owned(),
+            peer::Failure::OffThread => OFF_THREAD.to_owned(),
+            peer::Failure::NoAnswer(_) => NO_ANSWER.to_owned(),
+            peer::Failure::Refused(why) => chain::problem(method, &why),
+        })?;
         chain::unwrap(method, answer)
     }
-}
 
-/// Stands in for the node in unit tests: a test sets each method's answer, and
-/// what was asked is kept.
-#[cfg(test)]
-mod node {
-    use super::{chain, Value};
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-    use std::time::Duration;
-
-    pub const QUICK: Duration = Duration::from_secs(15);
-    pub const PROVING: Duration = Duration::from_secs(180);
-
+    // Stands in for the node in unit tests: a test sets each method's answer, and what was
+    // asked is kept. Reached through peer's stand-in host, so the gate is the module build's.
+    #[cfg(test)]
     thread_local! {
-        pub static ANSWERS: RefCell<HashMap<String, Value>> = RefCell::new(HashMap::new());
-        pub static ASKED: RefCell<Vec<(String, Value)>> = const { RefCell::new(Vec::new()) };
+        pub static ANSWERS: std::cell::RefCell<std::collections::HashMap<String, Value>> = std::cell::RefCell::new(std::collections::HashMap::new());
+        pub static ASKED: std::cell::RefCell<Vec<(String, Value)>> = const { std::cell::RefCell::new(Vec::new()) };
     }
 
-    pub fn call(method: &str, args: Value, _wait: Duration) -> Result<Value, String> {
-        ASKED.with(|asked| asked.borrow_mut().push((method.to_owned(), args)));
+    #[cfg(test)]
+    pub fn answer(method: &str, args: &Value) -> Result<Value, peer::Failure> {
+        ASKED.with(|asked| asked.borrow_mut().push((method.to_owned(), args.clone())));
         let answer = ANSWERS.with(|answers| answers.borrow().get(method).cloned());
-        chain::unwrap(method, answer.ok_or_else(|| "Basecamp's Logos Blockchain node didn't answer.".to_owned())?)
+        answer.ok_or_else(|| peer::Failure::NoAnswer("no answer set".to_owned()))
     }
 }
 
@@ -8684,6 +8870,8 @@ mod program_registry {
 #[cfg(not(test))]
 #[no_mangle]
 pub extern "Rust" fn logos_module_install() {
+    // The host exits on SIGTERM even when its main thread can't (sigterm.rs).
+    sigterm::arm(sigterm::GRACE);
     install::<Names>();
 }
 
@@ -8741,6 +8929,7 @@ mod tests {
             bridge_programs: Vec::new(),
             cli_lines: Default::default(),
             tool_status: Default::default(),
+            sheet_reads: SheetReads::default(),
         }
     }
 
@@ -10597,6 +10786,90 @@ mod tests {
         }
         assert!(node_asked().iter().all(|m| m == "get_cryptarchia_info"), "nothing was asked for the other app");
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+    }
+
+    /// The 2026-11-18 hang, (1) and (2), at the methods: blockchain_module isn't loaded (the
+    /// names host started before it, or it was never installed). Before, every chain method
+    /// waited 15 s on the module's one thread and every other call was answered busy meanwhile.
+    /// Now each answers at once, typed `module_not_loaded`, in the words the Names app shows as
+    /// the node being off ("isn't running"), never "didn't answer" (which the chain methods
+    /// read as "it may have been sent"); nothing reaches the node; the calls that don't need it
+    /// answer as ever; and once the module is up the next call reaches it.
+    #[test]
+    fn with_the_node_module_not_loaded_every_call_answers_at_once() {
+        let mut names = fresh();
+        peer::stand_in::set_down(chain::MODULE, true);
+        node_answers("get_cryptarchia_info", json!({ "tip": "ab", "height": 7, "slot": 9, "mode": "Online" }));
+        node_answers("get_time_info", json!({ "slot": 9, "epoch": 0 }));
+        let started = std::time::Instant::now();
+        for _ in 0..25 {
+            for answer in [names.chain_status(), names.chain_accounts(), names.chain_stake(), names.chain_claim(false)] {
+                let answer = parsed(&answer);
+                assert_eq!((answer["success"].clone(), answer["code"].clone(), answer["module"].clone()), (json!(false), json!("module_not_loaded"), json!("blockchain_module")), "{answer}");
+                let error = answer["error"].as_str().unwrap();
+                assert!(error.contains("isn't running") && !error.contains("didn't answer"), "{error}");
+            }
+            assert_eq!(parsed(&names.get_config())["module_version"], MODULE_VERSION);
+            assert_eq!(parsed(&names.pending_requests())["success"], true);
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
+        assert!(node_asked().is_empty(), "nothing was sent to a node that isn't loaded: {:?}", node_asked());
+        // It comes up: the next call (once the probe is asked again) reaches it.
+        peer::stand_in::set_down(chain::MODULE, false);
+        std::thread::sleep(peer::PRESENCE_KEEP + std::time::Duration::from_millis(50));
+        let status = parsed(&names.chain_status());
+        assert_eq!(status["success"], true, "{status}");
+        assert_eq!(node_asked(), ["get_cryptarchia_info", "get_time_info"]);
+    }
+
+    /// The 2026-11-18 sample of the stuck host: its main thread was in pending_requests →
+    /// relayed_sheet → root_only → bridge_tokens_programs → an HTTPS read of LEZ 0.4, made on
+    /// every poll. A sheet's reads now run on a thread of their own: the poll answers at once,
+    /// before the read is back (the sheet refused, still reading), and shows it once it is.
+    #[test]
+    fn a_slow_lez04_read_does_not_hold_up_the_poll_that_shows_the_sheet() {
+        let reads: Background<Vec<String>> = Background::threaded();
+        let slow = || {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            Ok(vec!["token".to_owned()])
+        };
+        let started = std::time::Instant::now();
+        assert_eq!(reads.get("lez04", SHEET_READ_EVERY, slow), None);
+        assert_eq!(reads.get("lez04", SHEET_READ_EVERY, || panic!("one read at a time")), None);
+        assert!(started.elapsed() < std::time::Duration::from_millis(100), "{:?}", started.elapsed());
+        std::thread::sleep(std::time::Duration::from_millis(900));
+        assert_eq!(reads.get("lez04", SHEET_READ_EVERY, || panic!("fresh: not read again")), Some(Ok(vec!["token".to_owned()])));
+        // Another network starts over.
+        assert_eq!(reads.get("elsewhere", SHEET_READ_EVERY, || Err("down".to_owned())), None);
+        assert!(STILL_READING.contains("signs nothing"));
+    }
+
+    /// A call made from a thread names spawned never reaches another module (peer.rs): such a
+    /// thread waits on the host's main thread, and four of them were the 2026-11-18 deadlock.
+    #[test]
+    fn the_node_is_never_asked_from_a_spawned_thread() {
+        node_answers("get_time_info", json!({ "slot": 9 }));
+        let answered = std::thread::spawn(|| node::call("get_time_info", json!([]), node::QUICK)).join().unwrap();
+        assert_eq!(answered, Err(node::OFF_THREAD.to_owned()));
+        assert!(!node::OFF_THREAD.contains("didn't answer"), "nothing was sent, so it doesn't say it may have been");
+        // From the call thread it is asked as ever.
+        assert!(node::call("get_time_info", json!([]), node::QUICK).is_ok());
+    }
+
+    /// A node that is loaded but gives no answer is asked once, then not again for a while: no
+    /// 15 s wait every poll (each one answered busy to everything else).
+    #[test]
+    fn a_node_that_gave_no_answer_is_not_waited_for_again_every_poll() {
+        let mut names = fresh();
+        peer::stand_in::hold_failures();
+        // No answer set: the stand-in node gives none.
+        let first = parsed(&names.chain_status());
+        assert!(first["error"].as_str().unwrap().contains("didn't answer"), "{first}");
+        for _ in 0..10 {
+            let held = parsed(&names.chain_status());
+            assert!(held["error"].as_str().unwrap().contains("isn't answering"), "{held}");
+        }
+        assert_eq!(node_asked(), ["get_cryptarchia_info"], "asked once");
     }
 
     #[test]
