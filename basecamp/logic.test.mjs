@@ -1078,6 +1078,9 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
 {
   const { faucetReply, grouped } = await import("./qml/logic.mjs");
   check("faucet: got, in a block", faucetReply({ ok: true, amount: "10000000", block: "11222" }, grouped), { line: "Got 10,000,000 LEZ · block 11222.", kind: "done", retry: false });
+  // The module asks the faucet on its own thread: until its answer is in it says pending, a working
+  // line (never red), and the app asks it again for the answer.
+  check("faucet: an ask under way is working, asked again", faucetReply({ ok: false, code: "pending", retry: true, reason: "Asking the faucet…" }), { line: "Asking the faucet…", kind: "working", retry: true, pending: true });
   check("faucet: refusals plainly, waits not red", [faucetReply({ ok: false, code: "already_today", reason: "Once a day per account." }).kind, faucetReply({ ok: false, code: "busy", retry: true }).retry, faucetReply({ ok: false, code: "bad_key" }).kind, faucetReply({ ok: false, code: "faucet_empty" }).line],
     ["waiting", true, "problem", "The faucet is empty for now."]);
 }
@@ -1396,6 +1399,22 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("remove: says Checking… at once", (qml.match(/text: busyHere \? "Checking…" : "Remove"/g) || []).length, 2);
   check("save: says Saving… at once", /label: root\.sbSaving \? "Saving…" : "Save"/.test(qml), true);
   check("wording: checked on LEZ 0.4", [/prefix: "LNS names and profiles: checked on"/.test(qml), /hint: "Check a name, such as jef"/.test(qml)], [true, true]);
+}
+
+{
+  // The setup card names Basecamp's button as Basecamp labels it: "Unload" (Module Inspector),
+  // never "Unload All" (2026-11-18).
+  const L = await import("./qml/logic.mjs");
+  const me = { name: "names_ui", installDir: "/x/plugins/names_ui" };
+  const newMod = { name: "lez_bridge", hashes: { root: L.BUNDLED_BRIDGE[0].root } };
+  const lines = [
+    L.bridgeSetupState({ list: [me, newMod], bundle: "ok", answers: true, features: [], install: { phase: "unload" } }).line,
+    L.bridgeSetupState({ list: [me, newMod], bundle: "ok", answers: false, stuck: true }).line,
+    L.bridgeSetupState({ list: [me, newMod], bundle: "ok", answers: true, features: [] }).line,
+  ];
+  check("unload step: Basecamp's button is Unload", lines.map((line) => [/LEZ Bridge → Unload\. /.test(line), /Unload All/.test(line)]), [[true, false], [true, false], [true, false]]);
+  const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  check("unload: no 'Unload All' anywhere the app shows", /Unload All/.test(qml), false);
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");

@@ -2092,7 +2092,7 @@ export function receiveSteps(s) {
 export function bridgeSetupState(s) {
     var st = s || {}
     var t = function(state, line, button, action) { return { state: state, line: line, button: button || "", action: action || "" } }
-    var unload = "Settings → Module Inspector → LEZ Bridge → Unload All. Then close the Names tab and open Names again."
+    var unload = "Settings → Module Inspector → LEZ Bridge → Unload. Then close the Names tab and open Names again."
     if (st.install) {
         var p = st.install.phase
         if (p === "asking" || p === "installing" || p === "slow") return t("busy", st.install.line)
@@ -2105,14 +2105,14 @@ export function bridgeSetupState(s) {
     if (!mod)
         return st.bundle === "ok" ? t("install", "The LEZ Bridge isn't installed. It comes with Names.", "Install", "install")
             : st.bundle === "bad" ? t("manual", "Install the LEZ Bridge package: Package Manager (the cube icon) → Install Local Package") : t("", "")
-    // Installed but not loaded while this Names tab is open (after Unload All): a new tab starts it.
+    // Installed but not loaded while this Names tab is open (after Unload): a new tab starts it.
     if (st.answers === false && st.notLoaded)
         return t("reopen", "Close the Names tab and open Names again.")
     // A reply to an old token (the bridge was reloaded under Names): only a reopen reconnects.
     if (st.answers === false && st.stale)
         return t("stale", "Close the Names tab and open Names again to reconnect to the bridge.")
     // A bridge that doesn't answer and is an older build than the one shipped (tonight's frozen
-    // one): the new files first, so the one Unload All that follows starts the new bridge.
+    // one): the new files first, so the one Unload that follows starts the new bridge.
     if (st.answers === false && st.stuck && st.bundle === "ok" && bridgeDiffers(st.list))
         return t("update", "The LEZ Bridge doesn't answer, and an update is ready.", "Update", "update")
     if (st.answers === false)
@@ -2732,9 +2732,10 @@ export function faucetReply(value, grouped) {
     var g = grouped || function(x) { return String(x) }
     if (v.ok === true)
         return { line: "Got " + g(String(v.amount || "0")) + " LEZ" + (v.block ? " · block " + String(v.block) : "") + ".", kind: "done", retry: false }
-    var waits = ["busy", "rate_limited", "already_today"]
-    var reason = String(v.reason || "") || (v.code === "already_today" ? "This account already had test LEZ today." : v.code === "faucet_empty" ? "The faucet is empty for now." : "The faucet said no.")
-    return { line: reason, kind: waits.indexOf(String(v.code || "")) >= 0 ? "waiting" : "problem", retry: v.retry === true }
+    var waits = ["busy", "rate_limited", "already_today", "pending"]
+    var reason = String(v.reason || "") || (v.code === "already_today" ? "This account already had test LEZ today." : v.code === "faucet_empty" ? "The faucet is empty for now." : v.code === "pending" ? "Asking the faucet…" : "The faucet said no.")
+    // `pending`: the module asks the faucet on its own thread; the app asks it again for the answer.
+    return { line: reason, kind: v.code === "pending" ? "working" : waits.indexOf(String(v.code || "")) >= 0 ? "waiting" : "problem", retry: v.retry === true, pending: v.code === "pending" }
 }
 
 // ── Private claim and private send-back, from a private account (rfp-022

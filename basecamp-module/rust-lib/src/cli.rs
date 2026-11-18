@@ -434,6 +434,7 @@ pub const FAUCET_URL: &str = "https://lez.buggers.online/faucet";
 /// Asks the faucet at `url` to pay `account` (base58): `{account, amount, tx}`,
 /// or the faucet's own reason in plain words (funded today, empty, busy).
 pub fn request_faucet(url: &str, account: &str) -> Result<Value, String> {
+    crate::served::blocking("cli::request_faucet");
     let sent = ureq::post(url)
         .timeout(std::time::Duration::from_secs(60))
         .send_json(json!({ "account": account }));
@@ -670,6 +671,7 @@ pub fn claim_args(name: &str, snapshot: &Path) -> Result<Vec<String>, String> {
 
 /// Fetches the snapshot at `url`, a static file, at most `MAX_SNAPSHOT` bytes.
 pub fn fetch_snapshot(url: &str, wait: Duration) -> Result<Vec<u8>, String> {
+    crate::served::blocking("cli::fetch_snapshot");
     let reply = ureq::get(url)
         .timeout(wait.clamp(Duration::from_secs(1), Duration::from_secs(30)))
         .call()
@@ -1217,6 +1219,7 @@ static SLOW_READS: Mutex<std::collections::BTreeMap<String, std::sync::Arc<SlowR
 /// is stopped. A read that ended in an error or a failed exit is never kept for a later
 /// call, which reads afresh (slow-read-error-survives-recovery).
 fn run_bounded(setup: &Setup, command: Vec<String>, patience: Duration, deadline: registry::Deadline, probe: &Probe) -> Result<CliOutput, String> {
+    crate::served::blocking("cli::run_bounded");
     let key = format!("{}\u{0}{}\u{0}{}\u{0}{}", setup.program.display(), setup.wallet.display(), setup.sequencer, command.join("\u{0}"));
     let read = {
         let mut reads = SLOW_READS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2326,6 +2329,7 @@ fn capture(process: Command, program: &Path, patience: Duration) -> Result<(Opti
 
 /// The same, with `input` on its standard input when there is any.
 fn feed(mut process: Command, program: &Path, input: &str, patience: Duration, stop: Option<&std::sync::atomic::AtomicBool>) -> Result<CliOutput, String> {
+    crate::served::blocking("cli::feed");
     if !input.is_empty() {
         process.stdin(Stdio::piped());
     }
@@ -2433,7 +2437,7 @@ pub fn version(program: &Path) -> Result<String, String> {
     }
     let mut process = Command::new(program);
     process.arg("--version").stdin(Stdio::null());
-    let (code, out, err) = capture(process, program, VERSION_PATIENCE)?;
+    let (code, out, err) = crate::served::local(|| capture(process, program, VERSION_PATIENCE))?;
     let line = last_line(&out);
     if code == Some(0) && line.starts_with("names ") {
         return Ok(line.to_owned());

@@ -99,6 +99,9 @@ pub fn seen_token_programs(dir: &Path) -> Result<Vec<String>, String> {
 /// Adds token programs to the ones kept in `dir`; never removes one, and never writes over a
 /// file it can't read.
 pub fn keep_token_programs(dir: &Path, programs: &[String]) {
+    // Background reads keep what they read too: one writer at a time, so none is lost.
+    static ONE_WRITER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _turn = ONE_WRITER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let Ok(mut kept) = seen_token_programs(dir) else { return };
     let before = kept.len();
     for program in programs {
@@ -143,6 +146,8 @@ pub const EVERY: Duration = Duration::from_secs(30);
 pub const MAX_ACCOUNTS: usize = 24;
 /// The pause between two account reads.
 const ACCOUNT_PAUSE: Duration = Duration::from_millis(120);
+/// The most token definitions whose names one read asks for (each is one request).
+const NAMES_PER_READ: usize = 4;
 /// How long the token list is kept before the Config is read again (seconds).
 const TOKENS_FRESH_S: u64 = 3600;
 /// How long a reset is told after it was seen (seconds).
@@ -401,19 +406,190 @@ pub fn encode_burn(burn: &BurnMessage) -> Vec<u8> {
     out
 }
 
-/// The whole Config of the bridge `program` on the chain at `url`, or `None` when the chain has
-/// none. Any failed read is an error (fail closed), as in `token_program_of`.
-pub fn config_of(url: &str, program: &AccountId) -> Result<Option<BridgeConfig>, String> {
-    let deadline = Deadline::after(Duration::from_secs(8));
-    let config = call(url, "getAccount", json!([registry::account_text(&config_address(program))]), deadline)?;
-    if config.is_null() {
-        return Ok(None);
+/// The whole Config of the bridge `program` on the chain at `url`, read at most `max_age` ago
+/// (`config_state`), or `None` when the chain has none. Any failed read is an error (fail
+/// closed), as in `token_program_of`.
+pub fn config_of(url: &str, program: &AccountId, max_age: Duration) -> Result<Option<BridgeConfig>, String> {
+    match config_state(url, program, max_age)? {
+        None => Ok(None),
+        Some(bytes) => decode_bridge_config(&bytes).map(Some),
     }
-    let bytes = state_under(&config, program)?;
-    if bytes.is_empty() {
-        return Ok(None);
+}
+
+// ── Each bridge's Config, kept: one read serves the balances, the sheets and the signing ──
+//
+// A bridge's Config (its token program, its tokens, whether burns are paused) is one account,
+// and three paths used to read it on their own: the balance read, the relayed-call sheet (every
+// 30 s, for each bridge, twice: its token program and, for a burn bridge, the whole Config) and
+// each approval. Now one read is kept per endpoint and bridge, and each path says how old it may
+// be: an hour for what a balance shows and which programs a call may not have as its root
+// (`CONFIG_FRESH`), five minutes for a burn's sheet (`BURN_SHEET_FRESH`), a minute for signing a
+// burn (`BURN_SIGN_FRESH`).
+
+/// How old a kept Config may be for showing tokens and for the root-only list.
+pub const CONFIG_FRESH: Duration = Duration::from_secs(3600);
+/// How old the target bridge's Config may be for a burn's sheet.
+pub const BURN_SHEET_FRESH: Duration = Duration::from_secs(300);
+/// How old the target bridge's Config may be when a burn is approved, signed or proposed: a
+/// pause of burns (`burn_frozen`) set on the chain is seen within this.
+pub const BURN_SIGN_FRESH: Duration = Duration::from_secs(60);
+/// One Config read's wait.
+const CONFIG_WAIT: Duration = Duration::from_secs(8);
+
+#[derive(Default)]
+struct KeptConfig {
+    /// The last good read: when, and the state bytes (None: no Config on that chain).
+    good: Option<(std::time::Instant, Option<Vec<u8>>)>,
+    /// The last failed read: when, and why.
+    failed: Option<(std::time::Instant, String)>,
+    reading: bool,
+}
+
+type ConfigKey = (String, AccountId);
+
+fn configs() -> std::sync::MutexGuard<'static, Vec<(ConfigKey, KeptConfig)>> {
+    static CONFIGS: std::sync::Mutex<Vec<(ConfigKey, KeptConfig)>> = std::sync::Mutex::new(Vec::new());
+    CONFIGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn config_read_ended() -> &'static std::sync::Condvar {
+    static ENDED: std::sync::Condvar = std::sync::Condvar::new();
+    &ENDED
+}
+
+fn kept_config<'a>(kept: &'a mut Vec<(ConfigKey, KeptConfig)>, url: &str, program: &AccountId) -> &'a mut KeptConfig {
+    let key = (url.to_owned(), *program);
+    let at = match kept.iter().position(|(known, _)| *known == key) {
+        Some(at) => at,
+        None => {
+            kept.push((key, KeptConfig::default()));
+            kept.len() - 1
+        }
+    };
+    &mut kept[at].1
+}
+
+/// Reads bridge `program`'s Config account on `url` now (one `getAccount`) and keeps a good read.
+/// Reads bridge `program`'s Config account on `url` now (one `getAccount`), for the one read of it
+/// under way (`reading`, set by the caller): keeps a good read, then lets the others waiting for
+/// it go on.
+fn read_config_now(url: &str, program: &AccountId, deadline: Deadline) -> Result<Option<Vec<u8>>, String> {
+    let deadline = deadline.min_with(CONFIG_WAIT);
+    let read = call(url, "getAccount", json!([registry::account_text(&config_address(program))]), deadline)
+        .and_then(|config| if config.is_null() { Ok(None) } else { state_under(&config, program).map(|bytes| (!bytes.is_empty()).then_some(bytes)) });
+    let mut kept = configs();
+    let entry = kept_config(&mut kept, url, program);
+    match &read {
+        Ok(state) => entry.good = Some((std::time::Instant::now(), state.clone())),
+        Err(why) => entry.failed = Some((std::time::Instant::now(), why.clone())),
     }
-    decode_bridge_config(&bytes).map(Some)
+    entry.reading = false;
+    drop(kept);
+    config_read_ended().notify_all();
+    read
+}
+
+/// The state bytes of bridge `program`'s Config on `url` (None: the chain has no Config there),
+/// read at most `max_age` ago: what was kept, else read now. Blocks for the read: for background
+/// reads (and tests) only; a call's own thread uses `config_within`.
+pub fn config_state(url: &str, program: &AccountId, max_age: Duration) -> Result<Option<Vec<u8>>, String> {
+    config_state_by(url, program, max_age, Deadline::after(CONFIG_WAIT))
+}
+
+/// `config_state` within a read's `deadline` (a balance read's, all its requests together). One
+/// read of a Config at a time: a second reader waits for the one under way and takes its answer.
+fn config_state_by(url: &str, program: &AccountId, max_age: Duration, deadline: Deadline) -> Result<Option<Vec<u8>>, String> {
+    let asked = std::time::Instant::now();
+    let mut kept = configs();
+    loop {
+        let entry = kept_config(&mut kept, url, program);
+        if let Some((at, state)) = &entry.good {
+            if at.elapsed() <= max_age {
+                return Ok(state.clone());
+            }
+        }
+        if !entry.reading {
+            // The read another reader waited for failed: its answer is this one's too.
+            if let Some((at, why)) = &entry.failed {
+                if *at >= asked {
+                    return Err(why.clone());
+                }
+            }
+            entry.reading = true;
+            break;
+        }
+        let left = deadline.left();
+        if left.is_zero() {
+            return Err(problem(deadline.too_slow()));
+        }
+        kept = config_read_ended().wait_timeout(kept, left).unwrap_or_else(std::sync::PoisonError::into_inner).0;
+    }
+    drop(kept);
+    read_config_now(url, program, deadline)
+}
+
+/// What the wallet knows of a bridge's Config at a call (`config_within`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigNow {
+    /// Read within the age asked for: the state bytes, None when the chain has no Config.
+    Read(Option<Vec<u8>>),
+    /// The last read failed and nothing young enough is kept: why.
+    Unread(String),
+    /// Being read; nothing young enough is kept yet.
+    Reading,
+}
+
+/// Bridge `program`'s Config on `url` as a call may use it, never waiting on the network for more
+/// than `wait`: a read at most `max_age` old, else a read started on its own thread and waited
+/// for `wait` at most.
+pub fn config_within(url: &str, program: &AccountId, max_age: Duration, wait: Duration) -> ConfigNow {
+    let asked = std::time::Instant::now();
+    let mut kept = configs();
+    {
+        let entry = kept_config(&mut kept, url, program);
+        if let Some((at, state)) = &entry.good {
+            if at.elapsed() <= max_age {
+                return ConfigNow::Read(state.clone());
+            }
+        }
+        if !entry.reading {
+            entry.reading = true;
+            let (url, program) = (url.to_owned(), *program);
+            crate::served::spawn(move || {
+                let _ = read_config_now(&url, &program, Deadline::after(CONFIG_WAIT));
+            });
+        }
+    }
+    let until = asked + wait;
+    loop {
+        let entry = kept_config(&mut kept, url, program);
+        if let Some((at, state)) = &entry.good {
+            if at.elapsed() <= max_age {
+                return ConfigNow::Read(state.clone());
+            }
+        }
+        if !entry.reading {
+            return match &entry.failed {
+                Some((at, why)) if *at >= asked || entry.good.is_none() => ConfigNow::Unread(why.clone()),
+                _ => ConfigNow::Reading,
+            };
+        }
+        let left = until.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return ConfigNow::Reading;
+        }
+        kept = config_read_ended().wait_timeout(kept, left).unwrap_or_else(std::sync::PoisonError::into_inner).0;
+    }
+}
+
+/// Forgets every kept Config of `url` (the chain there was reset).
+pub fn forget_configs(url: &str) {
+    for ((known, _), entry) in configs().iter_mut() {
+        if known == url {
+            entry.good = None;
+            entry.failed = None;
+        }
+    }
 }
 
 /// The Config bytes of the bridge `program` in a `getAccount` reply (tests' fixtures).
@@ -540,35 +716,40 @@ fn call(url: &str, method: &str, params: Value, deadline: Deadline) -> Result<Va
 /// person's bridged tokens sit. `None` when the chain has no Config for that bridge (then it
 /// holds no bridged tokens). Any failed read is an error, never `None`: a caller that must not
 /// sign a call to it can't take "unknown" for "none" (fail closed).
-pub fn token_program_of(url: &str, program: &AccountId) -> Result<Option<AccountId>, String> {
-    let deadline = Deadline::after(Duration::from_secs(8));
-    let config = call(url, "getAccount", json!([registry::account_text(&config_address(program))]), deadline)?;
-    if config.is_null() {
-        return Ok(None);
+/// Read at most `max_age` ago (`config_state`).
+pub fn token_program_of(url: &str, program: &AccountId, max_age: Duration) -> Result<Option<AccountId>, String> {
+    match config_state(url, program, max_age)? {
+        None => Ok(None),
+        Some(bytes) => decode_config(&bytes).map(|(token_program, _)| Some(token_program)),
     }
-    let bytes = state_under(&config, program)?;
-    if bytes.is_empty() {
-        return Ok(None);
-    }
-    decode_config(&bytes).map(|(token_program, _)| Some(token_program))
 }
 
 // ── The test-LEZ faucet on the bridge test network's endpoint (bridge_faucetInfo, bridge_faucet) ──
 
 /// How long a faucet call may take: the faucet answers once its transfer is in a block.
 pub const FAUCET_WAIT: Duration = Duration::from_secs(120);
+/// How long the faucet's info may take: it answers from its own state.
+pub const FAUCET_INFO_WAIT: Duration = Duration::from_secs(10);
 
 /// One faucet call on `url` (JSON-RPC POST). The endpoint's own refusals come back as a result
 /// `{ok: false, code, reason, retry}`; its HTTP 429 is said the same way (`rate_limited`), and a
 /// 502 or 503 as `busy` with `retry: true`. Anything else that fails is an error in words.
-pub fn faucet_call(url: &str, method: &str, params: Value) -> Result<Value, String> {
+/// `wait`: the claim's `FAUCET_WAIT`, or the info's `FAUCET_INFO_WAIT`. An endpoint that asked to be
+/// left alone (`registry::slowed_down`) isn't asked until then: said as `rate_limited` at once.
+pub fn faucet_call(url: &str, method: &str, params: Value, wait: Duration) -> Result<Value, String> {
+    crate::served::blocking("bridge_net::faucet_call");
+    let limited = || json!({ "ok": false, "code": "rate_limited", "reason": "Too many requests to the bridge test network just now. Try again in a minute.", "retry": false });
+    if registry::slowed_down(url).is_some() {
+        return Ok(limited());
+    }
     let response = ureq::post(url)
-        .timeout(FAUCET_WAIT)
+        .timeout(wait)
         .send_json(json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }));
     let body = match response {
         Ok(response) => response.into_string().map_err(|error| format!("the bridge test network's reply broke off: {error}"))?,
-        Err(ureq::Error::Status(429, _)) => {
-            return Ok(json!({ "ok": false, "code": "rate_limited", "reason": "Too many requests to the bridge test network just now. Try again in a minute.", "retry": false }))
+        Err(ureq::Error::Status(429, response)) => {
+            registry::slow_down(url, registry::retry_after(429, response.header("retry-after")).unwrap_or(registry::RETRY_AFTER_MAX));
+            return Ok(limited());
         }
         Err(ureq::Error::Status(502 | 503, _)) => {
             return Ok(json!({ "ok": false, "code": "busy", "reason": "The faucet is busy. Try again in a few seconds.", "retry": true }))
@@ -655,6 +836,10 @@ pub fn read(url: &str, programs: &[AccountId], accounts: &[AccountId], dir: &Pat
     let saved = load_state(dir);
     let mut reset = was_reset(&saved, &channel, height);
     let same_chain = !reset && saved["channel"].as_str() == Some(channel.as_str());
+    if reset {
+        // Nothing kept from before the reset is used: the relayed-call checks read the Configs again.
+        forget_configs(url);
+    }
 
     let mut wanted: Vec<AccountId> = Vec::new();
     for program in programs {
@@ -675,6 +860,23 @@ pub fn read(url: &str, programs: &[AccountId], accounts: &[AccountId], dir: &Pat
     }
     let mut bridges: Vec<Bridge> = Vec::new();
     let wanted_all = wanted.clone();
+    // A definition's own name, read once a chain (it never changes once made), at most
+    // `NAMES_PER_READ` a read: the first read of a chain stays well under the endpoint's limit,
+    // and the names left show from the next reads on. A token whose name was read is marked
+    // (`name_read`), so one with none is never asked again.
+    let names_left = std::cell::Cell::new(NAMES_PER_READ);
+    let name_of = |token: &mut Value, token_program: &AccountId| {
+        if token["name_read"] == true || token["name"].is_string() || names_left.get() == 0 {
+            return;
+        }
+        let Some(definition) = token["definition"].as_str().map(str::to_owned) else { return };
+        names_left.set(names_left.get() - 1);
+        let read = call(url, "getAccount", json!([definition]), deadline);
+        if read.is_ok() {
+            token["name"] = json!(read.ok().and_then(|name| state_under(&name, token_program).ok()).and_then(|bytes| decode_definition_name(&bytes)));
+            token["name_read"] = json!(true);
+        }
+    };
     for program in wanted {
         let text = registry::account_text(&program);
         let cached = kept.iter().find(|entry| entry["program"] == text.as_str()).cloned().unwrap_or(Value::Null);
@@ -682,7 +884,7 @@ pub fn read(url: &str, programs: &[AccountId], accounts: &[AccountId], dir: &Pat
         let bridge = if cache_good {
             let token_program = cached["token_program"].as_str().and_then(|id| registry::parse_account(id).ok());
             // A list kept by the one-bridge build has no `bridge` on its rows: say which it is.
-            let tokens = cached["list"]
+            let tokens: Vec<Value> = cached["list"]
                 .as_array()
                 .cloned()
                 .unwrap_or_default()
@@ -694,13 +896,42 @@ pub fn read(url: &str, programs: &[AccountId], accounts: &[AccountId], dir: &Pat
                     if token["bridge_label"].is_null() {
                         token["bridge_label"] = json!(bridge_label(&text));
                     }
+                    // A name left for a later read (`NAMES_PER_READ`).
+                    if let Some(token_program) = &token_program {
+                        name_of(&mut token, token_program);
+                    }
                     token
                 })
                 .collect();
-            Bridge { program, present: cached["bridge"] == true, token_program, tokens, problem: cached["problem"].as_str().map(str::to_owned), saved: cached }
+            let mut saved = cached.clone();
+            saved["list"] = json!(tokens);
+            Bridge { program, present: cached["bridge"] == true, token_program, tokens, problem: cached["problem"].as_str().map(str::to_owned), saved }
         } else {
-            let config = call(url, "getAccount", json!([registry::account_text(&config_address(&program))]), deadline)?;
-            if config.is_null() {
+            // The Config as kept for an hour (`config_state`, shared with the relayed-call checks),
+            // read again on another chain. A Config that can't be read keeps the last list this
+            // chain gave, said as such; one never read on this chain shows no tokens for that bridge,
+            // and the read goes on: one bridge's endpoint trouble never hides the balances.
+            let config = config_state_by(url, &program, if reset { Duration::ZERO } else { CONFIG_FRESH }, deadline);
+            let config = match config {
+                Ok(config) => config,
+                Err(why) => {
+                    let kept_list = cached["list"].as_array().cloned().filter(|_| same_chain && cached["bridge"] == true);
+                    let problem = format!("can't read the bridge's token list just now ({}), so its tokens aren't shown", why.replace("can't reach the bridge test network: ", ""));
+                    let bridge = match kept_list {
+                        Some(list) => {
+                            let token_program = cached["token_program"].as_str().and_then(|id| registry::parse_account(id).ok());
+                            Bridge { program, present: true, token_program, tokens: list, problem: None, saved: cached }
+                        }
+                        None => {
+                            let saved = json!({ "read_at": 0, "program": text, "bridge": true, "token_program": null, "list": [], "problem": problem });
+                            Bridge { program, present: true, token_program: None, tokens: Vec::new(), problem: Some(problem), saved }
+                        }
+                    };
+                    bridges.push(bridge);
+                    continue;
+                }
+            };
+            if config.is_none() {
                 // The bridge was there on this chain and is gone: a reset by another name.
                 if same_chain && cached["bridge"] == true {
                     reset = true;
@@ -708,7 +939,7 @@ pub fn read(url: &str, programs: &[AccountId], accounts: &[AccountId], dir: &Pat
                 let saved = json!({ "read_at": now, "program": text, "bridge": false, "token_program": null, "list": [], "problem": null });
                 Bridge { program, present: false, token_program: None, tokens: Vec::new(), problem: None, saved }
             } else {
-                match state_under(&config, &program).and_then(|bytes| decode_config(&bytes)) {
+                match config.as_deref().map_or_else(|| Err("no Config".to_owned()), decode_config) {
                     Ok((token_program, listed)) => {
                         // Kept for good, as a relayed call's check keeps it (S-1): a bridge removed
                         // before any relayed call was checked stays refused as root. Never a bridge
@@ -717,11 +948,21 @@ pub fn read(url: &str, programs: &[AccountId], accounts: &[AccountId], dir: &Pat
                             keep_token_programs(dir, &[registry::account_text(&token_program)]);
                         }
                         let mut tokens = Vec::new();
+                        // A definition's name never changes once made: one read on this chain is
+                        // kept (only a new definition is read), and one that can't be read is shown
+                        // without its name.
+                        let known_names: Vec<Value> = if same_chain { cached["list"].as_array().cloned().unwrap_or_default() } else { Vec::new() };
                         for token in &listed {
                             let definition = registry::account_text(&token.definition);
-                            let name = call(url, "getAccount", json!([definition]), deadline)?;
-                            let name = state_under(&name, &token_program).ok().and_then(|bytes| decode_definition_name(&bytes));
-                            tokens.push(json!({ "bridge": text, "bridge_label": bridge_label(&text), "definition": definition, "eth_token": token.eth_token, "symbol": token.symbol(), "decimals": token.decimals, "name": name }));
+                            let mut row = json!({ "bridge": text, "bridge_label": bridge_label(&text), "definition": definition, "eth_token": token.eth_token, "symbol": token.symbol(), "decimals": token.decimals, "name": null });
+                            match known_names.iter().find(|known| known["definition"] == definition.as_str() && (known["name"].is_string() || known["name_read"] == true)) {
+                                Some(known) => {
+                                    row["name"] = known["name"].clone();
+                                    row["name_read"] = json!(true);
+                                }
+                                None => name_of(&mut row, &token_program),
+                            }
+                            tokens.push(row);
                         }
                         let saved = json!({ "read_at": now, "program": text, "bridge": true, "token_program": registry::account_text(&token_program), "list": tokens, "problem": null });
                         Bridge { program, present: true, token_program: Some(token_program), tokens, problem: None, saved }
@@ -1232,16 +1473,22 @@ mod tests {
             "bridge_faucet" if request["params"][0] == "50".repeat(32) => (503, "".to_owned()),
             _ => (200, json!({ "jsonrpc": "2.0", "id": 1, "error": { "code": -32601, "message": "no such method" } }).to_string()),
         });
-        let info = faucet_shown(&faucet_call(&url, "bridge_faucetInfo", json!([])).unwrap());
+        let info = faucet_shown(&faucet_call(&url, "bridge_faucetInfo", json!([]), FAUCET_INFO_WAIT).unwrap());
         assert_eq!(info, json!({ "available": true, "amount": "10000000", "per_account_hours": "24" }));
-        let got = faucet_shown(&faucet_call(&url, "bridge_faucet", json!(["ab".repeat(32), "Public/X"])).unwrap());
+        let got = faucet_shown(&faucet_call(&url, "bridge_faucet", json!(["ab".repeat(32), "Public/X"]), FAUCET_WAIT).unwrap());
         assert_eq!((got["ok"].as_bool(), got["block"].as_str(), got["amount"].as_str()), (Some(true), Some("11222"), Some("10000000")));
-        let refused = faucet_shown(&faucet_call(&url, "bridge_faucet", json!(["ee".repeat(32)])).unwrap());
+        let refused = faucet_shown(&faucet_call(&url, "bridge_faucet", json!(["ee".repeat(32)]), FAUCET_WAIT).unwrap());
         assert_eq!((refused["code"].as_str(), refused["reason"].as_str()), (Some("already_today"), Some("This account had test LEZ today.")));
-        assert_eq!(faucet_call(&url, "bridge_faucet", json!(["42".repeat(32)])).unwrap()["code"], "rate_limited");
-        let busy = faucet_call(&url, "bridge_faucet", json!(["50".repeat(32)])).unwrap();
+        let busy = faucet_call(&url, "bridge_faucet", json!(["50".repeat(32)]), FAUCET_WAIT).unwrap();
         assert_eq!((busy["code"].as_str(), busy["retry"].as_bool()), (Some("busy"), Some(true)));
-        assert!(faucet_call(&url, "bridge_other", json!([])).unwrap_err().contains("no such method"));
+        assert!(faucet_call(&url, "bridge_other", json!([]), FAUCET_WAIT).unwrap_err().contains("no such method"));
+        // A 429: said as rate limited, and the endpoint is left alone for its wait (10 s without a
+        // Retry-After): the next ask is answered the same at once, without a request.
+        assert_eq!(faucet_call(&url, "bridge_faucet", json!(["42".repeat(32)]), FAUCET_WAIT).unwrap()["code"], "rate_limited");
+        assert!(registry::slowed_down(&url).is_some_and(|left| left > Duration::from_secs(8)));
+        let started = std::time::Instant::now();
+        assert_eq!(faucet_call(&url, "bridge_faucetInfo", json!([]), FAUCET_INFO_WAIT).unwrap()["code"], "rate_limited");
+        assert!(started.elapsed() < Duration::from_millis(50));
     }
 
     #[test]

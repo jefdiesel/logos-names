@@ -745,6 +745,7 @@ pub fn channel_id(sequencer: &str) -> Result<String, String> {
 /// one LEZ zone from another (`zones`).
 #[cfg(not(test))]
 pub fn channel_id_within(sequencer: &str, wait: Duration) -> Result<String, String> {
+    crate::served::blocking("registry::channel_id_within");
     let response = ureq::post(sequencer)
         .timeout(wait)
         .send_json(json!({ "jsonrpc": "2.0", "id": 1, "method": "getChannelId", "params": {} }))
@@ -786,6 +787,11 @@ impl Deadline {
         Deadline { start, at: start + budget }
     }
 
+    /// This deadline, or `budget` from now if that comes first.
+    pub fn min_with(&self, budget: Duration) -> Self {
+        Deadline { start: self.start, at: self.at.min(Instant::now() + budget) }
+    }
+
     /// The time left.
     pub fn left(&self) -> Duration {
         self.at.saturating_duration_since(Instant::now())
@@ -823,10 +829,75 @@ pub fn request_wait(deadline: Deadline) -> Result<Duration, String> {
     Ok(left.min(REQUEST_CAP))
 }
 
+// ── Slowing down when an endpoint asks (HTTP 429, or 503 with Retry-After) ──
+//
+// LEZ 0.4's endpoint limits each address (50 requests per 10 s at its edge; 5 a second with a
+// burst of 60 at its filter, which answers 429 with `Retry-After: 10`). An endpoint that asked is
+// left alone until then: a background read waits for it (within its deadline) and asks once
+// more; a call's own thread never waits, it fails at once in words, and the served read shows the
+// last value with its age.
+
+/// The longest wait an endpoint's `Retry-After` is taken for.
+pub const RETRY_AFTER_MAX: Duration = Duration::from_secs(60);
+
+/// Until when each endpoint (by host) asked to be left alone.
+static SLOW_DOWN: std::sync::Mutex<Vec<(String, Instant)>> = std::sync::Mutex::new(Vec::new());
+
+/// How long the endpoint at `url` still asks to be left alone, if it does.
+pub fn slowed_down(url: &str) -> Option<Duration> {
+    let host = crate::served::host_of(url);
+    let mut kept = SLOW_DOWN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    kept.retain(|(_, until)| *until > Instant::now());
+    kept.iter().find(|(known, _)| *known == host).map(|(_, until)| until.saturating_duration_since(Instant::now()))
+}
+
+/// Notes that the endpoint at `url` asked to be left alone for `wait`.
+pub fn slow_down(url: &str, wait: Duration) {
+    let host = crate::served::host_of(url);
+    let until = Instant::now() + wait.min(RETRY_AFTER_MAX);
+    let mut kept = SLOW_DOWN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    kept.retain(|(known, _)| *known != host);
+    kept.push((host, until));
+}
+
+/// How long an HTTP `status` reply asks to be left alone: its `Retry-After` (seconds), else
+/// 10 s for a 429 and 5 s for a 503 (the LEZ 0.4 filter's own values). None for other replies.
+pub fn retry_after(status: u16, header: Option<&str>) -> Option<Duration> {
+    let default = match status {
+        429 => 10,
+        503 => 5,
+        _ => return None,
+    };
+    let said = header.and_then(|text| text.trim().parse::<u64>().ok());
+    // A 503 without the header is a proxy's plain failure, not a request to wait.
+    if status == 503 && said.is_none() {
+        return None;
+    }
+    Some(Duration::from_secs(said.unwrap_or(default).clamp(1, RETRY_AFTER_MAX.as_secs())))
+}
+
+/// What a read says when the endpoint asks to be left alone for `left` more.
+pub fn slow_down_problem(left: Duration) -> String {
+    format!("could not reach the sequencer: it asked the wallet to slow down (too many requests); it is read again in {} s", left.as_secs().max(1))
+}
+
+/// Before a request to `url`: an endpoint that asked to be left alone is waited for on a
+/// background read's thread (when `deadline` leaves time to ask after), refused at once on a
+/// call's own thread.
+fn wait_turn(url: &str, deadline: Deadline) -> Result<(), String> {
+    let Some(left) = slowed_down(url) else { return Ok(()) };
+    if crate::served::in_background() && left + Duration::from_millis(300) < deadline.left() {
+        std::thread::sleep(left);
+        return Ok(());
+    }
+    Err(slow_down_problem(left))
+}
+
 /// A request to the sequencer that failed, in words: no answer in time, no connection, or
 /// an HTTP error status (a proxy's 503) instead of a JSON-RPC reply.
 fn request_problem(error: ureq::Error, deadline: Deadline) -> String {
     match error {
+        ureq::Error::Status(429, _) => slow_down_problem(Duration::from_secs(10)),
         ureq::Error::Status(code, _) => format!("could not reach the sequencer: it answered HTTP {code} instead of a reading"),
         ureq::Error::Transport(transport) => {
             let text = transport.to_string();
@@ -855,11 +926,26 @@ pub fn rpc_result(body: &[u8]) -> Result<Value, String> {
 /// `deadline` at most (see `request_wait`); every failure is said in words, never read as
 /// an empty answer.
 pub fn rpc(sequencer: &str, method: &str, params: Value, deadline: Deadline) -> Result<Value, String> {
-    let wait = request_wait(deadline)?;
-    let response = ureq::post(sequencer)
-        .timeout(wait)
-        .send_json(json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }))
-        .map_err(|error| request_problem(error, deadline))?;
+    crate::served::blocking("registry::rpc");
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+    let mut asked_again = false;
+    let response = loop {
+        wait_turn(sequencer, deadline)?;
+        let wait = request_wait(deadline)?;
+        match ureq::post(sequencer).timeout(wait).send_json(&body) {
+            Ok(response) => break response,
+            Err(ureq::Error::Status(status, response)) if retry_after(status, response.header("retry-after")).is_some() => {
+                let pause = retry_after(status, response.header("retry-after")).unwrap_or(RETRY_AFTER_MAX);
+                slow_down(sequencer, pause);
+                // Asked once more after the wait, on a background read's thread only (`wait_turn`).
+                if asked_again || !crate::served::in_background() {
+                    return Err(if status == 429 { slow_down_problem(pause) } else { request_problem(ureq::Error::Status(status, response), deadline) });
+                }
+                asked_again = true;
+            }
+            Err(error) => return Err(request_problem(error, deadline)),
+        }
+    };
     // Read at most MAX_REPLY_LEN: a sequencer that sends more is refused, not believed.
     let mut body = Vec::new();
     std::io::Read::read_to_end(&mut std::io::Read::take(response.into_reader(), MAX_REPLY_LEN as u64 + 1), &mut body)
@@ -1004,6 +1090,15 @@ pub fn stub_http(reply: &'static str, connections: usize) -> String {
 /// to be slow. A degraded sequencer, as a proxy in front of one shows it, for tests.
 #[cfg(test)]
 pub fn stub_rpc(answer: impl Fn(&Value) -> (u16, String) + Send + Sync + 'static) -> String {
+    stub_rpc_with(move |request| {
+        let (status, body) = answer(request);
+        (status, String::new(), body)
+    })
+}
+
+/// `stub_rpc` whose answers carry headers of their own too (`"Retry-After: 1\r\n"`).
+#[cfg(test)]
+pub fn stub_rpc_with(answer: impl Fn(&Value) -> (u16, String, String) + Send + Sync + 'static) -> String {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
     let address = listener.local_addr().expect("address");
@@ -1029,8 +1124,8 @@ pub fn stub_rpc(answer: impl Fn(&Value) -> (u16, String) + Send + Sync + 'static
                         }
                     }
                 };
-                let (status, reply) = answer(&serde_json::from_slice(&body).unwrap_or(Value::Null));
-                let head = format!("HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", reply.len());
+                let (status, headers, reply) = answer(&serde_json::from_slice(&body).unwrap_or(Value::Null));
+                let head = format!("HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n", reply.len());
                 let _ = stream.write_all(head.as_bytes());
                 let _ = stream.write_all(reply.as_bytes());
                 let _ = stream.flush();
@@ -1109,6 +1204,7 @@ pub fn sequencer_reachable(sequencer: &str) -> Result<(), String> {
 /// (`CHANNELS`), or a fixed one.
 #[cfg(test)]
 pub fn channel_id_within(sequencer: &str, _wait: Duration) -> Result<String, String> {
+    crate::served::blocking("registry::channel_id_within");
     CHANNELS_ASKED.with(|asked| asked.set(asked.get() + 1));
     CHANNELS
         .with(|known| known.borrow().iter().find(|(url, _)| url == sequencer).map(|(_, channel)| channel.clone()))
@@ -1200,6 +1296,7 @@ pub fn minted_in(reply: &Value) -> Result<bool, String> {
 /// Tests say which deposits LEZ minted (`MINTED`), and that it didn't answer (`MINTED_UNREAD`).
 #[cfg(test)]
 pub fn deposit_minted(_sequencer: &str, receipt: &AccountId, _deadline: Deadline) -> Result<bool, String> {
+    crate::served::blocking("registry::deposit_minted");
     if MINTED_UNREAD.with(std::cell::Cell::get) {
         return Err("could not reach the sequencer".to_owned());
     }
@@ -1227,6 +1324,7 @@ pub fn public_balance(sequencer: &str, account: &AccountId, deadline: Deadline) 
 /// Tests say what an account holds: never the network.
 #[cfg(test)]
 pub fn public_balance(_sequencer: &str, account: &AccountId, _deadline: Deadline) -> Result<u128, String> {
+    crate::served::blocking("registry::public_balance");
     BALANCES.with(|held| held.borrow().iter().find(|(id, _)| id == account).map(|(_, balance)| *balance)).ok_or_else(|| "not reached".to_owned())
 }
 

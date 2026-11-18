@@ -555,7 +555,7 @@ Item {
     // The names module never answering at all (Basecamp hasn't connected this window to it; seen
     // after an update on 15 Nov): after 20 s, one plain line instead of an empty wallet, and
     // asked again every 10 s until it answers.
-    readonly property string moduleUnreachable: "Names can't reach its module. Settings → Module Inspector → Names → Unload All, then close the Names tab and open Names again. If it still can't, restart Basecamp."
+    readonly property string moduleUnreachable: "Names can't reach its module. Settings → Module Inspector → Names → Unload, then close the Names tab and open Names again. If it still can't, restart Basecamp."
     property double configAskSince: 0
     Timer {
         interval: 10000
@@ -808,9 +808,12 @@ Item {
             loadActivity()
         }), function(message) {
             console.log("names_ui: CLI balance:", message)
-            // Busy keeps the balance shown (the 15 s poll asks again); anything else is said.
+            // Busy keeps the balance shown and asks again (the module reads the balance on its
+            // own thread and says busy until the first read is back); anything else is said.
             if (waitAgain(message)) {
-                cliBalance = shown === undefined ? null : shown
+                // Nothing shown yet stays "Reading…" (undefined) while it is asked again.
+                cliBalance = shown
+                againWhenFree("cli_balance", loadCliBalance)
                 return
             }
             cliBalance = null
@@ -859,7 +862,13 @@ Item {
     function loadFaucetInfo() {
         if (namesNet !== "0.4" || moduleFeatures.indexOf("test_lez_faucet") < 0)
             return
-        askLater("faucet_info", [], function(value) { faucetInfo = value }, function(message) { console.log("names_ui: faucet_info:", message) }, 30000)
+        askLater("faucet_info", [], function(value) { faucetInfo = value }, function(message) {
+            console.log("names_ui: faucet_info:", message)
+            // The module reads the faucet on its own thread: until the first answer is back it
+            // says busy, and it is asked again.
+            if (waitAgain(message))
+                againWhenFree("faucet_info", loadFaucetInfo)
+        }, 30000)
     }
     function faucetSet(account, st) {
         var all = faucetState
@@ -874,7 +883,14 @@ Item {
         faucetSet(account, { busy: true, line: n > 0 ? "The faucet is busy; asking again…" : "", kind: "working" })
         askLater("faucet_claim", [account], function(value) {
             var r = Logic.faucetReply(value, Logic.grouped)
-            if (r.retry && n < 3) {
+            // The ask under way (the module waits for the faucet on its own thread): asked again for
+            // its answer, every 3 s for up to 3 minutes; never a second ask of the faucet.
+            if (r.pending && n < 60) {
+                faucetSet(account, { busy: true, line: r.line, kind: "working" })
+                againAfter(3000, function() { getTestLez(account, n + 1) })
+                return
+            }
+            if (r.retry && !r.pending && n < 3) {
                 faucetSet(account, { busy: true, line: r.line, kind: "waiting" })
                 againAfter(5000, function() { getTestLez(account, n + 1) })
                 return
@@ -4498,6 +4514,10 @@ Item {
                 shieldJob = { id: value.busy.id, started: value.busy.started || Date.now() }
         }, function(message) {
             console.log("names_ui: CLI status:", message)
+            // The module asks the CLI on its own thread: until that is back it says busy (the
+            // page keeps "Reading your wallet…"), and it is asked again.
+            if (waitAgain(message))
+                againWhenFree("cli_status", loadCliStatus)
         })
     }
 

@@ -10,6 +10,16 @@ may still be working on it. Look before trying again."), because the call may ha
 Polls and reads ask again after either one (`waitAgain`). Actions show the line; a busy action is
 safe to press again.
 
+Since `names-stall-2` (2026-11-18), the reads the app polls while a page is open never wait on
+the network or the names CLI on the module's thread (`basecamp-module/rust-lib/src/served.rs`):
+`wallet`, `cli_balance`, `activity`'s balance and receipt reads, `cli_accounts`, `cli_status`'s
+CLI probes, `cli_mine`'s first read, `settings`, `faucet_info`, `zone_list`'s channel read and
+the relayed-call sheet's bridge Configs are read on a thread of their own and answered with the
+last read (`read_at`; a read that failed since says `stale`, `as_of` and `warning`, which
+`Logic.readNote` shows). Before the first read is back (600 ms at most) such a call answers busy,
+and the app asks again. `faucet_claim` answers `code: "pending"` while the faucet is asked, and
+the app asks again for its answer (never a second ask of the faucet).
+
 Since `names-hang-fix` (2026-11-18), a module that isn't loaded is never waited for, so it can't
 make the wallet busy (`basecamp-module/rust-lib/src/peer.rs`). The module finds out from its
 endpoint, which takes microseconds and needs no client. A chain method then answers at once with
@@ -54,7 +64,7 @@ do.
 | 676 | loadCliMine | askLater | cli_mine | poll: keeps what is shown; its timer asks again (15 s; anon_name and board_likes: best effort) |
 | 691 | loadCliMine | askLater | anon_name | poll: keeps what is shown; its timer asks again (15 s; anon_name and board_likes: best effort) |
 | 692 | loadCliMine | askLater | board_likes | poll: keeps what is shown; its timer asks again (15 s; anon_name and board_likes: best effort) |
-| 701 | loadCliBalance | askLater | cli_balance | poll: keeps the balance shown (15 s timer) |
+| 701 | loadCliBalance | askLater | cli_balance | keeps the balance shown (nothing shown: "Reading…"); asked again in 5 s (againWhenFree) |
 | 753 | loadBridgeNet | askLater | bridge_net_balances | poll: shows the busy line under the balances it keeps; 30 s timer |
 | 772 | bridgeNetWatch | askLater | bridge_net_watch | action: says "The wallet is busy; still working." (nothing was done; press again). No answer at all says "No answer from the wallet yet…" instead |
 | 791 | setWalletNet | askLater | set_names_network | action: says "The wallet is busy; still working." (nothing was done; press again). No answer at all says "No answer from the wallet yet…" instead |
@@ -79,7 +89,7 @@ do.
 | 1676 | bridgeRun | askLater | chain_bridge | action: says "The wallet is busy; still working." (nothing was done; press again). No answer at all says "No answer from the wallet yet…" instead |
 | 1717 | bridgeSplit | askLater | chain_split | action: says "The wallet is busy; still working." (nothing was done; press again). No answer at all says "No answer from the wallet yet…" instead; its tx poll: next tick |
 | 1740 | bridgeSplit | askLater | chain_tx | action: says "The wallet is busy; still working." (nothing was done; press again). No answer at all says "No answer from the wallet yet…" instead; its tx poll: next tick |
-| 1839 | loadCliStatus | askLater | cli_status | poll: keeps the last status (a busy read is never "no wallet", so never Welcome); 15 s |
+| 1839 | loadCliStatus | askLater | cli_status | keeps the last status (a busy read is never "no wallet", so never Welcome; nothing yet: "Reading your wallet…"); asked again in 5 s (againWhenFree) |
 | 1862 | installCli | askLater | cli_install | action: says "The wallet is busy; still working." (nothing was done; press again). No answer at all says "No answer from the wallet yet…" instead |
 | 1893 | checkInstall | askLater | job | job poll: next tick asks again |
 | 1918 | createWallet | askLater | cli_create_wallet | action: says "The wallet is busy; still working." (nothing was done; press again). No answer at all says "No answer from the wallet yet…" instead (and the module refuses over an existing store) |

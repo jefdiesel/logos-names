@@ -53,6 +53,7 @@ mod provider_public;
 mod spell;
 mod text;
 mod registry;
+mod served;
 mod shortlist;
 mod sigterm;
 mod wallet;
@@ -1326,6 +1327,12 @@ struct Names {
     /// one thread, where the 2026-11-18 sample of the stuck host found it. Approving still reads
     /// them afresh.
     sheet_reads: SheetReads,
+    /// The reads the Names app polls while a page is open, answered at once from what was last
+    /// read, each read again on a thread of its own (served.rs).
+    served: served::Served,
+    /// The `seq` of the last LEZ balance read (`lez_read`) whose History work was done: each read
+    /// settles and notes the History once, in order, on the call's thread.
+    lez_applied: HashMap<String, u64>,
     /// When LEZ last answered about each followed bridge's receipt (seconds), so each is
     /// asked on its schedule (`activity::receipt_due`), not on every balance read.
     receipt_asks: std::sync::Mutex<std::collections::BTreeMap<AccountId, u64>>,
@@ -1371,11 +1378,39 @@ const SHEET_READ_EVERY: std::time::Duration = std::time::Duration::from_secs(30)
 /// A sheet shown before its first background read is back: refused, and says so.
 const STILL_READING: &str = "the wallet is still reading which program holds your bridged tokens on LEZ 0.4, so it signs nothing yet; this updates in a moment";
 
-/// The background reads behind relayed-call sheets (`Names::sheet_reads`).
+/// The background reads behind relayed-call sheets (`Names::sheet_reads`): per bridge, so one
+/// bridge that can't be read never stands for another.
 #[derive(Default)]
 struct SheetReads {
-    tokens: Background<Vec<String>>,
-    burns: Background<Vec<(AccountId, bridge_net::BridgeConfig)>>,
+    tokens: Background<Vec<(AccountId, Known<AccountId>)>>,
+    burns: Background<Vec<(AccountId, Known<bridge_net::BridgeConfig>)>>,
+}
+
+/// What a check knows of one bridge's Config (its token program, or the whole Config).
+#[derive(Clone, Debug, PartialEq)]
+enum Known<T> {
+    /// Read (within the age the check asks for): None when the chain has no Config there.
+    Read(Option<T>),
+    /// Couldn't be read just now: why.
+    Unread(String),
+    /// Being read on its own thread.
+    Reading,
+}
+
+/// Where a relayed call's check takes the bridges' Configs from: a sheet a poll shows from the
+/// last background read (`SheetReads`); approving, signing again or proposing from what was read
+/// within its bound, else from a read started on its own thread and waited for `FIRST_WAIT` at
+/// most. Neither ever reads the network on the call's own thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Check {
+    Sheet,
+    Signing,
+}
+
+/// Whether a check's error is a wait (a read still under way, or one to try again in a moment),
+/// not a refusal of the call.
+fn is_wait(why: &str) -> bool {
+    why == STILL_READING || why.contains("try again in a moment")
 }
 
 /// One value read on a thread of its own and kept: `get` answers at once with the last one
@@ -1421,7 +1456,7 @@ impl<T: Clone + Send + 'static> Background<T> {
             slot.updating = true;
             let shared = std::sync::Arc::clone(&self.slot);
             let key = key.to_owned();
-            std::thread::spawn(move || {
+            served::spawn(move || {
                 let value = read();
                 let mut slot = shared.lock().unwrap_or_else(|e| e.into_inner());
                 if slot.key == key {
@@ -1500,6 +1535,8 @@ impl Default for Names {
             cli_lines: Default::default(),
             tool_status: Default::default(),
             sheet_reads: SheetReads::default(),
+            served: served::Served::default(),
+            lez_applied: HashMap::new(),
         };
         // Files saved by versions before 0.10 were readable by every account on the
         // machine; this closes them up once.
@@ -1801,6 +1838,18 @@ fn reply_coded(outcome: Result<Value, (String, &str)>) -> String {
         Err((error, code)) => json!({ "success": false, "value": null, "error": error, "code": code }),
     }
     .to_string()
+}
+
+/// What an error carries in front of a served read's busy envelope (`busy_or_reply`).
+const BUSY_MARK: &str = "\u{0}busy\u{0}";
+
+/// `reply`, but an error that is a served read's busy envelope (`BUSY_MARK`) is answered as that
+/// envelope: not taken, ask again.
+fn busy_or_reply(outcome: Result<Value, String>) -> String {
+    match outcome {
+        Err(why) if why.starts_with(BUSY_MARK) => why[BUSY_MARK.len()..].to_owned(),
+        other => reply(other),
+    }
 }
 
 fn reply(outcome: Result<Value, String>) -> String {
@@ -2563,6 +2612,8 @@ impl Names {
         self.board_reads.lock().expect("the board reads lock").clear();
         // The balance was read from the old network (CR-3).
         cli::forget_balance();
+        // Every served read too, and one under way is dropped when it ends.
+        self.served.forget("");
     }
 
     /// Answers a read about `typed` from the cache while it is fresh, else asks
@@ -2611,6 +2662,9 @@ impl Names {
         self.board_reads.lock().expect("the board reads lock").retain(|key, _| !key.starts_with("cli_mine:"));
         // The wallet or its default account changed: so did the balance (CR-2).
         cli::forget_balance();
+        for kind in [LEZ_BALANCE_KEY, "cli_accounts", "wallet", "first-cli_mine:"] {
+            self.served.forget(kind);
+        }
     }
 
     /// Drops what the cache knows about `typed`, after a change to it.
@@ -2809,12 +2863,24 @@ impl Names {
         if let Some(channel) = &zones.home().channel {
             return Some(channel.clone());
         }
-        if self.channel_asked && !again {
-            return None;
-        }
-        self.channel_asked = true;
         let sequencer = zones.home().sequencer.clone();
-        let channel = registry::channel_id_within(&sequencer, CHANNEL_WAIT).ok().and_then(|read| zones::channel(&read))?;
+        let read = if again {
+            self.channel_asked = true;
+            registry::channel_id_within(&sequencer, CHANNEL_WAIT).ok()
+        } else {
+            // A poll (zone_list, a balance read) never waits on it: asked once a run on a thread
+            // of its own, and taken by the first call after the answer is back.
+            let key = format!("home-channel:{sequencer}");
+            let snap = if self.channel_asked {
+                self.served.peek(&key)
+            } else {
+                self.channel_asked = true;
+                let asked = sequencer.clone();
+                self.served.read(&key, std::time::Duration::from_secs(3600), served::Lane::Host(sequencer.clone()), move || registry::channel_id_within(&asked, CHANNEL_WAIT).map(Value::from))
+            };
+            snap.value.as_ref().and_then(Value::as_str).map(str::to_owned)
+        };
+        let channel = read.and_then(|read| zones::channel(&read))?;
         if zones.holder(&channel, Some(0)).is_some() {
             return None;
         }
@@ -3090,19 +3156,57 @@ impl Names {
         Ok(json!({ "installed": true, "path": ours, "version": line }))
     }
 
-    /// What the LEZ 0.4 tool at `program` can do here (`cli::prover_status`), asked once per file.
-    fn tool_status_of(&self, program: &std::path::Path) -> Value {
-        let Ok(modified) = std::fs::metadata(program).and_then(|meta| meta.modified()) else { return Value::Null };
-        if let Some((when, status)) = self.tool_status.lock().ok().and_then(|seen| seen.get(program).cloned()) {
-            if when == modified {
-                return status;
+    /// What `cli_status` asks the CLI itself (`module --help`, `--version`, `prover-status` on
+    /// LEZ 0.4 (what its tool can do here), `module accounts` for an old wallet), read on a thread
+    /// of its own once per CLI file and wallet file as they are now (their modification times),
+    /// and kept. Its version line is kept for `cli_line` too.
+    fn cli_probes(&mut self, program: Option<&std::path::Path>, wallet: Option<&std::path::Path>) -> served::Snap {
+        let stamp = |path: &std::path::Path| std::fs::metadata(path).and_then(|meta| meta.modified()).ok();
+        let program = program.map(std::path::Path::to_path_buf);
+        let lez04 = self.net == Net::Lez04;
+        // The wallet as `cli_setup` names it, without asking the CLI its version here (the probe
+        // does, and only a LEZ 0.4 CLI is asked about a LEZ 0.4 wallet).
+        let setup = match (&program, wallet) {
+            (Some(program), Some(wallet)) if self.unavailable().is_none() => Some(cli::Setup {
+                program: program.clone(),
+                wallet: wallet.to_path_buf(),
+                registry: self.program.as_ref().map(registry::account_text),
+                sequencer: self.sequencer.clone(),
+            }),
+            _ => None,
+        };
+        let key = format!(
+            "cli-probes:{:?}|{:?}|{:?}|{:?}|{}",
+            program,
+            program.as_deref().and_then(stamp),
+            wallet,
+            wallet.and_then(|dir| stamp(&dir.join(cli::STORAGE_FILE))),
+            self.net.id()
+        );
+        let probed = program.clone();
+        let snap = self.served.read(&key, std::time::Duration::from_secs(24 * 3600), served::Lane::Free, move || {
+            let line = probed.as_deref().and_then(|path| cli::version(path).ok());
+            let speaks_04 = line.as_deref().is_some_and(|line| line.contains(LEZ04_CLI_MARK));
+            Ok(json!({
+                "outdated": probed.as_deref().is_some_and(|path| !cli::speaks_module(path)),
+                "cli_line": line,
+                "tool": if lez04 { probed.as_deref().map_or(Value::Null, |path| cli::prover_status(path).unwrap_or(Value::Null)) } else { Value::Null },
+                "old_wallet": setup.as_ref().filter(|_| !lez04 || speaks_04).is_some_and(cli::wallet_is_old),
+            }))
+        });
+        if let (Some(value), Some(path)) = (&snap.value, &program) {
+            if let Some(modified) = stamp(path) {
+                if let (Some(line), Ok(mut lines)) = (value["cli_line"].as_str(), self.cli_lines.lock()) {
+                    lines.insert(path.clone(), (modified, line.to_owned()));
+                }
+                if lez04 {
+                    if let Ok(mut seen) = self.tool_status.lock() {
+                        seen.insert(path.clone(), (modified, value["tool"].clone()));
+                    }
+                }
             }
         }
-        let status = cli::prover_status(program).unwrap_or(Value::Null);
-        if let Ok(mut seen) = self.tool_status.lock() {
-            seen.insert(program.to_path_buf(), (modified, status.clone()));
-        }
-        status
+        snap
     }
 
     /// Puts the LEZ 0.4 names tool at `path` to use, when its SHA-256 is the expected one and it
@@ -3782,8 +3886,100 @@ impl Names {
     /// Settles the history's entries still on their way, from the chain and the jobs, and
     /// returns the balances to note (`rows`, what the wallet's LEZ accounts hold as read
     /// from `sequencer`): an account a bridge goes to is read afresh, or left out when its
-    /// read can't be told apart from that bridge's arrival.
+    /// read can't be told apart from that bridge's arrival. All on this thread: the module's
+    /// polls make the same steps with the network part on a thread of its own (`lez_read`).
+    #[cfg(test)]
     fn settle_activity(&self, dir: &std::path::Path, sequencer: &str, rows: &[(String, u128)], deadline: registry::Deadline) -> Vec<(String, u128)> {
+        self.settle_entries(dir);
+        let plan = self.receipt_plan(dir, sequencer);
+        let asked = plan.run(dir, rows, deadline);
+        self.apply_receipts(dir, plan.at, asked)
+    }
+
+    /// `key` for a served read of the zone in use on the network in use, with what it was read
+    /// from (`about`): a read that ends after a switch is never shown as another's.
+    fn served_key(&self, kind: &str, about: &str) -> String {
+        format!("{kind}@{}#{}|{about}", self.zones.current_id(), self.net.id())
+    }
+
+    /// The LEZ balance read of the zone in use (`names balance`, then the asks about the bridges
+    /// followed, `ReceiptPlan`), made on a thread of its own and answered at once with the last
+    /// one (`cli_balance`, `activity`). Each read's History work (the receipts' answers, what the
+    /// accounts hold) is done once, in order, here on the call's thread: it writes the History,
+    /// which only this thread does.
+    fn lez_read(&mut self) -> Result<served::Snap, String> {
+        let setup = self.cli_setup()?;
+        setup.wallet_ready()?;
+        let key = self.served_key(LEZ_BALANCE_KEY, &format!("{}|{}|{}", setup.program.display(), setup.wallet.display(), setup.sequencer));
+        Ok(self.lez_serve(key, Some(setup), self.sequencer.clone()))
+    }
+
+    /// Without the names CLI (none set, or the wallet folder not there) the bridges followed are
+    /// still asked after (no balances): as `lez_read`, on a thread of its own.
+    fn receipts_read(&mut self) {
+        let key = self.served_key("receipts", &self.sequencer);
+        let _ = self.lez_serve(key, None, self.sequencer.clone());
+    }
+
+    fn lez_serve(&mut self, key: String, setup: Option<cli::Setup>, fallback_sequencer: String) -> served::Snap {
+        let dir = config_dir();
+        if !self.served.inline {
+            // A read that ended since the last call: its History work first, before another read
+            // is planned from the History.
+            let kept = self.served.peek(&key);
+            self.lez_noted(&key, &kept);
+        }
+        let sequencer = setup.as_ref().map_or(fallback_sequencer, |setup| setup.sequencer.clone());
+        let plan = dir.as_ref().map(|dir| self.receipt_plan(dir, &sequencer));
+        let lane = if setup.is_some() { served::Lane::Cli } else { served::Lane::Host(sequencer) };
+        let snap = self.served.read(&key, BALANCE_EVERY, lane, move || {
+            let deadline = registry::Deadline::after(cli::CALL_BUDGET);
+            let read = setup.as_ref().map(|setup| cli::balance_read(setup, deadline)).transpose()?;
+            // Only a read in which the sequencer gave every balance moves the History: an
+            // unread balance is never a 0 (selective-degradation-cold-read-false-arrivals).
+            let complete = read.as_ref().is_some_and(cli::BalanceRead::complete);
+            let rows = read.as_ref().filter(|_| complete).map(cli::BalanceRead::balances).unwrap_or_default();
+            // What settled first, so a send between the wallet's own accounts is not also taken
+            // for money that arrived.
+            let asked = match (&plan, &dir) {
+                (Some(plan), Some(dir)) => plan.run(dir, &rows, deadline),
+                _ => ReceiptsAsked { rows, minted: HashMap::new() },
+            };
+            Ok(json!({
+                "value": read.as_ref().map_or(Value::Null, cli::BalanceRead::reply),
+                "marks": read.as_ref().map_or(Value::Null, cli::BalanceRead::marks),
+                "complete": complete,
+                "plan_at": plan.as_ref().map(|plan| plan.at),
+                "asked": ReceiptPlan::asked_value(&asked),
+            }))
+        });
+        self.lez_noted(&key, &snap);
+        snap
+    }
+
+    /// A LEZ balance read's History work, once per read (`lez_applied`).
+    fn lez_noted(&mut self, key: &str, snap: &served::Snap) {
+        let Some(value) = &snap.value else { return };
+        if self.lez_applied.get(key).is_some_and(|seq| *seq >= snap.seq) {
+            return;
+        }
+        if self.lez_applied.len() >= MAX_CACHED {
+            self.lez_applied.clear();
+        }
+        self.lez_applied.insert(key.to_owned(), snap.seq);
+        let Some(dir) = config_dir() else { return };
+        let at = value["plan_at"].as_u64().unwrap_or_else(now);
+        let rows = self.apply_receipts(&dir, at, ReceiptPlan::asked_of(&value["asked"]));
+        if value["complete"] == true {
+            // The sequencer answers now: home's channel is learnt here if it isn't known.
+            self.home_channel(false);
+            self.note_lez(&rows);
+        }
+    }
+
+    /// The entries still on their way that settle from the node (the Logos Blockchain: a module
+    /// call, on this thread as every module call must be) and from the jobs (files).
+    fn settle_entries(&self, dir: &std::path::Path) {
         for entry in activity::all(dir).into_iter().filter(|entry| entry["state"] == "sending" || entry["state"] == "in_block") {
             let id = entry["id"].as_str().unwrap_or_default().to_owned();
             let mut settled = Value::Null;
@@ -3886,19 +4082,25 @@ impl Names {
                 activity::update(dir, &id, &settled);
             }
         }
-        // A bridge arrives once LEZ has minted its own deposit (its receipt), never on a
-        // balance that matches. Its account's balance is then read between two asks of the
-        // receipts, so the read either holds the credit (minted at the first ask) or doesn't
-        // (not minted at the second); a mint between them, or an ask LEZ doesn't answer,
-        // leaves the account unread this time, so its credit is never also taken for money
-        // that arrived (activity::note_balances).
-        //
-        // Bridges are followed for 30 days, and asking every one on every balance read cost
-        // reads without end (and a share of the call's deadline). The bridges to one account
-        // are asked together, and only when one is due by its age (`activity::receipt_due`:
-        // every minute, every hour once overdue) or when the account's balance rose in a way
-        // nothing explains (`activity::would_arrive`): no bridge's credit can be in the read
-        // unseen otherwise, so the wallet's read is noted as it is.
+    }
+
+    /// A bridge arrives once LEZ has minted its own deposit (its receipt), never on a
+    /// balance that matches. Its account's balance is then read between two asks of the
+    /// receipts, so the read either holds the credit (minted at the first ask) or doesn't
+    /// (not minted at the second); a mint between them, or an ask LEZ doesn't answer,
+    /// leaves the account unread this time, so its credit is never also taken for money
+    /// that arrived (activity::note_balances).
+    ///
+    /// Bridges are followed for 30 days, and asking every one on every balance read cost
+    /// reads without end (and a share of the call's deadline). The bridges to one account
+    /// are asked together, and only when one is due by its age (`activity::receipt_due`:
+    /// every minute, every hour once overdue) or when the account's balance rose in a way
+    /// nothing explains (`activity::would_arrive`): no bridge's credit can be in the read
+    /// unseen otherwise, so the wallet's read is noted as it is.
+    ///
+    /// The plan of those asks, made here from the History and the asks' schedule; the asks
+    /// themselves (`ReceiptPlan::run`) are network reads, made on the balance read's own thread.
+    fn receipt_plan(&self, dir: &std::path::Path, sequencer: &str) -> ReceiptPlan {
         let at = now();
         let entries = activity::all(dir);
         // A bridge is followed on the zone it went to. One to the zone in use settles with
@@ -3913,38 +4115,98 @@ impl Names {
         let mut asks = self.receipt_asks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         asks.retain(|receipt, _| followed.iter().chain(&elsewhere).any(|(_, _, followed)| followed == receipt));
         let sent_at = |id: &str| entries.iter().find(|entry| entry["id"] == id).and_then(|entry| entry["at"].as_u64()).unwrap_or(0);
-        let mut accounts: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        let mut due: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for (id, to, receipt) in &followed {
             if activity::receipt_due(at.saturating_sub(sent_at(id)), asks.get(receipt).copied(), at) {
-                accounts.insert(to.as_str());
+                due.insert(to.clone());
             }
         }
-        for (to, balance) in rows {
-            if followed.iter().any(|(_, bridge_to, _)| bridge_to == to) && activity::would_arrive(dir, at, "lez", zones.zone().scope(), Some(&here), to, *balance) {
-                accounts.insert(to.as_str());
-            }
-        }
-        // Every read here shares the call's deadline, so the call answers inside the host's time
-        // however many bridges wait; one past it is unread, and the bridge waits a round.
-        let ask = |receipt: &registry::AccountId| registry::deposit_minted(sequencer, receipt, deadline).ok();
-        let mut minted: std::collections::HashMap<registry::AccountId, Option<bool>> = followed
-            .iter()
-            .filter(|(_, to, _)| accounts.contains(to.as_str()))
-            .map(|(_, _, receipt)| (*receipt, ask(receipt)))
-            .collect();
         // One to another zone is asked at that zone's sequencer, on the same schedule.
-        for (id, _, receipt) in &elsewhere {
-            if !activity::receipt_due(at.saturating_sub(sent_at(id)), asks.get(receipt).copied(), at) {
-                continue;
+        let elsewhere: Vec<(AccountId, Option<String>)> = elsewhere
+            .iter()
+            .filter(|(id, _, receipt)| activity::receipt_due(at.saturating_sub(sent_at(id)), asks.get(receipt).copied(), at))
+            .map(|(id, _, receipt)| {
+                let theirs = went_to.get(id.as_str()).and_then(|zone| zones.index(zone)).and_then(|at| zones.at(at)).map(|zone| zone.sequencer.clone());
+                (*receipt, theirs)
+            })
+            .collect();
+        ReceiptPlan {
+            at,
+            sequencer: sequencer.to_owned(),
+            scope: zones.zone().scope().to_owned(),
+            here,
+            followed: followed.into_iter().map(|(_, to, receipt)| (to, receipt)).collect(),
+            due,
+            elsewhere,
+        }
+    }
+
+    /// The receipts' answers (`ReceiptPlan::run`) kept and told in the History: an ask LEZ
+    /// answered waits its schedule, one it didn't is tried again next time. Returns the rows to note.
+    fn apply_receipts(&self, dir: &std::path::Path, at: u64, asked: ReceiptsAsked) -> Vec<(String, u128)> {
+        let mut asks = self.receipt_asks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (receipt, answer) in &asked.minted {
+            if answer.is_some() {
+                asks.insert(*receipt, at);
             }
-            let theirs = went_to.get(id.as_str()).and_then(|zone| zones.index(zone)).and_then(|at| zones.at(at)).map(|zone| zone.sequencer.clone());
-            minted.insert(*receipt, theirs.and_then(|sequencer| registry::deposit_minted(&sequencer, receipt, deadline).ok()));
+        }
+        drop(asks);
+        let entries = activity::all(dir);
+        for (id, mut fields) in activity::bridge_updates(&entries, at, &|receipt| asked.minted.get(receipt).copied().flatten()) {
+            if fields["state"] == "arrived" {
+                fields["arrived_at"] = json!(at);
+            }
+            activity::update(dir, &id, &fields);
+        }
+        asked.rows
+    }
+}
+
+/// The asks of a balance read about the bridges followed (`Names::receipt_plan`): owned, so they
+/// can be made on the read's own thread.
+#[derive(Clone, Debug)]
+struct ReceiptPlan {
+    at: u64,
+    sequencer: String,
+    scope: String,
+    here: String,
+    /// Each bridge followed on the zone in use: the account it goes to, its receipt.
+    followed: Vec<(String, AccountId)>,
+    /// The accounts with a receipt due by its schedule.
+    due: std::collections::BTreeSet<String>,
+    /// Receipts due of bridges to other zones, with that zone's sequencer (None: removed).
+    elsewhere: Vec<(AccountId, Option<String>)>,
+}
+
+/// What `ReceiptPlan::run` found: the rows to note, and each receipt asked (None: unanswered).
+#[derive(Clone, Debug, Default)]
+struct ReceiptsAsked {
+    rows: Vec<(String, u128)>,
+    minted: HashMap<AccountId, Option<bool>>,
+}
+
+impl ReceiptPlan {
+    /// The asks, against `rows` (what the wallet's LEZ accounts hold as read): network reads only,
+    /// and History files read, never written. Every read here shares `deadline`, so the read ends
+    /// in time however many bridges wait; one past it is unread, and the bridge waits a round.
+    fn run(&self, dir: &std::path::Path, rows: &[(String, u128)], deadline: registry::Deadline) -> ReceiptsAsked {
+        let mut accounts = self.due.clone();
+        for (to, balance) in rows {
+            if self.followed.iter().any(|(bridge_to, _)| bridge_to == to) && activity::would_arrive(dir, self.at, "lez", &self.scope, Some(&self.here), to, *balance) {
+                accounts.insert(to.clone());
+            }
+        }
+        let ask = |receipt: &registry::AccountId| registry::deposit_minted(&self.sequencer, receipt, deadline).ok();
+        let mut minted: HashMap<AccountId, Option<bool>> =
+            self.followed.iter().filter(|(to, _)| accounts.contains(to)).map(|(_, receipt)| (*receipt, ask(receipt))).collect();
+        for (receipt, theirs) in &self.elsewhere {
+            minted.insert(*receipt, theirs.as_ref().and_then(|sequencer| registry::deposit_minted(sequencer, receipt, deadline).ok()));
         }
         let mut rows = rows.to_vec();
-        for to in accounts {
+        for to in &accounts {
             let Some(at_row) = rows.iter().position(|(account, _)| account == to) else { continue };
-            let receipts: Vec<registry::AccountId> = followed.iter().filter(|(_, bridge_to, _)| bridge_to == to).map(|(_, _, receipt)| *receipt).collect();
-            let fresh = registry::parse_account(to).ok().and_then(|id| registry::public_balance(sequencer, &id, deadline).ok());
+            let receipts: Vec<registry::AccountId> = self.followed.iter().filter(|(bridge_to, _)| bridge_to == to).map(|(_, receipt)| *receipt).collect();
+            let fresh = registry::parse_account(to).ok().and_then(|id| registry::public_balance(&self.sequencer, &id, deadline).ok());
             let mut certain = fresh.is_some();
             for receipt in &receipts {
                 match minted.get(receipt).copied().flatten() {
@@ -3970,20 +4232,74 @@ impl Names {
                 }
             }
         }
-        // An ask LEZ answered waits its schedule; one it didn't is tried again next time.
-        for (receipt, answer) in &minted {
-            if answer.is_some() {
-                asks.insert(*receipt, at);
+        ReceiptsAsked { rows, minted }
+    }
+
+    /// As kept with a balance read: `{rows: [[account, amount]], minted: [[receipt, bool|null]]}`.
+    fn asked_value(asked: &ReceiptsAsked) -> Value {
+        json!({
+            "rows": asked.rows.iter().map(|(account, amount)| json!([account, amount.to_string()])).collect::<Vec<_>>(),
+            "minted": asked.minted.iter().map(|(receipt, answer)| json!([registry::account_text(receipt), answer])).collect::<Vec<_>>(),
+        })
+    }
+
+    fn asked_of(value: &Value) -> ReceiptsAsked {
+        let rows = value["rows"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|row| Some((row[0].as_str()?.to_owned(), row[1].as_str()?.parse().ok()?)))
+            .collect();
+        let minted = value["minted"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|row| Some((registry::parse_account(row[0].as_str()?).ok()?, row[1].as_bool())))
+            .collect();
+        ReceiptsAsked { rows, minted }
+    }
+}
+
+/// `wallet`'s read: the wallet's accounts and what each public one holds, as `{accounts,
+/// private_accounts}`.
+fn wallet_read(setup: &cli::Setup, registry: &Registry, home: bool) -> Result<Value, String> {
+    {
+        let held = wallet::accounts(setup)?;
+        let summary = |account: &AccountId| -> Result<Value, String> {
+            if home {
+                return registry.account_summary(account);
             }
+            let balance = registry.balance(account)?;
+            Ok(json!({ "account": registry::account_text(account), "balance": balance.to_string(), "funded": balance > 0, "name": null }))
+        };
+        // Each summary is a read over the network; they are read together.
+        let mut accounts = std::thread::scope(|scope| {
+            let readers: Vec<_> = held
+                .public
+                .iter()
+                .take(MAX_WALLET_ACCOUNTS)
+                .map(|account| scope.spawn(|| summary(account)))
+                .collect();
+            readers
+                .into_iter()
+                .map(|reader| reader.join().unwrap_or_else(|_| Err("a read failed".to_owned())))
+                .collect::<Result<Vec<Value>, String>>()
+        })?;
+        // A stable sort: funded accounts first, each group in wallet order.
+        accounts.sort_by_key(|account| account["funded"] != true);
+        // A private account's balance is known only to the wallet.
+        let mut private = Vec::new();
+        for (account, balance) in held.private.iter().take(MAX_WALLET_ACCOUNTS) {
+            private.push(json!({
+                "account": registry::account_text(account),
+                "balance": balance.to_string(),
+                "funded": *balance > 0,
+            }));
         }
-        drop(asks);
-        for (id, mut fields) in activity::bridge_updates(&entries, at, &|receipt| minted.get(receipt).copied().flatten()) {
-            if fields["state"] == "arrived" {
-                fields["arrived_at"] = json!(at);
-            }
-            activity::update(dir, &id, &fields);
-        }
-        rows
+        private.sort_by_key(|account| account["funded"] != true);
+        Ok(json!({ "accounts": accounts, "private_accounts": private }))
     }
 }
 
@@ -4132,45 +4448,21 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| {
-            // Names are kept on home: on another zone an account is only what it holds there.
-            let home = self.on_home();
+        // Names are kept on home: on another zone an account is only what it holds there.
+        let home = self.on_home();
+        let ready = (|| -> Result<(cli::Setup, Registry), String> {
             let registry = if home { self.registry()? } else { Registry::new(&self.sequencer, self.program.unwrap_or([0; 32])) };
-            let held = self.held()?;
-            let summary = |account: &AccountId| -> Result<Value, String> {
-                if home {
-                    return registry.account_summary(account);
-                }
-                let balance = registry.balance(account)?;
-                Ok(json!({ "account": registry::account_text(account), "balance": balance.to_string(), "funded": balance > 0, "name": null }))
-            };
-            // Each summary is a read over the network; they are read together.
-            let mut accounts = std::thread::scope(|scope| {
-                let readers: Vec<_> = held
-                    .public
-                    .iter()
-                    .take(MAX_WALLET_ACCOUNTS)
-                    .map(|account| scope.spawn(|| summary(account)))
-                    .collect();
-                readers
-                    .into_iter()
-                    .map(|reader| reader.join().unwrap_or_else(|_| Err("a read failed".to_owned())))
-                    .collect::<Result<Vec<Value>, String>>()
-            })?;
-            // A stable sort: funded accounts first, each group in wallet order.
-            accounts.sort_by_key(|account| account["funded"] != true);
-            // A private account's balance is known only to the wallet.
-            let mut private = Vec::new();
-            for (account, balance) in held.private.iter().take(MAX_WALLET_ACCOUNTS) {
-                private.push(json!({
-                    "account": registry::account_text(account),
-                    "balance": balance.to_string(),
-                    "funded": *balance > 0,
-                }));
-            }
-            private.sort_by_key(|account| account["funded"] != true);
-            Ok(json!({ "accounts": accounts, "private_accounts": private }))
-        })())
+            Ok((self.cli_setup()?, registry))
+        })();
+        let (setup, registry) = match ready {
+            Ok(ready) => ready,
+            Err(why) => return reply(Err(why)),
+        };
+        // The CLI lists the accounts (seconds when it catches the wallet up), then each is read
+        // over the network: on a thread of its own, the call answering with the last read.
+        let key = self.served_key("wallet", &format!("{}|{}|{}", setup.wallet.display(), registry.sequencer, registry::account_text(&registry.program)));
+        let snap = self.served.read(&key, WALLET_EVERY, served::Lane::Cli, move || wallet_read(&setup, &Registry::new(&registry.sequencer, registry.program), home));
+        served::reply_of(&snap, "Your wallet", |_| Value::Null)
     }
 
     fn mine(&mut self) -> String {
@@ -4305,12 +4597,20 @@ impl NamesModule for Names {
     }
 
     fn settings(&mut self) -> String {
-        reply((|| {
-            let registry = self.registry()?;
+        let registry = match self.registry() {
+            Ok(registry) => registry,
+            Err(why) => return reply(Err(why)),
+        };
+        // Two network reads: on a thread of their own, the call answering with the last.
+        let (sequencer, program) = (registry.sequencer.clone(), registry.program);
+        let key = format!("settings:{sequencer}:{}", registry::account_text(&program));
+        let snap = self.served.read(&key, SETTINGS_EVERY, served::Lane::Host(sequencer.clone()), move || {
+            let registry = Registry::new(&sequencer, program);
             let settings = registry.settings()?;
             let now = registry.now()?;
             Ok(settings.as_ref().map_or(Value::Null, |settings| settings_json(settings, now)))
-        })())
+        });
+        served::reply_of(&snap, "The registry's settings", |_| Value::Null)
     }
 
     fn register_name(&mut self, name: String, owner: String, private_account: String) -> String {
@@ -4518,12 +4818,20 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| {
-            if self.net != Net::Lez04 {
-                return Err("the test-LEZ faucet is on LEZ 0.4 (the bridge test network); the wallet is on LEZ 0.3 now".to_owned());
+        if self.net != Net::Lez04 {
+            return reply(Err("the test-LEZ faucet is on LEZ 0.4 (the bridge test network); the wallet is on LEZ 0.3 now".to_owned()));
+        }
+        // Read on a thread of its own (at most every minute): the call answers with the last. A
+        // faucet that says it is rate limited keeps the last answer shown.
+        let url = self.lez04_rpc();
+        let snap = self.served.read(&format!("faucet_info:{url}"), FAUCET_INFO_EVERY, served::Lane::Host(url.clone()), move || {
+            let value = bridge_net::faucet_call(&url, "bridge_faucetInfo", json!([]), bridge_net::FAUCET_INFO_WAIT)?;
+            if value["code"] == "rate_limited" {
+                return Err(value["reason"].as_str().unwrap_or("too many requests just now").to_owned());
             }
-            bridge_net::faucet_call(&self.lez04_rpc(), "bridge_faucetInfo", json!([])).map(|v| bridge_net::faucet_shown(&v))
-        })())
+            Ok(bridge_net::faucet_shown(&value))
+        });
+        served::reply_of(&snap, "The faucet", |_| Value::Null)
     }
 
     fn faucet_claim(&mut self, account: String) -> String {
@@ -4536,9 +4844,35 @@ impl NamesModule for Names {
             }
             let id = bridge_net::public_account(&account)?;
             let written = format!("Public/{}", registry::account_text(&id));
-            let key = wallet::public_key(&self.cli_setup()?, &id)?.ok_or_else(|| format!("{written} isn't a public account of this wallet, so the faucet can't be asked for it"))?;
-            let value = bridge_net::faucet_call(&self.lez04_rpc(), "bridge_faucet", json!([registry::hex(&key), written]))?;
-            Ok(bridge_net::faucet_shown(&value))
+            let setup = self.cli_setup()?;
+            let url = self.lez04_rpc();
+            // The faucet answers once its transfer is in a block (up to 2 min): asked on a thread of
+            // its own, one ask per account at a time. A call while it is under way answers that it
+            // is (`pending`, asked again by the app); the first call after it ended takes its answer.
+            let key = format!("faucet_claim:{url}:{written}");
+            let kept = self.served.peek(&key);
+            if !self.served.inline && kept.updating {
+                return Ok(json!({ "ok": false, "code": "pending", "retry": true, "reason": "Asking the faucet… the test LEZ come once its transfer is in a block." }));
+            }
+            let snap = if kept.value.is_some() || kept.error.is_some() {
+                kept
+            } else {
+                self.served.read(&key, std::time::Duration::ZERO, served::Lane::Host(url.clone()), move || {
+                    let key = wallet::public_key(&setup, &id)?.ok_or_else(|| format!("{written} isn't a public account of this wallet, so the faucet can't be asked for it"))?;
+                    let value = bridge_net::faucet_call(&url, "bridge_faucet", json!([registry::hex(&key), written]), bridge_net::FAUCET_WAIT)?;
+                    Ok(bridge_net::faucet_shown(&value))
+                })
+            };
+            if snap.updating {
+                return Ok(json!({ "ok": false, "code": "pending", "retry": true, "reason": "Asking the faucet… the test LEZ come once its transfer is in a block." }));
+            }
+            // Its answer is given once: the next press asks the faucet again.
+            self.served.forget(&key);
+            match (snap.value, snap.error) {
+                (Some(value), _) => Ok(value),
+                (None, Some(why)) => Err(why),
+                (None, None) => Err("the faucet gave no answer".to_owned()),
+            }
         })())
     }
 
@@ -4729,29 +5063,46 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply_marked((|| {
-            let setup = self.names_setup()?;
-            // Names this wallet registered through the module (a public registration on LEZ 0.4)
-            // and the CLI doesn't list yet: the CLI is asked to add each (it checks the chain).
-            let unlisted = self.unlisted_names(&setup);
-            // The CLI reads every name it holds from the chain, which takes seconds:
-            // answer with the last list and refresh it on its own thread.
-            // Kept per wallet: another wallet holds other names.
-            let key = format!("cli_mine:{}", setup.wallet.display());
-            if self.mine_known(&key) {
-                let cached = self.board_read(key.clone(), move || {
-                    cli::add_held(&setup, &unlisted);
-                    cli::run_mine(&setup).map(Value::from)
-                });
-                // A refresh that failed leaves the last list, said to be from then.
-                let marks = cached["error"].as_str().map_or(Value::Null, |why| stale_marks(why, self.read_age_ms(&key), "Your names"));
-                return Ok((cached["posts"].clone(), marks));
-            }
+        let setup = match self.names_setup() {
+            Ok(setup) => setup,
+            Err(why) => return reply(Err(why)),
+        };
+        // Names this wallet registered through the module (a public registration on LEZ 0.4)
+        // and the CLI doesn't list yet: the CLI is asked to add each (it checks the chain).
+        let unlisted = self.unlisted_names(&setup);
+        // The CLI reads every name it holds from the chain, which takes seconds:
+        // answer with the last list and refresh it on its own thread.
+        // Kept per wallet: another wallet holds other names.
+        let key = format!("cli_mine:{}", setup.wallet.display());
+        if self.mine_known(&key) {
+            let cached = self.board_read(key.clone(), move || {
+                cli::add_held(&setup, &unlisted);
+                cli::run_mine(&setup).map(Value::from)
+            });
+            // A refresh that failed leaves the last list, said to be from then.
+            let marks = cached["error"].as_str().map_or(Value::Null, |why| stale_marks(why, self.read_age_ms(&key), "Your names"));
+            return reply_marked(Ok((cached["posts"].clone(), marks)));
+        }
+        // The first read too, on a thread of its own: until it is back the call answers busy (the
+        // app asks again), never an empty list taken for "no names".
+        let first = self.served.read(&format!("first-{key}"), std::time::Duration::ZERO, served::Lane::Cli, move || {
             cli::add_held(&setup, &unlisted);
-            let fresh = Value::from(cli::run_mine(&setup)?);
-            self.remember_mine(&key, fresh.clone());
-            Ok((fresh, Value::Null))
-        })())
+            cli::run_mine(&setup).map(Value::from)
+        });
+        match first.value_or("your names") {
+            Ok(fresh) => {
+                let fresh = fresh.clone();
+                self.remember_mine(&key, fresh.clone());
+                self.served.forget(&format!("first-{key}"));
+                reply_marked(Ok((fresh, Value::Null)))
+            }
+            Err(Ok(busy)) => busy,
+            Err(Err(why)) => {
+                // Asked afresh next time.
+                self.served.forget(&format!("first-{key}"));
+                reply(Err(why))
+            }
+        }
     }
 
     fn cli_add_name(&mut self, name: String) -> String {
@@ -4865,27 +5216,10 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply_marked((|| {
-            let setup = self.cli_setup()?;
-            setup.wallet_ready()?;
-            let deadline = registry::Deadline::after(cli::CALL_BUDGET);
-            let read = cli::balance_read(&setup, deadline)?;
-            // Only a read in which the sequencer gave every balance moves the History: an
-            // unread balance is never a 0 (selective-degradation-cold-read-false-arrivals).
-            if read.complete() {
-                let rows = read.balances();
-                // What settled first, so a send between the wallet's own accounts is not
-                // also taken for money that arrived.
-                let rows = match config_dir() {
-                    Some(dir) => self.settle_activity(&dir, &setup.sequencer, &rows, deadline),
-                    None => rows,
-                };
-                // The sequencer answers now: home's channel is learnt here if it isn't known.
-                self.home_channel(false);
-                self.note_lez(&rows);
-            }
-            Ok((read.reply(), read.marks()))
-        })())
+        match self.lez_read() {
+            Ok(snap) => served::reply_marked_of(&snap, "Your balance"),
+            Err(why) => reply(Err(why)),
+        }
     }
 
     fn cli_bridge(&mut self, amount: String, from_key: String, node: String, send: bool) -> String {
@@ -4955,7 +5289,7 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| {
+        busy_or_reply((|| {
             // A configured CLI or wallet folder that isn't reachable: said plainly, and never "no
             // wallet" (that would offer Welcome and "Create my wallet" over it).
             if let Some(why) = self.unavailable() {
@@ -4966,18 +5300,26 @@ impl NamesModule for Names {
             let wallet = self.resolve_wallet(self.cli_wallet.as_deref());
             let has_wallet = wallet.as_ref().is_some_and(|dir| dir.join(cli::STORAGE_FILE).is_file());
             let account = |which: &str| wallet.as_ref().filter(|_| has_wallet).and_then(|dir| cli::saved_account(dir, which));
-            let setup = self.cli_setup().ok().filter(|_| has_wallet);
+            // What only the CLI can say (it runs it three or four times, up to 20 s each when it
+            // hangs): asked on a thread of its own, once per CLI file and wallet file as they are,
+            // and kept. Until it is back the call answers busy, and the app asks again.
+            let probes = self.cli_probes(program.as_deref(), wallet.as_deref().filter(|_| has_wallet));
+            let probes = match probes.value_or("what the names CLI can do") {
+                Ok(probes) => probes.clone(),
+                Err(Ok(busy)) => return Err(BUSY_MARK.to_owned() + &busy),
+                Err(Err(why)) => return Err(why),
+            };
             Ok(json!({
                 "cli": program.as_ref().map(|path| path.to_string_lossy().into_owned()),
                 "prover": program.as_ref().is_some_and(|path| cli::has_prover(path)),
-                "outdated": program.as_ref().is_some_and(|path| !cli::speaks_module(path)),
+                "outdated": probes["outdated"] == true,
                 // `names 0.17.0 (LEZ v0.4.0-rc3)`; LEZ 0.4 runs only a CLI that says LEZ v0.4.
-                "cli_line": program.as_ref().and_then(|path| self.cli_line(path).ok()),
+                "cli_line": probes["cli_line"],
                 // On LEZ 0.4, what its tool can do here: `bare` (it can't try a public call first,
                 // nor prove), `unchecked_max_fee` per call kind. Null for a tool too old to say.
-                "tool": if self.net == Net::Lez04 { program.as_ref().map_or(Value::Null, |path| self.tool_status_of(path)) } else { Value::Null },
+                "tool": probes["tool"],
                 "names_network": self.net.shown(),
-                "old_wallet": setup.as_ref().is_some_and(cli::wallet_is_old),
+                "old_wallet": probes["old_wallet"] == true,
                 "installing": self.running_job(cli::INSTALL_JOB),
                 "wallet_dir": wallet.as_ref().map(|dir| dir.to_string_lossy().into_owned()),
                 "wallet": has_wallet,
@@ -5198,13 +5540,11 @@ impl NamesModule for Names {
         }
         let listed = (|| -> Result<(Value, Option<String>), String> {
             let dir = config_dir().ok_or("no folder for the Wallet's history")?;
-            let deadline = registry::Deadline::after(cli::CALL_BUDGET);
-            let setup = self.cli_setup().ok();
-            let read = setup.as_ref().and_then(|setup| cli::balances_by(setup, deadline).ok());
-            let sequencer = setup.as_ref().map_or_else(|| self.sequencer.clone(), |setup| setup.sequencer.clone());
-            let rows = self.settle_activity(&dir, &sequencer, read.as_deref().unwrap_or_default(), deadline);
-            if setup.is_some() && read.is_some() {
-                self.note_lez(&rows);
+            // What settled from the chain and the jobs, then the last LEZ balance read's History work
+            // (`lez_read`: the read and the receipts' asks on a thread of their own, never here).
+            self.settle_entries(&dir);
+            if self.lez_read().is_err() {
+                self.receipts_read();
             }
             // A history file that couldn't be read was kept aside, never written over: say so
             // once. Only a lost history fails the call; a lost file of marks is a warning
@@ -5956,11 +6296,17 @@ impl NamesModule for Names {
         }
         // Accounts whose balance the sequencer didn't give are listed with it null, and
         // named beside the list (balance-accounts-zeroed-with-success-on-partial-failure).
-        reply_marked((|| {
-            let read = cli::run_accounts_any(&self.cli_setup()?)?;
-            let marks = read.marks();
-            Ok((Value::from(read.rows), marks))
-        })())
+        let setup = match self.cli_setup() {
+            Ok(setup) => setup,
+            Err(why) => return reply(Err(why)),
+        };
+        // The CLI lists them (seconds when it catches the wallet up): on a thread of its own.
+        let key = self.served_key("cli_accounts", &format!("{}|{}", setup.wallet.display(), setup.sequencer));
+        let snap = self.served.read(&key, ACCOUNTS_EVERY, served::Lane::Cli, move || {
+            let read = cli::run_accounts_any(&setup)?;
+            Ok(json!({ "value": read.rows, "marks": read.marks() }))
+        });
+        served::reply_marked_of(&snap, "Your accounts")
     }
 
     fn cli_account_new(&mut self, kind: String, label: String) -> String {
@@ -6805,24 +7151,35 @@ impl NamesModule for Names {
             }
             let declared = self.store().private.declared_of(&app);
             let own = self.own_programs();
-            let root_only = self.root_only()?;
-            // A burn to a bridge (privacy `bridge_public_burn`): the Configs of the bridges a burn
-            // may go to are read now, and their token program may be the root only if the call is
-            // exactly such a burn (`burn_check`, below and at every later step).
-            let asks_burn = serde_json::from_str::<Value>(&call_json).ok().is_some_and(|call| call["privacy"] == provider_public::BURN_PRIVACY);
-            let burn_configs = if asks_burn { self.burn_configs()? } else { Vec::new() };
-            let root_only: Vec<(String, &'static str)> = if asks_burn {
-                let token_programs: Vec<String> = burn_configs.iter().map(|(_, config)| registry::account_text(&config.token_program)).collect();
-                let asked_root = serde_json::from_str::<Value>(&call_json).ok().and_then(|call| call["program"].as_str().and_then(|p| registry::parse_account(p.trim().trim_start_matches("Public/")).ok()));
+            // A burn to a bridge (privacy `bridge_public_burn`): the Config of the bridge it notifies
+            // is read within `BURN_SIGN_FRESH` (never waited for past `FIRST_WAIT`: an unreadable one,
+            // or one still being read, is a plain wait), and its token program may be the root only
+            // if the call is exactly such a burn (`burn_check`, below and at every later step). The
+            // other bridges' Configs bear on nothing but the words of a refusal.
+            let asked: Value = serde_json::from_str(&call_json).unwrap_or(Value::Null);
+            let asks_burn = asked["privacy"] == provider_public::BURN_PRIVACY;
+            let (root_only, burn_reads) = if asks_burn {
+                let reads = self.burns_within(Self::burn_target(&asked).as_ref());
+                // The target's own read decides first (a wait when it can't be read).
+                Self::burn_target_read(&asked, &reads)?;
+                let token_programs: Vec<String> = reads
+                    .iter()
+                    .filter_map(|(_, read)| match read {
+                        Known::Read(Some(config)) => Some(registry::account_text(&config.token_program)),
+                        _ => None,
+                    })
+                    .collect();
+                let asked_root = asked["program"].as_str().and_then(|p| registry::parse_account(p.trim().trim_start_matches("Public/")).ok());
                 if !asked_root.is_some_and(|id| token_programs.contains(&registry::account_text(&id))) {
                     return Err(NOT_A_BURN_BRIDGE.to_owned());
                 }
-                root_only.into_iter().filter(|(id, _)| !token_programs.contains(id)).collect()
+                let root_only: Vec<(String, &'static str)> = self.root_only_lenient(Check::Signing).into_iter().filter(|(id, _)| !token_programs.contains(id)).collect();
+                (root_only, reads)
             } else {
-                root_only
+                (self.root_only_now(Check::Signing)?, Vec::new())
             };
             let mut request = provider_public::relayed_call_request(&app, &account, &call_json, &summary, &declared, &own, &root_only, now)?;
-            let burn = Self::burn_gate_with(&request, &burn_configs)?;
+            let burn = Self::burn_gate_per_bridge(&request, &burn_reads)?;
             let store = self.store();
             let written = request["account"].as_str().unwrap_or_default().to_owned();
             if !store.granted(&app).contains(&written) {
@@ -6983,6 +7340,16 @@ const NOT_CONNECTED: &str = "ask for access first (request_access), then propose
 
 /// How often an app's balance reads may go to the chain (or the CLI).
 const BALANCE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+/// The served reads' kind for the LEZ balance read (`lez_read`).
+const LEZ_BALANCE_KEY: &str = "lez-balance";
+/// How often `wallet`'s read (the CLI's accounts, then each public one's summary) is made again.
+const WALLET_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+/// How often `cli_accounts`'s read is made again.
+const ACCOUNTS_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+/// How often the registry's settings are read again.
+const SETTINGS_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+/// How often the faucet's state is read again.
+const FAUCET_INFO_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The app asking, as Basecamp names its credential: a module's name, or
 /// `host` for the host itself (Basecamp, or `logosctl` driving the module).
@@ -7765,6 +8132,12 @@ impl Names {
                 return Err("this app no longer has that program declared; reject it".to_owned());
             }
             let sheet = self.relayed_sheet(request, true);
+            if sheet["wait"] == true {
+                // A bridge's Config still being read, or unreadable just now: the request stays
+                // pending and nothing was signed; the person presses Approve again.
+                let why = sheet["why"].as_array().and_then(|why| why.last()).and_then(Value::as_str).unwrap_or(STILL_READING);
+                return Err(why.to_owned());
+            }
             if sheet["refused"] == true {
                 return Err("the wallet refuses this call (see why on the sheet); reject it".to_owned());
             }
@@ -7857,8 +8230,7 @@ impl Names {
         // The rule about the wallet's own programs and the person's tokens, applied again; a burn
         // to a bridge is checked again against the bridge's Config read now.
         let own = self.own_programs();
-        let root_only = self.root_only().map_err(refused)?;
-        let burn = self.burn_gate(&request).map_err(refused)?;
+        let (root_only, burn) = self.relayed_checks(&request, Check::Signing).map_err(refused)?;
         provider_public::programs_allowed(&request, &own, &Self::root_only_for(root_only, burn.as_ref())).map_err(refused)?;
         // The kept bytes are still the approved ones.
         let message = registry::unhex(request["message"].as_str().unwrap_or_default()).unwrap_or_default();
@@ -7951,13 +8323,45 @@ impl Names {
 
     /// Programs a relayed call may never have as its root (`provider_public::RootOnly`): the
     /// token programs of the bridges on LEZ 0.4, where the person's bridged tokens sit (built in,
-    /// every one read before, and every configured bridge's read from its Config now), the
-    /// wallet's token programs, and the token programs of the token sources apps added. If one of
-    /// the bridge reads fails, nothing is signed: the error is returned and the caller refuses
-    /// (fail closed).
-    fn root_only(&mut self) -> Result<Vec<(String, &'static str)>, String> {
-        let bridged = self.bridge_tokens_programs().map_err(|why| format!("the wallet couldn't check {why} just now, so it signs nothing; try again"))?;
+    /// every one read before, and every configured bridge's from its Config), the wallet's token
+    /// programs, and the token programs of the token sources apps added. If one bridge's token
+    /// program can't be read, nothing is signed: the error is returned and the caller refuses
+    /// (fail closed); while one is still being read, `STILL_READING`.
+    ///
+    /// `check` says where the Configs come from, never from a read on this thread (`Check`).
+    fn root_only_now(&mut self, check: Check) -> Result<Vec<(String, &'static str)>, String> {
+        let mut read_now: Vec<String> = Vec::new();
+        for (program, read) in self.bridge_tokens_now(check)? {
+            match read {
+                Known::Read(Some(token_program)) => read_now.push(registry::account_text(&token_program)),
+                Known::Read(None) => {}
+                Known::Unread(why) => {
+                    return Err(format!("the wallet couldn't check the token program of bridge {} ({why}) just now, so it signs nothing; try again", registry::account_text(&program)));
+                }
+                Known::Reading => return Err(STILL_READING.to_owned()),
+            }
+        }
+        let bridged = self.bridge_tokens_with(read_now).map_err(|why| format!("the wallet couldn't check {why} just now, so it signs nothing; try again"))?;
         Ok(self.root_only_from(bridged))
+    }
+
+    /// `root_only` for a call checked as a burn to a bridge: what is known now (built in, kept, and
+    /// each bridge's token program as read), never waited for. A bridge whose Config can't be read
+    /// adds nothing here: the burn's root is its target's token program, checked exactly against
+    /// that bridge's own Config (`burn_gate_now`); no other bridge's read bears on it.
+    fn root_only_lenient(&mut self, check: Check) -> Vec<(String, &'static str)> {
+        let read_now: Vec<String> = match check {
+            Check::Sheet => self.bridge_tokens_now(Check::Sheet).unwrap_or_default(),
+            Check::Signing => self.tokens_within(bridge_net::CONFIG_FRESH, std::time::Duration::ZERO),
+        }
+        .into_iter()
+        .filter_map(|(_, read)| match read {
+            Known::Read(Some(token_program)) => Some(registry::account_text(&token_program)),
+            _ => None,
+        })
+        .collect();
+        let bridged = self.bridge_tokens_with(read_now).unwrap_or_else(|_| bridge_net::KNOWN_TOKEN_PROGRAMS.iter().map(|id| (*id).to_owned()).collect());
+        self.root_only_from(bridged)
     }
 
     /// `root_only` from the bridge token programs `bridged`.
@@ -7979,72 +8383,249 @@ impl Names {
         list
     }
 
-    /// The Configs of the bridges a relayed burn may go to (`bridge_net::BURN_BRIDGES`, built in),
-    /// read now; a bridge with no Config on this chain is left out. Any failed read is an error:
-    /// the caller signs nothing (fail closed).
-    fn burn_configs(&self) -> Result<Vec<(AccountId, bridge_net::BridgeConfig)>, String> {
-        (self.burn_configs_reader())()
+    /// Where the bridges' Configs are read: LEZ 0.4's endpoint (a test or a trial of a new chain may
+    /// point elsewhere for one run).
+    fn bridge_url(&self) -> String {
+        std::env::var("LOGOS_NAMES_BRIDGE_RPC").ok().filter(|url| !url.trim().is_empty()).unwrap_or_else(|| self.lez04_rpc())
     }
 
-    /// The LEZ 0.4 reads of `burn_configs`, as a job that owns what it needs (see
-    /// `bridge_tokens_reader`).
-    fn burn_configs_reader(&self) -> impl FnOnce() -> Result<Vec<(AccountId, bridge_net::BridgeConfig)>, String> + Send + 'static {
-        #[cfg(not(test))]
-        let url = std::env::var("LOGOS_NAMES_BRIDGE_RPC").ok().filter(|url| !url.trim().is_empty()).unwrap_or_else(|| self.lez04_rpc());
-        // Tests set the Config the chain would give (`BURN_CONFIGS`); unset, none.
-        #[cfg(test)]
-        let said: HashMap<String, Result<Option<bridge_net::BridgeConfig>, String>> = tests::BURN_CONFIGS.with(|configs| configs.borrow().clone());
-        move || {
-            let mut out = Vec::new();
-            for text in bridge_net::BURN_BRIDGES {
-                let program = registry::parse_account(text)?;
-                #[cfg(not(test))]
-                let read = bridge_net::config_of(&url, &program);
-                #[cfg(test)]
-                let read = said.get(text).cloned().unwrap_or(Ok(None));
-                match read {
-                    Ok(Some(config)) => out.push((program, config)),
-                    Ok(None) => {}
-                    Err(why) => return Err(format!("the wallet couldn't read the Config of {} just now ({why}), so it signs no burn; try again", bridge_net::bridge_label(text).unwrap_or(text))),
+    /// Each configured bridge's token program as the check takes it: a sheet's from the last
+    /// background read (`SheetReads`, `STILL_READING` before the first); a signing's from what was
+    /// read within `CONFIG_FRESH`, else read on its own thread and waited for `FIRST_WAIT` at most.
+    fn bridge_tokens_now(&self, check: Check) -> Result<Vec<(AccountId, Known<AccountId>)>, String> {
+        match check {
+            Check::Sheet => {
+                let key = format!("{}|{:?}", self.bridge_url(), self.bridge_programs_now());
+                match self.sheet_reads.tokens.get(&key, SHEET_READ_EVERY, self.tokens_reader(bridge_net::CONFIG_FRESH)) {
+                    None => Err(STILL_READING.to_owned()),
+                    Some(read) => read,
                 }
             }
-            Ok(out)
+            Check::Signing => Ok(self.tokens_within(bridge_net::CONFIG_FRESH, served::FIRST_WAIT)),
         }
     }
 
-    /// `root_only` for a sheet a poll shows: the bridge reads come from the last background read
-    /// (`SheetReads`), never made here. Until one is back: an error (the sheet is refused).
-    fn root_only_kept(&mut self) -> Result<Vec<(String, &'static str)>, String> {
-        let key = format!("{}|{:?}", self.lez04_rpc(), self.bridge_programs_now());
-        let read = self.sheet_reads.tokens.get(&key, SHEET_READ_EVERY, self.bridge_tokens_reader());
-        let read_now = match read {
-            None => return Err(STILL_READING.to_owned()),
-            Some(read) => read.map_err(|why| format!("the wallet couldn't check {why} just now, so it signs nothing; try again"))?,
-        };
-        let bridged = self.bridge_tokens_with(read_now).map_err(|why| format!("the wallet couldn't check {why} just now, so it signs nothing; try again"))?;
-        Ok(self.root_only_from(bridged))
+    /// A bridge's token program as its Config bytes name it, for the configured `programs`: a
+    /// Config naming a bridge program itself as its token program is unreadable (it would make every
+    /// claim to that bridge refused for good once kept).
+    fn token_known(_program: &AccountId, programs: &[AccountId], read: Result<Option<AccountId>, String>) -> Known<AccountId> {
+        match read {
+            Ok(Some(token_program)) if programs.contains(&token_program) => Known::Unread("its Config names a bridge program as its token program".to_owned()),
+            Ok(found) => Known::Read(found),
+            Err(why) => Known::Unread(why),
+        }
     }
 
-    /// `burn_gate` for a sheet a poll shows, from the last background read of the Configs.
-    fn burn_gate_kept(&self, request: &Value) -> Result<Option<provider_public::BridgeBurn>, String> {
-        if request["privacy"] != provider_public::BURN_PRIVACY {
-            return Ok(None);
+    /// Whether this test reads the bridges' Configs over HTTP from its stand-in endpoint
+    /// (`tests::BRIDGE_HTTP`, the stall tests); any other test's unset bridge has no Config.
+    #[cfg(test)]
+    fn stand_in(_url: &str) -> bool {
+        tests::BRIDGE_HTTP.with(std::cell::Cell::get)
+    }
+
+    /// The reads behind `bridge_tokens_now` for a sheet, as a job that owns what it needs: each
+    /// configured bridge's token program from its Config read at most `max_age` ago (blocking: a
+    /// background thread's, or a unit test's on the spot).
+    fn tokens_reader(&self, max_age: std::time::Duration) -> impl FnOnce() -> Result<Vec<(AccountId, Known<AccountId>)>, String> + Send + 'static {
+        let url = self.bridge_url();
+        // Tests set what the chain would say for each bridge (`BRIDGE_CONFIGS`); unset, no Config,
+        // except on a stand-in endpoint, which is read. Taken now, on the test's thread.
+        #[cfg(test)]
+        let said: HashMap<String, Result<Option<String>, String>> = tests::BRIDGE_CONFIGS.with(|configs| configs.borrow().clone());
+        #[cfg(test)]
+        let over_http = Self::stand_in(&url);
+        let programs = self.bridge_programs_now();
+        move || {
+            // Each bridge on a thread of its own (a dead endpoint costs one wait, not six).
+            let read = |program: &AccountId| -> Known<AccountId> {
+                #[cfg(test)]
+                {
+                    if let Some(answer) = said.get(&registry::account_text(program)) {
+                        let answer = answer.clone().and_then(|found| found.map(|id| registry::parse_account(&id)).transpose());
+                        return Self::token_known(program, &programs, answer);
+                    }
+                    if !over_http {
+                        return Known::Read(None);
+                    }
+                }
+                Self::token_known(program, &programs, bridge_net::token_program_of(&url, program, max_age))
+            };
+            Ok(std::thread::scope(|scope| {
+                let reads: Vec<_> = programs
+                    .iter()
+                    .map(|program| {
+                        let read = &read;
+                        scope.spawn(move || {
+                            served::as_background();
+                            (*program, read(program))
+                        })
+                    })
+                    .collect();
+                reads.into_iter().zip(&programs).map(|(reader, program)| reader.join().unwrap_or((*program, Known::Unread("a read failed".to_owned())))).collect()
+            }))
         }
-        let key = self.lez04_rpc();
-        match self.sheet_reads.burns.get(&key, SHEET_READ_EVERY, self.burn_configs_reader()) {
-            None => Err(STILL_READING.to_owned()),
-            Some(configs) => Self::burn_gate_with(request, &configs?),
+    }
+
+    /// Each configured bridge's token program for a check made on a call's thread: what was read
+    /// within `max_age`, else a read started on its own thread (all of them at once) and waited for
+    /// `wait` at most in all.
+    fn tokens_within(&self, max_age: std::time::Duration, wait: std::time::Duration) -> Vec<(AccountId, Known<AccountId>)> {
+        let url = self.bridge_url();
+        let programs = self.bridge_programs_now();
+        #[cfg(test)]
+        if self.served.inline || !Self::stand_in(&url) {
+            return (self.tokens_reader(max_age))().unwrap_or_default();
         }
+        for program in &programs {
+            let _ = bridge_net::config_within(&url, program, max_age, std::time::Duration::ZERO);
+        }
+        let until = std::time::Instant::now() + wait;
+        programs
+            .iter()
+            .map(|program| {
+                let left = until.saturating_duration_since(std::time::Instant::now());
+                let known = match bridge_net::config_within(&url, program, max_age, left) {
+                    bridge_net::ConfigNow::Read(None) => Self::token_known(program, &programs, Ok(None)),
+                    bridge_net::ConfigNow::Read(Some(bytes)) => Self::token_known(program, &programs, bridge_net::decode_config(&bytes).map(|(token_program, _)| Some(token_program))),
+                    bridge_net::ConfigNow::Unread(why) => Known::Unread(why),
+                    bridge_net::ConfigNow::Reading => Known::Reading,
+                };
+                (*program, known)
+            })
+            .collect()
+    }
+
+    /// The reads behind a burn's sheet, as a job that owns what it needs: the Config of each bridge a
+    /// relayed burn may go to (`bridge_net::BURN_BRIDGES`), read at most `max_age` ago.
+    fn burns_reader(&self, max_age: std::time::Duration) -> impl FnOnce() -> Result<Vec<(AccountId, Known<bridge_net::BridgeConfig>)>, String> + Send + 'static {
+        let url = self.bridge_url();
+        // Tests set the Config the chain would give (`BURN_CONFIGS`); unset, none, except on a
+        // stand-in endpoint, which is read.
+        #[cfg(test)]
+        let said: HashMap<String, Result<Option<bridge_net::BridgeConfig>, String>> = tests::BURN_CONFIGS.with(|configs| configs.borrow().clone());
+        #[cfg(test)]
+        let over_http = Self::stand_in(&url);
+        move || {
+            let read = |text: &str, program: &AccountId| -> Known<bridge_net::BridgeConfig> {
+                #[cfg(test)]
+                {
+                    if let Some(answer) = said.get(text) {
+                        return answer.clone().map_or_else(Known::Unread, Known::Read);
+                    }
+                    if !over_http {
+                        return Known::Read(None);
+                    }
+                }
+                let _ = text;
+                bridge_net::config_of(&url, program, max_age).map_or_else(Known::Unread, Known::Read)
+            };
+            let programs: Vec<(&str, AccountId)> = bridge_net::BURN_BRIDGES.iter().map(|text| registry::parse_account(text).map(|id| (*text, id))).collect::<Result<_, _>>()?;
+            // Each bridge on a thread of its own, as for the token programs.
+            Ok(std::thread::scope(|scope| {
+                let reads: Vec<_> = programs
+                    .iter()
+                    .map(|(text, program)| {
+                        let read = &read;
+                        scope.spawn(move || {
+                            served::as_background();
+                            (*program, read(text, program))
+                        })
+                    })
+                    .collect();
+                reads.into_iter().zip(&programs).map(|(reader, (_, program))| reader.join().unwrap_or((*program, Known::Unread("a read failed".to_owned())))).collect()
+            }))
+        }
+    }
+
+    /// The Configs of the bridges a burn may go to, for a check made on a call's thread: the
+    /// burn's `target` read within `BURN_SIGN_FRESH` (else read on its own thread and waited for
+    /// `FIRST_WAIT` at most), the others as kept within `CONFIG_FRESH` (never waited for: they only
+    /// word a refusal).
+    fn burns_within(&self, target: Option<&AccountId>) -> Vec<(AccountId, Known<bridge_net::BridgeConfig>)> {
+        let url = self.bridge_url();
+        #[cfg(test)]
+        if self.served.inline || !Self::stand_in(&url) {
+            return (self.burns_reader(bridge_net::BURN_SIGN_FRESH))().unwrap_or_default();
+        }
+        bridge_net::BURN_BRIDGES
+            .iter()
+            .filter_map(|text| registry::parse_account(text).ok())
+            .map(|program| {
+                let (max_age, wait) = if Some(&program) == target { (bridge_net::BURN_SIGN_FRESH, served::FIRST_WAIT) } else { (bridge_net::CONFIG_FRESH, std::time::Duration::ZERO) };
+                let known = match bridge_net::config_within(&url, &program, max_age, wait) {
+                    bridge_net::ConfigNow::Read(None) => Known::Read(None),
+                    bridge_net::ConfigNow::Read(Some(bytes)) => bridge_net::decode_bridge_config(&bytes).map_or_else(Known::Unread, |config| Known::Read(Some(config))),
+                    bridge_net::ConfigNow::Unread(why) => Known::Unread(why),
+                    bridge_net::ConfigNow::Reading => Known::Reading,
+                };
+                (program, known)
+            })
+            .collect()
+    }
+
+    /// The bridge a burn tells what was burned (its message's notify program), when it is one a
+    /// relayed burn may go to.
+    fn burn_target(request: &Value) -> Option<AccountId> {
+        let message = registry::unhex(request["message"].as_str().unwrap_or_default()).ok()?;
+        let notified = bridge_net::decode_burn(&message).ok()?.notify_program;
+        bridge_net::BURN_BRIDGES.iter().any(|text| registry::parse_account(text).ok() == Some(notified)).then_some(notified)
     }
 
     /// A relayed call that says it is a burn to a bridge (privacy `bridge_public_burn`), checked
-    /// exactly (`provider_public::burn_check`) against the Configs read now; `None` for any other
-    /// call. Recomputed from the stored bytes at every step (sheet, approval, re-sign), never kept.
-    fn burn_gate(&self, request: &Value) -> Result<Option<provider_public::BridgeBurn>, String> {
+    /// exactly (`provider_public::burn_check`) against the Config of the bridge it notifies; `None`
+    /// for any other call. Recomputed from the stored bytes at every step (sheet, approval, re-sign,
+    /// proposal), never kept. `check`: a sheet's Configs come from the background read (the target's
+    /// at most `BURN_SHEET_FRESH` old), a signing's from `burns_within` (`BURN_SIGN_FRESH`).
+    fn burn_gate_now(&self, request: &Value, check: Check) -> Result<Option<provider_public::BridgeBurn>, String> {
         if request["privacy"] != provider_public::BURN_PRIVACY {
             return Ok(None);
         }
-        Self::burn_gate_with(request, &self.burn_configs()?)
+        let reads = match check {
+            Check::Sheet => match self.sheet_reads.burns.get(&self.bridge_url(), SHEET_READ_EVERY, self.burns_reader(bridge_net::BURN_SHEET_FRESH)) {
+                None => return Err(STILL_READING.to_owned()),
+                Some(reads) => reads?,
+            },
+            Check::Signing => self.burns_within(Self::burn_target(request).as_ref()),
+        };
+        Self::burn_gate_per_bridge(request, &reads)
+    }
+
+    /// `burn_gate_with` from each burn bridge's read: the Config of the bridge the burn notifies must
+    /// be read (an unreadable one, or one still being read, is a plain wait: nothing signed, try
+    /// again); every other bridge's read bears on nothing but the words of a refusal, so a bridge
+    /// whose Config can't be read never refuses a burn toward another.
+    fn burn_gate_per_bridge(request: &Value, reads: &[(AccountId, Known<bridge_net::BridgeConfig>)]) -> Result<Option<provider_public::BridgeBurn>, String> {
+        if request["privacy"] != provider_public::BURN_PRIVACY {
+            return Ok(None);
+        }
+        Self::burn_target_read(request, reads)?;
+        let configs: Vec<(AccountId, bridge_net::BridgeConfig)> = reads
+            .iter()
+            .filter_map(|(program, read)| match read {
+                Known::Read(Some(config)) => Some((*program, config.clone())),
+                _ => None,
+            })
+            .collect();
+        Self::burn_gate_with(request, &configs)
+    }
+
+    /// A plain wait when the Config of the bridge a burn notifies couldn't be read just now or is
+    /// still being read; Ok otherwise (read, or not a bridge a burn may go to).
+    fn burn_target_read(request: &Value, reads: &[(AccountId, Known<bridge_net::BridgeConfig>)]) -> Result<(), String> {
+        if let Some(target) = Self::burn_target(request) {
+            let text = registry::account_text(&target);
+            let label = bridge_net::bridge_label(&text).map_or_else(|| text.clone(), str::to_owned);
+            match reads.iter().find(|(program, _)| *program == target).map(|(_, read)| read) {
+                Some(Known::Unread(why)) => {
+                    return Err(format!("the wallet couldn't read the Config of {label} just now ({why}), so it signs no burn to it; try again in a moment. Nothing was signed."));
+                }
+                Some(Known::Reading) => {
+                    return Err(format!("the wallet is still reading the Config of {label} on LEZ 0.4 to check this burn; try again in a moment. Nothing was signed."));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     fn burn_gate_with(request: &Value, configs: &[(AccountId, bridge_net::BridgeConfig)]) -> Result<Option<provider_public::BridgeBurn>, String> {
@@ -8073,12 +8654,39 @@ impl Names {
         }
     }
 
+    /// What a relayed call is checked against, by its kind: a burn by its target bridge's Config and
+    /// what is known of the rest (`root_only_lenient`); any other call by every bridge's token
+    /// program (`root_only_now`, fail closed).
+    fn relayed_checks(&mut self, request: &Value, check: Check) -> Result<(Vec<(String, &'static str)>, Option<provider_public::BridgeBurn>), String> {
+        let burn = self.burn_gate_now(request, check)?;
+        let root_only = if burn.is_some() { self.root_only_lenient(check) } else { self.root_only_now(check)? };
+        Ok((root_only, burn))
+    }
+
     /// Before the bridge list changes, the token program of each bridge listed now is read and
     /// kept (SF-2), so a bridge removed before any relayed call was checked stays refused as root.
-    /// Best effort: a read that fails keeps nothing new (the balance view and every check keep
-    /// what they read too).
+    /// Best effort, and never on this thread: the reads (an hour's kept Configs, else the network)
+    /// run on a thread of their own, which keeps what they give.
     fn keep_bridge_tokens_before_change(&self) {
-        let _ = self.bridge_tokens_programs();
+        let reader = self.tokens_reader(bridge_net::CONFIG_FRESH);
+        let keep = move || {
+            let read: Vec<String> = reader()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|(_, read)| match read {
+                    Known::Read(Some(token_program)) => Some(registry::account_text(&token_program)),
+                    _ => None,
+                })
+                .collect();
+            if let Some(dir) = config_dir() {
+                bridge_net::keep_token_programs(&dir, &read);
+            }
+        };
+        if self.served.inline {
+            keep();
+        } else {
+            served::spawn(keep);
+        }
     }
 
     /// The bridge token programs known without a read: the built-in ones and every one read before
@@ -8097,53 +8705,9 @@ impl Names {
         Ok(out)
     }
 
-    /// The bridge token programs on LEZ 0.4, canonical and once each: the ones known without a read
-    /// (`bridge_tokens_kept`), and the one each configured bridge's Config names now, which is then
-    /// kept for good (a sequencer that later answers "no Config" can't shrink the list). A bridge
-    /// with no Config on that chain adds nothing new. An error, naming the bridge, when any one
-    /// Config can't be read: the caller signs nothing.
-    fn bridge_tokens_programs(&self) -> Result<Vec<String>, String> {
-        let read_now = (self.bridge_tokens_reader())()?;
-        self.bridge_tokens_with(read_now)
-    }
-
-    /// The LEZ 0.4 reads of `bridge_tokens_programs`, as a job that owns what it needs, so it
-    /// can run now or on a thread of its own (`root_only_kept`).
-    fn bridge_tokens_reader(&self) -> impl FnOnce() -> Result<Vec<String>, String> + Send + 'static {
-        #[cfg(not(test))]
-        let url = std::env::var("LOGOS_NAMES_BRIDGE_RPC").ok().filter(|url| !url.trim().is_empty()).unwrap_or_else(|| self.lez04_rpc());
-        // Tests set what the chain would say for each bridge (`BRIDGE_CONFIGS`); unset, no Config.
-        // Taken now, on the test's thread, so the job can run anywhere.
-        #[cfg(test)]
-        let said: HashMap<String, Result<Option<String>, String>> = tests::BRIDGE_CONFIGS.with(|configs| configs.borrow().clone());
-        let programs = self.bridge_programs_now();
-        move || {
-            #[cfg(not(test))]
-            let read = |program: &AccountId| bridge_net::token_program_of(&url, program);
-            #[cfg(test)]
-            let read = |program: &AccountId| -> Result<Option<AccountId>, String> {
-                let answer = said.get(&registry::account_text(program)).cloned().unwrap_or(Ok(None))?;
-                answer.map(|id| registry::parse_account(&id)).transpose()
-            };
-            let mut read_now: Vec<String> = Vec::new();
-            for program in &programs {
-                match read(program) {
-                    // A Config naming a bridge itself as its token program would make every claim
-                    // to that bridge refused for good once kept: refused now, and not kept.
-                    Ok(Some(token_program)) if programs.contains(&token_program) => {
-                        return Err(format!("the token program of bridge {} (its Config names a bridge program as its token program)", registry::account_text(program)));
-                    }
-                    Ok(Some(token_program)) => read_now.push(registry::account_text(&token_program)),
-                    Ok(None) => {}
-                    Err(why) => return Err(format!("the token program of bridge {} ({why})", registry::account_text(program))),
-                }
-            }
-            Ok(read_now)
-        }
-    }
-
-    /// `bridge_tokens_programs` from the reads `read_now`: kept for good, and added to the ones
-    /// known without a read.
+    /// The bridge token programs on LEZ 0.4 from the reads `read_now`: kept for good (a sequencer
+    /// that later answers "no Config" can't shrink the list), and added to the ones known without a
+    /// read.
     fn bridge_tokens_with(&self, read_now: Vec<String>) -> Result<Vec<String>, String> {
         if let Some(dir) = config_dir() {
             bridge_net::keep_token_programs(&dir, &read_now);
@@ -8184,11 +8748,7 @@ impl Names {
         let shown = request["network"].as_str().and_then(Net::parse).unwrap_or(self.net).shown();
         let network = format!("{} · {}", shown["version"].as_str().unwrap_or_default(), shown["name"].as_str().unwrap_or_default());
         let own = self.own_programs();
-        let checked = if fresh {
-            self.root_only().and_then(|root_only| self.burn_gate(request).map(|burn| (root_only, burn)))
-        } else {
-            self.root_only_kept().and_then(|root_only| self.burn_gate_kept(request).map(|burn| (root_only, burn)))
-        };
+        let checked = self.relayed_checks(request, if fresh { Check::Signing } else { Check::Sheet });
         match checked {
             Ok((root_only, burn)) => {
                 provider_public::sheet(request, &request["report"], label.as_ref(), &network, &own, &Self::root_only_for(root_only, burn.as_ref()), burn.as_ref())
@@ -8198,6 +8758,8 @@ impl Names {
                 // the person's bridged tokens (and, for a burn, the bridge's Config).
                 let mut sheet = provider_public::sheet(request, &request["report"], label.as_ref(), &network, &own, &[], None);
                 sheet["refused"] = json!(true);
+                // A read still under way (or one to try again) is a wait, not a refusal of the call.
+                sheet["wait"] = json!(is_wait(&why));
                 if let Some(list) = sheet["why"].as_array_mut() {
                     list.push(json!(why));
                 }
@@ -8886,6 +9448,9 @@ mod tests {
         /// The Config bytes the chain gives for each bridge a burn may go to (`burn_configs`), by
         /// bridge program: a bridge not listed has no Config there.
         pub(super) static BURN_CONFIGS: std::cell::RefCell<HashMap<String, Result<Option<bridge_net::BridgeConfig>, String>>> = std::cell::RefCell::new(HashMap::new());
+        /// Whether a bridge neither map names is read over HTTP from the test's endpoint (the
+        /// stall tests), not taken as having no Config.
+        pub(super) static BRIDGE_HTTP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
 
     fn parsed(text: &str) -> Value {
@@ -8930,6 +9495,8 @@ mod tests {
             cli_lines: Default::default(),
             tool_status: Default::default(),
             sheet_reads: SheetReads::default(),
+            served: served::Served::default(),
+            lez_applied: HashMap::new(),
         }
     }
 
@@ -14190,5 +14757,436 @@ mod tests {
         assert!(taken["value"]["request"].is_string(), "{taken}");
         assert_ne!(every_file(&dir), before, "a call taken does write, so the check above would see a write");
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+    }
+
+    // ── The second stall (2026-11-18, build cdf9c1f): every call the Names app polls answers at once ──
+
+    /// A `getAccount` reply from `testdata/bridge-net/<file>`.
+    fn bridge_fixture(file: &str) -> String {
+        std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/bridge-net").join(file)).unwrap()
+    }
+
+    /// A stand-in bridge test network holding the six bridges' Configs (the recorded replies),
+    /// each request noted by method (and, for `getAccount`, whether it was a Config), answered
+    /// after `delay`; while `limited` is set, every request is answered 429 with `Retry-After`.
+    fn bridge_endpoint(delay: std::time::Duration, limited: std::sync::Arc<std::sync::atomic::AtomicBool>, retry_after: u64) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let noted = asked.clone();
+        let configs: Vec<(String, String)> = [
+            (bridge_net::DEFAULT_BRIDGE_PROGRAM, "config.json"),
+            (bridge_net::BRIDGE_V3_PROGRAM, "config-v3.json"),
+            (bridge_net::BRIDGE_V4_PROGRAM, "config-v4.json"),
+            (bridge_net::BRIDGE_V5_PROGRAM, "config-v5.json"),
+            (bridge_net::BRIDGE_V6_PROGRAM, "config-v6.json"),
+            (bridge_net::BRIDGE_V7_PROGRAM, "config-v7.json"),
+        ]
+        .iter()
+        .map(|(program, file)| (registry::account_text(&bridge_net::config_address(&registry::parse_account(program).unwrap())), bridge_fixture(file)))
+        .collect();
+        let url = registry::stub_rpc_with(move |request| {
+            let method = request["method"].as_str().unwrap_or_default().to_owned();
+            let account = request["params"][0].as_str().unwrap_or_default().to_owned();
+            let config = configs.iter().find(|(address, _)| *address == account).map(|(_, reply)| reply.clone());
+            noted.lock().unwrap().push(if config.is_some() { "getAccount (a Config)".to_owned() } else { method.clone() });
+            std::thread::sleep(delay);
+            if limited.load(std::sync::atomic::Ordering::SeqCst) {
+                return (429, format!("Retry-After: {retry_after}\r\n"), json!({ "jsonrpc": "2.0", "id": 1, "error": { "code": -32005, "message": "rate limited; slow down" } }).to_string());
+            }
+            let (_, body) = match method.as_str() {
+                "getChannelId" => registry::rpc_ok(json!("ab".repeat(32))),
+                "getLastBlockId" => registry::rpc_ok(json!(9)),
+                "bridge_faucetInfo" => registry::rpc_ok(json!({ "amount": "10000000", "per_account_hours": 24, "available": true })),
+                "getAccount" => return (200, String::new(), config.unwrap_or_else(|| bridge_fixture("unseen.json"))),
+                _ => registry::rpc_ok(Value::Null),
+            };
+            (200, String::new(), body)
+        });
+        (url, asked)
+    }
+
+    /// The module as the host runs it (every served read and sheet read on a thread of its own),
+    /// on LEZ 0.4 at `url`, with a names CLI that takes `cli_takes` seconds for anything but its
+    /// quick probes, and a relayed burn toward bridge v5 waiting for the person.
+    fn as_the_host(label: &str, url: &str, cli_takes: u64) -> (Names, std::path::PathBuf) {
+        let tail = format!(
+            "case \"$*\" in\n *--version*) echo 'names 0.17.0 (LEZ v0.4.0-rc3)' ;;\n *--help*) exit 0 ;;\n *prover-status*) echo '{{\"bare\": true}}' ;;\n *) sleep {cli_takes}; echo '{{}}' ;;\n esac"
+        );
+        let (mut names, dir) = with_wallet(label, &tail);
+        names.served = served::Served::threaded();
+        names.sheet_reads = SheetReads { tokens: Background::threaded(), burns: Background::threaded() };
+        names.net = Net::Lez04;
+        names.sequencer = url.to_owned();
+        BRIDGE_HTTP.with(|on| on.set(true));
+        // The bridge module is connected (a disconnected app's call bytes are dropped).
+        connect(&mut names, "lez_bridge", &format!("Public/{PUBLIC}"));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let mut burn = provider_public::tests::burn_request_for(provider_public::tests::V5_WETH, bridge_net::BRIDGE_V5_PROGRAM);
+        let at = provider::now_ms();
+        burn["network"] = json!("lez-0.4");
+        burn["zone"] = json!(zones::HOME);
+        burn["check"] = json!("ready");
+        burn["report"] = json!({});
+        burn["created"] = json!(at);
+        burn["expires"] = json!(at + 3_600_000);
+        names.store().requests.push(burn);
+        (names, dir)
+    }
+
+    /// Every call the Names app makes while a page is open, as it makes them.
+    fn polled_calls() -> Vec<(&'static str, Box<dyn Fn(&mut Names) -> String>)> {
+        let account = format!("Public/{PUBLIC}");
+        vec![
+            ("get_config", Box::new(|n: &mut Names| n.get_config())),
+            ("zone_list", Box::new(|n: &mut Names| n.zone_list())),
+            ("wallet", Box::new(|n: &mut Names| n.wallet())),
+            ("cli_status", Box::new(|n: &mut Names| n.cli_status())),
+            ("cli_mine", Box::new(|n: &mut Names| n.cli_mine())),
+            ("cli_balance", Box::new(|n: &mut Names| n.cli_balance())),
+            ("cli_accounts", Box::new(|n: &mut Names| n.cli_accounts())),
+            ("activity", Box::new(|n: &mut Names| n.activity(String::new()))),
+            ("settings", Box::new(|n: &mut Names| n.settings())),
+            ("faucet_info", Box::new(|n: &mut Names| n.faucet_info())),
+            ("bridge_net_balances", Box::new(move |n: &mut Names| n.bridge_net_balances(json!([account.clone()]).to_string()))),
+            ("pending_requests", Box::new(|n: &mut Names| n.pending_requests())),
+            ("pending_inscriptions", Box::new(|n: &mut Names| n.pending_inscriptions())),
+            ("token_source_holdings", Box::new(|n: &mut Names| n.token_source_holdings())),
+            ("app_grants", Box::new(|n: &mut Names| n.app_grants())),
+            ("running_jobs", Box::new(|n: &mut Names| n.running_jobs())),
+            ("backup_status", Box::new(|n: &mut Names| n.backup_status())),
+        ]
+    }
+
+    /// Makes every polled call once as the host dispatches it: each answers within a second and
+    /// reads nothing over the network (nor waits on the CLI) on its own thread. Their answers.
+    fn poll_once(names: &mut Names, calls: &[(&'static str, Box<dyn Fn(&mut Names) -> String>)]) -> HashMap<&'static str, Value> {
+        let mut answers = HashMap::new();
+        for (what, call) in calls {
+            let started = std::time::Instant::now();
+            let (answer, blocking) = served::on_dispatch(|| call(names));
+            let took = started.elapsed();
+            assert!(took < std::time::Duration::from_secs(1), "{what} held the module for {took:?}");
+            assert!(blocking.is_empty(), "{what} waited on the network or the CLI on its own thread: {blocking:?}");
+            answers.insert(*what, parsed(&answer));
+        }
+        answers
+    }
+
+    /// Whether a served read's answer is still the busy one (the first read under way).
+    fn still_busy(answer: &Value) -> bool {
+        answer["busy"] == true
+    }
+
+    /// The 2026-11-18 evidence: on one open of four the wallet sat on "Reading your wallet…" for
+    /// about 48 s and 11 polls in a row timed out (faucet_info, activity, the CLI balance, accounts,
+    /// token sources, pending_inscriptions, pending_requests): one slow call on the host's one
+    /// thread held all the others. With an endpoint that answers every request after 8 s and a CLI
+    /// that takes 3 s, every call the app polls answers within a second, twice over, reading
+    /// nothing on its own thread; the reads end on their own threads and the calls then answer
+    /// with them.
+    #[test]
+    fn every_polled_call_answers_within_a_second_while_the_endpoint_takes_eight() {
+        let (url, _) = bridge_endpoint(std::time::Duration::from_secs(8), Default::default(), 10);
+        let (mut names, dir) = as_the_host("stall-8s", &url, 3);
+        let calls = polled_calls();
+        let first = poll_once(&mut names, &calls);
+        assert!(still_busy(&first["faucet_info"]), "{}", first["faucet_info"]);
+        let again = poll_once(&mut names, &calls);
+        assert_eq!(again["pending_requests"]["success"], true, "{}", again["pending_requests"]);
+        // A faucet ask (a press, not a poll) answers at once too: the ask goes on on its own thread,
+        // and a second press while it does is told so, never a second ask.
+        for _ in 0..2 {
+            let started = std::time::Instant::now();
+            let (claim, blocking) = served::on_dispatch(|| names.faucet_claim(format!("Public/{PUBLIC}")));
+            assert!(started.elapsed() < std::time::Duration::from_secs(1) && blocking.is_empty(), "{blocking:?}");
+            assert_eq!(parsed(&claim)["value"]["code"], "pending", "{claim}");
+        }
+        // The reads end on their own threads: within the reads' own budgets, the calls answer with
+        // what they read (or why they couldn't), never busy for good.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let ended = loop {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let answers = poll_once(&mut names, &calls);
+            let read = |what: &str| !still_busy(&answers[what]);
+            let bridge = &answers["bridge_net_balances"]["value"];
+            let sheet = answers["pending_requests"]["value"][0]["sheet"]["why"].to_string();
+            if answers["faucet_info"]["value"]["available"] == true
+                && ["settings", "wallet", "cli_balance", "cli_accounts", "cli_status"].iter().all(|what| read(what))
+                && bridge["updating"] == false
+                && (bridge["read"].is_object() || bridge["error"].is_string())
+                && !sheet.contains(STILL_READING)
+            {
+                break answers;
+            }
+            assert!(std::time::Instant::now() < deadline, "the reads never ended: {answers:?}");
+        };
+        assert_eq!(ended["faucet_info"]["value"]["amount"], "10000000", "{}", ended["faucet_info"]);
+        // A read that ran out of time says so, in words; it isn't shown as a value.
+        assert!(ended["settings"]["error"].as_str().unwrap_or_default().contains("didn't answer"), "{}", ended["settings"]);
+        BRIDGE_HTTP.with(|on| on.set(false));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The same with an endpoint that answers 429 to everything: every polled call answers within
+    /// a second, and the endpoint is left alone for its Retry-After instead of being asked again
+    /// and again (a call's own thread never asks while it says to wait).
+    #[test]
+    fn every_polled_call_answers_within_a_second_while_the_endpoint_says_429() {
+        let limited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (url, asked) = bridge_endpoint(std::time::Duration::ZERO, limited.clone(), 30);
+        let (mut names, dir) = as_the_host("stall-429", &url, 0);
+        let calls = polled_calls();
+        let started = std::time::Instant::now();
+        while started.elapsed() < std::time::Duration::from_secs(4) {
+            poll_once(&mut names, &calls);
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+        assert!(registry::slowed_down(&url).is_some_and(|left| left > std::time::Duration::from_secs(20)), "the endpoint's Retry-After is kept");
+        // A first burst before the 429s come back (the reads under way when they did), then
+        // nothing more while the endpoint asks to be left alone: far from the polls' dozens.
+        let count = asked.lock().unwrap().len();
+        assert!(count <= 15, "{count} requests while the endpoint said to wait: {:?}", asked.lock().unwrap());
+        let answers = poll_once(&mut names, &calls);
+        assert!(answers["faucet_info"]["error"].as_str().unwrap_or_default().contains("Too many requests"), "{}", answers["faucet_info"]);
+        assert_eq!(asked.lock().unwrap().len(), count, "nothing asked while it says to wait");
+        BRIDGE_HTTP.with(|on| on.set(false));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A 429 on a background read is waited out (its Retry-After) and asked once more, so the read
+    /// still ends with its value; on a call's own thread it is never waited for, and the endpoint
+    /// isn't asked again until then.
+    #[test]
+    fn a_429_is_waited_out_on_a_background_read_and_never_on_a_call() {
+        let times = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = times.clone();
+        let url = registry::stub_rpc_with(move |_| {
+            if counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                return (429, "Retry-After: 1\r\n".to_owned(), "{}".to_owned());
+            }
+            (200, String::new(), json!({ "jsonrpc": "2.0", "id": 1, "result": 9 }).to_string())
+        });
+        let started = std::time::Instant::now();
+        let refused = registry::rpc(&url, "getLastBlockId", json!([]), registry::Deadline::after(std::time::Duration::from_secs(5))).unwrap_err();
+        assert!(refused.contains("slow down") && refused.contains("1 s"), "{refused}");
+        let refused = registry::rpc(&url, "getLastBlockId", json!([]), registry::Deadline::after(std::time::Duration::from_secs(5))).unwrap_err();
+        assert!(refused.contains("slow down"), "{refused}");
+        assert!(started.elapsed() < std::time::Duration::from_millis(300), "a call's thread never waits");
+        assert_eq!(times.load(std::sync::atomic::Ordering::SeqCst), 1, "not asked again while it says to wait");
+        // A background read: waits the second out, then reads.
+        let served = served::Served::threaded();
+        let reader = url.clone();
+        let read = move || registry::rpc(&reader, "getLastBlockId", json!([]), registry::Deadline::after(std::time::Duration::from_secs(5)));
+        let snap = served.read("height", std::time::Duration::from_secs(60), served::Lane::Host(url.clone()), read);
+        assert!(snap.value.is_none() && snap.updating, "{snap:?}");
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert_eq!(served.peek("height").value, Some(json!(9)));
+        assert_eq!(times.load(std::sync::atomic::Ordering::SeqCst), 2);
+        // A 429 met on a background read: waited out (once) and asked again.
+        let again = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = again.clone();
+        let second = registry::stub_rpc_with(move |_| {
+            if counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                return (429, "Retry-After: 1\r\n".to_owned(), "{}".to_owned());
+            }
+            (200, String::new(), json!({ "jsonrpc": "2.0", "id": 1, "result": 10 }).to_string())
+        });
+        let reader = second.clone();
+        let snap = served.read("height-2", std::time::Duration::from_secs(60), served::Lane::Host(second.clone()), move || {
+            registry::rpc(&reader, "getLastBlockId", json!([]), registry::Deadline::after(std::time::Duration::from_secs(5)))
+        });
+        assert!(snap.value.is_none());
+        std::thread::sleep(std::time::Duration::from_millis(1600));
+        assert_eq!(served.peek("height-2").value, Some(json!(10)), "{:?}", served.peek("height-2"));
+        assert_eq!(again.load(std::sync::atomic::Ordering::SeqCst), 2, "one 429, then the read");
+    }
+
+    /// The request budget of one wallet read on LEZ 0.4 with the six built-in bridges and a burn
+    /// waiting for the person (the balances, the relayed-call sheet, the faucet): the bridges'
+    /// Configs are read once and kept for an hour, shared by the balances and the sheet, and a
+    /// definition's name once a chain: the endpoint's limit is 50 requests per 10 s per address.
+    #[test]
+    fn one_wallet_read_stays_well_under_the_endpoint_limit() {
+        let (url, asked) = bridge_endpoint(std::time::Duration::ZERO, Default::default(), 10);
+        let (mut names, dir) = as_the_host("budget", &url, 0);
+        let accounts: Vec<String> = (0..4u8).map(|n| format!("Public/{}", registry::account_text(&[n + 40; 32]))).collect();
+        let read = |names: &mut Names| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            loop {
+                let balances = parsed(&names.bridge_net_balances(json!(accounts).to_string()));
+                let sheet = parsed(&names.pending_requests())["value"][0]["sheet"].clone();
+                let faucet = parsed(&names.faucet_info());
+                if balances["value"]["updating"] == false && balances["value"]["read"].is_object() && !sheet["why"].to_string().contains(STILL_READING) && faucet["success"] == true {
+                    return (balances, sheet);
+                }
+                assert!(std::time::Instant::now() < until, "{balances} {sheet} {faucet}");
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        };
+        let (balances, sheet) = read(&mut names);
+        assert_eq!(balances["value"]["read"]["bridges"].as_array().unwrap().len(), 6, "{balances}");
+        let cold = std::mem::take(&mut *asked.lock().unwrap());
+        // The first read of a chain: the chain (2), each account (4), each bridge's Config once (6,
+        // shared by the sheet), at most 4 definitions' names (the rest on the next reads), and the
+        // faucet (1): 17.
+        let configs = cold.iter().filter(|method| method.contains("a Config")).count();
+        assert_eq!(configs, 6, "each Config once, for the balances and the sheet: {cold:?}");
+        assert_eq!(cold.len(), 2 + 4 + 6 + 4 + 1, "{cold:?}");
+        // The sheet was made from those same reads: v5's burn checked against v5's Config.
+        assert_eq!(sheet["burn"]["bridge_label"], "bridge v5", "{sheet}");
+        // The next reads (every 30 s while the Wallet shows): the chain, the accounts and the
+        // definitions' names left, 4 at a time (the six bridges list 12); then the chain and the
+        // accounts only, until the Configs are an hour old.
+        let listed = balances["value"]["read"]["tokens"].as_array().unwrap().len();
+        assert_eq!(listed, 12, "{balances}");
+        for left in [4, 4, 0, 0] {
+            names.board_reads.lock().unwrap().clear();
+            let _ = read(&mut names);
+            let warm = std::mem::take(&mut *asked.lock().unwrap());
+            assert_eq!(warm.iter().filter(|method| method.contains("a Config")).count(), 0, "{warm:?}");
+            assert_eq!(warm.len(), 2 + accounts.len() + left, "{warm:?}");
+        }
+        BRIDGE_HTTP.with(|on| on.set(false));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A burn toward bridge X is decided by X's own Config only: with v6's and v7's Configs
+    /// unreadable a v5 burn is still taken (proposed, shown, approved); with v7's unreadable a v7
+    /// burn is a plain wait, nothing signed, and goes through once v7 reads again.
+    #[test]
+    fn a_burn_is_decided_by_its_own_bridge_s_config_only() {
+        use provider_public::tests::{burn_request_for, v4_config, v5_config, v7_config, V5_WETH};
+        let reads = |v6: Known<bridge_net::BridgeConfig>, v7: Known<bridge_net::BridgeConfig>| {
+            vec![
+                (registry::parse_account(bridge_net::BRIDGE_V4_PROGRAM).unwrap(), Known::Read(Some(v4_config()))),
+                (registry::parse_account(bridge_net::BRIDGE_V5_PROGRAM).unwrap(), Known::Read(Some(v5_config()))),
+                (registry::parse_account(bridge_net::BRIDGE_V6_PROGRAM).unwrap(), v6),
+                (registry::parse_account(bridge_net::BRIDGE_V7_PROGRAM).unwrap(), v7),
+            ]
+        };
+        let down = || Known::Unread("can't reach the bridge test network: timed out".to_owned());
+        // v6 and v7 unreadable: a v5 burn still passes, checked against v5's Config.
+        let v5_burn = burn_request_for(V5_WETH, bridge_net::BRIDGE_V5_PROGRAM);
+        let taken = Names::burn_gate_per_bridge(&v5_burn, &reads(down(), down())).unwrap().unwrap();
+        assert_eq!(taken.bridge_label, "bridge v5");
+        let still = Names::burn_gate_per_bridge(&v5_burn, &reads(Known::Reading, Known::Reading)).unwrap().unwrap();
+        assert_eq!(still.bridge_label, "bridge v5", "bridges still being read don't hold it up either");
+        // v7 unreadable: a v7 burn is a plain wait, never a refusal of the call.
+        let v7_weth = registry::account_text(&v7_config().tokens[0].definition);
+        let v7_burn = burn_request_for(&v7_weth, bridge_net::BRIDGE_V7_PROGRAM);
+        let wait = Names::burn_gate_per_bridge(&v7_burn, &reads(Known::Read(None), down())).unwrap_err();
+        assert!(wait.contains("couldn't read the Config of bridge v7") && wait.contains("try again in a moment") && wait.contains("Nothing was signed"), "{wait}");
+        assert!(is_wait(&wait));
+        let reading = Names::burn_gate_per_bridge(&v7_burn, &reads(Known::Read(None), Known::Reading)).unwrap_err();
+        assert!(reading.contains("still reading the Config of bridge v7") && is_wait(&reading), "{reading}");
+        // v7 readable again: the v7 burn passes (v6 unreadable all along).
+        assert_eq!(Names::burn_gate_per_bridge(&v7_burn, &reads(down(), Known::Read(Some(v7_config())))).unwrap().unwrap().bridge_label, "bridge v7");
+        // The matrix's own rule still holds through it: v5's wETH told to v7 is refused as not a
+        // token there, whatever v6 does.
+        let crossed = burn_request_for(V5_WETH, bridge_net::BRIDGE_V7_PROGRAM);
+        assert!(Names::burn_gate_per_bridge(&crossed, &reads(down(), Known::Read(Some(v7_config())))).unwrap_err().contains("isn't a token of bridge v7"));
+    }
+
+    /// Through the calls: v6 and v7 unreadable, a v5 burn is proposed, shown approvable and signed;
+    /// v7 unreadable, a v7 burn is refused at the proposal with a plain wait (nothing planned or
+    /// signed), and proposed once v7 reads again.
+    #[test]
+    fn a_v5_burn_goes_through_while_v6_and_v7_cant_be_read_and_a_v7_burn_waits() {
+        use sha2::Digest;
+        let tokens = "5w6nTkftFFDy8mtdpnKpZVetGQJ2WCKdhmpJsAYArbU7";
+        let payer = "Public/DGu98d9jZfTAuJKr9y3vWC1DDAujYUaddb6ugTpgSBNs";
+        let account = format!("Public/{PUBLIC}");
+        let message_for = |definition: &str, bridge: &str| {
+            let bridge = registry::parse_account(bridge).unwrap();
+            bridge_net::encode_burn(&bridge_net::BurnMessage {
+                definition: registry::parse_account(definition).unwrap(),
+                amount: 10_000_000_000_000_000,
+                notify_account: bridge_net::config_address(&bridge),
+                notify_program: bridge,
+                memo: [0x5A; 32],
+            })
+        };
+        let call_for = |definition: &str, bridge: &str| json!({
+            "program": tokens, "message": registry::hex(&message_for(definition, bridge)), "privacy": "bridge_public_burn",
+            "accounts": [{ "account": definition, "program": tokens }, { "seed": bridge_net::config_seed_hex(), "of": bridge, "program": bridge }],
+            "fee": { "payer": payer, "gas_limit": 250000, "tip": "0", "max_fee": "2500000" },
+        });
+        let report_for = |definition: &str, bridge: &str, hash: &str| {
+            let message = message_for(definition, bridge);
+            json!({
+                "hash": hash, "account": account, "program": tokens, "payer": payer, "gas_limit": 250000, "tip": "0", "max_fee": "2500000",
+                "message_len": message.len(), "message_sha256": registry::hex(&sha2::Sha256::digest(&message)),
+                "actors": [{ "account": PUBLIC, "program": tokens }, { "account": definition, "program": tokens },
+                           { "account": registry::account_text(&bridge_net::config_address(&registry::parse_account(bridge).unwrap())), "program": bridge }],
+                "creates": [], "own_balance": false,
+                "nonces": { PUBLIC: "3", payer.trim_start_matches("Public/"): "41" },
+            })
+        };
+        let tail = "case \"$*\" in\n\
+             *--version*) echo 'names 0.17.0 (LEZ v0.4.0-rc3)' ;;\n\
+             *\"public-call plan\"*) touch \"$(dirname \"$0\")/planned\"; cat \"$(dirname \"$0\")/plan-out.json\" ;;\n\
+             *\"public-call sign\"*) touch \"$(dirname \"$0\")/signed\"; cat \"$(dirname \"$0\")/sign-out.json\" ;;\n\
+             *) echo 'unexpected'; exit 1 ;;\n\
+             esac";
+        let (mut names, dir) = with_wallet("burn-own-config", tail);
+        names.net = Net::Lez04;
+        let v5_weth = provider_public::tests::V5_WETH;
+        let v7 = bridge_net::BRIDGE_V7_PROGRAM;
+        let v7_weth = registry::account_text(&provider_public::tests::v7_config().tokens[0].definition);
+        connect(&mut names, "lez_bridge", &account);
+        as_caller(app("lez_bridge"));
+        let declared = parsed(&names.declare_programs(json!([tokens, bridge_net::BRIDGE_V5_PROGRAM, v7]).to_string(), "to send tokens back".into()))["value"]["request"].as_str().unwrap().to_owned();
+        assert_eq!(approve(&mut names, &declared, "")["value"]["state"], "approved");
+        let set = |v6: Result<Option<bridge_net::BridgeConfig>, String>, v7: Result<Option<bridge_net::BridgeConfig>, String>| {
+            BURN_CONFIGS.with(|configs| {
+                let mut configs = configs.borrow_mut();
+                configs.insert(bridge_net::BRIDGE_V4_PROGRAM.to_owned(), Ok(Some(provider_public::tests::v4_config())));
+                configs.insert(bridge_net::BRIDGE_V5_PROGRAM.to_owned(), Ok(Some(provider_public::tests::v5_config())));
+                configs.insert(bridge_net::BRIDGE_V6_PROGRAM.to_owned(), v6);
+                configs.insert(bridge_net::BRIDGE_V7_PROGRAM.to_owned(), v7);
+            })
+        };
+        // v6 and v7 can't be read: a v5 burn is proposed, shown approvable, and signed.
+        set(Err("timed out".to_owned()), Err("timed out".to_owned()));
+        let v5_hash = "a5".repeat(32);
+        std::fs::write(dir.join("plan-out.json"), report_for(v5_weth, bridge_net::BRIDGE_V5_PROGRAM, &v5_hash).to_string()).unwrap();
+        std::fs::write(dir.join("sign-out.json"), json!({ "hash": v5_hash, "transaction": "b5b5" }).to_string()).unwrap();
+        as_caller(app("lez_bridge"));
+        let asked = parsed(&names.propose_relayed_call(account.clone(), call_for(v5_weth, bridge_net::BRIDGE_V5_PROGRAM).to_string(), String::new()));
+        assert_eq!(asked["value"]["check"], "ready", "{asked}");
+        let id = asked["value"]["request"].as_str().unwrap().to_owned();
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let pending = parsed(&names.pending_requests())["value"].clone();
+        let shown = pending.as_array().unwrap().iter().find(|r| r["id"] == id.as_str()).unwrap().clone();
+        assert_eq!((shown["sheet"]["refused"].as_bool(), shown["sheet"]["burn"]["bridge_label"].as_str()), (Some(false), Some("bridge v5")), "{shown}");
+        let done = approve(&mut names, &id, &account);
+        assert_eq!(done["value"]["state"], "done", "{done}");
+        // v7 can't be read: a v7 burn is a plain wait at the proposal; nothing planned or signed.
+        let _ = std::fs::remove_file(dir.join("planned"));
+        let _ = std::fs::remove_file(dir.join("signed"));
+        set(Ok(Some(provider_public::tests::v6_config())), Err("timed out".to_owned()));
+        as_caller(app("lez_bridge"));
+        let waits = parsed(&names.propose_relayed_call(account.clone(), call_for(&v7_weth, v7).to_string(), String::new()));
+        let why = waits["error"].as_str().unwrap_or_else(|| panic!("{waits}"));
+        assert!(why.contains("couldn't read the Config of bridge v7") && why.contains("try again in a moment") && why.contains("Nothing was signed"), "{why}");
+        assert!(waits["value"]["request"].is_null());
+        assert!(!dir.join("planned").exists() && !dir.join("signed").exists(), "nothing planned or signed");
+        // v7 reads again: the same burn is proposed.
+        set(Ok(Some(provider_public::tests::v6_config())), Ok(Some(provider_public::tests::v7_config())));
+        let v7_hash = "a7".repeat(32);
+        std::fs::write(dir.join("plan-out.json"), report_for(&v7_weth, v7, &v7_hash).to_string()).unwrap();
+        let asked = parsed(&names.propose_relayed_call(account.clone(), call_for(&v7_weth, v7).to_string(), String::new()));
+        assert_eq!(asked["value"]["check"], "ready", "{asked}");
+        // And at the approval, v7 unreadable again: a plain wait (the request stays pending), not
+        // "the wallet refuses this call".
+        let id = asked["value"]["request"].as_str().unwrap().to_owned();
+        set(Ok(Some(provider_public::tests::v6_config())), Err("timed out".to_owned()));
+        let at_approval = approve(&mut names, &id, &account);
+        let why = at_approval["error"].as_str().unwrap_or_else(|| panic!("{at_approval}"));
+        assert!(why.contains("try again in a moment") && !why.contains("refuses"), "{why}");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let pending = parsed(&names.pending_requests())["value"].clone();
+        assert!(pending.as_array().unwrap().iter().any(|r| r["id"] == id.as_str()), "still pending: {pending}");
+        BURN_CONFIGS.with(|configs| configs.borrow_mut().clear());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
