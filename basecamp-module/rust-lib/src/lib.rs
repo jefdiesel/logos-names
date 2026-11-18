@@ -12191,7 +12191,8 @@ mod tests {
     /// bridge's own wETH and dUSDC, in every denomination, pass toward their own bridge only; the
     /// same token toward any other of the four is refused as not a token there; toward v2 or v3
     /// (vaults that never release) refused as another program; in either order of the Configs;
-    /// and a bridge whose Config the chain doesn't have takes no burn, not even its own token's.
+    /// v3's own tokens refused toward every target; and a bridge whose Config the chain doesn't
+    /// have takes no burn, not even its own token's.
     #[test]
     fn every_burn_bridge_takes_only_its_own_tokens() {
         use provider_public::tests::{burn_request_of, v4_config, v5_config, v6_config, v7_config};
@@ -12245,6 +12246,24 @@ mod tests {
         }
         // 2 orders × (4 bridges × 2 tokens × 3 denominations to their own bridge; × 5 others).
         assert_eq!((passed, refused), (2 * 24, 2 * 40));
+        // v3's own tokens (same token program; its vault never releases): refused toward every
+        // target, its own bridge included, in both orders.
+        let v3 = provider_public::tests::config_fixture("config-v3.json", bridge_net::BRIDGE_V3_PROGRAM);
+        let mut v3_refused = 0;
+        for order in [&configs, &reversed] {
+            for token in &v3.tokens {
+                for (target, target_label) in targets {
+                    let request = burn_request_of(&registry::account_text(&token.definition), token.denoms[0], target);
+                    let why = Names::burn_gate_with(&request, order).expect_err("a v3 token never burns");
+                    match target_label {
+                        Some(label) => assert!(why.contains(&format!("isn't a token of {label}")), "v3 {} to {target}: {why}", token.symbol()),
+                        None => assert!(why.contains("another program"), "v3 {} to {target}: {why}", token.symbol()),
+                    }
+                    v3_refused += 1;
+                }
+            }
+        }
+        assert_eq!(v3_refused, 2 * 2 * 6);
         // A bridge with no Config on this chain takes nothing, its own token included.
         for (absent, _, config) in &bridges {
             let others: Vec<_> = configs.iter().filter(|(program, _)| registry::account_text(program) != *absent).cloned().collect();
