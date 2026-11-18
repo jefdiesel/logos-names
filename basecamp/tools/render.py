@@ -1198,7 +1198,7 @@ WALLET_NEXT = [
     ("sendback-address-refused", _STEP2 % ('root.sbSetBox("%s"); root.sbCheckCode()' % _ADDR.lower()),
      wn_mock(send_back_check={"ok": False, "error": {"code": "bad_address:no_checksum", "message": "This address is all in small (or all in capital) letters, so it has no checksum and a typo can't be caught. Copy it from your wallet, don't type it."}})),
     # The bridge busy with another call: a wait, with Check again.
-    ("sendback-address-busy", _STEP2 % ('root.sbSetBox("%s"); root.sbCheckCode()' % _ADDR), dict(wn_mock(), busy=["send_back_check"])),
+    ("sendback-address-busy", _STEP2 % ('root.sbSetBox("%s"); root.sbCheckCode()' % _ADDR), wn_mock(send_back_check={"__error": "The LEZ Bridge is still answering an earlier call."})),
     # An older LEZ Bridge (no address book): the addresses this account sent to before, without names.
     ("sendback-address-old-bridge", _STEP2 % '', _sb_feat(sb_mock(send_back_recipients={"recipients": [{"account": OWNER, "chain_id": 11155111, "address": _ADDR, "short": "0x68B5…975d", "last_used": 1}], "chain_id": 11155111}))),
     # Step 3: the burn's approval keeps the address and its words, and says the burn is next.
