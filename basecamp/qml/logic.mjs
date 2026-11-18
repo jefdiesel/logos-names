@@ -1461,12 +1461,12 @@ export function receiveCodeRefused(message) {
 /// module first: the app depends on it.
 export const BUNDLED_BRIDGE = [
     { name: "lez_bridge", file: "lez_bridge.lgx", label: "LEZ Bridge module",
-      sha256: "91769a75d6e42069531741bfd274807aa1adfed16d71d45ea6ff729e10aaa715",
-      root: "1f88249af3e0943d7c33da6cc7acc45bf26c15de3563eaf192da51e3a9c10bac",
+      sha256: "53d0498031a39d9376e60c2ab62602cff63dcc945528c9effd905d8313a283ef",
+      root: "3f5972d3017f7387615d01e392aaad1a017207b725d7a61d2802454fd7d82493",
       // The commit the shipped bridge says it was built from (its config().build.commit): rfp-022
-      // e003caa (branch v6-in-wallet: the relayed claim on a light-client bridge, private claim and
+      // 2c5214c (branch wallet-next-module: the address book and the safe Remove calls; before it v6-in-wallet: the relayed claim on a light-client bridge, private claim and
       // private send-back through the wallet's private-call sheet; v5 the default).
-      build: "e003caa" }
+      build: "2c5214c" }
 ]
 
 /// The LEZ 0.4 names tool this app ships in qml/bundled/ (built without in-process proving, so
