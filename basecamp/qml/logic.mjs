@@ -2114,14 +2114,6 @@ export const RECEIVE_DEPOSIT_STEPS = [
     "Check the page shows these four words. If they differ, stop.",
     "Deposit there, then come back here and press Check now."
 ]
-/// Bridge to Ethereum, the address step: what to do, in order, before the code is pasted.
-export const SEND_BACK_ADDRESS_STEPS = [
-    "Copy the link and open it in the browser with your Ethereum wallet.",
-    "Connect the wallet that should receive. The page shows a code and four words.",
-    "Copy that code, paste it below and press Read the code."
-]
-/// The other way in, said under the field: no page, the address itself (owner, 2026-11-16: a phone's
-/// Ethereum wallet can't hand the page's code back to Names on a Mac).
 /// Wei (decimal text) as ETH with at most 4 decimals, rounded down, trailing zeros dropped:
 /// "4885795182198553171" → "4.8857"; under 0.0001 but not zero → "less than 0.0001".
 export function ethAtMost4(wei) {
@@ -2156,14 +2148,6 @@ export function historyLine(h) {
 /// An optional hint on the step that asks where to send (owner, 2026-11-16): privacy is the
 /// person's choice, so it suggests and never asks.
 export const SEND_BACK_PRIVATE_HINT = "Want it private? In your Ethereum wallet, add a new account and use that one. It needs no ETH: the bridge pays the gas."
-export const SEND_BACK_ADDRESS_ROUTE = "Or paste the Ethereum address to receive it. Copy it from your wallet, don't type it."
-/// Once a pasted (or remembered) address is read: no page to compare with, so the address itself.
-export const SEND_BACK_ADDRESS_CONFIRM = "Check both halves are the address your Ethereum wallet shows. If they differ, stop. These four words stay with this withdrawal."
-/// Bridge to Ethereum, once the code is read: what to check, then the one button.
-export const SEND_BACK_CONFIRM_STEPS = [
-    "Check the page shows these four words. If they differ, stop.",
-    "Press Bridge to Ethereum. Your wallet then asks you to approve the burn."
-]
 /// Bridge to Ethereum, releasable by hand: the link, then Release on the page.
 export const SEND_BACK_RELEASE_STEPS = [
     "Copy the link and open it in the browser with your Ethereum wallet.",
@@ -2718,23 +2702,42 @@ export function faucetReply(value, grouped) {
 //    knows the bridge's method names, feature words and the shape of its private replies
 //    (rfp-022 modules/PRIVATE-IN-WALLET.md): Main.qml and the renders read them only through it. ──
 
-/// The LEZ Bridge's calls on the private paths (every argument a string).
+/// The LEZ Bridge's calls on the private paths, the address step of Bridge to Ethereum and the
+/// card's Remove (every argument a string). The calls marked "wallet-next" are not in the bridge
+/// module yet: their contract is docs/WALLET-NEXT-MODULE-CONTRACT.md, and the screens offer them
+/// only when `config().features` names them (BRIDGE_FEATURES).
 export const PRIVATE_BRIDGE = {
     receive: "make_deposit_request",   // (token, denom_index, "Private/<id>"): the deposit code, or {needs}
     claimPlan: "claim_plan",           // (deposit id): the checks, {ok, error: {code, message}, needs, sponsored, …}
     claim: "claim",                    // (deposit id, options): the wallet job ({id: "wr-…", request, phase}), or {needs}
     job: "job",                        // (job id): the wallet job, its state asked of the wallet once
     jobs: "jobs",                      // (): {jobs: […]}, to find a claim or burn already with the wallet
-    sendBackPlan: "send_back_plan",    // (token, denom_index, "Private/<id>", code): the stored exit, or {needs}
+    sendBackPlan: "send_back_plan",    // (token, denom_index, "Public/<id>" | "Private/<id>", code): the stored exit, or {needs}
     sendBackBurn: "send_back_burn",    // (send-back id, options): the wallet job (or a status carrying `job`), or {needs}
-    afterUncertain: "after_uncertain"  // the option that proposes again after an unanswered proposal
+    afterUncertain: "after_uncertain", // the option that proposes again after an unanswered proposal
+    // Bridge to Ethereum, the address step.
+    sendBackCheck: "send_back_check",          // (code or 0x… address): {ok, recipient, words_text, route, code, history, …} or {ok: false, error}
+    sendBackRecipients: "send_back_recipients",// (account): {recipients: [{address, short, last_used}]}: the older bridge's list (no names, no words)
+    addressBookList: "address_book_list",      // wallet-next (): {addresses: [{address, short, nickname, words_text, last_used, saved}], deployment}
+    addressBookSave: "address_book_save",      // wallet-next (address, nickname): {ok: true, entry, addresses} or {ok: false, error: {code, message}}
+    addressBookRemove: "address_book_remove",  // wallet-next (address): {ok: true, addresses} or {ok: false, error}
+    // The card's Remove: the bridge checks (Sepolia for a receive, LEZ for a send-back) and removes in one call.
+    receiveRemove: "receive_remove",           // wallet-next (receive id): {removed, id, code, text, checked}
+    sendBackRemove: "send_back_remove"         // wallet-next (send-back id): {removed, id, code, text, checked}
 }
 /// The `config().features` words that say an installed bridge answers them (modules/PRIVATE-IN-WALLET.md):
 /// a private code is offered only when its claim can be made (`private_claim_standin`, the claim on
-/// a bridge whose roots an operator records: v3, v4, v5).
-export const PRIVATE_FEATURES = { receive: ["private_claim_standin"], claim: ["private_claim_standin"], sendBack: ["private_send_back"] }
+/// a bridge whose roots an operator records: v3, v4, v5). The wallet-next words are in
+/// docs/WALLET-NEXT-MODULE-CONTRACT.md.
+export const PRIVATE_FEATURES = { receive: ["private_claim_standin"], claim: ["private_claim_standin"], sendBack: ["private_send_back"],
+                                  addressBook: ["address_book"], receiveRemove: ["receive_remove"], sendBackRemove: ["send_back_remove"] }
+export const BRIDGE_FEATURES = PRIVATE_FEATURES
 export function privateCan(features, what) {
     return (PRIVATE_FEATURES[what] || []).some(function(f) { return bridgeCan(features, f) })
+}
+/// Whether the bridge answers one of the calls above (by its BRIDGE_FEATURES key).
+export function bridgeNextCan(features, what) {
+    return privateCan(features, what)
 }
 /// A private claim or burn proved on this computer: one place for the time (measured 577 s and
 /// 642 s on a 16 GB Apple M4, 4 threads).
@@ -2932,4 +2935,170 @@ export function sendBackIsPrivate(row) {
 export function privateNoteShown(note) {
     var n = String(note || "")
     return /^Asking your Names Wallet how this stands/.test(n) ? n : ""
+}
+
+// ── Bridge to Ethereum, step 2 as the address step (rfp-022 proposal/WALLET-ROADMAP.md items 5, 7
+//    and 8, the owner's design of 2026-11-18): one box, always shown and empty at first, for the
+//    page's withdraw-to code or the Ethereum address; the previous addresses under it, none
+//    offered first; the address and its four words only once the box holds a valid one, with
+//    where to compare them; a required tick; then one button. The bridge's calls are in
+//    PRIVATE_BRIDGE above. ──
+
+/// The words of the address step, said once here.
+export const ADDRESS_BOX_HINT = "Paste the withdraw-to code from the bridge page (logoswd1…) or the Ethereum address to receive it. Copy it, don't type it."
+export const ADDRESS_GET_CODE = "No code yet? Copy the link, open it in the browser with your Ethereum wallet and connect: the page shows the code."
+export const ADDRESS_CHOOSE_TITLE = "Choose a previous address"
+export const ADDRESS_WORDS_LINE = "These four words are a fingerprint of this address. The bridge page shows the same four when the same Ethereum wallet is connected."
+export const ADDRESS_TICK = "This is my address"
+export const ADDRESS_LAST_CHECK = "Last check before the burn. Withdrawals to a wrong address can't be recovered."
+export const ADDRESS_CONTINUE = "I've checked the address — continue"
+/// Step 3 (the burn's approval): the address and its words stay; the burn is what comes next.
+export const ADDRESS_BURN_NEXT = "Next: the burn. Approve it in your wallet's sheet; once it is sent it can't be undone."
+export const ADDRESS_SAVE_TITLE = "Save to my addresses"
+export const ADDRESS_SAVE_NOTE = "The name stays in this wallet on this computer, never on chain."
+
+/// What the box holds, as the bridge reads it: the `logoswd1…` code, else the `0x…` address (its
+/// case kept), else "". A check and the tick belong to this value only.
+export function addressBoxKey(text) {
+    return sendBackCode(text) || sendBackAddress(text)
+}
+
+/// The address step's state, one place for what shows: {form, show (the address and its words),
+/// canContinue, why (the line under a disabled button, or a box problem), checkNow (the box holds
+/// a value not yet asked of the bridge)}. `s`: {input (the box), check (send_back_check's ok
+/// answer with `key`, the box value it was asked for), checking, error (a refusal, plain words),
+/// ticked, asking (the plan under way), canAddress (the bridge takes a 0x… address)}.
+/// `form`: "empty" | "bad" | "checking" | "refused" | "ready".
+export function addressStep(s) {
+    var st = s || {}
+    var raw = String(st.input || "").trim()
+    var code = sendBackCode(raw), address = sendBackAddress(raw)
+    var key = code || address
+    var r = function(form, why, extra) { return Object.assign({ form: form, show: false, canContinue: false, why: why, checkNow: false, key: key }, extra || {}) }
+    if (raw === "")
+        return r("empty", "Paste a code or an address, or choose a previous address.")
+    if (key === "")
+        return r("bad", "That isn't a withdraw-to code (logoswd1…) or an Ethereum address (0x and 40 characters).")
+    if (code === "" && st.canAddress === false)
+        return r("bad", "This LEZ Bridge reads only the bridge page's code (logoswd1…). Update it to paste an address.")
+    var check = st.check && typeof st.check === "object" ? st.check : null
+    if (check !== null && String(check.key || "") === key) {
+        var why = st.asking ? "" : st.ticked ? "" : "Tick “" + ADDRESS_TICK + "” to continue."
+        return r("ready", why, { show: true, canContinue: !!st.ticked && !st.asking })
+    }
+    if (st.checking)
+        return r("checking", "Checking the address…")
+    if (st.error && String(st.errorKey || key) === key)
+        return r("refused", String(st.error))
+    return r("checking", "Checking the address…", { checkNow: true })
+}
+
+/// The previous addresses offered under the box: [{address, short, nickname, title, sub, words,
+/// saved}], each address once (case aside), in the bridge's order. From `address_book_list`
+/// (`{addresses: [...]}`), or with an older bridge from `send_back_recipients` (`{recipients:
+/// [...]}`: no names, no words). An entry without a name says how it is known.
+export function addressBookRows(value) {
+    var v = value && typeof value === "object" ? value : {}
+    var list = Array.isArray(v.addresses) ? v.addresses : Array.isArray(v.recipients) ? v.recipients : Array.isArray(value) ? value : []
+    var seen = {}
+    var out = []
+    list.forEach(function(x) {
+        var a = x ? sendBackAddress(String(x.address || "")) : ""
+        if (a === "" || seen[a.toLowerCase()]) return
+        seen[a.toLowerCase()] = true
+        var nick = String(x.nickname || "").trim()
+        var short = String(x.short || "") || (a.substr(0, 6) + "…" + a.substr(38))
+        var words = String(x.words_text || (Array.isArray(x.words) ? x.words.join(" · ") : "") || "")
+        out.push({ address: a, short: short, nickname: nick, saved: x.saved === true || nick !== "",
+                   title: nick !== "" ? nick : "Sent to before", sub: short + (words !== "" ? " · " + words : ""), words: words })
+    })
+    return out
+}
+/// The previous address the box holds now, or null: the same checksummed address (an all-small
+/// copy is not it: the bridge refuses an address without its checksum).
+export function addressBookChosen(rows, input) {
+    var key = sendBackAddress(input)
+    if (key === "") return null
+    return (Array.isArray(rows) ? rows : []).filter(function(x) { return x.address === key })[0] || null
+}
+
+/// A short name for an address (local to this wallet): "" when it can be saved, else the reason.
+/// 1–24 characters: letters, digits, spaces, dots, dashes, underscores (the bridge checks the same).
+export function nicknameProblem(text) {
+    var t = String(text || "").trim()
+    if (t === "") return "Give it a short name, such as main or ledger."
+    if (t.length > 24) return "Keep the name to 24 characters or fewer."
+    if (!/^[A-Za-z0-9 ._-]+$/.test(t)) return "Use letters, digits, spaces, dots, dashes or underscores."
+    return ""
+}
+/// "Save to my addresses" is offered on a send-back's screen once its burn has gone out (its
+/// first send to that address), while the address has no name in this wallet and the bridge
+/// keeps names. `s`: {can, stage (sendBackProgress stage), recipient, rows (addressBookRows)}.
+export function addressSaveOffered(s) {
+    var st = s || {}
+    if (!st.can || sendBackAddress(st.recipient) === "") return false
+    if (["planned", "approve", "checking", "burn_unclear", ""].indexOf(String(st.stage || "")) >= 0) return false
+    var known = addressBookChosen(st.rows, st.recipient)
+    return !(known !== null && known.nickname !== "")
+}
+/// `address_book_save`'s answer: {ok, line, kind, rows}.
+export function addressSaveReply(value, nickname) {
+    var v = value && typeof value === "object" ? value : {}
+    var name = String(nickname || "").trim()
+    if (v.ok === true)
+        return { ok: true, line: "Saved as “" + String((v.entry && v.entry.nickname) || name) + "”. " + ADDRESS_SAVE_NOTE, kind: "done", rows: addressBookRows(v) }
+    var e = v.error && typeof v.error === "object" ? v.error : { code: "", message: String(v.error || "") }
+    var words = { bad_nickname: nicknameProblem(name) || "That name can't be used.", bad_address: "That address can't be saved.",
+                  nickname_taken: "Another address already has that name. Choose another.",
+                  full: "Your list of addresses is full (50). Remove one in Settings → Bridge first." }
+    var code = String(e.code || "").split(":")[0]
+    return { ok: false, line: e.message ? String(e.message) : (words[code] || "It wasn't saved."), kind: "problem", rows: null }
+}
+
+// ── Remove a stale receive or send-back from the card (WALLET-ROADMAP item 1). Offered only where
+//    removing can't lose money; the bridge checks again at the press (Sepolia for a receive's
+//    commitment, the bridge test network for a send-back's exit) and removes in the same call, or
+//    refuses. A deposited, unclaimed receive is never offered. ──
+
+/// Whether a card row offers Remove, from what this window last read: a receive whose code has no
+/// deposit seen ("waiting") or that is claimed; a send-back never proposed to the wallet (planned,
+/// no wallet job, no burn sent) or released. `kind`: "receive" | "send_back"; `progress`: the row's
+/// receiveProgress / sendBackProgress; `status`: its last status; `job`: a private burn's wallet job.
+export function removeOffered(kind, progress, status, job) {
+    var p = progress || {}, st = status || {}
+    if (kind === "receive")
+        return p.stage === "waiting" || p.stage === "claimed"
+    if (p.stage === "released") return true
+    if (p.stage !== "planned") return false
+    if (st.burn_tx) return false
+    // A private burn proposed to the wallet: only once its job is known to have ended (rejected,
+    // lapsed, failed); the bridge then reads the chain for the exit before it removes anything.
+    if (job && job.state === "running") return false
+    if (st.wallet_job && !(job && job.state)) return false
+    return true
+}
+/// `receive_remove` / `send_back_remove`'s answer, as the card's line: {removed, line, kind}.
+/// The bridge's own words when it gives them; a wait (amber) when it couldn't read the chain.
+export function removeReply(value, kind) {
+    var v = value && typeof value === "object" ? value : {}
+    var code = String(v.code || "")
+    var receive = kind === "receive"
+    var words = {
+        no_deposit: "No deposit was made for this code. Removed.",
+        claimed: "Already claimed. Removed from the list.",
+        deposited: "A deposit was made for this code and isn't claimed yet, so it stays.",
+        never_burned: "Nothing was burned for this send-back. Removed.",
+        released: "Already released on Ethereum. Removed from the list.",
+        in_flight: "A burn for this send-back is on its way, so it stays.",
+        with_wallet: "The burn is waiting in your wallet. Reject it there first; this send-back stays.",
+        unknown: "This one can't be checked here, so it stays.",
+        not_found: "It was already gone from this computer.",
+        unreachable: receive ? "Couldn't read Sepolia just now, so nothing was removed. Try again in a moment."
+                             : "Couldn't read the bridge test network just now, so nothing was removed. Try again in a moment."
+    }
+    var line = v.text ? String(v.text) : (words[code] || (v.removed === true ? "Removed." : "It stays: the bridge didn't remove it."))
+    if (v.removed === true || code === "not_found")
+        return { removed: true, line: line, kind: "done" }
+    var wait = ["unreachable", "busy", "rate_limited"].indexOf(code) >= 0
+    return { removed: false, line: line, kind: wait ? "waiting" : "problem" }
 }

@@ -1076,7 +1076,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
 
 {
   const { bridgeCodeInput, bridgeRowLine, bridgeActiveLine, bridgeCheckShown, bridgesWith, BRIDGE_CODE_WARNING, codeOlderVault, numbered,
-          RECEIVE_DEPOSIT_STEPS, SEND_BACK_ADDRESS_STEPS, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM } = await import("./qml/logic.mjs");
+          RECEIVE_DEPOSIT_STEPS, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM } = await import("./qml/logic.mjs");
   // Settings → Bridge (rfp-022 NAMES-SEND-BACK.md §9): the code box, the list, the check's answer.
   check("bridge code: pasted with spaces, or in the page's link", [bridgeCodeInput(" logosbr1abc\n").code, bridgeCodeInput("https://nameswallet.app/bridge/#logosbr1xyz").code, bridgeCodeInput("LOGOSBR1ABC").code], ["logosbr1abc", "logosbr1xyz", "LOGOSBR1ABC"]);
   check("bridge code: another kind of code, or nothing", [bridgeCodeInput("logoswd1abc").problem, bridgeCodeInput("hello").problem, bridgeCodeInput("").problem, bridgeCodeInput("logosdep1q").code],
@@ -1109,17 +1109,15 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     "1. Copy the link and open it in the browser with your Ethereum wallet.",
     "2. Check the page shows these four words. If they differ, stop.",
     "3. Deposit there, then come back here and press Check now."]);
-  check("bridge to Ethereum: the address step in order", numbered(SEND_BACK_ADDRESS_STEPS).length, 3);
 }
 
 {
-  const { sendBackAddress, sendBackCode, addressHalves, SEND_BACK_ADDRESS_ROUTE, sendBackCodeTitle } = await import("./qml/logic.mjs");
+  const { sendBackAddress, sendBackCode, addressHalves, sendBackCodeTitle } = await import("./qml/logic.mjs");
   // Bridge to Ethereum by a pasted address (owner, 2026-11-16): its case kept (the checksum lives in it).
   const A = "0x68B54942A37aE5ceBA34D47eFB8d33a293d3975d";
   check("address: kept as pasted, from a link, with spaces", [sendBackAddress(" " + A + "\n"), sendBackAddress("https://x/#" + A), sendBackAddress("0X" + A.slice(2))], [A, A, A]);
   check("address: not one", [sendBackAddress(A.slice(0, 41)), sendBackAddress("logoswd1abc"), sendBackAddress(""), sendBackCode(A)], ["", "", "", ""]);
   check("address: two halves to read back", addressHalves(A), ["0x68B54942A37aE5ceBA34", "D47eFB8d33a293d3975d"]);
-  check("address: the route said plainly", SEND_BACK_ADDRESS_ROUTE, "Or paste the Ethereum address to receive it. Copy it from your wallet, don't type it.");
   check("address: refusal title", sendBackCodeTitle("bad_address:no_checksum"), "That address can't be used");
   const { SEND_BACK_PRIVATE_HINT, historyLine } = await import("./qml/logic.mjs");
   // The receiving account's past: nothing sent and nothing held; sent from; holding; not read. Never "new".
@@ -1154,7 +1152,10 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   const PRIV = "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z";
   // The adapter: every bridge call the private screens make, in one place.
   check("private adapter: the bridge's calls", L.PRIVATE_BRIDGE, { receive: "make_deposit_request", claimPlan: "claim_plan", claim: "claim", job: "job", jobs: "jobs",
-    sendBackPlan: "send_back_plan", sendBackBurn: "send_back_burn", afterUncertain: "after_uncertain" });
+    sendBackPlan: "send_back_plan", sendBackBurn: "send_back_burn", afterUncertain: "after_uncertain",
+    // wallet-next (docs/WALLET-NEXT-MODULE-CONTRACT.md): the address step and the card's Remove.
+    sendBackCheck: "send_back_check", sendBackRecipients: "send_back_recipients", addressBookList: "address_book_list", addressBookSave: "address_book_save",
+    addressBookRemove: "address_book_remove", receiveRemove: "receive_remove", sendBackRemove: "send_back_remove" });
   check("private adapter: features (PRIVATE-IN-WALLET.md)", [L.privateCan(["private_claim_standin"], "claim"), L.privateCan(["private_claim_standin"], "receive"), L.privateCan(["receive"], "receive"), L.privateCan(null, "sendBack"),
     L.privateCan(["private_send_back"], "sendBack"), L.privateCan(["private_send_back"], "nothing")], [true, true, false, false, true, false]);
   check("private send-back as the module plans it", [L.sendBackIsPrivate({ kind: "private", account: "x" }), L.sendBackIsPrivate({ route: "private_call" })], [true, true]);
@@ -1240,8 +1241,8 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
   // Every string the page shows: never "official", never "lookup" (say "checking a name").
   const literals = qml.match(/"(?:[^"\\\n]|\\.)*"/g) || [];
-  // (Two older strings say "look up" — the search box's hint and a name page's line — and are left as they are.)
-  check("Main.qml strings: no 'official', no 'lookup'", literals.filter((l) => /official|lookup/i.test(l)), []);
+  // (WALLET-ROADMAP item 4: the older "look up" strings now say "checking a name" too.)
+  check("Main.qml strings: no 'official', no 'look up' in any form", literals.filter((l) => /official|look(s|ed|ing)?[ -]?up/i.test(l)), []);
   // The private wait's timers: one read every 30 s while its screen is open and in front; the 1 s clock reads nothing.
   check("private timer: 30 s, gated on its screen", /interval: Logic\.PRIVATE_CHECK_MS\s*\n\s*repeat: true\s*\n\s*running: root\.privateWaitOnView\s*\n\s*onTriggered: root\.privatePoll\(\)/.test(qml), true);
   check("private clock: moves the time only", /interval: 1000\s*\n\s*repeat: true\s*\n\s*running: root\.privateWaitOnView\s*\n\s*onTriggered: root\.privateNow = Date\.now\(\)\s*\n/.test(qml), true);
@@ -1249,6 +1250,107 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("private screen: the wallet's own sheet in place", [/ApproveBody \{ visible: root\.appInline && root\.walletView === "pclaim"; inline: true \}/.test(qml), /readonly property bool appInline: appPrivateHere \|\|/.test(qml)], [true, true]);
   check("private screen: the bridge's calls only through the adapter", (qml.match(/bridgeCall\("(claim|claim_plan|job|jobs|make_deposit_request)"/g) || []).length, 0);
   check("private screen: every button says what it does at once", [/"Checking…" : pclaimScreen\.stage === "asking" \? "Asking your wallet…"/.test(qml), /root\.receiveAsking \? "Making the code…"/.test(qml)], [true, true]);
+}
+
+// ── wallet-next (rfp-022 proposal/WALLET-ROADMAP.md items 1, 4, 5, 7, 8): the address step of
+//    Bridge to Ethereum, the saved addresses, Remove on the card, the "checking a name" wording. ──
+{
+  const L = await import("./qml/logic.mjs");
+  const A = "0x68B54942A37aE5ceBA34D47eFB8d33a293d3975d";
+  const B = "0xE2C4857976b346F8F9b3a7be714Cd92d0bF68680";
+  const CODE = "logoswd1qyqqqqqqqqqzr7dm2wcgqnmxn3uq7c2yupx7qfguwl6zcw0d2ej8zhwpsa8x4a5xg9ws3xcqp";
+  const ok = (key) => ({ ok: true, key, recipient: A, words_text: "lens · mushroom · enjoy · orient" });
+  const st = (o) => L.addressStep(Object.assign({ canAddress: true }, o));
+  // The box: empty at first; nothing pre-filled; the form says what it holds.
+  check("address step: empty box", [st({ input: "" }).form, st({ input: "   " }).form, st({ input: "" }).show, st({ input: "" }).canContinue], ["empty", "empty", false, false]);
+  check("address step: empty says what to do", st({ input: "" }).why, "Paste a code or an address, or choose a previous address.");
+  check("address step: not a code or an address", [st({ input: "hello" }).form, st({ input: A.slice(0, 30) }).form, st({ input: "hello" }).show], ["bad", "bad", false]);
+  check("address step: an address on a bridge that takes only codes", [st({ input: A, canAddress: false }).form, /Update it/.test(st({ input: A, canAddress: false }).why), st({ input: CODE, canAddress: false }).form], ["bad", true, "checking"]);
+  check("address step: well-formed and not checked yet: check it now", [st({ input: A }).form, st({ input: A }).checkNow, st({ input: A, checking: true }).checkNow, st({ input: " " + CODE + "\n" }).key], ["checking", true, false, CODE]);
+  check("address step: the words show only once checked", [st({ input: A, check: ok(A) }).show, st({ input: A, checking: true }).show, st({ input: A, error: "x", errorKey: A }).show], [true, false, false]);
+  // The check belongs to the box's value: another value in the box hides it.
+  check("address step: a check for another value is not shown", [st({ input: B, check: ok(A) }).show, st({ input: B, check: ok(A) }).form, st({ input: B, check: ok(A) }).checkNow], [false, "checking", true]);
+  check("address step: a check without its key is not shown", st({ input: A, check: { ok: true, recipient: A } }).show, false);
+  check("address step: refused, for this value only", [st({ input: A, error: "This address is all in small letters.", errorKey: A }).form, st({ input: A, error: "x", errorKey: B }).form], ["refused", "checking"]);
+  // The tick is required; the button says why it waits.
+  check("address step: continue only with the tick", [st({ input: A, check: ok(A) }).canContinue, st({ input: A, check: ok(A), ticked: true }).canContinue], [false, true]);
+  check("address step: the reason under the disabled button", [st({ input: A, check: ok(A) }).why, st({ input: A, check: ok(A), ticked: true }).why], ["Tick “This is my address” to continue.", ""]);
+  check("address step: not twice while the plan runs", st({ input: A, check: ok(A), ticked: true, asking: true }).canContinue, false);
+  check("address step: the words of the design", [L.ADDRESS_CONTINUE, L.ADDRESS_TICK, L.ADDRESS_LAST_CHECK, L.ADDRESS_CHOOSE_TITLE, L.ADDRESS_SAVE_TITLE],
+    ["I've checked the address — continue", "This is my address", "Last check before the burn. Withdrawals to a wrong address can't be recovered.", "Choose a previous address", "Save to my addresses"]);
+  check("address step: the words line says what and where", L.ADDRESS_WORDS_LINE, "These four words are a fingerprint of this address. The bridge page shows the same four when the same Ethereum wallet is connected.");
+  check("address step: step 3 says the burn is next", /^Next: the burn\./.test(L.ADDRESS_BURN_NEXT), true);
+  check("address step: box key", [L.addressBoxKey(" " + A + " "), L.addressBoxKey("https://nameswallet.app/bridge/#" + CODE), L.addressBoxKey("nope")], [A, CODE, ""]);
+
+  // The previous addresses: the book's names and words; an older bridge's recipients; each once.
+  const book = { addresses: [{ address: A, short: "0x68B5…975d", nickname: "main", words_text: "lens · mushroom · enjoy · orient", last_used: 2, saved: true },
+                             { address: B, short: "0xE2C4…8680", nickname: "", words_text: "maple · tiger · seven · lamp", last_used: 1, saved: false },
+                             { address: A.toLowerCase(), nickname: "dup" }, { address: "0x123", nickname: "bad" }] };
+  const rows = L.addressBookRows(book);
+  check("previous addresses: each once, valid only, in order", rows.map((r) => r.address), [A, B]);
+  check("previous addresses: name, short address and four words", [rows[0].title, rows[0].sub, rows[1].title, rows[1].sub],
+    ["main", "0x68B5…975d · lens · mushroom · enjoy · orient", "Sent to before", "0xE2C4…8680 · maple · tiger · seven · lamp"]);
+  const old = L.addressBookRows({ recipients: [{ account: "Public/x", address: A, short: "0x68B5…975d", last_used: 1 }] });
+  check("previous addresses: an older bridge's list (no name, no words)", [old.length, old[0].title, old[0].sub, old[0].saved], [1, "Sent to before", "0x68B5…975d", false]);
+  check("previous addresses: nothing", [L.addressBookRows(null), L.addressBookRows({}), L.addressBookRows({ addresses: "x" })], [[], [], []]);
+  check("previous addresses: the one in the box", [L.addressBookChosen(rows, A).nickname, L.addressBookChosen(rows, A.toLowerCase()), L.addressBookChosen(rows, CODE), L.addressBookChosen(rows, " " + B).title], ["main", null, null, "Sent to before"]);
+
+  // Save to my addresses: a short name, offered after the first send to an address without one.
+  check("nickname rules", ["main", " ledger ", "", "x".repeat(25), "my wallet.2_b-c", "ünï", "a/b"].map(L.nicknameProblem),
+    ["", "", "Give it a short name, such as main or ledger.", "Keep the name to 24 characters or fewer.", "", "Use letters, digits, spaces, dots, dashes or underscores.", "Use letters, digits, spaces, dots, dashes or underscores."]);
+  const offer = (o) => L.addressSaveOffered(Object.assign({ can: true, stage: "burned", recipient: B, rows }, o));
+  check("save offer: after the burn went out, unnamed address", [offer({}), offer({ stage: "released" }), offer({ stage: "settling" }), offer({ stage: "recorded" })], [true, true, true, true]);
+  check("save offer: not before the burn, not a named one, not without the bridge's book", [offer({ stage: "planned" }), offer({ stage: "approve" }), offer({ recipient: A }), offer({ can: false }), offer({ recipient: "" })],
+    [false, false, false, false, false]);
+  check("save reply: saved", L.addressSaveReply({ ok: true, entry: { address: B, nickname: "ledger" }, addresses: book.addresses }, "ledger"),
+    { ok: true, line: "Saved as “ledger”. The name stays in this wallet on this computer, never on chain.", kind: "done", rows });
+  check("save reply: refused, in plain words", [L.addressSaveReply({ ok: false, error: { code: "full" } }, "x").line, L.addressSaveReply({ ok: false, error: { code: "bad_nickname" } }, "").line,
+    L.addressSaveReply({ ok: false, error: { code: "x", message: "Kept as it was." } }, "a").line, L.addressSaveReply(null, "a").kind,
+    L.addressSaveReply({ ok: false, error: { code: "nickname_taken" } }, "main").line, L.addressSaveReply({ ok: false, error: { code: "bad_address:no_checksum" } }, "main").line],
+    ["Your list of addresses is full (50). Remove one in Settings → Bridge first.", "Give it a short name, such as main or ledger.", "Kept as it was.", "problem",
+     "Another address already has that name. Choose another.", "That address can't be saved."]);
+
+  // Remove on the card: offered only where removing can't lose money.
+  const rp = (stage) => L.receiveProgress({ stage });
+  check("remove: a receive with no deposit seen, or claimed", ["requested", "claimed"].map((x) => L.removeOffered("receive", rp(x))), [true, true]);
+  check("remove: never a deposited, unclaimed receive", ["deposited", "final", "claimable", "unknown", undefined].map((x) => L.removeOffered("receive", rp(x))), [false, false, false, false, false]);
+  check("remove: never a claimable receive whose relay moved on", L.removeOffered("receive", L.receiveProgress({ stage: "claimable", relay: false })), false);
+  const sp = (stage, more) => L.sendBackProgress(Object.assign({ stage }, more || {}), 0);
+  check("remove: a send-back never proposed, or released", [L.removeOffered("send_back", sp("planned"), { stage: "planned" }), L.removeOffered("send_back", sp("released"), { stage: "released" })], [true, true]);
+  check("remove: never a send-back with a burn on its way", ["approve", "burning", "burned", "recorded", "proving", "proved", "wrapped", "releasable", "burn_unclear"].map((x) => L.removeOffered("send_back", sp(x), { stage: x })),
+    [false, false, false, false, false, false, false, false, false]);
+  check("remove: never while settling", L.removeOffered("send_back", sp("recorded", { settle_id: "s1", settle: { stage: "wrapping" } }), { stage: "recorded", settle_id: "s1", settle: { stage: "wrapping" } }), false);
+  check("remove: a planned send-back with a burn sent or a wallet job", [L.removeOffered("send_back", sp("planned"), { stage: "planned", burn_tx: "ab" }),
+    L.removeOffered("send_back", sp("planned"), { stage: "planned", wallet_job: "wr-1" }),
+    L.removeOffered("send_back", sp("planned"), { stage: "planned", wallet_job: "wr-1" }, { id: "wr-1", state: "running" }),
+    L.removeOffered("send_back", sp("planned"), { stage: "planned", wallet_job: "wr-1" }, { id: "wr-1", state: "cancelled" })], [false, false, false, true]);
+  check("remove reply: the bridge's checks in words", [L.removeReply({ removed: true, code: "no_deposit" }, "receive"), L.removeReply({ removed: false, code: "deposited" }, "receive"),
+    L.removeReply({ removed: false, code: "unreachable" }, "receive"), L.removeReply({ removed: false, code: "unreachable" }, "send_back").line],
+    [{ removed: true, line: "No deposit was made for this code. Removed.", kind: "done" }, { removed: false, line: "A deposit was made for this code and isn't claimed yet, so it stays.", kind: "problem" },
+     { removed: false, line: "Couldn't read Sepolia just now, so nothing was removed. Try again in a moment.", kind: "waiting" },
+     "Couldn't read the bridge test network just now, so nothing was removed. Try again in a moment."]);
+  check("remove reply: send-back words; the bridge's own text wins; gone already counts", [L.removeReply({ removed: true, code: "never_burned" }, "send_back").line, L.removeReply({ removed: false, code: "with_wallet" }, "send_back").line,
+    L.removeReply({ removed: true, code: "released", text: "Released in tx 0xab. Removed." }, "send_back").line, L.removeReply({ removed: false, code: "not_found" }, "receive").removed, L.removeReply(null, "receive").kind],
+    ["Nothing was burned for this send-back. Removed.", "The burn is waiting in your wallet. Reject it there first; this send-back stays.", "Released in tx 0xab. Removed.", true, "problem"]);
+  check("remove: features name it", [L.bridgeNextCan(["receive_remove"], "receiveRemove"), L.bridgeNextCan(["send_back_remove"], "sendBackRemove"), L.bridgeNextCan(["address_book"], "addressBook"), L.bridgeNextCan(["send_back"], "addressBook"), L.bridgeNextCan(null, "receiveRemove")],
+    [true, true, true, false, false]);
+
+  // The words: "LNS names", never "official", never "look up" (WALLET-ROADMAP item 4).
+  const words = [L.ADDRESS_BOX_HINT, L.ADDRESS_GET_CODE, L.ADDRESS_CHOOSE_TITLE, L.ADDRESS_WORDS_LINE, L.ADDRESS_TICK, L.ADDRESS_LAST_CHECK, L.ADDRESS_CONTINUE, L.ADDRESS_BURN_NEXT, L.ADDRESS_SAVE_TITLE, L.ADDRESS_SAVE_NOTE]
+    .concat(["no_deposit", "claimed", "deposited", "never_burned", "released", "in_flight", "with_wallet", "unknown", "unreachable"].map((c) => L.removeReply({ code: c }, "receive").line));
+  check("wallet-next words: no 'official', no 'look up'", words.filter((w) => /official|look(s|ed|ing)?[ -]?up/i.test(w)), []);
+
+  // Main.qml: the address step and Remove as built.
+  const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  check("wallet-next: the bridge's new calls only through the adapter", (qml.match(/bridgeCall\("(address_book_list|address_book_save|address_book_remove|receive_remove|send_back_remove|send_back_check|send_back_plan)"/g) || []).length, 0);
+  // 44 Timers in Main.qml at 0520887: none added (the box is checked once per change, never repeated).
+  check("wallet-next: no new timer", (qml.match(/^\s*Timer \{/gm) || []).length, 44);
+  check("address step: the box is always shown, nothing pre-filled", [/Field \{ id: sbCodeField; Layout\.fillWidth: true; size: 15; code: true;/.test(qml), /Send to " \+ root\.sbSaved/.test(qml), /\(used before\)/.test(qml)], [true, false, false]);
+  check("address step: the button is the tick's", /Action \{ label: root\.sbAsking \? "Getting it ready…" : Logic\.ADDRESS_CONTINUE; strong: true; enabledNow: sbAddressStep\.a\.canContinue; onPressed: root\.sbContinue\(\) \}/.test(qml), true);
+  check("address step: the plan refuses an unticked or other value", /if \(!sbTicked \|\| sbCheck\.key !== Logic\.addressBoxKey\(sbCodeInput\)\)\s*\n\s*return/.test(qml), true);
+  check("remove: says Checking… at once", (qml.match(/text: busyHere \? "Checking…" : "Remove"/g) || []).length, 2);
+  check("save: says Saving… at once", /label: root\.sbSaving \? "Saving…" : "Save"/.test(qml), true);
+  check("wording: checked on LEZ 0.4", [/prefix: "LNS names and profiles: checked on"/.test(qml), /hint: "Check a name, such as jef"/.test(qml)], [true, true]);
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");

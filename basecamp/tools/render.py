@@ -861,11 +861,11 @@ for _name, _js, _mock in [
     ("card-sendback", SB_CARD % 'root.sendBacksLoaded = true; root.sendBacks = [{ id: "sb-e2ba7765d0fbf247", amount: "0.01 ETH", account: "%s", recipient: "%s", words: "", stage: "burned" }]; root.sbStatuses = { "sb-e2ba7765d0fbf247": { stage: "burned" } }' % (OWNER, SB_RECIPIENT), sb_mock(sb_view("burned"))),
     ("sendback-amount", SB_OPEN % '', sb_mock()),
     ("sendback-link", SB_OPEN % 'root.againAfter(200, function() { root.sbDenom = 0 })', sb_mock()),
-    ("sendback-words", SB_OPEN % 'root.againAfter(200, function() { root.sbDenom = 0; root.sbCodeInput = "%s"; root.sbCheckCode() })' % SB_CODE, sb_mock()),
-    ("sendback-bad-code", SB_OPEN % 'root.againAfter(200, function() { root.sbDenom = 0; root.sbCodeInput = "%s"; root.sbCheckCode() })' % SB_CODE, sb_mock(send_back_check={"ok": False, "error": {"code": "other_vault", "message": "This code is for another bridge vault: open the bridge page from this wallet's link again."}})),
-    ("sendback-approve", SB_OPEN % 'root.againAfter(60, function() { root.sbDenom = 0; root.sbCodeInput = "%s"; root.sbCheckCode(); root.againAfter(60, function() { root.sbPlan(); root.againAfter(60, function() { %s }) }) })' % (SB_CODE, SB_BURN_SHEET),
+    ("sendback-words", SB_OPEN % 'root.againAfter(200, function() { root.sbDenom = 0; root.sbSetBox("%s"); root.sbCheckCode() })' % SB_CODE, sb_mock()),
+    ("sendback-bad-code", SB_OPEN % 'root.againAfter(200, function() { root.sbDenom = 0; root.sbSetBox("%s"); root.sbCheckCode() })' % SB_CODE, sb_mock(send_back_check={"ok": False, "error": {"code": "other_vault", "message": "This code is for another bridge vault: open the bridge page from this wallet's link again."}})),
+    ("sendback-approve", SB_OPEN % 'root.againAfter(60, function() { root.sbDenom = 0; root.sbSetBox("%s"); root.sbCheckCode(); root.againAfter(60, function() { root.sbTicked = true; root.sbPlan(); root.againAfter(60, function() { %s }) }) })' % (SB_CODE, SB_BURN_SHEET),
         sb_mock(send_back_plan=sb_view("planned"), send_back_burn=sb_view("approve"))),
-    ("sendback-names-update", SB_OPEN % 'root.againAfter(200, function() { root.sbDenom = 0; root.sbCodeInput = "%s"; root.sbCheckCode(); root.againAfter(200, function() { root.sbPlan() }) })' % SB_CODE,
+    ("sendback-names-update", SB_OPEN % 'root.againAfter(200, function() { root.sbDenom = 0; root.sbSetBox("%s"); root.sbCheckCode(); root.againAfter(200, function() { root.sbTicked = true; root.sbPlan() }) })' % SB_CODE,
         sb_mock(send_back_plan=sb_view("planned"), send_back_burn={"needs": "names_update", "request": None, "message": "x"})),
     ("sendback-burned", sb_focus(sb_view("burned")), sb_mock(sb_view("burned"))),
     ("sendback-recorded", sb_focus(sb_view("recorded", releasable_at="@HOUR@")), sb_mock(sb_view("recorded"))),
@@ -880,7 +880,7 @@ for _name, _js, _mock in [
     ("sendback-proving", sb_focus(sb_view("proving", releasable_at="@HOUR@")), sb_mock(sb_view("proving"))),
     ("sendback-burn-unclear", sb_focus(sb_view("burn_unclear", text="Included in a block, but the account's balance did not go down: it may have been refused. Look in the Names app.")), sb_mock(sb_view("burn_unclear"))),
     ("sendback-relay-refused", sb_focus(sb_view("approve", note="The bridge's relay refused the burn: the relay's daily limit for burns is reached. Nothing was sent.")), sb_mock(sb_view("approve"))),
-    ("sendback-exit-keys", SB_OPEN % ('root.againAfter(60, function() { root.sbDenom = 0; root.sbCodeInput = "%s"; root.sbCheckCode(); root.againAfter(60, function() { root.sbPlan(); root.againAfter(60, function() { '
+    ("sendback-exit-keys", SB_OPEN % ('root.againAfter(60, function() { root.sbDenom = 0; root.sbSetBox("%s"); root.sbCheckCode(); root.againAfter(60, function() { root.sbTicked = true; root.sbPlan(); root.againAfter(60, function() { '
         'root.appRequests = [{ id: "r5", kind: "secret", app: "lez_bridge", account: "%s", scope: "RFP022/exit", explanation: "lez_bridge asks for keys of its own, made from this account key: the wallet can make the same ones again after a restore, and they cannot sign or spend", created: Date.now(), expires: Date.now() + 600000, publisher: null, choices: [{ account: "%s", account_kind: "public", label: "Names wallet, main public account", granted: true }] }]; root.appChosen = ["%s"] }) }) })') % (SB_CODE, OWNER, OWNER, OWNER),
         sb_mock(send_back_plan={"needs": "secret", "request": {"request": "r5", "state": "pending"}, "message": "Approve \"RFP022/exit\" in the Names app: your wallet makes this app's exit secrets from your account, so a send-back can be released after you restore the wallet."})),
     ("sendback-busy", sb_focus(sb_view("burned", busy=True, note="The bridge's endpoint is busy; trying again shortly.")), sb_mock(sb_view("burned"))),
@@ -974,11 +974,11 @@ def _sb_feat(m):
     m["bridge"].setdefault("config", _copy.deepcopy(SB_CONFIG))
     m["bridge"]["config"]["features"] = list(m["bridge"]["config"].get("features", [])) + ["send_back_address", "send_back_recipients", "bridges"]
     return m
-SCENARIOS["sendback-address"] = SB_OPEN % ('root.againAfter(200, function() { root.sbDenom = 0; root.sbCodeInput = "%s"; root.sbCheckCode() })' % _ADDR)
+SCENARIOS["sendback-address"] = SB_OPEN % ('root.againAfter(200, function() { root.sbDenom = 0; root.sbSetBox("%s"); root.sbCheckCode() })' % _ADDR)
 MOCKS["sendback-address"] = _sb_feat(sb_mock(send_back_check=_ADDR_CHECK))
 SCENARIOS["sendback-address-field"] = SB_OPEN % 'root.againAfter(200, function() { root.sbDenom = 0 })'
 MOCKS["sendback-address-field"] = _sb_feat(sb_mock())
-SCENARIOS["sendback-address-lowercase"] = SB_OPEN % ('root.againAfter(200, function() { root.sbDenom = 0; root.sbCodeInput = "%s"; root.sbCheckCode() })' % _ADDR.lower())
+SCENARIOS["sendback-address-lowercase"] = SB_OPEN % ('root.againAfter(200, function() { root.sbDenom = 0; root.sbSetBox("%s"); root.sbCheckCode() })' % _ADDR.lower())
 MOCKS["sendback-address-lowercase"] = _sb_feat(sb_mock(send_back_check={"ok": False, "error": {"code": "bad_address:no_checksum", "message": "This address is all in small (or all in capital) letters, so it has no checksum and a typo can't be caught. Copy it from your wallet, don't type it."}}))
 SCENARIOS["sendback-saved"] = SB_OPEN % 'root.againAfter(200, function() { root.sbDenom = 0 })'
 MOCKS["sendback-saved"] = _sb_feat(sb_mock(send_back_recipients={"recipients": [{"account": "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "chain_id": 11155111, "address": _ADDR, "short": "0x68B5…975d", "last_used": 1}], "chain_id": 11155111}))
@@ -1151,12 +1151,94 @@ PRIVATE_SB = [
 for _name, _js, _mock in PRIVATE_SB:
     SCENARIOS[_name] = _js
     MOCKS[_name] = _mock
+# ── wallet-next (rfp-022 proposal/WALLET-ROADMAP.md items 1, 4, 5, 7, 8): Bridge to Ethereum's address
+# step, Save to my addresses, Remove on the card. The bridge's new calls (address_book_*, receive_remove,
+# send_back_remove) answer as docs/WALLET-NEXT-MODULE-CONTRACT.md says; nothing here is a real module. ──
+WN_FEATURES = SB_FEATURES + ["send_back_settle", "bridges", "send_back_address", "send_back_recipients", "address_book", "receive_remove", "send_back_remove"]
+WN_CONFIG = dict(SB_CONFIG, features=WN_FEATURES)
+_ADDR3 = "0x4B20993Bc481177ec7E8f571ceCaE8A9e22C02db"
+WN_BOOK = {"addresses": [
+    {"address": _ADDR, "short": "0x68B5…975d", "nickname": "main", "words": ["lens", "mushroom", "enjoy", "orient"], "words_text": "lens · mushroom · enjoy · orient", "last_used": 1795000000, "saved": True},
+    {"address": _ADDR3, "short": "0x4B20…02db", "nickname": "ledger", "words": ["frost", "cabin", "upper", "salad"], "words_text": "frost · cabin · upper · salad", "last_used": 1794000000, "saved": True},
+    {"address": SB_RECIPIENT, "short": "0xE2C4…8680", "nickname": "", "words": ["maple", "tiger", "seven", "lamp"], "words_text": "maple · tiger · seven · lamp", "last_used": 1793000000, "saved": False}],
+    "deployment": "bridge-test-network-v4", "chain_id": 11155111}
+def wn_mock(status=None, **bridge):
+    return sb_mock(status, **dict({"config": WN_CONFIG, "address_book_list": WN_BOOK}, **bridge))
+_STEP2 = SB_OPEN % 'root.againAfter(120, function() { root.sbDenom = 0; %s })'
+_PICK = 'root.againAfter(120, function() { root.sbChooseAddress(root.sbBook[0]); %s })'
+_SB_SAVE_FOCUS = sb_focus(sb_view("burned"), 'root.againAfter(120, function() { %s })')
+WN_ARR = ('[{ id: "dep-old", symbol: "ETH", amount: "1", account: "%s" }, { id: "dep-2", symbol: "ETH", amount: "0.1", account: "%s" }]' % (OWNER, OWNER))
+WN_ARR_ST = '({ "dep-old": { stage: "requested" }, "dep-2": { stage: "deposited", confirmations: 20, final_in_min: 7 } })'
+WN_SBS = ('root.sendBacksLoaded = true; root.sendBacks = [{ id: "sb-planned", amount: "0.01 ETH", account: "%s", recipient: "%s", words: "", stage: "planned" }, { id: "sb-e2ba7765d0fbf247", amount: "0.01 ETH", account: "%s", recipient: "%s", words: "", stage: "burned" }]; '
+          'root.sbStatuses = { "sb-planned": { stage: "planned" }, "sb-e2ba7765d0fbf247": { stage: "burned" } }' % (OWNER, SB_RECIPIENT, OWNER, SB_RECIPIENT))
+def wn_card(then="", arr=WN_ARR, st=WN_ARR_ST, sbs=WN_SBS):
+    return CARD_04 % (arr, st, CHECKED + '; root.bridgeConfig = %s; %s; root.againAfter(60, function() { %s })' % (json.dumps(WN_CONFIG), sbs, then))
+def wn_card_mock(**bridge):
+    return {"bridge": dict({"config": WN_CONFIG, "receives": {"receives": []}, "send_backs": {"send_backs": []}}, **bridge), "bridgeNet": NET04_V4}
+WALLET_NEXT = [
+    # Step 2, the address step: the box empty (nothing pre-filled), the previous addresses under it.
+    ("sendback-address-empty", _STEP2 % '', wn_mock()),
+    # The first time: no previous addresses; where the code comes from.
+    ("sendback-address-first", _STEP2 % '', wn_mock(address_book_list={"addresses": [], "deployment": "bridge-test-network-v4"})),
+    # Something typed that isn't a code or an address yet.
+    ("sendback-address-partial", _STEP2 % 'root.sbSetBox("0x68B54942A37a")', wn_mock()),
+    # A pasted address being checked by the bridge.
+    ("sendback-address-checking", _STEP2 % ('root.sbSetBox("%s"); root.sbChecking = true' % _ADDR), wn_mock()),
+    # A previous address picked: the box filled, the address in full with its four words, what they are,
+    # where to compare them; the tick not set, the button waiting for it.
+    ("sendback-address-picked", _STEP2 % (_PICK % ''), wn_mock(send_back_check=_ADDR_CHECK)),
+    # Ticked: the button can be pressed.
+    ("sendback-address-ticked", _STEP2 % (_PICK % 'root.againAfter(60, function() { root.sbTicked = true })'), wn_mock(send_back_check=_ADDR_CHECK)),
+    # The bridge page's code pasted (not a previous address): the same read-back.
+    ("sendback-address-code", _STEP2 % ('root.sbSetBox("%s"); root.sbCheckCode()' % SB_CODE), wn_mock()),
+    # An address without its checksum: refused by the bridge, in its words.
+    ("sendback-address-refused", _STEP2 % ('root.sbSetBox("%s"); root.sbCheckCode()' % _ADDR.lower()),
+     wn_mock(send_back_check={"ok": False, "error": {"code": "bad_address:no_checksum", "message": "This address is all in small (or all in capital) letters, so it has no checksum and a typo can't be caught. Copy it from your wallet, don't type it."}})),
+    # The bridge busy with another call: a wait, with Check again.
+    ("sendback-address-busy", _STEP2 % ('root.sbSetBox("%s"); root.sbCheckCode()' % _ADDR), dict(wn_mock(), busy=["send_back_check"])),
+    # An older LEZ Bridge (no address book): the addresses this account sent to before, without names.
+    ("sendback-address-old-bridge", _STEP2 % '', _sb_feat(sb_mock(send_back_recipients={"recipients": [{"account": OWNER, "chain_id": 11155111, "address": _ADDR, "short": "0x68B5…975d", "last_used": 1}], "chain_id": 11155111}))),
+    # Step 3: the burn's approval keeps the address and its words, and says the burn is next.
+    ("sendback-approve-next", SB_OPEN % ('root.againAfter(60, function() { root.sbDenom = 0; root.sbSetBox("%s"); root.sbCheckCode(); root.againAfter(60, function() { root.sbTicked = true; root.sbContinue(); root.againAfter(60, function() { %s }) }) })' % (SB_CODE, SB_BURN_SHEET)),
+     wn_mock(send_back_plan=sb_view("planned"), send_back_burn=sb_view("approve"))),
+    # After the first send to an address with no name here: Save to my addresses.
+    ("sendback-save-offer", _SB_SAVE_FOCUS % '', wn_mock(sb_view("burned"))),
+    ("sendback-save-typed", _SB_SAVE_FOCUS % 'sbSaveField.text = "ledger 2"', wn_mock(sb_view("burned"))),
+    ("sendback-save-badname", _SB_SAVE_FOCUS % 'sbSaveField.text = "my/wallet"', wn_mock(sb_view("burned"))),
+    ("sendback-save-saving", _SB_SAVE_FOCUS % 'sbSaveField.text = "ledger 2"; root.sbSaving = true', wn_mock(sb_view("burned"))),
+    ("sendback-saved", _SB_SAVE_FOCUS % 'sbSaveField.text = "ledger 2"; root.sbSaveAddress()',
+     wn_mock(sb_view("burned"), address_book_save={"ok": True, "entry": {"address": SB_RECIPIENT, "nickname": "ledger 2"}, "addresses": [dict(WN_BOOK["addresses"][2], nickname="ledger 2", saved=True)] + WN_BOOK["addresses"][:2]})),
+    ("sendback-save-refused", _SB_SAVE_FOCUS % 'sbSaveField.text = "ledger 2"; root.sbSaveAddress()', wn_mock(sb_view("burned"), address_book_save={"ok": False, "error": {"code": "full", "message": ""}})),
+    # The card: Remove on the unpaid code and the never-proposed send-back only (not on the deposit on
+    # its way, not on the burned send-back).
+    ("card-remove", wn_card(), wn_card_mock()),
+    ("card-remove-checking", wn_card('root.bridgeRemoving = "receive:dep-old"'), wn_card_mock()),
+    ("card-remove-done", wn_card('root.removeBridgeRow("receive", "dep-old")'), wn_card_mock(receive_remove={"removed": True, "id": "dep-old", "code": "no_deposit", "checked": {"chain": "sepolia", "deposit_found": False}})),
+    # Paid meanwhile: the bridge's check at the press found the deposit; nothing removed.
+    ("card-remove-refused", wn_card('root.removeBridgeRow("receive", "dep-old")'), wn_card_mock(receive_remove={"removed": False, "id": "dep-old", "code": "deposited", "checked": {"chain": "sepolia", "deposit_found": True}})),
+    ("card-remove-unreachable", wn_card('root.removeBridgeRow("receive", "dep-old")'), wn_card_mock(receive_remove={"removed": False, "id": "dep-old", "code": "unreachable"})),
+    ("card-remove-sendback", wn_card('root.removeBridgeRow("send_back", "sb-planned")'), wn_card_mock(send_back_remove={"removed": True, "id": "sb-planned", "code": "never_burned", "checked": {"chain": "lez", "burn_found": False}})),
+    # The last row removed: the panel goes, the line stays.
+    ("card-remove-last", wn_card('root.removeBridgeRow("receive", "dep-old")', arr='[{ id: "dep-old", symbol: "ETH", amount: "1", account: "%s" }]' % OWNER, st='({ "dep-old": { stage: "requested" } })', sbs='root.sendBacks = []'),
+     wn_card_mock(receive_remove={"removed": True, "id": "dep-old", "code": "no_deposit"})),
+    # Settings → Bridge: the address book, names and all, each with Remove.
+    ("settings-bridge-book", 'root.section = "settings"; root.loadBridges()', _br_mock(config={"build": {"commit": "c26a464"}, "deployment": {"name": "bridge-test-network-v5", "bridge_program": _BR_V5["bridge_program"]},
+     "features": _BR_FEATURES + ["send_back_address", "send_back_recipients", "address_book"]}, address_book_list=WN_BOOK)),
+    # Search: the network names are checked on (WALLET-ROADMAP item 4: "checking a name", never "look up").
+    ("search-checked-on", 'root.section = "search"', {}),
+]
+for _name, _js, _mock in WALLET_NEXT:
+    SCENARIOS[_name] = _js
+    MOCKS[_name] = _mock
+
 def _ago(text):
     """A job's start in a mock ("@AGO:n@"): n seconds before this render, in ms."""
     import re as _re, time as _time
     return _re.sub(r'"@AGO:(\d+)@"', lambda m: str(int(_time.time() * 1000) - int(m.group(1)) * 1000), text)
 HEIGHTS = {name: 2100 for name in ("claim-private-approve", "claim-private-simulating", "claim-private-check-failed", "sendback-private-approve")}
 HEIGHTS.update({"card-private-proving": 1500, "card-arriving-private": 1500})
+HEIGHTS.update({name: 1700 for name, _j, _m in WALLET_NEXT if name.startswith("sendback-address") or name.startswith("sendback-approve")})
+HEIGHTS.update({name: 1800 for name, _j, _m in WALLET_NEXT if name.startswith("card-remove")})
 
 def main():
     qml, out_dir = sys.argv[1], sys.argv[2]

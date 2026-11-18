@@ -823,7 +823,7 @@ Item {
     // ── Two networks: LEZ 0.3 (public Logos testnet) and LEZ 0.4 (bridge test network) ──
 
     /// The names network the module is on: "0.3" (LEZ 0.3, the public Logos testnet, the
-    /// default) or "0.4" (LEZ 0.4, the bridge test network). Names are looked up, registered
+    /// default) or "0.4" (LEZ 0.4, the bridge test network). Names are checked, registered
     /// and paid there, with that network's own CLI and wallet (set_names_network).
     property string namesNet: "0.3"
     /// Which network the Wallet shows: always the names network, so a balance, a name and a
@@ -1686,6 +1686,49 @@ Item {
         }
     }
 
+    // ── Remove a stale row from the card (rfp-022 WALLET-ROADMAP.md item 1): offered only where
+    // removing can't lose money (Logic.removeOffered); the LEZ Bridge checks again at the press
+    // (Sepolia for a receive's commitment, the bridge test network for a send-back's exit) and
+    // removes in the same call, or refuses. One at a time; the result line stays under the card
+    // after the row has gone. ──
+    property string bridgeRemoving: ""     // "receive:<id>" | "send_back:<id>" while its check runs
+    property string bridgeRemoveLine: ""
+    property string bridgeRemoveKind: ""
+    function removeBridgeRow(kind, id) {
+        if (bridgeRemoving !== "" || !id)
+            return
+        bridgeRemoving = kind + ":" + id
+        bridgeRemoveLine = ""
+        var method = kind === "receive" ? Logic.PRIVATE_BRIDGE.receiveRemove : Logic.PRIVATE_BRIDGE.sendBackRemove
+        bridgeCall(method, [String(id)], function(value) {
+            bridgeRemoving = ""
+            var r = Logic.removeReply(value, kind)
+            bridgeRemoveLine = r.line
+            bridgeRemoveKind = r.kind
+            if (r.removed) {
+                if (kind === "receive") {
+                    receives = receives.filter(function(x) { return x.id !== id })
+                    var rs = receiveStatuses
+                    delete rs[id]
+                    receiveStatuses = rs
+                    receiveStatusesChanged()
+                } else {
+                    sendBacks = sendBacks.filter(function(x) { return x.id !== id })
+                    var ss = sbStatuses
+                    delete ss[id]
+                    sbStatuses = ss
+                    sbStatusesChanged()
+                }
+            }
+            console.log("names_ui: remove", kind, id + ":", r.removed ? "removed" : "kept", value && value.code ? value.code : "")
+        }, function(message, k) {
+            bridgeRemoving = ""
+            bridgeRemoveLine = sentence(k === "busy" ? "The LEZ Bridge is busy; nothing was removed. Try again in a moment." : message)
+            bridgeRemoveKind = Logic.noticeKind(bridgeRemoveLine, true)
+            console.log("names_ui: remove", kind, id + ":", k, message)
+        }, 90000)
+    }
+
     /// A receive claimed here: claimed in `block` (or unknown), shown so for a while.
     function receiveClaimed(id, block) {
         if (id === "")
@@ -1712,29 +1755,109 @@ Item {
     property bool sbLinkCopied: false
     property string sbCodeInput: ""
     property var sbCheck: null             // send_back_check(code), with `code`
-    property var sbSaved: []               // send_back_recipients(account): addresses sent back to before, newest first
-    property bool sbAnother: false         // "Use another address": the page's steps instead of the saved one
+    // Step 2, the address step (rfp-022 WALLET-ROADMAP.md item 8): one box, empty at first; the
+    // previous addresses under it; the address and its words once the box holds a valid one; a
+    // required tick. A check and the tick belong to the box's value (Logic.addressBoxKey): any edit
+    // or pick clears both.
+    property var sbBook: []                // Logic.addressBookRows: address_book_list (or, older bridge, send_back_recipients(account))
+    property bool sbTicked: false          // "This is my address"
+    property bool sbChecking: false        // send_back_check under way for the box's value
+    property string sbCheckErrorKey: ""    // the box value sbCheckError is about
+    property bool sbCompareCopied: false   // "Copy the link" beside the four words
+    property string sbSaveName: ""         // "Save to my addresses": the short name typed
+    property bool sbSaving: false
+    property string sbSaveLine: ""
+    property string sbSaveKind: ""
     property var savedRecipients: null     // Settings → Bridge: every remembered address (send_back_recipients(""))
     property string recipientForgetting: ""
-    /// The addresses this account sent back to before (the bridge keeps them once a burn is handed over).
-    function loadSbSaved() {
-        sbSaved = []
-        // Asked whether or not the bridge's config was read yet: an older bridge answers "Method not
-        // found", which leaves the list empty.
-        if (sbAccount === "")
+    readonly property bool sbBookNamed: Logic.bridgeNextCan(bridgeFeatures, "addressBook")
+    readonly property var sbAddressNow: Logic.addressStep({ input: sbCodeInput, check: sbCheck, checking: sbChecking, error: sbCheckError, errorKey: sbCheckErrorKey,
+        ticked: sbTicked, asking: sbAsking, canAddress: bridgeConfig === null || Logic.bridgeCan(bridgeFeatures, "send_back_address") })
+    // The previous address the box holds, or the one its checked code pays to (so its name shows).
+    readonly property var sbBookChosen: Logic.addressBookChosen(sbBook, sbCheck !== null && sbCheck.key === Logic.addressBoxKey(sbCodeInput) ? String(sbCheck.recipient || "") : sbCodeInput)
+    /// The previous addresses: the bridge's address book (names and words), or with an older bridge
+    /// the addresses this account sent back to before. Read when the screen opens; never polled.
+    function loadSbBook() {
+        var named = sbBookNamed
+        if (!named && sbAccount === "") {
+            sbBook = []
             return
+        }
         var asked = sbAccount
-        bridgeCall("send_back_recipients", [asked], function(v) {
-            if (asked === sbAccount)
-                sbSaved = v && Array.isArray(v.recipients) ? v.recipients : []
-        }, function() {}, 20000)
+        bridgeCall(named ? Logic.PRIVATE_BRIDGE.addressBookList : Logic.PRIVATE_BRIDGE.sendBackRecipients, named ? [] : [asked], function(v) {
+            if (named || asked === sbAccount)
+                sbBook = Logic.addressBookRows(v)
+        }, function(message, kind) { console.log("names_ui: send back: previous addresses:", kind, message) }, 20000)
     }
-    /// "Send to 0x1234…abcd (used before)": read and shown to confirm like a pasted address.
-    function sbUseSaved(address) {
-        sbCodeInput = String(address)
+    /// The box changed (typed, pasted, picked): its check and the tick are dropped, and a well-formed
+    /// value is checked by the bridge a moment later (once; nothing repeats).
+    function sbBoxChanged(text) {
+        if (String(text) === sbCodeInput)
+            return
+        sbCodeInput = String(text)
+        sbTicked = false
+        sbCheck = null
+        sbCheckError = ""
+        sbCheckErrorKey = ""
+        var want = Logic.addressBoxKey(sbCodeInput)
+        if (want === "")
+            return
+        againAfter(350, function() {
+            if (Logic.addressBoxKey(sbCodeInput) === want && sbCheck === null && !sbChecking && sbCheckErrorKey !== want)
+                sbCheckCode()
+        })
+    }
+    /// "Choose a previous address": fills the box with it (still read back and ticked).
+    function sbChooseAddress(row) {
+        if (!row)
+            return
+        sbCodeField.text = String(row.address)
+        sbBoxChanged(String(row.address))
         sbCheckCode()
     }
+    function sbCopyCompare() {
+        if (sbLink === null || !sbLink.link)
+            return
+        copy(String(sbLink.link), "The link")
+        sbCompareCopied = true
+        againAfter(2500, function() { sbCompareCopied = false })
+    }
+    /// "I've checked the address — continue": only for the value checked and ticked now.
+    function sbContinue() {
+        if (!sbAddressNow.canContinue || sbCheck === null || sbCheck.key !== Logic.addressBoxKey(sbCodeInput))
+            return
+        sbPlan()
+    }
+    /// "Save to my addresses": a short name for the address this send-back went to (kept by the
+    /// bridge on this computer; never on chain).
+    function sbSaveAddress() {
+        var address = sbFocusRow !== null ? String(sbFocusRow.recipient || "") : ""
+        var name = sbSaveName.trim()
+        if (sbSaving || address === "" || Logic.nicknameProblem(name) !== "")
+            return
+        sbSaving = true
+        sbSaveLine = ""
+        bridgeCall(Logic.PRIVATE_BRIDGE.addressBookSave, [address, name], function(v) {
+            sbSaving = false
+            var r = Logic.addressSaveReply(v, name)
+            sbSaveLine = r.line
+            sbSaveKind = r.kind
+            if (r.ok && r.rows.length > 0)
+                sbBook = r.rows
+            console.log("names_ui: send back: address saved:", r.ok)
+        }, function(message, kind) {
+            sbSaving = false
+            sbSaveLine = sentence(kind === "busy" ? "The LEZ Bridge is busy; it wasn't saved. Try again in a moment." : message)
+            sbSaveKind = Logic.noticeKind(sbSaveLine, true)
+        }, 20000, false)
+    }
+    /// Settings → Bridge: the addresses this wallet knows. With the bridge's address book, its
+    /// entries (names and all); else every account's addresses sent to before.
     function loadSavedRecipients() {
+        if (sbBookNamed) {
+            bridgeCall(Logic.PRIVATE_BRIDGE.addressBookList, [], function(v) { savedRecipients = Logic.addressBookRows(v) }, function() {}, 20000)
+            return
+        }
         if (!Logic.bridgeCan(bridgeFeatures, "send_back_recipients"))
             return
         bridgeCall("send_back_recipients", [""], function(v) { savedRecipients = v && Array.isArray(v.recipients) ? v.recipients : [] }, function() {}, 20000)
@@ -1742,10 +1865,15 @@ Item {
     function forgetRecipient(row) {
         if (recipientForgetting !== "")
             return
-        recipientForgetting = String(row.address) + "|" + String(row.account)
-        bridgeCall("send_back_forget", [String(row.account || ""), String(row.address)], function(v) {
+        recipientForgetting = String(row.address) + "|" + String(row.account || "")
+        var named = sbBookNamed
+        bridgeCall(named ? Logic.PRIVATE_BRIDGE.addressBookRemove : "send_back_forget", named ? [String(row.address)] : [String(row.account || ""), String(row.address)], function(v) {
             recipientForgetting = ""
-            savedRecipients = v && Array.isArray(v.recipients) ? v.recipients : []
+            if (named) {
+                savedRecipients = Logic.addressBookRows(v)
+                sbBook = savedRecipients
+            } else
+                savedRecipients = v && Array.isArray(v.recipients) ? v.recipients : []
         }, function(message, kind) {
             recipientForgetting = ""
             bridgeNote = sentence(kind === "busy" ? "The LEZ Bridge is busy; nothing changed. Try again in a moment." : message)
@@ -1792,8 +1920,9 @@ Item {
     function sbPick(source) {
         sbAccount = source ? source.account : ""
         sbAsset = source ? source.asset : null
-        sbAnother = false
-        loadSbSaved()
+        sbSetBox("")
+        if (!sbBookNamed)
+            loadSbBook()
         sbDenom = -1
         if (sbAmounts.length === 1)
             sbDenom = sbAmounts[0].index
@@ -1826,8 +1955,12 @@ Item {
         sbExtras = []
         sbAccount = account || ""
         sbAsset = asset || null
-        sbAnother = false
-        loadSbSaved()
+        sbSetBox("")
+        sbTicked = false
+        sbSaveField.text = ""
+        sbSaveName = ""
+        sbSaveLine = ""
+        sbSaveKind = ""
         sbDenom = -1
         sbFocus = typeof focusId === "string" ? focusId : ""
         if (sbFocus !== "" && sbFocusRow !== null)
@@ -1842,6 +1975,8 @@ Item {
             bridgeCall("send_back_link", [], function(link) {
                 sbLink = link
                 receiveHold = false
+                // The previous addresses (and, on a send-back's screen, whether its address has a name).
+                loadSbBook()
                 if (sbFocus === "" && receiveRegistry === null)
                     loadReceiveRegistry()
                 else
@@ -1870,32 +2005,52 @@ Item {
         console.log("names_ui: send back: the withdraw page link copied")
         againAfter(2500, function() { sbLinkCopied = false })
     }
-    /// The pasted withdraw-to code: what it says (address and four words), read by the bridge.
+    /// Sets the box (and its field) to `text`, as if it were pasted: its check and tick dropped.
+    function sbSetBox(text) {
+        sbCodeField.text = String(text || "")
+        sbBoxChanged(String(text || ""))
+    }
+    /// The box's code or address, read by the bridge: the address and its four words, or why not.
     function sbCheckCode() {
         // The page's code, or (with a bridge that takes one) the Ethereum address itself.
-        var address = Logic.sendBackAddress(sbCodeInput)
-        var code = Logic.sendBackCode(sbCodeInput) || (Logic.bridgeCan(bridgeFeatures, "send_back_address") ? address : "")
+        var key = Logic.addressBoxKey(sbCodeInput)
+        var code = Logic.sendBackCode(sbCodeInput) || (Logic.bridgeCan(bridgeFeatures, "send_back_address") ? Logic.sendBackAddress(sbCodeInput) : "")
         sbCheck = null
         sbCheckError = ""
-        if (code === "") {
-            sbCheckError = address !== "" ? "This LEZ Bridge reads only the bridge page's code. Use Copy the link above, or update the LEZ Bridge to paste an address."
-                : "Paste the code the bridge page shows (it starts logoswd1), or the Ethereum address to receive it."
+        sbCheckErrorKey = ""
+        sbTicked = false
+        if (code === "" || sbChecking)
             return
-        }
-        sbAsking = true
-        bridgeCall("send_back_check", [code], function(value) {
-            sbAsking = false
+        sbChecking = true
+        bridgeCall(Logic.PRIVATE_BRIDGE.sendBackCheck, [code], function(value) {
+            sbChecking = false
+            // Answered for a value no longer in the box: dropped (the box's own check follows).
+            if (Logic.addressBoxKey(sbCodeInput) !== key) {
+                sbBoxRecheck()
+                return
+            }
             // The plan always gets the page's code: for an address, the one the bridge made for it.
             if (value && value.ok === true)
-                sbCheck = Object.assign({}, value, { code: value.code ? String(value.code) : code })
+                sbCheck = Object.assign({}, value, { key: key, code: value.code ? String(value.code) : code })
             else {
                 var e = value && value.error ? value.error : {}
                 sbCheckError = e.message ? sentence(String(e.message)) : Logic.sendBackCodeTitle(e.code) + "."
+                sbCheckErrorKey = key
             }
         }, function(message, kind) {
-            sbAsking = false
+            sbChecking = false
+            if (Logic.addressBoxKey(sbCodeInput) !== key) {
+                sbBoxRecheck()
+                return
+            }
             sbCheckError = sentence(kind === "busy" ? "The LEZ Bridge is still answering an earlier call. Try again." : message)
+            sbCheckErrorKey = key
         }, 60000, false)
+    }
+    /// The box changed while a check was out: its own value is checked now.
+    function sbBoxRecheck() {
+        if (Logic.addressStep({ input: sbCodeInput, canAddress: Logic.bridgeCan(bridgeFeatures, "send_back_address") }).checkNow)
+            sbCheckCode()
     }
     /// A first-time question from the bridge (connect, programs, account, keys): drawn in the page
     /// (appInline), and asked again once answered.
@@ -1916,9 +2071,12 @@ Item {
     function sbPlan() {
         if (sbAsking || sbCheck === null || sbDenom < 0 || sbAsset === null)
             return
+        // Only the address in the box now, read back and ticked as the person's.
+        if (!sbTicked || sbCheck.key !== Logic.addressBoxKey(sbCodeInput))
+            return
         sbAsking = true
         sbError = ""
-        bridgeCall("send_back_plan", [Logic.sendBackSymbol(sbAsset.symbol), String(sbDenom), sbAccount, sbCheck.code], function(value) {
+        bridgeCall(Logic.PRIVATE_BRIDGE.sendBackPlan, [Logic.sendBackSymbol(sbAsset.symbol), String(sbDenom), sbAccount, sbCheck.code], function(value) {
             sbAsking = false
             if (value && value.needs) {
                 sbNeedsReply(value, "plan")
@@ -3503,7 +3661,7 @@ Item {
                                                            chainAccounts, chainAccounts === null && chainError !== "", chainStake, namesByNpk,
                                                            mainName, mainName).concat(Logic.bridgedGroups(bridgedHoldings))
 
-    /// The wallet's names by the npk their profiles publish: {npk: [name]}, from the lookups.
+    /// The wallet's names by the npk their profiles publish: {npk: [name]}, from checking them.
     readonly property var namesByNpk: {
         var map = {}
         cliNames.forEach(function(entry) {
@@ -5049,7 +5207,7 @@ Item {
             page = ask("page_view", [found.name])
             if (!mine && tool !== "pay")
                 tool = ""
-            // A name the wallet holds joins "My names" once it is looked up (the module refuses others).
+            // A name the wallet holds joins "My names" once it is checked (the module refuses others).
             if (wallet.length > 0 && !remembers(found.name))
                 askLater("keep", [found.name], function() { root.loadMine() }, function() {})
         } catch (error) {
@@ -5977,7 +6135,7 @@ Item {
         askLater("board_follows", [], function(value) { boardFollows = value || [] }, function() {})
     }
 
-    /// A name's display name, colour and avatar, looked up once for its posts.
+    /// A name's display name, colour and avatar, checked once for its posts.
     function boardLookUp(name) {
         if (boardPeople[name] !== undefined)
             return
@@ -8434,7 +8592,7 @@ Item {
             : net === "chain" ? "<b>the Logos Blockchain</b>"
             : net === "both" ? "<b>the Logos Blockchain</b> and <b>LEZ 0.3</b> · public Logos testnet"
             : net === "0.3+chain" ? "<b>LEZ 0.3</b> · public Logos testnet, and on <b>the Logos Blockchain</b>"
-            : net === "messages" ? "<b>Logos Messaging</b>; LNS names are looked up on " + (root.namesNet === "0.4" ? "<b>LEZ 0.4</b> · bridge test network" : "<b>LEZ 0.3</b> · public Logos testnet")
+            : net === "messages" ? "<b>Logos Messaging</b>; LNS names are checked on " + (root.namesNet === "0.4" ? "<b>LEZ 0.4</b> · bridge test network" : "<b>LEZ 0.3</b> · public Logos testnet")
             : "<b>LEZ 0.3</b> · public Logos testnet")
     }
 
@@ -9433,7 +9591,7 @@ Item {
                 Hint {
                     visible: root.chatError === "" && root.mainChat !== "" && root.mainChat === root.chatMine
                     font.pixelSize: root.px(14)
-                    text: "Messages are on: anyone who looks up " + root.mainName + " can message you here."
+                    text: "Messages are on: anyone who checks the name " + root.mainName + " can message you here."
                 }
                 StatusLine {
                     visible: root.notice !== "" && root.section === "messages"
@@ -9762,6 +9920,17 @@ Item {
                                             }
                                         }
                                         Action { visible: arrivingRow.p.claim && root.bridgeSetupClear; label: Logic.receiveIsPrivate(arrivingRow.modelData) && root.privateClaimJobs[arrivingRow.modelData.id] ? "Open" : Logic.receiveIsPrivate(arrivingRow.modelData) ? "Claim privately" : "Claim"; strong: true; onPressed: root.claimArrived(arrivingRow.modelData.id) }
+                                        // Remove: an unpaid code or a claimed one only; the bridge checks Sepolia at the press.
+                                        Link {
+                                            readonly property bool busyHere: root.bridgeRemoving === "receive:" + arrivingRow.modelData.id
+                                            visible: Logic.bridgeNextCan(root.bridgeFeatures, "receiveRemove") && Logic.removeOffered("receive", arrivingRow.p, root.receiveStatuses[arrivingRow.modelData.id])
+                                                && !root.privateClaimJobs[arrivingRow.modelData.id]
+                                            text: busyHere ? "Checking…" : "Remove"
+                                            color: root.dim
+                                            font.pixelSize: root.px(15)
+                                            font.underline: !busyHere
+                                            onPressed: root.removeBridgeRow("receive", arrivingRow.modelData.id)
+                                        }
                                         Link { visible: !arrivingRow.p.claim && arrivingRow.p.stage !== "old"; text: "Open ›"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.openEthReceive(arrivingRow.modelData.id) }
                                     }
                                 }
@@ -9807,12 +9976,24 @@ Item {
                                                 text: pj !== null && pj.stage !== "done" ? "Private burn · " + pj.card : backRow.p.card
                                             }
                                         }
+                                        // Remove: never proposed to the wallet, or released; the bridge reads LEZ at the press.
+                                        Link {
+                                            readonly property bool busyHere: root.bridgeRemoving === "send_back:" + backRow.modelData.id
+                                            visible: Logic.bridgeNextCan(root.bridgeFeatures, "sendBackRemove") && Logic.removeOffered("send_back", backRow.p, root.sbStatuses[backRow.modelData.id], root.sbJobs[backRow.modelData.id] || null)
+                                            text: busyHere ? "Checking…" : "Remove"
+                                            color: root.dim
+                                            font.pixelSize: root.px(15)
+                                            font.underline: !busyHere
+                                            onPressed: root.removeBridgeRow("send_back", backRow.modelData.id)
+                                        }
                                         Link { text: "Open ›"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.openSendBack("", null, backRow.modelData.id) }
                                     }
                                 }
                             }
                             SendBackCheckLine { visible: root.sbRowsNow.some(function(x) { return x.progress.stage !== "released" }) }
                         }
+                        // What Remove checked, and whether it removed: stays after the row (or the panel) is gone.
+                        StatusLine { visible: root.bridgeRemoveLine !== ""; kind: root.bridgeRemoveKind; text: root.bridgeRemoveLine }
                         BridgeSetupBox { visible: root.walletView === "home" && root.bridgeSetup.state !== ""; primary: root.cardSetupBlocks }
                         StatusLine {
                             visible: root.bridgeNetStatusNow.tone === "bad" || root.bridgeNetStatusNow.tone === "warn"
@@ -9834,7 +10015,7 @@ Item {
                         Hint {
                             visible: root.bridgeNetAccounts.length === 0
                             font.pixelSize: root.px(15)
-                            text: root.cliBalance === undefined ? "Reading your accounts…" : "Your wallet has no public account to look up here."
+                            text: root.cliBalance === undefined ? "Reading your accounts…" : "Your wallet has no public account to check here."
                         }
                         // One block per public account: native LEZ, then each bridged token.
                         Repeater {
@@ -11451,84 +11632,97 @@ Item {
                         }
                     }
 
-                    // Step 2: the Ethereum address, from the bridge page: copy its link, connect there, paste its code.
+                    // Step 2: the address step (rfp-022 WALLET-ROADMAP.md item 8). One box, always shown,
+                    // empty at first: the bridge page's code or the Ethereum address. The previous addresses
+                    // under it, none offered first. The address and its four words only once the box holds a
+                    // valid one, with where to compare them; a required tick; then the one button.
                     ColumnLayout {
+                        id: sbAddressStep
                         visible: sendBackScreen.shows && sendBackScreen.choosing && root.sbDenom >= 0
                         Layout.fillWidth: true
                         spacing: 12
+                        readonly property var a: root.sbAddressNow
                         RowLayout {
                             spacing: 14
                             Hint { Layout.fillWidth: false; color: root.ink; text: (root.sbAmounts.filter(function(d) { return d.index === root.sbDenom })[0] || { text: "" }).text + " " + (root.sbAsset !== null ? root.sbAsset.symbol : "") + " from " + Logic.idShort(root.sbAccount) + "." }
-                            Link { visible: root.sbAmounts.length > 1 && root.sbCheck === null; text: "Change"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.sbDenom = -1 }
+                            Link { visible: root.sbAmounts.length > 1 && !sbAddressStep.a.show; text: "Change"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.sbDenom = -1 }
                         }
                         Hint { visible: root.sbFromPrivate; font.pixelSize: root.px(15); text: "From your private account: your wallet proves the burn on this computer (" + Logic.PRIVATE_PROOF_TIME + ") and checks the account holds it." }
-                        Hint { visible: root.sbCheck === null; font.pixelSize: root.px(15); text: Logic.SEND_BACK_PRIVATE_HINT }
-                        // An address this account sent back to before: offered first, one press (it is still
-                        // read back in full with its four words before anything is approved).
+                        // The box.
+                        Hint { color: root.ink; text: Logic.ADDRESS_BOX_HINT }
+                        Field { id: sbCodeField; Layout.fillWidth: true; size: 15; code: true; hint: Logic.bridgeCan(root.bridgeFeatures, "send_back_address") ? "logoswd1… or 0x…" : "logoswd1…"; onTextChanged: root.sbBoxChanged(text); onAccepted: root.sbCheckCode() }
+                        // What the box holds: nothing yet, not a code or address, being checked, refused.
                         RowLayout {
-                            visible: root.sbCheck === null && root.sbSaved.length > 0 && !root.sbAnother
-                            spacing: 14
-                            Action { label: root.sbAsking ? "Checking…" : root.sbSaved.length > 0 ? "Send to " + root.sbSaved[0].short + " (used before)" : ""; strong: true; enabledNow: !root.sbAsking && root.sbSaved.length > 0; onPressed: root.sbUseSaved(root.sbSaved[0].address) }
-                            Link { text: "Use another address"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.sbAnother = true }
-                        }
-                        StatusLine { visible: root.sbCheck === null && root.sbSaved.length > 0 && !root.sbAnother && root.sbCheckError !== ""; kind: Logic.noticeKind(root.sbCheckError, true); text: root.sbCheckError }
-                        ColumnLayout {
-                            visible: root.sbCheck === null && (root.sbSaved.length === 0 || root.sbAnother)
+                            visible: sbAddressStep.a.form === "empty"
                             Layout.fillWidth: true
-                            spacing: 10
-                            NumberLine { text: "1. " + Logic.SEND_BACK_ADDRESS_STEPS[0] }
-                            Action { label: root.sbLinkCopied ? "Copied." : "Copy the link"; strong: true; enabledNow: root.sbLink !== null && !!root.sbLink.link; onPressed: root.sbCopyLink() }
-                            NumberLine { text: "2. " + Logic.SEND_BACK_ADDRESS_STEPS[1] }
-                            NumberLine { text: "3. " + Logic.SEND_BACK_ADDRESS_STEPS[2] }
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: 10
-                                Field { id: sbCodeField; Layout.fillWidth: true; size: 15; code: true; hint: Logic.bridgeCan(root.bridgeFeatures, "send_back_address") ? "logoswd1… or 0x…" : "logoswd1…"; onTextChanged: root.sbCodeInput = text; onAccepted: root.sbCheckCode() }
-                                Action {
-                                    readonly property bool isAddress: Logic.sendBackCode(root.sbCodeInput) === "" && Logic.sendBackAddress(root.sbCodeInput) !== ""
-                                    label: root.sbAsking ? (isAddress ? "Checking…" : "Reading…") : isAddress ? "Check the address" : "Read the code"
-                                    enabledNow: !root.sbAsking && (Logic.sendBackCode(root.sbCodeInput) !== "" || Logic.sendBackAddress(root.sbCodeInput) !== "")
-                                    onPressed: root.sbCheckCode()
-                                }
-                            }
-                            Hint { visible: Logic.bridgeCan(root.bridgeFeatures, "send_back_address"); font.pixelSize: root.px(15); text: Logic.SEND_BACK_ADDRESS_ROUTE }
-                            WhyLine { visible: !root.sbAsking && Logic.sendBackCode(root.sbCodeInput) === "" && Logic.sendBackAddress(root.sbCodeInput) === "" && root.sbCheckError === ""; text: "Paste the code from the bridge page to read it." }
-                            StatusLine { visible: root.sbCheckError !== ""; kind: Logic.noticeKind(root.sbCheckError, true); text: root.sbCheckError }
+                            spacing: 14
+                            Hint { font.pixelSize: root.px(15); text: Logic.ADDRESS_GET_CODE }
+                            Action { Layout.alignment: Qt.AlignTop; label: root.sbLinkCopied ? "Copied." : "Copy the link"; enabledNow: root.sbLink !== null && !!root.sbLink.link; onPressed: root.sbCopyLink() }
                         }
-                        // The address the code names, and its four words: the same as on the page.
+                        WhyLine { visible: sbAddressStep.a.form === "bad"; text: sbAddressStep.a.why }
+                        StatusLine { visible: sbAddressStep.a.form === "checking"; kind: "working"; text: sbAddressStep.a.why }
+                        StatusLine {
+                            visible: sbAddressStep.a.form === "refused"
+                            kind: Logic.noticeKind(sbAddressStep.a.why, true)
+                            text: sbAddressStep.a.why
+                            // A wait (the bridge busy, a read that didn't answer): asked again on a press.
+                            actionLabel: kind === "waiting" ? "Check again" : ""
+                            onAct: root.sbCheckCode()
+                        }
+                        // The previous addresses: a name, the short address and its four words. Picking one
+                        // fills the box; it is still read back and ticked.
                         ColumnLayout {
-                            visible: root.sbCheck !== null
+                            visible: root.sbBook.length > 0
                             Layout.fillWidth: true
                             spacing: 8
-                            Hint { color: root.ink; text: "To this Ethereum address:" }
-                            // Pasted (not from the page): the address in two halves to read back, and what a wrong one means.
-                            readonly property bool byAddress: root.sbCheck !== null && root.sbCheck.route === "address"
-                            Text { visible: !parent.byAddress; Layout.fillWidth: true; text: root.sbCheck !== null ? String(root.sbCheck.recipient || "") : ""; textFormat: Text.PlainText; color: root.ink; font.family: root.mono; font.pixelSize: root.px(16); wrapMode: Text.WrapAnywhere }
+                            Hint { color: root.ink; font.weight: Font.DemiBold; text: Logic.ADDRESS_CHOOSE_TITLE }
                             Repeater {
-                                model: parent.byAddress ? Logic.addressHalves(root.sbCheck.recipient) : []
+                                model: root.sbBook
+                                PickRow {
+                                    required property var modelData
+                                    title: modelData.title
+                                    sub: modelData.sub
+                                    current: root.sbBookChosen !== null && root.sbBookChosen.address === modelData.address
+                                    enabledNow: !root.sbAsking
+                                    onPressed: root.sbChooseAddress(modelData)
+                                }
+                            }
+                        }
+                        Hint { visible: !sbAddressStep.a.show; font.pixelSize: root.px(15); text: Logic.SEND_BACK_PRIVATE_HINT }
+                        // The address the box holds, and its four words: once it is valid.
+                        ColumnLayout {
+                            visible: sbAddressStep.a.show && root.sbCheck !== null
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Hint { color: root.ink; text: root.sbBookChosen !== null && root.sbBookChosen.nickname !== "" ? "To this Ethereum address (" + root.sbBookChosen.nickname + "):" : "To this Ethereum address:" }
+                            Repeater {
+                                model: root.sbCheck !== null ? Logic.addressHalves(String(root.sbCheck.recipient || "")) : []
                                 Text { required property var modelData; Layout.fillWidth: true; text: modelData; textFormat: Text.PlainText; color: root.ink; font.family: root.mono; font.pixelSize: root.px(22); font.weight: Font.DemiBold }
                             }
-                            StatusLine { visible: parent.byAddress; kind: ""; text: root.sbCheck !== null && root.sbCheck.address_warning ? String(root.sbCheck.address_warning) : "Withdrawals to a wrong address can't be recovered." }
-                            // Its past (sent from / holds), a warning only: Bridge to Ethereum stays pressable.
+                            Text { Layout.fillWidth: true; text: root.sbCheck !== null ? String(root.sbCheck.words_text || "") : ""; color: root.ink; font.family: root.sans; font.pixelSize: root.px(30); font.weight: Font.Bold; wrapMode: Text.WordWrap }
+                            // What the words are, and where to compare them.
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 14
+                                Hint { color: root.ink; text: Logic.ADDRESS_WORDS_LINE }
+                                Action { Layout.alignment: Qt.AlignTop; label: root.sbCompareCopied ? "Copied." : "Copy the link"; enabledNow: root.sbLink !== null && !!root.sbLink.link; onPressed: root.sbCopyCompare() }
+                            }
+                            // Its past (sent from / holds), a warning only: continue stays pressable.
                             Hint {
                                 readonly property var h: Logic.historyLine(root.sbCheck !== null ? root.sbCheck.history : null)
-                                visible: parent.byAddress && h.text !== ""
+                                visible: h.text !== ""
                                 color: h.kind === "caution" ? root.waitTone : root.ink
                                 font.pixelSize: root.px(15)
                                 text: (h.kind === "caution" ? "!  " : "") + h.text
                             }
-                            NumberLine { text: "1. " + (parent.byAddress ? Logic.SEND_BACK_ADDRESS_CONFIRM : Logic.SEND_BACK_CONFIRM_STEPS[0]) }
-                            Text { Layout.fillWidth: true; text: root.sbCheck !== null ? String(root.sbCheck.words_text || "") : ""; color: root.ink; font.family: root.sans; font.pixelSize: root.px(30); font.weight: Font.Bold; wrapMode: Text.WordWrap }
                             Repeater {
                                 model: root.sbCheck !== null && Array.isArray(root.sbCheck.warnings) ? root.sbCheck.warnings : []
                                 Hint { required property var modelData; color: root.ink; text: "!  " + String(modelData) }
                             }
-                            NumberLine { text: "2. " + Logic.SEND_BACK_CONFIRM_STEPS[1] }
-                            RowLayout {
-                                spacing: 14
-                                Action { label: root.sbAsking ? "Getting it ready…" : "Bridge to Ethereum"; strong: true; enabledNow: !root.sbAsking; onPressed: root.sbPlan() }
-                                Link { visible: !root.sbAsking; text: root.sbCheck !== null && root.sbCheck.route === "address" ? "Another address" : "Another code"; color: root.dim; font.pixelSize: root.px(15); onPressed: { root.sbCheck = null; root.sbCodeInput = ""; sbCodeField.text = ""; root.sbAnother = true } }
-                            }
+                            Tick { Layout.topMargin: 4; checked: root.sbTicked; text: Logic.ADDRESS_TICK; onToggled: root.sbTicked = !root.sbTicked }
+                            StatusLine { kind: ""; text: Logic.ADDRESS_LAST_CHECK }
+                            Action { label: root.sbAsking ? "Getting it ready…" : Logic.ADDRESS_CONTINUE; strong: true; enabledNow: sbAddressStep.a.canContinue; onPressed: root.sbContinue() }
+                            WhyLine { text: sbAddressStep.a.why }
                         }
                     }
 
@@ -11540,8 +11734,13 @@ Item {
                         Layout.fillWidth: true
                         spacing: 6
                         Hint { color: root.ink; text: root.sbFocusRow !== null ? root.sbFocusRow.amount + " to this Ethereum address" + (sendBackScreen.st !== null && sendBackScreen.st.receive_text ? " (you receive " + sendBackScreen.st.receive_text + "):" : ":") : "" }
-                        Text { Layout.fillWidth: true; text: root.sbFocusRow !== null ? root.sbFocusRow.recipient : ""; textFormat: Text.PlainText; color: root.ink; font.family: root.mono; font.pixelSize: root.px(16); wrapMode: Text.WrapAnywhere }
+                        Repeater {
+                            model: root.sbFocusRow !== null ? Logic.addressHalves(root.sbFocusRow.recipient) : []
+                            Text { required property var modelData; Layout.fillWidth: true; text: modelData; textFormat: Text.PlainText; color: root.ink; font.family: root.mono; font.pixelSize: root.px(18); font.weight: Font.DemiBold }
+                        }
                         Text { Layout.fillWidth: true; text: root.sbFocusRow !== null ? root.sbFocusRow.words : ""; color: root.ink; font.family: root.sans; font.pixelSize: root.px(24); font.weight: Font.Bold; wrapMode: Text.WordWrap }
+                        // The address was checked on step 2; what comes now is the burn.
+                        StatusLine { Layout.topMargin: 6; kind: ""; text: Logic.ADDRESS_BURN_NEXT }
                     }
                     // The bridge's first-time questions and the burn itself, answered here.
                     ApproveBody { visible: root.appInline && root.walletView === "sendback"; inline: true }
@@ -11576,6 +11775,26 @@ Item {
                                 + (sendBackScreen.st !== null && sendBackScreen.st.receive_text ? "; you receive " + sendBackScreen.st.receive_text + "." : ".")
                         }
                         Hint { visible: root.sbFocusRow !== null && root.sbFocusRow.words !== ""; font.pixelSize: root.px(15); text: root.sbFocusRow !== null ? "Its words: " + root.sbFocusRow.words : "" }
+                        // After the first send to an address with no name here: "Save to my addresses" with
+                        // a short name (kept by the LEZ Bridge on this computer, never on chain).
+                        ColumnLayout {
+                            readonly property bool offered: Logic.addressSaveOffered({ can: root.sbBookNamed, stage: sendBackScreen.p.stage, recipient: root.sbFocusRow !== null ? root.sbFocusRow.recipient : "", rows: root.sbBook })
+                            readonly property string problem: Logic.nicknameProblem(root.sbSaveName)
+                            visible: offered && root.sbSaveKind !== "done"
+                            Layout.fillWidth: true
+                            Layout.topMargin: 6
+                            spacing: 8
+                            Hint { color: root.ink; font.weight: Font.DemiBold; text: Logic.ADDRESS_SAVE_TITLE }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 10
+                                Field { id: sbSaveField; Layout.fillWidth: true; Layout.maximumWidth: root.px(320); size: 15; hint: "A short name, such as main or ledger"; onTextChanged: { root.sbSaveName = text; if (root.sbSaveKind !== "done") root.sbSaveLine = "" } onAccepted: root.sbSaveAddress() }
+                                Action { label: root.sbSaving ? "Saving…" : "Save"; enabledNow: !root.sbSaving && parent.parent.problem === ""; onPressed: root.sbSaveAddress() }
+                            }
+                            WhyLine { text: root.sbSaveName.trim() !== "" ? parent.problem : "" }
+                            Hint { font.pixelSize: root.px(15); text: Logic.ADDRESS_SAVE_NOTE }
+                        }
+                        StatusLine { visible: root.sbSaveLine !== ""; kind: root.sbSaveKind; text: root.sbSaveLine }
                         // The burn not proposed yet (or proposed again after a no).
                         Action { visible: sendBackScreen.p.action === "burn" && !root.appInline && root.sbError === ""; label: root.sbAsking ? "Asking your wallet…" : "Approve the burn"; strong: true; enabledNow: !root.sbAsking; onPressed: root.sbBurn() }
                         // The bridge's settlement service: one press, after its consent sentence when
@@ -12535,12 +12754,12 @@ Item {
                 width: Math.min(parent.width - 112, root.tool === "settings" ? 1040 : 820)
                 spacing: 22
 
-                // Which network names are looked up on: always reachable on Search, a result shown
+                // Which network names are checked on: always reachable on Search, a result shown
                 // or not (switching clears the result).
                 NetSwitch { visible: root.section === "search" }
-                RunsOn { visible: root.section === "search" || root.section === "profile"; prefix: "LNS names and profiles: looked up on" }
+                RunsOn { visible: root.section === "search" || root.section === "profile"; prefix: "LNS names and profiles: checked on" }
 
-                // Search: look up any name.
+                // Search: check any name.
                 ColumnLayout {
                     visible: root.section === "search"
                     Layout.fillWidth: true
@@ -12551,7 +12770,7 @@ Item {
                     Field {
                         id: searchField
                         Layout.fillWidth: true
-                        hint: "Look up a name, such as jef"
+                        hint: "Check a name, such as jef"
                         onAccepted: root.find(searchField.text)
                     }
                     IconButton {
@@ -13026,20 +13245,20 @@ Item {
                             }
                         }
                     }
-                    // Ethereum addresses sent back to before (offered first on Bridge to Ethereum).
+                    // The Ethereum addresses this wallet knows (listed under Choose a previous address on Bridge to Ethereum).
                     ColumnLayout {
                         visible: root.bridgeChoosable && root.savedRecipients !== null && root.savedRecipients.length > 0
                         Layout.fillWidth: true
                         spacing: 6
-                        Hint { color: root.ink; font.pixelSize: root.px(15); text: "Ethereum addresses you sent to before (offered first next time):" }
+                        Hint { color: root.ink; font.pixelSize: root.px(15); text: root.sbBookNamed ? "My Ethereum addresses (the names stay in this wallet, never on chain):" : "Ethereum addresses you sent to before (listed under Choose a previous address):" }
                         Repeater {
                             model: root.savedRecipients !== null ? root.savedRecipients : []
                             RowLayout {
                                 required property var modelData
                                 Layout.fillWidth: true
                                 spacing: 12
-                                Text { Layout.fillWidth: true; text: modelData.address + "  ·  from " + Logic.idShort(modelData.account); textFormat: Text.PlainText; color: root.ink; font.family: root.mono; font.pixelSize: root.px(14); elide: Text.ElideRight }
-                                Link { text: root.recipientForgetting === modelData.address + "|" + modelData.account ? "Removing…" : "Remove"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.forgetRecipient(modelData) }
+                                Text { Layout.fillWidth: true; text: modelData.title !== undefined ? modelData.title + "  ·  " + modelData.address : modelData.address + "  ·  from " + Logic.idShort(modelData.account); textFormat: Text.PlainText; color: root.ink; font.family: root.mono; font.pixelSize: root.px(14); elide: Text.ElideRight }
+                                Link { text: root.recipientForgetting === modelData.address + "|" + (modelData.account || "") ? "Removing…" : "Remove"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.forgetRecipient(modelData) }
                             }
                         }
                     }
