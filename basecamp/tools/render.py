@@ -993,7 +993,7 @@ _BR_FEATURES += ["send_back_address", "send_back_recipients"]
 # what Logic.PRIVATE_BRIDGE reads (claim_plan, claim, job, jobs, send_back_burn). ──
 V5 = "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA"
 PRIV = "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z"
-PV_FEATURES = SB_FEATURES + ["send_back_settle", "bridges", "private_receive", "private_claim", "private_send_back"]
+PV_FEATURES = SB_FEATURES + ["send_back_settle", "bridges", "private_claim_standin", "private_send_back"]
 PV_CONFIG = {"build": {"commit": "pv00001"}, "deployment": {"name": "bridge-test-network-v5", "bridge_program": V5, "release": "proof"}, "features": PV_FEATURES, "notices": {}}
 OLD_CONFIG = dict(PV_CONFIG, features=SB_FEATURES)
 PV_ARR = '[{ id: "dep-p1", symbol: "ETH", amount: "0.1", account: "%s", account_kind: "private" }]' % PRIV
@@ -1126,11 +1126,11 @@ PV_SB_CARD = 'root.cliNames = []; root.cliPending = []; root.openWallet("home");
     json.dumps(PV_CONFIG), json.dumps([{"token_program": "5w6nTkftFFDy8mtdpnKpZVetGQJ2WCKdhmpJsAYArbU7", "app": "lez_bridge", "holdings": [{"account": PRIV, "account_kind": "private", "definition": "DbPGo6FeRLp7NaUWxQGC1WXpJkSQe1jbAqYVMQkCuuPw", "symbol": "wETH", "balance": "100000000000000000", "decimals": 18}]}]))
 PV_SB_ID = "sb-p1"
 def pv_sb_focus(stage, job, extra=""):
-    view = sb_view(stage, id=PV_SB_ID, account=PRIV, fee_payer="Paid inside the proof from your account.", privacy="A private burn publishes the amount and an exit commitment; the account it leaves and the Ethereum address stay hidden until the release.")
+    view = sb_view(stage, id=PV_SB_ID, account=PRIV, kind="private", route="private_call", wallet_job=job["id"] if job else None, burn_phase=job["phase"] if job and stage == "approve" else None, fee_payer="Your wallet pays the LEZ fee from this private account's own LEZ, inside the proof.", privacy="A private burn publishes the amount and an exit commitment; the account it leaves and the Ethereum address stay hidden until the release.")
     jobs = {"jobs": [job]} if job else {"jobs": []}
     js_ = PV_SB_CARD % ('root.sendBacksLoaded = true; root.sendBacks = [{ id: "%s", amount: "0.01 ETH", account: "%s", recipient: "%s", words: "maple · tiger · seven · lamp", stage: "%s" }]; root.openSendBack("", null, "%s"); root.sbStatuses = { "%s": %s }; root.againAfter(50, function() { root.sbAskNow = false; root.receiveAskNow = false; root.sbScheduleNext() }); %s'
                        % (PV_SB_ID, PRIV, SB_RECIPIENT, stage, PV_SB_ID, PV_SB_ID, json.dumps(view), extra))
-    return js_, pv_mock(send_backs={"send_backs": [view]}, send_back_status=view, jobs=jobs)
+    return js_, pv_mock(send_backs={"send_backs": [view]}, send_back_status=view, jobs=jobs, job=job)
 
 PRIVATE_SB = [
     # The accounts to send from: the public ones as before, then the private ones (proved here).

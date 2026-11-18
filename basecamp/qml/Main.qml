@@ -1934,7 +1934,7 @@ Item {
                 return
             }
             var id = String(value.id)
-            var row = { id: id, amount: String(value.amount_text || ""), account: String(value.account || sbAccount), recipient: String(value.recipient || ""), words: String(value.words_text || ""), stage: String(value.stage || "planned") }
+            var row = { id: id, amount: String(value.amount_text || ""), account: String(value.account || sbAccount), recipient: String(value.recipient || ""), words: String(value.words_text || ""), stage: String(value.stage || "planned"), kind: String(value.kind || "") }
             sendBacks = [row].concat(sendBacks.filter(function(x) { return x.id !== id }))
             var all = sbStatuses
             all[id] = value
@@ -1994,6 +1994,12 @@ Item {
     }
     /// A private send-back opened again: its burn's job, if the wallet still has it (read only).
     function sbFindJob(id) {
+        var known = sbStatuses[id] && sbStatuses[id].wallet_job ? String(sbStatuses[id].wallet_job) : ""
+        if (known !== "") {
+            bridgeCall(Logic.PRIVATE_BRIDGE.job, [known], function(value) { if (value && value.id) sbTakeJob(id, value) },
+                function(message, kind) { console.log("names_ui: send back: job:", kind, message) }, 90000)
+            return
+        }
         bridgeCall(Logic.PRIVATE_BRIDGE.jobs, [], function(value) {
             var j = Logic.privateJobFor(value, [], id)
             if (j !== null)

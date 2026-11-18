@@ -1155,7 +1155,11 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   // The adapter: every bridge call the private screens make, in one place.
   check("private adapter: the bridge's calls", L.PRIVATE_BRIDGE, { receive: "make_deposit_request", claimPlan: "claim_plan", claim: "claim", job: "job", jobs: "jobs",
     sendBackPlan: "send_back_plan", sendBackBurn: "send_back_burn", afterUncertain: "after_uncertain" });
-  check("private adapter: features", [L.privateCan(["private_claim"], "claim"), L.privateCan(["receive"], "receive"), L.privateCan(null, "sendBack"), L.privateCan(["private_send_back"], "nothing")], [true, false, false, false]);
+  check("private adapter: features (PRIVATE-IN-WALLET.md)", [L.privateCan(["private_claim_standin"], "claim"), L.privateCan(["private_claim_standin"], "receive"), L.privateCan(["receive"], "receive"), L.privateCan(null, "sendBack"),
+    L.privateCan(["private_send_back"], "sendBack"), L.privateCan(["private_send_back"], "nothing")], [true, true, false, false, true, false]);
+  check("private send-back as the module plans it", [L.sendBackIsPrivate({ kind: "private", account: "x" }), L.sendBackIsPrivate({ route: "private_call" })], [true, true]);
+  check("private send-back: the burn's reply carries the job", L.privateReply({ id: "sb-1", stage: "approve", burn_phase: "approve", wallet_job: "wr-2", job: { id: "wr-2", state: "running", phase: "approve", request: "r2" } }).job.id, "wr-2");
+  check("private refusal: the bridge's float is low (the operator tops it up): a wait", L.privateRefusal("float_low").kind, "waiting");
   // Replies: a first-time question (flat, and claim_plan's nested one), a job, a status carrying one, a refusal, an older Names.
   const job = { id: "wr-1", kind: "claim", subject: "dep-p1", request: "r1", state: "running", phase: "approve", wallet_request: { state: "pending", check: "ready" } };
   check("private reply: needs", [L.privateReply({ needs: "secret", request: { request: "r0" } }).kind, L.privateReply({ ok: false, needs: { needs: "connect", request: { request: "r0" } } }).needs.needs], ["needs", "connect"]);

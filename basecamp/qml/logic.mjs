@@ -2726,10 +2726,12 @@ export const PRIVATE_BRIDGE = {
     sendBackBurn: "send_back_burn",    // (send-back id, options): the wallet job (or a status carrying `job`), or {needs}
     afterUncertain: "after_uncertain"  // the option that proposes again after an unanswered proposal
 }
-/// The `config().features` words that say an installed bridge answers them.
-export const PRIVATE_FEATURES = { receive: "private_receive", claim: "private_claim", sendBack: "private_send_back" }
+/// The `config().features` words that say an installed bridge answers them (modules/PRIVATE-IN-WALLET.md):
+/// a private code is offered only when its claim can be made (`private_claim_standin`, the claim on
+/// a bridge whose roots an operator records: v3, v4, v5).
+export const PRIVATE_FEATURES = { receive: ["private_claim_standin"], claim: ["private_claim_standin"], sendBack: ["private_send_back"] }
 export function privateCan(features, what) {
-    return bridgeCan(features, PRIVATE_FEATURES[what] || "")
+    return (PRIVATE_FEATURES[what] || []).some(function(f) { return bridgeCan(features, f) })
 }
 /// A private claim or burn proved on this computer: one place for the time (measured 577 s and
 /// 642 s on a 16 GB Apple M4, 4 threads).
@@ -2740,7 +2742,7 @@ export const PRIVATE_CHECK_MS = 30000
 /// The one line beside the Private choice on Receive.
 export const PRIVATE_RECEIVE_NOTE = "Private: nobody can link this deposit to your account. Claiming it takes " + PRIVATE_PROOF_TIME + " of proving on this computer."
 /// The private claim's one line, above its button.
-export const PRIVATE_CLAIM_NOTE = "Private: nobody can link the deposit to this account. Your wallet proves the claim on this computer, " + PRIVATE_PROOF_TIME + ", then sends it."
+export const PRIVATE_CLAIM_NOTE = "Private: it goes to a one-time address of this account, and nobody can link it to the deposit. The bridge pays the fee. Your wallet proves the claim on this computer, " + PRIVATE_PROOF_TIME + ", then sends it."
 /// The private send-back's one line, beside the account choice.
 export const PRIVATE_SEND_BACK_NOTE = "From a private account: nobody sees which account it leaves. Your wallet proves the burn on this computer, " + PRIVATE_PROOF_TIME + "; its fee comes from the account's own LEZ."
 /// Under the proving wait: the page may be left.
@@ -2759,7 +2761,7 @@ export function privateAccounts(accounts) {
 }
 /// Whether a receive (a receives() row, or one made here) goes to a private account.
 export function receiveIsPrivate(row) {
-    return !!row && (row.account_kind === "private" || /^Private\//.test(String(row.account || "")))
+    return !!row && (row.account_kind === "private" || row.claim === "private" || /^Private\//.test(String(row.account || "")))
 }
 /// A receive's account as the wallet writes it: `Private/<id>` for a private one.
 export function receiveAccountShown(row) {
@@ -2855,7 +2857,7 @@ export function privateElapsed(since, now) {
 /// with ONE next action. Waits (not final yet, not recorded yet) are amber with Check now.
 export function privateRefusal(code) {
     var c = String(code || "")
-    if (claimIsWait(c) || c === "busy" || c === "unreachable" || c === "eth_unreachable" || c === "rate_limited")
+    if (claimIsWait(c) || c === "float_low" || c === "busy" || c === "unreachable" || c === "eth_unreachable" || c === "rate_limited")
         return { kind: "waiting", label: "Check now", action: "check" }
     return { kind: "problem", label: "Back to the wallet", action: "back" }
 }
@@ -2922,7 +2924,7 @@ export function privateSendBackSources(accounts, holdings) {
 
 /// The account a send-back leaves from is private.
 export function sendBackIsPrivate(row) {
-    return !!row && /^Private\//.test(String(row.account || ""))
+    return !!row && (row.kind === "private" || row.route === "private_call" || /^Private\//.test(String(row.account || "")))
 }
 
 /// A job's note worth a line on the wait: only the bridge's "the wallet was busy, asking again"
