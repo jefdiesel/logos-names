@@ -1139,6 +1139,9 @@ PRIVATE_SB = [
     ("sendback-private-choose", PV_SB_CARD % 'root.againAfter(150, function() { root.openSendBack("", null) })', pv_mock()),
     # A private account chosen: its amounts, then the address step with its line.
     ("sendback-private-address", PV_SB_CARD % 'root.againAfter(120, function() { root.openSendBack("", null); root.againAfter(120, function() { root.sbPick(root.sbPrivateSources[0]); root.sbDenom = 0 }) })', pv_mock()),
+    # From a private account, with the address book: a previous address picked and ticked.
+    ("sendback-private-address-ticked", PV_SB_CARD % 'root.againAfter(100, function() { root.openSendBack("", null); root.againAfter(100, function() { root.sbPick(root.sbPrivateSources[0]); root.sbDenom = 0; root.againAfter(80, function() { root.sbChooseAddress(root.sbBook[0]); root.againAfter(60, function() { root.sbTicked = true }) }) }) })',
+     pv_mock(config=dict(PV_CONFIG, features=PV_FEATURES + ["send_back_address", "send_back_recipients", "address_book"]), address_book_list={"addresses": [{"address": SB_RECIPIENT, "short": "0xE2C4…8680", "nickname": "ledger", "words_text": "maple · tiger · seven · lamp", "saved": True}]})),
     # The burn proposed: the address and its words, then the wallet's own sheet in place.
     ("sendback-private-approve", *pv_sb_focus("approve", pv_job("approve", kind="redeem", subject=PV_SB_ID, wr={"state": "pending", "check": "ready", "phase": None}), 'root.againAfter(120, function() { %s })' % pv_inline(pv_request("burn")))),
     # Approved: proving the burn on this computer.
@@ -1224,6 +1227,14 @@ WALLET_NEXT = [
     # Settings → Bridge: the address book, names and all, each with Remove.
     ("settings-bridge-book", 'root.section = "settings"; root.loadBridges()', _br_mock(config={"build": {"commit": "c26a464"}, "deployment": {"name": "bridge-test-network-v5", "bridge_program": _BR_V5["bridge_program"]},
      "features": _BR_FEATURES + ["send_back_address", "send_back_recipients", "address_book"]}, address_book_list=WN_BOOK)),
+    # Remove on a claimed receive and on a released send-back (both still shown on the card for a while).
+    ("card-remove-finished", wn_card('root.receiveClaimedAt = { "dep-old": Date.now() - 60000 }; root.sbReceivedAt = { "sb-planned": Date.now() - 60000 }',
+        st='({ "dep-old": { stage: "claimed", claimed_block: 6054 }, "dep-2": { stage: "deposited", confirmations: 20, final_in_min: 7 } })',
+        sbs=WN_SBS.replace('"sb-planned": { stage: "planned" }', '"sb-planned": { stage: "released", released_tx: "0x7a" }')), wn_card_mock()),
+    # A send-back the bridge keeps: its burn found on the bridge test network at the press.
+    ("card-remove-sendback-kept", wn_card('root.removeBridgeRow("send_back", "sb-planned")'), wn_card_mock(send_back_remove={"removed": False, "id": "sb-planned", "code": "in_flight", "checked": {"chain": "lez", "burn_found": True}})),
+    # A name another saved address already has.
+    ("sendback-save-taken", _SB_SAVE_FOCUS % 'sbSaveField.text = "main"; root.sbSaveAddress()', wn_mock(sb_view("burned"), address_book_save={"ok": False, "error": {"code": "nickname_taken", "message": ""}})),
     # Search: the network names are checked on (WALLET-ROADMAP item 4: "checking a name", never "look up").
     ("search-checked-on", 'root.section = "search"', {}),
 ]

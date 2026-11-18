@@ -1326,7 +1326,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     L.removeOffered("send_back", sp("planned"), { stage: "planned", wallet_job: "wr-1" }, { id: "wr-1", state: "cancelled" })], [false, false, false, true]);
   check("remove reply: the bridge's checks in words", [L.removeReply({ removed: true, code: "no_deposit" }, "receive"), L.removeReply({ removed: false, code: "deposited" }, "receive"),
     L.removeReply({ removed: false, code: "unreachable" }, "receive"), L.removeReply({ removed: false, code: "unreachable" }, "send_back").line],
-    [{ removed: true, line: "No deposit was made for this code. Removed.", kind: "done" }, { removed: false, line: "A deposit was made for this code and isn't claimed yet, so it stays.", kind: "problem" },
+    [{ removed: true, line: "No deposit was made for this code. Removed.", kind: "done" }, { removed: false, line: "A deposit was made for this code and isn't claimed yet, so it stays.", kind: "" },
      { removed: false, line: "Couldn't read Sepolia just now, so nothing was removed. Try again in a moment.", kind: "waiting" },
      "Couldn't read the bridge test network just now, so nothing was removed. Try again in a moment."]);
   check("remove reply: send-back words; the bridge's own text wins; gone already counts", [L.removeReply({ removed: true, code: "never_burned" }, "send_back").line, L.removeReply({ removed: false, code: "with_wallet" }, "send_back").line,
@@ -1347,7 +1347,8 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("wallet-next: no new timer", (qml.match(/^\s*Timer \{/gm) || []).length, 44);
   check("address step: the box is always shown, nothing pre-filled", [/Field \{ id: sbCodeField; Layout\.fillWidth: true; size: 15; code: true;/.test(qml), /Send to " \+ root\.sbSaved/.test(qml), /\(used before\)/.test(qml)], [true, false, false]);
   check("address step: the button is the tick's", /Action \{ label: root\.sbAsking \? "Getting it ready…" : Logic\.ADDRESS_CONTINUE; strong: true; enabledNow: sbAddressStep\.a\.canContinue; onPressed: root\.sbContinue\(\) \}/.test(qml), true);
-  check("address step: the plan refuses an unticked or other value", /if \(!sbTicked \|\| sbCheck\.key !== Logic\.addressBoxKey\(sbCodeInput\)\)\s*\n\s*return/.test(qml), true);
+  check("address step: the plan refuses an unticked or other value, and says so", /if \(!sbTicked \|\| sbCheck\.key !== Logic\.addressBoxKey\(sbCodeInput\)\) \{\s*\n\s*sbError = /.test(qml), true);
+  check("address step: the box's hint follows what the bridge reads", [L.ADDRESS_BOX_HINT.indexOf("Ethereum address") > 0, L.ADDRESS_BOX_HINT_CODE.indexOf("address") < 0], [true, true]);
   check("remove: says Checking… at once", (qml.match(/text: busyHere \? "Checking…" : "Remove"/g) || []).length, 2);
   check("save: says Saving… at once", /label: root\.sbSaving \? "Saving…" : "Save"/.test(qml), true);
   check("wording: checked on LEZ 0.4", [/prefix: "LNS names and profiles: checked on"/.test(qml), /hint: "Check a name, such as jef"/.test(qml)], [true, true]);

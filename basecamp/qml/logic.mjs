@@ -2946,6 +2946,8 @@ export function privateNoteShown(note) {
 
 /// The words of the address step, said once here.
 export const ADDRESS_BOX_HINT = "Paste the withdraw-to code from the bridge page (logoswd1…) or the Ethereum address to receive it. Copy it, don't type it."
+/// The same for a bridge that reads only the page's code (no `send_back_address`).
+export const ADDRESS_BOX_HINT_CODE = "Paste the withdraw-to code from the bridge page (logoswd1…). Copy it, don't type it."
 export const ADDRESS_GET_CODE = "No code yet? Copy the link, open it in the browser with your Ethereum wallet and connect: the page shows the code."
 export const ADDRESS_CHOOSE_TITLE = "Choose a previous address"
 export const ADDRESS_WORDS_LINE = "These four words are a fingerprint of this address. The bridge page shows the same four when the same Ethereum wallet is connected."
@@ -3099,6 +3101,9 @@ export function removeReply(value, kind) {
     var line = v.text ? String(v.text) : (words[code] || (v.removed === true ? "Removed." : "It stays: the bridge didn't remove it."))
     if (v.removed === true || code === "not_found")
         return { removed: true, line: line, kind: "done" }
+    // A read that didn't answer is a wait; a row kept because money is on its way is a plain fact
+    // (not a failure: there is nothing to do but let it finish); anything else is a problem.
     var wait = ["unreachable", "busy", "rate_limited"].indexOf(code) >= 0
-    return { removed: false, line: line, kind: wait ? "waiting" : "problem" }
+    var kept = ["deposited", "in_flight", "with_wallet", "unknown"].indexOf(code) >= 0
+    return { removed: false, line: line, kind: wait ? "waiting" : kept ? "" : "problem" }
 }

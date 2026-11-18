@@ -1796,6 +1796,8 @@ Item {
             return
         sbCodeInput = String(text)
         sbTicked = false
+        if (sbFocus === "")
+            sbError = ""
         sbCheck = null
         sbCheckError = ""
         sbCheckErrorKey = ""
@@ -2072,8 +2074,10 @@ Item {
         if (sbAsking || sbCheck === null || sbDenom < 0 || sbAsset === null)
             return
         // Only the address in the box now, read back and ticked as the person's.
-        if (!sbTicked || sbCheck.key !== Logic.addressBoxKey(sbCodeInput))
+        if (!sbTicked || sbCheck.key !== Logic.addressBoxKey(sbCodeInput)) {
+            sbError = "Check the address in the box and tick \u201c" + Logic.ADDRESS_TICK + "\u201d first. Nothing was done."
             return
+        }
         sbAsking = true
         sbError = ""
         bridgeCall(Logic.PRIVATE_BRIDGE.sendBackPlan, [Logic.sendBackSymbol(sbAsset.symbol), String(sbDenom), sbAccount, sbCheck.code], function(value) {
@@ -11649,7 +11653,7 @@ Item {
                         }
                         Hint { visible: root.sbFromPrivate; font.pixelSize: root.px(15); text: "From your private account: your wallet proves the burn on this computer (" + Logic.PRIVATE_PROOF_TIME + ") and checks the account holds it." }
                         // The box.
-                        Hint { color: root.ink; text: Logic.ADDRESS_BOX_HINT }
+                        Hint { color: root.ink; text: Logic.bridgeCan(root.bridgeFeatures, "send_back_address") ? Logic.ADDRESS_BOX_HINT : Logic.ADDRESS_BOX_HINT_CODE }
                         Field { id: sbCodeField; Layout.fillWidth: true; size: 15; code: true; hint: Logic.bridgeCan(root.bridgeFeatures, "send_back_address") ? "logoswd1… or 0x…" : "logoswd1…"; onTextChanged: root.sbBoxChanged(text); onAccepted: root.sbCheckCode() }
                         // What the box holds: nothing yet, not a code or address, being checked, refused.
                         RowLayout {
