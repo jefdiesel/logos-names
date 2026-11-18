@@ -1662,7 +1662,7 @@ var STEP_SHORT = {
     secret: ["Keys", "Keys"], approve: ["Approve", "Approved"], done: ["Claim", "Claimed"],
     choose: ["Amount", "Amount"], deposit: ["Deposit", "Deposited"], wait: ["Wait", "Final"], claim: ["Claim", "Claimed"],
     address: ["Address", "Address"], burn: ["Approve", "Approved"], back: ["Ethereum", "Received"],
-    source: ["Account", "Account"]
+    source: ["Account", "Account"], prove: ["Prove", "Proved"], token_source: ["Tokens", "Tokens"]
 }
 export function stepShort(key, state) {
     var pair = STEP_SHORT[key]
@@ -1896,7 +1896,7 @@ export function receiveRowsShown(list, statuses, claimedAt, now, showAll) {
         hidden++
         return false
     })
-    return { rows: rows.map(function(e) { return { id: e.row.id, symbol: e.row.symbol, amount: e.row.amount, account: e.row.account, progress: e.progress, where: receiveWhere(st[e.row.id], e.row) } }), hidden: hidden }
+    return { rows: rows.map(function(e) { return { id: e.row.id, symbol: e.row.symbol, amount: e.row.amount, account: e.row.account, account_kind: String(e.row.account_kind || ""), progress: e.progress, where: receiveWhere(st[e.row.id], e.row) } }), hidden: hidden }
 }
 
 /// The receive that opening "Receive from Ethereum" shows first, or "": the newest one on its way
@@ -1973,6 +1973,9 @@ export function sendBackAutoMode(status) {
     var s = status || {}
     if (s.busy === true) return { mode: "gentle" }
     if (settleRunning(s)) return { mode: "settle" }
+    // From a private account the burn is proved on this computer first (about 10 minutes): its
+    // wait is checked at most every 30 s, on its own screen, never the 5 s job pace.
+    if (sendBackIsPrivate(s) && ["planned", "approve", "burning"].indexOf(String(s.stage)) >= 0) return { mode: "private" }
     switch (s.stage) {
     case "approve": return { mode: s.note ? "none" : "job" }
     case "burning": case "proving": return { mode: "job" }
@@ -1997,6 +2000,7 @@ export function bridgeNextCheck(s) {
         if (!st.frontmost || st.screen === "card" || !it.focused) return
         if (m === "gentle") take(now + CHECK_GENTLE_MS)
         if (m === "settle") take(now + CHECK_SETTLE_MS)
+        if (m === "private") take(now + PRIVATE_CHECK_MS)
         if (m === "at" && Number(it.at) > now) take(Number(it.at))
     })
     return due
@@ -2290,7 +2294,7 @@ export function sendBackAmounts(registry, asset) {
         .filter(function(d) { return /^[0-9]+$/.test(d.value) }) : []
     if (denoms.length === 0)
         denoms = known.denoms.map(function(v, i) { return { index: i, value: v } })
-    return denoms.filter(function(d) { return /^[0-9]+$/.test(d.value) && atLeast(String(asset.base || "0"), d.value) })
+    return denoms.filter(function(d) { return /^[0-9]+$/.test(d.value) && (asset.anyAmount === true || atLeast(String(asset.base || "0"), d.value)) })
         .map(function(d) { return { index: d.index, value: d.value, text: withDecimals(d.value, known.decimals) } })
 }
 
@@ -2488,13 +2492,13 @@ export function sendBackSteps(s) {
     var needs = needsStep(st.needs)
     if (needs && extras.indexOf(needs) < 0)
         extras = extras.concat([needs])
-    var keys = ["source", "address"].concat(extras, ["burn", "back"])
+    var keys = ["source", "address"].concat(extras, st["private"] ? ["burn", "prove", "back"] : ["burn", "back"])
     var titles = { source: "Choose the account and the amount", address: "Give the Ethereum address", connect: "Let the bridge see this account",
                    programs: "Allow the bridge's programs", public_account: "Give the bridge this account",
-                   secret: "Allow the bridge's exit keys", burn: "Approve the burn", back: st.stage === "released" ? "Received on Ethereum" : "Back to Ethereum" }
+                   secret: "Allow the bridge's exit keys", token_source: "Show the bridged tokens", burn: "Approve the burn", prove: "Proving on this computer", back: st.stage === "released" ? "Received on Ethereum" : "Back to Ethereum" }
     var stage = String(st.stage || "choose")
     var now = stage === "choose" ? "source" : stage === "address" ? "address" : stage === "needs" ? (needs || "burn")
-        : stage === "planned" || stage === "approve" ? "burn" : "back"
+        : stage === "planned" || stage === "approve" ? "burn" : stage === "proving_burn" ? "prove" : "back"
     var at = stage === "released" ? keys.length : keys.indexOf(now)
     return keys.map(function(k, i) {
         var state = i < at ? "done" : i === at ? "now" : "later"
@@ -2647,14 +2651,17 @@ export function approveWhy(s) {
     return ""
 }
 
-/// Why "Make the deposit code" can't be pressed ("" when it can): {asking, ticked, account}.
+/// Why "Make the deposit code" can't be pressed ("" when it can): {asking, ticked, account, kind
+/// ("private" | "public"; public when not given), able (the bridge makes private codes)}.
 export function receiveMakeWhy(s) {
     var st = s || {}
     if (st.asking)
         return ""
+    if (st.kind === "private" && !st.able)
+        return "This LEZ Bridge can't make private codes yet. Update it, or choose Public."
     if (!st.account)
         return "Choose the account above."
-    if (!st.ticked)
+    if (st.kind !== "private" && !st.ticked)
         return "Tick “Not private” above to make the code."
     return ""
 }
@@ -2699,4 +2706,228 @@ export function faucetReply(value, grouped) {
     var waits = ["busy", "rate_limited", "already_today"]
     var reason = String(v.reason || "") || (v.code === "already_today" ? "This account already had test LEZ today." : v.code === "faucet_empty" ? "The faucet is empty for now." : "The faucet said no.")
     return { line: reason, kind: waits.indexOf(String(v.code || "")) >= 0 ? "waiting" : "problem", retry: v.retry === true }
+}
+
+// ── Private claim and private send-back, from a private account (rfp-022
+//    proposal/PRIVATE-IN-WALLET-SCOPE.md, step 7). The LEZ Bridge proposes each as a private call
+//    to this wallet (`propose_private_call`): this app shows the wallet's own sheet, "Approve, prove
+//    and send", and the wallet proves on this computer and sends. This block is the ONE place that
+//    knows the bridge's method names, feature words and the shape of its private replies
+//    (rfp-022 modules/PRIVATE-IN-WALLET.md): Main.qml and the renders read them only through it. ──
+
+/// The LEZ Bridge's calls on the private paths (every argument a string).
+export const PRIVATE_BRIDGE = {
+    receive: "make_deposit_request",   // (token, denom_index, "Private/<id>"): the deposit code, or {needs}
+    claimPlan: "claim_plan",           // (deposit id): the checks, {ok, error: {code, message}, needs, sponsored, …}
+    claim: "claim",                    // (deposit id, options): the wallet job ({id: "wr-…", request, phase}), or {needs}
+    job: "job",                        // (job id): the wallet job, its state asked of the wallet once
+    jobs: "jobs",                      // (): {jobs: […]}, to find a claim or burn already with the wallet
+    sendBackPlan: "send_back_plan",    // (token, denom_index, "Private/<id>", code): the stored exit, or {needs}
+    sendBackBurn: "send_back_burn",    // (send-back id, options): the wallet job (or a status carrying `job`), or {needs}
+    afterUncertain: "after_uncertain"  // the option that proposes again after an unanswered proposal
+}
+/// The `config().features` words that say an installed bridge answers them.
+export const PRIVATE_FEATURES = { receive: "private_receive", claim: "private_claim", sendBack: "private_send_back" }
+export function privateCan(features, what) {
+    return bridgeCan(features, PRIVATE_FEATURES[what] || "")
+}
+/// A private claim or burn proved on this computer: one place for the time (measured 577 s and
+/// 642 s on a 16 GB Apple M4, 4 threads).
+export const PRIVATE_PROOF_TIME = "about 10 minutes"
+/// The proving wait is checked by itself no more often than this, and only while its own screen
+/// is open and in front (Check now asks at once).
+export const PRIVATE_CHECK_MS = 30000
+/// The one line beside the Private choice on Receive.
+export const PRIVATE_RECEIVE_NOTE = "Private: nobody can link this deposit to your account. Claiming it takes " + PRIVATE_PROOF_TIME + " of proving on this computer."
+/// The private claim's one line, above its button.
+export const PRIVATE_CLAIM_NOTE = "Private: nobody can link the deposit to this account. Your wallet proves the claim on this computer, " + PRIVATE_PROOF_TIME + ", then sends it."
+/// The private send-back's one line, beside the account choice.
+export const PRIVATE_SEND_BACK_NOTE = "From a private account: nobody sees which account it leaves. Your wallet proves the burn on this computer, " + PRIVATE_PROOF_TIME + "; its fee comes from the account's own LEZ."
+/// Under the proving wait: the page may be left.
+export const PRIVATE_LEAVE_LINE = "You can leave this page: your wallet keeps proving. Come back here for the result."
+
+/// The wallet's private accounts on this network, each `Private/<id>` once (cli_accounts).
+export function privateAccounts(accounts) {
+    var out = []
+    ;(Array.isArray(accounts) ? accounts : []).forEach(function(a) {
+        if (!a || a.kind !== "private") return
+        var id = String(a.account || "").replace(/^Private\//, "")
+        if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(id) && out.indexOf("Private/" + id) < 0)
+            out.push("Private/" + id)
+    })
+    return out
+}
+/// Whether a receive (a receives() row, or one made here) goes to a private account.
+export function receiveIsPrivate(row) {
+    return !!row && (row.account_kind === "private" || /^Private\//.test(String(row.account || "")))
+}
+/// A receive's account as the wallet writes it: `Private/<id>` for a private one.
+export function receiveAccountShown(row) {
+    if (!row) return ""
+    var a = String(row.account || "")
+    return receiveIsPrivate(row) && !/^Private\//.test(a) ? "Private/" + a : a
+}
+
+/// What a bridge answer is on the private paths: {kind: "needs" | "job" | "status" | "error" |
+/// "held" | "other", needs, job, status, error}. A `needs` (a first-time gate) carries the
+/// wallet's request; `claim_plan` nests it (`{ok: false, needs: {needs, request, message}}`). A job
+/// is the module's wallet job (`id` "wr-…" or `kind` with `request`); a send-back's status may
+/// carry it as `job`. `names_update` is an older Names that can't sign it.
+export function privateReply(value) {
+    var v = value && typeof value === "object" ? value : null
+    if (v === null) return { kind: "other" }
+    if (v.needs === "names_update") return { kind: "held", status: v }
+    if (v.needs && typeof v.needs === "object" && v.needs.needs) return { kind: "needs", needs: v.needs }
+    if (typeof v.needs === "string" && v.needs !== "") return { kind: "needs", needs: v }
+    if (v.job && typeof v.job === "object" && v.job.id) return { kind: v.stage ? "status" : "job", job: v.job, status: v.stage ? v : null }
+    if (isWalletJob(v)) return { kind: "job", job: v }
+    if (v.ok === false && v.error) return { kind: "error", error: typeof v.error === "object" ? v.error : { code: "", message: String(v.error) } }
+    if (v.stage) return { kind: "status", status: v }
+    return { kind: "other", value: v }
+}
+function isWalletJob(v) {
+    return !!v && typeof v === "object" && typeof v.id === "string" && (v.id.indexOf("wr-") === 0 || (typeof v.request === "string" && typeof v.phase === "string" && typeof v.state === "string"))
+}
+/// The running (or newest) wallet job of `kind` ("claim", or the send-back's) for `subject` (a
+/// deposit or send-back id) in a `jobs()` answer, or null.
+export function privateJobFor(value, kinds, subject) {
+    var list = value && Array.isArray(value.jobs) ? value.jobs : Array.isArray(value) ? value : []
+    var want = Array.isArray(kinds) ? kinds : [kinds]
+    var mine = list.filter(function(j) { return isWalletJob(j) && String(j.subject || "") === String(subject) && (want.length === 0 || want.indexOf(String(j.kind || "")) >= 0) })
+    var running = mine.filter(function(j) { return j.state === "running" })
+    return running.length > 0 ? running[0] : mine.length > 0 ? mine[0] : null
+}
+
+/// A private call's wallet job as the screens show it. `what`: "claim" or "burn". {stage, id,
+/// request, running, headline, card, detail, tone, code, tx, note, started}: stage "checking"
+/// (proposed; the wallet simulates it before its sheet can be approved), "approve" (its sheet
+/// waits for the person), "proving" (approved: checked once more, then proved here), "sending"
+/// (proved; sent, waiting for its block), "done", "failed" (the wallet's check stopped it, or the
+/// proof or send failed), "ended" (rejected, lapsed or cancelled: nothing was signed or sent).
+export function privateJob(job, what) {
+    var j = job && typeof job === "object" ? job : null
+    if (j === null) return null
+    var burn = what === "burn"
+    var noun = burn ? "burn" : "claim"
+    var wr = j.wallet_request && typeof j.wallet_request === "object" ? j.wallet_request : {}
+    var state = String(j.state || "running"), phase = String(j.phase || "approve")
+    var err = j.error && typeof j.error === "object" ? j.error : null
+    var r = function(stage, headline, card, detail, tone) {
+        return { stage: stage, id: String(j.id || ""), request: String(j.request || ""), running: state === "running", headline: headline, card: card,
+                 detail: detail || "", tone: tone, code: err ? String(err.code || "") : "", tx: j.result && j.result.tx ? String(j.result.tx) : j.tx ? String(j.tx) : "",
+                 note: state === "running" && j.note ? String(j.note) : "", started: Number(j.started) || 0 }
+    }
+    if (state === "done")
+        return r("done", burn ? "Burned privately: your wallet proved it and sent it." : "Claimed privately.", burn ? "Burned privately" : "Claimed privately", "", "done")
+    if (state === "cancelled") {
+        // Lapsed while the wallet was still checking it: not "nobody answered".
+        if (wr.state === "expired" && wr.check && wr.check !== "ready")
+            return r("ended", "Your wallet's check took more than 10 minutes, so the request lapsed before it could be approved. Nothing was signed or sent.", "Not sent", "", "problem")
+        return r("ended", approvalEndedLine(wr.state === "expired" || wr.state === "cancelled" ? wr.state : "rejected"), "Not sent", "", "problem")
+    }
+    if (state === "failed") {
+        if (err && err.code === "wallet_check")
+            return r("failed", "Your wallet couldn't check this " + noun + ", so it can't be approved. Nothing was signed or sent.", "Stopped by your wallet's check",
+                     "The reason is on the approval below; reject it there to clear it.", "problem")
+        var said = err && err.message ? String(err.message).replace(/^The Names Wallet says:\s*/, "").replace(/\s*Open the Names app[^.]*\.?\s*$/, "").replace(/\.$/, "") : ""
+        return r("failed", "Your wallet couldn't finish the " + noun + (said !== "" ? ": " + said + "." : "."), "Failed", phase === "submit" || phase === "confirm" ? "It may have been proved but not sent." : "", "problem")
+    }
+    if (phase === "approve")
+        return wr.check === "ready"
+            ? r("approve", "Waiting for your approval.", "Waiting for your approval", "", "ready")
+            : r("checking", "Your wallet is checking the " + noun + " before you approve it.", "Checking it", "", "plain")
+    if (phase === "submit" || phase === "confirm" || phase === "done")
+        return r("sending", "Proved. Sending it and waiting for its block.", "Sending it", "", "wait")
+    return r("proving", "Proving the " + noun + " on this computer: " + PRIVATE_PROOF_TIME + ".", "Proving on this computer", phase === "simulate" ? "Your wallet checks it once more, then proves it." : "", "wait")
+}
+
+/// The proving wait's clock: "4:12 so far · about 10 minutes in all". `since`: when it was
+/// approved (ms; else when it was proposed), `now` ms.
+export function privateElapsed(since, now) {
+    if (!(Number(since) > 0)) return "Proving takes " + PRIVATE_PROOF_TIME + "."
+    var s = Math.max(0, Math.floor((Number(now) - Number(since)) / 1000))
+    var sec = s % 60
+    var text = Math.floor(s / 60) + ":" + (sec < 10 ? "0" : "") + sec + " so far · " + PRIVATE_PROOF_TIME + " in all"
+    return s > 15 * 60 ? text + ". It is taking longer than usual; it goes on." : text + "."
+}
+
+/// A private claim's refusal by its check (`claim_plan`'s `error.code`): {kind, label, action}
+/// with ONE next action. Waits (not final yet, not recorded yet) are amber with Check now.
+export function privateRefusal(code) {
+    var c = String(code || "")
+    if (claimIsWait(c) || c === "busy" || c === "unreachable" || c === "eth_unreachable" || c === "rate_limited")
+        return { kind: "waiting", label: "Check now", action: "check" }
+    return { kind: "problem", label: "Back to the wallet", action: "back" }
+}
+
+/// Where the private claim screen is: "looking" (reading for a claim already with the wallet),
+/// "start", "checking" (the checks), "asking" (proposing), "needs" (a first-time sheet),
+/// "uncertain", "refused" (the checks refused it), or the job's stage (privateJob).
+export function privateClaimStage(s) {
+    var st = s || {}
+    if (st.looking) return "looking"
+    if (st.job) return st.job.stage
+    if (st.checking) return "checking"
+    if (st.asking) return "asking"
+    if (st.needs) return "needs"
+    if (st.uncertain) return "uncertain"
+    if (st.refused) return "refused"
+    return "start"
+}
+
+/// The private claim's steps: Arrived, the first-time questions, Approve, Prove, Claimed.
+export function privateClaimSteps(s) {
+    var st = s || {}
+    var extras = (st.extras || []).map(needsStep)
+    var needs = needsStep(st.needs)
+    if (needs && extras.indexOf(needs) < 0)
+        extras = extras.concat([needs])
+    var keys = ["arrived"].concat(extras, ["approve", "prove", "done"])
+    var titles = { arrived: "Your deposit arrived", connect: "Let the bridge see this account", private_account: "Give the bridge this account",
+                   secret: "Allow the bridge's deposit keys", token_source: "Show the bridged tokens", approve: "Approve the private claim",
+                   prove: "Proving on this computer", done: st.stage === "done" ? "Claimed privately" : "Claim" }
+    var stage = String(st.stage || "start")
+    var now = stage === "needs" ? (needs || "approve") : stage === "proving" ? "prove" : stage === "sending" ? "done"
+        : stage === "failed" && st.failedAt === "prove" ? "prove" : "approve"
+    var at = stage === "done" ? keys.length : keys.indexOf(now)
+    return keys.map(function(k, i) {
+        var state = i < at ? "done" : i === at ? "now" : "later"
+        return { key: k, n: i + 1, total: keys.length, title: titles[k] || k, short: stepShort(k, state), state: state, line: "" }
+    })
+}
+
+/// The private accounts Send back can start from: each private account, with the bridged holding
+/// the wallet lists for it (token_source_holdings) when it lists one, else no amount (the wallet's
+/// simulation checks the balance when it proves the burn). [{key, account, symbol, amount, asset,
+/// private: true}]; `asset.anyAmount` offers every denomination.
+export function privateSendBackSources(accounts, holdings) {
+    var out = []
+    privateAccounts(accounts).forEach(function(acct) {
+        var id = acct.replace(/^Private\//, "")
+        var held = null
+        ;(Array.isArray(holdings) ? holdings : []).forEach(function(src) {
+            ;((src && src.holdings) || []).forEach(function(h) {
+                var sym = String(h.symbol || "")
+                var card = sym === "ETH" ? "wETH" : sym
+                if (held === null && String(h.account || "").replace(/^(Private|Public)\//, "") === id && SEND_BACK_FALLBACK[card] && someAmount(String(h.balance || "0")))
+                    held = { symbol: card, base: String(h.balance), amount: withDecimals(String(h.balance), Number(h.decimals) || SEND_BACK_FALLBACK[card].decimals) }
+            })
+        })
+        var asset = held !== null ? { symbol: held.symbol, base: held.base, amount: held.amount, "private": true }
+            : { symbol: "wETH", base: "", amount: "", "private": true, anyAmount: true }
+        out.push({ key: acct + "|" + asset.symbol, account: acct, symbol: asset.symbol, amount: asset.amount, asset: asset, "private": true })
+    })
+    return out
+}
+
+/// The account a send-back leaves from is private.
+export function sendBackIsPrivate(row) {
+    return !!row && /^Private\//.test(String(row.account || ""))
+}
+
+/// A job's note worth a line on the wait: only the bridge's "the wallet was busy, asking again"
+/// (its other notes repeat the headline, with another time); "" otherwise.
+export function privateNoteShown(note) {
+    var n = String(note || "")
+    return /^Asking your Names Wallet how this stands/.test(n) ? n : ""
 }

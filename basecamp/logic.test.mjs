@@ -1148,6 +1148,105 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     [0, "0.01 wETH on bridge v5: choose bridge v5 in Settings → Bridge to send it back.", "", ""]);
 }
 
+{
+  // The private claim and the private send-back (rfp-022 proposal/PRIVATE-IN-WALLET-SCOPE.md, step 7).
+  const L = await import("./qml/logic.mjs");
+  const PRIV = "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z";
+  // The adapter: every bridge call the private screens make, in one place.
+  check("private adapter: the bridge's calls", L.PRIVATE_BRIDGE, { receive: "make_deposit_request", claimPlan: "claim_plan", claim: "claim", job: "job", jobs: "jobs",
+    sendBackPlan: "send_back_plan", sendBackBurn: "send_back_burn", afterUncertain: "after_uncertain" });
+  check("private adapter: features", [L.privateCan(["private_claim"], "claim"), L.privateCan(["receive"], "receive"), L.privateCan(null, "sendBack"), L.privateCan(["private_send_back"], "nothing")], [true, false, false, false]);
+  // Replies: a first-time question (flat, and claim_plan's nested one), a job, a status carrying one, a refusal, an older Names.
+  const job = { id: "wr-1", kind: "claim", subject: "dep-p1", request: "r1", state: "running", phase: "approve", wallet_request: { state: "pending", check: "ready" } };
+  check("private reply: needs", [L.privateReply({ needs: "secret", request: { request: "r0" } }).kind, L.privateReply({ ok: false, needs: { needs: "connect", request: { request: "r0" } } }).needs.needs], ["needs", "connect"]);
+  check("private reply: job", [L.privateReply(job).kind, L.privateReply({ stage: "approve", job: job }).kind, L.privateReply({ stage: "approve", job: job }).job.id], ["job", "status", "wr-1"]);
+  check("private reply: refusal, older Names, plain", [L.privateReply({ ok: false, error: { code: "not_final", message: "x" } }).error.code, L.privateReply({ needs: "names_update" }).kind, L.privateReply({ ok: true }).kind, L.privateReply(null).kind],
+    ["not_final", "held", "other", "other"]);
+  check("private reply: a public send-back is not a job", L.privateReply({ id: "sb-1", stage: "planned" }).kind, "status");
+  check("private job found again", [L.privateJobFor({ jobs: [Object.assign({}, job, { state: "done", id: "wr-0" }), job] }, ["claim"], "dep-p1").id, L.privateJobFor({ jobs: [job] }, ["claim"], "dep-2"), L.privateJobFor([job], [], "dep-p1").id],
+    ["wr-1", null, "wr-1"]);
+  // The job as the screens say it.
+  const st = (j) => L.privateJob(Object.assign({}, job, j), "claim");
+  check("private job: checking, then the sheet", [st({ wallet_request: { state: "pending", check: "checking" } }).stage, st({}).stage, st({}).tone], ["checking", "approve", "ready"]);
+  check("private job: proving (simulated again first), sending", [st({ phase: "simulate", wallet_request: { state: "approved" } }).stage, st({ phase: "simulate", wallet_request: { state: "approved" } }).detail,
+    st({ phase: "prove" }).headline, st({ phase: "submit" }).stage, st({ phase: "confirm" }).tone],
+    ["proving", "Your wallet checks it once more, then proves it.", "Proving the claim on this computer: about 10 minutes.", "sending", "wait"]);
+  check("private job: done", [st({ state: "done", phase: "done", result: { tx: "ab", ok: true } }).headline, st({ state: "done", result: { tx: "ab" } }).tx, L.privateJob(Object.assign({}, job, { state: "done" }), "burn").card],
+    ["Claimed privately.", "ab", "Burned privately"]);
+  check("private job: the wallet's check stopped it", [st({ state: "failed", error: { code: "wallet_check", message: "The Names Wallet's check stopped this call. Open the Names app to see why." } }).headline, st({ state: "failed", error: { code: "wallet_check" } }).tone],
+    ["Your wallet couldn't check this claim, so it can't be approved. Nothing was signed or sent.", "problem"]);
+  check("private job: failed while proving, in the wallet's words (no 'open the Names app' inside it)", st({ state: "failed", phase: "prove", error: { code: "wallet_failed", message: "The Names Wallet says: proving stopped: out of memory. Open the Names app for the details." } }).headline,
+    "Your wallet couldn't finish the claim: proving stopped: out of memory.");
+  check("private job: failed while sending says it may be proved", st({ state: "failed", phase: "submit", error: { code: "wallet_failed", message: "The Names Wallet says: refused." } }).detail, "It may have been proved but not sent.");
+  check("private job: ended (never says who said no)", [st({ state: "cancelled", wallet_request: { state: "rejected", check: "ready" } }).headline, st({ state: "cancelled", wallet_request: { state: "expired", check: "ready" } }).headline,
+    st({ state: "cancelled", wallet_request: { state: "expired", check: "checking" } }).headline, st({ state: "cancelled", wallet_request: { state: "cancelled" } }).stage],
+    ["The approval was rejected, so nothing was signed or sent.", "Nobody answered the approval within 10 minutes, so nothing was signed or sent.",
+     "Your wallet's check took more than 10 minutes, so the request lapsed before it could be approved. Nothing was signed or sent.", "ended"]);
+  check("private job: a lapse while still checking is not 'nobody answered'", /Nobody answered/.test(st({ state: "cancelled", wallet_request: { state: "expired", check: "checking" } }).headline), false);
+  check("private job: only the busy note shows", [L.privateNoteShown("Asking your Names Wallet how this stands: busy. Asking again shortly."), L.privateNoteShown("Your wallet is proving it on this computer (about 11 minutes, about 9.5 GB of memory).")],
+    ["Asking your Names Wallet how this stands: busy. Asking again shortly.", ""]);
+  check("private job: none", [L.privateJob(null, "claim"), L.privateJob(undefined, "burn")], [null, null]);
+  // The wait's clock.
+  check("private clock", [L.privateElapsed(1000, 1000 + 252000), L.privateElapsed(0, 5), L.privateElapsed(1000, 1000 + 5000)],
+    ["4:12 so far · about 10 minutes in all.", "Proving takes about 10 minutes.", "0:05 so far · about 10 minutes in all."]);
+  check("private clock: past 15 min it says so, and that it goes on", L.privateElapsed(1, 1 + 17 * 60000), "17:00 so far · about 10 minutes in all. It is taking longer than usual; it goes on.");
+  // The screen's stage and steps.
+  check("private claim stage", [L.privateClaimStage({ looking: true }), L.privateClaimStage({}), L.privateClaimStage({ checking: true }), L.privateClaimStage({ asking: true }), L.privateClaimStage({ needs: true }),
+    L.privateClaimStage({ uncertain: true }), L.privateClaimStage({ refused: true }), L.privateClaimStage({ job: { stage: "proving" }, checking: true })],
+    ["looking", "start", "checking", "asking", "needs", "uncertain", "refused", "proving"]);
+  const steps = (s) => L.privateClaimSteps(s).map((x) => (x.state === "done" ? "✓" : x.state === "now" ? ">" : "") + x.short);
+  check("private claim steps", [steps({ stage: "start" }), steps({ stage: "needs", needs: "secret" }), steps({ stage: "proving", extras: ["secret"] }), steps({ stage: "sending" }), steps({ stage: "done" }), steps({ stage: "failed", failedAt: "prove" })],
+    [["✓Arrived", ">Approve", "Prove", "Claim"], ["✓Arrived", ">Keys", "Approve", "Prove", "Claim"], ["✓Arrived", "✓Keys", "✓Approved", ">Prove", "Claim"], ["✓Arrived", "✓Approved", "✓Proved", ">Claim"],
+     ["✓Arrived", "✓Approved", "✓Proved", "✓Claimed"], ["✓Arrived", "✓Approved", ">Prove", "Claim"]]);
+  check("private claim steps: the last says claimed only when done", [L.privateClaimSteps({ stage: "done" }).pop().title, L.privateClaimSteps({ stage: "proving" }).pop().title], ["Claimed privately", "Claim"]);
+  check("private refusals: one action, waits amber", [L.privateRefusal("not_final"), L.privateRefusal("root_not_attested").kind, L.privateRefusal("already_claimed"), L.privateRefusal("wrong_account").label],
+    [{ kind: "waiting", label: "Check now", action: "check" }, "waiting", { kind: "problem", label: "Back to the wallet", action: "back" }, "Back to the wallet"]);
+  // Accounts and rows.
+  const accts = [{ account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", kind: "public" }, { account: PRIV, kind: "private" }, { account: PRIV, kind: "private" }, { account: "Private/short", kind: "private" }];
+  check("private accounts: private only, once, well formed", L.privateAccounts(accts), [PRIV]);
+  check("private receive rows", [L.receiveIsPrivate({ account: PRIV }), L.receiveIsPrivate({ account: "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", account_kind: "private" }), L.receiveIsPrivate({ account: "Public/x" }), L.receiveIsPrivate(null),
+    L.receiveAccountShown({ account: "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", account_kind: "private" })], [true, true, false, false, PRIV]);
+  check("card rows keep the account's kind", L.receiveRowsShown([{ id: "d", symbol: "ETH", amount: "0.1", account: PRIV, account_kind: "private" }], { d: { stage: "claimable" } }, {}, 0, false).rows[0].account_kind, "private");
+  // Make the deposit code: private needs a bridge that makes private codes, never the "Not private" tick.
+  check("make why: private", [L.receiveMakeWhy({ kind: "private", able: true, account: PRIV, ticked: false }), L.receiveMakeWhy({ kind: "private", able: false, account: PRIV }), L.receiveMakeWhy({ kind: "private", able: true, account: "" })],
+    ["", "This LEZ Bridge can't make private codes yet. Update it, or choose Public.", "Choose the account above."]);
+  check("make why: public unchanged", [L.receiveMakeWhy({ account: "A", ticked: false }), L.receiveMakeWhy({ kind: "public", account: "A", ticked: true })], ["Tick “Not private” above to make the code.", ""]);
+  // Send back from a private account: its holding when the wallet lists one, else every amount.
+  const held = [{ token_program: "T", holdings: [{ account: PRIV, account_kind: "private", symbol: "wETH", balance: "100000000000000000", decimals: 18 }] }];
+  const srcs = L.privateSendBackSources(accts, held);
+  check("private sources: the holding", [srcs.length, srcs[0].account, srcs[0].amount, srcs[0].private], [1, PRIV, "0.1", true]);
+  check("private sources: unknown balance offers every amount", [L.privateSendBackSources(accts, []).map((s) => s.asset.anyAmount), L.sendBackAmounts(null, L.privateSendBackSources(accts, [])[0].asset).map((d) => d.text)],
+    [[true], ["0.01", "0.1", "1"]]);
+  check("private sources: a holding caps the amounts", L.sendBackAmounts(null, srcs[0].asset).map((d) => d.text), ["0.01", "0.1"]);
+  check("private send-back", [L.sendBackIsPrivate({ account: PRIV }), L.sendBackIsPrivate({ account: "Public/x" })], [true, false]);
+  check("private send-back steps", L.sendBackSteps({ stage: "proving_burn", private: true }).map((x) => (x.state === "now" ? ">" : x.state === "done" ? "✓" : "") + x.short), ["✓Account", "✓Address", "✓Approved", ">Prove", "Ethereum"]);
+  check("public send-back steps unchanged", L.sendBackSteps({ stage: "approve" }).map((x) => x.key), ["source", "address", "burn", "back"]);
+  // No background polling: a private wait is read every 30 s, on its own screen, in front only.
+  check("private pace", [L.PRIVATE_CHECK_MS >= 30000, L.sendBackAutoMode({ account: PRIV, stage: "approve" }).mode, L.sendBackAutoMode({ account: "Public/x", stage: "approve" }).mode, L.sendBackAutoMode({ account: PRIV, stage: "burned" }).mode],
+    [true, "private", "job", "none"]);
+  check("private pace: when", [L.bridgeNextCheck({ visible: true, frontmost: true, screen: "sendback", now: 1000, items: [{ mode: "private", focused: true }] }),
+    L.bridgeNextCheck({ visible: true, frontmost: false, screen: "sendback", now: 1000, items: [{ mode: "private", focused: true }] }),
+    L.bridgeNextCheck({ visible: true, frontmost: true, screen: "card", now: 1000, items: [{ mode: "private", focused: false }] })], [31000, 0, 0]);
+  // Words: never "official", never "lookup"; one time for the proof.
+  const words = [L.PRIVATE_RECEIVE_NOTE, L.PRIVATE_CLAIM_NOTE, L.PRIVATE_SEND_BACK_NOTE, L.PRIVATE_LEAVE_LINE]
+    .concat(["approve", "simulate", "prove", "submit", "done"].map((p) => st({ phase: p }).headline))
+    .concat(["claim", "burn"].map((w) => L.privateJob(Object.assign({}, job, { state: "failed", error: { code: "wallet_check" } }), w).headline + L.privateJob(Object.assign({}, job, { state: "failed", error: { code: "wallet_check" } }), w).detail));
+  check("private words: no 'official', no 'lookup'", words.filter((w) => /official|look ?up/i.test(w)), []);
+  check("private words: the time said once, as about 10 minutes", [L.PRIVATE_PROOF_TIME, [L.PRIVATE_RECEIVE_NOTE, L.PRIVATE_CLAIM_NOTE, L.PRIVATE_SEND_BACK_NOTE].every((w) => w.indexOf(L.PRIVATE_PROOF_TIME) >= 0)], ["about 10 minutes", true]);
+  const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  // Every string the page shows: never "official", never "lookup" (say "checking a name").
+  const literals = qml.match(/"(?:[^"\\\n]|\\.)*"/g) || [];
+  // (Two older strings say "look up" — the search box's hint and a name page's line — and are left as they are.)
+  check("Main.qml strings: no 'official', no 'lookup'", literals.filter((l) => /official|lookup/i.test(l)), []);
+  // The private wait's timers: one read every 30 s while its screen is open and in front; the 1 s clock reads nothing.
+  check("private timer: 30 s, gated on its screen", /interval: Logic\.PRIVATE_CHECK_MS\s*\n\s*repeat: true\s*\n\s*running: root\.privateWaitOnView\s*\n\s*onTriggered: root\.privatePoll\(\)/.test(qml), true);
+  check("private clock: moves the time only", /interval: 1000\s*\n\s*repeat: true\s*\n\s*running: root\.privateWaitOnView\s*\n\s*onTriggered: root\.privateNow = Date\.now\(\)\s*\n/.test(qml), true);
+  check("private wait: only on its own screen, in front", /readonly property bool privateWaitOnView: section === "wallet" && receiveFrontmost/.test(qml), true);
+  check("private screen: the wallet's own sheet in place", [/ApproveBody \{ visible: root\.appInline && root\.walletView === "pclaim"; inline: true \}/.test(qml), /readonly property bool appInline: appPrivateHere \|\|/.test(qml)], [true, true]);
+  check("private screen: the bridge's calls only through the adapter", (qml.match(/bridgeCall\("(claim|claim_plan|job|jobs|make_deposit_request)"/g) || []).length, 0);
+  check("private screen: every button says what it does at once", [/"Checking…" : pclaimScreen\.stage === "asking" \? "Asking your wallet…"/.test(qml), /root\.receiveAsking \? "Making the code…"/.test(qml)], [true, true]);
+}
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);
 

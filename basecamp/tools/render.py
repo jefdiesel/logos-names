@@ -986,6 +986,175 @@ SCENARIOS["settings-bridge-saved"] = 'root.section = "settings"; root.loadBridge
 MOCKS["settings-bridge-saved"] = _br_mock(send_back_recipients={"recipients": [{"account": "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "chain_id": 11155111, "address": _ADDR, "short": "0x68B5…975d", "last_used": 1}], "chain_id": 11155111})
 _BR_FEATURES += ["send_back_address", "send_back_recipients"]
 
+
+# ── The private claim and the private send-back (rfp-022 proposal/PRIVATE-IN-WALLET-SCOPE.md, step 7):
+# a private choice on Receive, "Claim privately" on an arrived private receive, a private Bridge to
+# Ethereum; the wallet's own sheet in place; the proving wait; each ending. The bridge's answers are
+# what Logic.PRIVATE_BRIDGE reads (claim_plan, claim, job, jobs, send_back_burn). ──
+V5 = "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA"
+PRIV = "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z"
+PV_FEATURES = SB_FEATURES + ["send_back_settle", "bridges", "private_receive", "private_claim", "private_send_back"]
+PV_CONFIG = {"build": {"commit": "pv00001"}, "deployment": {"name": "bridge-test-network-v5", "bridge_program": V5, "release": "proof"}, "features": PV_FEATURES, "notices": {}}
+OLD_CONFIG = dict(PV_CONFIG, features=SB_FEATURES)
+PV_ARR = '[{ id: "dep-p1", symbol: "ETH", amount: "0.1", account: "%s", account_kind: "private" }]' % PRIV
+PV_REG = {"tokens": [{"symbol": "ETH", "decimals": 18, "denoms": [{"index": 0, "value": "10000000000000000", "text": "0.01"}, {"index": 1, "value": "100000000000000000", "text": "0.1"}, {"index": 2, "value": "1000000000000000000", "text": "1"}]}]}
+
+def pv_job(phase, state="running", wr=None, error=None, note=None, ago=60, kind="claim", subject="dep-p1", tx=None, request="r-pv1"):
+    """The module's wallet job view (lez_bridge wallet.rs job_view), as `job(id)` answers it."""
+    wr = wr or {"state": "approved" if phase not in ("approve",) else "pending", "check": "ready", "phase": phase}
+    return {"id": "wr-1792000000001", "kind": kind, "subject": subject, "request": request, "started": "@AGO:%d@" % ago, "state": state, "phase": phase,
+            "wallet_request": wr, "error": error, "result": {"tx": tx, "ok": True} if state == "done" else None, "elapsed_s": ago, "note": note,
+            "can_cancel": state == "running" and phase in ("approve", "simulate", "prove"), "wallet": "names", "prove_estimate_s": 671}
+def js(v):
+    out = json.dumps(v)
+    import re as _re
+    return _re.sub(r'"@AGO:(\d+)@"', lambda m: "Date.now() - %d" % (int(m.group(1)) * 1000), out)
+
+def pv_request(kind_of="claim", check="ready", problem=None, rid="r-pv1"):
+    """A private_call as pending_requests answers it: the wallet's own sheet (provider_private.rs)."""
+    if kind_of == "claim":
+        lines = [PRIV[:14] + "…4Z receives 0.1 (100,000,000,000,000,000 base units) wETH (DbPGo6…BRVJ).", PRIV[:14] + "…4Z receives 19,345,048 LEZ: the bridge's sponsored fee credit, less the fee.",
+                 "Nothing leaves your account.", "Fee: about 5,654,952 LEZ, at most 9,300,135, paid inside the proof from the bridge's sponsored credit."]
+        summary = "Claim 0.1 ETH from Sepolia (deposit dep-p1)"
+        changes = ["Public/END4S7…cXFu: CuV1ct…nDMA's data changes", "wETH (DbPGo6…BRVJ): supply 1,200,000,000,000,000,000 → 1,300,000,000,000,000,000"]
+    else:
+        lines = [PRIV[:14] + "…4Z sends 0.01 (10,000,000,000,000,000 base units) wETH (DbPGo6…BRVJ) to be burned.", "The burn tells bridge v5 (CuV1ct…nDMA) about it, with an exit commitment that hides the Ethereum address.",
+                 "Fee: about 4,903,112 LEZ, at most 8,800,000, paid inside the proof from your account."]
+        summary = "Send back 0.01 ETH to 0xE2C4857976b346F8F9b3a7be714Cd92d0bF68680 on Ethereum (exit 0xe2ba7765…)"
+        changes = ["wETH (DbPGo6…BRVJ): supply 1,300,000,000,000,000,000 → 1,290,000,000,000,000,000", "Public/END4S7…cXFu: CuV1ct…nDMA's data changes"]
+    sheet = None if check != "ready" else {"lines": lines, "public_changes": changes,
+             "privacy": ["Public: the programs it runs (2), the public accounts it reaches and the changes above, the fee reserve, and the time.", "Private: " + PRIV + ", its balance, and the message to it (proven, not shown).",
+                         "Checked: your account's ID appears nowhere in the public state and events this call leaves (the messages between programs aren't checked)."],
+             "programs": [{"program": V5, "label": {"registry": False, "text": None, "kind": None, "verified": None, "stale": None, "upgradeable": None}, "new_for_app": False},
+                          {"program": "5w6nTkftFFDy8mtdpnKpZVetGQJ2WCKdhmpJsAYArbU7", "label": {"registry": False, "text": None, "kind": None, "verified": None, "stale": None, "upgradeable": None}, "new_for_app": False}],
+             "warnings": [], "refusals": [], "refused": False, "digest": "77e1"}
+    return {"id": rid, "kind": "private_call", "app": "lez_bridge", "created": 0, "expires": 4102444800000, "account": PRIV, "check": check, "check_problem": problem,
+            "message_len": 1335 if kind_of == "claim" else 145, "prove_expect": "Proving runs on this computer: about 11 minutes and about 9.5 GB of memory (measured for a bridge claim on an Apple M4 with 16 GB, 4 threads). Other apps may be slow meanwhile.",
+            "app_summary": summary, "sheet": sheet, "choices": [{"account": PRIV, "account_kind": "private", "pays": True, "label": "the account the app asked for", "granted": True}],
+            "zone": "home", "zone_name": "Home", "zone_in_use": True, "zone_removed": False, "publisher": None}
+
+def pv_mock(**bridge):
+    b = {"config": PV_CONFIG, "registry": PV_REG, "receives": {"receives": []}, "jobs": {"jobs": []}, "send_back_link": SB_LINK, "send_back_check": SB_CHECK, "send_backs": {"send_backs": []}}
+    b.update(bridge)
+    return {"bridge": b, "bridgeNet": NET04_V4}
+
+# The card, then Claim privately on the arrived receive dep-p1 (`then`: more JS once it is open).
+PV_CLAIM = CARD_04 % (PV_ARR, '({ "dep-p1": { stage: "claimable" } })', CHECKED + '; root.bridgeConfig = %s; root.openPrivateClaim("dep-p1"); root.againAfter(80, function() { %%s })' % json.dumps(PV_CONFIG))
+def pv_claim(then=""):
+    return PV_CLAIM % then
+def pv_take(job, extra=""):
+    return 'root.pcTakeJob(%s); %s' % (js(job), extra)
+APPROVED_4MIN = 'root.privateApprovedAt = { "wr-1792000000001": Date.now() - 252000 }; '
+def pv_inline(req):
+    return 'root.appRequests = [%s]; root.appChosen = ["%s"]; root.appChosenFor = "%s"' % (json.dumps(req), PRIV, req["id"])
+FAILED_TOOL = "This build of the LEZ 0.4 names tool can't make proofs: it has no in-process prover, and no r0vm was found."
+
+PRIVATE_SCENARIOS = [
+    # Receive: Private is chosen first (the privacy default), its one line, the private accounts.
+    ("receive-private-choice", 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive() }) })', pv_mock()),
+    # The code for a private account (make_deposit_request), then the page as before.
+    ("receive-private-code", 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive(); root.againAfter(200, function() { root.makeReceive() }) }) })',
+     pv_mock(make_deposit_request={"deposit": {"id": "dep-p1", "account": PRIV, "account_kind": "private"}, "symbol": "ETH", "denom_text": "0.1", "request": "logosdep1qyqqqqqqqqqzr7dm2wcgqnmxn3uq7c2yupx7qfguwl6zcw0d2ej8zhwpsa8x4a5xg9ws3xcqp",
+                                     "request_url": "https://nameswallet.app/bridge/#logosdep1qyqqqqqqqqqzr7dm2wcgqnmxn3uq7c2yupx7qfguwl6zcw0d2ej8zhwpsa8x4a5xg9ws3xcqp", "request_qr": {"size": 0, "rows": []},
+                                     "compare": {"first": "a50e0f", "last": "9d21c4", "text": "a50e0f … 9d21c4", "words": ["cream", "laugh", "load", "visual"], "words_text": "cream · laugh · load · visual"},
+                                     "bridge_fee": {"text": "0.1 ETH into " + PRIV[:14] + "…; the bridge fee is 0.0003 ETH (0.3%); you send 0.1003 ETH in all."}, "commitment": "0x" + "a5" * 32})),
+    # The deposit keys asked the first time, answered on the screen.
+    ("receive-private-keys", 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive(); root.againAfter(200, function() { root.makeReceive(); root.againAfter(100, function() { root.appRequests = [{ id: "r-k1", kind: "secret", app: "lez_bridge", account: "%s", scope: "RFP022/deposit", explanation: "The LEZ Bridge gets values made from this account\'s key for its deposit secrets. It can\'t spend from the account.", created: Date.now(), expires: Date.now() + 600000, choices: [{ account: "%s", label: "Private account", granted: true }], publisher: null, checking: false }]; root.appChosen = ["%s"]; root.appChosenFor = "r-k1" }) }) }) })' % (PRIV, PRIV, PRIV),
+     pv_mock(make_deposit_request={"needs": "secret", "request": {"request": "r-k1", "state": "pending"}, "message": "Approve \"RFP022/deposit\" in the Names app."})),
+    # No private account on LEZ 0.4 yet.
+    ("receive-private-noaccount", 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive() }) })',
+     dict(pv_mock(), accounts=[{"account": OWNER, "kind": "public", "label": None, "balance": "1250000", "default": True, "public_key": "ab" * 32}])),
+    # An older LEZ Bridge (no private codes): Public is chosen; choosing Private says why it can't.
+    ("receive-private-old-bridge", 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive(); root.againAfter(200, function() { root.receiveKind = "private" }) }) })',
+     pv_mock(config=OLD_CONFIG)),
+    # The card: a private receive arrived, "Claim privately".
+    ("card-arriving-private", CARD_04 % (PV_ARR, '({ "dep-p1": { stage: "claimable" } })', CHECKED + '; root.bridgeConfig = %s' % json.dumps(PV_CONFIG)), pv_mock()),
+    # The card while its claim is proved here, and a private burn on its way.
+    ("card-private-proving", CARD_04 % (PV_ARR, '({ "dep-p1": { stage: "claimable" } })', CHECKED + '; root.bridgeConfig = %s; root.privateClaimJobs = { "dep-p1": %s }' % (json.dumps(PV_CONFIG), js(pv_job("prove")))), pv_mock()),
+    # Claim privately: the note and the button.
+    ("claim-private-start", pv_claim(), pv_mock()),
+    # The button at once: "Checking…" (the bridge's checks under way).
+    ("claim-private-checking", pv_claim('root.pcChecking = true'), pv_mock()),
+    # A memory warning on a computer under 16 GB.
+    ("claim-private-memory", pv_claim('root.machineMemory = 8 * 1024 * 1024 * 1024'), pv_mock()),
+    # The checks refused it: not final yet (a wait, Check now), already claimed (the way back).
+    ("claim-private-notfinal", pv_claim('root.pcStart()'), pv_mock(claim_plan={"ok": False, "error": {"code": "not_final", "message": "The deposit is not final on Sepolia yet: about 6 minutes to go."}})),
+    ("claim-private-claimed", pv_claim('root.pcStart()'), pv_mock(claim_plan={"ok": False, "error": {"code": "already_claimed", "message": "This deposit is already claimed."}})),
+    # The first-time question (the deposit keys), answered here.
+    ("claim-private-keys", pv_claim('root.pcStart(); root.againAfter(60, function() { root.appRequests = [{ id: "r-k1", kind: "secret", app: "lez_bridge", account: "%s", scope: "RFP022/deposit", explanation: "The LEZ Bridge gets values made from this account\'s key for its deposit secrets. It can\'t spend from the account.", created: Date.now(), expires: Date.now() + 600000, choices: [{ account: "%s", label: "Private account", granted: true }], publisher: null, checking: false }]; root.appChosen = ["%s"]; root.appChosenFor = "r-k1" })' % (PRIV, PRIV, PRIV)),
+     pv_mock(claim_plan={"ok": False, "needs": {"needs": "secret", "request": {"request": "r-k1", "state": "pending"}, "message": "Approve \"RFP022/deposit\" in the Names app."}})),
+    # Proposed: the wallet simulates it before its sheet can be approved.
+    ("claim-private-simulating", pv_claim('root.pcStart(); root.againAfter(60, function() { %s })' % pv_inline(pv_request(check="checking"))),
+     pv_mock(claim_plan={"ok": True, "sponsored": True}, claim=pv_job("approve", wr={"state": "pending", "check": "checking", "phase": None}))),
+    # The wallet's own sheet, in place: "Approve, prove and send".
+    ("claim-private-approve", pv_claim('root.pcStart(); root.againAfter(60, function() { %s })' % pv_inline(pv_request())),
+     pv_mock(claim_plan={"ok": True, "sponsored": True}, claim=pv_job("approve", wr={"state": "pending", "check": "ready", "phase": None}))),
+    # The wallet's check failed (this build's names tool can't prove): the sheet says why; Reject.
+    ("claim-private-check-failed", pv_claim(pv_take(pv_job("approve", state="failed", wr={"state": "pending", "check": "failed", "phase": "plan"}, error={"code": "wallet_check", "message": "The Names Wallet's check stopped this call. Open the Names app to see why."})) + pv_inline(pv_request(check="failed", problem=FAILED_TOOL))), pv_mock()),
+    # Approved: proving on this computer, the clock, the page may be left.
+    ("claim-private-proving", pv_claim(APPROVED_4MIN + pv_take(pv_job("prove"))), pv_mock()),
+    # Re-entry: the claim found with the wallet (jobs()), checked once more before proving.
+    ("claim-private-reopened", pv_claim(''), pv_mock(jobs={"jobs": [pv_job("simulate", ago=95)]})),
+    # The wallet was busy when asked: the wait goes on, in amber.
+    ("claim-private-busy", pv_claim(APPROVED_4MIN + pv_take(pv_job("prove", note="Asking your Names Wallet how this stands: it is busy. Asking again shortly."))), pv_mock()),
+    # Taking longer than usual (17 min).
+    ("claim-private-long", pv_claim('root.privateApprovedAt = { "wr-1792000000001": Date.now() - 1030000 }; ' + pv_take(pv_job("prove"))), pv_mock()),
+    # Check now pressed: "Checking…" at once.
+    ("claim-private-checknow", pv_claim(APPROVED_4MIN + pv_take(pv_job("prove")) + '; root.pcPolling = true'), pv_mock()),
+    # Proved: sent, waiting for its block.
+    ("claim-private-sending", pv_claim(APPROVED_4MIN + pv_take(pv_job("submit"))), pv_mock()),
+    # Done.
+    ("claim-private-done", pv_claim(pv_take(pv_job("done", state="done", tx="9f2c" * 16)) + '; root.pcDetails = true'), pv_mock()),
+    # Failures: the proof or the send failed; rejected; lapsed while still being checked; nobody answered.
+    ("claim-private-failed", pv_claim(APPROVED_4MIN + pv_take(pv_job("prove", state="failed", wr={"state": "failed", "check": "ready", "phase": "prove"}, error={"code": "wallet_failed", "message": "The Names Wallet says: proving stopped: this computer ran out of memory. Open the Names app for the details."}))), pv_mock()),
+    ("claim-private-rejected", pv_claim(pv_take(pv_job("approve", state="cancelled", wr={"state": "rejected", "check": "ready", "phase": None}, error={"code": "wallet_rejected", "message": "You rejected it in the Names app; nothing was signed or sent."}))), pv_mock()),
+    ("claim-private-lapsed", pv_claim(pv_take(pv_job("approve", state="cancelled", wr={"state": "expired", "check": "checking", "phase": "plan"}, error={"code": "wallet_rejected", "message": "Nobody answered it in the Names app within 10 minutes; nothing was signed or sent."}))), pv_mock()),
+    ("claim-private-expired", pv_claim(pv_take(pv_job("approve", state="cancelled", wr={"state": "expired", "check": "ready", "phase": None}, error={"code": "wallet_rejected", "message": "Nobody answered it in the Names app within 10 minutes; nothing was signed or sent."}))), pv_mock()),
+    # A proposal that got no answer: it may be waiting in the Names app; Continue after looking.
+    ("claim-private-uncertain", pv_claim('root.pcStart()'), pv_mock(claim_plan={"ok": True, "sponsored": True}, claim={"__error": "Your Names Wallet didn't answer in time, so this claim may be waiting in the Names app. If it is there, approve or reject it there (approved, the wallet proves and sends it itself, and this deposit then shows as claimed). This app doesn't propose it again for 11 minutes. Nothing was sent from here."})),
+    # The bridge call itself failed (busy): one line, Try again.
+    ("claim-private-error", pv_claim('root.pcStart()'), pv_mock(claim_plan={"__error": "the bridge test network can't be reached (https://lez.nameswallet.app/): connection timed out"})),
+    # An older LEZ Bridge: no private claim; why under the button.
+    ("claim-private-old-bridge", CARD_04 % (PV_ARR, '({ "dep-p1": { stage: "claimable" } })', CHECKED + '; root.bridgeConfig = %s; root.openPrivateClaim("dep-p1")' % json.dumps(OLD_CONFIG)), pv_mock(config=OLD_CONFIG)),
+]
+for _name, _js, _mock in PRIVATE_SCENARIOS:
+    SCENARIOS[_name] = _js
+    MOCKS[_name] = _mock
+
+# Bridge to Ethereum from a private account.
+PV_SB_CARD = 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.bridgeConfig = %s; root.loadBridgeNet(); root.bridgedHoldings = %s; %%s }) })' % (
+    json.dumps(PV_CONFIG), json.dumps([{"token_program": "5w6nTkftFFDy8mtdpnKpZVetGQJ2WCKdhmpJsAYArbU7", "app": "lez_bridge", "holdings": [{"account": PRIV, "account_kind": "private", "definition": "DbPGo6FeRLp7NaUWxQGC1WXpJkSQe1jbAqYVMQkCuuPw", "symbol": "wETH", "balance": "100000000000000000", "decimals": 18}]}]))
+PV_SB_ID = "sb-p1"
+def pv_sb_focus(stage, job, extra=""):
+    view = sb_view(stage, id=PV_SB_ID, account=PRIV, fee_payer="Paid inside the proof from your account.", privacy="A private burn publishes the amount and an exit commitment; the account it leaves and the Ethereum address stay hidden until the release.")
+    jobs = {"jobs": [job]} if job else {"jobs": []}
+    js_ = PV_SB_CARD % ('root.sendBacksLoaded = true; root.sendBacks = [{ id: "%s", amount: "0.01 ETH", account: "%s", recipient: "%s", words: "maple · tiger · seven · lamp", stage: "%s" }]; root.openSendBack("", null, "%s"); root.sbStatuses = { "%s": %s }; root.againAfter(50, function() { root.sbAskNow = false; root.receiveAskNow = false; root.sbScheduleNext() }); %s'
+                       % (PV_SB_ID, PRIV, SB_RECIPIENT, stage, PV_SB_ID, PV_SB_ID, json.dumps(view), extra))
+    return js_, pv_mock(send_backs={"send_backs": [view]}, send_back_status=view, jobs=jobs)
+
+PRIVATE_SB = [
+    # The accounts to send from: the public ones as before, then the private ones (proved here).
+    ("sendback-private-choose", PV_SB_CARD % 'root.againAfter(150, function() { root.openSendBack("", null) })', pv_mock()),
+    # A private account chosen: its amounts, then the address step with its line.
+    ("sendback-private-address", PV_SB_CARD % 'root.againAfter(120, function() { root.openSendBack("", null); root.againAfter(120, function() { root.sbPick(root.sbPrivateSources[0]); root.sbDenom = 0 }) })', pv_mock()),
+    # The burn proposed: the address and its words, then the wallet's own sheet in place.
+    ("sendback-private-approve", *pv_sb_focus("approve", pv_job("approve", kind="redeem", subject=PV_SB_ID, wr={"state": "pending", "check": "ready", "phase": None}), 'root.againAfter(120, function() { %s })' % pv_inline(pv_request("burn")))),
+    # Approved: proving the burn on this computer.
+    ("sendback-private-proving", *pv_sb_focus("approve", pv_job("prove", kind="redeem", subject=PV_SB_ID), APPROVED_4MIN)),
+    # The proof failed.
+    ("sendback-private-failed", *pv_sb_focus("approve", pv_job("prove", state="failed", kind="redeem", subject=PV_SB_ID, wr={"state": "failed", "check": "ready", "phase": "prove"}, error={"code": "wallet_failed", "message": "The Names Wallet says: the sequencer refused it: the account doesn't hold 0.01 wETH. Open the Names app for the details."}), APPROVED_4MIN)),
+    # Sent: the send-back's own stages follow (burned, then Ethereum records it).
+    ("sendback-private-burned", *pv_sb_focus("burned", pv_job("done", state="done", kind="redeem", subject=PV_SB_ID, tx="9f2c" * 16))),
+]
+for _name, _js, _mock in PRIVATE_SB:
+    SCENARIOS[_name] = _js
+    MOCKS[_name] = _mock
+def _ago(text):
+    """A job's start in a mock ("@AGO:n@"): n seconds before this render, in ms."""
+    import re as _re, time as _time
+    return _re.sub(r'"@AGO:(\d+)@"', lambda m: str(int(_time.time() * 1000) - int(m.group(1)) * 1000), text)
+HEIGHTS = {name: 2100 for name in ("claim-private-approve", "claim-private-simulating", "claim-private-check-failed", "sendback-private-approve")}
+
 def main():
     qml, out_dir = sys.argv[1], sys.argv[2]
     wanted = sys.argv[3:] or list(SCENARIOS)
@@ -1006,11 +1175,11 @@ def main():
                                "log_tail": "proving the change on this machine...\nError: the transaction was refused: out of gas"} if scenario == "cli-failed"
                               else {"id": "hopper-1792000000000", "name": "hopper", "kind": "set_text", "started": 1792000000000, "finished": None, "exit": None, "state": "running", "log_tail": "proving the change on this machine..."}), "records": json.dumps(RECORDS),
             "registry": "null" if scenario == "unset" else json.dumps("DbYLkKwd2b13bQhceVj351mpPw7QmRzEjRT2EfU56CKH"),
-            "mock": json.dumps(MOCKS.get(scenario, {})).replace('"@SOON@"', str(int(__import__("time").time()) + 1500)).replace('"@HOUR@"', str(int(__import__("time").time()) + 3400)),
+            "mock": _ago(json.dumps(MOCKS.get(scenario, {}))).replace('"@SOON@"', str(int(__import__("time").time()) + 1500)).replace('"@HOUR@"', str(int(__import__("time").time()) + 3400)),
             "bridge_key": "" if scenario == "get-tokens" else "8e3b0f4a2c71d95e6a0b4c8d2f1e7a3954c6b0d8e2f4a6c8b0d2e4f6a8c0b2d4",
             "home_channel": HOME_CHANNEL,
             "bridge_net": json.dumps(NET04),
-            "scenario": (SCENARIOS[scenario] % dict(filled, zone_request=zone_request(scenario == "approve-zone"))) if "%(zone" in SCENARIOS[scenario] else SCENARIOS[scenario], "out": out, "height": 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "register-net04", "wallet-names-net04", "send-net04", "name", "settings-accounts", "settings-oldcli", "settings-account-new", "settings-network") or scenario.startswith("settings-zones") or scenario.startswith("settings-bridge") or scenario.startswith("backup") else 2000 if scenario.startswith("approve-private") or scenario.startswith("approve-relayed") else 1500 if scenario.startswith("card-sendback") or scenario.startswith("sendback-") else 1100 if scenario.startswith("approve-") and "zone" in scenario else 1500 if scenario.startswith("get-tokens") or scenario.startswith("wallet") or scenario.startswith("claim") or scenario.startswith("card-arriving") else 1100 if scenario.startswith("receive-") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1100 if scenario.startswith("inscribe") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
+            "scenario": (SCENARIOS[scenario] % dict(filled, zone_request=zone_request(scenario == "approve-zone"))) if "%(zone" in SCENARIOS[scenario] else SCENARIOS[scenario], "out": out, "height": HEIGHTS[scenario] if scenario in HEIGHTS else 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "register-net04", "wallet-names-net04", "send-net04", "name", "settings-accounts", "settings-oldcli", "settings-account-new", "settings-network") or scenario.startswith("settings-zones") or scenario.startswith("settings-bridge") or scenario.startswith("backup") else 2000 if scenario.startswith("approve-private") or scenario.startswith("approve-relayed") else 1500 if scenario.startswith("card-sendback") or scenario.startswith("sendback-") else 1100 if scenario.startswith("approve-") and "zone" in scenario else 1500 if scenario.startswith("get-tokens") or scenario.startswith("wallet") or scenario.startswith("claim") or scenario.startswith("card-arriving") else 1100 if scenario.startswith("receive-") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1100 if scenario.startswith("inscribe") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
         }
         # Beside Main.qml, so its relative imports (logic.mjs) resolve.
         with tempfile.NamedTemporaryFile("w", suffix=".qml", delete=False, dir=os.path.join(HERE, "..", "qml")) as handle:

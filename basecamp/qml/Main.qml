@@ -981,6 +981,8 @@ Item {
     readonly property string bridgeSetupNow: Logic.bridgeSetup({ list: installedList, answers: claimBridgeAnswers, checkWith: claimCheckWith, features: bridgeConfig !== null ? bridgeFeatures : null })
     readonly property var bridgeLabels: [["JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", "bridge v2"], ["4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr", "bridge v3"], [Logic.BRIDGE_V4_PROGRAM, "bridge v4"], [Logic.BRIDGE_V5_PROGRAM, "bridge v5"]]
     readonly property string claimAccount: claimCheck !== null && claimCheck.ok && claimCheck.deposit ? String(claimCheck.deposit.account || "") : ""
+    // The account this app's own bridge screen is for: the claim file's, or the private claim's.
+    readonly property string bridgeHintAccount: walletView === "pclaim" && pcRow !== null ? Logic.receiveAccountShown(pcRow) : claimAccount
     readonly property string claimAccountProblemNow: cliAccounts === null ? "" : Logic.claimAccountProblem(claimAccount, cliAccounts)
     readonly property var claimBridgeNow: Logic.claimBridge(claimCheck !== null && claimCheck.call ? claimCheck.call.program : "", bridgePrograms, bridgeLabels)
     readonly property string claimStageNow: Logic.claimStage({ missing: claimMissing, looking: claimBridgeAnswers === null, job: depositClaimJob, uncertain: claimUncertain, needs: claimNeeds,
@@ -1239,6 +1241,15 @@ Item {
     property int receiveDenom: 1
     property string receiveAccount: ""
     property bool receivePublicOk: false
+    // Private or public: chosen by the person ("" until then: private, the privacy default, when
+    // the bridge makes private codes, else public). A private code's claim is proved here.
+    property string receiveKind: ""
+    property string receivePrivateAccount: ""
+    readonly property bool receivePrivateAble: Logic.privateCan(bridgeFeatures, "receive")
+    readonly property string receiveKindNow: receiveKind !== "" ? receiveKind : receivePrivateAble ? "private" : "public"
+    readonly property var receivePrivateList: Logic.privateAccounts(cliAccounts)
+    readonly property string receivePrivateNow: receivePrivateList.indexOf(receivePrivateAccount) >= 0 ? receivePrivateAccount : receivePrivateList.length > 0 ? receivePrivateList[0] : ""
+    readonly property bool receiveCanMake: receiveKindNow === "private" ? receivePrivateAble && receivePrivateNow !== "" : receivePublicOk && receiveAccountNow !== ""
     property bool receiveAsking: false
     property var receiveNeeds: null
     property string receiveNeedsState: ""
@@ -1296,6 +1307,7 @@ Item {
         receiveNeeds = null
         receiveDetails = false
         receivePublicOk = false
+        receiveKind = ""
         receiveMissing = false
         receiveFocus = typeof focusId === "string" ? focusId : Logic.receiveInProgress(receives, receiveStatuses, receiveCodes)
         receiveResult = receiveFocus !== "" && receiveCodes[receiveFocus] ? receiveCodes[receiveFocus]
@@ -1406,9 +1418,14 @@ Item {
     /// The deposit code for the chosen amount and account. A public account only after the person
     /// has read the "not private" line (the module refuses it without "true").
     function makeReceive(switched) {
-        if (receiveAsking || receiveAccountNow === "" || !receivePublicOk || receiveHoldNow !== "")
+        if (receiveAsking || !receiveCanMake || receiveHoldNow !== "")
             return
-        receiveAccount = receiveAccountNow
+        var priv = receiveKindNow === "private"
+        var into = priv ? receivePrivateNow : receiveAccountNow
+        if (priv)
+            receivePrivateAccount = into
+        else
+            receiveAccount = into
         receiveAsking = true
         receiveError = ""
         // New codes are made on the bundled bridge's default (v4): a claim file for another vault
@@ -1435,7 +1452,11 @@ Item {
             }, 30000, false)
             return
         }
-        bridgeCall("make_public_deposit_request", [receiveToken, String(receiveDenom), receiveAccount, "true"], function(value) {
+        // A private code: the bridge's private deposit request (Logic.PRIVATE_BRIDGE); a public one
+        // only after the "Not private" tick (the bridge refuses it without "true").
+        var method = priv ? Logic.PRIVATE_BRIDGE.receive : "make_public_deposit_request"
+        var args = priv ? [receiveToken, String(receiveDenom), into] : [receiveToken, String(receiveDenom), into, "true"]
+        bridgeCall(method, args, function(value) {
             receiveAsking = false
             var r = Logic.receiveReply(value)
             if (r.kind === "needs" && Logic.needsWithoutRequest(value) !== "") {
@@ -1459,7 +1480,7 @@ Item {
             if (value.deposit && value.deposit.id) {
                 var id = String(value.deposit.id)
                 if (!receives.some(function(x) { return x.id === id }))
-                    receives = [{ id: id, symbol: String(value.symbol || ""), amount: String(value.denom_text || ""), account: receiveAccount }].concat(receives)
+                    receives = [{ id: id, symbol: String(value.symbol || ""), amount: String(value.denom_text || ""), account: into, account_kind: priv ? "private" : "public" }].concat(receives)
                 // Followed from here on: kept for this window, so the screen can show it again.
                 var codes = receiveCodes
                 codes[id] = Object.assign({ made_at: Date.now() }, value)
@@ -1781,8 +1802,9 @@ Item {
     readonly property var sbFocusStatus: sbFocus !== "" ? (sbStatuses[sbFocus] || (sbFocusRow !== null ? { stage: sbFocusRow.stage } : null)) : null
     readonly property var sbProgressNow: Logic.sendBackProgress(sbFocusStatus, receiveNow / 1000)
     readonly property var sbStepsNow: Logic.sendBackSteps({
-        stage: sbFocus !== "" ? (sbProgressNow.stage === "checking" ? "planned" : sbProgressNow.stage) : sbNeeds !== null ? "needs" : sbDenom >= 0 ? "address" : "choose",
-        needs: sbNeeds !== null ? sbNeeds.needs : "", extras: sbExtras })
+        stage: sbFocus !== "" && sbJobView !== null && sbJobView.stage !== "done" ? (sbJobView.stage === "proving" || sbJobView.stage === "sending" || sbJobView.code === "wallet_failed" ? "proving_burn" : "approve")
+            : sbFocus !== "" ? (sbProgressNow.stage === "checking" ? "planned" : sbProgressNow.stage) : sbNeeds !== null ? "needs" : sbDenom >= 0 ? "address" : "choose",
+        needs: sbNeeds !== null ? sbNeeds.needs : "", extras: sbExtras, "private": sbFromPrivate })
     readonly property var sbRowsNow: Logic.sendBackRowsShown(sendBacks, sbStatuses, sbReceivedAt, receiveNow)
     // "next check in N min" only for a gentle check of the send-back on screen (never a known time).
     readonly property double sbNextShown: walletView === "sendback" && sbFocusStatus !== null && Logic.sendBackAutoMode(sbFocusStatus).mode === "gentle" ? sbNextAt : 0
@@ -1824,6 +1846,8 @@ Item {
                     loadReceiveRegistry()
                 else
                     sbAskNow = true
+                if (sbFocus !== "" && sbFromPrivate && sbJob === null)
+                    sbFindJob(sbFocus)
                 if (sbFocus === "" && sbAsset !== null && sbAmounts.length === 1 && sbDenom < 0)
                     sbDenom = sbAmounts[0].index
             }, function(message, kind) {
@@ -1925,14 +1949,80 @@ Item {
             console.log("names_ui: send back: send_back_plan:", kind, message)
         }, 180000, false)
     }
+    // From a private account (rfp-022 PRIVATE-IN-WALLET-SCOPE.md G6): the burn is a private call
+    // the bridge proposes to this wallet; its sheet is the step here, then the wallet proves it on
+    // this computer and sends it. The job is read only while this screen is open and in front
+    // (every 30 s) and on Check now; once it is sent, the send-back goes on as before.
+    property var sbJobs: ({})              // send-back id → its burn's wallet job (the module's job view)
+    property bool sbJobPolling: false
+    property double sbJobCheckedAt: 0
+    property bool sbJobCheckFailed: false
+    readonly property var sbJob: sbFocus !== "" ? (sbJobs[sbFocus] || null) : null
+    readonly property var sbJobView: Logic.privateJob(sbJob, "burn")
+    readonly property bool sbPrivateAble: bridgeConfig !== null && Logic.privateCan(bridgeFeatures, "sendBack")
+    readonly property var sbPrivateSources: sbPrivateAble ? Logic.privateSendBackSources(cliAccounts, bridgedHoldings) : []
+    readonly property bool sbFromPrivate: Logic.sendBackIsPrivate(sbFocusRow !== null ? sbFocusRow : { account: sbAccount })
+    function sbTakeJob(id, job) {
+        var all = sbJobs
+        all[id] = job
+        sbJobs = all
+        sbJobsChanged()
+        sbJobCheckedAt = Date.now()
+        var v = Logic.privateJob(job, "burn")
+        // Sent: the send-back's own stages follow (the burn's block, then Ethereum).
+        if (v !== null && v.stage === "done") {
+            sbAskNow = true
+            loadTokens()
+        }
+    }
+    function sbJobPoll() {
+        if (sbJobPolling || sbJob === null || !sbJob.id)
+            return
+        sbJobPolling = true
+        var id = sbFocus
+        bridgeCall(Logic.PRIVATE_BRIDGE.job, [String(sbJob.id)], function(value) {
+            sbJobPolling = false
+            sbJobCheckFailed = false
+            if (value && value.id)
+                sbTakeJob(id, value)
+        }, function(message, kind) {
+            sbJobPolling = false
+            sbJobCheckFailed = true
+            sbJobCheckedAt = Date.now()
+            console.log("names_ui: send back: private job:", kind, message)
+        }, 90000)
+    }
+    /// A private send-back opened again: its burn's job, if the wallet still has it (read only).
+    function sbFindJob(id) {
+        bridgeCall(Logic.PRIVATE_BRIDGE.jobs, [], function(value) {
+            var j = Logic.privateJobFor(value, [], id)
+            if (j !== null)
+                sbTakeJob(id, j)
+        }, function(message, kind) { console.log("names_ui: send back: jobs:", kind, message) }, 60000)
+    }
+
     function sbBurn() {
         if (sbAsking || sbFocus === "")
             return
         sbAsking = true
         sbError = ""
         var id = sbFocus
-        bridgeCall("send_back_burn", [id, "{}"], function(value) {
+        var fromPrivate = sbFromPrivate
+        bridgeCall(Logic.PRIVATE_BRIDGE.sendBackBurn, [id, "{}"], function(value) {
             sbAsking = false
+            // From a private account: the wallet job to follow (or the status carrying it).
+            var pr = fromPrivate ? Logic.privateReply(value) : null
+            if (pr !== null && pr.job) {
+                if (pr.status) {
+                    var st = sbStatuses
+                    st[id] = pr.status
+                    sbStatuses = st
+                    sbStatusesChanged()
+                }
+                sbTakeJob(id, pr.job)
+                console.log("names_ui: send back: private burn proposed:", pr.job.id)
+                return
+            }
             if (value && value.needs === "names_update") {
                 sbNamesOld = true
                 sbError = Logic.sendBackBurnHeld(value)
@@ -1996,7 +2086,7 @@ Item {
         var onScreen = walletView === "sendback"
         var rows = onScreen ? sendBacks.filter(function(x) { return x.id === sbFocus }) : sendBacks
         var items = rows.map(function(x) {
-            var m = Logic.sendBackAutoMode(sbStatuses[x.id] || { stage: x.stage })
+            var m = Logic.sendBackAutoMode(Object.assign({ account: x.account }, sbStatuses[x.id] || { stage: x.stage }))
             return { mode: m.mode, at: m.at, focused: onScreen && x.id === sbFocus }
         })
         sbNextAt = Logic.bridgeNextCheck({ now: Date.now(), visible: receiveWatching, frontmost: receiveFrontmost, screen: onScreen ? "sendback" : "card", items: items })
@@ -2032,7 +2122,7 @@ Item {
         var open = sendBacks.filter(function(x) {
             var st = sbStatuses[x.id] ? sbStatuses[x.id].stage : x.stage
             return st !== "released" && (st !== "planned" || x.id === onScreen) && (onScreen === "" || x.id === onScreen)
-                && (asked || Logic.sendBackAutoMode(sbStatuses[x.id] || { stage: x.stage }).mode !== "none")
+                && (asked || Logic.sendBackAutoMode(Object.assign({ account: x.account }, sbStatuses[x.id] || { stage: x.stage })).mode !== "none")
         })
         if (open.length === 0) {
             sbCheckedAt = Date.now()
@@ -2764,6 +2854,275 @@ Item {
         if (depositClaimJob === null)
             return
         bridgeCall("relayed_claim_cancel", [depositClaimJob.id], function(value) { depositClaimJob = value }, function(message) { claimError = sentence(message); console.log("names_ui: claim:", claimError) }, 120000, false)
+    }
+
+    // ── Claim privately (rfp-022 proposal/PRIVATE-IN-WALLET-SCOPE.md, step 7): a receive into a
+    //    private account. The LEZ Bridge checks it and proposes a private call to this wallet
+    //    (Logic.PRIVATE_BRIDGE); this app's own sheet, "Approve, prove and send", is the step, in
+    //    place; the wallet then proves on this computer (Logic.PRIVATE_PROOF_TIME) and sends it.
+    //    Nothing is read by itself except while this screen is open and in front, every 30 s
+    //    (Logic.PRIVATE_CHECK_MS), and on Check now. ──
+    property string pcDeposit: ""          // the receive being claimed
+    property var pcPlan: null              // claim_plan's answer (the checks), once it passed
+    property var pcRefused: null           // claim_plan's refusal: {code, message}
+    property bool pcChecking: false        // claim_plan on its way
+    property bool pcAsking: false          // claim (the proposal) on its way
+    property bool pcLooking: false         // reading for a claim already with the wallet
+    property var pcNeeds: null             // a first-time question: {needs, request, message}
+    property string pcNeedsThen: ""        // what goes on once it is approved: "start" | "claim"
+    property var pcExtras: []
+    property string pcUncertain: ""        // the bridge's words after a proposal that got no answer
+    property var pcJob: null               // the wallet job (the module's job view)
+    property bool pcPolling: false
+    property double pcCheckedAt: 0
+    property bool pcCheckFailed: false
+    property string pcError: ""
+    property bool pcDetails: false
+    property var privateApprovedAt: ({})   // job id → when it was approved here (ms): the wait's clock
+    property var privateClaimJobs: ({})    // deposit id → its claim job, for the card while Names is open
+    property double privateNow: Date.now()
+    readonly property var pcRow: pcDeposit === "" ? null : (receives.filter(function(x) { return x.id === pcDeposit })[0] || null)
+    readonly property var pcJobNow: Logic.privateJob(pcJob, "claim")
+    readonly property string pcStageNow: Logic.privateClaimStage({ looking: pcLooking, job: pcJobNow, checking: pcChecking, asking: pcAsking,
+        needs: pcNeeds !== null, uncertain: pcUncertain !== "", refused: pcRefused !== null })
+    readonly property bool privateClaimAble: bridgeConfig === null || Logic.privateCan(bridgeFeatures, "claim")
+
+    /// The Claim button of a receive that arrived: a private one is claimed privately (proved
+    /// here), a public one by the bridge's relay as before.
+    function claimArrived(id) {
+        var row = receives.filter(function(x) { return x.id === id })[0] || null
+        if (Logic.receiveIsPrivate(row))
+            openPrivateClaim(id)
+        else
+            claimReceive(id)
+    }
+    /// Opens Claim privately for the receive `id`: a claim already with the wallet is shown again
+    /// (jobs(): read only), else the Claim button.
+    function openPrivateClaim(id) {
+        walletView = "pclaim"
+        pcDeposit = id
+        pcPlan = null
+        pcRefused = null
+        pcNeeds = null
+        pcUncertain = ""
+        pcError = ""
+        pcDetails = false
+        pcExtras = []
+        pcCheckFailed = false
+        pcJob = privateClaimJobs[id] || null
+        pcLooking = pcJob === null
+        bridgeCall(Logic.PRIVATE_BRIDGE.jobs, [], function(value) {
+            pcLooking = false
+            var j = Logic.privateJobFor(value, ["claim"], id)
+            if (j !== null && pcDeposit === id && (j.state === "running" || pcJob !== null))
+                pcTakeJob(j)
+        }, function(message, kind) {
+            pcLooking = false
+            console.log("names_ui: private claim: jobs:", kind, message)
+        }, 60000)
+    }
+    function leavePrivateClaim() {
+        walletView = "home"
+    }
+    /// "Claim privately": the bridge's checks first (nothing proposed but a first-time question),
+    /// then the claim is proposed to this wallet; its sheet comes up here.
+    function pcStart() {
+        if (pcChecking || pcAsking || pcDeposit === "")
+            return
+        pcError = ""
+        pcRefused = null
+        pcChecking = true
+        var id = pcDeposit
+        bridgeCall(Logic.PRIVATE_BRIDGE.claimPlan, [id], function(value) {
+            pcChecking = false
+            var r = Logic.privateReply(value)
+            if (r.kind === "needs") {
+                pcTakeNeeds(r.needs, "start")
+                return
+            }
+            if (r.kind === "error") {
+                pcRefused = r.error
+                console.log("names_ui: private claim refused:", r.error.code || "", r.error.message || "")
+                return
+            }
+            pcPlan = value
+            pcPropose(false)
+        }, function(message, kind) {
+            pcChecking = false
+            pcError = sentence(kind === "busy" ? "The LEZ Bridge is still answering an earlier call. Nothing was sent; try again." : message)
+            console.log("names_ui: private claim: claim_plan:", kind, message)
+        }, 180000, false)
+    }
+    /// Proposes the claim (never by itself: it proposes). `after`: the person looked after a
+    /// proposal that got no answer.
+    function pcPropose(after) {
+        if (pcAsking || pcDeposit === "")
+            return
+        pcAsking = true
+        pcUncertain = ""
+        pcError = ""
+        var options = {}
+        if (after === true)
+            options[Logic.PRIVATE_BRIDGE.afterUncertain] = true
+        bridgeCall(Logic.PRIVATE_BRIDGE.claim, [pcDeposit, JSON.stringify(options)], function(value) {
+            pcAsking = false
+            var r = Logic.privateReply(value)
+            if (r.kind === "needs") {
+                pcTakeNeeds(r.needs, "claim")
+                return
+            }
+            if (r.kind === "job") {
+                pcTakeJob(r.job)
+                console.log("names_ui: private claim proposed:", r.job.id)
+                return
+            }
+            pcError = "The LEZ Bridge gave no claim to follow. Nothing was sent; try again."
+        }, function(message, kind) {
+            pcAsking = false
+            if (/didn't answer in time|may be waiting in the Names app/i.test(String(message)))
+                pcUncertain = sentence(message)
+            else
+                pcError = sentence(kind === "busy" ? "The LEZ Bridge is still answering an earlier call. Nothing was sent; try again." : message)
+            console.log("names_ui: private claim: claim:", kind, message)
+        }, 240000, false)
+    }
+    function pcTakeNeeds(n, then) {
+        if (Logic.needsWithoutRequest(n) !== "") {
+            pcError = sentence(Logic.needsWithoutRequest(n))
+            return
+        }
+        var key = Logic.needsStep(n.needs)
+        if (pcExtras.indexOf(key) < 0)
+            pcExtras = pcExtras.concat([key])
+        pcNeeds = n
+        pcNeedsThen = then
+    }
+    function pcTakeJob(j) {
+        pcJob = j
+        pcCheckedAt = Date.now()
+        var all = privateClaimJobs
+        all[pcDeposit] = j
+        privateClaimJobs = all
+        privateClaimJobsChanged()
+        var v = Logic.privateJob(j, "claim")
+        if (v !== null && v.stage === "done") {
+            receiveClaimed(pcDeposit, j.block || null)
+            loadTokens()
+        }
+    }
+    /// One read of the claim on the screen: its job, or (a first-time question answered elsewhere)
+    /// that question.
+    function pcPoll() {
+        if (pcPolling)
+            return
+        if (pcNeeds !== null) {
+            var rid = pcNeeds.request ? String(pcNeeds.request.request || "") : ""
+            if (rid === "")
+                return
+            pcPolling = true
+            bridgeCall("wallet_request", [rid], function(value) {
+                pcPolling = false
+                pcCheckedAt = Date.now()
+                var state = value && value.state ? String(value.state) : ""
+                if (state === "approved" || state === "done")
+                    pcNeedsAnswered(true)
+                else if (state === "rejected" || state === "expired" || state === "cancelled") {
+                    pcNeeds = null
+                    pcError = Logic.approvalEndedLine(state)
+                }
+            }, function() { pcPolling = false; pcCheckFailed = true }, 60000)
+            return
+        }
+        if (pcJob === null || !pcJob.id)
+            return
+        pcPolling = true
+        var deposit = pcDeposit
+        bridgeCall(Logic.PRIVATE_BRIDGE.job, [String(pcJob.id)], function(value) {
+            pcPolling = false
+            pcCheckFailed = false
+            if (value && value.id && deposit === pcDeposit)
+                pcTakeJob(value)
+        }, function(message, kind) {
+            pcPolling = false
+            pcCheckFailed = true
+            pcCheckedAt = Date.now()
+            console.log("names_ui: private claim: job:", kind, message)
+        }, 90000)
+    }
+    function pcNeedsAnswered(approved) {
+        var then = pcNeedsThen
+        pcNeeds = null
+        if (!approved) {
+            pcError = Logic.approvalEndedLine("rejected")
+            return
+        }
+        if (then === "claim")
+            pcPropose(false)
+        else
+            pcStart()
+    }
+
+    /// The private wait on screen (a claim or a send-back's burn being approved, proved or sent):
+    /// read every 30 s only while its screen is open and in front; a clock moves its elapsed time.
+    readonly property bool privateWaitOnView: section === "wallet" && receiveFrontmost
+        && ((walletView === "pclaim" && (pcNeeds !== null || (pcJobNow !== null && pcJobNow.running)))
+            || (walletView === "sendback" && sbJobView !== null && sbJobView.running))
+    function privatePoll() {
+        if (walletView === "pclaim")
+            pcPoll()
+        else if (walletView === "sendback")
+            sbJobPoll()
+    }
+    Timer {
+        interval: Logic.PRIVATE_CHECK_MS
+        repeat: true
+        running: root.privateWaitOnView
+        onTriggered: root.privatePoll()
+    }
+    Timer {
+        interval: 1000
+        repeat: true
+        running: root.privateWaitOnView
+        onTriggered: root.privateNow = Date.now()
+    }
+    /// The wait's clock starts when it was approved here, else when it was proposed.
+    function privateSince(job) {
+        if (!job || !job.id)
+            return 0
+        return Number(privateApprovedAt[job.id]) || Number(job.started) || 0
+    }
+    /// A request this app's own private screen asked for (its first-time question, or its private
+    /// call): drawn on that screen as its step. "pclaim-needs" | "pclaim-job" | "sendback-job" | "".
+    function privateRequestHere(request) {
+        if (request === null || request === undefined || request.app !== "lez_bridge" || section !== "wallet")
+            return ""
+        var id = String(request.id)
+        if (walletView === "pclaim") {
+            if (pcNeeds !== null && pcNeeds.request && String(pcNeeds.request.request || "") === id)
+                return "pclaim-needs"
+            if (request.kind === "private_call" && pcJob !== null && (String(pcJob.request || "") === id || (pcJob.state === "running" && String(pcJob.request || "") === "")))
+                return "pclaim-job"
+        }
+        if (walletView === "sendback" && request.kind === "private_call" && sbJob !== null && (String(sbJob.request || "") === id || (sbJob.state === "running" && String(sbJob.request || "") === "")))
+            return "sendback-job"
+        return ""
+    }
+    readonly property bool appPrivateHere: privateRequestHere(appRequest) !== ""
+    /// This screen's own request was answered here: the screen goes on at once (one read), with
+    /// no notice at the top of the page.
+    function privateAnswered(where, request, approved) {
+        if (where === "pclaim-needs") {
+            pcNeedsAnswered(approved)
+            return
+        }
+        var job = where === "pclaim-job" ? pcJob : sbJob
+        if (approved && job && job.id) {
+            var at = privateApprovedAt
+            at[job.id] = Date.now()
+            privateApprovedAt = at
+            privateApprovedAtChanged()
+        }
+        againAfter(approved ? 1500 : 500, where === "pclaim-job" ? pcPoll : sbJobPoll)
     }
 
     /// Watches (or stops watching) a public account on the bridge test network.
@@ -6260,7 +6619,10 @@ Item {
     // This app's own Claim or Receive screen is what asked (the bridge, inside its flow): the
     // request is that screen's step, drawn there and not as a sheet over it. Leaving the screen
     // leaves it pending, and the sheet shows it wherever the person goes in Names.
-    readonly property bool appInline: appRequest !== null && appSheetCompact && appRequest.app === "lez_bridge" && section === "wallet"
+    // A private call this app's own private claim or send-back asked for is drawn there too, as
+    // the full sheet ("Approve, prove and send"); another app's private call keeps the sheet over
+    // everything (appPrivateHere matches the request to the screen's own job).
+    readonly property bool appInline: appPrivateHere || appRequest !== null && appSheetCompact && appRequest.app === "lez_bridge" && section === "wallet"
         && ((walletView === "claim" && ["asking", "needs", "running", "uncertain"].indexOf(claimStageNow) >= 0)
             || (walletView === "ethreceive" && receiveNeeds !== null)
             || (walletView === "sendback" && (sbNeeds !== null || (sbFocusStatus !== null && sbFocusStatus.stage === "approve"))))
@@ -6396,7 +6758,7 @@ Item {
                 appSheetDetails = false
                 appError = ""
                 // Access for the bridge while this app's claim screen has its file: that account only.
-                appChosen = Logic.preTicked(request, appPublisherFailed(request), request.app === "lez_bridge" ? claimAccount : "")
+                appChosen = Logic.preTicked(request, appPublisherFailed(request), request.app === "lez_bridge" ? bridgeHintAccount : "")
                 // Nothing could be ticked for the person: the accounts show on the short sheet
                 // itself, so Approve never waits on a choice hidden under Details.
                 appNeedsChoice = appChosen.length === 0 && (request.choices || []).length > 0
@@ -6489,8 +6851,16 @@ Item {
         var method = approve ? "approve_request" : "reject_request"
         var chosen = appChosen.slice()
         var args = approve ? [request.id, chosen.join(",")] : [request.id]
+        // Asked for this app's own private claim or send-back: that screen goes on (no notice).
+        var mine = privateRequestHere(request)
         askLater(method, args, function(value) {
             appBusy = false
+            if (mine !== "") {
+                privateAnswered(mine, request, approve)
+                loadAppRequests()
+                loadAppGrants()
+                return
+            }
             if (approve && appIsToken(request))
                 say("Sending " + appSends(request) + " to " + request.destination + " for " + request.app + ". "
                     + (Logic.tokenSendProves(/^Private\//.test(chosen[0] || ""), request.destination) ? "It's proven on this computer first: 7-12 minutes." : "One block, about 30 seconds."), "waiting")
@@ -7267,7 +7637,7 @@ Item {
         Layout.fillWidth: true
         spacing: 8
             Repeater {
-                model: Logic.sheetChoices(choicesBox.request, choicesBox.request !== null && choicesBox.request.app === "lez_bridge" ? root.claimAccount : "")
+                model: Logic.sheetChoices(choicesBox.request, choicesBox.request !== null && choicesBox.request.app === "lez_bridge" ? root.bridgeHintAccount : "")
                 Rectangle {
                     id: choiceRow
                     required property var modelData
@@ -7796,6 +8166,53 @@ Item {
             y: 18
             width: parent.width - 44
             spacing: 10
+        }
+    }
+    /// A private claim's or burn's wait after its sheet (Logic.privateJob): the wallet checks it,
+    /// proves it on this computer and sends it. The wait is the headline (amber), the clock under
+    /// it, then that the page may be left; it ends in one plain line, a failure with one action.
+    component PrivateWaitPanel: UnderwayPanel {
+        id: waitPanel
+        property string what: "claim"
+        property var view: null            // Logic.privateJob(job, what)
+        property var job: null             // the module's job (its id and start, for the clock)
+        property bool polling: false
+        property double checkedAt: 0
+        property bool failed: false
+        property string doneLine: ""
+        signal checkNow()
+        signal again()
+        signal back()
+        readonly property bool waiting: view !== null && (view.stage === "proving" || view.stage === "sending")
+        readonly property bool ended: view !== null && (view.stage === "failed" || view.stage === "ended")
+        StatusLine {
+            kind: waitPanel.view === null ? "" : waitPanel.view.stage === "checking" ? "working" : waitPanel.ended ? "problem" : Logic.toneKind(waitPanel.view.tone)
+            text: waitPanel.view === null ? "" : waitPanel.view.stage === "done" && waitPanel.doneLine !== "" ? waitPanel.doneLine : waitPanel.view.headline
+            actionLabel: waitPanel.view === null || !waitPanel.ended ? "" : waitPanel.view.code === "wallet_check" ? "Back to the wallet" : "Start again"
+            actionStrong: true
+            onAct: if (waitPanel.view.code === "wallet_check") waitPanel.back(); else waitPanel.again()
+        }
+        Text {
+            visible: waitPanel.waiting
+            Layout.fillWidth: true
+            text: Logic.privateElapsed(root.privateSince(waitPanel.job), root.privateNow)
+            textFormat: Text.PlainText
+            color: root.ink
+            font.family: root.sans
+            font.pixelSize: root.px(22)
+            font.weight: Font.DemiBold
+            wrapMode: Text.WordWrap
+        }
+        Hint { visible: waitPanel.view !== null && waitPanel.view.detail !== ""; font.pixelSize: root.px(15); text: waitPanel.view !== null ? waitPanel.view.detail : "" }
+        Hint { visible: waitPanel.waiting; color: root.ink; text: Logic.PRIVATE_LEAVE_LINE }
+        Hint { visible: waitPanel.waiting && root.proofWarning !== ""; font.pixelSize: root.px(15); text: root.proofWarning }
+        // The wallet was busy when asked: the job goes on; asked again at the next check.
+        StatusLine { visible: waitPanel.view !== null && Logic.privateNoteShown(waitPanel.view.note) !== ""; kind: "waiting"; text: waitPanel.view !== null ? Logic.privateNoteShown(waitPanel.view.note) : "" }
+        RowLayout {
+            visible: waitPanel.view !== null && waitPanel.view.running
+            spacing: 12
+            Action { readonly property var b: Logic.checkButton(waitPanel.polling, false); label: b.label; enabledNow: b.enabled; onPressed: waitPanel.checkNow() }
+            Text { text: Logic.receiveCheckLine(waitPanel.polling, waitPanel.checkedAt, 0, root.privateNow, waitPanel.failed); visible: text !== "" && text !== "Checking…"; color: waitPanel.failed && !waitPanel.polling ? root.waitTone : root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
         }
     }
     /// Check now (a button: "Checking…" at once, then the answer) and "Checked just now", with
@@ -9328,8 +9745,9 @@ Item {
                                                 Text { Layout.alignment: Qt.AlignBaseline; text: "into " + Logic.idShort(arrivingRow.modelData.account) + (arrivingRow.modelData.where ? " · " + arrivingRow.modelData.where : ""); color: root.dim; font.family: root.sans; font.pixelSize: root.px(15) }
                                             }
                                             StatusLine {
-                                                kind: Logic.toneKind(arrivingRow.p.tone)
-                                                text: arrivingRow.p.card
+                                                readonly property var pj: Logic.privateJob(root.privateClaimJobs[arrivingRow.modelData.id] || null, "claim")
+                                                kind: pj !== null && pj.stage !== "done" ? Logic.toneKind(pj.tone) : Logic.toneKind(arrivingRow.p.tone)
+                                                text: pj !== null && pj.stage !== "done" && arrivingRow.p.claim ? "Claiming privately · " + pj.card : arrivingRow.p.card
                                             }
                                             Hint {
                                                 visible: arrivingRow.p.stage === "claimed"
@@ -9337,7 +9755,7 @@ Item {
                                                 text: arrivingRow.p.stage === "claimed" ? Logic.receiveBalanceLine(root.bridgeNetBlocks, arrivingRow.modelData.account, arrivingRow.modelData.symbol) : ""
                                             }
                                         }
-                                        Action { visible: arrivingRow.p.claim && root.bridgeSetupClear; label: "Claim"; strong: true; onPressed: root.claimReceive(arrivingRow.modelData.id) }
+                                        Action { visible: arrivingRow.p.claim && root.bridgeSetupClear; label: Logic.receiveIsPrivate(arrivingRow.modelData) && root.privateClaimJobs[arrivingRow.modelData.id] ? "Open" : Logic.receiveIsPrivate(arrivingRow.modelData) ? "Claim privately" : "Claim"; strong: true; onPressed: root.claimArrived(arrivingRow.modelData.id) }
                                         Link { visible: !arrivingRow.p.claim && arrivingRow.p.stage !== "old"; text: "Open ›"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.openEthReceive(arrivingRow.modelData.id) }
                                     }
                                 }
@@ -9378,8 +9796,9 @@ Item {
                                                 Text { Layout.alignment: Qt.AlignBaseline; text: "from " + Logic.idShort(backRow.modelData.account) + " to " + Logic.idShort(backRow.modelData.recipient); color: root.dim; font.family: root.sans; font.pixelSize: root.px(15) }
                                             }
                                             StatusLine {
-                                                kind: Logic.toneKind(backRow.p.tone)
-                                                text: backRow.p.card
+                                                readonly property var pj: Logic.privateJob(root.sbJobs[backRow.modelData.id] || null, "burn")
+                                                kind: pj !== null && pj.stage !== "done" ? Logic.toneKind(pj.tone) : Logic.toneKind(backRow.p.tone)
+                                                text: pj !== null && pj.stage !== "done" ? "Private burn · " + pj.card : backRow.p.card
                                             }
                                         }
                                         Link { text: "Open ›"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.openSendBack("", null, backRow.modelData.id) }
@@ -10551,7 +10970,7 @@ Item {
                                 text: (modelData.ok ? "✓ " : "✗ ") + modelData.text
                             }
                         }
-                        Hint { visible: root.claimCheck !== null && !!root.claimCheck.privacy; font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.privacy ? root.claimCheck.privacy + " Private claims aren't in this wallet yet." : "" }
+                        Hint { visible: root.claimCheck !== null && !!root.claimCheck.privacy; font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.privacy ? root.claimCheck.privacy + (root.receivePrivateAble ? " For a private claim, make a private code on Receive from Ethereum." : " Private claims aren't in this wallet yet.") : "" }
                         Hint { visible: root.claimCheck !== null && !!root.claimCheck.approval; font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.approval ? root.claimCheck.approval : "" }
                         Hint { visible: root.claimCheck !== null && root.claimCheck.ok === false && !!root.claimCheck.error; font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.error ? Logic.claimErrorTitle(root.claimCheck.error.code) + ": " + String(root.claimCheck.error.message || "") : "" }
                         Repeater {
@@ -10577,6 +10996,114 @@ Item {
                     }
                 }
 
+                // ── Claim privately: a receive into a private account, proved on this computer ──
+                ColumnLayout {
+                    id: pclaimScreen
+                    visible: root.walletView === "pclaim"
+                    Layout.fillWidth: true
+                    Layout.maximumWidth: root.pageWidth
+                    spacing: 12
+                    readonly property string stage: root.pcStageNow
+                    readonly property var row: root.pcRow
+                    readonly property var refusal: root.pcRefused !== null ? Logic.privateRefusal(root.pcRefused.code) : null
+                    // Before the wallet has the claim: the note and the one button.
+                    readonly property bool before: ["start", "checking", "asking", "refused", "uncertain"].indexOf(stage) >= 0
+                    PageHeader { title: "Claim privately"; net: "0.4"; onBack: root.leavePrivateClaim() }
+                    BridgeSetupBox { then: "receive" }
+                    StepHeader {
+                        visible: pclaimScreen.stage !== "looking"
+                        steps: Logic.privateClaimSteps({ stage: pclaimScreen.stage, extras: root.pcExtras, needs: root.pcNeeds !== null ? root.pcNeeds.needs : "",
+                                                         failedAt: root.pcJobNow !== null && root.pcJobNow.code === "wallet_failed" ? "prove" : "" })
+                    }
+                    RowLayout {
+                        visible: pclaimScreen.row !== null
+                        spacing: 10
+                        Text { text: pclaimScreen.row !== null ? pclaimScreen.row.amount + " " + pclaimScreen.row.symbol : ""; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.Bold }
+                        Text { Layout.alignment: Qt.AlignBaseline; text: pclaimScreen.row !== null ? "into " + Logic.idShort(pclaimScreen.row.account) + " · private" : ""; color: root.dim; font.family: root.sans; font.pixelSize: root.px(15) }
+                    }
+                    StatusLine { visible: pclaimScreen.stage === "looking"; kind: "working"; text: "Looking for a claim already with your wallet…" }
+
+                    // Step: claim it (the bridge's checks, then the proposal; the sheet comes next).
+                    Hint { visible: pclaimScreen.before; color: root.ink; text: Logic.PRIVATE_CLAIM_NOTE }
+                    Hint { visible: pclaimScreen.before && root.proofWarning !== ""; font.pixelSize: root.px(15); text: root.proofWarning }
+                    Action {
+                        visible: pclaimScreen.stage === "start" || pclaimScreen.stage === "checking" || pclaimScreen.stage === "asking"
+                        label: pclaimScreen.stage === "checking" ? "Checking…" : pclaimScreen.stage === "asking" ? "Asking your wallet…" : "Claim privately"
+                        strong: true
+                        enabledNow: pclaimScreen.stage === "start" && root.privateClaimAble && root.pcError === ""
+                        onPressed: root.pcStart()
+                    }
+                    WhyLine { visible: pclaimScreen.stage === "start" && !root.privateClaimAble; text: "This LEZ Bridge can't claim privately yet: update it from the LEZ 0.4 card." }
+                    // The checks refused it: one line in its kind, and its one next action.
+                    StatusLine {
+                        visible: pclaimScreen.stage === "refused"
+                        kind: pclaimScreen.refusal !== null ? pclaimScreen.refusal.kind : "problem"
+                        text: root.pcRefused === null ? "" : root.sentence(String(root.pcRefused.message || Logic.claimErrorTitle(root.pcRefused.code)))
+                        actionLabel: pclaimScreen.refusal !== null ? pclaimScreen.refusal.label : ""
+                        actionStrong: true
+                        onAct: if (pclaimScreen.refusal.action === "check") root.pcStart(); else root.leavePrivateClaim()
+                    }
+                    // A first-time question from the bridge, answered here as the step itself.
+                    StatusLine { visible: pclaimScreen.stage === "needs" && !root.appInline; kind: "waiting"; text: "Waiting for your answer in the approval sheet." }
+                    // The private call: the wallet's own sheet, "Approve, prove and send", in place.
+                    ApproveBody { visible: root.appInline && root.walletView === "pclaim"; inline: true }
+                    StatusLine {
+                        visible: pclaimScreen.stage === "uncertain"
+                        kind: "waiting"
+                        text: root.pcUncertain
+                        actionLabel: root.pcAsking ? "Asking your wallet…" : "Continue"
+                        actionEnabled: !root.pcAsking
+                        onAct: root.pcPropose(true)
+                    }
+                    // The wait: checked, then (approved) proved here and sent; done or failed.
+                    PrivateWaitPanel {
+                        visible: root.pcJobNow !== null && !(root.appInline && (root.pcJobNow.stage === "approve" || root.pcJobNow.stage === "checking" || root.pcJobNow.code === "wallet_check"))
+                        what: "claim"
+                        view: root.pcJobNow
+                        job: root.pcJob
+                        polling: root.pcPolling
+                        checkedAt: root.pcCheckedAt
+                        failed: root.pcCheckFailed
+                        doneLine: pclaimScreen.row !== null ? "Claimed privately into " + Logic.idShort(pclaimScreen.row.account) + ". Nothing public links it to the deposit." : "Claimed privately."
+                        onCheckNow: root.pcPoll()
+                        onAgain: { root.pcJob = null; root.pcStart() }
+                        onBack: root.leavePrivateClaim()
+                    }
+                    // A call that didn't go through: its line, and Try again (nothing was sent).
+                    StatusLine {
+                        visible: root.pcError !== ""
+                        kind: Logic.noticeKind(root.pcError, true)
+                        text: root.pcError
+                        actionLabel: root.pcChecking || root.pcAsking ? "" : Logic.approvalEnded(root.pcError) ? "Start again" : "Try again"
+                        onAct: { root.pcError = ""; root.pcStart() }
+                    }
+
+                    Link {
+                        visible: pclaimScreen.stage !== "looking" && !root.appInline
+                        text: root.pcDetails ? "Details ▾" : "Details ▸"
+                        color: root.dim
+                        font.pixelSize: root.px(15)
+                        onPressed: root.pcDetails = !root.pcDetails
+                    }
+                    ColumnLayout {
+                        visible: root.pcDetails && pclaimScreen.stage !== "looking" && !root.appInline
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Hint { font.pixelSize: root.px(15); text: "LEZ 0.4 · bridge test network. The LEZ Bridge builds the claim and asks your wallet; your wallet simulates it, shows you what it does, then proves it on this computer and sends it. The bridge never sees your keys and never proves." }
+                        Fact { visible: pclaimScreen.row !== null; label: "Into"; code: true; value: pclaimScreen.row !== null ? Logic.receiveAccountShown(pclaimScreen.row) : ""; full: pclaimScreen.row !== null ? Logic.receiveAccountShown(pclaimScreen.row) : "" }
+                        Fact { visible: root.pcPlan !== null && root.pcPlan.sponsored !== undefined && root.pcPlan.sponsored !== null; label: "Fee"; value: root.pcPlan !== null && root.pcPlan.sponsored === true ? "Sponsored by the bridge, paid inside the proof" : "Paid inside the proof from the account" }
+                        Hint { visible: root.pcPlan !== null && !!root.pcPlan.privacy && !!root.pcPlan.privacy.headline; font.pixelSize: root.px(15); text: root.pcPlan !== null && root.pcPlan.privacy ? String(root.pcPlan.privacy.headline || "") : "" }
+                        Repeater {
+                            model: root.pcPlan !== null && root.pcPlan.privacy && Array.isArray(root.pcPlan.privacy.notes) ? root.pcPlan.privacy.notes : []
+                            Hint { required property var modelData; font.pixelSize: root.px(15); text: String(modelData) }
+                        }
+                        Hint { visible: root.pcRefused !== null && !!root.pcRefused.code; font.pixelSize: root.px(15); text: root.pcRefused !== null ? Logic.claimErrorTitle(root.pcRefused.code) + " (" + String(root.pcRefused.code || "") + ")" : "" }
+                        Hint { visible: root.pcNeeds !== null && !!root.pcNeeds.message; font.pixelSize: root.px(15); text: root.pcNeeds !== null ? String(root.pcNeeds.message || "") : "" }
+                        Fact { visible: root.pcJobNow !== null; label: "Job"; code: true; value: root.pcJobNow !== null ? root.pcJobNow.id : ""; full: root.pcJobNow !== null ? root.pcJobNow.id : "" }
+                        Fact { visible: root.pcJobNow !== null && root.pcJobNow.tx !== ""; label: "Transaction"; code: true; value: root.pcJobNow !== null ? root.pcJobNow.tx : ""; full: root.pcJobNow !== null ? root.pcJobNow.tx : "" }
+                    }
+                }
+
                 // ── Receive from Ethereum ──
                 ColumnLayout {
                     id: receiveScreen
@@ -10587,7 +11114,8 @@ Item {
                     readonly property var stepNow: root.receiveStepsNow.filter(function(x) { return x.state === "now" })[0] || null
                     readonly property var result: root.receiveResult
                     // The account the code pays: the code's own (one shown again), else the one chosen.
-                    readonly property string resultAccount: result !== null && result.account ? String(result.account) : root.receiveAccount
+                    readonly property string resultAccount: result !== null && result.account ? String(result.account)
+                        : root.receiveFocusRow !== null ? Logic.receiveAccountShown(root.receiveFocusRow) : root.receiveKindNow === "private" ? root.receivePrivateNow : root.receiveAccount
                     readonly property var refusal: root.receiveFocus !== "" ? (root.receiveCodeRefusals[root.receiveFocus] || null) : null
                     readonly property var releaseNotice: root.bridgeConfig !== null && root.bridgeConfig.notices && root.bridgeConfig.notices.release && root.bridgeConfig.notices.release.text ? root.bridgeConfig.notices.release : null
                     readonly property var p: root.receiveFocusProgress
@@ -10639,8 +11167,30 @@ Item {
                                 Choice { required property var modelData; label: modelData.text + " " + root.receiveToken; chosen: root.receiveDenom === modelData.index; onPressed: root.receiveDenom = modelData.index }
                             }
                         }
-                        StatusLine { visible: root.receiveAccountList.length === 0; kind: "problem"; text: "No public account on LEZ 0.4 yet. Make one in Settings, then come back."; actionLabel: "Open Settings"; onAct: root.go("settings") }
+                        // Private or public (private first: the privacy default), with one line on what it means.
                         Flow {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Choice { label: "Private"; chosen: root.receiveKindNow === "private"; onPressed: root.receiveKind = "private" }
+                            Choice { label: "Public"; chosen: root.receiveKindNow === "public"; onPressed: root.receiveKind = "public" }
+                        }
+                        Hint { visible: root.receiveKindNow === "private"; color: root.ink; text: Logic.PRIVATE_RECEIVE_NOTE }
+                        // Private: the wallet's private accounts on LEZ 0.4.
+                        StatusLine { visible: root.receiveKindNow === "private" && root.receivePrivateAble && root.cliAccounts !== null && root.receivePrivateList.length === 0; kind: "problem"; text: "No private account on LEZ 0.4 yet. Make one in Settings, then come back."; actionLabel: "Open Settings"; onAct: root.go("settings") }
+                        Flow {
+                            visible: root.receiveKindNow === "private" && root.receivePrivateAble
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Repeater {
+                                model: root.receivePrivateList
+                                Choice { required property var modelData; label: "Into " + Logic.idShort(modelData) + " · private"; chosen: root.receivePrivateNow === modelData; onPressed: root.receivePrivateAccount = modelData }
+                            }
+                        }
+                        Hint { visible: root.receiveKindNow === "private" && root.receivePrivateAble && root.proofWarning !== ""; color: root.ink; font.pixelSize: root.px(15); text: root.proofWarning }
+                        // Public: as before, after the one thing to read first.
+                        StatusLine { visible: root.receiveKindNow === "public" && root.receiveAccountList.length === 0; kind: "problem"; text: "No public account on LEZ 0.4 yet. Make one in Settings, then come back."; actionLabel: "Open Settings"; onAct: root.go("settings") }
+                        Flow {
+                            visible: root.receiveKindNow === "public"
                             Layout.fillWidth: true
                             spacing: 8
                             Repeater {
@@ -10650,13 +11200,18 @@ Item {
                         }
                         // The one thing to read first: a public account links the deposit to it.
                         Tick {
+                            visible: root.receiveKindNow === "public"
                             checked: root.receivePublicOk
                             text: "Not private: the claim links this deposit to this account for good."
                             onToggled: root.receivePublicOk = !root.receivePublicOk
                         }
                         StatusLine { visible: root.receiveHoldNow !== ""; kind: ""; text: root.receiveHoldNow }
-                        Action { visible: root.receiveHoldNow === ""; label: root.receiveAsking ? "Making the code…" : "Make the deposit code"; strong: true; enabledNow: !root.receiveAsking && root.receivePublicOk && root.receiveAccountNow !== ""; onPressed: root.makeReceive() }
-                        WhyLine { visible: root.receiveHoldNow === "" && text !== ""; text: Logic.receiveMakeWhy({ asking: root.receiveAsking, ticked: root.receivePublicOk, account: root.receiveAccountNow }) }
+                        Action { visible: root.receiveHoldNow === ""; label: root.receiveAsking ? "Making the code…" : "Make the deposit code"; strong: true; enabledNow: !root.receiveAsking && root.receiveCanMake; onPressed: root.makeReceive() }
+                        WhyLine {
+                            visible: root.receiveHoldNow === "" && text !== ""
+                            text: Logic.receiveMakeWhy({ asking: root.receiveAsking, ticked: root.receivePublicOk, kind: root.receiveKindNow, able: root.receivePrivateAble,
+                                                         account: root.receiveKindNow === "private" ? root.receivePrivateNow : root.receiveAccountNow })
+                        }
                     }
                     StatusLine { visible: root.receiveNeeds !== null && !root.appInline; kind: "waiting"; text: "Waiting for your answer in the approval sheet." }
                     // This screen's own question to the wallet, answered here (not in a sheet over it).
@@ -10722,9 +11277,11 @@ Item {
                         Hint {
                             visible: receiveScreen.p.stage === "claimable" && root.receiveFocusRow !== null
                             color: root.ink
-                            text: root.receiveFocusRow === null ? "" : root.receiveFocusRow.amount + " " + root.receiveFocusRow.symbol + " is ready to claim into " + Logic.idShort(root.receiveFocusRow.account) + ". The bridge's relay pays the fee."
+                            text: root.receiveFocusRow === null ? "" : Logic.receiveIsPrivate(root.receiveFocusRow)
+                                ? root.receiveFocusRow.amount + " " + root.receiveFocusRow.symbol + " is ready to claim privately into " + Logic.idShort(root.receiveFocusRow.account) + ". Your wallet proves the claim on this computer, " + Logic.PRIVATE_PROOF_TIME + "."
+                                : root.receiveFocusRow.amount + " " + root.receiveFocusRow.symbol + " is ready to claim into " + Logic.idShort(root.receiveFocusRow.account) + ". The bridge's relay pays the fee."
                         }
-                        Action { visible: receiveScreen.p.claim; label: "Claim"; strong: true; onPressed: root.claimReceive(root.receiveFocus) }
+                        Action { visible: receiveScreen.p.claim; label: Logic.receiveIsPrivate(root.receiveFocusRow) && root.privateClaimJobs[root.receiveFocus] ? "Open the claim" : "Claim"; strong: true; onPressed: root.claimArrived(root.receiveFocus) }
                         Hint {
                             visible: receiveScreen.p.stage === "claimed" && root.receiveFocusRow !== null && !/now holds/.test(text)
                             font.pixelSize: root.px(15)
@@ -10764,7 +11321,8 @@ Item {
                         spacing: 10
                         Hint { font.pixelSize: root.px(15); text: "The wallet makes this deposit's secret from your account's own key; this app never sees it. The page gets only a code: the amount, the vault and a commitment that hides which account receives it." }
                         Hint { visible: root.bridgeConfig !== null && !!root.bridgeConfig.notices && !!root.bridgeConfig.notices.not_private; font.pixelSize: root.px(15); text: root.bridgeConfig !== null && root.bridgeConfig.notices && root.bridgeConfig.notices.not_private ? String(root.bridgeConfig.notices.not_private.text || "") : "" }
-                        Hint { font.pixelSize: root.px(15); text: "Private accounts can't receive on the bridge test network yet: their claim needs a proof that hasn't run there." }
+                        Hint { visible: !root.receivePrivateAble; font.pixelSize: root.px(15); text: "This LEZ Bridge can't make private codes yet: their claim needs a proof made on this computer, which a newer LEZ Bridge offers." }
+                        Hint { visible: root.receivePrivateAble; font.pixelSize: root.px(15); text: "A private code's deposit is claimed by a proof your wallet makes on this computer (" + Logic.PRIVATE_PROOF_TIME + ", about 9.5 GB of memory). Nothing public then links the Sepolia deposit to your account; the amount, the token and the timing are public." }
                         Fact { visible: receiveScreen.result !== null; label: "Into"; code: true; value: receiveScreen.resultAccount; full: receiveScreen.resultAccount }
                         Hint { visible: receiveScreen.refusal !== null && receiveScreen.refusal.detail !== ""; font.pixelSize: root.px(15); text: receiveScreen.refusal !== null ? receiveScreen.refusal.detail : "" }
                         Hint { visible: receiveScreen.releaseNotice !== null; font.pixelSize: root.px(15); text: receiveScreen.releaseNotice !== null ? String(receiveScreen.releaseNotice.text) : "" }
@@ -10814,6 +11372,8 @@ Item {
                     readonly property bool choosing: root.sbFocus === "" && root.sbNeeds === null
                     // The burn's approval is drawn here (appInline): it is the step, not the panel.
                     readonly property bool burning: root.appInline && root.sbFocus !== "" && (p.stage === "planned" || p.stage === "approve")
+                    // A private burn still with the wallet (checked, approved, proved, sent): its own wait.
+                    readonly property bool privateWait: root.sbFocus !== "" && root.sbJobView !== null && root.sbJobView.stage !== "done" && !(burning && root.sbJobView.stage === "approve")
                     PageHeader { title: "Bridge to Ethereum"; net: "0.4"; onBack: root.walletView = "home" }
                     BridgeSetupBox { then: "sendback" }
                     StatusLine { visible: !root.receiveMissing && root.bridgeSetupClear && root.bridgeConfig !== null && !root.sbCan; kind: ""; text: "This LEZ Bridge can't bridge to Ethereum yet. Update it (above)." }
@@ -10849,6 +11409,22 @@ Item {
                             }
                         }
                         Hint { visible: root.sbSources.length > 0 && root.sbElsewhere !== ""; font.pixelSize: root.px(15); text: root.sbElsewhere }
+                        // From a private account (a newer LEZ Bridge): proved on this computer first.
+                        Flow {
+                            visible: root.sbPrivateSources.length > 0
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Repeater {
+                                model: root.sbPrivateSources
+                                Choice {
+                                    required property var modelData
+                                    label: Logic.idShort(modelData.account) + (modelData.amount !== "" ? " · " + modelData.amount + " " + modelData.symbol : "") + " · private"
+                                    chosen: root.sbAsset !== null && root.sbAccount === modelData.account
+                                    onPressed: root.sbPick(modelData)
+                                }
+                            }
+                        }
+                        Hint { visible: root.sbPrivateSources.length > 0; color: root.ink; text: Logic.PRIVATE_SEND_BACK_NOTE }
                         // Then the amounts that account holds.
                         Flow {
                             visible: root.sbAsset !== null
@@ -10861,7 +11437,7 @@ Item {
                         }
                         // Nothing to send back: said in one line, with the way to get some.
                         RowLayout {
-                            visible: root.sbSources.length === 0
+                            visible: root.sbSources.length === 0 && root.sbPrivateSources.length === 0
                             spacing: 14
                             StatusLine { Layout.fillWidth: false; kind: root.bridgeNet === null ? "working" : ""; text: root.bridgeNet === null ? "Reading your accounts on the bridge test network…" : root.sbElsewhere !== "" ? root.sbElsewhere : "None of your public accounts holds bridged tokens that can go back to Ethereum yet" + (root.sbChosen !== null ? " on the bridge chosen in Settings → Bridge." : " (bridge v4 or v5).") }
                             Action { visible: root.bridgeNet !== null; label: "Receive from Ethereum"; onPressed: root.openEthReceive() }
@@ -10878,6 +11454,7 @@ Item {
                             Hint { Layout.fillWidth: false; color: root.ink; text: (root.sbAmounts.filter(function(d) { return d.index === root.sbDenom })[0] || { text: "" }).text + " " + (root.sbAsset !== null ? root.sbAsset.symbol : "") + " from " + Logic.idShort(root.sbAccount) + "." }
                             Link { visible: root.sbAmounts.length > 1 && root.sbCheck === null; text: "Change"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.sbDenom = -1 }
                         }
+                        Hint { visible: root.sbFromPrivate; font.pixelSize: root.px(15); text: "From your private account: your wallet proves the burn on this computer (" + Logic.PRIVATE_PROOF_TIME + ") and checks the account holds it." }
                         Hint { visible: root.sbCheck === null; font.pixelSize: root.px(15); text: Logic.SEND_BACK_PRIVATE_HINT }
                         // An address this account sent back to before: offered first, one press (it is still
                         // read back in full with its four words before anything is approved).
@@ -10961,10 +11538,23 @@ Item {
                     }
                     // The bridge's first-time questions and the burn itself, answered here.
                     ApproveBody { visible: root.appInline && root.walletView === "sendback"; inline: true }
+                    // A private burn: the wallet checks it, then (approved above) proves it here and sends it.
+                    PrivateWaitPanel {
+                        visible: sendBackScreen.shows && sendBackScreen.privateWait
+                        what: "burn"
+                        view: root.sbJobView
+                        job: root.sbJob
+                        polling: root.sbJobPolling
+                        checkedAt: root.sbJobCheckedAt
+                        failed: root.sbJobCheckFailed
+                        onCheckNow: root.sbJobPoll()
+                        onAgain: root.sbBurn()
+                        onBack: root.walletView = "home"
+                    }
 
                     // Step 3 and on: where the send-back is. The wait is the headline.
                     UnderwayPanel {
-                        visible: sendBackScreen.shows && root.sbFocus !== "" && !sendBackScreen.burning && !(root.sbNamesOld && sendBackScreen.p.stage === "planned")
+                        visible: sendBackScreen.shows && root.sbFocus !== "" && !sendBackScreen.burning && !(root.sbNamesOld && sendBackScreen.p.stage === "planned") && !sendBackScreen.privateWait
                         StatusLine {
                             kind: Logic.toneKind(sendBackScreen.p.tone)
                             text: sendBackScreen.p.headline
@@ -11052,7 +11642,7 @@ Item {
                             Layout.fillWidth: true
                             kind: Logic.noticeKind(root.sbError, true)
                             text: root.sbError
-                            actionLabel: root.sbNamesOld ? "Back to the wallet" : root.sbAsking ? ""
+                            actionLabel: root.sbNamesOld ? "Back to the wallet" : root.sbAsking ? "" : root.sbFromPrivate && Logic.isWaitMessage(root.sbError) ? ""
                                 : root.sbFocus !== "" && sendBackScreen.p.action === "burn" ? (Logic.approvalEnded(root.sbError) ? "Start again" : "Try again")
                                 : root.sbFocus === "" && Logic.approvalEnded(root.sbError) ? "Start again" : ""
                             onAct: if (root.sbNamesOld) root.walletView = "home"; else if (root.sbFocus !== "") root.sbBurn(); else root.sbPlan()
@@ -11070,7 +11660,8 @@ Item {
                         visible: root.sbDetails && sendBackScreen.shows && !root.appInline
                         Layout.fillWidth: true
                         spacing: 10
-                        Hint { font.pixelSize: root.px(15); text: "The wallet burns the wrapped tokens on the bridge test network; the bridge's relay pays the LEZ fee. Ethereum then records the burn, this computer proves it, and the vault releases the ETH to the address you connected, after its delay if it has one." }
+                        Hint { visible: !root.sbFromPrivate; font.pixelSize: root.px(15); text: "The wallet burns the wrapped tokens on the bridge test network; the bridge's relay pays the LEZ fee. Ethereum then records the burn, this computer proves it, and the vault releases the ETH to the address you connected, after its delay if it has one." }
+                        Hint { visible: root.sbFromPrivate; font.pixelSize: root.px(15); text: "From a private account the wallet proves the burn on this computer (" + Logic.PRIVATE_PROOF_TIME + ", about 9.5 GB of memory) and sends it; its fee comes from the account's own LEZ, inside the proof. Ethereum then records the burn, and the vault releases the ETH to the address you connected." }
                         Hint { font.pixelSize: root.px(15); text: "The burn carries an exit commitment, not the address: the address stays hidden until the release. Your wallet makes the exit's secret from your account's key; this app never sees it." }
                         Hint { font.pixelSize: root.px(15); text: "Text copied in Names may not reach another computer through Screen Sharing: open the link in a browser on this computer, or select it below." }
                         TextEdit {
