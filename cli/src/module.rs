@@ -79,8 +79,12 @@ pub enum Request {
     Fee,
     /// The values an app asked for with `app_secret` (Wallet Provider SDK), from the JSON on
     /// standard input: `{app, account, scope, context, tag, first, count}`; prints `{account,
-    /// values}`. The Basecamp module checks the app and its grant first; see `app_secret.rs`.
+    /// values, scheme}` (`scheme`: `phrase` or `imported`). The Basecamp module checks the app and
+    /// its grant first; see `app_secret.rs`.
     AppSecret,
+    /// Whether one of this wallet's accounts is imported, from `{account}` on standard input;
+    /// prints `{account, scheme}`. Derives nothing: what a secret request says before approval.
+    AccountScheme,
     /// A mini-app's privacy-preserving call (`propose_private_call`; `private_call.rs`).
     #[command(subcommand)]
     PrivateCall(CallRequest),
@@ -179,6 +183,12 @@ impl Client {
                 std::io::Read::read_to_end(&mut std::io::stdin(), &mut input).context("cannot read the request")?;
                 let request: serde_json::Value = serde_json::from_slice(&input).context("not a request")?;
                 self.app_secret(&request)
+            }
+            Request::AccountScheme => {
+                let mut input = Vec::new();
+                std::io::Read::read_to_end(&mut std::io::stdin(), &mut input).context("cannot read the request")?;
+                let request: serde_json::Value = serde_json::from_slice(&input).context("not a request")?;
+                self.account_scheme(&request)
             }
             Request::PrivateCall(CallRequest::Plan) => {
                 let mut input = Vec::new();

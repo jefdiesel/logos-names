@@ -7527,6 +7527,8 @@ impl Names {
 /// How long a private call's plan (the CLI's simulation) may take: it reads the programs'
 /// bytecode and catches the wallet up with the chain.
 const PRIVATE_PLAN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(240);
+/// How long the account-scheme question waits for the CLI.
+const SCHEME_PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
 /// How long `app_secret` waits for the CLI.
 const SECRET_PATIENCE: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -7577,8 +7579,16 @@ impl Names {
             if let Some(waiting) = waiting {
                 return Ok(json!({ "granted": false, "request": provider::app_view(waiting) }));
             }
-            let request = provider_private::secret_request(&app, &account, &ask.scope, "", now)?;
+            let mut request = provider_private::secret_request(&app, &account, &ask.scope, "", now)?;
+            // An imported account: said once, on the first secret request for it from any app.
+            if self.account_imported(&account) == Some(true) {
+                let store = self.store();
+                let first = !store.private.secrets.values().filter_map(Value::as_array).flatten().any(|g| g["account"] == account.as_str())
+                    && !store.requests.iter().any(|r| r["kind"] == provider::SECRET && r["account"] == account.as_str() && r["imported"] == true);
+                provider_private::mark_imported(&mut request, private, first);
+            }
             let view = provider::app_view(&request);
+            let store = self.store();
             store.add(request, now)?;
             store.save();
             return Ok(json!({ "granted": false, "request": view }));
@@ -7596,19 +7606,54 @@ impl Names {
             "app": ask.app, "account": account, "scope": ask.scope, "context": registry::hex(&ask.context),
             "tag": ask.tag, "first": ask.first, "count": ask.count,
         });
+        let what = if ask.scope.starts_with("RFP022/deposit") { "deposit keys" } else { "the values this app asks for" };
+        // The tool's words never reach the screen (they named key trees and CLI errors): a plain line.
         let output = cli::run_with_input(&setup, vec!["module".into(), "app-secret".into()], &input.to_string(), SECRET_PATIENCE)
-            .map_err(|why| {
-                // The tool's own reason, said plainly (it used to be hidden behind a guess).
-                let what = if ask.scope.starts_with("RFP022/deposit") { "deposit keys" } else { "the values this app asks for" };
-                let why = why.trim().trim_start_matches("Error: ").to_owned();
-                format!("This wallet can't make {what} for {account}: {why}")
-            })?;
-        let answer: Value = serde_json::from_str(cli::last_line(&output)).map_err(|_| "the names CLI gave no values".to_owned())?;
+            .map_err(|why| provider_private::secret_failure(what, &account, &why))?;
+        let answer: Value = serde_json::from_str(cli::last_line(&output)).map_err(|_| provider_private::secret_failure(what, &account, ""))?;
         let values: Vec<String> = answer["values"].as_array().map(Vec::as_slice).unwrap_or_default().iter().filter_map(|v| v.as_str().map(str::to_owned)).collect();
         if values.len() as u64 != ask.count || answer["account"] != account.as_str() || values.iter().any(|v| v.len() != 64) {
-            return Err("the names CLI gave the wrong values".to_owned());
+            return Err(provider_private::secret_failure(what, &account, ""));
         }
-        Ok(json!({ "granted": true, "account": account, "scope": ask.scope, "tag": ask.tag, "first": ask.first, "values": values }))
+        // A tool that doesn't name its scheme predates imported accounts' phrase values: for an
+        // imported account it may give values from the imported key, which the phrase can't make again.
+        let imported = match answer["scheme"].as_str() {
+            Some(app_secret::SCHEME_IMPORTED) => true,
+            Some(app_secret::SCHEME_PHRASE) => false,
+            _ if self.account_imported(&account) == Some(true) => return Err(provider_private::older_tool_for_imported(what, &account)),
+            _ => false,
+        };
+        Ok(json!({ "granted": true, "account": account, "scope": ask.scope, "tag": ask.tag, "first": ask.first, "values": values, "imported": imported }))
+    }
+
+    /// Whether `account` is imported: the names CLI's word (`module account-scheme`, by key-tree
+    /// membership), else the wallet file's list (`backup::accounts_of`, which reads no key and
+    /// can't name an imported PRIVATE account); `None` when neither can tell.
+    fn account_imported(&self, account: &str) -> Option<bool> {
+        if let Ok(setup) = self.cli_setup() {
+            if setup.wallet_ready().is_ok() {
+                let input = json!({ "account": account });
+                if let Ok(out) = cli::run_with_input(&setup, vec!["module".into(), "account-scheme".into()], &input.to_string(), SCHEME_PATIENCE) {
+                    if let Ok(answer) = serde_json::from_str::<Value>(cli::last_line(&out)) {
+                        if answer["account"] == account {
+                            match answer["scheme"].as_str() {
+                                Some(app_secret::SCHEME_IMPORTED) => return Some(true),
+                                Some(app_secret::SCHEME_PHRASE) => return Some(false),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let dir = self.wallet_dir_of(self.net)?;
+        let store = std::fs::read(dir.join(cli::STORAGE_FILE)).ok()?;
+        let entries: Vec<Value> = backup::accounts_of(&store).into_iter().filter(|a| a["account"] == account).collect();
+        if entries.is_empty() {
+            return None;
+        }
+        // Listed in a key tree as well: a phrase account (the CLI's rule).
+        Some(entries.iter().all(|a| a["imported"] == true))
     }
 
     /// Runs the CLI's simulation of a private call on its own thread; the request learns the
@@ -11930,6 +11975,96 @@ mod tests {
         assert_eq!(parsed(&ask(&mut names))["value"]["granted"], false);
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An imported account (rfp-022 `proposal/IMPORTED-ACCOUNTS-DESIGN.md`): the first secret card
+    /// for it says so once (and, for a private one, the restore limit), the values carry
+    /// `imported`, a tool that names no scheme is refused for it, and no tool text reaches the app.
+    #[test]
+    fn an_imported_account_is_said_once_and_an_older_tool_is_refused_plainly() {
+        let values = format!("[\"{}\"]", "ab".repeat(32));
+        let account = format!("Private/{PRIVATE}");
+        let run = |label: &str, secret_line: &str| {
+            let tail = format!(
+                "case \"$*\" in\n\
+                 *\"module account-scheme\"*) echo '{{\"account\":\"{account}\",\"scheme\":\"imported\"}}' ;;\n\
+                 *\"module app-secret\"*) {secret_line} ;;\n\
+                 esac"
+            );
+            let (mut names, dir) = with_wallet(label, &tail);
+            connect(&mut names, "lez_bridge", &account);
+            (names, dir)
+        };
+        let ask = |names: &mut Names, scope: &str| parsed(&names.app_secret(account.clone(), scope.into(), "abcd".into(), "RFP022/ck".into(), 0, 1));
+        let shown = |names: &mut Names, id: &str| {
+            as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+            let pending = parsed(&names.pending_requests())["value"].clone();
+            pending.as_array().unwrap().iter().find(|r| r["id"] == id).unwrap()["explanation"].as_str().unwrap().to_owned()
+        };
+        // A tool that names its scheme.
+        let (mut names, dir) = run("imported-new-tool", &format!("echo '{{\"account\":\"{account}\",\"values\":{values},\"scheme\":\"imported\"}}'"));
+        as_caller(app("lez_bridge"));
+        let first = ask(&mut names, "RFP022/deposit")["value"].clone();
+        let id = first["request"]["request"].as_str().unwrap().to_owned();
+        let text = shown(&mut names, &id);
+        assert!(text.contains(provider_private::IMPORTED_LINE), "{text}");
+        assert!(text.contains(provider_private::PRIVATE_IMPORTED_LIMIT), "{text}");
+        assert!(!text.contains("made from this account's key"), "{text}");
+        assert_eq!(approve(&mut names, &id, &account)["value"]["state"], "approved");
+        as_caller(app("lez_bridge"));
+        let got = ask(&mut names, "RFP022/deposit")["value"].clone();
+        assert_eq!((got["granted"].as_bool(), got["imported"].as_bool()), (Some(true), Some(true)), "{got}");
+        // The second scope's card doesn't say it again (the limit of a private account stays).
+        let second = ask(&mut names, "RFP022/exit")["value"]["request"]["request"].as_str().unwrap().to_owned();
+        let text = shown(&mut names, &second);
+        assert!(!text.contains(provider_private::IMPORTED_LINE), "{text}");
+        assert!(text.contains(provider_private::PRIVATE_IMPORTED_LIMIT), "{text}");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let _ = std::fs::remove_dir_all(dir);
+
+        // A tool from before (14ec746 to 7096020): values without a scheme, for an imported account.
+        let (mut names, dir) = run("imported-old-tool", &format!("echo '{{\"account\":\"{account}\",\"values\":{values}}}'"));
+        as_caller(app("lez_bridge"));
+        let id = ask(&mut names, "RFP022/exit")["value"]["request"]["request"].as_str().unwrap().to_owned();
+        assert_eq!(approve(&mut names, &id, &account)["value"]["state"], "approved");
+        as_caller(app("lez_bridge"));
+        let refused = ask(&mut names, "RFP022/exit");
+        let error = refused["error"].as_str().unwrap_or_default().to_owned();
+        assert!(error.contains("too old") && error.contains("was imported"), "{refused}");
+        assert!(refused["value"]["values"].is_null(), "no values from it: {refused}");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let _ = std::fs::remove_dir_all(dir);
+
+        // The October tool's refusal (the owner's screen, 2026-11-18): plain words, no tool text.
+        let old = format!("echo \"Error: {account}: it isn't an account of this wallet's recovery phrase, so values made from it couldn't be restored\" >&2; exit 1");
+        let (mut names, dir) = run("imported-october-tool", &old);
+        as_caller(app("lez_bridge"));
+        let id = ask(&mut names, "RFP022/exit")["value"]["request"]["request"].as_str().unwrap().to_owned();
+        assert_eq!(approve(&mut names, &id, &account)["value"]["state"], "approved");
+        as_caller(app("lez_bridge"));
+        let error = ask(&mut names, "RFP022/exit")["error"].as_str().unwrap_or_default().to_owned();
+        assert!(error.contains("too old") && error.contains("Update the names tool"), "{error}");
+        for raw in ["CLI", "Error", "recovery phrase, so values", "key tree"] {
+            assert!(!error.contains(raw), "{raw:?} in {error}");
+        }
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_secret_failure_never_shows_the_tool_s_words() {
+        let a = "Public/X";
+        for (why, has) in [
+            ("the names CLI failed: Error: Public/X: it isn't an account of this wallet's recovery phrase, so values made from it couldn't be restored", "too old"),
+            ("the names CLI failed: Public/X: this wallet has no such public account", "isn't one of this wallet's own accounts"),
+            (cli::OLDER_CLI, "older than this app"),
+            ("the names CLI failed: thread 'main' panicked at src/x.rs:1", "couldn't make"),
+            ("", "couldn't make"),
+        ] {
+            let text = provider_private::secret_failure("deposit keys", a, why);
+            assert!(text.contains(has), "{why} -> {text}");
+            assert!(!text.contains("CLI") && !text.contains("Error") && !text.contains("panicked"), "{text}");
+        }
     }
 
     /// D1, D2, D4 through the module itself: the wallet's own Names registry is refused at

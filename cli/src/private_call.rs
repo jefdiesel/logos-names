@@ -576,9 +576,10 @@ impl Client {
         Ok(())
     }
 
-    /// `names module app-secret`: the values an app asks for (`app_secret.rs`), from this
-    /// wallet's own account key. An imported account's values come from its imported key: they
-    /// come back by importing that key again or from a Backup, never from the recovery phrase.
+    /// `names module app-secret`: the values an app asks for (`app_secret.rs`). A phrase account's
+    /// come from its own key; an imported account's from this wallet's root `R` and its id, so the
+    /// recovery phrase alone makes them again. The answer names the scheme (`"scheme"`): the module
+    /// refuses an imported account's values from a tool that doesn't say.
     pub fn app_secret(&self, request: &serde_json::Value) -> Result<()> {
         let field = |key: &str| request[key].as_str().ok_or_else(|| anyhow!("no {key}"));
         let context = hex::decode(field("context").unwrap_or_default()).context("the context is not hex")?;
@@ -593,27 +594,102 @@ impl Client {
         } else {
             bail!("write the account as Public/<id> or Private/<id>");
         };
-        let mut secret = account_secret(&self.wallet, private, id).map_err(|why| anyhow!("{written}: {why}"))?;
-        let values = crate::app_secret::values(&secret, id.value(), &ask);
-        secret.fill(0);
-        println!("{}", serde_json::json!({ "account": written, "values": values.iter().map(hex::encode).collect::<Vec<_>>() }));
+        let (values, scheme) = match account_secret(&self.wallet, private, id).map_err(|why| anyhow!("{written}: {why}"))? {
+            AccountSecret::Phrase(mut secret) => {
+                let values = crate::app_secret::values(&secret, id.value(), &ask);
+                secret.fill(0);
+                (values, crate::app_secret::SCHEME_PHRASE)
+            }
+            AccountSecret::Imported => {
+                let mut root = imported_root(&self.wallet).map_err(|why| anyhow!("{written}: {why}"))?;
+                let values = crate::app_secret::imported_values(&root, id.value(), &ask);
+                root.fill(0);
+                (values, crate::app_secret::SCHEME_IMPORTED)
+            }
+        };
+        println!("{}", serde_json::json!({ "account": written, "values": values.iter().map(hex::encode).collect::<Vec<_>>(), "scheme": scheme }));
+        Ok(())
+    }
+
+    /// `names module account-scheme`: `{account, scheme}` for one of this wallet's accounts.
+    pub fn account_scheme(&self, request: &serde_json::Value) -> Result<()> {
+        let written = request["account"].as_str().ok_or_else(|| anyhow!("no account"))?;
+        let (private, bare) = match (written.strip_prefix("Private/"), written.strip_prefix("Public/")) {
+            (Some(bare), _) => (true, bare),
+            (_, Some(bare)) => (false, bare),
+            _ => bail!("write the account as Public/<id> or Private/<id>"),
+        };
+        let id = parse_account(bare).map_err(|error| anyhow!(error))?;
+        let scheme = match account_secret(&self.wallet, private, id).map_err(|why| anyhow!("{written}: {why}"))? {
+            AccountSecret::Phrase(mut secret) => {
+                secret.fill(0);
+                crate::app_secret::SCHEME_PHRASE
+            }
+            AccountSecret::Imported => crate::app_secret::SCHEME_IMPORTED,
+        };
+        println!("{}", serde_json::json!({ "account": written, "scheme": scheme }));
         Ok(())
     }
 }
 
-/// An account's own 32-byte secret, the input of its app secrets: a public account's signing
-/// key, a private account's authorization secret key. An account of the recovery phrase's key
-/// trees, or an imported one (its values then come back with the imported key, not the phrase;
-/// the bridge's deposits into an imported account rely on it, 15 Nov). Another wallet's account
-/// is refused.
-pub fn account_secret<C: wallet::WalletSequencerClient>(wallet: &wallet::WalletCore<C>, private: bool, id: AccountId) -> Result<[u8; 32], String> {
+/// Where an account's app secrets come from. Its `Debug` never prints the secret.
+#[derive(PartialEq, Eq)]
+pub enum AccountSecret {
+    /// An account of the recovery phrase's key trees: its own 32-byte secret (a public account's
+    /// signing key, a private account's authorization secret key).
+    Phrase([u8; 32]),
+    /// An imported account (its key is held, no key tree has it): its values come from
+    /// [`imported_root`] and its id.
+    Imported,
+}
+
+impl std::fmt::Debug for AccountSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Phrase(_) => "Phrase(..)",
+            Self::Imported => "Imported",
+        })
+    }
+}
+
+/// Which scheme `id` follows, by key-tree membership: an id the trees hold is a phrase account
+/// even when it was also imported (the imported entries are listed first, so a first match
+/// would misread it). Another wallet's account, and shared or group accounts, are refused.
+pub fn account_secret<C: wallet::WalletSequencerClient>(wallet: &wallet::WalletCore<C>, private: bool, id: AccountId) -> Result<AccountSecret, String> {
     let key_chain = wallet.storage().key_chain();
     if private {
-        let found = key_chain.private_account(id).ok_or("this wallet has no such private account")?;
-        Ok(found.key_chain.private_key_holder.authorization_secret_key.0)
+        let mut held = false;
+        for found in key_chain.private_accounts() {
+            if AccountId::for_private_account(&found.key_chain.nullifier_public_key, &found.key_chain.viewing_public_key, found.kind) != id {
+                continue;
+            }
+            held = true;
+            // A tree account: the tree itself has this account's key chain at that index (an imported
+            // account keeps the index it had in the wallet it came from).
+            let tree = found.chain_index.as_ref().and_then(|index| key_chain.private_account_key_chain_by_index(index));
+            if let Some(tree) = tree {
+                if AccountId::for_private_account(&tree.nullifier_public_key, &tree.viewing_public_key, found.kind) == id {
+                    return Ok(AccountSecret::Phrase(tree.private_key_holder.authorization_secret_key.0));
+                }
+            }
+        }
+        if held { Ok(AccountSecret::Imported) } else { Err("this wallet has no such private account".to_owned()) }
     } else {
-        Ok(*key_chain.pub_account_signing_key(id).ok_or("this wallet has no such public account")?.value())
+        let key = key_chain.pub_account_signing_key(id).ok_or("this wallet has no such public account")?;
+        if key_chain.public_account_ids().any(|(found, index)| found == id && index.is_some()) {
+            Ok(AccountSecret::Phrase(*key.value()))
+        } else {
+            Ok(AccountSecret::Imported)
+        }
     }
+}
+
+/// `R`: the private key tree root's secret spending key, which only the recovery phrase gives
+/// (LEZ `ChildKeysPrivate::root`; the root node is in every storage file and every restore). Read
+/// from the tree, never from an imported entry.
+pub fn imported_root<C: wallet::WalletSequencerClient>(wallet: &wallet::WalletCore<C>) -> Result<[u8; 32], String> {
+    let root = wallet.storage().key_chain().private_account_key_chain_by_index(&Default::default()).ok_or("this wallet's key tree has no root")?;
+    Ok(root.secret_spending_key.0)
 }
 
 #[cfg(test)]
@@ -650,28 +726,75 @@ mod tests {
         let (mut other, _) = open("other");
         let others = made(&mut other);
         let ask = crate::app_secret::Ask::new("lez_bridge", "RFP022/deposit", vec![1, 2, 3], "RFP022/ck", 0, 3).unwrap();
+        let secret = |wallet: &WalletCore<SequencerClient>, private: bool, id: AccountId| match account_secret(wallet, private, id).unwrap() {
+            AccountSecret::Phrase(secret) => secret,
+            AccountSecret::Imported => panic!("{id} is a phrase account"),
+        };
         for ((private, id), (_, other_id)) in accounts.iter().zip(others.iter()) {
-            let mine = crate::app_secret::values(&account_secret(&original, *private, *id).unwrap(), id.value(), &ask);
-            let again = crate::app_secret::values(&account_secret(&restored, *private, *id).unwrap(), id.value(), &ask);
+            let mine = crate::app_secret::values(&secret(&original, *private, *id), id.value(), &ask);
+            let again = crate::app_secret::values(&secret(&restored, *private, *id), id.value(), &ask);
             assert_eq!(mine, again, "restoring gives the same values for {id}");
-            let theirs = crate::app_secret::values(&account_secret(&other, *private, *other_id).unwrap(), other_id.value(), &ask);
+            let theirs = crate::app_secret::values(&secret(&other, *private, *other_id), other_id.value(), &ask);
             assert_ne!(mine, theirs);
             // The values are not the account's key, nor its key hashed with the tag alone.
-            let key = account_secret(&original, *private, *id).unwrap();
+            let key = secret(&original, *private, *id);
             assert!(mine.iter().all(|value| *value != key));
         }
         // Another wallet's account is refused here, not derived from.
         assert!(account_secret(&original, true, others[1].1).is_err());
         assert!(account_secret(&original, false, others[0].1).is_err());
-        // An imported public account works, and importing the same key elsewhere gives the same
-        // values (that, or a Backup, is how they come back: not the phrase).
+        // An imported public account: its values come from this wallet's phrase and its id. The
+        // same key imported into a wallet of another phrase gives OTHER values (the 15 Nov rule,
+        // values from the imported key, gave the same: they are never this wallet's now).
         let key = lee::PrivateKey::try_new([7u8; 32]).unwrap();
         let imported = AccountId::from(&lee::PublicKey::new_from_private_key(&key));
         original.storage_mut().key_chain_mut().add_imported_public_account(key.clone());
-        other.storage_mut().key_chain_mut().add_imported_public_account(key);
-        let here = crate::app_secret::values(&account_secret(&original, false, imported).unwrap(), imported.value(), &ask);
-        let there = crate::app_secret::values(&account_secret(&other, false, imported).unwrap(), imported.value(), &ask);
-        assert_eq!(here, there);
+        other.storage_mut().key_chain_mut().add_imported_public_account(key.clone());
+        assert_eq!(account_secret(&original, false, imported), Ok(AccountSecret::Imported));
+        let root_of = |wallet: &WalletCore<SequencerClient>| imported_root(wallet).unwrap();
+        let here = crate::app_secret::imported_values(&root_of(&original), imported.value(), &ask);
+        let there = crate::app_secret::imported_values(&root_of(&other), imported.value(), &ask);
+        assert_ne!(here, there, "another phrase, other values");
+        let old_rule = crate::app_secret::values(key.value(), imported.value(), &ask);
+        assert!(here.iter().all(|v| !old_rule.contains(v)), "the imported key's own values are not this wallet's");
+        // The restored wallet, WITHOUT the imported key, makes the same values from the phrase alone.
+        assert_eq!(account_secret(&restored, false, imported).map(|_| ()), Err("this wallet has no such public account".to_owned()));
+        assert_eq!(crate::app_secret::imported_values(&root_of(&restored), imported.value(), &ask), here);
+        // ...and so does it after importing the key again.
+        restored.storage_mut().key_chain_mut().add_imported_public_account(key);
+        assert_eq!(account_secret(&restored, false, imported), Ok(AccountSecret::Imported));
+        // A phrase account also imported (its own key added to the imported list) stays a phrase account.
+        let (_, public) = accounts[0];
+        let own = original.storage().key_chain().pub_account_signing_key(public).unwrap().clone();
+        original.storage_mut().key_chain_mut().add_imported_public_account(own);
+        assert_eq!(account_secret(&original, false, public).map(|s| matches!(s, AccountSecret::Phrase(_))), Ok(true));
+        // An imported private account: imported, whatever chain index it carries from its wallet.
+        let (_, other_private) = others[1];
+        let found = other.storage().key_chain().private_account(other_private).unwrap();
+        let (chain, index, account) = (found.key_chain.clone(), found.chain_index.clone(), found.account.clone());
+        assert!(index.is_some(), "it carries its old wallet's index");
+        original.storage_mut().key_chain_mut().add_imported_private_account(chain, index, account);
+        assert_eq!(account_secret(&original, true, other_private), Ok(AccountSecret::Imported));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `R` from a wallet restored from the public BIP-39 test phrase is the Python generator's
+    /// (rfp-022 `gen_names_imported_vectors.py`): the values really come from the phrase.
+    #[test]
+    fn the_imported_root_is_the_phrase_s() {
+        use sequencer_service_rpc::SequencerClient;
+        use wallet::WalletCore;
+        let doc: serde_json::Value = serde_json::from_str(include_str!("../../basecamp-module/rust-lib/testdata/app-secret-imported-v1.json")).unwrap();
+        let root = std::env::temp_dir().join(format!("names-imported-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for case in doc["roots"].as_array().unwrap() {
+            let dir = root.join(case["name"].as_str().unwrap().replace(' ', "-"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("wallet_config.json"), serde_json::to_vec(&wallet::config::WalletConfig::default()).unwrap()).unwrap();
+            let (mut w, _) = WalletCore::<SequencerClient>::new_init_storage(dir.join("wallet_config.json"), dir.join("storage.json"), None, "").unwrap();
+            w.restore_storage(&case["phrase"].as_str().unwrap().parse().unwrap());
+            assert_eq!(format!("0x{}", hex::encode(imported_root(&w).unwrap())), case["root"].as_str().unwrap(), "{}", case["name"]);
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 

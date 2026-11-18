@@ -4013,6 +4013,7 @@ async fn main() -> Result<()> {
                             // Reads only: a private call's plan and an app's secrets may run
                             // while a job that saves the wallet does.
                             | module::Request::AppSecret
+                            | module::Request::AccountScheme
                             | module::Request::PrivateCall(module::CallRequest::Plan)
                             // A public call another account pays for: planned and signed, never sent.
                             | module::Request::PublicCall(module::PublicCallRequest::Plan | module::PublicCallRequest::Sign { .. })

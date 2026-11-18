@@ -563,6 +563,56 @@ fn program_name(program: &str, labels: &Map<String, Value>) -> String {
 
 /// A request to use app secrets of `scope` from `account` (`app_secret`), which the person
 /// approves once.
+/// Said once, on the first secret request for an imported account (rfp-022
+/// `proposal/IMPORTED-ACCOUNTS-DESIGN.md` (e)).
+pub const IMPORTED_LINE: &str = "This account was imported. Its bridge secrets come from this wallet's recovery phrase, so the phrase can finish a withdrawal; the account's own key is still needed to move what stays in it.";
+/// What that costs, plainly: no more than what the first private account's key chain already holds.
+pub const IMPORTED_EXPOSURE: &str = "Whoever holds the full keys of this wallet's first private account could also make these values, as they already can for that account's own.";
+/// A private imported account's id isn't on chain: a phrase-only restore can't look for it.
+pub const PRIVATE_IMPORTED_LIMIT: &str = "A wallet restored from the recovery phrase can't find this account's withdrawals by itself; keep a backup.";
+
+/// Marks a secret request for an imported account; `first`: the first for it from any app, which
+/// says what that means.
+pub fn mark_imported(request: &mut Value, private: bool, first: bool) {
+    request["imported"] = json!(true);
+    let mut lines = Vec::new();
+    if first {
+        lines.push(IMPORTED_LINE);
+        lines.push(IMPORTED_EXPOSURE);
+    }
+    if private {
+        lines.push(PRIVATE_IMPORTED_LIMIT);
+    }
+    if lines.is_empty() {
+        return;
+    }
+    let before = request["explanation"].as_str().unwrap_or_default().to_owned();
+    // The phrase-account wording ("made from this account's key") isn't what happens here.
+    let before = before.replace("The wallet makes them from this account's key, so they come back if you restore the wallet from its recovery phrase. ", "");
+    request["explanation"] = json!(format!("{} {before}", lines.join(" ")));
+}
+
+/// Why `app_secret` gave no values, in plain words: never the names tool's own text, which named
+/// key trees and CLI errors (the 0.17.0 screen showed "the names CLI failed: Error: …").
+pub fn secret_failure(what: &str, account: &str, why: &str) -> String {
+    let why = why.to_ascii_lowercase();
+    if why.contains("isn't an account of this wallet's recovery phrase") || why.contains("couldn't be restored") {
+        return older_tool_for_imported(what, account);
+    }
+    if why.contains("no such public account") || why.contains("no such private account") {
+        return format!("This wallet can't make {what} for {account}: it isn't one of this wallet's own accounts (a shared or group account, or another wallet's). Nothing was shared.");
+    }
+    if why.contains("older than this app") || why.contains("unrecognized subcommand") {
+        return format!("The names tool set for this network is older than this app and can't make {what} for {account}. Update it in App settings; nothing was shared.");
+    }
+    format!("This wallet couldn't make {what} for {account}. Nothing was shared; try again, and if it keeps failing, update the names tool in App settings.")
+}
+
+/// An imported account and a names tool from before imported accounts' phrase values.
+pub fn older_tool_for_imported(what: &str, account: &str) -> String {
+    format!("{account} was imported, and the names tool set for this network is too old to make {what} for an imported account. Update the names tool in App settings; nothing was shared.")
+}
+
 pub fn secret_request(app: &str, account: &str, scope: &str, reason: &str, now: u64) -> Result<Value, String> {
     let (private, id) = account_ref(account)?;
     crate::app_secret::Ask::new(app, scope, Vec::new(), "x", 0, 1)?;

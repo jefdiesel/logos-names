@@ -131,7 +131,7 @@ balances are 128-bit numbers.
 | `declare_programs(programs_json, reason)` | Names the programs (1 to 8 IDs, a JSON array) you will ask the person to sign calls to that someone else pays for. The person approves it once (see [Calls someone else pays for](#calls-someone-else-pays-for)). | a request |
 | `propose_relayed_call(account, call_json, summary)` | Asks the wallet to sign, as one of the public accounts you were given, a call whose fee another account pays (a relay's). The wallet hands the signed transaction back to you and sends nothing. LEZ 0.4 only. | a request; once approved, `transaction` and `hash` |
 | `resign_relayed_call(request_id)` | Signs your approved relayed call again, without asking the person, when only the fee payer's nonce has moved (your relay had another transaction in flight). Same account and account nonce, program, bytes, actors, payer, gas limit, tip and max fee; at most 3 times within 10 minutes of the approval. A refusal carries `code`: `unchanged` (send what you have), `landed_or_used` (your account's nonce moved: the call may have landed; check before proposing again), `ask_again` (propose it again) or `refused`. | the request, with the new `transaction` and `hash` |
-| `app_secret(account, scope, context_hex, tag, first, count)` | Values the wallet derives for your app from one of your accounts; the first use of each (account, scope) is approved by the person (see [App secrets](#app-secrets)). | `{granted: false, request}` or `{granted: true, account, scope, tag, first, values}` |
+| `app_secret(account, scope, context_hex, tag, first, count)` | Values the wallet derives for your app from one of your accounts; the first use of each (account, scope) is approved by the person (see [App secrets](#app-secrets)). | `{granted: false, request}` or `{granted: true, account, scope, tag, first, values, imported}` |
 | `propose_token_source(token_program, definitions_json)` | Asks to list a token program's definitions, with names, symbols and decimals, in the person's holdings (see [Token sources](#token-sources)). Needs no access first. | a request |
 | `token_sources()` | The token sources the person accepted. | `[{token_program, definitions, app, since}]` |
 | `propose_inscription(text)` | Asks to inscribe a testimonial on the Logos Blockchain (not the LEZ zone), paid from one of the person's node's accounts, which they pick. Needs no access first (see [Inscriptions](#inscriptions-on-the-logos-blockchain)). | a request |
@@ -371,8 +371,15 @@ value = SHA256(tag | m_i)        for i in first .. first + count
   (1-32 printable ASCII). `scope` is 1-64 printable ASCII, `context_hex` up to 256 bytes, `count`
   1-64.
 - The same call gives the same values after the person restores the wallet from its recovery
-  phrase (accounts made again in the same order are the same accounts). An account imported from
-  a key is refused, since the phrase doesn't restore it.
+  phrase (accounts made again in the same order are the same accounts). An account **imported**
+  from a key (the wallet holds its key, no key tree of the phrase has it) gets values from the
+  phrase too: `ikm` is the private key tree root's secret spending key `R`, under salt
+  `logos-names/app-secret/imported/v1` and info prefix `logos-names/app-secret/imported/v1/info`
+  (the rest of `info` as above, the account's id in it), so a wallet restored from the phrase
+  alone makes them again (see [BRIDGE-SDK.md](BRIDGE-SDK.md) §1). The answer then carries
+  `imported: true`. The CLI decides by key-tree membership and names the scheme
+  (`names module app-secret` prints `scheme`; `names module account-scheme` answers it alone);
+  the module refuses an imported account's values from a tool that names none.
 - The first call for an (account, scope) returns `{granted: false, request}`: the person sees
   your app, the account, the scope, and that you get values from which the account's key can't
   be recovered and with which nothing can be spent. Poll `request_status`; once `approved`, call

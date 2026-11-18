@@ -21,6 +21,22 @@
 //! two-level convention (`s` = `m` stays in the wallet; `k = SHA256("RFP022/ck" | s)` is what
 //! the app gets and what its transactions carry), and it holds for any app: whatever an app
 //! learns is a one-way image of a master value it can't recover.
+//!
+//! An **imported** account (its key is in the wallet, but neither key tree of the recovery phrase
+//! holds it) takes its values from the phrase instead, so a wallet restored from the phrase alone
+//! makes them again (rfp-022 `proposal/IMPORTED-ACCOUNTS-DESIGN.md`):
+//!
+//! ```text
+//! R     = the private key tree root's secret spending key (first 32 bytes of
+//!         HMAC-SHA512(key = "/LEE-Keys/v1/Master/Private", msg = BIP-39 seed of the phrase))
+//! prk   = HMAC-SHA256(key = "logos-names/app-secret/imported/v1", msg = R)
+//! info  = "logos-names/app-secret/imported/v1/info" | the same fields as above
+//! m, value as above
+//! ```
+//!
+//! New salt and new `info` prefix: nothing a phrase account gets changes, and the two schemes never
+//! meet. Which scheme an account follows is the names CLI's decision (tree membership); its answer
+//! names it (`"scheme"`).
 
 use sha2::{Digest, Sha256};
 
@@ -28,6 +44,13 @@ use sha2::{Digest, Sha256};
 pub const SALT: &[u8] = b"logos-names/app-secret/v1";
 /// First bytes of every HKDF-Expand `info`.
 pub const INFO_TAG: &[u8] = b"logos-names/app-secret/v1/info";
+/// HKDF-Extract salt of an imported account's values.
+pub const IMPORTED_SALT: &[u8] = b"logos-names/app-secret/imported/v1";
+/// First bytes of an imported account's HKDF-Expand `info`.
+pub const IMPORTED_INFO_TAG: &[u8] = b"logos-names/app-secret/imported/v1/info";
+/// The CLI's word for each scheme (`"scheme"` in its answer).
+pub const SCHEME_PHRASE: &str = "phrase";
+pub const SCHEME_IMPORTED: &str = "imported";
 /// A scope's length in bytes.
 pub const MAX_SCOPE: usize = 64;
 /// A tag's length in bytes.
@@ -102,8 +125,13 @@ impl Ask {
 
 /// HKDF-Expand `info` for `index` (see the module docs).
 pub fn info(app: &str, scope: &str, context: &[u8], account: &[u8; 32], index: u64) -> Vec<u8> {
-    let mut info = Vec::with_capacity(INFO_TAG.len() + 2 + app.len() + scope.len() + 2 + context.len() + 40);
-    info.extend_from_slice(INFO_TAG);
+    info_with(INFO_TAG, app, scope, context, account, index)
+}
+
+/// `info` after `prefix` (the phrase scheme's or the imported one's).
+fn info_with(prefix: &[u8], app: &str, scope: &str, context: &[u8], account: &[u8; 32], index: u64) -> Vec<u8> {
+    let mut info = Vec::with_capacity(prefix.len() + 2 + app.len() + scope.len() + 2 + context.len() + 40);
+    info.extend_from_slice(prefix);
     info.push(u8::try_from(app.len()).unwrap_or(u8::MAX));
     info.extend_from_slice(app.as_bytes());
     info.push(u8::try_from(scope.len()).unwrap_or(u8::MAX));
@@ -121,6 +149,21 @@ pub fn master(account_secret: &[u8; 32], account: &[u8; 32], ask: &Ask, index: u
     let mut message = info(&ask.app, &ask.scope, &ask.context, account, index);
     message.push(1);
     hmac_sha256(&prk, &message)
+}
+
+/// The master value `m` of an imported account for `index`, from the wallet's root `R`.
+pub fn imported_master(root: &[u8; 32], account: &[u8; 32], ask: &Ask, index: u64) -> [u8; 32] {
+    let mut prk = hmac_sha256(IMPORTED_SALT, root);
+    let mut message = info_with(IMPORTED_INFO_TAG, &ask.app, &ask.scope, &ask.context, account, index);
+    message.push(1);
+    let m = hmac_sha256(&prk, &message);
+    prk.fill(0);
+    m
+}
+
+/// The values `ask` gets from the imported account `account` of the wallet whose root is `root`.
+pub fn imported_values(root: &[u8; 32], account: &[u8; 32], ask: &Ask) -> Vec<[u8; 32]> {
+    (ask.first..ask.first + ask.count).map(|index| tagged(&ask.tag, &imported_master(root, account, ask, index))).collect()
 }
 
 /// `SHA256(tag | m)`: what the app gets.
@@ -210,6 +253,48 @@ mod tests {
         }
         // What the app gets is never the master value itself.
         assert_ne!(reference, master(&secret, &account, &base, 5));
+    }
+
+    /// rfp-022 `lez-bridge/client/tests/vectors/gen_names_imported_vectors.py` (Python, stdlib), its
+    /// output copied byte for byte to `testdata/app-secret-imported-v1.json`.
+    #[test]
+    fn imported_vectors() {
+        let doc: serde_json::Value = serde_json::from_str(include_str!("../testdata/app-secret-imported-v1.json")).unwrap();
+        let unhex32 = |v: &serde_json::Value| -> [u8; 32] {
+            let t = v.as_str().unwrap().trim_start_matches("0x");
+            (0..32).map(|i| u8::from_str_radix(&t[2 * i..2 * i + 2], 16).unwrap()).collect::<Vec<_>>().try_into().unwrap()
+        };
+        assert_eq!(doc["salt"], std::str::from_utf8(IMPORTED_SALT).unwrap());
+        assert_eq!(doc["info_tag"], std::str::from_utf8(IMPORTED_INFO_TAG).unwrap());
+        let c = &doc["names_case"];
+        let root = unhex32(&c["root"]);
+        let account = [9_u8; 32];
+        let ask = Ask::new("lez_bridge", "RFP022/deposit", vec![0xab, 0xcd], "RFP022/ck", 0, 2).unwrap();
+        assert_eq!(imported_master(&root, &account, &ask, 0), unhex32(&c["master_0"]));
+        let got = imported_values(&root, &account, &ask);
+        assert_eq!(got, c["values"].as_array().unwrap().iter().map(unhex32).collect::<Vec<_>>());
+        // The phrase scheme with the same 32 bytes as an account secret gives other values.
+        assert_eq!(values(&root, &account, &ask), c["phrase_scheme_values"].as_array().unwrap().iter().map(unhex32).collect::<Vec<_>>());
+        assert_ne!(values(&root, &account, &ask), got);
+        // The bridge's cases: claim and exit secrets.
+        for case in doc["cases"].as_array().unwrap() {
+            let r = unhex32(&case["root"]);
+            let id = unhex32(&case["account"]);
+            let t = |k: &str| case[k].as_str().unwrap().trim_start_matches("0x").to_owned();
+            let bytes = |h: String| (0..h.len() / 2).map(|i| u8::from_str_radix(&h[2 * i..2 * i + 2], 16).unwrap()).collect::<Vec<u8>>();
+            let denom: u128 = case["denom"].as_str().unwrap().parse().unwrap();
+            let fee: u128 = case["max_relay_fee"].as_str().unwrap().parse().unwrap();
+            let u = |v: u128| { let mut o = [0u8; 32]; o[16..].copy_from_slice(&v.to_be_bytes()); o };
+            let dctx = [bytes(t("cfg_id")), bytes(t("token")), u(denom).to_vec()].concat();
+            let ectx = [dctx.clone(), bytes(t("eth_dest")), u(fee).to_vec()].concat();
+            let index = case["index"].as_u64().unwrap();
+            let dep = Ask::new("lez_bridge", "RFP022/deposit", dctx, "RFP022/ck", index, 1).unwrap();
+            assert_eq!(imported_master(&r, &id, &dep, index), unhex32(&case["deposit_master"]));
+            assert_eq!(imported_values(&r, &id, &dep)[0], unhex32(&case["claim_secret"]));
+            let exit = Ask::new("lez_bridge", "RFP022/exit", ectx, "RFP022/ek", index, 1).unwrap();
+            assert_eq!(imported_values(&r, &id, &exit)[0], unhex32(&case["exit_secret"]));
+            assert_eq!(values(&r, &id, &exit)[0], unhex32(&case["phrase_scheme_exit_secret"]));
+        }
     }
 
     #[test]
