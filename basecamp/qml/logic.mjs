@@ -2084,9 +2084,12 @@ export function receiveBalanceLine(blocks, account, symbol, deployment) {
     // The wrapped token keeps the symbol or puts a "w" before it (ETH arrives as wETH).
     var all = block && Array.isArray(block.assets) ? block.assets.filter(function(a) { return a.symbol === symbol || a.symbol === "w" + symbol }) : []
     var key = receiveBridgeKey(deployment)
+    var named = deployment && typeof deployment === "object" ? String(deployment.id || deployment.label || "") : String(deployment || "")
     var asset = null
-    if (key !== "") {
-        var ofBridge = all.filter(function(a) { return receiveBridgeKey(a.bridgeLabel || "") === key || receiveBridgeKey(String(a.name || "").split("· ").pop()) === key })
+    if (named !== "") {
+        // A bridge added from its code ("added-…") names no version: only an unlabelled single row
+        // can be its, never another bridge's balance.
+        var ofBridge = key === "" ? [] : all.filter(function(a) { return receiveBridgeKey(a.bridgeLabel || "") === key || receiveBridgeKey(String(a.name || "").split("· ").pop()) === key })
         // One bridge only, unlabelled: it is the row's (a wallet with one bridge shows no label).
         if (ofBridge.length === 0 && all.length === 1 && !all[0].bridgeLabel && String(all[0].name || "").indexOf("· ") < 0)
             ofBridge = all

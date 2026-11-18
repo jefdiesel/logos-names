@@ -1442,6 +1442,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     { symbol: "wETH", name: "Wrapped Sepolia ETH · bridge v5", bridgeLabel: "bridge v5", amount: "1.01" }] }];
   check("balance line: the v5 row reads v5, not v6", L.receiveBalanceLine(two, acct, "ETH", { id: "bridge-test-network-v5", label: "bridge v5", current: true }), "3J29s1…7CNA now holds 1.01 wETH.");
   check("balance line: the v6 row reads v6", L.receiveBalanceLine(two, acct, "ETH", { id: "added-1", label: "sepolia-v6" }), "3J29s1…7CNA now holds 0.01 wETH.");
+  check("balance line: a bridge added from its code (\"added-…\", no version): never another bridge's balance", L.receiveBalanceLine(two, acct, "ETH", { id: "added-95cea20e4a1b", label: "added-95cea20e4a1b" }), "The balance of 3J29s1…7CNA shows on the Wallet card once the network is read again.");
   check("balance line: a bridge the card has no row for: no other bridge's balance", L.receiveBalanceLine(two, acct, "ETH", { id: "bridge-test-network-v4", label: "bridge v4" }), "The balance of 3J29s1…7CNA shows on the Wallet card once the network is read again.");
   check("balance line: one unlabelled row (one bridge): it", L.receiveBalanceLine([{ account: acct, assets: [{ symbol: "wETH", name: "Wrapped Sepolia ETH", amount: "0.2" }] }], acct, "ETH", { id: "bridge-test-network-v5", label: "bridge v5" }), "3J29s1…7CNA now holds 0.2 wETH.");
   check("balance line: a label as before", L.receiveBalanceLine(two, acct, "ETH", "bridge v5"), "3J29s1…7CNA now holds 1.01 wETH.");
