@@ -1956,6 +1956,9 @@ export const CHECK_GENTLE_MS = 150000
 /// A settlement the bridge's service runs (rfp-022 NAMES-SEND-BACK.md §4a): every 30 s, only on
 /// its own screen, open and in front.
 export const CHECK_SETTLE_MS = 30000
+/// A private claim's or burn's wait (proved on this computer): checked by itself no more often
+/// than this, and only while its own screen is open and in front (Check now asks at once).
+export const PRIVATE_CHECK_MS = 30000
 
 /// How a receive is checked by itself, from its receive_status: "gentle" while it becomes final on
 /// Sepolia (deposited, final), else "none" (Check now, and once on view).
@@ -2736,9 +2739,6 @@ export function privateCan(features, what) {
 /// A private claim or burn proved on this computer: one place for the time (measured 577 s and
 /// 642 s on a 16 GB Apple M4, 4 threads).
 export const PRIVATE_PROOF_TIME = "about 10 minutes"
-/// The proving wait is checked by itself no more often than this, and only while its own screen
-/// is open and in front (Check now asks at once).
-export const PRIVATE_CHECK_MS = 30000
 /// The one line beside the Private choice on Receive.
 export const PRIVATE_RECEIVE_NOTE = "Private: nobody can link this deposit to your account. Claiming it takes " + PRIVATE_PROOF_TIME + " of proving on this computer."
 /// The private claim's one line, above its button.

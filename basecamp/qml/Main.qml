@@ -1243,13 +1243,13 @@ Item {
     property bool receivePublicOk: false
     // Private or public: chosen by the person ("" until then: private, the privacy default, when
     // the bridge makes private codes, else public). A private code's claim is proved here.
-    property string receiveKind: ""
+    property string ethReceiveKind: ""
     property string receivePrivateAccount: ""
     readonly property bool receivePrivateAble: Logic.privateCan(bridgeFeatures, "receive")
-    readonly property string receiveKindNow: receiveKind !== "" ? receiveKind : receivePrivateAble ? "private" : "public"
+    readonly property string ethReceiveKindNow: ethReceiveKind !== "" ? ethReceiveKind : receivePrivateAble ? "private" : "public"
     readonly property var receivePrivateList: Logic.privateAccounts(cliAccounts)
     readonly property string receivePrivateNow: receivePrivateList.indexOf(receivePrivateAccount) >= 0 ? receivePrivateAccount : receivePrivateList.length > 0 ? receivePrivateList[0] : ""
-    readonly property bool receiveCanMake: receiveKindNow === "private" ? receivePrivateAble && receivePrivateNow !== "" : receivePublicOk && receiveAccountNow !== ""
+    readonly property bool receiveCanMake: ethReceiveKindNow === "private" ? receivePrivateAble && receivePrivateNow !== "" : receivePublicOk && receiveAccountNow !== ""
     property bool receiveAsking: false
     property var receiveNeeds: null
     property string receiveNeedsState: ""
@@ -1307,7 +1307,7 @@ Item {
         receiveNeeds = null
         receiveDetails = false
         receivePublicOk = false
-        receiveKind = ""
+        ethReceiveKind = ""
         receiveMissing = false
         receiveFocus = typeof focusId === "string" ? focusId : Logic.receiveInProgress(receives, receiveStatuses, receiveCodes)
         receiveResult = receiveFocus !== "" && receiveCodes[receiveFocus] ? receiveCodes[receiveFocus]
@@ -1420,7 +1420,7 @@ Item {
     function makeReceive(switched) {
         if (receiveAsking || !receiveCanMake || receiveHoldNow !== "")
             return
-        var priv = receiveKindNow === "private"
+        var priv = ethReceiveKindNow === "private"
         var into = priv ? receivePrivateNow : receiveAccountNow
         if (priv)
             receivePrivateAccount = into
@@ -11121,7 +11121,7 @@ Item {
                     readonly property var result: root.receiveResult
                     // The account the code pays: the code's own (one shown again), else the one chosen.
                     readonly property string resultAccount: result !== null && result.account ? String(result.account)
-                        : root.receiveFocusRow !== null ? Logic.receiveAccountShown(root.receiveFocusRow) : root.receiveKindNow === "private" ? root.receivePrivateNow : root.receiveAccount
+                        : root.receiveFocusRow !== null ? Logic.receiveAccountShown(root.receiveFocusRow) : root.ethReceiveKindNow === "private" ? root.receivePrivateNow : root.receiveAccount
                     readonly property var refusal: root.receiveFocus !== "" ? (root.receiveCodeRefusals[root.receiveFocus] || null) : null
                     readonly property var releaseNotice: root.bridgeConfig !== null && root.bridgeConfig.notices && root.bridgeConfig.notices.release && root.bridgeConfig.notices.release.text ? root.bridgeConfig.notices.release : null
                     readonly property var p: root.receiveFocusProgress
@@ -11177,14 +11177,14 @@ Item {
                         Flow {
                             Layout.fillWidth: true
                             spacing: 8
-                            Choice { label: "Private"; chosen: root.receiveKindNow === "private"; onPressed: root.receiveKind = "private" }
-                            Choice { label: "Public"; chosen: root.receiveKindNow === "public"; onPressed: root.receiveKind = "public" }
+                            Choice { label: "Private"; chosen: root.ethReceiveKindNow === "private"; onPressed: root.ethReceiveKind = "private" }
+                            Choice { label: "Public"; chosen: root.ethReceiveKindNow === "public"; onPressed: root.ethReceiveKind = "public" }
                         }
-                        Hint { visible: root.receiveKindNow === "private"; color: root.ink; text: Logic.PRIVATE_RECEIVE_NOTE }
+                        Hint { visible: root.ethReceiveKindNow === "private"; color: root.ink; text: Logic.PRIVATE_RECEIVE_NOTE }
                         // Private: the wallet's private accounts on LEZ 0.4.
-                        StatusLine { visible: root.receiveKindNow === "private" && root.receivePrivateAble && root.cliAccounts !== null && root.receivePrivateList.length === 0; kind: "problem"; text: "No private account on LEZ 0.4 yet. Make one in Settings, then come back."; actionLabel: "Open Settings"; onAct: root.go("settings") }
+                        StatusLine { visible: root.ethReceiveKindNow === "private" && root.receivePrivateAble && root.cliAccounts !== null && root.receivePrivateList.length === 0; kind: "problem"; text: "No private account on LEZ 0.4 yet. Make one in Settings, then come back."; actionLabel: "Open Settings"; onAct: root.go("settings") }
                         Flow {
-                            visible: root.receiveKindNow === "private" && root.receivePrivateAble
+                            visible: root.ethReceiveKindNow === "private" && root.receivePrivateAble
                             Layout.fillWidth: true
                             spacing: 8
                             Repeater {
@@ -11192,11 +11192,11 @@ Item {
                                 Choice { required property var modelData; label: "Into " + Logic.idShort(modelData) + " · private"; chosen: root.receivePrivateNow === modelData; onPressed: root.receivePrivateAccount = modelData }
                             }
                         }
-                        Hint { visible: root.receiveKindNow === "private" && root.receivePrivateAble && root.proofWarning !== ""; color: root.ink; font.pixelSize: root.px(15); text: root.proofWarning }
+                        Hint { visible: root.ethReceiveKindNow === "private" && root.receivePrivateAble && root.proofWarning !== ""; color: root.ink; font.pixelSize: root.px(15); text: root.proofWarning }
                         // Public: as before, after the one thing to read first.
-                        StatusLine { visible: root.receiveKindNow === "public" && root.receiveAccountList.length === 0; kind: "problem"; text: "No public account on LEZ 0.4 yet. Make one in Settings, then come back."; actionLabel: "Open Settings"; onAct: root.go("settings") }
+                        StatusLine { visible: root.ethReceiveKindNow === "public" && root.receiveAccountList.length === 0; kind: "problem"; text: "No public account on LEZ 0.4 yet. Make one in Settings, then come back."; actionLabel: "Open Settings"; onAct: root.go("settings") }
                         Flow {
-                            visible: root.receiveKindNow === "public"
+                            visible: root.ethReceiveKindNow === "public"
                             Layout.fillWidth: true
                             spacing: 8
                             Repeater {
@@ -11206,7 +11206,7 @@ Item {
                         }
                         // The one thing to read first: a public account links the deposit to it.
                         Tick {
-                            visible: root.receiveKindNow === "public"
+                            visible: root.ethReceiveKindNow === "public"
                             checked: root.receivePublicOk
                             text: "Not private: the claim links this deposit to this account for good."
                             onToggled: root.receivePublicOk = !root.receivePublicOk
@@ -11215,8 +11215,8 @@ Item {
                         Action { visible: root.receiveHoldNow === ""; label: root.receiveAsking ? "Making the code…" : "Make the deposit code"; strong: true; enabledNow: !root.receiveAsking && root.receiveCanMake; onPressed: root.makeReceive() }
                         WhyLine {
                             visible: root.receiveHoldNow === "" && text !== ""
-                            text: Logic.receiveMakeWhy({ asking: root.receiveAsking, ticked: root.receivePublicOk, kind: root.receiveKindNow, able: root.receivePrivateAble,
-                                                         account: root.receiveKindNow === "private" ? root.receivePrivateNow : root.receiveAccountNow })
+                            text: Logic.receiveMakeWhy({ asking: root.receiveAsking, ticked: root.receivePublicOk, kind: root.ethReceiveKindNow, able: root.receivePrivateAble,
+                                                         account: root.ethReceiveKindNow === "private" ? root.receivePrivateNow : root.receiveAccountNow })
                         }
                     }
                     StatusLine { visible: root.receiveNeeds !== null && !root.appInline; kind: "waiting"; text: "Waiting for your answer in the approval sheet." }

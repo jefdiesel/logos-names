@@ -994,7 +994,7 @@ _BR_FEATURES += ["send_back_address", "send_back_recipients"]
 V5 = "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA"
 PRIV = "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z"
 PV_FEATURES = SB_FEATURES + ["send_back_settle", "bridges", "private_claim_standin", "private_send_back"]
-PV_CONFIG = {"build": {"commit": "pv00001"}, "deployment": {"name": "bridge-test-network-v5", "bridge_program": V5, "release": "proof"}, "features": PV_FEATURES, "notices": {}}
+PV_CONFIG = {"build": {"commit": "c26a464"}, "deployment": {"name": "bridge-test-network-v5", "bridge_program": V5, "release": "proof"}, "features": PV_FEATURES, "notices": {}}
 OLD_CONFIG = dict(PV_CONFIG, features=SB_FEATURES)
 PV_ARR = '[{ id: "dep-p1", symbol: "ETH", amount: "0.1", account: "%s", account_kind: "private" }]' % PRIV
 PV_REG = {"tokens": [{"symbol": "ETH", "decimals": 18, "denoms": [{"index": 0, "value": "10000000000000000", "text": "0.01"}, {"index": 1, "value": "100000000000000000", "text": "0.1"}, {"index": 2, "value": "1000000000000000000", "text": "1"}]}]}
@@ -1033,10 +1033,12 @@ def pv_request(kind_of="claim", check="ready", problem=None, rid="r-pv1"):
             "app_summary": summary, "sheet": sheet, "choices": [{"account": PRIV, "account_kind": "private", "pays": True, "label": "the account the app asked for", "granted": True}],
             "zone": "home", "zone_name": "Home", "zone_in_use": True, "zone_removed": False, "publisher": None}
 
+PV_HELD = [{"token_program": "5w6nTkftFFDy8mtdpnKpZVetGQJ2WCKdhmpJsAYArbU7", "app": "lez_bridge", "holdings": [{"account": PRIV, "account_kind": "private", "definition": "DbPGo6FeRLp7NaUWxQGC1WXpJkSQe1jbAqYVMQkCuuPw", "symbol": "wETH", "balance": "100000000000000000", "decimals": 18}]}]
 def pv_mock(**bridge):
     b = {"config": PV_CONFIG, "registry": PV_REG, "receives": {"receives": []}, "jobs": {"jobs": []}, "send_back_link": SB_LINK, "send_back_check": SB_CHECK, "send_backs": {"send_backs": []}}
     b.update(bridge)
-    return {"bridge": b, "bridgeNet": NET04_V4}
+    # The private account's bridged holding, as token_source_holdings answers it.
+    return {"bridge": b, "bridgeNet": NET04_V4, "bridged": PV_HELD}
 
 # The card, then Claim privately on the arrived receive dep-p1 (`then`: more JS once it is open).
 PV_CLAIM = CARD_04 % (PV_ARR, '({ "dep-p1": { stage: "claimable" } })', CHECKED + '; root.bridgeConfig = %s; root.openPrivateClaim("dep-p1"); root.againAfter(80, function() { %%s })' % json.dumps(PV_CONFIG))
@@ -1046,7 +1048,7 @@ def pv_take(job, extra=""):
     return 'root.pcTakeJob(%s); %s' % (js(job), extra)
 APPROVED_4MIN = 'root.privateApprovedAt = { "wr-1792000000001": Date.now() - 252000 }; '
 def pv_inline(req):
-    return 'root.appRequests = [%s]; root.appChosen = ["%s"]; root.appChosenFor = "%s"' % (json.dumps(req), PRIV, req["id"])
+    return 'root.appRequests = [%s]; root.appChosen = ["%s"]; root.appChosenFor = "%s"' % (json.dumps(req).replace("4102444800000", "Date.now() + 540000"), PRIV, req["id"])
 FAILED_TOOL = "This build of the LEZ 0.4 names tool can't make proofs: it has no in-process prover, and no r0vm was found."
 
 PRIVATE_SCENARIOS = [
@@ -1065,7 +1067,7 @@ PRIVATE_SCENARIOS = [
     ("receive-private-noaccount", 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive() }) })',
      dict(pv_mock(), accounts=[{"account": OWNER, "kind": "public", "label": None, "balance": "1250000", "default": True, "public_key": "ab" * 32}])),
     # An older LEZ Bridge (no private codes): Public is chosen; choosing Private says why it can't.
-    ("receive-private-old-bridge", 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive(); root.againAfter(200, function() { root.receiveKind = "private" }) }) })',
+    ("receive-private-old-bridge", 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive(); root.againAfter(200, function() { root.ethReceiveKind = "private" }) }) })',
      pv_mock(config=OLD_CONFIG)),
     # The card: a private receive arrived, "Claim privately".
     ("card-arriving-private", CARD_04 % (PV_ARR, '({ "dep-p1": { stage: "claimable" } })', CHECKED + '; root.bridgeConfig = %s' % json.dumps(PV_CONFIG)), pv_mock()),
@@ -1154,6 +1156,7 @@ def _ago(text):
     import re as _re, time as _time
     return _re.sub(r'"@AGO:(\d+)@"', lambda m: str(int(_time.time() * 1000) - int(m.group(1)) * 1000), text)
 HEIGHTS = {name: 2100 for name in ("claim-private-approve", "claim-private-simulating", "claim-private-check-failed", "sendback-private-approve")}
+HEIGHTS.update({"card-private-proving": 1500, "card-arriving-private": 1500})
 
 def main():
     qml, out_dir = sys.argv[1], sys.argv[2]
