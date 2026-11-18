@@ -39,11 +39,24 @@ pub const BRIDGE_V4_PROGRAM: &str = "BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJB
 /// The bridge of the vault with no release delay (v5), deployed 2026-11-15 evening: the one the
 /// wallet uses by default from then on. Same token program as v3 and v4.
 pub const BRIDGE_V5_PROGRAM: &str = "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA";
-/// The bridges read when none is set: v2, v3, v4 and v5 (MAX_BRIDGES).
-pub const DEFAULT_BRIDGE_PROGRAMS: [&str; 4] = [DEFAULT_BRIDGE_PROGRAM, BRIDGE_V3_PROGRAM, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM];
+/// The bridge of vault v6 (2026-11-18): deposit roots from the RFP-021 light client, releases by
+/// proof (vault 0x95cea20e…427e). Same token program as v3 to v5, its own wrapped definitions.
+pub const BRIDGE_V6_PROGRAM: &str = "4PxaLAfPZDvpfZaR8SsC2Y7pYMPNwPPGVGMpjEVPQWed";
+/// The bridge of vault v7 (2026-11-18): v6's way in, and out only through a 2-of-3 signer gate,
+/// releases by proof (vault 0x4d7b360c…d23e). Same token program, its own wrapped definitions.
+pub const BRIDGE_V7_PROGRAM: &str = "CdijfhGnf1NjyCvYTZcGijQZzZ6soNJQ75Piex1ZTM93";
+/// The bridges read when none is set: v2 to v7 (MAX_BRIDGES).
+pub const DEFAULT_BRIDGE_PROGRAMS: [&str; 6] = [DEFAULT_BRIDGE_PROGRAM, BRIDGE_V3_PROGRAM, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM, BRIDGE_V6_PROGRAM, BRIDGE_V7_PROGRAM];
 /// What each known bridge is called on a balance row, by its program: the names of the
-/// deployments (rfp-022's v2, its fixed v3 and v4). Another bridge shows its short program ID.
-pub const BRIDGE_LABELS: [(&str, &str); 4] = [(DEFAULT_BRIDGE_PROGRAM, "bridge v2"), (BRIDGE_V3_PROGRAM, "bridge v3"), (BRIDGE_V4_PROGRAM, "bridge v4"), (BRIDGE_V5_PROGRAM, "bridge v5")];
+/// deployments (rfp-022's v2 to v7). Another bridge shows its short program ID.
+pub const BRIDGE_LABELS: [(&str, &str); 6] = [
+    (DEFAULT_BRIDGE_PROGRAM, "bridge v2"),
+    (BRIDGE_V3_PROGRAM, "bridge v3"),
+    (BRIDGE_V4_PROGRAM, "bridge v4"),
+    (BRIDGE_V5_PROGRAM, "bridge v5"),
+    (BRIDGE_V6_PROGRAM, "bridge v6"),
+    (BRIDGE_V7_PROGRAM, "bridge v7"),
+];
 
 /// The label of the bridge `program` (`BRIDGE_LABELS`), or None.
 pub fn bridge_label(program: &str) -> Option<&'static str> {
@@ -100,8 +113,10 @@ pub fn keep_token_programs(dir: &Path, programs: &[String]) {
 }
 
 /// The most bridges the Wallet knows: each is one Config read (plus its tokens' definitions,
-/// once an hour) in every balance read and every relayed-call check.
-pub const MAX_BRIDGES: usize = 4;
+/// once an hour) in every balance read and every relayed-call check. Six since v6 and v7: a read
+/// of MAX_ACCOUNTS accounts, the six Configs and the chain's two stays under the edge's 50
+/// requests per 10 s per IP.
+pub const MAX_BRIDGES: usize = 6;
 /// Short symbols of the bridged tokens, by their Ethereum token address (the same on every
 /// re-genesis). A token the Config lists without a symbol here shows its address.
 pub const SYMBOLS: [(&str, &str); 2] = [
@@ -123,7 +138,8 @@ pub const ZONE: &str = "bridge-0.4";
 /// How often it is read at most (WALLET-READ.md, polling rule).
 pub const EVERY: Duration = Duration::from_secs(30);
 /// The most accounts one read asks about: one request each, a short pause apart, so a read of
-/// all of them (plus 3 to 5 others) stays well under the edge's 50 requests per 10 s per IP.
+/// all of them (plus the chain's 2, up to MAX_BRIDGES Configs and, once an hour, their tokens'
+/// definitions) stays under the edge's 50 requests per 10 s per IP.
 pub const MAX_ACCOUNTS: usize = 24;
 /// The pause between two account reads.
 const ACCOUNT_PAUSE: Duration = Duration::from_millis(120);
@@ -326,10 +342,12 @@ pub fn decode_bridge_config(bytes: &[u8]) -> Result<BridgeConfig, String> {
 
 // ── Burns to a bridge (Send back to Ethereum) ──────────────────────────────
 
-/// The bridges a relayed burn may go to: the ones whose vault releases by proof (v4). Built in,
-/// not a setting: v2 and v3 share v4's token program, and a burn to them destroys the tokens for
-/// good (their vaults can never release). Never `set_bridge_programs`.
-pub const BURN_BRIDGES: [&str; 2] = [BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM];
+/// The bridges a relayed burn may go to: the ones whose vault releases by proof (v4 to v7). Built
+/// in, not a setting: v2 and v3 share their token program, and a burn to them destroys the tokens
+/// for good (their vaults can never release). Never `set_bridge_programs`. All four share one
+/// token program, so a burn is held to the bridge it notifies: its definition must be one that
+/// bridge's own Config lists (`provider_public::burn_check`), and every bridge has its own.
+pub const BURN_BRIDGES: [&str; 4] = [BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM, BRIDGE_V6_PROGRAM, BRIDGE_V7_PROGRAM];
 
 /// The bridge Config's seed, as a relayed call's program account names it (`seed`, hex).
 pub fn config_seed_hex() -> String {
@@ -910,6 +928,47 @@ mod tests {
         assert!(DEFAULT_BRIDGE_PROGRAMS.len() <= MAX_BRIDGES && DEFAULT_BRIDGE_PROGRAMS.contains(&BRIDGE_V4_PROGRAM));
     }
 
+    /// v6 and v7 as the bridge test network holds them (`config-v6.json`, `config-v7.json`: one
+    /// read-only `getAccount` of each Config, 2026-11-18): each fixture is the Config of its own
+    /// bridge (the address derived here is the one read, the state sits under that program, the
+    /// vault is the deployment's), both light-client Configs (root source 1) decode, share v3 to
+    /// v5's token program, and list their own wrapped definitions. Every definition of v4 to v7 is
+    /// different from every other: that is what holds a burn to its own bridge.
+    #[test]
+    fn the_v6_and_v7_configs_read_and_every_burn_bridge_has_its_own_tokens() {
+        let cases = [
+            (BRIDGE_V4_PROGRAM, "config-v4.json", "HUdVSAHEKE2cQbrzzb9eBi4LSwjvQV64XqxmwH9PXsWX", "c2c6a059eab928966b24fa5549d441a3b17b54ed"),
+            (BRIDGE_V5_PROGRAM, "config-v5.json", "FBWWSLgMgEtMs7PUNBfTGXccZdRSAeRHtMRP4nyZsrnW", "afbdf192434e9888bb23dae6f2d15eea6246ed10"),
+            (BRIDGE_V6_PROGRAM, "config-v6.json", "9osFF9nkdvEy51wARL7peUF94um3ZBExhAhYSK9ypiNz", "95cea20e75d3b352b49d13cb0cddc268a14c427e"),
+            (BRIDGE_V7_PROGRAM, "config-v7.json", "DTHA5tMxD4Vv2BtahwK3cyTFRfLvXE84N7s3AfvxYFg3", "4d7b360cf385d3477f1a67c1aedeb6c17c26d23e"),
+        ];
+        let mut definitions = Vec::new();
+        for (program, file, config, vault) in cases {
+            assert_eq!(registry::account_text(&config_address(&id(program))), config, "{file}: the Config read is {program}'s");
+            let bytes = config_bytes_in(&fixture(file)["result"], &id(program)).unwrap_or_else(|why| panic!("{file}: {why}"));
+            assert_eq!(hex(&bytes[32..52]), vault, "{file}: the deployment's vault");
+            let config = decode_bridge_config(&bytes).unwrap_or_else(|why| panic!("{file}: {why}"));
+            assert_eq!(registry::account_text(&config.token_program), "5w6nTkftFFDy8mtdpnKpZVetGQJ2WCKdhmpJsAYArbU7", "{file}");
+            assert!(!config.burn_frozen && config.tokens.len() == 2 && config.tokens.iter().all(|t| t.registered && !t.burn_frozen && t.denoms.len() == 3), "{file}");
+            let mut symbols: Vec<String> = config.tokens.iter().map(Token::symbol).collect();
+            symbols.sort();
+            assert_eq!(symbols, ["dUSDC", "wETH"], "{file}");
+            assert!(BURN_BRIDGES.contains(&program) && DEFAULT_BRIDGE_PROGRAMS.contains(&program), "{file}");
+            definitions.extend(config.tokens.iter().map(|t| t.definition));
+        }
+        let mut distinct = definitions.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!((definitions.len(), distinct.len()), (8, 8), "every bridge's wrapped tokens are its own");
+        let v6 = decode_bridge_config(&config_bytes_in(&fixture("config-v6.json")["result"], &id(BRIDGE_V6_PROGRAM)).unwrap()).unwrap();
+        assert_eq!(registry::account_text(&v6.tokens.iter().find(|t| t.symbol() == "wETH").unwrap().definition), "5WLrfRYHGY14wnNG7sa8b6Bzy9ZXPCeB4XnHK2qiuP5t");
+        let v7 = decode_bridge_config(&config_bytes_in(&fixture("config-v7.json")["result"], &id(BRIDGE_V7_PROGRAM)).unwrap()).unwrap();
+        assert_eq!(registry::account_text(&v7.tokens.iter().find(|t| t.symbol() == "wETH").unwrap().definition), "BWDmKjDqkJDrLt1DDXGPeL4DBF8RsGAwB9BQvT7Hzpqg");
+        assert_eq!((bridge_label(BRIDGE_V6_PROGRAM), bridge_label(BRIDGE_V7_PROGRAM)), (Some("bridge v6"), Some("bridge v7")));
+        assert_eq!((DEFAULT_BRIDGE_PROGRAMS.len(), MAX_BRIDGES, BRIDGE_LABELS.len()), (6, 6, 6));
+        assert!(!BURN_BRIDGES.contains(&DEFAULT_BRIDGE_PROGRAM) && !BURN_BRIDGES.contains(&BRIDGE_V3_PROGRAM));
+    }
+
     #[test]
     fn a_config_that_is_short_long_or_unknown_is_refused() {
         let bytes = config_bytes();
@@ -1126,7 +1185,7 @@ mod tests {
         assert!(kept.contains(&TOKEN_PROGRAM.to_owned()) && kept.contains(&second_tokens_text), "{kept:?}");
         assert!(later["token_problem"].is_null());
         // At most MAX_BRIDGES are read.
-        let many: Vec<AccountId> = (0..6u8).map(|n| [n + 30; 32]).collect();
+        let many: Vec<AccountId> = (0..(MAX_BRIDGES as u8 + 2)).map(|n| [n + 30; 32]).collect();
         assert_eq!(read(&url, &many, &[id(OWNER)], &dir, 9_000).unwrap()["bridges"].as_array().unwrap().len(), MAX_BRIDGES);
         let _ = std::fs::remove_dir_all(dir);
     }

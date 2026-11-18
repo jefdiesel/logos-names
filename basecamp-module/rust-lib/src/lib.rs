@@ -12186,6 +12186,159 @@ mod tests {
         assert!(Names::burn_gate_with(&to_v3, &configs).unwrap_err().contains("another program"));
     }
 
+    /// The four bridges a burn may go to (v4 to v7) share one token program, so the gate holds
+    /// every burn to the bridge it notifies, over the whole matrix, with the real Configs: each
+    /// bridge's own wETH and dUSDC, in every denomination, pass toward their own bridge only; the
+    /// same token toward any other of the four is refused as not a token there; toward v2 or v3
+    /// (vaults that never release) refused as another program; in either order of the Configs;
+    /// and a bridge whose Config the chain doesn't have takes no burn, not even its own token's.
+    #[test]
+    fn every_burn_bridge_takes_only_its_own_tokens() {
+        use provider_public::tests::{burn_request_of, v4_config, v5_config, v6_config, v7_config};
+        let bridges = [
+            (bridge_net::BRIDGE_V4_PROGRAM, "bridge v4", v4_config()),
+            (bridge_net::BRIDGE_V5_PROGRAM, "bridge v5", v5_config()),
+            (bridge_net::BRIDGE_V6_PROGRAM, "bridge v6", v6_config()),
+            (bridge_net::BRIDGE_V7_PROGRAM, "bridge v7", v7_config()),
+        ];
+        assert_eq!(bridge_net::BURN_BRIDGES.to_vec(), bridges.iter().map(|(program, _, _)| *program).collect::<Vec<_>>(), "the matrix covers every burn bridge");
+        let configs: Vec<(AccountId, bridge_net::BridgeConfig)> = bridges.iter().map(|(program, _, config)| (registry::parse_account(program).unwrap(), config.clone())).collect();
+        let reversed: Vec<_> = configs.iter().rev().cloned().collect();
+        let targets = [
+            (bridge_net::BRIDGE_V4_PROGRAM, Some("bridge v4")),
+            (bridge_net::BRIDGE_V5_PROGRAM, Some("bridge v5")),
+            (bridge_net::BRIDGE_V6_PROGRAM, Some("bridge v6")),
+            (bridge_net::BRIDGE_V7_PROGRAM, Some("bridge v7")),
+            (bridge_net::DEFAULT_BRIDGE_PROGRAM, None),
+            (bridge_net::BRIDGE_V3_PROGRAM, None),
+        ];
+        let (mut passed, mut refused) = (0, 0);
+        for order in [&configs, &reversed] {
+            for (origin, origin_label, config) in &bridges {
+                for token in &config.tokens {
+                    let definition = registry::account_text(&token.definition);
+                    for (target, target_label) in targets {
+                        let amounts: Vec<u128> = if target == *origin { token.denoms.clone() } else { vec![token.denoms[0]] };
+                        for amount in amounts {
+                            let request = burn_request_of(&definition, amount, target);
+                            let what = format!("{} {} of {origin_label} told to {target}", amount, token.symbol());
+                            match Names::burn_gate_with(&request, order) {
+                                Ok(Some(burn)) => {
+                                    assert_eq!(target, *origin, "{what}: passed");
+                                    assert_eq!((burn.bridge.as_str(), burn.bridge_label.as_str(), burn.definition.as_str(), burn.amount), (*origin, *origin_label, definition.as_str(), amount), "{what}");
+                                    passed += 1;
+                                }
+                                Ok(None) => panic!("{what}: not taken as a burn"),
+                                Err(why) => {
+                                    assert_ne!(target, *origin, "{what}: refused ({why})");
+                                    match target_label {
+                                        Some(label) => assert!(why.contains(&format!("isn't a token of {label}")), "{what}: {why}"),
+                                        None => assert!(why.contains("another program"), "{what}: {why}"),
+                                    }
+                                    refused += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // 2 orders × (4 bridges × 2 tokens × 3 denominations to their own bridge; × 5 others).
+        assert_eq!((passed, refused), (2 * 24, 2 * 40));
+        // A bridge with no Config on this chain takes nothing, its own token included.
+        for (absent, _, config) in &bridges {
+            let others: Vec<_> = configs.iter().filter(|(program, _)| registry::account_text(program) != *absent).cloned().collect();
+            for token in &config.tokens {
+                let request = burn_request_of(&registry::account_text(&token.definition), token.denoms[0], absent);
+                let why = Names::burn_gate_with(&request, &others).unwrap_err();
+                assert!(why.contains("another program"), "{absent}: {why}");
+            }
+        }
+        // No Config at all: not a burn bridge.
+        let lone = burn_request_of(&registry::account_text(&bridges[3].2.tokens[0].definition), bridges[3].2.tokens[0].denoms[0], bridge_net::BRIDGE_V7_PROGRAM);
+        assert_eq!(Names::burn_gate_with(&lone, &[]).unwrap_err(), NOT_A_BURN_BRIDGE);
+    }
+
+    /// Through the call itself: with v4 to v7's Configs on the chain, v5's wETH told to v7 is
+    /// refused at the proposal (nothing stored, nothing planned or signed), and v7's own wETH told
+    /// to v7 is proposed and shown as a burn to bridge v7.
+    #[test]
+    fn a_v5_token_burned_toward_v7_is_refused_before_anything_is_signed() {
+        use sha2::Digest;
+        let v7 = bridge_net::BRIDGE_V7_PROGRAM;
+        let tokens = "5w6nTkftFFDy8mtdpnKpZVetGQJ2WCKdhmpJsAYArbU7";
+        let v5_weth = provider_public::tests::V5_WETH;
+        let v7_weth = "BWDmKjDqkJDrLt1DDXGPeL4DBF8RsGAwB9BQvT7Hzpqg";
+        let payer = "Public/DGu98d9jZfTAuJKr9y3vWC1DDAujYUaddb6ugTpgSBNs";
+        let account = format!("Public/{PUBLIC}");
+        let v7_id = registry::parse_account(v7).unwrap();
+        let config_account = registry::account_text(&bridge_net::config_address(&v7_id));
+        let burn_bytes = |definition: &str| {
+            bridge_net::encode_burn(&bridge_net::BurnMessage {
+                definition: registry::parse_account(definition).unwrap(),
+                amount: 10_000_000_000_000_000,
+                notify_account: bridge_net::config_address(&v7_id),
+                notify_program: v7_id,
+                memo: [0x7E; 32],
+            })
+        };
+        let call = |definition: &str| json!({
+            "program": tokens, "message": registry::hex(&burn_bytes(definition)), "privacy": "bridge_public_burn",
+            "accounts": [{ "account": definition, "program": tokens }, { "seed": bridge_net::config_seed_hex(), "of": v7, "program": v7 }],
+            "fee": { "payer": payer, "gas_limit": 250000, "tip": "0", "max_fee": "2500000" },
+        });
+        let message = burn_bytes(v7_weth);
+        let hash = "7e".repeat(32);
+        let report = json!({
+            "hash": hash, "account": account, "program": tokens, "payer": payer, "gas_limit": 250000, "tip": "0", "max_fee": "2500000",
+            "message_len": message.len(), "message_sha256": registry::hex(&sha2::Sha256::digest(&message)),
+            "actors": [{ "account": PUBLIC, "program": tokens }, { "account": v7_weth, "program": tokens }, { "account": config_account, "program": v7 }],
+            "creates": [], "own_balance": false,
+            "nonces": { PUBLIC: "3", payer.trim_start_matches("Public/"): "41" },
+        });
+        let tail = "case \"$*\" in\n\
+             *--version*) echo 'names 0.17.0 (LEZ v0.4.0-rc3)' ;;\n\
+             *\"public-call plan\"*) touch \"$(dirname \"$0\")/planned\"; cat \"$(dirname \"$0\")/plan-out.json\" ;;\n\
+             *\"public-call sign\"*) touch \"$(dirname \"$0\")/signed\"; cat \"$(dirname \"$0\")/sign-out.json\" ;;\n\
+             *) echo 'unexpected'; exit 1 ;;\n\
+             esac";
+        let (mut names, dir) = with_wallet("relayed-burn-v7", tail);
+        std::fs::write(dir.join("plan-out.json"), report.to_string()).unwrap();
+        std::fs::write(dir.join("sign-out.json"), json!({ "hash": hash, "transaction": "b7b7" }).to_string()).unwrap();
+        names.net = Net::Lez04;
+        connect(&mut names, "lez_bridge", &account);
+        as_caller(app("lez_bridge"));
+        let declared = parsed(&names.declare_programs(json!([tokens, v7]).to_string(), "to send tokens back".into()))["value"]["request"].as_str().unwrap().to_owned();
+        assert_eq!(approve(&mut names, &declared, "")["value"]["state"], "approved");
+        BURN_CONFIGS.with(|configs| {
+            let mut configs = configs.borrow_mut();
+            configs.insert(bridge_net::BRIDGE_V4_PROGRAM.to_owned(), Ok(Some(provider_public::tests::v4_config())));
+            configs.insert(bridge_net::BRIDGE_V5_PROGRAM.to_owned(), Ok(Some(provider_public::tests::v5_config())));
+            configs.insert(bridge_net::BRIDGE_V6_PROGRAM.to_owned(), Ok(Some(provider_public::tests::v6_config())));
+            configs.insert(v7.to_owned(), Ok(Some(provider_public::tests::v7_config())));
+        });
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let pending_count = |names: &mut Names| parsed(&names.pending_requests())["value"].as_array().map_or(0, Vec::len);
+        let before = pending_count(&mut names);
+        as_caller(app("lez_bridge"));
+        let crossed = parsed(&names.propose_relayed_call(account.clone(), call(v5_weth).to_string(), String::new()));
+        assert!(crossed["error"].as_str().unwrap_or_else(|| panic!("{crossed}")).contains("isn't a token of bridge v7"), "{crossed}");
+        assert!(crossed["value"]["request"].is_null(), "{crossed}");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert_eq!(pending_count(&mut names), before, "nothing stored");
+        as_caller(app("lez_bridge"));
+        assert!(!dir.join("planned").exists() && !dir.join("signed").exists(), "nothing planned or signed");
+        // v7's own token to v7: proposed and shown as a burn to bridge v7.
+        let asked = parsed(&names.propose_relayed_call(account.clone(), call(v7_weth).to_string(), String::new()));
+        assert_eq!(asked["value"]["check"], "ready", "{asked}");
+        let id = asked["value"]["request"].as_str().unwrap().to_owned();
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let pending = parsed(&names.pending_requests())["value"].clone();
+        let shown = pending.as_array().unwrap().iter().find(|r| r["id"] == id.as_str()).unwrap().clone();
+        assert_eq!((shown["sheet"]["refused"].as_bool(), shown["sheet"]["burn"]["bridge_label"].as_str()), (Some(false), Some("bridge v7")), "{shown}");
+        BURN_CONFIGS.with(|configs| configs.borrow_mut().clear());
+    }
+
     /// A call someone else pays for (LEZ 0.4): only to a program the app declared, built by the
     /// wallet, shown from that build, signed as approved and handed back half signed; nothing
     /// is sent.
@@ -13539,7 +13692,7 @@ mod tests {
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
     }
 
-    /// The bridges are a list (config.json `lez04.bridge_programs`, at most 4): set whole,
+    /// The bridges are a list (config.json `lez04.bridge_programs`, at most 6): set whole,
     /// saved with the first also as `bridge_program` for earlier 0.17 builds; an earlier build's
     /// single `bridge_program` still reads as a list of one; a bad list changes nothing.
     #[test]
@@ -13556,12 +13709,13 @@ mod tests {
         assert_eq!(saved_file()["registry"], DEFAULT_REGISTRY, "LEZ 0.3's flat fields stay as they were");
         assert_eq!(parsed(&names.get_config())["bridge_programs"], json!([a, b]));
         assert_eq!(Names::default().bridge_programs_now().iter().map(registry::account_text).collect::<Vec<_>>(), vec![a.clone(), b.clone()], "after a restart");
-        // Refused, and nothing changed: a repeat, the native token, not a program, five, not a list.
+        // Refused, and nothing changed: a repeat, the native token, not a program, more than
+        // MAX_BRIDGES (seven), not a list.
         for bad in [
             json!([a, a]).to_string(),
             json!([a, registry::account_text(&registry::NATIVE_TOKEN)]).to_string(),
             json!(["not a program"]).to_string(),
-            json!((1..=5u8).map(|n| registry::account_text(&[n + 10; 32])).collect::<Vec<_>>()).to_string(),
+            json!((1..=bridge_net::MAX_BRIDGES as u8 + 1).map(|n| registry::account_text(&[n + 10; 32])).collect::<Vec<_>>()).to_string(),
             "\"one\"".to_owned(),
         ] {
             assert!(!names.set_bridge_programs(bad.clone()), "{bad}");
@@ -13576,12 +13730,12 @@ mod tests {
         // An earlier 0.17 build's file: only `bridge_program`.
         std::fs::write(config.join("config.json"), json!({ "lez04": { "bridge_program": format!("Public/{a}") } }).to_string()).unwrap();
         assert_eq!(Names::default().bridge_programs_now().iter().map(registry::account_text).collect::<Vec<_>>(), vec![a.clone()]);
-        // A hand-written list: bad ids and repeats dropped, at most four kept.
-        let many: Vec<String> = (1..=6u8).map(|n| registry::account_text(&[n + 20; 32])).collect();
+        // A hand-written list: bad ids and repeats dropped, at most MAX_BRIDGES (six) kept.
+        let many: Vec<String> = (1..=bridge_net::MAX_BRIDGES as u8 + 2).map(|n| registry::account_text(&[n + 20; 32])).collect();
         let mut written = vec!["junk".to_owned(), many[0].clone()];
         written.extend(many.iter().cloned());
         std::fs::write(config.join("config.json"), json!({ "lez04": { "bridge_programs": written } }).to_string()).unwrap();
-        assert_eq!(Names::default().bridge_programs_now().iter().map(registry::account_text).collect::<Vec<_>>(), many[..4].to_vec());
+        assert_eq!(Names::default().bridge_programs_now().iter().map(registry::account_text).collect::<Vec<_>>(), many[..bridge_net::MAX_BRIDGES].to_vec());
         as_caller(logos_rust_sdk::LogosCaller::Module { name: "evil_ui".into(), instance: None });
         assert!(!names.set_bridge_programs(json!([a]).to_string()), "Names app only");
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);

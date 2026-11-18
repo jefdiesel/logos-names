@@ -1320,22 +1320,48 @@ export function otherDeployment(name, tried) {
 export const BRIDGE_V4_PROGRAM = "BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf"
 /// The v5 bridge (no release delay; deployed 2026-11-15 evening), the default from then on.
 export const BRIDGE_V5_PROGRAM = "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA"
-/// The bridges whose vault releases by proof: the ones a token can be bridged back from.
-export const BURN_BRIDGE_PROGRAMS = [BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM]
+/// The v6 bridge (deposit roots from the light client; vault 0x95cea20e…427e, 2026-11-18).
+export const BRIDGE_V6_PROGRAM = "4PxaLAfPZDvpfZaR8SsC2Y7pYMPNwPPGVGMpjEVPQWed"
+/// The v7 bridge (v6's way in, out through a 2-of-3 signer gate; vault 0x4d7b360c…d23e, 2026-11-18).
+export const BRIDGE_V7_PROGRAM = "CdijfhGnf1NjyCvYTZcGijQZzZ6soNJQ75Piex1ZTM93"
+/// The bridges whose vault releases by proof: the ones a token can be bridged back from (the
+/// module's bridge_net::BURN_BRIDGES, which is what decides).
+export const BURN_BRIDGE_PROGRAMS = [BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM, BRIDGE_V6_PROGRAM, BRIDGE_V7_PROGRAM]
 var BRIDGE_V2_PROGRAM = "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7"
 var BRIDGE_V3_PROGRAM = "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr"
+/// The most bridges the wallet reads (the module's bridge_net::MAX_BRIDGES).
+export const MAX_BRIDGES = 6
+/// What each known bridge is called, by its program (the module's bridge_net::BRIDGE_LABELS).
+export const BRIDGE_LABELS = [[BRIDGE_V2_PROGRAM, "bridge v2"], [BRIDGE_V3_PROGRAM, "bridge v3"], [BRIDGE_V4_PROGRAM, "bridge v4"],
+                              [BRIDGE_V5_PROGRAM, "bridge v5"], [BRIDGE_V6_PROGRAM, "bridge v6"], [BRIDGE_V7_PROGRAM, "bridge v7"]]
+/// The LEZ Bridge's ids for v6 and v7, which it knows as added bridges: "added-" and the first 6
+/// bytes of the bridge's cfgId (rfp-022 bridge_code.rs `added_name`; v6's cfgId 0x7d1a304a12a4…,
+/// v7's 0x7ef9153b69a3…, read from their Configs on 2026-11-18). Only for the name shown.
+export const ADDED_BRIDGE_LABELS = [["added-7d1a304a12a4", "bridge v6"], ["added-7ef9153b69a3", "bridge v7"]]
+/// The name to show for a bridge: by its program when the row has one (`bridge_program`), else by
+/// the LEZ Bridge's id for it, else its own label or id. `row`: a bridges()/bridge_check row, or a
+/// deployment view ({id, label}).
+export function bridgeLabelOf(row) {
+    if (!row || typeof row !== "object")
+        return ""
+    var program = String(row.bridge_program || "")
+    var known = BRIDGE_LABELS.filter(function(e) { return program !== "" && e[0] === program })[0]
+        || ADDED_BRIDGE_LABELS.filter(function(e) { return e[0] === String(row.id || "") })[0]
+    return known ? known[1] : String(row.label || row.id || "")
+}
 /// The bridges the wallet must read for the bundled bridge's claims and burns, from get_config's
-/// `bridge_programs`: the list with v5 and v4 added when a saved list lacks them (at most 4: v2,
-/// whose vault is retired, makes room first), else null (nothing to change). Built in here, never
-/// taken from the bridge's own answer.
+/// `bridge_programs`: the list with v4 to v7 added when a saved list lacks them (at most
+/// MAX_BRIDGES: v2, whose vault is retired, makes room first, then v3), else null (nothing to
+/// change). Built in here, never taken from the bridge's own answer.
 export function bridgesToAdd(programs) {
     if (!Array.isArray(programs) || programs.length === 0)
         return null
     var out = programs.slice()
-    ;[BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM].forEach(function(p) {
+    BURN_BRIDGE_PROGRAMS.forEach(function(p) {
         if (out.indexOf(p) >= 0) return
-        if (out.length < 4) out.push(p)
+        if (out.length < MAX_BRIDGES) out.push(p)
         else if (out.indexOf(BRIDGE_V2_PROGRAM) >= 0) out[out.indexOf(BRIDGE_V2_PROGRAM)] = p
+        else if (out.indexOf(BRIDGE_V3_PROGRAM) >= 0) out[out.indexOf(BRIDGE_V3_PROGRAM)] = p
     })
     return out.join(",") === programs.join(",") ? null : out
 }
@@ -1389,7 +1415,7 @@ export function bridgeRowLine(row) {
     if (!row || typeof row !== "object")
         return ""
     var kind = row.kind === "added" ? "added" + (row.endpoint_host ? " · " + row.endpoint_host : "") : "built in"
-    return String(row.label || row.id || "") + " · vault " + String(row.vault_short || "") + " · " + kind
+    return bridgeLabelOf(row) + " · vault " + String(row.vault_short || "") + " · " + kind
 }
 
 /// The chosen bridge in a sentence, from bridges(): "New receives and sends to Ethereum use
@@ -1398,7 +1424,7 @@ export function bridgeActiveLine(list) {
     var row = list && list.active_row ? list.active_row : null
     if (!row)
         return ""
-    return "New receives and sends to Ethereum use " + String(row.label || row.id) + " (vault " + String(row.vault_short || "") + ", " + (row.kind === "added" ? "added" : "built in") + ")."
+    return "New receives and sends to Ethereum use " + bridgeLabelOf(row) + " (vault " + String(row.vault_short || "") + ", " + (row.kind === "added" ? "added" : "built in") + ")."
 }
 
 /// What a bridge_check (or a refused bridge_add) answer says, for the Add a bridge box: {kind
@@ -1412,15 +1438,15 @@ export function bridgeCheckShown(reply) {
         var wait = e.code === "unreachable" || e.code === "busy"
         return { kind: wait ? "waiting" : "problem", line: String(e.message || "The bridge code was refused."), words: "", use: false, checks: checks }
     }
-    var where = r.builtin ? "This is " + String(r.label || r.id) + ", built into this app."
-        : "Checked on Sepolia and on " + String(r.endpoint_host || "its network") + ": " + String(r.label || "") + ", vault " + String(r.vault_short || "") + "."
+    var where = r.builtin ? "This is " + bridgeLabelOf(r) + ", built into this app."
+        : "Checked on Sepolia and on " + String(r.endpoint_host || "its network") + ": " + bridgeLabelOf(r) + ", vault " + String(r.vault_short || "") + "."
     if (r.current)
         return { kind: "done", line: where + " New receives already use it.", words: String(r.words_text || ""), use: false, checks: checks }
     return { kind: "done", line: where, words: String(r.words_text || ""), use: true, checks: checks }
 }
 
 /// The bridges the wallet must read so a chosen bridge's claims and burns aren't refused
-/// (get_config `bridge_programs`, at most 4): `programs` with `program` added, or null when it is
+/// (get_config `bridge_programs`, at most MAX_BRIDGES): `programs` with `program` added, or null when it is
 /// there already, or "full" when no bridge can make room. Room is made from v2 and v3 first (their
 /// vaults can't pay out), then from a bridge not in `keep` (the chosen one and every bridge this
 /// computer has deposits or sends on).
@@ -1430,7 +1456,7 @@ export function bridgesWith(programs, program, keep) {
     if (programs.indexOf(program) >= 0)
         return null
     var out = programs.slice()
-    if (out.length < 4) {
+    if (out.length < MAX_BRIDGES) {
         out.push(program)
         return out
     }
@@ -1872,7 +1898,7 @@ export function receiveProgress(status) {
 export function receiveWhere(status, row) {
     var d = status && status.deployment && typeof status.deployment === "object" ? status.deployment
         : row && row.deployment && typeof row.deployment === "object" ? row.deployment : null
-    return d && d.current === false && d.label ? String(d.label) : ""
+    return d && d.current === false && (d.label || d.id) ? bridgeLabelOf(d) : ""
 }
 
 /// How long a receive claimed while Names was open stays on the card ("Claimed in block N").
@@ -2434,7 +2460,23 @@ function sendBackProgressPlain(status, nowSeconds, clock) {
         if (s.note && s.busy !== true) return r("approve", "Signed · the bridge's relay hasn't sent it", "Signed; the bridge's relay hasn't sent it yet and tries again at each check.", String(s.note), "wait")
         return r("approve", "Waiting for your approval", "Waiting for your approval.", "", "ready")
     case "burning": return r("burning", "Sending the burn · " + SEND_BACK_TIMES.burn, "Sending the burn: " + SEND_BACK_TIMES.burn + ".", "", "wait")
-    case "burned": return r("burned", "Burned · waiting for Ethereum to record it", "Waiting for Ethereum to record it.", "", "wait")
+    case "burned": {
+        // A bridge whose Ethereum update waits in a seq-sig gate (v7): the LEZ Bridge reads the
+        // gate and says the wait (`update`, `text`, `wait`; rfp-022 V7-IN-WALLET.md §2). Its words
+        // replace the generic wait, and `gate` keeps the by-hand line off the page. v4/v5 carry
+        // no `update`: unchanged.
+        if (s.update && typeof s.update === "object" && s.text) {
+            var said = String(s.text).replace(/^Burned\.\s*/, "")
+            said = said.charAt(0).toUpperCase() + said.substr(1)
+            var w = s.wait && typeof s.wait === "object" ? s.wait : {}
+            var what = w.what ? String(w.what).replace(/\s*\([^)]*\)\s*$/, "") : "Ethereum to record it"
+            var until = Number(w.until) > 0 && Number(nowSeconds) < Number(w.until) ? " until " + at(Number(w.until)) : ""
+            var p = r("burned", "Burned · waiting for " + what + until, said, "", s.update.dead === true ? "problem" : "wait")
+            p.gate = true
+            return p
+        }
+        return r("burned", "Burned · waiting for Ethereum to record it", "Waiting for Ethereum to record it.", "", "wait")
+    }
     // The bridge's words, without its "Look in the Names app" (this is the Names app).
     case "burn_unclear": return r("burn_unclear", "The burn may have been refused", "The burn may have been refused.", String(s.text || "").replace(/\s*Look in the Names app\.?/i, "").trim(), "problem", "check")
     case "recorded": return r("recorded", "Recorded on Ethereum · make the proof", "Recorded on Ethereum: make the release proof.", until, "ready", "prove")

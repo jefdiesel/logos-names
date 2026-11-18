@@ -72,7 +72,7 @@ Not in: `pressure-fixes` (11 commits on `main`, partly ported to the 0.4 line al
   wallet has no wallet on LEZ 0.4 yet…"), never a request left waiting behind the Welcome screen.
 - **The bridges are a setting, not a build constant, and there may be several.** The bridge
   programs the Wallet reads on LEZ 0.4 (each Config lists that bridge's tokens) live in
-  config.json under `lez04.bridge_programs`, a list of at most 4. The first is also written as
+  config.json under `lez04.bridge_programs`, a list of at most 6. The first is also written as
   `lez04.bridge_program`, which an earlier 0.17 build reads; a file with only
   `lez04.bridge_program` reads as a list of one. With none set, the default is
   `JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7`, today's.

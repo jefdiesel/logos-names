@@ -76,7 +76,7 @@ bridge's token program (named in that bridge's Config) holds the dUSDC and wETH 
 A root call to one, signed by the holder, can move them; reached from another program (a bridge
 claim declares it), a transfer refuses, because it isn't the root signer. So each is refused as
 the root only (`not_root`), together with the wallet's own token programs.
-- The bridges are a list (config.json `lez04.bridge_programs`, at most 4; an earlier build's
+- The bridges are a list (config.json `lez04.bridge_programs`, at most 6; an earlier build's
   single `lez04.bridge_program` reads as a list of one; none set means the default bridge).
 - The wallet reads every listed bridge's token program from the chain each time it checks
   (`bridge_net::token_program_of`, at propose, at approval and at re-sign).

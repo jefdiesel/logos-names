@@ -1006,10 +1006,32 @@ pub(crate) mod tests {
         crate::bridge_net::decode_bridge_config(&bytes).unwrap()
     }
 
+    /// The Config of `program` from `testdata/bridge-net/<file>` (a real `getAccount` reply).
+    pub(crate) fn config_fixture(file: &str, program: &str) -> crate::bridge_net::BridgeConfig {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/bridge-net").join(file);
+        let reply: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let bytes = crate::bridge_net::config_bytes_in(&reply["result"], &id(program)).unwrap();
+        crate::bridge_net::decode_bridge_config(&bytes).unwrap()
+    }
+
+    /// The v6 and v7 Configs as the bridge test network holds them (config-v6.json,
+    /// config-v7.json, read 2026-11-18).
+    pub(crate) fn v6_config() -> crate::bridge_net::BridgeConfig {
+        config_fixture("config-v6.json", crate::bridge_net::BRIDGE_V6_PROGRAM)
+    }
+    pub(crate) fn v7_config() -> crate::bridge_net::BridgeConfig {
+        config_fixture("config-v7.json", crate::bridge_net::BRIDGE_V7_PROGRAM)
+    }
+
     /// A stored relayed call burning one cent of `definition`, notified to `bridge`'s Config.
     pub(crate) fn burn_request_for(definition: &str, bridge: &str) -> Value {
+        burn_request_of(definition, CENT, bridge)
+    }
+
+    /// The same for `amount` base units.
+    pub(crate) fn burn_request_of(definition: &str, amount: u128, bridge: &str) -> Value {
         let call = json!({
-            "program": V4_TOKENS, "message": registry::hex(&burn_message(definition, CENT, bridge)), "privacy": BURN_PRIVACY,
+            "program": V4_TOKENS, "message": registry::hex(&burn_message(definition, amount, bridge)), "privacy": BURN_PRIVACY,
             "accounts": [{ "account": definition, "program": V4_TOKENS }, { "seed": crate::bridge_net::config_seed_hex(), "of": bridge, "program": bridge }],
             "fee": { "payer": PAYER, "gas_limit": 250000, "tip": "0", "max_fee": "2500000" }
         })

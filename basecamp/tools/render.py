@@ -868,6 +868,11 @@ for _name, _js, _mock in [
     ("sendback-names-update", SB_OPEN % 'root.againAfter(200, function() { root.sbDenom = 0; root.sbSetBox("%s"); root.sbCheckCode(); root.againAfter(200, function() { root.sbTicked = true; root.sbPlan() }) })' % SB_CODE,
         sb_mock(send_back_plan=sb_view("planned"), send_back_burn={"needs": "names_update", "request": None, "message": "x"})),
     ("sendback-burned", sb_focus(sb_view("burned")), sb_mock(sb_view("burned"))),
+    # v7 (seq-sig gate): the LEZ Bridge's `update`/`text`/`wait` while the staged update's contest
+    # window runs (rfp-022 sendback.rs gate_wait_text, word for word); stage stays `burned`.
+    ("sendback-burned-v7-window", sb_focus(sb_view("burned", update={"window_s": 600, "pending": True, "finalizable_at": "@SOON@", "block_id": 28000, "covers": True, "dead": False},
+        text="Burned. Waiting for the 10-minute contest window: Ethereum has the update that records this burn, and it can be applied when the window ends.",
+        wait={"what": "the 10-minute contest window", "until": "@SOON@", "seconds": 1500})), sb_mock(sb_view("burned"))),
     ("sendback-recorded", sb_focus(sb_view("recorded", releasable_at="@HOUR@")), sb_mock(sb_view("recorded"))),
     ("sendback-witness", sb_focus(sb_view("recorded", releasable_at="@HOUR@"), 'root.againAfter(50, function() { root.sbProve() })'), sb_mock(sb_view("recorded"), send_back_prove={"needs": "prover", "request": None, "message": "x"},
         send_back_witness={"id": "sb-e2ba7765d0fbf247", "command": ["/Volumes/exos162/logos/rfp-022/public-demo/prove/prove-release-rc3.sh", "--secret-file", "/Users/you/Library/Application Support/lez_bridge/send-back/sb-e2ba7765d0fbf247/k", "--inputs", "…/inputs.json", "--leaves", "…/leaves.txt"],

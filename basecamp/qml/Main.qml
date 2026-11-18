@@ -979,7 +979,7 @@ Item {
     property string bridgeBundle: ""
     property var bridgeInstall: null       // {phase: "asking"|"installing"|"slow"|"starting"|"failed"|"updated", line}
     readonly property string bridgeSetupNow: Logic.bridgeSetup({ list: installedList, answers: claimBridgeAnswers, checkWith: claimCheckWith, features: bridgeConfig !== null ? bridgeFeatures : null })
-    readonly property var bridgeLabels: [["JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", "bridge v2"], ["4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr", "bridge v3"], [Logic.BRIDGE_V4_PROGRAM, "bridge v4"], [Logic.BRIDGE_V5_PROGRAM, "bridge v5"]]
+    readonly property var bridgeLabels: Logic.BRIDGE_LABELS
     readonly property string claimAccount: claimCheck !== null && claimCheck.ok && claimCheck.deposit ? String(claimCheck.deposit.account || "") : ""
     // The account this app's own bridge screen is for: the claim file's, or the private claim's.
     readonly property string bridgeHintAccount: walletView === "pclaim" && pcRow !== null ? Logic.receiveAccountShown(pcRow) : claimAccount
@@ -1012,7 +1012,7 @@ Item {
     }
     /// A saved list of bridges without v4 (the bundled bridge's default since 0343cb0) gets it
     /// added, so its claims aren't refused and its tokens show; once per window, and never more
-    /// than the module allows (4).
+    /// than the module allows (6).
     property bool bridgeAddTried: false
     function addBundledBridge() {
         var list = Logic.bridgesToAdd(bridgePrograms)
@@ -1141,9 +1141,9 @@ Item {
         }, 30000, false)
     }
     /// After a choice: the bridge's config again (Receive and Bridge to Ethereum read it), and the
-    /// wallet told to read the chosen bridge (its list holds at most 4; v2 and v3 make room first).
+    /// wallet told to read the chosen bridge (its list holds at most 6; v2 and v3 make room first).
     function bridgeChosen(row) {
-        bridgeNote = row ? "New receives and sends to Ethereum now use " + String(row.label || row.id) + "." : "Chosen."
+        bridgeNote = row ? "New receives and sends to Ethereum now use " + Logic.bridgeLabelOf(row) + "." : "Chosen."
         bridgeNoteKind = "done"
         bridgeCall("config", [], function(value) { bridgeAnswered(value) }, function() {}, 10000)
         var program = row && row.bridge_program ? String(row.bridge_program) : ""
@@ -1151,7 +1151,7 @@ Item {
         var keep = rows.filter(function(r) { return r.current || Number(r.items || 0) > 0 }).map(function(r) { return String(r.bridge_program || "") })
         var list = Logic.bridgesWith(bridgePrograms, program, keep)
         if (list === "full") {
-            bridgeNote = bridgeNote + " This wallet already reads 4 bridges with deposits on them, so it can't show this one's balances until one is finished."
+            bridgeNote = bridgeNote + " This wallet already reads " + Logic.MAX_BRIDGES + " bridges with deposits on them, so it can't show this one's balances until one is finished."
             bridgeNoteKind = "waiting"
             return
         }
@@ -11771,7 +11771,7 @@ Item {
                         }
                         Hint { visible: sendBackScreen.p.detail !== ""; font.pixelSize: root.px(15); text: sendBackScreen.p.detail }
                         // The steps done by hand today, said once, here.
-                        Hint { visible: Logic.sendBackByHand(sendBackScreen.p.stage) && sendBackScreen.p.action !== "settle"; font.pixelSize: root.px(15); text: Logic.sendBackByHandLine(sendBackScreen.p.stage) }
+                        Hint { visible: Logic.sendBackByHand(sendBackScreen.p.stage) && sendBackScreen.p.action !== "settle" && sendBackScreen.p.gate !== true; font.pixelSize: root.px(15); text: Logic.sendBackByHandLine(sendBackScreen.p.stage) }
                         Hint {
                             visible: root.sbFocusRow !== null
                             color: root.ink

@@ -798,10 +798,12 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
 {
   const { bridgesToAdd, BRIDGE_V4_PROGRAM, receiveHoldLine, receiveCodeRefused, RECEIVE_DEPLOYMENT, BUNDLED_BRIDGE } = await import("./qml/logic.mjs");
   const V2 = "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", V3 = "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr";
-  check("v4 and v5 added to a saved list without them", bridgesToAdd([V2, V3]), [V2, V3, BRIDGE_V4_PROGRAM, "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA"]);
-  const { BRIDGE_V5_PROGRAM } = await import("./qml/logic.mjs");
-  check("nothing to add", [bridgesToAdd([V2, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM]), bridgesToAdd([]), bridgesToAdd(null), bridgesToAdd(["a", "b", "c", "d"])], [null, null, null, null]);
-  check("v5 added; v2 makes room when full", [bridgesToAdd([V2, V3, BRIDGE_V4_PROGRAM]), bridgesToAdd([V2, V3, BRIDGE_V4_PROGRAM, "d"])], [[V2, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM], [BRIDGE_V5_PROGRAM, V3, BRIDGE_V4_PROGRAM, "d"]]);
+  const { BRIDGE_V5_PROGRAM, BRIDGE_V6_PROGRAM, BRIDGE_V7_PROGRAM } = await import("./qml/logic.mjs");
+  check("v4 to v7 added to a saved list without them", bridgesToAdd([V2, V3]), [V2, V3, BRIDGE_V4_PROGRAM, "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA", "4PxaLAfPZDvpfZaR8SsC2Y7pYMPNwPPGVGMpjEVPQWed", "CdijfhGnf1NjyCvYTZcGijQZzZ6soNJQ75Piex1ZTM93"]);
+  check("v6 and v7 added to the saved list of the last build", bridgesToAdd([V2, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM]), [V2, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM, BRIDGE_V6_PROGRAM, BRIDGE_V7_PROGRAM]);
+  check("nothing to add", [bridgesToAdd([V2, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM, BRIDGE_V6_PROGRAM, BRIDGE_V7_PROGRAM]), bridgesToAdd([]), bridgesToAdd(null), bridgesToAdd(["a", "b", "c", "d", "e", "f"])], [null, null, null, null]);
+  check("v2, then v3 make room when full; never past six", [bridgesToAdd([V2, V3, BRIDGE_V4_PROGRAM, "d", "e"]), bridgesToAdd([V2, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM, "e", "f"]), bridgesToAdd(["a", "b", "c", "d"])],
+    [[BRIDGE_V6_PROGRAM, BRIDGE_V7_PROGRAM, BRIDGE_V4_PROGRAM, "d", "e", BRIDGE_V5_PROGRAM], [BRIDGE_V6_PROGRAM, BRIDGE_V7_PROGRAM, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM, "e", "f"], ["a", "b", "c", "d", BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM]]);
   check("Receive's deployment is v5", RECEIVE_DEPLOYMENT, "bridge-test-network-v5");
   const now = { build: { commit: BUNDLED_BRIDGE[0].build }, deployment: { name: "bridge-test-network-v4", bridge_program: BRIDGE_V4_PROGRAM } };
   check("no hold with the shipped bridge read", receiveHoldLine(now, [V2, V3, BRIDGE_V4_PROGRAM]), "");
@@ -898,6 +900,34 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("stage actions", stages.map((stage) => sendBackProgress({ stage }, 0, at).action), ["burn", "", "", "", "check", "prove", "", "seal", "", "release", "", ""]);
   check("burned: the honest wait, no time promised", [sendBackProgress({ stage: "burned" }, 0, at).headline, sendBackProgress({ stage: "burned" }, 0, at).detail],
     ["Waiting for Ethereum to record it.", ""]);
+  {
+    // A v7 send-back (seq-sig gate): the LEZ Bridge's `text`/`wait` with `update` (rfp-022 V7-IN-WALLET.md §2, sendback.rs
+    // gate_wait_text, word for word) are the waiting line; v4/v5 carry `text` but no `update`, and keep the generic wait.
+    const window = { stage: "burned", update: { window_s: 600, pending: true, finalizable_at: 5000, block_id: 28000, covers: true, dead: false },
+      text: "Burned. Waiting for the 10-minute contest window: Ethereum has the update that records this burn, and it can be applied when the window ends.",
+      wait: { what: "the 10-minute contest window", until: 5000, seconds: 600 } };
+    const w = sendBackProgress(window, 4400, at);
+    check("v7 burned: the contest window is the wait", [w.stage, w.card, w.headline, w.tone, w.action, w.gate],
+      ["burned", "Burned · waiting for the 10-minute contest window until T5000", "Waiting for the 10-minute contest window: Ethereum has the update that records this burn, and it can be applied when the window ends.", "wait", "", true]);
+    const passed = { stage: "burned", update: { window_s: 600, pending: true, finalizable_at: 5000, block_id: 28000, covers: true, dead: false },
+      text: "Burned. The contest window has passed: waiting for the update that records this burn to be applied on Ethereum.",
+      wait: { what: "the update to be applied on Ethereum (its contest window has passed)", until: null, seconds: null } };
+    const nothing = { stage: "burned", update: { window_s: 600, pending: false, dead: false },
+      text: "Burned. Waiting for the next update on Ethereum: two of the bridge's signers sign its blocks, then a proof is made (by hand today, so hours).",
+      wait: { what: "the next update on Ethereum (two of the bridge's signers sign, then a proof; by hand today)", until: null, seconds: null } };
+    const dead = { stage: "burned", update: { window_s: 600, pending: false, dead: true },
+      text: "Burned, but the bridge's update gate on Ethereum has stopped: it can't take updates any more. Nothing is lost on the bridge test network; ask the bridge's operator.",
+      wait: { what: "an update the bridge's gate can no longer take (it has stopped)", until: null, seconds: null } };
+    check("v7 burned: window passed, nothing staged, a stopped gate", [passed, nothing, dead].map((x) => { const p = sendBackProgress(x, 6000, at); return [p.card, p.headline, p.tone] }), [
+      ["Burned · waiting for the update to be applied on Ethereum", "The contest window has passed: waiting for the update that records this burn to be applied on Ethereum.", "wait"],
+      ["Burned · waiting for the next update on Ethereum", "Waiting for the next update on Ethereum: two of the bridge's signers sign its blocks, then a proof is made (by hand today, so hours).", "wait"],
+      ["Burned · waiting for an update the bridge's gate can no longer take", "Burned, but the bridge's update gate on Ethereum has stopped: it can't take updates any more. Nothing is lost on the bridge test network; ask the bridge's operator.", "problem"]]);
+    check("v7 burned: past the window's end no time is promised", sendBackProgress(window, 5000, at).card, "Burned · waiting for the 10-minute contest window");
+    const v5 = sendBackProgress({ stage: "burned", text: "Burned. Waiting for Ethereum to record it: the bridge operator posts updates by hand today.", wait: { what: "the next update on Ethereum (the bridge operator, by hand today)", seconds: null }, update: null }, 0, at);
+    check("v4/v5 burned: unchanged (no update, so the module's text is not used)", [v5.card, v5.headline, v5.gate], ["Burned · waiting for Ethereum to record it", "Waiting for Ethereum to record it.", undefined]);
+    check("the card row carries the window too", sendBackRowsShown([{ id: "s7", amount: "0.01 ETH", account: "Public/A", recipient: "0xR", stage: "burned" }], { s7: window }, {}, 4400 * 1000)[0].progress.card,
+      "Burned · waiting for the 10-minute contest window until T5000".replace("T5000", clockShown(5000)));
+  }
   {
     // The hand steps are said once, in one place (SEND_BACK_BY_HAND), and the times come from one constant.
     const { SEND_BACK_TIMES, SEND_BACK_BY_HAND, sendBackByHand } = await import("./qml/logic.mjs");
@@ -1094,14 +1124,28 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     bridgeCheckShown({ ok: false, error: { code: "mismatch", message: "The deposit desk sends deposits elsewhere. Refused: nothing was added." }, checks: [{ ok: false, text: "desk" }] }),
     bridgeCheckShown({ ok: false, error: { code: "unreachable", message: "Sepolia can't be read now." } }).kind],
     [{ kind: "problem", line: "The deposit desk sends deposits elsewhere. Refused: nothing was added.", words: "", use: false, checks: ["✕ desk"] }, "waiting"]);
-  // The wallet reads the chosen bridge: added to its list (at most 4), v2 and v3 make room first.
-  const V2 = "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", V3 = "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr", V6 = "Six6", V7 = "Seven7";
-  check("bridge list: added with room, unchanged when there", [bridgesWith([V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM], V6, []), bridgesWith([V2, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM], BRIDGE_V5_PROGRAM, [])],
-    [[V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM, V6], null]);
-  check("bridge list: a fifth bridge takes v2's place, then v3's", [bridgesWith([V2, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM], V6, [BRIDGE_V5_PROGRAM]), bridgesWith([V6, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM], V7, [V6])],
-    [[V6, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM], [V6, V7, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM]]);
-  check("bridge list: a bridge with deposits on it is kept; full when all are", [bridgesWith([V2, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM], V6, [V2, V3, BRIDGE_V5_PROGRAM]), bridgesWith(["a", "b", "c", "d"], V6, ["a", "b", "c", "d"])],
-    [[V2, V3, V6, BRIDGE_V5_PROGRAM], "full"]);
+  // The wallet reads the chosen bridge: added to its list (at most 6), v2 and v3 make room first.
+  const V2 = "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", V3 = "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr", V6 = "Six6", V7 = "Seven7", V8 = "Eight8", V9 = "Nine9";
+  check("bridge list: added with room, unchanged when there", [bridgesWith([V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM], V6, []), bridgesWith([V2, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM], BRIDGE_V5_PROGRAM, []), bridgesWith([V2, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM, V6], V7, [])],
+    [[V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM, V6], null, [V2, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM, V6, V7]]);
+  check("bridge list: a seventh bridge takes v2's place, then v3's", [bridgesWith([V2, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM, V6, V7], V8, [BRIDGE_V5_PROGRAM]), bridgesWith([V8, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM, V6, V7], V9, [V8])],
+    [[V8, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM, V6, V7], [V8, V9, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM, V6, V7]]);
+  check("bridge list: a bridge with deposits on it is kept; full when all are", [bridgesWith([V2, V3, BRIDGE_V4_PROGRAM, BRIDGE_V5_PROGRAM, V6, V7], V8, [V2, V3, BRIDGE_V5_PROGRAM, V6, V7]), bridgesWith(["a", "b", "c", "d", "e", "f"], V8, ["a", "b", "c", "d", "e", "f"])],
+    [[V2, V3, V8, BRIDGE_V5_PROGRAM, V6, V7], "full"]);
+  // v6 and v7 are added bridges to the LEZ Bridge ("added-" and their cfgId's first 6 bytes): named
+  // by their program where a row has it, else by that id; any other added bridge keeps its own name.
+  const { bridgeLabelOf, receiveWhere } = await import("./qml/logic.mjs");
+  const v6row = { id: "added-7d1a304a12a4", label: "sepolia-v6", kind: "added", vault_short: "0x95cE…427E", bridge_program: "4PxaLAfPZDvpfZaR8SsC2Y7pYMPNwPPGVGMpjEVPQWed", endpoint_host: "lez.nameswallet.app" };
+  const v7row = { id: "added-7ef9153b69a3", label: "", kind: "added", vault_short: "0x4D7B…d23E", bridge_program: "CdijfhGnf1NjyCvYTZcGijQZzZ6soNJQ75Piex1ZTM93" };
+  check("v6 and v7 named on their rows", [bridgeRowLine(v6row), bridgeRowLine(v7row), bridgeActiveLine({ active_row: v7row })],
+    ["bridge v6 · vault 0x95cE…427E · added · lez.nameswallet.app", "bridge v7 · vault 0x4D7B…d23E · added", "New receives and sends to Ethereum use bridge v7 (vault 0x4D7B…d23E, added)."]);
+  check("v6 and v7 named by the bridge's id alone (a deployment view)", [bridgeLabelOf({ id: "added-7d1a304a12a4", label: "added-7d1a304a12a4" }), bridgeLabelOf({ id: "added-7ef9153b69a3", label: "added-7ef9153b69a3" }),
+    receiveWhere({ deployment: { id: "added-7d1a304a12a4", label: "added-7d1a304a12a4", current: false } }), receiveWhere({ deployment: { id: "added-7ef9153b69a3", label: "added-7ef9153b69a3", current: true } })],
+    ["bridge v6", "bridge v7", "bridge v6", ""]);
+  check("another added bridge keeps its own name; built-ins by program", [bridgeLabelOf({ id: "added-0123456789ab", label: "my bridge" }), bridgeLabelOf({ id: "added-0123456789ab", label: "" }), bridgeLabelOf({ id: "x", bridge_program: BRIDGE_V4_PROGRAM, label: "y" }), bridgeLabelOf(null)],
+    ["my bridge", "added-0123456789ab", "bridge v4", ""]);
+  check("bridge check of the v7 code: named bridge v7", bridgeCheckShown({ ok: true, id: "added-7ef9153b69a3", label: "sepolia-v7", bridge_program: "CdijfhGnf1NjyCvYTZcGijQZzZ6soNJQ75Piex1ZTM93", vault_short: "0x4D7B…d23E", endpoint_host: "lez.nameswallet.app" }).line,
+    "Checked on Sepolia and on lez.nameswallet.app: bridge v7, vault 0x4D7B…d23E.");
   // A code made on another bridge than the one chosen now is "for an older vault"; the bridge says which is current.
   check("older vault: the bridge's current flag wins", [codeOlderVault({ deployment: { id: "added-abc", current: true } }), codeOlderVault({ deployment: { id: "bridge-test-network-v5", current: false } })], [false, true]);
   // What to do next, numbered (owner, 2026-11-16).
