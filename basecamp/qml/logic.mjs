@@ -1821,9 +1821,32 @@ export function receiveTokens(registry) {
     var list = registry && Array.isArray(registry.tokens) ? registry.tokens : []
     var out = list.filter(function(t) { return t && t.symbol && Array.isArray(t.denoms) && t.denoms.length > 0 }).map(function(t) {
         return { symbol: String(t.symbol), frozen: !!(t.freeze && t.freeze.eth_deposits === true),
-                 denoms: t.denoms.map(function(d, i) { return { index: d.index !== undefined ? Number(d.index) : i, text: String(d.text || d.value || "") } }) }
+                 denoms: t.denoms.map(function(d, i) { return { index: d.index !== undefined ? Number(d.index) : i, text: String(d.text || d.value || ""), value: String(d.value || "") } }) }
     })
     return out.length > 0 ? out : RECEIVE_FALLBACK
+}
+
+/// The index of the smallest denomination in `list` ([{index, text, value?}]: receiveTokens'
+/// denoms or sendBackAmounts), -1 for none. By `value` (base units) when every entry has one,
+/// else by the shown text ("1,000" → 1000). Receive from Ethereum and Bridge to Ethereum always
+/// start on it; the last amount is never remembered (owner, 2026-11-18).
+export function smallestDenom(list) {
+    var l = Array.isArray(list) ? list.filter(function(d) { return d && d.index !== undefined }) : []
+    if (l.length === 0) return -1
+    var byValue = l.every(function(d) { return /^[0-9]+$/.test(String(d.value || "")) })
+    var less = byValue
+        ? function(a, b) { var x = String(a.value).replace(/^0+(?=.)/, ""), y = String(b.value).replace(/^0+(?=.)/, ""); return x.length !== y.length ? x.length < y.length : x < y }
+        : function(a, b) { return Number(String(a.text || "").replace(/,/g, "")) < Number(String(b.text || "").replace(/,/g, "")) }
+    var best = l[0]
+    l.forEach(function(d) { if (less(d, best)) best = d })
+    return Number(best.index)
+}
+
+/// The denomination Receive asks for: `chosen` when the person pressed one this list has, else
+/// the smallest (smallestDenom). -1 when the list is empty.
+export function denomOrSmallest(list, chosen) {
+    var l = Array.isArray(list) ? list : []
+    return Number(chosen) >= 0 && l.some(function(d) { return d && Number(d.index) === Number(chosen) }) ? Number(chosen) : smallestDenom(l)
 }
 
 /// A deposit request's reply: {kind: "needs" | "code" | "old", value}. "old": a LEZ Bridge that
@@ -1922,7 +1945,7 @@ export function receiveRowsShown(list, statuses, claimedAt, now, showAll) {
         hidden++
         return false
     })
-    return { rows: rows.map(function(e) { return { id: e.row.id, symbol: e.row.symbol, amount: e.row.amount, account: e.row.account, account_kind: String(e.row.account_kind || ""), progress: e.progress, where: receiveWhere(st[e.row.id], e.row) } }), hidden: hidden }
+    return { rows: rows.map(function(e) { return { id: e.row.id, symbol: e.row.symbol, amount: e.row.amount, account: e.row.account, account_kind: String(e.row.account_kind || ""), deployment: e.row.deployment || null, progress: e.progress, where: receiveWhere(st[e.row.id], e.row) } }), hidden: hidden }
 }
 
 /// The receive that opening "Receive from Ethereum" shows first, or "": the newest one on its way
@@ -2035,20 +2058,41 @@ export function bridgeNextCheck(s) {
     return due
 }
 
+/// The bridge a receive row is on, as a short key ("v5"), from its deployment ({id, label}: the
+/// bridge's receives()) or a label ("bridge v5"); "" when it names none.
+export function receiveBridgeKey(deployment) {
+    var d = deployment
+    var texts = d && typeof d === "object" ? [d.label, d.id] : [d]
+    for (var i = 0; i < texts.length; i++) {
+        var m = /(?:^|[^a-z0-9])v([0-9]+)(?![0-9])/i.exec(String(texts[i] || ""))
+        if (m) return "v" + m[1]
+    }
+    return ""
+}
+
 /// Where a claimed receive's tokens are now, from the card's account blocks (bridgeNetRows):
 /// "CCVd76…pKnk now holds 0.1 ETH." or, before the network is read again, where to look.
-export function receiveBalanceLine(blocks, account, symbol) {
+/// `deployment` (the row's own, from receives(); or a label such as "bridge v5"): the balance on
+/// THAT bridge only. A v5 claim once said "now holds 0.01 wETH" from v6's row while the account
+/// held 1.01 on v5 (2026-11-18). Without one (an older bridge), as before: a row that holds
+/// something (the first was v2's 0 wETH after a v4 claim on the M2, 15 Nov), else the first.
+export function receiveBalanceLine(blocks, account, symbol, deployment) {
     var id = String(account || "").replace(/^Public\//, "")
     var block = (Array.isArray(blocks) ? blocks : []).filter(function(b) { return String(b.account || "").replace(/^Public\//, "") === id })[0]
     // The wrapped token keeps the symbol or puts a "w" before it (ETH arrives as wETH).
-    // With several bridges, one row per bridge: the one this receive's bridge listed (`bridge`,
-    // its label such as "bridge v4"), else one that holds something (the first was v2's 0 wETH
-    // after a v4 claim on the M2, 15 Nov), else the first.
     var all = block && Array.isArray(block.assets) ? block.assets.filter(function(a) { return a.symbol === symbol || a.symbol === "w" + symbol }) : []
-    var bridge = arguments.length > 3 ? String(arguments[3] || "") : ""
-    var ofBridge = bridge ? all.filter(function(a) { return String(a.name || "").indexOf("· " + bridge) >= 0 }) : []
-    var held = all.filter(function(a) { return !/^0(\.0*)?$/.test(String(a.amount || "0")) })
-    var asset = ofBridge[0] || held[0] || all[0] || null
+    var key = receiveBridgeKey(deployment)
+    var asset = null
+    if (key !== "") {
+        var ofBridge = all.filter(function(a) { return receiveBridgeKey(a.bridgeLabel || "") === key || receiveBridgeKey(String(a.name || "").split("· ").pop()) === key })
+        // One bridge only, unlabelled: it is the row's (a wallet with one bridge shows no label).
+        if (ofBridge.length === 0 && all.length === 1 && !all[0].bridgeLabel && String(all[0].name || "").indexOf("· ") < 0)
+            ofBridge = all
+        asset = ofBridge[0] || null
+    } else {
+        var held = all.filter(function(a) { return !/^0(\.0*)?$/.test(String(a.amount || "0")) })
+        asset = held[0] || all[0] || null
+    }
     if (asset) return idShort(id) + " now holds " + asset.amount + " " + asset.symbol + "."
     return "The balance of " + idShort(id) + " shows on the Wallet card once the network is read again."
 }
@@ -2790,6 +2834,11 @@ export const PRIVATE_RECEIVE_NOTE = "Private: nobody can link this deposit to yo
 /// The private claim's one line, above its button.
 export const PRIVATE_CLAIM_NOTE = "Private: it goes to a one-time address of this account, and nobody can link it to the deposit. The bridge pays the fee. Your wallet proves the claim on this computer, " + PRIVATE_PROOF_TIME + ", then sends it."
 /// The private send-back's one line, beside the account choice.
+/// Whether step 1 of Bridge to Ethereum shows PRIVATE_SEND_BACK_NOTE: there are private accounts
+/// to send from and no PUBLIC account is chosen (it showed beside a chosen public account, 18 Nov).
+export function sendBackPrivateNoteShown(privateSources, account, fromPrivate) {
+    return Array.isArray(privateSources) && privateSources.length > 0 && (String(account || "") === "" || !!fromPrivate)
+}
 export const PRIVATE_SEND_BACK_NOTE = "From a private account: nobody sees which account it leaves. Your wallet proves the burn on this computer, " + PRIVATE_PROOF_TIME + "; its fee comes from the account's own LEZ."
 /// Under the proving wait: the page may be left.
 export const PRIVATE_LEAVE_LINE = "You can leave this page: your wallet keeps proving. Come back here for the result."

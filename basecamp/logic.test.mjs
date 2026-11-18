@@ -630,7 +630,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
 
 {
   const { receiveTokens, receiveReply, receivesFrom, receiveProgress, receiveSteps, RECEIVE_FALLBACK } = await import("./qml/logic.mjs");
-  check("receiveTokens from registry", receiveTokens({ tokens: [{ symbol: "ETH", denoms: [{ index: 0, value: "10000000000000000", text: "0.01" }] }] }), [{ symbol: "ETH", frozen: false, denoms: [{ index: 0, text: "0.01" }] }]);
+  check("receiveTokens from registry", receiveTokens({ tokens: [{ symbol: "ETH", denoms: [{ index: 0, value: "10000000000000000", text: "0.01" }] }] }), [{ symbol: "ETH", frozen: false, denoms: [{ index: 0, text: "0.01", value: "10000000000000000" }] }]);
   check("receiveTokens fallback", receiveTokens(null), RECEIVE_FALLBACK);
   check("receiveReply", [receiveReply({ needs: "secret" }).kind, receiveReply({ request: "logosdep1qq" }).kind, receiveReply({ deposit: {} }).kind], ["needs", "code", "old"]);
   check("receivesFrom keeps the unclaimed receives",
@@ -1415,6 +1415,46 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("unload step: Basecamp's button is Unload", lines.map((line) => [/LEZ Bridge → Unload\. /.test(line), /Unload All/.test(line)]), [[true, false], [true, false], [true, false]]);
   const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
   check("unload: no 'Unload All' anywhere the app shows", /Unload All/.test(qml), false);
+}
+
+{
+  // a. Receive from Ethereum and Bridge to Ethereum start on the SMALLEST amount; the last one is
+  // never remembered (2026-11-18).
+  const L = await import("./qml/logic.mjs");
+  const eth = L.receiveTokens({ tokens: [{ symbol: "ETH", denoms: [{ index: 0, text: "1", value: "1000000000000000000" }, { index: 1, text: "0.1", value: "100000000000000000" }, { index: 2, text: "0.01", value: "10000000000000000" }] }] })[0].denoms;
+  check("smallest denomination by value (registry order not sorted)", L.smallestDenom(eth), 2);
+  check("smallest denomination by text (no values: the fallback list)", L.smallestDenom([{ index: 0, text: "1,000" }, { index: 1, text: "100" }, { index: 2, text: "10,000" }]), 1);
+  check("smallest: empty list", [L.smallestDenom([]), L.smallestDenom(null)], [-1, -1]);
+  check("receive: nothing pressed: the smallest; pressed: kept; pressed on another token's list: the smallest",
+    [L.denomOrSmallest(eth, -1), L.denomOrSmallest(eth, 0), L.denomOrSmallest([{ index: 0, text: "100" }, { index: 1, text: "1,000" }], 2)], [2, 0, 0]);
+  check("Bridge to Ethereum: the smallest amount the account holds", L.smallestDenom(L.sendBackAmounts(null, { symbol: "wETH", base: "1010000000000000000" })),
+    L.sendBackAmounts(null, { symbol: "wETH", base: "1010000000000000000" }).sort((a, b) => (BigInt(a.value) < BigInt(b.value) ? -1 : 1))[0].index);
+  const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  check("receive: the screen starts with no amount pressed (so the smallest)", [/property int receiveDenom: -1/.test(qml), (qml.match(/receiveDenom = -1/g) || []).length >= 3, /String\(receiveDenom\)/.test(qml)], [true, true, false]);
+  check("send back: no amount kept from before (sbPick and the screen pick the smallest)", [(qml.match(/sbDenom = Logic\.smallestDenom\(sbAmounts\)/g) || []).length, /sbDenom = sbAmounts\[0\]\.index/.test(qml)], [2, false]);
+
+  // b. A claimed receive's line reads the balance on the row's OWN bridge: a v5 claim said "now
+  // holds 0.01 wETH" from v6's row while the account held 1.01 on v5 (2026-11-18).
+  const acct = "Public/3J29s1Wy62NYMRuTe6MWXQrpWkqUAkv9t6PqzHWF7CNA";
+  const two = [{ account: acct, assets: [
+    { symbol: "LEZ", name: "Native", amount: "5" },
+    { symbol: "wETH", name: "Wrapped Sepolia ETH · bridge v6", bridgeLabel: "bridge v6", amount: "0.01" },
+    { symbol: "wETH", name: "Wrapped Sepolia ETH · bridge v5", bridgeLabel: "bridge v5", amount: "1.01" }] }];
+  check("balance line: the v5 row reads v5, not v6", L.receiveBalanceLine(two, acct, "ETH", { id: "bridge-test-network-v5", label: "bridge v5", current: true }), "3J29s1…7CNA now holds 1.01 wETH.");
+  check("balance line: the v6 row reads v6", L.receiveBalanceLine(two, acct, "ETH", { id: "added-1", label: "sepolia-v6" }), "3J29s1…7CNA now holds 0.01 wETH.");
+  check("balance line: a bridge the card has no row for: no other bridge's balance", L.receiveBalanceLine(two, acct, "ETH", { id: "bridge-test-network-v4", label: "bridge v4" }), "The balance of 3J29s1…7CNA shows on the Wallet card once the network is read again.");
+  check("balance line: one unlabelled row (one bridge): it", L.receiveBalanceLine([{ account: acct, assets: [{ symbol: "wETH", name: "Wrapped Sepolia ETH", amount: "0.2" }] }], acct, "ETH", { id: "bridge-test-network-v5", label: "bridge v5" }), "3J29s1…7CNA now holds 0.2 wETH.");
+  check("balance line: a label as before", L.receiveBalanceLine(two, acct, "ETH", "bridge v5"), "3J29s1…7CNA now holds 1.01 wETH.");
+  check("bridge key", [L.receiveBridgeKey({ id: "bridge-test-network-v5", label: "bridge v5" }), L.receiveBridgeKey({ id: "bridge-test-network", label: "bridge v2" }), L.receiveBridgeKey(null), L.receiveBridgeKey("bridge v12")], ["v5", "v2", "", "v12"]);
+  check("card rows keep their deployment", L.receiveRowsShown([{ id: "r1", symbol: "ETH", amount: "1", account: acct, deployment: { id: "bridge-test-network-v5", label: "bridge v5" } }], {}, {}, 0, true).rows[0].deployment, { id: "bridge-test-network-v5", label: "bridge v5" });
+  check("every balance line on screen passes the row's deployment", (qml.match(/Logic\.receiveBalanceLine\(/g) || []).length, (qml.match(/Logic\.receiveBalanceLine\([^)]*\.deployment\)/g) || []).length);
+
+  // c. Bridge to Ethereum step 1: the private-account note only while no public account is chosen.
+  const priv = [{ account: "Private/AAA" }];
+  check("private note: nothing chosen / a private account chosen / a public account chosen / no private accounts",
+    [L.sendBackPrivateNoteShown(priv, "", false), L.sendBackPrivateNoteShown(priv, "Private/AAA", true), L.sendBackPrivateNoteShown(priv, "Public/BBB", false), L.sendBackPrivateNoteShown([], "", false)],
+    [true, true, false, false]);
+  check("private note: the screen uses the rule", /visible: Logic\.sendBackPrivateNoteShown\(root\.sbPrivateSources, root\.sbAccount, root\.sbFromPrivate\); color: root\.ink; text: Logic\.PRIVATE_SEND_BACK_NOTE/.test(qml), true);
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");

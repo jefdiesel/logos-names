@@ -1257,7 +1257,10 @@ Item {
     property bool bridgeRestartAsking: false
     readonly property var receiveTokenList: Logic.receiveTokens(receiveRegistry)
     property string receiveToken: "ETH"
-    property int receiveDenom: 1
+    // The amount pressed on this screen (-1: none yet, so the smallest: Logic.denomOrSmallest). Never
+    // remembered: opening the screen, "Make another code" or another token starts on the smallest.
+    property int receiveDenom: -1
+    readonly property int receiveDenomNow: Logic.denomOrSmallest((receiveTokenList.filter(function(t) { return t.symbol === receiveToken })[0] || { denoms: [] }).denoms, receiveDenom)
     property string receiveAccount: ""
     property bool receivePublicOk: false
     // Private or public: chosen by the person ("" until then: private, the privacy default, when
@@ -1322,6 +1325,7 @@ Item {
     function openEthReceive(focusId) {
         walletView = "ethreceive"
         loadInstalled(checkBundle)
+        receiveDenom = -1
         receiveError = ""
         receiveNeeds = null
         receiveDetails = false
@@ -1390,6 +1394,7 @@ Item {
     }
     /// "Make another code": the choice of amount and account, whatever is on its way.
     function startNewReceive() {
+        receiveDenom = -1
         receiveFocus = ""
         receiveResult = null
         receiveExtras = []
@@ -1474,7 +1479,7 @@ Item {
         // A private code: the bridge's private deposit request (Logic.PRIVATE_BRIDGE); a public one
         // only after the "Not private" tick (the bridge refuses it without "true").
         var method = priv ? Logic.PRIVATE_BRIDGE.receive : "make_public_deposit_request"
-        var args = priv ? [receiveToken, String(receiveDenom), into] : [receiveToken, String(receiveDenom), into, "true"]
+        var args = priv ? [receiveToken, String(receiveDenomNow), into] : [receiveToken, String(receiveDenomNow), into, "true"]
         bridgeCall(method, args, function(value) {
             receiveAsking = false
             var r = Logic.receiveReply(value)
@@ -1944,9 +1949,8 @@ Item {
         sbSetBox("")
         if (!sbBookNamed)
             loadSbBook()
-        sbDenom = -1
-        if (sbAmounts.length === 1)
-            sbDenom = sbAmounts[0].index
+        // The smallest amount this account holds, pre-selected (never the last one; "Change" offers the rest).
+        sbDenom = Logic.smallestDenom(sbAmounts)
     }
     readonly property var sbFocusRow: sbFocus !== "" ? (sendBacks.filter(function(x) { return x.id === sbFocus })[0] || null) : null
     readonly property var sbFocusStatus: sbFocus !== "" ? (sbStatuses[sbFocus] || (sbFocusRow !== null ? { stage: sbFocusRow.stage } : null)) : null
@@ -2004,8 +2008,8 @@ Item {
                     sbAskNow = true
                 if (sbFocus !== "" && sbFromPrivate && sbJob === null)
                     sbFindJob(sbFocus)
-                if (sbFocus === "" && sbAsset !== null && sbAmounts.length === 1 && sbDenom < 0)
-                    sbDenom = sbAmounts[0].index
+                if (sbFocus === "" && sbAsset !== null && sbAmounts.length > 0 && sbDenom < 0)
+                    sbDenom = Logic.smallestDenom(sbAmounts)
             }, function(message, kind) {
                 receiveHold = false
                 sbError = kind === "missing" ? "" : sentence(message)
@@ -9980,7 +9984,7 @@ Item {
                                             Hint {
                                                 visible: arrivingRow.p.stage === "claimed"
                                                 font.pixelSize: root.px(15)
-                                                text: arrivingRow.p.stage === "claimed" ? Logic.receiveBalanceLine(root.bridgeNetBlocks, arrivingRow.modelData.account, arrivingRow.modelData.symbol) : ""
+                                                text: arrivingRow.p.stage === "claimed" ? Logic.receiveBalanceLine(root.bridgeNetBlocks, arrivingRow.modelData.account, arrivingRow.modelData.symbol, arrivingRow.modelData.deployment) : ""
                                             }
                                         }
                                         Action { visible: arrivingRow.p.claim && root.bridgeSetupClear; label: Logic.receiveIsPrivate(arrivingRow.modelData) && root.privateClaimJobs[arrivingRow.modelData.id] ? "Open" : Logic.receiveIsPrivate(arrivingRow.modelData) ? "Claim privately" : "Claim"; strong: true; onPressed: root.claimArrived(arrivingRow.modelData.id) }
@@ -11407,7 +11411,7 @@ Item {
                             spacing: 8
                             Repeater {
                                 model: root.receiveTokenList
-                                Choice { required property var modelData; label: modelData.symbol; chosen: root.receiveToken === modelData.symbol; onPressed: root.receiveToken = modelData.symbol }
+                                Choice { required property var modelData; label: modelData.symbol; chosen: root.receiveToken === modelData.symbol; onPressed: { root.receiveToken = modelData.symbol; root.receiveDenom = -1 } }
                             }
                         }
                         Flow {
@@ -11415,7 +11419,7 @@ Item {
                             spacing: 8
                             Repeater {
                                 model: (root.receiveTokenList.filter(function(t) { return t.symbol === root.receiveToken })[0] || { denoms: [] }).denoms
-                                Choice { required property var modelData; label: modelData.text + " " + root.receiveToken; chosen: root.receiveDenom === modelData.index; onPressed: root.receiveDenom = modelData.index }
+                                Choice { required property var modelData; label: modelData.text + " " + root.receiveToken; chosen: root.receiveDenomNow === modelData.index; onPressed: root.receiveDenom = modelData.index }
                             }
                         }
                         // Private or public (private first: the privacy default), with one line on what it means.
@@ -11521,8 +11525,8 @@ Item {
                         StatusLine {
                             kind: Logic.toneKind(receiveScreen.p.tone)
                             text: receiveScreen.p.stage === "claimed" ? receiveScreen.p.headline.replace(/\.$/, "")
-                                + (root.receiveFocusRow !== null && /now holds/.test(Logic.receiveBalanceLine(root.bridgeNetBlocks, root.receiveFocusRow.account, root.receiveFocusRow.symbol))
-                                   ? " · " + Logic.receiveBalanceLine(root.bridgeNetBlocks, root.receiveFocusRow.account, root.receiveFocusRow.symbol) : ".")
+                                + (root.receiveFocusRow !== null && /now holds/.test(Logic.receiveBalanceLine(root.bridgeNetBlocks, root.receiveFocusRow.account, root.receiveFocusRow.symbol, root.receiveFocusRow.deployment))
+                                   ? " · " + Logic.receiveBalanceLine(root.bridgeNetBlocks, root.receiveFocusRow.account, root.receiveFocusRow.symbol, root.receiveFocusRow.deployment) : ".")
                                 : receiveScreen.p.headline
                         }
                         Hint { visible: receiveScreen.p.detail !== ""; font.pixelSize: root.px(15); text: receiveScreen.p.detail }
@@ -11537,7 +11541,7 @@ Item {
                         Hint {
                             visible: receiveScreen.p.stage === "claimed" && root.receiveFocusRow !== null && !/now holds/.test(text)
                             font.pixelSize: root.px(15)
-                            text: root.receiveFocusRow === null ? "" : Logic.receiveBalanceLine(root.bridgeNetBlocks, root.receiveFocusRow.account, root.receiveFocusRow.symbol)
+                            text: root.receiveFocusRow === null ? "" : Logic.receiveBalanceLine(root.bridgeNetBlocks, root.receiveFocusRow.account, root.receiveFocusRow.symbol, root.receiveFocusRow.deployment)
                         }
                         Hint {
                             visible: receiveScreen.p.stage === "waiting" && receiveScreen.result === null
@@ -11678,7 +11682,7 @@ Item {
                                 }
                             }
                         }
-                        Hint { visible: root.sbPrivateSources.length > 0; color: root.ink; text: Logic.PRIVATE_SEND_BACK_NOTE }
+                        Hint { visible: Logic.sendBackPrivateNoteShown(root.sbPrivateSources, root.sbAccount, root.sbFromPrivate); color: root.ink; text: Logic.PRIVATE_SEND_BACK_NOTE }
                         // Then the amounts that account holds.
                         Flow {
                             visible: root.sbAsset !== null
