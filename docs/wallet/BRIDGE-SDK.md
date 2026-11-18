@@ -24,6 +24,17 @@ m     = HMAC-SHA256(prk, info | 0x01)                 never leaves the wallet
 value = SHA256(tag | m)                               what the app gets (tag: 1-32 bytes)
 ```
 
+- **Imported accounts** (2026-11-18; rfp-022 `proposal/IMPORTED-ACCOUNTS-DESIGN.md`): an account
+  the wallet holds a key for but no key tree of the phrase has gets the same formula with
+  `ikm = R` (the private key tree root's secret spending key, first 32 bytes of
+  HMAC-SHA512("/LEE-Keys/v1/Master/Private", BIP-39 seed)), salt
+  `logos-names/app-secret/imported/v1` and info prefix `logos-names/app-secret/imported/v1/info`.
+  A wallet restored from the phrase alone makes them again for the account's id; phrase
+  accounts' values are unchanged. Vectors: `basecamp-module/rust-lib/testdata/app-secret-imported-v1.json`
+  (a byte-for-byte copy of rfp-022 `lez-bridge/client/tests/vectors/kdf-names-imported-v1.json`, from
+  its stdlib generator `gen_names_imported_vectors.py`). Whoever holds the full keys of the wallet's
+  first private account can make these values too, as they already can that account's own. Values
+  the 15-Nov rule made from the imported key (names tools 14ec746 to 7096020) are never given now.
 - `app` is `current_caller()`'s module name, never an argument, so `lez_bridge` can't ask for
   `other_app`'s values. The account's key is behind HMAC, so no value gives it.
 - For the bridge: scope `RFP022/deposit`, context `cfgId(32) | token(20) | u256(denom)` (84

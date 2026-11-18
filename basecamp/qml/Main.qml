@@ -2115,7 +2115,7 @@ Item {
                 return
             }
             var id = String(value.id)
-            var row = { id: id, amount: String(value.amount_text || ""), account: String(value.account || sbAccount), recipient: String(value.recipient || ""), words: String(value.words_text || ""), stage: String(value.stage || "planned"), kind: String(value.kind || "") }
+            var row = { id: id, amount: String(value.amount_text || ""), account: String(value.account || sbAccount), recipient: String(value.recipient || ""), words: String(value.words_text || ""), stage: String(value.stage || "planned"), kind: String(value.kind || ""), notice: String(value.account_notice || "") }
             sendBacks = [row].concat(sendBacks.filter(function(x) { return x.id !== id }))
             var all = sbStatuses
             all[id] = value
@@ -11596,6 +11596,8 @@ Item {
                         Fact { visible: receiveScreen.result !== null; label: "Code"; code: true; value: receiveScreen.result !== null ? String(receiveScreen.result.request || "") : ""; full: receiveScreen.result !== null ? String(receiveScreen.result.request || "") : "" }
                         Fact { visible: receiveScreen.result !== null && !!receiveScreen.result.commitment; label: "Commitment"; code: true; value: receiveScreen.result !== null ? String(receiveScreen.result.commitment || "") : ""; full: receiveScreen.result !== null ? String(receiveScreen.result.commitment || "") : "" }
                         Hint { visible: receiveScreen.result !== null && !!receiveScreen.result.not_private; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.not_private ? String(receiveScreen.result.not_private.text || "") : "" }
+                        // An imported account (rfp-022 IMPORTED-ACCOUNTS-DESIGN.md): what the phrase can and can't do for it.
+                        Hint { visible: receiveScreen.result !== null && !!receiveScreen.result.account_notice; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.account_notice ? String(receiveScreen.result.account_notice) : "" }
                         Hint { visible: receiveScreen.result !== null && !!receiveScreen.result.bridge_fee && !!receiveScreen.result.bridge_fee.error; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.bridge_fee && receiveScreen.result.bridge_fee.error ? String(receiveScreen.result.bridge_fee.error) : "" }
                         Hint { visible: receiveScreen.result !== null && !!receiveScreen.result.compare; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.compare ? String(receiveScreen.result.compare.text || "") : "" }
                         Hint { visible: text !== ""; font.pixelSize: root.px(15); text: Logic.compareDigitsDetail(receiveScreen.result !== null ? receiveScreen.result.compare : null) }
@@ -11839,6 +11841,7 @@ Item {
                                 + (sendBackScreen.st !== null && sendBackScreen.st.receive_text ? "; you receive " + sendBackScreen.st.receive_text + "." : ".")
                         }
                         Hint { visible: root.sbFocusRow !== null && root.sbFocusRow.words !== ""; font.pixelSize: root.px(15); text: root.sbFocusRow !== null ? "Its words: " + root.sbFocusRow.words : "" }
+                        Hint { visible: root.sbFocusRow !== null && !!root.sbFocusRow.notice; font.pixelSize: root.px(15); text: root.sbFocusRow !== null && root.sbFocusRow.notice ? String(root.sbFocusRow.notice) : "" }
                         // After the first send to an address with no name here: "Save to my addresses" with
                         // a short name (kept by the LEZ Bridge on this computer, never on chain).
                         ColumnLayout {

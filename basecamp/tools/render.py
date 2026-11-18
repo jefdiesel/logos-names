@@ -897,6 +897,23 @@ for _name, _js, _mock in [
     SCENARIOS[_name] = _js
     MOCKS[_name] = _mock
 
+# Imported accounts (rfp-022 IMPORTED-ACCOUNTS-DESIGN.md): the first secret card for one, the
+# receive code and the send-back with the bridge's account_notice (module texts, word for word).
+_IMPORTED_LINE = ("This account was imported. Its bridge secrets come from this wallet's recovery phrase, so the phrase can finish a withdrawal; "
+                  "the account's own key is still needed to move what stays in it.")
+_IMPORTED_COST = "Whoever holds the full keys of this wallet's first private account could also make these values, as they already can for that account's own."
+SCENARIOS["approve-secret-imported"] = ('root.appRequests = [{"id": "r1", "kind": "secret", "app": "lez_bridge", "created": 0, "expires": 4102444800000, "account": "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "scope": "RFP022/exit", "reason": "", "imported": true, '
+    '"choices": [{"account": "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "account_kind": "public", "pays": false, "label": "the account the app asked for", "granted": true}], "publisher": null, '
+    '"explanation": %s}]; root.appChosen = ["Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk"]; root.appChosenFor = "r1"') % json.dumps(
+    _IMPORTED_LINE + " " + _IMPORTED_COST + " lez_bridge asks for secret values of its own, \"RFP022/exit\", made from Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk. lez_bridge gets only these values, never the account's key, and no other app can get them. "
+    "Whoever holds them can see what lez_bridge does with them (for a bridge, which deposits are yours), but can't spend from your account: every transaction still needs your approval here. You can take this back in Settings, Connected apps.")
+MOCKS["approve-secret-imported"] = MOCKS.get("approve-secret", {})
+SCENARIOS["receive-code-imported"] = SCENARIOS["receive-code"]
+MOCKS["receive-code-imported"] = _copy.deepcopy(MOCKS["receive-code-words"])
+MOCKS["receive-code-imported"]["bridge"]["make_public_deposit_request"]["account_notice"] = _IMPORTED_LINE
+SCENARIOS["sendback-imported-private"] = sb_focus(sb_view("burned")).replace('stage: "burned" }]', 'stage: "burned", notice: "This account was imported. A wallet restored from the recovery phrase can\'t find this account\'s withdrawals by itself; keep a backup." }]', 1)
+MOCKS["sendback-imported-private"] = sb_mock(sb_view("burned"))
+
 # Checks on demand: Receive with a deposit becoming final, its one gentle check announced in minutes;
 # the card while a check runs.
 SCENARIOS["receive-deposited-gentle"] = RECEIVE_04 % (ARR, '({ "dep-1": { stage: "deposited", confirmations: 20, final_in_min: 14 } })', 'root.receiveCheckedAt = Date.now() - 3000; root.openEthReceive("dep-1"); root.againAfter(200, function() { root.receiveAskNow = false; root.receiveCheckedAt = Date.now() - 3000; root.receiveNextAt = Date.now() + 147000 })')
