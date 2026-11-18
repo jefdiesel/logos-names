@@ -2574,36 +2574,47 @@ impl Names {
     }
 
     fn resolve_now(&mut self, name: String) -> String {
-        self.about(&name, |registry, name, derived| {
-            let Some(resolved) = registry.resolve(name, derived)? else {
-                return Ok(Value::Null);
-            };
-            let mut value = resolved.to_json();
-            value["deposit"] = Value::from(registry.deposit(&derived.id)?.to_string());
-            Ok(value)
-        })
+        self.about(&name, resolve_answer)
     }
 
     fn page_now(&mut self, name: String) -> String {
-        self.about(&name, |registry, name, derived| {
-            Ok(registry.page(name, derived)?.unwrap_or(Value::Null))
-        })
+        self.about(&name, page_answer)
     }
 
     fn page_view_now(&mut self, name: String) -> String {
-        self.about(&name, |registry, name, derived| {
-            Ok(registry.page(name, derived)?.map_or(Value::Null, |page| page_view::view(&page)))
-        })
+        self.about(&name, page_view_answer)
     }
 
     fn avatar_now(&mut self, name: String) -> String {
-        self.about(&name, |registry, name, derived| {
-            let resolved = registry.resolve(name, derived)?;
-            let entry = resolved.as_ref().and_then(|resolved| {
-                resolved.profile.texts.iter().find(|(key, _)| key == "avatar").map(|(_, value)| value.as_str())
-            });
-            Ok(entry.and_then(avatar::pixels).unwrap_or(Value::Null))
-        })
+        self.about(&name, avatar_answer)
+    }
+
+    /// A read about a name for the Names app (`resolve`, `page`, `page_view`, `avatar`,
+    /// `deposit`): made on a thread of its own (the name's derivation too, Argon2, seconds of CPU)
+    /// and answered at once with the last one (served.rs), busy until the first is back; read again
+    /// after `READ_FRESH`, at once after a change to the name (`forget_reads`). None for another
+    /// app's read and in unit tests, which read on the spot (`cached_read`), as every app's did.
+    fn name_read(&mut self, kind: &str, typed: &str, answer: fn(&Registry, &str, &Derived) -> Result<Value, String>) -> Option<String> {
+        if self.served.inline || only_the_names_app().is_err() {
+            return None;
+        }
+        let name = match registry::parse_name(typed) {
+            Ok(name) => name,
+            Err(why) => return Some(reply(Err(why))),
+        };
+        let registry = match self.registry() {
+            Ok(registry) => registry,
+            Err(why) => return Some(reply(Err(why))),
+        };
+        let known = self.derived.get(&name).cloned();
+        let (sequencer, program) = (registry.sequencer.clone(), registry.program);
+        let key = format!("name:{name}:{kind}:{sequencer}:{}", registry::account_text(&program));
+        let lane = served::Lane::Own(format!("names@{}", served::host_of(&sequencer)));
+        let snap = self.served.read(&key, READ_FRESH, lane, move || {
+            let derived = known.unwrap_or_else(|| derived_kept(&name));
+            answer(&Registry::new(&sequencer, program), &name, &derived)
+        });
+        Some(served::reply_of(&snap, "This name", |_| Value::Null))
     }
 
     /// Drops every answer read from the chain, after the chain or registry changed.
@@ -2661,16 +2672,25 @@ impl Names {
     fn forget_mine(&self) {
         self.board_reads.lock().expect("the board reads lock").retain(|key, _| !key.starts_with("cli_mine:"));
         // The wallet or its default account changed: so did the balance (CR-2).
-        cli::forget_balance();
-        for kind in [LEZ_BALANCE_KEY, "cli_accounts", "wallet", "first-cli_mine:"] {
-            self.served.forget(kind);
-        }
+        self.forget_balances();
     }
 
     /// Drops what the cache knows about `typed`, after a change to it.
     fn forget_reads(&mut self, typed: &str) {
         let name = registry::normalize_name(typed);
         self.read_cache.retain(|(_, cached), _| *cached != name);
+        self.served.forget(&format!("name:{name}:"));
+        self.served.forget("mine@");
+    }
+
+    /// What the wallet holds changed, or may have (a send started or ended, an account made or
+    /// renamed, another default): every read of it is made afresh, and a read under way is dropped
+    /// when it ends (so a balance read before a send is never noted in the History after it).
+    fn forget_balances(&self) {
+        cli::forget_balance();
+        for kind in [LEZ_BALANCE_KEY, "receipts@", "cli_accounts@", "wallet@", "mine@", "first-cli_mine:"] {
+            self.served.forget(kind);
+        }
     }
 
     fn board_read(&self, key: String, fetch: impl FnOnce() -> Result<Value, String> + Send + 'static) -> Value {
@@ -2945,11 +2965,6 @@ impl Names {
         Ok(setup)
     }
 
-    /// Home's wallet's accounts: the ones that hold names.
-    fn names_held(&self) -> Result<Held, String> {
-        wallet::accounts(&self.names_setup()?)
-    }
-
     /// Refuses a change to a name, or a payment to one, while another zone is in use:
     /// names are kept on home, and its wallet signs and pays for them.
     fn names_here(&self) -> Result<(), String> {
@@ -2963,6 +2978,8 @@ impl Names {
     /// `log_started`, with the entry said to be on the zone in use.
     fn log_started(&self, out: &str, entry: Value) {
         log_started(out, activity::in_zone(entry, &self.zones.current_id()));
+        // A send was logged: a balance read made before it is never noted after it.
+        self.forget_balances();
     }
 
     /// Notes what the zone in use's LEZ accounts hold now, in the Wallet's history (arrivals).
@@ -4303,6 +4320,100 @@ fn wallet_read(setup: &cli::Setup, registry: &Registry, home: bool) -> Result<Va
     }
 }
 
+/// `mine`'s reads: the names CLI's accounts, then each remembered name's record (together) and
+/// each revealed registration's. `{names: [the names the wallet holds, as shown], found: [names
+/// with a record], landed: [names it holds], reveal_landed: [revealed names now held by their
+/// commitment's owner]}`.
+fn mine_read(setup: &cli::Setup, registry: &Registry, remembered: &[String], revealed: &[(String, AccountId)], known: &HashMap<String, Derived>) -> Result<Value, String> {
+    let held = wallet::accounts(setup)?.public;
+    let derived_of = |name: &str| known.get(name).cloned().unwrap_or_else(|| derived_kept(name));
+    // Deriving is done one name at a time (it is CPU work and kept); the reads go out together.
+    let derived: Vec<Derived> = remembered.iter().map(|name| derived_of(name)).collect();
+    let resolved = std::thread::scope(|scope| {
+        let readers: Vec<_> = remembered.iter().zip(&derived).map(|(name, derived)| scope.spawn(move || registry.resolve(name, derived))).collect();
+        readers.into_iter().map(|reader| reader.join().unwrap_or_else(|_| Err("a read failed".to_owned()))).collect::<Result<Vec<_>, String>>()
+    })?;
+    let (mut names, mut found, mut landed) = (Vec::new(), Vec::new(), Vec::new());
+    for ((name, resolved), derived) in remembered.iter().zip(resolved).zip(&derived) {
+        let Some(resolved) = resolved else { continue };
+        found.push(name.clone());
+        if let Some(holder) = held.iter().find(|account| resolved.is_held_by(&derived.id, account)) {
+            names.push(json!({
+                "name": name,
+                "display": format!("{name}{}", registry::NAME_SUFFIX),
+                "owner": registry::account_text(holder),
+                // The public account the name publishes for payments, or null.
+                "account": resolved.profile.account.as_ref().map(registry::account_text),
+                "expires": resolved.expires_json(),
+                "never": resolved.never_expires(),
+                "lapsed": resolved.lapsed(registry::local_now()),
+            }));
+            landed.push(name.clone());
+        }
+    }
+    let reveal_landed: Vec<String> = revealed
+        .iter()
+        .filter(|(name, owner)| {
+            let derived = derived_of(name);
+            registry.resolve(name, &derived).ok().flatten().is_some_and(|record| record.is_held_by(&derived.id, owner))
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    Ok(json!({ "names": names, "found": found, "landed": landed, "reveal_landed": reveal_landed }))
+}
+
+/// `resolve`'s read: the name's record, with its deposit, or null.
+fn resolve_answer(registry: &Registry, name: &str, derived: &Derived) -> Result<Value, String> {
+    let Some(resolved) = registry.resolve(name, derived)? else {
+        return Ok(Value::Null);
+    };
+    let mut value = resolved.to_json();
+    value["deposit"] = Value::from(registry.deposit(&derived.id)?.to_string());
+    Ok(value)
+}
+
+/// `page`'s read.
+fn page_answer(registry: &Registry, name: &str, derived: &Derived) -> Result<Value, String> {
+    Ok(registry.page(name, derived)?.unwrap_or(Value::Null))
+}
+
+/// `page_view`'s read.
+fn page_view_answer(registry: &Registry, name: &str, derived: &Derived) -> Result<Value, String> {
+    Ok(registry.page(name, derived)?.map_or(Value::Null, |page| page_view::view(&page)))
+}
+
+/// `avatar`'s read.
+fn avatar_answer(registry: &Registry, name: &str, derived: &Derived) -> Result<Value, String> {
+    let resolved = registry.resolve(name, derived)?;
+    let entry = resolved.as_ref().and_then(|resolved| resolved.profile.texts.iter().find(|(key, _)| key == "avatar").map(|(_, value)| value.as_str()));
+    Ok(entry.and_then(avatar::pixels).unwrap_or(Value::Null))
+}
+
+/// `deposit`'s read: what registering the name takes now.
+fn deposit_answer(registry: &Registry, name: &str, _derived: &Derived) -> Result<Value, String> {
+    let tier = shortlist::tier_of_name(name);
+    let settings = registry.settings()?;
+    let now = registry.now()?;
+    Ok(deposit_json(name, tier, settings.as_ref(), now))
+}
+
+/// A name's derivation made on a background read's thread (Argon2, 64 MiB), kept for the next
+/// (a few hundred names at most).
+fn derived_kept(name: &str) -> Derived {
+    static KEPT: std::sync::Mutex<Option<HashMap<String, Derived>>> = std::sync::Mutex::new(None);
+    if let Some(derived) = KEPT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_or_insert_with(HashMap::new).get(name) {
+        return derived.clone();
+    }
+    let derived = registry::derive(name);
+    let mut kept = KEPT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let kept = kept.get_or_insert_with(HashMap::new);
+    if kept.len() >= MAX_CACHED {
+        kept.clear();
+    }
+    kept.insert(name.to_owned(), derived.clone());
+    derived
+}
+
 /// What registering a name of `tier` takes under `settings`, for `deposit`.
 fn deposit_json(name: &str, tier: u8, settings: Option<&Settings>, now: u64) -> Value {
     let mut value = json!({
@@ -4410,18 +4521,30 @@ impl NamesModule for Names {
     }
 
     fn resolve(&mut self, name: String) -> String {
+        if let Some(answer) = self.name_read("resolve", &name, resolve_answer) {
+            return answer;
+        }
         self.cached_read("resolve", &name.clone(), |this| this.resolve_now(name))
     }
 
     fn page(&mut self, name: String) -> String {
+        if let Some(answer) = self.name_read("page", &name, page_answer) {
+            return answer;
+        }
         self.cached_read("page", &name.clone(), |this| this.page_now(name))
     }
 
     fn page_view(&mut self, name: String) -> String {
+        if let Some(answer) = self.name_read("page_view", &name, page_view_answer) {
+            return answer;
+        }
         self.cached_read("page_view", &name.clone(), |this| this.page_view_now(name))
     }
 
     fn avatar(&mut self, name: String) -> String {
+        if let Some(answer) = self.name_read("avatar", &name, avatar_answer) {
+            return answer;
+        }
         self.cached_read("avatar", &name.clone(), |this| this.avatar_now(name))
     }
 
@@ -4469,55 +4592,37 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| {
+        busy_or_reply((|| {
             let registry = self.registry()?;
-            let held = self.names_held()?.public;
+            let setup = self.names_setup()?;
             let mut memory = memory()?;
             let remembered = memory.names(&registry.program);
-            // Deriving is done one name at a time (it is CPU work and cached);
-            // the reads that follow go out together.
-            let derived: Vec<Derived> = remembered.iter().map(|(name, _)| self.derived(name)).collect();
-            let reader = &registry;
-            let resolved = std::thread::scope(|scope| {
-                let readers: Vec<_> = remembered
-                    .iter()
-                    .zip(&derived)
-                    .map(|((name, _), derived)| scope.spawn(move || reader.resolve(name, derived)))
-                    .collect();
-                readers
-                    .into_iter()
-                    .map(|reader| reader.join().unwrap_or_else(|_| Err("a read failed".to_owned())))
-                    .collect::<Result<Vec<_>, String>>()
-            })?;
             let mut commitments = pending()?;
-            let mut names = Vec::new();
+            let revealed: Vec<(String, AccountId)> =
+                commitments.all(&registry.program).into_iter().filter(|(_, saved)| saved.revealed.is_some()).map(|(name, saved)| (name, saved.owner)).collect();
+            // The reads (the CLI's accounts, each remembered name's record, each revealed
+            // registration's) on a thread of its own, the names' derivations there too; what they
+            // change here (the names remembered, the registrations under way) on this thread.
+            let known: HashMap<String, Derived> = remembered.iter().map(|(name, _)| name).chain(revealed.iter().map(|(name, _)| name)).filter_map(|name| Some((name.clone(), self.derived.get(name)?.clone()))).collect();
+            let key = self.served_key("mine", &format!("{}|{}|{}", setup.wallet.display(), registry.sequencer, registry::account_text(&registry.program)));
+            let (sequencer, program) = (registry.sequencer.clone(), registry.program);
+            let asked: Vec<String> = remembered.iter().map(|(name, _)| name.clone()).collect();
+            let snap = self.served.read(&key, std::time::Duration::from_secs(15), served::Lane::Cli, move || mine_read(&setup, &Registry::new(&sequencer, program), &asked, &revealed, &known));
+            let read = match snap.value_or("your names") {
+                Ok(read) => read.clone(),
+                Err(Ok(busy)) => return Err(BUSY_MARK.to_owned() + &busy),
+                Err(Err(why)) => return Err(why),
+            };
+            let listed = |field: &str| -> Vec<String> { read[field].as_array().map(Vec::as_slice).unwrap_or_default().iter().filter_map(|n| n.as_str().map(str::to_owned)).collect() };
+            let (found, landed, reveal_landed) = (listed("found"), listed("landed"), listed("reveal_landed"));
             let mut kept = Vec::new();
-            let mut landed = Vec::new();
-            for (((name, added), found), derived) in remembered.iter().cloned().zip(resolved).zip(&derived) {
-                match found {
-                    Some(resolved) => {
-                        let holder = held.iter().find(|account| resolved.is_held_by(&derived.id, account));
-                        if let Some(holder) = holder {
-                            names.push(json!({
-                                "name": name,
-                                "display": format!("{name}{}", registry::NAME_SUFFIX),
-                                "owner": registry::account_text(holder),
-                                // The public account the name publishes for payments, or null.
-                                "account": resolved.profile.account.as_ref().map(registry::account_text),
-                                "expires": resolved.expires_json(),
-                                "never": resolved.never_expires(),
-                                "lapsed": resolved.lapsed(registry::local_now()),
-                            }));
-                            landed.push(name.clone());
-                        }
-                        // A name another wallet holds is kept: it may be this
-                        // person's other wallet.
-                        kept.push((name, added));
-                    }
-                    None if now().saturating_sub(added) < FORGET_UNREGISTERED_AFTER => kept.push((name, added)),
+            for (name, added) in remembered.iter().cloned() {
+                if found.contains(&name) {
+                    // A name another wallet holds is kept: it may be this person's other wallet.
+                    kept.push((name, added));
+                } else if now().saturating_sub(added) < FORGET_UNREGISTERED_AFTER || commitments.get(&registry.program, &name).is_some() {
                     // A registration still under way is kept too.
-                    None if commitments.get(&registry.program, &name).is_some() => kept.push((name, added)),
-                    None => {}
+                    kept.push((name, added));
                 }
             }
             if kept.len() != remembered.len() {
@@ -4537,14 +4642,11 @@ impl NamesModule for Names {
                 }
                 // A reveal that has landed, for a name not yet remembered (the screen that sent it
                 // closed before asking again): remembered, and the commitment dropped.
-                if saved.revealed.is_some() {
-                    let derived = self.derived(&name);
-                    if registry.resolve(&name, &derived).ok().flatten().is_some_and(|record| record.is_held_by(&derived.id, &saved.owner)) {
-                        self.remember(&registry.program, &name);
-                        commitments.remove(&registry.program, &name);
-                        changed = true;
-                        continue;
-                    }
+                if saved.revealed.is_some() && reveal_landed.contains(&name) {
+                    self.remember(&registry.program, &name);
+                    commitments.remove(&registry.program, &name);
+                    changed = true;
+                    continue;
                 }
                 under_way.push(json!({
                     "name": name,
@@ -4560,7 +4662,7 @@ impl NamesModule for Names {
             if changed {
                 commitments.save();
             }
-            Ok(json!({ "names": names, "pending": under_way }))
+            Ok(json!({ "names": read["names"], "pending": under_way }))
         })())
     }
 
@@ -4568,15 +4670,32 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| {
+        busy_or_reply((|| {
             let name = registry::parse_name(&name)?;
             let registry = self.registry()?;
             // Only names the open wallet holds are remembered, so the device
-            // keeps no list of names merely looked up.
-            let derived = self.derived(&name);
-            let held = self.names_held()?.public;
-            let found = registry.resolve(&name, &derived)?;
-            if !found.is_some_and(|resolved| held.iter().any(|account| resolved.is_held_by(&derived.id, account))) {
+            // keeps no list of names merely looked up. The check (the CLI's accounts, then the
+            // name's record) is made on a thread of its own: busy until it is back.
+            let setup = self.names_setup()?;
+            let known = self.derived.get(&name).cloned();
+            let (sequencer, program, checked) = (registry.sequencer.clone(), registry.program, name.clone());
+            let key = format!("keep:{name}:{sequencer}:{}", registry::account_text(&program));
+            let snap = self.served.read(&key, std::time::Duration::ZERO, served::Lane::Cli, move || {
+                let derived = known.unwrap_or_else(|| derived_kept(&checked));
+                let held = wallet::accounts(&setup)?.public;
+                let found = Registry::new(&sequencer, program).resolve(&checked, &derived)?;
+                Ok(Value::Bool(found.is_some_and(|resolved| held.iter().any(|account| resolved.is_held_by(&derived.id, account)))))
+            });
+            let held = match snap.value_or("whether your wallet holds it") {
+                Ok(held) => *held == true,
+                Err(Ok(busy)) => return Err(BUSY_MARK.to_owned() + &busy),
+                Err(Err(why)) => {
+                    self.served.forget(&key);
+                    return Err(why);
+                }
+            };
+            self.served.forget(&key);
+            if !held {
                 return Err(format!("{name}{} is not held by the open wallet", registry::NAME_SUFFIX));
             }
             let mut memory = memory()?;
@@ -4588,12 +4707,10 @@ impl NamesModule for Names {
 
     fn deposit(&mut self, name: String) -> String {
         // Showing what a name takes needs no proof, so no download of the locked list.
-        self.about(&name, |registry, name, _derived| {
-            let tier = shortlist::tier_of_name(name);
-            let settings = registry.settings()?;
-            let now = registry.now()?;
-            Ok(deposit_json(name, tier, settings.as_ref(), now))
-        })
+        if let Some(answer) = self.name_read("deposit", &name, deposit_answer) {
+            return answer;
+        }
+        self.about(&name, deposit_answer)
     }
 
     fn settings(&mut self) -> String {
@@ -5033,7 +5150,6 @@ impl NamesModule for Names {
             let written = backup::restore_into(&dir, &files)?;
             drop(files);
             self.forget_mine();
-            cli::forget_balance();
             Ok(json!({ "network": net.id(), "folder": dir.display().to_string(), "files": written, "accounts": part["accounts"] }))
         })())
     }
@@ -5916,7 +6032,7 @@ impl NamesModule for Names {
         if let Ok(state) = &state {
             if state["state"] != "running" {
                 // It may have moved tokens: the next balance is read afresh.
-                cli::forget_balance();
+                self.forget_balances();
                 if let Some(name) = state["name"].as_str() {
                     let name = name.to_owned();
                     self.forget_reads(&name);
@@ -6316,7 +6432,10 @@ impl NamesModule for Names {
         reply((|| {
             let setup = self.cli_setup()?;
             self.no_job_running()?;
-            cli::run_account_new(&setup, kind.trim(), &label)
+            let made = cli::run_account_new(&setup, kind.trim(), &label)?;
+            // The accounts the app reads next include it.
+            self.forget_balances();
+            Ok(made)
         })())
     }
 
@@ -6327,7 +6446,9 @@ impl NamesModule for Names {
         reply((|| {
             let setup = self.cli_setup()?;
             self.no_job_running()?;
-            cli::run_account_label(&setup, &account, &label)
+            let labelled = cli::run_account_label(&setup, &account, &label)?;
+            self.forget_balances();
+            Ok(labelled)
         })())
     }
 
@@ -6349,7 +6470,14 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| cli::run_fee(&self.cli_setup()?))())
+        let setup = match self.cli_setup() {
+            Ok(setup) => setup,
+            Err(why) => return reply(Err(why)),
+        };
+        // The CLI reads the chain's fee state: on a thread of its own, kept for half a minute.
+        let key = self.served_key("cli_fee", &format!("{}|{}", setup.wallet.display(), setup.sequencer));
+        let snap = self.served.read(&key, std::time::Duration::from_secs(30), served::Lane::Cli, move || cli::run_fee(&setup));
+        served::reply_of(&snap, "The fee", |_| Value::Null)
     }
 
     // ── The Logos Blockchain ────────────────────────────────────────────
@@ -14853,6 +14981,29 @@ mod tests {
             ("app_grants", Box::new(|n: &mut Names| n.app_grants())),
             ("running_jobs", Box::new(|n: &mut Names| n.running_jobs())),
             ("backup_status", Box::new(|n: &mut Names| n.backup_status())),
+            // The rest the app reads while a page is open (Main.qml): My names, a name looked up
+            // or shown on the board, what registering one takes, the fee quote, the tokens, the
+            // node, the board and messages.
+            ("mine", Box::new(|n: &mut Names| n.mine())),
+            ("resolve", Box::new(|n: &mut Names| n.resolve("alice".into()))),
+            ("avatar", Box::new(|n: &mut Names| n.avatar("alice".into()))),
+            ("page_view", Box::new(|n: &mut Names| n.page_view("alice".into()))),
+            ("deposit", Box::new(|n: &mut Names| n.deposit("bobby".into()))),
+            ("keep", Box::new(|n: &mut Names| n.keep("alice".into()))),
+            ("cli_fee", Box::new(|n: &mut Names| n.cli_fee())),
+            ("watched_tokens", Box::new(|n: &mut Names| n.watched_tokens())),
+            ("cli_token_holdings", Box::new(|n: &mut Names| n.cli_token_holdings(String::new()))),
+            ("cli_token_pending", Box::new(|n: &mut Names| n.cli_token_pending())),
+            ("chain_status", Box::new(|n: &mut Names| n.chain_status())),
+            ("chain_accounts", Box::new(|n: &mut Names| n.chain_accounts())),
+            ("chain_stake", Box::new(|n: &mut Names| n.chain_stake())),
+            ("dm_names", Box::new(|n: &mut Names| n.dm_names())),
+            ("chat_names", Box::new(|n: &mut Names| n.chat_names())),
+            ("anon_name", Box::new(|n: &mut Names| n.anon_name())),
+            ("board_likes", Box::new(|n: &mut Names| n.board_likes())),
+            ("board_follows", Box::new(|n: &mut Names| n.board_follows())),
+            ("board_feed", Box::new(|n: &mut Names| n.board_feed(false))),
+            ("job", Box::new(|n: &mut Names| n.job("0123456789abcdef".into()))),
         ]
     }
 
@@ -15009,13 +15160,21 @@ mod tests {
         let (url, asked) = bridge_endpoint(std::time::Duration::ZERO, Default::default(), 10);
         let (mut names, dir) = as_the_host("budget", &url, 0);
         let accounts: Vec<String> = (0..4u8).map(|n| format!("Public/{}", registry::account_text(&[n + 40; 32]))).collect();
+        // Everything the Wallet reads (its other reads go to the same endpoint on LEZ 0.4: the
+        // accounts' summaries, the registry's settings; the CLI's own requests aren't counted here).
         let read = |names: &mut Names| {
             let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
             loop {
                 let balances = parsed(&names.bridge_net_balances(json!(accounts).to_string()));
                 let sheet = parsed(&names.pending_requests())["value"][0]["sheet"].clone();
                 let faucet = parsed(&names.faucet_info());
-                if balances["value"]["updating"] == false && balances["value"]["read"].is_object() && !sheet["why"].to_string().contains(STILL_READING) && faucet["success"] == true {
+                let others: Vec<Value> = [names.wallet(), names.settings(), names.cli_balance(), names.cli_accounts(), names.activity(String::new())].iter().map(|answer| parsed(answer)).collect();
+                if balances["value"]["updating"] == false
+                    && balances["value"]["read"].is_object()
+                    && !sheet["why"].to_string().contains(STILL_READING)
+                    && faucet["success"] == true
+                    && others.iter().all(|answer| answer["busy"] != true && answer["updating"] != true)
+                {
                     return (balances, sheet);
                 }
                 assert!(std::time::Instant::now() < until, "{balances} {sheet} {faucet}");
@@ -15026,11 +15185,13 @@ mod tests {
         assert_eq!(balances["value"]["read"]["bridges"].as_array().unwrap().len(), 6, "{balances}");
         let cold = std::mem::take(&mut *asked.lock().unwrap());
         // The first read of a chain: the chain (2), each account (4), each bridge's Config once (6,
-        // shared by the sheet), at most 4 definitions' names (the rest on the next reads), and the
-        // faucet (1): 17.
+        // shared by the sheet), at most 4 definitions' names (the rest on the next reads), the
+        // faucet (1) and the registry's settings (3 `getAccountView`s: its settings and the clock);
+        // the wallet's own accounts come from the CLI, which this stand-in lists none of: 20.
         let configs = cold.iter().filter(|method| method.contains("a Config")).count();
         assert_eq!(configs, 6, "each Config once, for the balances and the sheet: {cold:?}");
-        assert_eq!(cold.len(), 2 + 4 + 6 + 4 + 1, "{cold:?}");
+        assert_eq!(cold.iter().filter(|method| *method == "getAccountView").count(), 3, "{cold:?}");
+        assert_eq!(cold.len(), 2 + 4 + 6 + 4 + 1 + 3, "{cold:?}");
         // The sheet was made from those same reads: v5's burn checked against v5's Config.
         assert_eq!(sheet["burn"]["bridge_label"], "bridge v5", "{sheet}");
         // The next reads (every 30 s while the Wallet shows): the chain, the accounts and the
@@ -15187,6 +15348,40 @@ mod tests {
         let pending = parsed(&names.pending_requests())["value"].clone();
         assert!(pending.as_array().unwrap().iter().any(|r| r["id"] == id.as_str()), "still pending: {pending}");
         BURN_CONFIGS.with(|configs| configs.borrow_mut().clear());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A change to the wallet is read afresh, never answered from before it: with the reads kept
+    /// on their own threads, a renamed account shows its new name on the next read (busy until
+    /// that read is back), and a read kept past its age waits for its newer one.
+    #[test]
+    fn a_change_to_the_wallet_is_read_afresh_not_answered_from_before_it() {
+        let tail = "case \"$*\" in\n *account-list*) cat \"$(dirname \"$0\")/accounts.json\" ;;\n *account-label*) echo '{\"ok\": true}' ;;\n *) echo '{}' ;;\n esac";
+        let (mut names, dir) = with_wallet("read-after-write", tail);
+        names.served = served::Served::threaded();
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let list = |label: &str| json!([{ "account": format!("Public/{PUBLIC}"), "kind": "public", "label": label, "balance": "5", "default": true }]).to_string();
+        std::fs::write(dir.join("accounts.json"), list("old")).unwrap();
+        let label_now = |names: &mut Names| -> Option<String> {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let started = std::time::Instant::now();
+                let answer = parsed(&names.cli_accounts());
+                assert!(started.elapsed() < std::time::Duration::from_secs(1));
+                if answer["success"] == true && answer["updating"] != true {
+                    return answer["value"][0]["label"].as_str().map(str::to_owned);
+                }
+                assert!(std::time::Instant::now() < until, "{answer}");
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        };
+        assert_eq!(label_now(&mut names).as_deref(), Some("old"));
+        std::fs::write(dir.join("accounts.json"), list("new")).unwrap();
+        assert_eq!(parsed(&names.cli_account_label(format!("Public/{PUBLIC}"), "new".into()))["success"], true);
+        // The next answer is the new list, or busy until it is read: never the old one.
+        let after = parsed(&names.cli_accounts());
+        assert!(after["busy"] == true || after["value"][0]["label"] == "new", "{after}");
+        assert_eq!(label_now(&mut names).as_deref(), Some("new"));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

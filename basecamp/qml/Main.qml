@@ -805,6 +805,9 @@ Item {
             cliBalance = value
             // Balances the sequencer didn't give show as unknown, and this says which.
             balanceNote = Logic.readNote(reply)
+            // The module answered with its last read while a newer one is under way: asked again.
+            if (reply && reply.updating === true)
+                againWhenFree("cli_balance", loadCliBalance)
             loadActivity()
         }), function(message) {
             console.log("names_ui: CLI balance:", message)
@@ -3396,6 +3399,9 @@ Item {
             cliAccounts = Logic.accountsShown(value)
             accountsNote = Logic.readNote(reply)
             accountsError = ""
+            // The last read, a newer one under way (after a change, say): asked again.
+            if (reply && reply.updating === true)
+                againWhenFree("accounts", loadAccounts)
         }), function(message) {
             console.log("names_ui: accounts:", message)
             // Busy keeps the accounts shown and asks again; anything else is said.
@@ -5009,7 +5015,10 @@ Item {
     function loadWallet(announce) {
         if (registry === "")
             return
-        askLater("wallet", [], onNet(function(value) {
+        askLater("wallet", [], onNet(function(value, reply) {
+            // The last read, a newer one under way: asked again for it.
+            if (reply && reply.updating === true)
+                walletRetry.restart()
             var funded = value.accounts.filter(function(account) { return account.funded })
             wallet = funded
             privateWallet = (value.private_accounts || []).filter(function(account) { return account.funded })
@@ -5233,10 +5242,26 @@ Item {
                 tool = ""
             // A name the wallet holds joins "My names" once it is checked (the module refuses others).
             if (wallet.length > 0 && !remembers(found.name))
-                askLater("keep", [found.name], function() { root.loadMine() }, function() {})
+                keepName(found.name)
         } catch (error) {
+            // The module reads a name on its own thread: busy until the first read is back, and
+            // it is read again in a moment.
+            if (waitAgain(error.message)) {
+                say("Reading " + name + "…", "working")
+                againWhenFree("read", function() { read(name) })
+                return
+            }
             sayRead(error.message)
         }
+    }
+
+    /// A name the wallet holds joins "My names" once the module has checked it (on its own
+    /// thread: busy until then, and asked again).
+    function keepName(name) {
+        askLater("keep", [name], function() { root.loadMine() }, function(message) {
+            if (waitAgain(message))
+                againWhenFree("keep:" + name, function() { keepName(name) })
+        })
     }
 
     // ── Changing ────────────────────────────────────────────────────────
@@ -6178,14 +6203,29 @@ Item {
             })
             boardPeople = next
             if (typeof texts.avatar === "string" && texts.avatar.trim() !== "")
-                askLater("avatar", [name], function(value) {
-                    if (!(value && value.width > 0 && value.height > 0 && value.width <= 128 && value.height <= 128))
-                        return
-                    var more = Object.assign({}, boardPeople)
-                    more[name] = Object.assign({}, more[name], { pixels: { width: value.width, height: value.height, pixels: value.pixels } })
-                    boardPeople = more
-                }, function() {})
-        }, function() {})
+                boardAvatar(name)
+        }, function(message) {
+            // The module reads names on its own thread: busy until the first read is back. The
+            // name is looked up again then (never left blank for good).
+            if (!waitAgain(message))
+                return
+            var again = Object.assign({}, boardPeople)
+            delete again[name]
+            boardPeople = again
+            againWhenFree("person:" + name, function() { boardLookUp(name) })
+        })
+    }
+    function boardAvatar(name) {
+        askLater("avatar", [name], function(value) {
+            if (!(value && value.width > 0 && value.height > 0 && value.width <= 128 && value.height <= 128))
+                return
+            var more = Object.assign({}, boardPeople)
+            more[name] = Object.assign({}, more[name], { pixels: { width: value.width, height: value.height, pixels: value.pixels } })
+            boardPeople = more
+        }, function(message) {
+            if (waitAgain(message))
+                againWhenFree("avatar:" + name, function() { boardAvatar(name) })
+        })
     }
 
     function boardShow(which, post) {

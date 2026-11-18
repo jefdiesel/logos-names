@@ -43,6 +43,8 @@ pub enum Lane {
     Host(String),
     /// Quick local work (asking the CLI its version): never waits behind the others.
     Free,
+    /// A queue of its own, by name (the reads about names, beside an endpoint's other reads).
+    Own(String),
 }
 
 fn lane_lock(lane: &Lane) -> Option<Arc<Mutex<()>>> {
@@ -52,6 +54,7 @@ fn lane_lock(lane: &Lane) -> Option<Arc<Mutex<()>>> {
         Lane::Cli => Some(lock(&CLI).get_or_insert_with(Default::default).clone()),
         Lane::Host(url) => Some(lock(&HOSTS).get_or_insert_with(HashMap::new).entry(host_of(url)).or_default().clone()),
         Lane::Free => None,
+        Lane::Own(name) => Some(lock(&HOSTS).get_or_insert_with(HashMap::new).entry(format!("own:{name}")).or_default().clone()),
     }
 }
 
@@ -195,7 +198,11 @@ impl Served {
             slots.1.insert(key.to_owned(), Slot { id, ..Slot::default() });
         }
         let slot = slots.1.get_mut(key).expect("the slot was just made");
-        if !slot.updating && slot.ended.is_none_or(|at| at.elapsed() >= every) {
+        let due = !slot.updating && slot.ended.is_none_or(|at| at.elapsed() >= every);
+        // A value past `every` whose newer read starts now: waited for as a first read is, so a
+        // fast read answers fresh; a slow one answers the last value, `updating`.
+        let started = (due && slot.value.is_some()).then_some(slot.seq);
+        if due {
             slot.updating = true;
             let (shared, key_owned, id) = (Arc::clone(&self.shared), key.to_owned(), slot.id);
             spawn(move || {
@@ -219,10 +226,12 @@ impl Served {
             });
         }
         let first = slot.value.is_none() && slot.error.is_none();
-        if first {
+        if first || started.is_some() {
             let until = Instant::now() + FIRST_WAIT;
             loop {
-                let waiting = slots.1.get(key).is_some_and(|slot| slot.updating && slot.value.is_none() && slot.error.is_none());
+                let waiting = slots.1.get(key).is_some_and(|slot| {
+                    slot.updating && (started.is_some_and(|seq| slot.seq == seq) || (slot.value.is_none() && slot.error.is_none()))
+                });
                 let left = until.saturating_duration_since(Instant::now());
                 if !waiting || left.is_zero() {
                     break;
@@ -265,7 +274,8 @@ pub fn reply_of(snap: &Snap, what: &str, marks: impl FnOnce(&Value) -> Value) ->
         Err(Ok(busy)) => busy,
         Err(Err(why)) => json!({ "success": false, "value": null, "error": why }).to_string(),
         Ok(value) => {
-            let mut out = json!({ "success": true, "value": value, "error": null, "read_at": snap.read_at });
+            // `updating`: a newer read is under way (the app may ask again for it).
+            let mut out = json!({ "success": true, "value": value, "error": null, "read_at": snap.read_at, "updating": snap.updating });
             let own = marks(value);
             if let (Some(out), Some(own)) = (out.as_object_mut(), own.as_object()) {
                 for (key, field) in own {
@@ -409,6 +419,28 @@ mod tests {
         served.forget("b");
         std::thread::sleep(Duration::from_millis(1000));
         assert_eq!(served.peek("b"), Snap::default(), "a read for a forgotten value isn't kept");
+    }
+
+    #[test]
+    fn a_value_past_its_age_waits_for_a_fast_newer_read_and_says_updating_for_a_slow_one() {
+        let served = Served::threaded();
+        let every = Duration::from_millis(200);
+        assert_eq!(served.read("v", every, Lane::Free, || Ok(json!(1))).value, Some(json!(1)));
+        std::thread::sleep(Duration::from_millis(250));
+        // Past its age, a fast read: the call answers with it.
+        let snap = served.read("v", every, Lane::Free, || Ok(json!(2)));
+        assert_eq!((snap.value, snap.updating), (Some(json!(2)), false));
+        std::thread::sleep(Duration::from_millis(250));
+        // A slow one: the last value, said to be updating.
+        let snap = served.read("v", every, Lane::Free, || {
+            std::thread::sleep(Duration::from_millis(1200));
+            Ok(json!(3))
+        });
+        assert_eq!((snap.value.clone(), snap.updating), (Some(json!(2)), true));
+        let shown: Value = serde_json::from_str(&reply_of(&snap, "It", |_| Value::Null)).unwrap();
+        assert_eq!(shown["updating"], true);
+        std::thread::sleep(Duration::from_millis(1300));
+        assert_eq!(served.peek("v").value, Some(json!(3)));
     }
 
     #[test]

@@ -13,11 +13,15 @@ safe to press again.
 Since `names-stall-2` (2026-11-18), the reads the app polls while a page is open never wait on
 the network or the names CLI on the module's thread (`basecamp-module/rust-lib/src/served.rs`):
 `wallet`, `cli_balance`, `activity`'s balance and receipt reads, `cli_accounts`, `cli_status`'s
-CLI probes, `cli_mine`'s first read, `settings`, `faucet_info`, `zone_list`'s channel read and
-the relayed-call sheet's bridge Configs are read on a thread of their own and answered with the
-last read (`read_at`; a read that failed since says `stale`, `as_of` and `warning`, which
-`Logic.readNote` shows). Before the first read is back (600 ms at most) such a call answers busy,
-and the app asks again. `faucet_claim` answers `code: "pending"` while the faucet is asked, and
+CLI probes, `cli_mine`'s first read, `mine`, `keep`, `cli_fee`, `settings`, `faucet_info`,
+`zone_list`'s channel read, the relayed-call sheet's bridge Configs, and, for the Names app only,
+`resolve`, `page`, `page_view`, `avatar` and `deposit` (other apps still read those on the spot)
+are read on a thread of their own and answered with the last read (`read_at`; a read that failed
+since says `stale`, `as_of` and `warning`, which `Logic.readNote` shows; `updating` while a newer
+one is under way, and the balance, accounts and wallet loaders ask again for it). Before the first
+read is back (600 ms at most; also when a kept read is past its age) such a call answers busy, and
+the app asks again: the name lookups (`read`, the board's, `keep`) now do too. A change to the
+wallet (a send logged, a job ended, an account made or renamed) drops the kept reads of it. `faucet_claim` answers `code: "pending"` while the faucet is asked, and
 the app asks again for its answer (never a second ask of the faucet).
 
 Since `names-hang-fix` (2026-11-18), a module that isn't loaded is never waited for, so it can't
