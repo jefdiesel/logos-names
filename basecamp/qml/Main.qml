@@ -11214,7 +11214,8 @@ Item {
                         StatusLine { visible: root.receiveHoldNow !== ""; kind: ""; text: root.receiveHoldNow }
                         Action { visible: root.receiveHoldNow === ""; label: root.receiveAsking ? "Making the code…" : "Make the deposit code"; strong: true; enabledNow: !root.receiveAsking && root.receiveCanMake; onPressed: root.makeReceive() }
                         WhyLine {
-                            visible: root.receiveHoldNow === "" && text !== ""
+                            // (No private account: the problem line above says so, with its one action.)
+                            visible: root.receiveHoldNow === "" && text !== "" && !(root.ethReceiveKindNow === "private" && root.receivePrivateAble && root.receivePrivateList.length === 0)
                             text: Logic.receiveMakeWhy({ asking: root.receiveAsking, ticked: root.receivePublicOk, kind: root.ethReceiveKindNow, able: root.receivePrivateAble,
                                                          account: root.ethReceiveKindNow === "private" ? root.receivePrivateNow : root.receiveAccountNow })
                         }
