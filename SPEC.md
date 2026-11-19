@@ -10,14 +10,18 @@ on the chain in the clear; version 2 keeps neither.
 
 ## 1. What is private and what is not
 
-The registry is built so that knowing a name is the only way to find it.
+The registry never stores a name, so finding one means knowing or guessing it.
+Guessing is cheap for short and common names (below).
 
 - **The chain never sees a name.** Every instruction, account address and
   event uses a 32-byte identifier derived from the name (section 3).
 - **What a name resolves to is sealed**: encrypted under a key that is also
   derived from the name (section 5). The registry program stores the bytes and
   cannot read them.
-- **There is no list of names** and nothing links one record to another.
+- **The chain keeps no list of names.** Record addresses can still be listed by
+  scanning blocks, and a guessed name can be checked against them. A record's
+  owner tag doesn't link it to the holder's other records, but a public holder,
+  or receiving keys shared between names, can.
 
 What this does not hide:
 
@@ -54,8 +58,24 @@ What this does not hide:
   Only a private-account holder is hidden. Whoever serves the RPC, holding a
   dictionary of name identifiers, can also tell which names a client looks up.
 - **The connection.** Whoever serves the sequencer's RPC sees which record
-  addresses a client reads and from where, though not the names.
-- **Clients never tie a name to an account.** A conforming client sets only
+  addresses a client reads and from where, and so which names, for any name it
+  can guess. It can also lie: nothing in its answer is authenticated, so for any
+  name it can guess, a lying RPC can make the name resolve to keys or an account
+  of its choosing. For any name at all, it can answer "not registered" or return
+  an older record (keys from before a transfer, say); nothing binds an answer to
+  the chain's latest state.
+- **Receiving keys point to one account.** A private account's ID is computed
+  from its keys (on LEZ 0.4, `SHA-256(prefix ‖ npk ‖ vpk)`; on v0.3.1 an
+  identifier was hashed in too), so anyone who resolves a name can compute the
+  wallet account its published keys were made for, and tell which names publish
+  the same keys. On LEZ 0.4 every payment to the keys arrives at that account,
+  as a pending credit its holder claims (`names receive`); on v0.3.1 a payment the
+  `names` CLI sent used a random identifier and landed on a fresh account. That
+  is why each name should get keys of its own. The CLI makes a new private
+  account for every name, and so does the Basecamp module (its `auto` choice);
+  names the module registered before that share their wallet's first private
+  account's keys until Receive privately is run on them again.
+- **Clients publish no account.** A conforming client sets only
   `npk` and `vpk` in a profile, never `account`; pays a name only through its
   receiving keys; never displays an address or the keys behind a name; and
   writes no reverse record (section 6). Those fields remain in the format for
@@ -250,18 +270,24 @@ own clock in milliseconds and a grace period of 30 days (2,592,000,000 ms):
 
 **Paying a name.**
 
-- Private: send a shielded transfer to the key pair (`npk`, `vpk`) with a fresh
-  random identifier. If `npk` is `None`, the name does not accept private
+- Private: send a shielded transfer to the key pair (`npk`, `vpk`). On LEZ 0.4
+  it arrives as a pending credit to the account those keys derive, which the
+  holder claims with a private transaction of their own (`names receive`). If `npk` is `None`, the name does not accept private
   payments. A client SHOULD prefer this whenever the name offers it.
 - Public: send to `account`. If it is `None`, the name does not accept public
   payments.
 - A wallet should show the user what it resolved before sending, as it would
   for a pasted address.
 
-What a private payment hides depends on where it is sent from. The recipient is
-always hidden: each payment lands on a fresh private account only the holder can
-find. Sent from a public account, the sender and the amount are visible. Sent
-from a private account, neither is.
+What a private payment hides depends on where it is sent from. On LEZ 0.4 every
+payment to a name arrives at the one account its keys derive, which anyone who
+resolves the name can compute (section 1). Sent from a public account, the payer,
+the amount and the account paid are in the clear, so anyone who resolves the name
+sees that payment (and the first one leaves a public recovery note at that account).
+Sent from a private account (what clients do by default), the transfer runs inside
+the proof and its credit is sealed to the name's viewing key: an observer can't tell
+that the name was paid, how much, or by whom, and the holder's later claim spends by
+nullifier, so it can't be linked either.
 
 **Reverse (account to name).** Read the registry's actor state on the account and
 decode `PrimaryName`. This is only a claim, set by the account itself. A client
@@ -388,7 +414,10 @@ Rules:
   least `now`, so `now` is never in the future, and uses it as the time. A
   client takes `now` from the chain's clock: the timestamp, in the last 8 of 16
   bytes, of the clock program's actor state on the account whose ID is the ASCII
-  bytes `/LEZ/ClockProgramAccount/0000001`. It does not use its own clock: a
+  bytes `/LEZ/ClockProgramAccount/0000000` (LEZ 0.4 rc3 keeps one clock account;
+  rc1 had three and this read `…/0000001`). The sequencer ticks the clock as the
+  last transaction of each block, so the value read is the previous block's time,
+  never ahead of the next block's. It does not use its own clock: a
   transaction whose `now` is ahead of the chain fails and is still charged.
 - **Fees.** `fee` must equal the settings' price for `term`, and `treasury` must
   be the settings' treasury; the program then moves `fee` from the signer to
@@ -801,6 +830,11 @@ every visitor's address and the record addresses they read, which a dictionary
 of names turns back into names (section 1). A site whose sequencer does not
 allow cross-origin requests shows no names and points to `names open`.
 
+The Names web app (`/app` on the project site) does not meet this yet. The
+testnet RPC refuses browsers, so the app reads the chain through a relay run by
+the project (`lez.buggers.online/lez`), which can see what this section
+warns about.
+
 ### 12.4 Model Context Protocol
 
 `mcp/server.js` exposes `resolve_name`, `get_page` and `reverse_lookup` as
@@ -991,11 +1025,16 @@ The value also has `deposit` (or `fee`) and `tier`; `tx` is `null` when nothing
 was sent.
 
 `private_account` makes the name payable privately from the start: one of the
-wallet's private accounts in base58, `auto` for its first one (made if it has
-none), or empty to set nothing. The reveal uses it; given at commit time it is
-remembered for it. `receive_privately(name, private_account)` publishes the
-receiving keys of that account (`auto` allowed) and removes any public account
-from the name. `set_account` points the name at a public account (base58), which
+wallet's private accounts in base58, `auto` for a new private account made for
+this name alone, or empty to set nothing. The reveal uses it; given at commit time
+it is remembered for it, and so is the account `auto` made, so a retried reveal
+reuses it (at most three are made for one commitment). Names that share receiving
+keys are linked to each other, which is why `auto` never reuses another name's.
+`receive_privately(name, private_account)` publishes the receiving keys of that
+account (`auto` makes a new one each time, after checking the wallet holds the
+name) and removes any public account from the name. The names CLI marks an account it made
+for `auto` (`"fresh": true` in `names module keys`), and the module refuses `auto` with a CLI
+too old to say so, whose `auto` gave every name the wallet's first private account. `set_account` points the name at a public account (base58), which
 anyone who resolves the name then sees, with its balance and history.
 `set_private_keys` publishes a 32-byte nullifier public key and a 1184-byte
 viewing public key, both in hex. `clear_addresses` removes the public account

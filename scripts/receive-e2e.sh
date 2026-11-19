@@ -1,5 +1,5 @@
 #!/bin/bash
-# `names receive` on LEZ 0.4, end to end on a fresh local rc1 standalone chain (nothing real
+# `names receive` on LEZ 0.4, end to end on a fresh local rc3 standalone chain (nothing real
 # is spent). A payment to someone's private keys (what `names pay <name>` sends to a name's
 # receiving keys) arrives as a pending credit, and the receiving account starts empty, so it
 # can't pay the private fee a claim costs. `names receive` claims it with another private
@@ -69,7 +69,7 @@ export LEE_WALLET_PASSWORD= LOGOS_NAMES_RPC=$RPC
 new_wallet() {
   mkdir -p "$1"
   cat > "$1/wallet_config.json" <<EOF
-{ "gas_limit": 2000000, "private_fee_headroom_blocks": 5, "seq_block_poll_max_amount": 100, "seq_poll_max_retries": 5,
+{ "gas_limit": 2000000, "fee_headroom_blocks": 5, "seq_block_poll_max_amount": 100, "seq_poll_max_retries": 5,
   "seq_poll_timeout": "12s", "seq_tx_poll_max_blocks": 5, "sequencer": { "sequencer_addr": "$RPC/" } }
 EOF
   LEE_WALLET_HOME_DIR=$1 "$NAMES" wallet check-health > /dev/null

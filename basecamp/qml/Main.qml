@@ -2276,7 +2276,7 @@ Item {
         { title: "Prove the commitment", time: "5–12 min",
           why: "Your computer builds a zero-knowledge proof. The chain checks it without learning which account is yours." },
         { title: "Wait", time: "until 15 min after step 1",
-          why: "The commitment hides which name you picked. Waiting means nobody who sees it can rush to take the name first." },
+          why: "The commitment hides which name you picked. The wait means someone who sees your reveal can't take the name first. It doesn't stop someone who learns the name another way around the time you commit." },
         { title: "Prove and register", time: "5–12 min",
           why: "A second proof reveals the name and moves the deposit. Then it's yours." }
     ]
@@ -5934,7 +5934,7 @@ Item {
                             }
                         }
                         Hint {
-                            text: root.cliNames.length > 0 ? "Anyone can pay any of these from Names. It arrives privately, in that name's own private account, and the chain doesn't show who paid you or how much."
+                            text: root.cliNames.length > 0 ? "Anyone can pay any of these from Names. It arrives privately, in that name's own private account. Paid from a private account, the chain doesn't show who paid you or how much; paid from a public account, it shows both."
                                 : "You don't have a name yet. With one, people pay you by name, privately."
                         }
                     }

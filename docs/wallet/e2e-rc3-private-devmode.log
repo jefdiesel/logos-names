@@ -1,0 +1,157 @@
+
+## 23:49:55 fresh rc3 standalone sequencer on http://127.0.0.1:4190 (RISC0_DEV_MODE=1)
+
+## 23:50:00 clock: read the rc3 clock actor directly (16 bytes expected; time > 0 once a block has ticked)
+clock actor 4BdcjoXkq786TMWcBGGHqcxeLYMZmn17rL4eM9ZyRWNT block 1 time 0
+
+## 23:50:00 deploy the Names registry
+Transaction hash is 9c00e0038963565070ef8804a704bd28438a50642884d3d952e71a5325227d67
+Transaction is included in block 2
+Transaction hash is 1ac36a3613d02446fde47d45a92b70b75b2e922c63161ed16aa115df070be541
+Transaction is included in block 3
+Transaction hash is 224d34639ee1004c592f70fdb3cde85c0161c2b0512e384ba49aeb0fdb035715
+Transaction is included in block 4
+Transaction hash is b4e242e306fd6de529bd5a4d3a10330f7135c1c3da6fb999b303e69a573abd59
+Transaction is included in block 5
+Transaction hash is b869cb4a305bd601af43eb0d661abbd25970acd356f664c325925c15ce65cc92
+Transaction is included in block 6
+Transaction hash is 2a51e1460d5204ca236fae82b8fe655e13cc3675d9bfe0a1a61bc12d42b8cbb7
+Transaction is included in block 7
+Program deployed. Header account id: Gf9VpwLfrwRTZNTc8XyoDh9LUVxF8xVcvDQiMc7NnDJV
+Transaction hash is 6ab597864e770f87c22a9f5a68f0f2a508c95e24ad60d53606e7638c84df6964
+Transaction is included in block 8
+fee paid: 4088
+reading the registry's bytecode from the chain
+fee: about 261552, at most 435888 (gas: 31475 cycles, limit 47213)
+submitted a4d909bbaf215b30aeb3801ac20106475620302b27516e2bcce9838507c10432
+applied in block 9
+fee paid: 257768
+
+## 23:52:01 clock: read the rc3 clock actor directly (16 bytes expected; time > 0 once a block has ticked)
+clock actor 4BdcjoXkq786TMWcBGGHqcxeLYMZmn17rL4eM9ZyRWNT block 9 time 1794613917721
+
+## 23:52:01 names setup makes P's public and private accounts; fund the public one, then setup again shields (a proof)
+public account   Public/BsW7Vowsrx3L95aAxuRAxwpueMLVNfpBaF8tJbC9zwpS
+private account  Private/3KAsJopBaoJTu4u4RBtDe9Sx4SmFD4d28tn1z9JckbF8
+Public/BsW7Vowsrx3L95aAxuRAxwpueMLVNfpBaF8tJbC9zwpS holds 0; send it at least 50,000,000 testnet tokens from your LEZ wallet (or with `names bridge`), then run `names setup` again. A name is held by a
+Transaction hash is ed2988c10bb47b0491c95f360cc1f18c464b7819da4d4ead89eb4f44da1641c7
+Transaction is included in block 10
+fee paid: 4352
+public account   Public/BsW7Vowsrx3L95aAxuRAxwpueMLVNfpBaF8tJbC9zwpS
+private account  Private/3KAsJopBaoJTu4u4RBtDe9Sx4SmFD4d28tn1z9JckbF8
+Latest block is 10
+Syncing to block 10. Blocks to sync: 9
+Synced to block 10 in 400.86475ms
+Latest block is 10
+fee: about 5070616, at most 8239751 (a move to private, paid inside the proof from Private/3KAsJopBaoJTu4u4RBtDe9Sx4SmFD4d28tn1z9JckbF8)
+moving 100000000 to the private account; generating the proof (a few minutes)
+Latest block is 10
+Latest block is 10
+WARNING: proving in dev mode. This will not generate valid, secure proofs.
+WARNING: Proving in dev mode does not generate a valid receipt. Receipts generated from this process are invalid and should never be used in production.
+Latest block is 11
+Syncing to block 11. Blocks to sync: 1
+Synced to block 11 in 15.234541ms
+Latest block is 11
+fee paid: 5070616
+ready: `names register <name>` holds a name privately, `names pay <name> <amount>` pays one
+Latest block is 11
+public accounts (seen on chain):
+  Public/6pmBGQyryVXij7uBBrcfWdSxy7KHRUPHSJkKVhWPsoCv  0
+  Public/BsW7Vowsrx3L95aAxuRAxwpueMLVNfpBaF8tJbC9zwpS  100000000  (default)
+private accounts (only this wallet sees them):
+  Private/3KAsJopBaoJTu4u4RBtDe9Sx4SmFD4d28tn1z9JckbF8  94929384  (default)
+private total: 94929384
+Latest block is 11
+
+## 23:52:38 register privrcthree PRIVATELY (default owner: the setup private account): commit proof, 15-minute wait, reveal proof
+privrcthree takes a deposit of 1000000, held for as long as you keep the name and refunded when you release it
+(the deposit stops name squatting: holding many names ties up many deposits; nobody keeps it)
+Latest block is 11
+Latest block is 11
+plan: registering privrcthree takes 2 private steps, paid inside their proofs from Private/3KAsJopBaoJTu4u4RBtDe9Sx4SmFD4d28tn1z9JckbF8: fees about 12399800, at most 20149675 in all, besides the 1000000 they move
+step 1 of 2: committing to privrcthree
+reading the registry's bytecode from the chain
+Latest block is 11
+Latest block is 11
+Latest block is 11
+Latest block is 11
+fee: about 5256328, at most 8541533 (paid inside the proof, from Private/3KAsJopBaoJTu4u4RBtDe9Sx4SmFD4d28tn1z9JckbF8)
+acting privately; proving it on this computer (a few minutes), so the chain never learns your account
+WARNING: proving in dev mode. This will not generate valid, secure proofs.
+WARNING: Proving in dev mode does not generate a valid receipt. Receipts generated from this process are invalid and should never be used in production.
+WARNING: proving in dev mode. This will not generate valid, secure proofs.
+WARNING: Proving in dev mode does not generate a valid receipt. Receipts generated from this process are invalid and should never be used in production.
+submitted 01a580430f4ae89e84dd1aa0ad787b841aa41f4898f9c38ce06fdc053cb9a324
+applied in block 12
+Latest block is 12
+Syncing to block 12. Blocks to sync: 1
+Synced to block 12 in 15.972917ms
+Latest block is 12
+fee paid: 5149864
+waiting 885s before revealing (the commitment must be 15 minutes old)
+waiting 855s before revealing (the commitment must be 15 minutes old)
+waiting 825s before revealing (the commitment must be 15 minutes old)
+waiting 795s before revealing (the commitment must be 15 minutes old)
+waiting 765s before revealing (the commitment must be 15 minutes old)
+waiting 735s before revealing (the commitment must be 15 minutes old)
+waiting 705s before revealing (the commitment must be 15 minutes old)
+waiting 675s before revealing (the commitment must be 15 minutes old)
+waiting 645s before revealing (the commitment must be 15 minutes old)
+waiting 615s before revealing (the commitment must be 15 minutes old)
+waiting 585s before revealing (the commitment must be 15 minutes old)
+waiting 555s before revealing (the commitment must be 15 minutes old)
+waiting 525s before revealing (the commitment must be 15 minutes old)
+waiting 495s before revealing (the commitment must be 15 minutes old)
+waiting 465s before revealing (the commitment must be 15 minutes old)
+waiting 435s before revealing (the commitment must be 15 minutes old)
+waiting 405s before revealing (the commitment must be 15 minutes old)
+waiting 375s before revealing (the commitment must be 15 minutes old)
+waiting 345s before revealing (the commitment must be 15 minutes old)
+waiting 315s before revealing (the commitment must be 15 minutes old)
+waiting 285s before revealing (the commitment must be 15 minutes old)
+waiting 255s before revealing (the commitment must be 15 minutes old)
+waiting 225s before revealing (the commitment must be 15 minutes old)
+waiting 195s before revealing (the commitment must be 15 minutes old)
+waiting 165s before revealing (the commitment must be 15 minutes old)
+waiting 135s before revealing (the commitment must be 15 minutes old)
+waiting 105s before revealing (the commitment must be 15 minutes old)
+waiting 75s before revealing (the commitment must be 15 minutes old)
+waiting 45s before revealing (the commitment must be 15 minutes old)
+waiting 15s before revealing (the commitment must be 15 minutes old)
+payments to privrcthree will arrive privately at Private/6JxL9dEz9EWTWrHxLuHyYBvY9KFvnootfRMZRF8VmZLv
+step 2 of 2: registering privrcthree at 1794614847726 for a deposit of 1000000
+Latest block is 71
+Syncing to block 71. Blocks to sync: 59
+Synced to block 71 in 984.502333ms
+Latest block is 71
+Latest block is 71
+Latest block is 71
+fee: about 6390616, at most 10384751 (paid inside the proof, from Private/3KAsJopBaoJTu4u4RBtDe9Sx4SmFD4d28tn1z9JckbF8)
+acting privately; proving it on this computer (about 1 minutes, as last time), so the chain never learns your account
+WARNING: proving in dev mode. This will not generate valid, secure proofs.
+WARNING: Proving in dev mode does not generate a valid receipt. Receipts generated from this process are invalid and should never be used in production.
+WARNING: proving in dev mode. This will not generate valid, secure proofs.
+WARNING: Proving in dev mode does not generate a valid receipt. Receipts generated from this process are invalid and should never be used in production.
+submitted bf402475b0af364bda83ff3188dcf777542e5a2664d1477e9ec8c2a877ccb0c9
+applied in block 72
+Latest block is 72
+Syncing to block 72. Blocks to sync: 1
+Synced to block 72 in 13.998917ms
+Latest block is 72
+fee paid: 5557040
+privrcthree is registered
+{
+  "expires": null,
+  "expires_date": "never",
+  "held_by": "3KAsJopBaoJTu4u4RBtDe9Sx4SmFD4d28tn1z9JckbF8",
+  "lapsed": false,
+  "name": "privrcthree",
+  "page": null,
+  "payable_privately": true,
+  "public_account": null,
+  "texts": {}
+}
+privrcthree  held by a deposit (no expiry); held privately
+PASS: private registration of privrcthree on a fresh rc3 chain (RISC0_DEV_MODE=1)
+sequencer stopped

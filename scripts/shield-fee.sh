@@ -1,7 +1,7 @@
 #!/bin/bash
 # What moving tokens from a public account into a brand-new private account costs on LEZ 0.4:
 # the fee reserve, who pays it, the fee actually charged and the refund, measured on a fresh
-# local rc1 standalone chain (nothing real is spent). Prints MEASURED lines.
+# local rc3 standalone chain (nothing real is spent). Prints MEASURED lines.
 #
 #   SEQ_BIN=… SEQ_CONFIG=… NAMES=… WORK=<new dir> RPC_PORT=3240 METRICS_PORT=9240 scripts/shield-fee.sh
 set -euo pipefail
@@ -33,7 +33,7 @@ MAIN=$WORK/wallet
 N() { LEE_WALLET_HOME_DIR=$MAIN "$NAMES" "$@"; }
 mkdir -p "$MAIN"
 cat > "$MAIN/wallet_config.json" <<EOF
-{ "gas_limit": 2000000, "private_fee_headroom_blocks": 5, "seq_block_poll_max_amount": 100, "seq_poll_max_retries": 5,
+{ "gas_limit": 2000000, "fee_headroom_blocks": 5, "seq_block_poll_max_amount": 100, "seq_poll_max_retries": 5,
   "seq_poll_timeout": "12s", "seq_tx_poll_max_blocks": 5, "sequencer": { "sequencer_addr": "$RPC/" } }
 EOF
 N wallet check-health > /dev/null

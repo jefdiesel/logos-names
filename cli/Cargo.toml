@@ -57,4 +57,4 @@ blake2 = "0.10"
 
 [dev-dependencies]
 # LEZ 0.4's own bridge types: the tests feed the shared deposit encoding to its real decoder.
-bridge_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc1", features = ["host"] }
+bridge_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3", features = ["host"] }

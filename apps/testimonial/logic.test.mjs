@@ -44,7 +44,7 @@ check("clock program ID", L.CLOCK_PROGRAM, vectors.clock.program);
 check("clock account ID", L.CLOCK_ACCOUNT, vectors.clock.account);
 check("clock IDs derive as in Rust", [
   L.base58(L.sha256(L.utf8("/LEE-BuiltinProgram/v1/AccountId").concat(L.utf8("clock")))),
-  L.base58(L.utf8("/LEZ/ClockProgramAccount/0000001")),
+  L.base58(L.utf8("/LEZ/ClockProgramAccount/0000000")),
 ], [vectors.clock.program, vectors.clock.account]);
 for (const [i, v] of vectors.cases.entries()) {
   const call = L.postCall(v.program, v.submission, v.username, v.text, v.now, "Public/" + v.author);

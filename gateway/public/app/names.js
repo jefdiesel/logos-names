@@ -1445,8 +1445,9 @@ function isValidName(name) {
 /**
 * The identifier and key of `name`. The chain knows the name only by `id`;
 * `key` opens and seals what the name resolves to and is never sent anywhere.
-* The derivation is slow and memory-hard on purpose, to make scanning for names
-* expensive: about half a second and 64 MiB in pure JavaScript.
+* The derivation is slow and memory-hard on purpose, to slow down guessing (short
+* and common names stay cheap to guess): about half a second and 64 MiB in pure
+* JavaScript.
 */
 async function deriveName(name) {
 	if (!isValidName(name)) throw new Error(`invalid name: ${name}`);

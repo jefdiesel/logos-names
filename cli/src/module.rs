@@ -28,8 +28,8 @@ const MAX_LABEL: usize = 40;
 pub enum Request {
     /// Print this wallet's accounts as JSON.
     Accounts,
-    /// Print a private account's receiving keys as JSON; `auto` is the first one, made
-    /// if there is none.
+    /// Print a private account's receiving keys as JSON; `auto` makes a new private
+    /// account for them (saved, under the wallet's lock), so no two names share keys.
     Keys { account: String },
     /// Sign, try and send the change given as JSON on standard input.
     Send,
@@ -135,7 +135,7 @@ impl Client {
             Request::AccountUse { account } => self.module_account_use(&account).await,
             Request::Fee => {
                 let quote = self.wallet.client().get_fee_state().await?;
-                let headroom = self.wallet.config().private_fee_headroom_blocks;
+                let headroom = self.wallet.config().fee_headroom_blocks;
                 println!("{}", fees::quote_json(&quote, headroom, NATIVE_TRANSFER_GAS_LIMIT));
                 Ok(())
             }
@@ -280,12 +280,13 @@ impl Client {
     }
 
     fn module_keys(&mut self, account: &str) -> Result<()> {
-        let account: AccountId = if account == "auto" {
-            let first = self.wallet.storage().key_chain().private_account_ids().map(|(id, _)| id).next();
-            match first {
-                Some(found) => found,
-                None => self.new_receiving_keys()?.0,
-            }
+        // `auto` is a new account each time, as `names register` and `receive-privately` make
+        // theirs: names that share receiving keys are linked to each other, and the keys show
+        // the wallet account they come from to anyone who resolves the names. The module
+        // remembers the account it gets for a registration and passes its ID on a retry.
+        let fresh = account == "auto";
+        let account: AccountId = if fresh {
+            self.new_receiving_keys()?.0
         } else {
             parse_account(account).map_err(|error| anyhow!(error))?
         };
@@ -302,6 +303,9 @@ impl Client {
                 "account": account.to_string(),
                 "npk": hex::encode(keys.nullifier_public_key.0),
                 "vpk": hex::encode(keys.viewing_public_key.to_bytes()),
+                // Marks an account made for this answer, so the module can tell this CLI from
+                // an older one whose `auto` gave the wallet's first account to every name.
+                "fresh": fresh,
             })
         );
         Ok(())

@@ -28,7 +28,7 @@ const PDA_PREFIX = "/LEE/v0.2/AccountId/PDA/"
 /// borsh `{block_id: u64, timestamp: u64}`: the last block's time in milliseconds.
 /// Both are checked against the Rust values in test/vectors.json.
 export const CLOCK_PROGRAM = "2hwaRW8sMnyKLLRbDRw8k68tiv9bnfq98oxcdtcp157Z"
-export const CLOCK_ACCOUNT = "4BdcjoXkq786TMWcBGGHqcxeLYMZmn17rL4eM9ZyRWNU"
+export const CLOCK_ACCOUNT = "4BdcjoXkq786TMWcBGGHqcxeLYMZmn17rL4eM9ZyRWNT"
 
 // ── Bytes ──────────────────────────────────────────────────────────────────────────
 

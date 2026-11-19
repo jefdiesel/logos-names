@@ -1,6 +1,35 @@
 # Porting Names to LEZ 0.4
 
-Branch `lez-0.4`, pinned to `v0.4.0-rc1`. The 0.3 deployment stays live until the 0.4 testnet launches.
+Branch `lez-0.4`, pinned to `v0.4.0-rc1`; branch `rc3-port` moves it to `v0.4.0-rc3` (`bafd07be`, below). The 0.3 deployment stays live until the 0.4 testnet launches.
+
+## rc1 to rc3
+
+What LEZ `v0.4.0-rc3` changed for Names, and what the port did:
+
+- **Clock.** One clock account, `/LEZ/ClockProgramAccount/0000000` (rc1 had three; Names read `…/0000001`). The CLI, the module (`registry.rs`), the web app (`register.js`), the testimonial client and app, and SPEC §8 read the new one. The tick is the last transaction of each block, so the time read is the previous block's: still never ahead of the block a transaction lands in, so the `[now, now + 10 min)` window is unchanged. `AssertTimestamp` is gone; the registry never sent it (its time check is the transaction's validity window, which the sequencer checks against the block it builds).
+- **Loader.** Headers and segments are stored as a tagged `LoaderEntry`; the CLI reads a header with `ProgramHeader::from_loader_actor_state`. The loader charges 1 gas per byte it reads, so a deploy costs about the program's size in gas; deploys go through the LEZ wallet, which measures it.
+- **Wallet.** It measures each public transaction's gas by simulating it, declares the measured gas plus 25%, prices `max_fee` at the fee headroom, and refuses to send a transaction whose simulation reverts. `private_fee_headroom_blocks` became `fee_headroom_blocks` (the old key still reads). `names wallet` takes rc3's new `--allow-revert`, `--gas-limit`, `--max-fee` and `--tip`, and prints a dry run's report.
+- Unchanged: the record layout, ids, PDAs, the commit/reveal rules, the claims format, the public transaction format, risc0 3.0.5 and the toolchain. The guest's image id changes because it links rc3's `lee_core`.
+
+Checked on the Mac mini on 2026-11-13 against a standalone rc3 sequencer (`--features standalone,prove`):
+
+- Registry guest, local (non-Docker) build: rc1 `7d0caf7f…5f4742` (459,464 bytes), rc3 `00ad4571…6dd2dd` (459,496 bytes). The Docker build CI makes (`ci.yml`, job `guest`) was not run here; its id is unverified until CI runs on this branch.
+- `cargo test --release --workspace`: 267 passed, 0 failed. `wallet-tokens`: 20 passed. Module (`basecamp-module/rust-lib`, `cargo test --lib`): 321 passed, 2 ignored. JS: resolver 28, app settings 11, claims 4, lez-tx 23, shortlist 4, `basecamp/logic.test.mjs` and the testimonial app's logic test pass.
+- `scripts/wallet-e2e.sh`: PASS (`docs/wallet/e2e-rc3-wallet.log`): deploy, deposit mode, a public registration (commit, 15-minute wait, reveal), the locked name, payments, tokens, testimonial, fees, a drop and a restart, a name handed on and back.
+- A private registration (owner a private account: shield, private commit, private reveal) passed in RISC0 dev mode only (`docs/wallet/e2e-rc3-private-devmode.log`): fake receipts, accepted by a sequencer run with `RISC0_DEV_MODE=1`. It checks the transactions, fees, clock and windows on rc3, not the proofs.
+- With this branch's CLI and its module package (`nix build .#lgx-portable`, names 0.15.3): `lp22-zones-e2e.sh` on two rc3 sequencers 57 PASS, 0 FAIL; the four solo-node Logos Blockchain e2es `chain-ipc` 43/0, `chain-accounts` 30/0, `chain-fee` 23/0, `lp22-inscribe` 32/0 (`docs/wallet/e2e-rc3-*.log`; chain-ipc's version check needs the package in a folder named `…-lgx-<version>`, which a first run lacked).
+- The module itself on rc3 (`basecamp-module/tools/try-changes.py` over logosctl, this branch's package and CLI; `docs/wallet/e2e-rc3-module-try-changes.log`, rerun after the review fixes): 36 ok, 1 FAIL. Registering with `auto` twice, receiving privately, entries, profile, page, transfer, release and re-registering all took effect, and `auto` made three distinct private accounts, none shared. Five calls (three `set_text`, `set_profile`, the second `release`) came back from logosctl as `RPC_FAILED` ("callModuleMethod … RPC call failed") although each change landed; the one FAIL is a `resolve` read that failed the same way while waiting. Reusing an account on a retried reveal is covered by unit tests only.
+
+### Known limits
+
+- **Private registration is proven only in RISC0 dev mode.** No real rc3 proof has been run: not the circuit's memory, not whether a real proof (10.5–11.5 min on the Mac mini) still lands inside the 10-minute window with the proof lead tuned on rc1, not the sequencer accepting real receipts for this image id. No private payment to a name and no `names receive` has run on rc3.
+- **A public commit or reveal at clock 0, or with a skewed local clock, reverts and pays its gas limit.** The clock reads 0 at block 1 of a fresh chain, and the CLI takes it as is (the module refuses 0); if the clock can't be read, the CLI uses this machine's time less a minute. Neither the CLI's simulation nor the wallet's checks the validity window. A private one is dropped free. Deploying and configuring a registry takes several blocks, so the first case doesn't arise in practice.
+- **The locked-name list's root is compiled into the guest** (`core/src/lib.rs`, `9778bed4…`): changing the list means a new guest, a new image id and a redeploy.
+- **Web registration is off on this line** (`WEB_REGISTRATION = false` in `gateway/public/app/app.js`): the web app's list is the old one (root `66c75f76…`, 1.6 MB), and a web reveal would fail on chain after the commit and the wait. Registration from the web moves to its own page.
+- `receive_privately(name, "auto")` makes a new private account on each call, with no cap: a retried failure leaves unused accounts in the wallet (off chain).
+- A payment from a public account leaves a permanent public recovery note at the name's account (the first one).
+- **A module call can report failure for a change that landed.** In the try-changes run, logosctl answered `RPC_FAILED` on five of about thirty calls (and on one read), intermittently; the chain showed every change. The app should read the name back before telling the person a change failed. Cause not found (Logos Core IPC, not the module refusing).
+- A claim's claimed `now` can be up to 10 minutes early, so a claim can land up to 10 minutes after `claims_until` (from before the port).
 
 ## What changed in the program
 

@@ -11,7 +11,7 @@ alone, with plain sequencer reads**: no indexer, no server of ours, no trust in 
 |---|---|
 | `core/` | All program logic (`testimonial_core`): records, PDAs, the handler, the list walk and the adoption summary. Host tests. |
 | `methods/`, `methods/guest/` | The risc0 guest (`logos_testimonial`), one line: `actor_entrypoint!(testimonial_core::handle)`. |
-| `engine-test/` | The real guest ELF on LEZ v0.4.0-rc1's real state machine (`V03State`). `forwarder/` is a test-only guest that relays messages, to prove relayed posts are refused. `testimonial-imageid` writes the ELF and prints its image ID. |
+| `engine-test/` | The real guest ELF on LEZ v0.4.0-rc3's real state machine (`V03State`). `forwarder/` is a test-only guest that relays messages, to prove relayed posts are refused. `testimonial-imageid` writes the ELF and prints its image ID. |
 | `client/` | `testimonial`: `post`, `list` (with per-month counts and the adoption check), `show`, `address`. |
 
 ## Design
@@ -172,7 +172,7 @@ mini: `export PATH=$HOME/.cargo/bin:$HOME/.risc0/bin:/opt/homebrew/bin:$PATH`.
 
 ```sh
 cargo test -p testimonial_core                                   # host logic, fast
-cargo test --release -p testimonial_engine_test -- --nocapture   # real guest, real rc1 engine
+cargo test --release -p testimonial_engine_test -- --nocapture   # real guest, real rc3 engine
 cargo build --release -p testimonial_client                      # the `testimonial` binary
 cargo run --release -p testimonial_engine_test --bin testimonial-imageid -- testimonial.bin
 ```

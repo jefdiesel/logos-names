@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use clock_core::{CLOCK_01_PROGRAM_ACCOUNT_ID, ClockAccountData, clock_account_id};
+use clock_core::{CLOCK_PROGRAM_ACCOUNT_ID, ClockAccountData, clock_account_id};
 use common::{HashType, transaction::LeeTransaction};
 use lee::{
     PublicTransaction, Simulation,
@@ -606,8 +606,13 @@ enum Command {
         name: String,
     },
     /// Pay a name. By default the payment goes to the name's private receiving keys:
-    /// nobody, the payer included, learns the account behind the name, and the chain
-    /// shows neither recipient nor amount; proving it takes a few minutes. With
+    /// paid from a private account (the default), the chain shows neither payer, recipient
+    /// nor amount; proving it takes a few minutes. Paid from a public account, it shows the
+    /// payer, the amount and the account paid, which anyone who resolves the name can tie to it.
+    /// The keys are fixed per name: anyone who resolves it can tell which names share
+    /// them and compute the wallet account they come from. On LEZ 0.4 every payment to
+    /// the name arrives at that one account, as a credit its holder claims with
+    /// `names receive`. With
     /// `--public`, or when the name has only a public account, it is an ordinary
     /// public transfer to that account.
     Pay {
@@ -617,8 +622,8 @@ enum Command {
         #[arg(value_parser = tokens::parse_amount, allow_hyphen_values = true)]
         amount: u128,
         /// Account to pay from; the wallet must hold its key. Defaults to the private
-        /// account from `names setup`, which hides the payer too; a public one is seen
-        /// paying.
+        /// account from `names setup`, which hides the payer, the recipient and the amount;
+        /// from a public one the chain shows the payer, the amount and the account paid.
         #[arg(long, value_parser = parse_account)]
         from: Option<AccountId>,
         /// Pay the name's public account instead of its private keys.
@@ -1117,7 +1122,7 @@ impl Client {
             return Program::new(bytes.into())
                 .map_err(|error| anyhow!("{what}'s bytecode does not load: {error}"));
         }
-        let header = ProgramHeader::from_bytes(&self.actor_state_of(id, PROGRAM_LOADER_ACCOUNT_ID).await?)
+        let header = ProgramHeader::from_loader_actor_state(&self.actor_state_of(id, PROGRAM_LOADER_ACCOUNT_ID).await?)
             .ok_or_else(|| anyhow!("{id} is not a deployed program"))?;
         let cache = fetch_persistent_storage_path()?.with_file_name(format!("{cache}-{id}.bin"));
         if let Ok(bytes) = std::fs::read(&cache) {
@@ -1219,7 +1224,7 @@ impl Client {
     /// now (0 for a native transfer).
     async fn private_fee(&self, cycles: u64) -> Result<fees::Estimate> {
         let quote = self.wallet.client().get_fee_state().await?;
-        Ok(fees::private_running(&quote, self.wallet.config().private_fee_headroom_blocks, cycles))
+        Ok(fees::private_running(&quote, self.wallet.config().fee_headroom_blocks, cycles))
     }
 
     /// Checks that the private changes of `job` can all be paid for, as the wallet will pay
@@ -1319,7 +1324,7 @@ impl Client {
     /// cannot be read, this machine's clock set back a minute, so that it is not ahead
     /// of the next block.
     async fn now(&self) -> u64 {
-        self.actor_state_of(CLOCK_01_PROGRAM_ACCOUNT_ID, clock_account_id())
+        self.actor_state_of(CLOCK_PROGRAM_ACCOUNT_ID, clock_account_id())
             .await
             .ok()
             .and_then(|state| borsh::from_slice::<ClockAccountData>(&state).ok())
@@ -1582,7 +1587,7 @@ impl Client {
                 readable(ready)
             );
             println!(
-                "  it waits until the commitment is {} minutes old, so nobody who saw it can take the name first,",
+                "  it waits until the commitment is {} minutes old, so someone who sees the reveal can't take the name first,",
                 MIN_COMMIT_AGE_MS / 60_000
             );
             println!("  then proves the last step on this computer ({}); keep this computer on and awake", proving_words());
@@ -2291,7 +2296,7 @@ impl Client {
     async fn print_transfer_fee(&self, from: AccountId) -> Result<()> {
         let quote = self.wallet.client().get_fee_state().await?;
         let (estimate, how) = if self.is_private(from) {
-            (fees::private(&quote, self.wallet.config().private_fee_headroom_blocks), "a private transfer, paid inside the proof")
+            (fees::private(&quote, self.wallet.config().fee_headroom_blocks), "a private transfer, paid inside the proof")
         } else {
             (fees::native_public(&quote, NATIVE_TRANSFER_GAS_LIMIT), "a public transfer")
         };
@@ -2310,7 +2315,7 @@ impl Client {
         // A payment to someone's private keys arrives as a pending credit, and claiming it
         // is a private transaction of its own (SC-1): below its fee it is worth nothing.
         let quote = self.wallet.client().get_fee_state().await?;
-        let claim = fees::private(&quote, self.wallet.config().private_fee_headroom_blocks);
+        let claim = fees::private(&quote, self.wallet.config().fee_headroom_blocks);
         if amount <= claim.about {
             println!(
                 "note: claiming this costs the holder a private transaction (about {}, paid from another private account of theirs), more than the {amount} you are paying",
@@ -2336,7 +2341,7 @@ impl Client {
         let before = self.wallet.get_account_balance(from).await?;
 
         println!("paying {amount} privately to {name}{NAME_SUFFIX}; generating the proof");
-        println!("(paying from a public account shows that account as the payer; pay from a Private/ account to hide it)");
+        println!("(paying from a public account shows that account as the payer, the amount, and the account paid, which anyone who resolves {name} can tie to it; pay from a Private/ account to hide all three)");
         let (hash, _) = NativeTokenTransfer(&self.wallet)
             .transfer(AccountIdentity::Public(from), recipient, amount, CreditDelivery::Automatic)
             .await
@@ -2391,7 +2396,7 @@ impl Client {
             return Ok(());
         }
         let quote = self.wallet.client().get_fee_state().await?;
-        let fee = fees::private(&quote, self.wallet.config().private_fee_headroom_blocks);
+        let fee = fees::private(&quote, self.wallet.config().fee_headroom_blocks);
         // A credit worth less than claiming it costs (a private fee's refund, most often) is
         // left: claiming it would lose money. `--all` claims it anyway.
         // A fee's refund is left even with `--all`: claiming it pays a claim's fee and makes
@@ -2797,18 +2802,16 @@ fn quietly<T>(run: impl FnOnce() -> T) -> T {
 async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>) -> Result<Option<HashType>> {
     use clap::{CommandFactory as _, Parser as _};
     use wallet::{
-        ExecutionFailureKind,
+        ExecutionFailureKind, FeeParams,
         cli::{Args, SubcommandReturnValue, execute_continuous_run, execute_subcommand},
     };
     let mut sent = None;
 
-    let Args { continuous_run, dry_run, fee_headroom, fee_payer, refund_to, command } =
+    // LEZ rc3's wallet arguments: the fee ones become the send's FeeParams, as in its own
+    // `wallet` binary (lez/wallet/src/main.rs).
+    let Args { continuous_run, dry_run, allow_revert, gas_limit, max_fee, tip, fee_headroom, fee_payer, refund_to, command } =
         Args::parse_from(std::iter::once("names wallet".to_owned()).chain(args));
-    let mut overrides = overrides.unwrap_or_default();
-    if fee_headroom.is_some() {
-        overrides.private_fee_headroom_blocks = fee_headroom;
-    }
-    let overrides = Some(overrides);
+    let fee_params = FeeParams { gas_limit, max_fee, tip, headroom_blocks: fee_headroom, payer: fee_payer, refund_to };
     write_default_wallet_files()?;
     let config_path = fetch_config_path()?;
     let storage_path = fetch_persistent_storage_path()?;
@@ -2839,15 +2842,16 @@ async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>)
             wallet
         };
         wallet.set_dry_run(dry_run);
-        wallet.set_private_fee_payer(fee_payer);
-        wallet.set_private_refund_target(refund_to);
+        wallet.set_allow_revert(allow_revert);
+        wallet.set_fee_params(fee_params);
         match execute_subcommand(&mut wallet, command).await {
-            // A dry run ends the command on the error channel once it has reported.
-            Err(error) if matches!(error.root_cause().downcast_ref(), Some(ExecutionFailureKind::DryRun)) => {}
+            // A dry run ends the command on the error channel with its report.
+            Err(error) => match error.root_cause().downcast_ref() {
+                Some(ExecutionFailureKind::DryRun(report)) => println!("{report}"),
+                _ => return Err(error),
+            },
             Ok(SubcommandReturnValue::TransactionExecuted { tx_hash }) => sent = Some(tx_hash),
-            result => {
-                result?;
-            }
+            Ok(_) => {}
         }
     } else if continuous_run {
         let password = wallet_password(&storage_path)?;
@@ -4012,7 +4016,7 @@ async fn main() -> Result<()> {
                 let refunds: Vec<u128> = pending.iter().filter(|message| is_fee_refund(message)).filter_map(|message| message.native_credit()).collect();
                 let credits: Vec<u128> = pending.iter().filter(|message| !is_fee_refund(message)).filter_map(|message| message.native_credit()).collect();
                 let claim = match client.wallet.client().get_fee_state().await {
-                    Ok(quote) => fees::private(&quote, client.wallet.config().private_fee_headroom_blocks).about,
+                    Ok(quote) => fees::private(&quote, client.wallet.config().fee_headroom_blocks).about,
                     Err(_) => 0,
                 };
                 let (worth, small): (Vec<u128>, Vec<u128>) = credits.into_iter().partition(|amount| *amount > claim);

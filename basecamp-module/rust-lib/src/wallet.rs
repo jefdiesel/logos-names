@@ -106,15 +106,32 @@ pub fn accounts(setup: &Setup) -> Result<Held, String> {
 }
 
 /// The keys others use to pay the private account `choice`: an account ID, or
-/// `auto` for the wallet's first one, made if it has none.
+/// `auto` for a new private account the CLI makes (and saves) for this call.
 pub fn private_keys(setup: &Setup, choice: &str) -> Result<([u8; 32], Vec<u8>), String> {
+    receiving_keys(setup, choice).map(|(_, npk, vpk)| (npk, vpk))
+}
+
+/// As [`private_keys`], with the account the keys belong to: for `auto`, the one
+/// the CLI just made, which a registration remembers so a retry reuses it.
+pub fn receiving_keys(setup: &Setup, choice: &str) -> Result<(AccountId, [u8; 32], Vec<u8>), String> {
     let keys = answer(&cli::run_text(setup, request(&["keys", "--", choice.trim()]), LOOK)?)?;
+    fresh_for_auto(choice, &keys)?;
     let read = |field: &str| keys[field].as_str().and_then(|text| registry::unhex(text).ok());
     let npk = read("npk").and_then(|bytes| <[u8; 32]>::try_from(bytes).ok());
-    match (npk, read("vpk")) {
-        (Some(npk), Some(vpk)) => Ok((npk, vpk)),
+    let account = keys["account"].as_str().and_then(|text| registry::parse_account(text).ok());
+    match (account, npk, read("vpk")) {
+        (Some(account), Some(npk), Some(vpk)) => Ok((account, npk, vpk)),
         _ => Err("the names CLI did not give that account's receiving keys".to_owned()),
     }
+}
+
+/// Refuses an `auto` answer that doesn't say it made a new account: an older names CLI
+/// gives the wallet's first private account to every name, which would link them.
+fn fresh_for_auto(choice: &str, keys: &Value) -> Result<(), String> {
+    if choice.trim() == "auto" && keys["fresh"].as_bool() != Some(true) {
+        return Err("Your names CLI is too old to give each name its own receiving account. Update the Names app, then try again. Nothing was sent.".to_owned());
+    }
+    Ok(())
 }
 
 fn mention_json(mention: &Mention) -> Value {
@@ -152,6 +169,17 @@ pub fn send(setup: &Setup, change: &Change) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_needs_a_cli_that_says_it_made_a_new_account() {
+        let fresh = json!({ "account": "x", "npk": "00", "vpk": "00", "fresh": true });
+        let old = json!({ "account": "x", "npk": "00", "vpk": "00" });
+        assert_eq!(fresh_for_auto("auto", &fresh), Ok(()));
+        assert!(fresh_for_auto(" auto ", &old).expect_err("an old CLI").contains("too old"));
+        assert!(fresh_for_auto("auto", &json!({ "fresh": false })).is_err());
+        // A named account is the wallet's own choice: no flag needed.
+        assert_eq!(fresh_for_auto("9xyz", &old), Ok(()));
+    }
 
     #[test]
     fn the_cli_answer_is_read_from_its_last_line() {

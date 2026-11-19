@@ -1,9 +1,13 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
+  push:            # every branch, so tests don't have to queue on the Mini's build lock
   pull_request:
+
+# A newer push to the same branch cancels the older run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   core:
@@ -28,6 +32,7 @@ jobs:
       - run: npm ci
       - run: node --test resolver/names.test.js
       - run: node basecamp/logic.test.mjs
+      - run: node --test gateway/app-settings.test.mjs
 
   guest:
     name: Reproducible guest build

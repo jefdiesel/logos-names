@@ -64,7 +64,7 @@ pub const MIN_COMMIT_AGE_MS: u64 = 15 * 60 * 1000;
 pub const MAX_COMMIT_AGE_MS: u64 = 24 * 60 * 60 * 1000;
 /// The account the chain keeps its clock on, and the program whose state on
 /// it holds the time: `{block_id: u64, timestamp: u64}`, in milliseconds.
-const CLOCK_ACCOUNT: &AccountId = b"/LEZ/ClockProgramAccount/0000001";
+const CLOCK_ACCOUNT: &AccountId = b"/LEZ/ClockProgramAccount/0000000";
 const BUILTIN_PROGRAM_PREFIX: &[u8] = b"/LEE-BuiltinProgram/v1/AccountId";
 const RECORD_SEAL: &[u8] = b"logos-names/v5/record";
 const PAGE_SEAL: &[u8] = b"logos-names/v5/page";
@@ -183,8 +183,8 @@ pub struct Derived {
 /// `master = Argon2id(name, "logos-names/v5", 64 MiB, 3 passes, 1 lane)`, then
 /// `id = SHA-256("logos-names/v5/id" ‖ master)` and
 /// `key = SHA-256("logos-names/v5/key" ‖ master)`. Slow and memory-hard on
-/// purpose, so that scanning for names is expensive; callers that ask
-/// repeatedly should keep the result.
+/// purpose, to slow down guessing (short and common names stay cheap to
+/// guess); callers that ask repeatedly should keep the result.
 pub fn derive(name: &str) -> Derived {
     let master = master(name);
     Derived {
