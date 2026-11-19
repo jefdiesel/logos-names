@@ -33,7 +33,7 @@ use names_core::{
     NameRecord, Page, Settings, commitment,
     normalize_name, owner_tag, page_address, record_address, settings_address,
     validate_name, OwnerTag, TIER_NORMAL, decode_record, deed as lns_deed, deed_definition_address,
-    deed_definition_seed, deed_holding_address, deed_holding_seed, registration_nonce,
+    deed_definition_seed, deed_holding_address, deed_holding_seed,
 };
 use names_seal::{
     Derived, PageContent, Profile, TextRecord, derive, open_page, open_profile, seal_page,
@@ -247,9 +247,9 @@ enum DeedCommand {
         #[arg(value_parser = parse_name)]
         name: String,
     },
-    /// Mint the deed of a name you hold that has none (one registered before deeds).
-    /// Locked, reserved and short names have no deed.
-    Mint {
+    /// Claim the deed of a name you hold: free (no deposit, no fee beyond gas),
+    /// optional, once while you hold it. Locked, reserved and short names have no deed.
+    Claim {
         #[arg(value_parser = parse_name)]
         name: String,
     },
@@ -688,8 +688,8 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// A name's deed: the 1-of-1 NFT that goes with it. `names deed show <name>`,
-    /// `names deed mint <name>` (for a name registered before deeds).
+    /// A name's deed: an optional 1-of-1 NFT that goes with it once claimed.
+    /// `names deed show <name>`, `names deed claim <name>`.
     #[command(subcommand)]
     Deed(DeedCommand),
     /// The Logos Blockchain, through your own node: status, balances, sending to a
@@ -1365,7 +1365,7 @@ impl Client {
         let Some(deed) = record.deed else {
             let (_, tier) = length_proof(&id)?;
             let why = if tier == TIER_NORMAL {
-                "registered before deeds: its holder can mint one with `names deed mint`"
+                "no deed claimed: its holder can claim one for free with `names deed claim`"
             } else {
                 "locked, reserved and short names have no deed"
             };
@@ -1405,8 +1405,8 @@ impl Client {
         }))
     }
 
-    /// Mints the deed of `name`, held here, which has none (it was registered before deeds).
-    async fn deed_mint(&mut self, name: &str) -> Result<()> {
+    /// Claims the deed of `name`, held here: free, optional, once while it is held.
+    async fn deed_claim(&mut self, name: &str) -> Result<()> {
         let (Derived { id, .. }, record, _) = self.lookup_held(name).await?;
         if record.deed.is_some() {
             bail!("{name}{NAME_SUFFIX} already has a deed (`names deed show {name}`)");
@@ -1421,8 +1421,8 @@ impl Client {
         let [record_seed, ..] = name_seeds(&id);
         let mut mentions = vec![self.own_actor(holder), self.registry_actor(record_seed)];
         mentions.extend(self.deed_mentions(&id, &nonce, &[record.owner], true));
-        println!("minting the deed of {name}{NAME_SUFFIX}: definition {}", deed_definition_address(&self.program, &id, &nonce));
-        self.send_with(mentions, &Instruction::MintDeed { id, nonce, length }, 0, true).await
+        println!("claiming the deed of {name}{NAME_SUFFIX} (free): definition {}", deed_definition_address(&self.program, &id, &nonce));
+        self.send_with(mentions, &Instruction::ClaimDeed { id, nonce, length }, 0, true).await
     }
 
     async fn record(&self, id: &NameId) -> Result<Option<NameRecord>> {
@@ -1759,20 +1759,19 @@ impl Client {
             if let Some((deed, old_owner)) = &lapsed_deed {
                 mentions.extend(self.deed_mentions(&id, &deed.nonce, &[*old_owner], false));
             }
-            // A name of the normal tier is minted its deed in this transaction.
-            if tier == TIER_NORMAL {
-                mentions.extend(self.deed_mentions(&id, &registration_nonce(&promised, claimed), &[holder], true));
-            }
-            let deeds = tier == TIER_NORMAL || lapsed_deed.is_some();
-            // A name of the normal tier is registered with its deed; plain Register mints none.
-            let (sealed, length) = (sealed.clone(), length.clone());
-            let treasury = cost.treasury;
-            let instruction = if tier == TIER_NORMAL {
-                Instruction::RegisterWithDeed { id, sealed, term, fee, treasury, now: claimed, secret, deposit, length }
-            } else {
-                Instruction::Register { id, sealed, term, fee, treasury, now: claimed, secret, deposit, length }
+            // Registering mints no deed: the holder may claim one later (`names deed claim`).
+            let instruction = Instruction::Register {
+                id,
+                sealed: sealed.clone(),
+                term,
+                fee,
+                treasury: cost.treasury,
+                now: claimed,
+                secret,
+                deposit,
+                length: length.clone(),
             };
-            let sent = self.send_with(mentions, &instruction, fee, deeds).await;
+            let sent = self.send_with(mentions, &instruction, fee, lapsed_deed.is_some()).await;
             let Err(error) = sent else {
                 self.note_proof();
                 break;
@@ -3277,7 +3276,7 @@ fn gas_limit_for(cycles: u64) -> u64 {
 fn call_cycles(instruction: &Instruction) -> u64 {
     match instruction {
         Instruction::Commit { .. } => COMMIT_CYCLES,
-        Instruction::Register { .. } | Instruction::RegisterWithDeed { .. } | Instruction::Claim { .. } | Instruction::MintDeed { .. } => REVEAL_CYCLES,
+        Instruction::Register { .. } | Instruction::Claim { .. } | Instruction::ClaimDeed { .. } => REVEAL_CYCLES,
         Instruction::Release { .. } => 51_322,
         _ => CHANGE_CYCLES,
     }
@@ -4546,7 +4545,7 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&client.deed_show(&name).await?)?);
             Ok(())
         }
-        Command::Deed(DeedCommand::Mint { name }) => client.deed_mint(&name).await,
+        Command::Deed(DeedCommand::Claim { name }) => client.deed_claim(&name).await,
         Command::Release { name } => client.release(&name).await,
         Command::Open { name, port, no_browser, storage } => {
             let name = client.following(&name).await?;

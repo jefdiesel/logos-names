@@ -46,9 +46,9 @@
 //! [`apply`] sees no clock either: the time is the sender's claim, which
 //! [`instruct`] binds to the block's timestamp and passes on inside the effects.
 //!
-//! A name of the normal tier also has a deed: a 1-of-1 NFT of Logos's NFT program
-//! ([`deed`]), minted when the name is registered and held in an account only this
-//! program can authorize. The record says which deed is the name's; the record's
+//! A name of the normal tier can also have a deed: a 1-of-1 NFT of Logos's NFT
+//! program ([`deed`]), which its holder claims for free if they want one
+//! ([`Instruction::ClaimDeed`]), held in an account only this program can authorize. The record says which deed is the name's; the record's
 //! actor moves the deed with every transfer and burns it on release, so the name
 //! and its deed never part. LNS stays the source of truth: the deed follows it.
 
@@ -98,8 +98,6 @@ const CLAIM_LEAF_DOMAIN: &[u8] = b"logos-names/v6/claim-leaf";
 const DEED_DEFINITION_SEED_DOMAIN: &[u8] = b"lns-deed/v1/definition/";
 /// A deed's holding: `H(domain ‖ definition ‖ owner tag)`, one per holder of one registration.
 const DEED_HOLDING_SEED_DOMAIN: &[u8] = b"lns-deed/v1/holding/";
-/// A registration's deed nonce: `H(domain ‖ commitment ‖ now)`.
-const DEED_NONCE_DOMAIN: &[u8] = b"lns-deed/v1/nonce/";
 const CLAIM_NODE_DOMAIN: &[u8] = b"logos-names/v6/claim-node";
 
 /// The registry charges a fee per term, paid to its treasury; names lapse.
@@ -382,49 +380,29 @@ pub enum Instruction {
         now: u64,
         proof: ClaimProof,
     },
-    /// Mint the deed of a name that has none, such as one registered before deeds
-    /// existed, into the signer's deed account. Only its holder may, and only for
-    /// a name of the normal tier, which `length` shows: locked, reserved and short
-    /// names have no deed. `nonce` is new and random; it decides the deed's
-    /// definition ([`deed_definition_address`]).
-    MintDeed {
+    /// Claim the name's deed: mint it into the signer's deed account. Optional and
+    /// free (no deposit, no fee beyond gas). Only the name's holder may, only once
+    /// while the name is held (a deed burns with a release, and a new registration
+    /// may claim a fresh one), and only for a name of the normal tier, which `length`
+    /// shows: locked, reserved and short names have no deed. `nonce` is new and random;
+    /// it decides the deed's definition ([`deed_definition_address`]).
+    ClaimDeed {
         id: NameId,
         nonce: [u8; 32],
         length: LengthProof,
     },
-    /// [`Instruction::Register`], and the name, if of the normal tier, is minted its
-    /// deed in the same transaction (the client declares the deed's actors). Plain
-    /// `Register` mints none ([`PLAIN_REGISTER_MINTS`]), so clients built before deeds
-    /// keep registering; their names can be given a deed later with `MintDeed`.
-    RegisterWithDeed {
-        id: NameId,
-        sealed: Vec<u8>,
-        term: u8,
-        fee: u128,
-        treasury: Option<AccountId>,
-        now: u64,
-        secret: [u8; 32],
-        deposit: bool,
-        length: LengthProof,
-    },
 }
-
-/// Whether plain [`Instruction::Register`] mints a deed too. Off while clients built
-/// before deeds (which don't declare a deed's actors, so a minting registration of
-/// theirs would fail) are still in use; turning it on is this one line and an update.
-pub const PLAIN_REGISTER_MINTS: bool = false;
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum Effect {
     /// On the record: refused unless the actor is empty or holds a record
     /// whose grace period ended by `now`.
-    /// A lapsed record's deed is burned; `deed`, when given, is minted to `owner`.
+    /// A lapsed record's deed is burned with it.
     Register {
         owner: OwnerTag,
         now: u64,
         expires: u64,
         sealed: Vec<u8>,
-        deed: Option<NewDeed>,
     },
     /// On the record: add `term_ms` to the later of its expiry and `now`,
     /// refused once its grace period has ended.
@@ -492,7 +470,7 @@ pub enum Effect {
     Reveal { now: u64 },
     /// On the record: give it `deed` and mint it to `signer`, refused unless
     /// `signer` owns it and it has no deed yet.
-    MintDeed { signer: OwnerTag, deed: NewDeed },
+    ClaimDeed { signer: OwnerTag, deed: NewDeed },
     /// On a deed account, from a record: create the deed's definition (the
     /// account behind `definition_seed`) with this account as its master. Its own
     /// seed grant authorizes this account for the whole creation; the definition
@@ -737,12 +715,6 @@ fn sha256_of(parts: &[&[u8]]) -> [u8; 32] {
     sha256(&parts.concat())
 }
 
-/// The nonce of a registration's deed, from its commitment and claimed time: new for
-/// every registration, so a name released and registered again gets a new deed.
-#[must_use]
-pub fn registration_nonce(commitment: &[u8; 32], now: u64) -> [u8; 32] {
-    sha256_of(&[DEED_NONCE_DOMAIN, commitment, &now.to_le_bytes()])
-}
 
 /// The seed of the deed definition of the name `id` minted with `nonce`.
 #[must_use]
@@ -933,14 +905,6 @@ pub fn instruct(input: &ReceiveInput, instruction: Instruction) -> Response {
     let program = &input.receiver.program_account_id;
     let signer = &input.receiver.account_id;
     let response = Response::keep_state();
-    // The two registrations share one body; only whether they mint differs.
-    let (instruction, mints) = match instruction {
-        Instruction::RegisterWithDeed { id, sealed, term, fee, treasury, now, secret, deposit, length } => {
-            (Instruction::Register { id, sealed, term, fee, treasury, now, secret, deposit, length }, true)
-        }
-        Instruction::Register { .. } => (instruction, PLAIN_REGISTER_MINTS),
-        other => (other, false),
-    };
 
     match instruction {
         Instruction::Register {
@@ -965,8 +929,6 @@ pub fn instruct(input: &ReceiveInput, instruction: Instruction) -> Response {
             // Bound to the holder: a reveal seen pending can't be replayed for
             // another account.
             let promised = commitment(&id, &owner, &secret);
-            // Only a name of the normal tier has a deed: locked, reserved and short ones don't.
-            let deed = (mints && tier == TIER_NORMAL).then(|| new_deed(program, id, registration_nonce(&promised, now)));
             let response = charge(response, program, signer, &id, treasury, term, fee, deposit, tier);
             bounded_window(response, now)
                 .send(self::effect(
@@ -978,7 +940,7 @@ pub fn instruct(input: &ReceiveInput, instruction: Instruction) -> Response {
                 .send(self::effect(
                     record_address(program, &id),
                     program,
-                    Effect::Register { owner, now, expires, sealed, deed },
+                    Effect::Register { owner, now, expires, sealed },
                 ))
                 // A lapsed holder's page must not outlive their hold on the name.
                 .send(self::effect(
@@ -1138,8 +1100,7 @@ pub fn instruct(input: &ReceiveInput, instruction: Instruction) -> Response {
                     Effect::WritePage { sealed: Vec::new() },
                 ))
         }
-        Instruction::RegisterWithDeed { .. } => unreachable!("handled as Register"),
-        Instruction::MintDeed { id, nonce, length } => {
+        Instruction::ClaimDeed { id, nonce, length } => {
             assert!(
                 length_tier(&id, &length) == TIER_NORMAL,
                 "this name is locked (one to four characters, or on the reserved list), so it has no deed"
@@ -1147,7 +1108,7 @@ pub fn instruct(input: &ReceiveInput, instruction: Instruction) -> Response {
             response.send(self::effect(
                 record_address(program, &id),
                 program,
-                Effect::MintDeed { signer: owner_tag(&id, signer), deed: new_deed(program, id, nonce) },
+                Effect::ClaimDeed { signer: owner_tag(&id, signer), deed: new_deed(program, id, nonce) },
             ))
         }
     }
@@ -1217,15 +1178,11 @@ fn deed_messages(effect: &Effect, input: &ReceiveInput) -> Vec<SyncMessage> {
     let program = &input.receiver.program_account_id;
     let held = || (!input.pre_state.is_empty()).then(|| load_record(&input.pre_state));
     match effect {
-        Effect::Register { owner, deed, .. } => {
-            // A lapsed record's deed goes with it; then the new one is minted.
-            let mut sent: Vec<SyncMessage> = held()
-                .and_then(|old| old.deed.map(|old_deed| burn_deed(program, &old_deed.definition, &old.owner)))
-                .into_iter()
-                .collect();
-            sent.extend(deed.as_ref().map(|deed| mint_deed(program, deed, owner)));
-            sent
-        }
+        // A lapsed record's deed goes with it; the new registrant may claim a fresh one.
+        Effect::Register { .. } => held()
+            .and_then(|old| old.deed.map(|old_deed| burn_deed(program, &old_deed.definition, &old.owner)))
+            .into_iter()
+            .collect(),
         Effect::Claim { .. } => held()
             .and_then(|old| old.deed.map(|old_deed| burn_deed(program, &old_deed.definition, &old.owner)))
             .into_iter()
@@ -1238,7 +1195,7 @@ fn deed_messages(effect: &Effect, input: &ReceiveInput) -> Vec<SyncMessage> {
             .and_then(|record| record.deed)
             .map(|deed| vec![burn_deed(program, &deed.definition, signer)])
             .unwrap_or_default(),
-        Effect::MintDeed { signer, deed } => vec![mint_deed(program, deed, signer)],
+        Effect::ClaimDeed { signer, deed } => vec![mint_deed(program, deed, signer)],
         Effect::CreateDeed { definition_seed } => {
             assert!(input.is_authorized, "only the registry's own deed account creates a deed");
             let seed = PdaSeed::new(*definition_seed);
@@ -1284,7 +1241,6 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
             now,
             expires,
             sealed,
-            deed,
         } => {
             if !pre_data.is_empty() {
                 let held = load_record(pre_data);
@@ -1299,7 +1255,7 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
                 expires,
                 sealed,
                 claimed: false,
-                deed: deed.map(|deed| Deed { definition: deed.definition, nonce: deed.nonce }),
+                deed: None,
             }))
         }
         Effect::Renew { now, term_ms } => {
@@ -1480,7 +1436,7 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
             assert!(now < after(made, MAX_COMMIT_AGE_MS), "the commitment has expired");
             Some(Vec::new())
         }
-        Effect::MintDeed { signer, deed } => {
+        Effect::ClaimDeed { signer, deed } => {
             let mut record = load_owned(pre_data, &signer);
             assert!(record.deed.is_none(), "this name already has a deed");
             record.deed = Some(Deed { definition: deed.definition, nonce: deed.nonce });
@@ -1703,11 +1659,6 @@ mod tests {
     /// The secret the test registrations commit with.
     const SECRET: [u8; 32] = [5; 32];
 
-    /// The deed a registration of `id` by `owner` at `now` gets.
-    fn deed_of(id: &NameId, owner: AccountId, now: u64) -> Option<Deed> {
-        let nonce = registration_nonce(&commitment(id, &owner_tag(id, &owner), &SECRET), now);
-        Some(Deed { definition: deed_definition_address(&PROGRAM, id, &nonce), nonce })
-    }
 
     fn committed(id: &NameId, holder: AccountId) -> AccountId {
         commitment_address(&PROGRAM, &commitment(id, &owner_tag(id, &holder), &SECRET))
@@ -3259,72 +3210,46 @@ mod tests {
         expected.extend(d1.value());
         expected.extend(tag);
         assert_eq!(deed_holding_seed(&d1, &tag), PdaSeed::new(sha256(&expected)));
-        // The same name registered at another time, or with another secret, gets another nonce.
-        let promised = commitment(&JEF, &tag, &SECRET);
-        assert_ne!(registration_nonce(&promised, NOW), registration_nonce(&promised, NOW + 1));
-        assert_ne!(registration_nonce(&promised, NOW), registration_nonce(&commitment(&JEF, &tag, &[6; 32]), NOW));
-    }
-
-    fn with_deed(instruction: Instruction) -> Instruction {
-        let Instruction::Register { id, sealed, term, fee, treasury, now, secret, deposit, length } = instruction else {
-            panic!("a registration");
-        };
-        Instruction::RegisterWithDeed { id, sealed, term, fee, treasury, now, secret, deposit, length }
     }
 
     #[test]
-    fn a_plain_registration_mints_no_deed_so_older_clients_keep_working() {
-        assert!(!PLAIN_REGISTER_MINTS);
+    fn a_registration_never_mints_a_deed() {
         let effects = run_plan(on_registration(&JEF, ALICE), register(JEF, Vec::new()));
-        assert!(effects.iter().any(|(_, effect)| matches!(effect, Effect::Register { deed: None, .. })));
+        assert!(effects.iter().all(|(_, effect)| !matches!(effect, Effect::ClaimDeed { .. })));
         let mut chain = Chain::default();
         chain.register(&JEF, ALICE, b"x");
+        assert_eq!(chain.record(&JEF).expect("registered").deed, None);
         assert_eq!(chain.data(&record_address(&PROGRAM, &JEF)).first(), Some(&6), "written as version 6");
-        // Both registrations otherwise plan the same effects.
-        let plain = run_plan(on_registration(&JEF, ALICE), register(JEF, b"p".to_vec()));
-        let deeded = run_plan(on_registration(&JEF, ALICE), with_deed(register(JEF, b"p".to_vec())));
-        assert_eq!(plain.len(), deeded.len());
-        for ((at, a), (at2, b)) in plain.iter().zip(&deeded) {
-            assert_eq!(at, at2);
-            match (a, b) {
-                (Effect::Register { deed: None, owner, sealed, .. }, Effect::Register { deed: Some(_), owner: owner2, sealed: sealed2, .. }) => {
-                    assert_eq!((owner, sealed), (owner2, sealed2));
-                }
-                _ => assert_eq!(a, b),
-            }
-        }
+        let response = effect_at(
+            record_address(&PROGRAM, &JEF),
+            Vec::new(),
+            Effect::Register { owner: owner_tag(&JEF, &ALICE), now: NOW, expires: u64::MAX, sealed: Vec::new() },
+        );
+        assert!(response.sync_messages.is_empty(), "nothing else is sent");
     }
 
     #[test]
-    fn a_registration_with_deed_through_the_harness_records_it() {
+    fn a_claim_mints_the_deed_through_the_deed_accounts_grant() {
+        let alice = owner_tag(&JEF, &ALICE);
+        let nonce = [4; 32];
+        let effects = run_plan(on_record(&JEF, ALICE), Instruction::ClaimDeed { id: JEF, nonce, length: length_of(&JEF) });
+        let [(record, Effect::ClaimDeed { signer, deed })] = effects.as_slice() else { panic!("one claim: {effects:?}") };
+        assert_eq!((*record, *signer), (record_address(&PROGRAM, &JEF), alice));
+        assert_eq!(deed.definition, deed_definition_address(&PROGRAM, &JEF, &nonce));
         let mut chain = Chain::default();
-        let instruction = with_deed(register(JEF, b"sealed".to_vec()));
-        chain.actors.insert(committed(&JEF, ALICE), to_bytes(&Commitment { version: VERSION, made: NOW - MIN_COMMIT_AGE_MS }));
-        chain.run_exactly(on_registration(&JEF, ALICE), instruction);
-        assert_eq!(chain.record(&JEF).expect("registered").deed, deed_of(&JEF, ALICE, NOW));
-        assert_eq!(chain.data(&record_address(&PROGRAM, &JEF)).first(), Some(&7), "a deeded record is version 7");
-    }
-
-    #[test]
-    fn a_registration_mints_the_names_deed_to_its_holder() {
-        let effects = run_plan(on_registration(&JEF, ALICE), with_deed(register(JEF, Vec::new())));
-        let (record, Effect::Register { owner, deed: Some(deed), .. }) =
-            effects.iter().find(|(_, effect)| matches!(effect, Effect::Register { .. })).cloned().expect("a register")
-        else {
-            panic!("a normal name's registration carries its deed");
-        };
-        assert_eq!(record, record_address(&PROGRAM, &JEF));
-        assert_eq!(Some(Deed { definition: deed.definition, nonce: deed.nonce }), deed_of(&JEF, ALICE, NOW));
+        chain.register(&JEF, ALICE, b"");
+        let held = chain.data(&record_address(&PROGRAM, &JEF)).to_vec();
 
         // The record keeps the deed and asks the holder's deed account to create it.
-        let response = effect_at(record, Vec::new(), Effect::Register { owner, now: NOW, expires: u64::MAX, sealed: Vec::new(), deed: Some(deed) });
+        let response = effect_at(*record, held, Effect::ClaimDeed { signer: alice, deed: *deed });
         let stored = decode_record(response.post_state.as_ref().expect("written")).expect("a record");
-        assert_eq!(stored.deed, deed_of(&JEF, ALICE, NOW));
+        assert_eq!(stored.deed, Some(Deed { definition: deed.definition, nonce }));
+        assert_eq!(response.post_state.as_ref().expect("written").first(), Some(&7), "a deeded record is version 7");
         let [create] = response.sync_messages.as_slice() else { panic!("one message: {:?}", response.sync_messages) };
-        let holding = deed_holding_seed(&deed.definition, &owner);
-        assert_eq!(create.to, Actor::new(deed_holding_address(&PROGRAM, &deed.definition, &owner), PROGRAM));
+        let holding = deed_holding_seed(&deed.definition, &alice);
+        assert_eq!(create.to, Actor::new(deed_holding_address(&PROGRAM, &deed.definition, &alice), PROGRAM));
         assert_eq!(create.pda_seeds, seeds(&[holding]), "granted the deed account's seed");
-        let definition_seed = deed_definition_seed(&JEF, &deed.nonce);
+        let definition_seed = deed_definition_seed(&JEF, &nonce);
         assert_eq!(registry_effect(create), Effect::CreateDeed { definition_seed: *definition_seed.as_bytes() });
 
         // The deed account, authorized by that grant, has the definition create the deed with it as master.
@@ -3340,6 +3265,14 @@ mod tests {
         assert_eq!((name.as_str(), printable_supply, master), (deed::DEED_NAME, 1, at), "a 1-of-1 held by the deed account");
         assert_eq!(metadata.standard, deed::MetadataStandard::Simple);
         assert_eq!(metadata.uri, deed::DEED_URI);
+    }
+
+    #[test]
+    fn claiming_a_deed_is_free() {
+        let effects = run_plan(on_record(&JEF, ALICE), Instruction::ClaimDeed { id: JEF, nonce: [4; 32], length: length_of(&JEF) });
+        assert_eq!(effects.len(), 1, "only the record's claim");
+        let planned = plan(&input(on_record(&JEF, ALICE), &Instruction::ClaimDeed { id: JEF, nonce: [4; 32], length: length_of(&JEF) }), Instruction::ClaimDeed { id: JEF, nonce: [4; 32], length: length_of(&JEF) });
+        assert!(planned.output().chained_calls.is_empty(), "no native transfer: no deposit, no fee");
     }
 
     #[test]
@@ -3365,21 +3298,16 @@ mod tests {
     }
 
     #[test]
-    fn locked_reserved_and_short_names_get_no_deed() {
+    fn locked_reserved_and_short_names_get_no_deed_on_registration() {
         for id in [LOCKED_NAME, THREE_NAME] {
-            let effects = run_plan(on_registration(&id, ALICE), with_deed(register(id, Vec::new())));
-            assert!(
-                effects.iter().any(|(_, effect)| matches!(effect, Effect::Register { deed: None, .. })),
-                "no deed for a name that is not of the normal tier"
+            let response = effect_at(
+                record_address(&PROGRAM, &id),
+                Vec::new(),
+                Effect::Register { owner: [1; 32], now: NOW, expires: u64::MAX, sealed: Vec::new() },
             );
+            assert!(response.sync_messages.is_empty());
+            assert_eq!(decode_record(response.post_state.as_ref().expect("written")).expect("a record").deed, None);
         }
-        let response = effect_at(
-            record_address(&PROGRAM, &LOCKED_NAME),
-            Vec::new(),
-            Effect::Register { owner: [1; 32], now: NOW, expires: u64::MAX, sealed: Vec::new(), deed: None },
-        );
-        assert!(response.sync_messages.is_empty());
-        assert_eq!(decode_record(response.post_state.as_ref().expect("written")).expect("a record").deed, None);
     }
 
     #[test]
@@ -3496,19 +3424,23 @@ mod tests {
             deed: Some(deed),
         });
         let bob = owner_tag(&JEF, &BOB);
-        let fresh = new_deed(&PROGRAM, JEF, [2; 32]);
         let later = NOW + GRACE_MS;
         let response = effect_at(
             record_address(&PROGRAM, &JEF),
             lapsed,
-            Effect::Register { owner: bob, now: later, expires: later + YEAR, sealed: Vec::new(), deed: Some(fresh) },
+            Effect::Register { owner: bob, now: later, expires: later + YEAR, sealed: Vec::new() },
         );
-        let [burn, create] = response.sync_messages.as_slice() else { panic!("two messages") };
+        let [burn] = response.sync_messages.as_slice() else { panic!("one message") };
         assert_eq!(burn.to, Actor::new(deed_holding_address(&PROGRAM, &deed.definition, &alice), NFT));
         assert_eq!(nft_message(burn), deed::NftMessage::Burn { amount: 1 });
-        assert_eq!(create.to.account_id, deed_holding_address(&PROGRAM, &fresh.definition, &bob));
+        let held = response.post_state.expect("written").to_vec();
+        assert_eq!(decode_record(&held).expect("decodes").deed, None, "the new registrant has no deed yet");
+        // ...and may claim a fresh one: a new nonce, a new definition and deed account.
+        let fresh = new_deed(&PROGRAM, JEF, [2; 32]);
         assert_ne!(fresh.definition, deed.definition);
-        assert_eq!(decode_record(&response.post_state.expect("written")).expect("decodes").deed.map(|d| d.definition), Some(fresh.definition));
+        let response = effect_at(record_address(&PROGRAM, &JEF), held, Effect::ClaimDeed { signer: bob, deed: fresh });
+        let [create] = response.sync_messages.as_slice() else { panic!("one message") };
+        assert_eq!(create.to.account_id, deed_holding_address(&PROGRAM, &fresh.definition, &bob));
     }
 
     #[test]
@@ -3522,21 +3454,21 @@ mod tests {
     }
 
     #[test]
-    fn the_holder_mints_a_deed_for_a_name_registered_before_deeds() {
+    fn the_holder_claims_a_deed_for_a_name_registered_before_deeds() {
         let alice = owner_tag(&JEF, &ALICE);
         let nonce = [4; 32];
         let effects = run_plan(
             on_record(&JEF, ALICE),
-            Instruction::MintDeed { id: JEF, nonce, length: length_of(&JEF) },
+            Instruction::ClaimDeed { id: JEF, nonce, length: length_of(&JEF) },
         );
         let fresh = new_deed(&PROGRAM, JEF, nonce);
-        assert_eq!(effects, vec![(record_address(&PROGRAM, &JEF), Effect::MintDeed { signer: alice, deed: fresh })]);
+        assert_eq!(effects, vec![(record_address(&PROGRAM, &JEF), Effect::ClaimDeed { signer: alice, deed: fresh })]);
         let mut v6 = vec![6];
         v6.extend(alice);
         v6.extend(u64::MAX.to_le_bytes());
         v6.extend(0u32.to_le_bytes());
         v6.push(0);
-        let response = effect_at(record_address(&PROGRAM, &JEF), v6, Effect::MintDeed { signer: alice, deed: fresh });
+        let response = effect_at(record_address(&PROGRAM, &JEF), v6, Effect::ClaimDeed { signer: alice, deed: fresh });
         let stored = decode_record(&response.post_state.clone().expect("written")).expect("decodes");
         assert_eq!(stored.deed, Some(Deed { definition: fresh.definition, nonce }));
         assert_eq!(stored.owner, alice);
@@ -3550,45 +3482,45 @@ mod tests {
     fn a_name_has_one_deed() {
         let alice = owner_tag(&JEF, &ALICE);
         let (record, _) = deeded(alice, [1; 32]);
-        let _ = effect_at(record_address(&PROGRAM, &JEF), record, Effect::MintDeed { signer: alice, deed: new_deed(&PROGRAM, JEF, [2; 32]) });
+        let _ = effect_at(record_address(&PROGRAM, &JEF), record, Effect::ClaimDeed { signer: alice, deed: new_deed(&PROGRAM, JEF, [2; 32]) });
     }
 
     #[test]
     #[should_panic(expected = "signer does not own this name")]
-    fn only_the_holder_mints_the_deed() {
+    fn only_the_holder_claims_the_deed() {
         let (mut record, _) = deeded(owner_tag(&JEF, &ALICE), [1; 32]);
         record = {
             let mut r = decode_record(&record).expect("decodes");
             r.deed = None;
             to_bytes(&r)
         };
-        let _ = effect_at(record_address(&PROGRAM, &JEF), record, Effect::MintDeed { signer: owner_tag(&JEF, &BOB), deed: new_deed(&PROGRAM, JEF, [2; 32]) });
+        let _ = effect_at(record_address(&PROGRAM, &JEF), record, Effect::ClaimDeed { signer: owner_tag(&JEF, &BOB), deed: new_deed(&PROGRAM, JEF, [2; 32]) });
     }
 
     #[test]
     #[should_panic(expected = "so it has no deed")]
-    fn a_locked_name_cannot_mint_a_deed() {
+    fn a_locked_name_cannot_claim_a_deed() {
         let _ = run_plan(
             on_record(&LOCKED_NAME, ALICE),
-            Instruction::MintDeed { id: LOCKED_NAME, nonce: [4; 32], length: length_of(&LOCKED_NAME) },
+            Instruction::ClaimDeed { id: LOCKED_NAME, nonce: [4; 32], length: length_of(&LOCKED_NAME) },
         );
     }
 
     #[test]
     #[should_panic(expected = "so it has no deed")]
-    fn a_three_character_name_cannot_mint_a_deed() {
+    fn a_three_character_name_cannot_claim_a_deed() {
         let _ = run_plan(
             on_record(&THREE_NAME, ALICE),
-            Instruction::MintDeed { id: THREE_NAME, nonce: [4; 32], length: length_of(&THREE_NAME) },
+            Instruction::ClaimDeed { id: THREE_NAME, nonce: [4; 32], length: length_of(&THREE_NAME) },
         );
     }
 
     #[test]
     #[should_panic(expected = "the length proof does not hold")]
-    fn a_locked_name_cannot_borrow_a_normal_names_proof_to_mint() {
+    fn a_locked_name_cannot_borrow_a_normal_names_proof_to_claim() {
         let _ = run_plan(
             on_record(&LOCKED_NAME, ALICE),
-            Instruction::MintDeed { id: LOCKED_NAME, nonce: [4; 32], length: length_of(&JEF) },
+            Instruction::ClaimDeed { id: LOCKED_NAME, nonce: [4; 32], length: length_of(&JEF) },
         );
     }
 
@@ -3596,6 +3528,9 @@ mod tests {
     #[should_panic(expected = "a deed's definition is derived from its name and nonce")]
     fn a_deed_whose_definition_does_not_derive_is_refused() {
         let wrong = NewDeed { id: JEF, nonce: [1; 32], definition: BOB };
-        let _ = effect_at(record_address(&PROGRAM, &JEF), Vec::new(), Effect::Register { owner: [1; 32], now: NOW, expires: u64::MAX, sealed: Vec::new(), deed: Some(wrong) });
+        let mut chain = Chain::default();
+        chain.register(&JEF, ALICE, b"");
+        let held = chain.data(&record_address(&PROGRAM, &JEF)).to_vec();
+        let _ = effect_at(record_address(&PROGRAM, &JEF), held, Effect::ClaimDeed { signer: owner_tag(&JEF, &ALICE), deed: wrong });
     }
 }

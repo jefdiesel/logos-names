@@ -17,7 +17,7 @@ use names_core::{
     MODE_DEPOSIT, claim_leaf, claim_proof, claim_root, commitment, commitment_address, deposit_address,
     name_seeds, commitment_seed, owner_tag, page_address, record_address, settings_address, settings_seed,
     OwnerTag, decode_record, deed, deed_definition_address, deed_definition_seed, deed_holding_address,
-    deed_holding_seed, registration_nonce,
+    deed_holding_seed,
 };
 use deed::{NftMessage, NftState, NFT_PROGRAM};
 
@@ -197,14 +197,6 @@ fn register(id: NameId, secret: [u8; 32], now: u64, length: LengthProof) -> Inst
     }
 }
 
-/// [`register`], minting the name's deed.
-fn register_deeded(id: NameId, secret: [u8; 32], now: u64, length: LengthProof) -> Instruction {
-    let Instruction::Register { id, sealed, term, fee, treasury, now, secret, deposit, length } = register(id, secret, now, length) else {
-        unreachable!()
-    };
-    Instruction::RegisterWithDeed { id, sealed, term, fee, treasury, now, secret, deposit, length }
-}
-
 fn main() {
     let elf = names_methods::LOGOS_NAMES_ELF;
     let mut deployer = who(9);
@@ -285,12 +277,28 @@ fn main() {
     let later = T0 + MIN_COMMIT_AGE_MS;
     let length = short_list().prove(&jef).expect("a proof");
     let before = run.balance(alice.id);
-    let mut actors = run.registering(&jef, alice.id, &secret);
+    let actors = run.registering(&jef, alice.id, &secret);
     let (alices, bobs) = (owner_tag(&jef, &alice.id), owner_tag(&jef, &bob.id));
-    let nonce = registration_nonce(&promised, later);
+    run.send("alice registers with a deposit", &mut alice, register(jef, secret, later, length), actors, later);
+    assert_eq!(run.record(&jef).expect("registered").deed, None, "registering mints no deed");
+    println!("ok   a registration has no deed until its holder claims one");
+    // The claim: free, by the holder only, once.
+    let nonce = [0x41; 32];
     let definition = deed_definition_address(&program, &jef, &nonce);
+    let mut actors = vec![run.actor(record_address(&program, &jef))];
     actors.extend(run.deed_actors(&definition, Some((&jef, &nonce)), &[alices]));
-    run.send("alice registers with a deposit", &mut alice, register_deeded(jef, secret, later, length), actors, later);
+    let claim_deed = |nonce| Instruction::ClaimDeed { id: jef, nonce, length: short_list().prove(&jef).expect("a proof") };
+    let bobs_try = deed_definition_address(&program, &jef, &[0x42; 32]);
+    let mut bobs_actors = vec![run.actor(record_address(&program, &jef))];
+    bobs_actors.extend(run.deed_actors(&bobs_try, Some((&jef, &[0x42; 32])), &[bobs]));
+    run.refuse("bob cannot claim the deed of alice's name", "signer does not own this name", &mut bob, Message::Instruction(claim_deed([0x42; 32])), bobs_actors, later);
+    let before_claim = run.balance(alice.id);
+    run.send("alice claims her name's deed", &mut alice, claim_deed(nonce), actors, later);
+    assert_eq!(run.balance(alice.id), before_claim, "the claim moved none of alice's money (public fees are not charged here)");
+    let again = deed_definition_address(&program, &jef, &[0x43; 32]);
+    let mut again_actors = vec![run.actor(record_address(&program, &jef))];
+    again_actors.extend(run.deed_actors(&again, Some((&jef, &[0x43; 32])), &[alices]));
+    run.refuse("a second claim is refused", "this name already has a deed", &mut alice, Message::Instruction(claim_deed([0x43; 32])), again_actors, later);
     let record = run.record(&jef).expect("registered");
     assert_eq!(record.owner, alices);
     assert_eq!(run.balance(alice.id), before - DEPOSIT, "the deposit left alice in the same transaction");
@@ -306,7 +314,7 @@ fn main() {
         other => panic!("no deed definition: {other:?}"),
     }
     assert_eq!(run.deed_balance(&definition, &alices), Some(1), "alice's deed account holds the deed");
-    println!("ok   N1: the registration minted a 1-of-1 deed into alice's deed account");
+    println!("ok   N1: the claim minted a 1-of-1 deed into alice's deed account (nested grant)");
 
     let bobs_tag = owner_tag(&jef, &bob.id);
     let actors = run.name_actors(&jef);
@@ -457,20 +465,20 @@ fn main() {
     let held_definition = deed_definition_address(&program, &held, &nonce);
     let mut actors = vec![run.actor(record_address(&program, &held))];
     actors.extend(run.deed_actors(&held_definition, Some((&held, &nonce)), &[helds]));
-    let mint = Instruction::MintDeed { id: held, nonce, length: short_list().prove(&held).expect("a proof") };
+    let mint = Instruction::ClaimDeed { id: held, nonce, length: short_list().prove(&held).expect("a proof") };
     run.refuse(
-        "bob cannot mint the deed of alice's name",
+        "bob cannot claim the deed of alice's claimed name",
         "signer does not own this name",
         &mut bob,
         Message::Instruction(mint.clone()),
         actors.clone(),
         later,
     );
-    run.send("alice mints the deed of a name that had none", &mut alice, mint.clone(), actors.clone(), later);
+    run.send("alice claims the deed of a claimed (deedless) name", &mut alice, mint.clone(), actors.clone(), later);
     assert_eq!(run.record(&held).expect("held").deed.map(|deed| deed.definition), Some(held_definition));
     assert_eq!(run.deed_balance(&held_definition, &helds), Some(1));
-    println!("ok   the opt-in mint gave the name its deed");
-    let again = Instruction::MintDeed { id: held, nonce: [0x4e; 32], length: short_list().prove(&held).expect("a proof") };
+    println!("ok   the claim gave the name its deed");
+    let again = Instruction::ClaimDeed { id: held, nonce: [0x4e; 32], length: short_list().prove(&held).expect("a proof") };
     let mut again_actors = vec![run.actor(record_address(&program, &held))];
     let other = deed_definition_address(&program, &held, &[0x4e; 32]);
     again_actors.extend(run.deed_actors(&other, Some((&held, &[0x4e; 32])), &[helds]));
@@ -481,7 +489,7 @@ fn main() {
         .find(|leaf| leaf.tier == names_core::TIER_LOCKED)
         .expect("a locked name")
         .id;
-    let locked_mint = Instruction::MintDeed { id: locked, nonce, length: short_list().prove(&locked).expect("a proof") };
+    let locked_mint = Instruction::ClaimDeed { id: locked, nonce, length: short_list().prove(&locked).expect("a proof") };
     run.refuse(
         "a locked name has no deed",
         "so it has no deed",
@@ -523,12 +531,15 @@ fn main() {
         again_at,
     );
     let reveal_at = again_at + MIN_COMMIT_AGE_MS;
-    let nonce2 = registration_nonce(&promised2, reveal_at);
-    let definition2 = deed_definition_address(&program, &jef, &nonce2);
-    let mut actors = run.registering(&jef, alice.id, &secret2);
-    actors.extend(run.deed_actors(&definition2, Some((&jef, &nonce2)), &[alices]));
+    let actors = run.registering(&jef, alice.id, &secret2);
     let length = short_list().prove(&jef).expect("a proof");
-    run.send("alice registers jef again", &mut alice, register_deeded(jef, secret2, reveal_at, length), actors, reveal_at);
+    run.send("alice registers jef again", &mut alice, register(jef, secret2, reveal_at, length), actors, reveal_at);
+    assert_eq!(run.record(&jef).expect("registered").deed, None);
+    let nonce2 = [0x44; 32];
+    let definition2 = deed_definition_address(&program, &jef, &nonce2);
+    let mut actors = vec![run.actor(record_address(&program, &jef))];
+    actors.extend(run.deed_actors(&definition2, Some((&jef, &nonce2)), &[alices]));
+    run.send("alice claims a fresh deed", &mut alice, claim_deed(nonce2), actors, reveal_at);
     assert_ne!(definition2, definition, "a new registration, a new deed");
     assert_eq!(run.deed_balance(&definition2, &alices), Some(1));
     assert_eq!(run.supply(&definition), 0, "the old deed stays burned");
@@ -558,5 +569,14 @@ fn main() {
     let old: (u8, [u8; 32], u64, Vec<u8>, bool) = borsh::from_slice(&bytes).expect("a strict version 6 reader reads it");
     assert_eq!(old.1, owner_tag(&plain, &bob.id));
     println!("ok   an older client's plain Register still registers (no deed, version 6 record)");
+    let actors = run.name_actors(&plain);
+    run.send(
+        "bob transfers a deedless name with no deed actors, as today",
+        &mut bob,
+        Instruction::Transfer { id: plain, new_owner: owner_tag(&plain, &alice.id) },
+        actors,
+        reveal_at,
+    );
+    assert_eq!(run.record(&plain).expect("held").owner, owner_tag(&plain, &alice.id));
     println!("\nall scenarios passed");
 }
