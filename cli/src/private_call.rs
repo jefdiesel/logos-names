@@ -94,6 +94,22 @@ fn native_program() -> AccountId {
     native_token::NATIVE_TOKEN_PROGRAM_ID
 }
 
+/// Blocks of base-fee climb a private call's fee reserve is priced for: none, so every private
+/// call reserves the fee at the chain's head. An account that holds no LEZ before the call (a
+/// first bridge claim, paid from the claim's own sponsor credit) can't reserve more: the LEZ rc3
+/// wallet caps the reserve at what the payer holds before the call (`lez/wallet/src/lib.rs:1808`).
+/// With the wallet's default 5 blocks an account that already held LEZ reserved 13/8 of it, and
+/// the reserve is published, so a repeat claim was told from a first one (rfp-022
+/// `docs/privacy-m5/repeat-claimers.md`). The cost is a first claim's: a base fee that rises
+/// before inclusion makes the wallet price and prove again (up to twice), or the call is dropped.
+pub const PRIVATE_CALL_FEE_HEADROOM_BLOCKS: u64 = 0;
+
+/// The wallet's fee settings while it plans and proves a private call; put back to the defaults
+/// after each.
+fn private_call_fee_params() -> wallet::FeeParams {
+    wallet::FeeParams { headroom_blocks: Some(PRIVATE_CALL_FEE_HEADROOM_BLOCKS), ..wallet::FeeParams::default() }
+}
+
 /// `native` (or `LEZ`) or a program ID.
 fn program_of(text: &str) -> Result<AccountId> {
     match text.trim() {
@@ -263,6 +279,7 @@ impl Client {
         let wallet_mentions: Vec<AccountMention> = call.mentions.iter().map(|(_, mention, _)| mention.clone()).collect();
         let programs: ProgramCatalog = catalog.iter().cloned().collect();
         self.wallet.set_dry_run(true);
+        self.wallet.set_fee_params(private_call_fee_params());
         let (dry, mut printed) = captured(self.wallet.send_tx_with_pre_check(
             wallet_mentions,
             0,
@@ -275,6 +292,7 @@ impl Client {
         ))
         .await;
         self.wallet.set_dry_run(false);
+        self.wallet.set_fee_params(wallet::FeeParams::default());
         match dry {
             // rc3 hands the dry run's report back instead of printing it; its text is the
             // lines rc1 printed, which are read below.
@@ -549,6 +567,7 @@ impl Client {
         println!("phase: prove");
         println!("acting privately; proving it on this computer ({}), so the chain never learns your account", crate::proving_words());
         let started = std::time::Instant::now();
+        self.wallet.set_fee_params(private_call_fee_params());
         let sent = self
             .wallet
             .send_tx_with_pre_check(wallet_mentions, 0, call.message.clone(), &programs, None, AsyncDelivery::default(), call.fee_payer, move |states| {
@@ -566,6 +585,7 @@ impl Client {
                 Ok(())
             })
             .await;
+        self.wallet.set_fee_params(wallet::FeeParams::default());
         self.proved_ms = Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
         let (hash, _) = sent.map_err(|error| crate::refused_or(error, "the sequencer did not accept the transaction"))?;
         println!("phase: submit");
@@ -809,5 +829,22 @@ mod tests {
         let headroom = dry_text(printed, "headroom").and_then(|t| t.rsplit_once('(').and_then(|(_, n)| n.trim_end_matches(')').trim().parse::<u128>().ok()));
         assert_eq!(headroom, Some(9_300_135));
         assert!(contains(b"xxabcxx", b"abc") && !contains(b"xxabxx", b"abc") && !contains(b"x", b""));
+    }
+
+    /// rfp-022 `docs/privacy-m5/repeat-claimers.md`: a private call reserves the fee at the head,
+    /// whatever the account holds, and changes no other fee setting.
+    #[test]
+    fn a_private_call_prices_no_headroom_and_sets_nothing_else() {
+        assert_eq!(PRIVATE_CALL_FEE_HEADROOM_BLOCKS, 0);
+        let params = private_call_fee_params();
+        assert_eq!(params.headroom_blocks, Some(0));
+        assert_eq!(wallet::FeeParams { headroom_blocks: None, ..params }, wallet::FeeParams::default());
+        // The rc3 wallet's reserve (`lez/wallet/src/lib.rs:1808`) with no headroom: the headroom
+        // reserve is the fee at the head, so an empty and a funded payer reserve the same.
+        let rc3_reserve = |headroom: u128, balance: u128, at_head: u128| headroom.min(balance).max(at_head);
+        let at_head = 5_723_160;
+        assert_eq!(rc3_reserve(at_head, 0, at_head), rc3_reserve(at_head, 40_000_000, at_head));
+        // With the default 5 blocks they differ (the dry-run sample above: 9,300,135 at the ceiling).
+        assert_ne!(rc3_reserve(9_300_135, 0, at_head), rc3_reserve(9_300_135, 40_000_000, at_head));
     }
 }
