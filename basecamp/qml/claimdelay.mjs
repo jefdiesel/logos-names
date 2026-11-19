@@ -27,6 +27,8 @@ export const CLAIM_DELAY_DUE_LINE = "The planned claim time has come: starting t
 export const CLAIM_DELAY_READING = "Reading the claim time…"
 export const CLAIM_DELAY_ON_DETAIL = "Claim time: a random wait of 1 to 24 hours after this wallet saw the deposit arrive, chosen once and kept. Deposits of the same amount made meanwhile hide which one is yours."
 export const CLAIM_DELAY_NOW_DETAIL = "You chose to claim now, without the random wait."
+export const CLAIM_DELAY_UNREAD = "Couldn't read this claim's planned time, so the claim waits. Try again, or claim now instead."
+export const CLAIM_DELAY_RETRY_LABEL = "Try again"
 export const CLAIM_DELAY_PUBLIC_LINE = "No wait for a public account: its claim shows which deposit it is anyway, so waiting would hide nothing."
 
 export function claimDelayCan(features) {
@@ -74,20 +76,32 @@ export function claimDelayLine(atMs, nowMs, offsetMin) {
 /// Off for any reason is today's page: the Claim button as before.
 export function claimDelayState(s) {
     var st = s || {}
-    var off = function(why, detail) { return { on: false, due: false, hold: false, atMs: 0, why: why, line: "", detail: detail || "" } }
+    var off = function(why, detail) { return { on: false, due: false, hold: false, retry: false, atMs: 0, why: why, line: "", detail: detail || "" } }
+    var reading = { on: false, due: false, hold: true, retry: false, atMs: 0, why: "reading", line: CLAIM_DELAY_READING, detail: "" }
+    // "Claim now instead" pressed on this opening: the page claims now; the bridge keeps its plan
+    // until the claim is really sent (review 4, finding 3), so a refused or declined claim waits again.
+    if (st.override === true) return off("chose_now", CLAIM_DELAY_NOW_DETAIL)
+    // The bridge's features not read yet: a private receive waits for them (fails closed).
+    if (st.featuresKnown === false && st.row && isPrivate(st.row)) return reading
     if (!claimDelayCan(st.features)) return off("no_feature")
     if (!st.row) return off("unread")
     if (!isPrivate(st.row)) return off("public", CLAIM_DELAY_PUBLIC_LINE)
     var p = st.plan
-    if (p === null || p === undefined) return { on: false, due: false, hold: true, atMs: 0, why: "reading", line: CLAIM_DELAY_READING, detail: "" }
-    if (typeof p !== "object" || p.failed) return off("unread")
+    if (p === null || p === undefined) return reading
+    // The plan call failed: the same plan as receive_status last carried it, else hold with a
+    // plain line, Try again, and "Claim now instead" as the way past (review 4, finding 2).
+    if (typeof p !== "object" || p.failed) {
+        var f = st.fallback
+        if (f && typeof f === "object" && typeof f.delay === "string") p = f
+        else return { on: false, due: false, hold: true, retry: true, atMs: 0, why: "unread", line: CLAIM_DELAY_UNREAD, detail: "" }
+    }
     if (p.delay === "off") return off(p.why === "chose_now" ? "chose_now" : p.why === "public" ? "public" : "claimed",
                                       p.why === "chose_now" ? CLAIM_DELAY_NOW_DETAIL : p.why === "public" ? CLAIM_DELAY_PUBLIC_LINE : "")
     if (p.delay !== "on" || !(Number(p.claim_at) > 0)) return off("pending")
     var atMs = Number(p.claim_at) * 1000
     var now = Number(st.nowMs) || 0
     var due = now >= atMs
-    return { on: true, due: due, hold: !due, atMs: atMs, why: "on",
+    return { on: true, due: due, hold: !due, retry: false, atMs: atMs, why: "on",
              line: due ? CLAIM_DELAY_DUE_LINE : claimDelayLine(atMs, now, st.offsetMin), detail: CLAIM_DELAY_ON_DETAIL }
 }
 
@@ -99,13 +113,23 @@ export function claimDelayWatching(s) {
 }
 
 /// Whether the check starts the claim now: due, the page open and in front, nothing started or
-/// failed, the claim possible, not already started by itself on this opening, and the last check
-/// at least 30 s ago. The claim it starts is the same as pressing Claim: the person approves it.
+/// failed, the claim possible, not already started by itself on this opening. The 30 s timer paces
+/// the checks; there is no second throttle (review 4, finding 4: a tick that came while the page was
+/// still looking up the wallet's jobs must not hold the start back 30 s). The claim it starts is the
+/// same as pressing Claim: the person approves it.
 export function claimDelayAutoStart(s) {
     var st = s || {}
-    if (!claimDelayWatching(st) || !st.due || st.able === false || String(st.error || "") !== "") return false
-    var last = Number(st.lastAt) || 0
-    return last === 0 || Number(st.nowMs) - last >= CLAIM_DELAY_CHECK_MS
+    return claimDelayWatching(st) && !!st.due && st.able !== false && String(st.error || "") === ""
+}
+
+/// The page's controls for a view: the status line's own action ("now": Claim now instead,
+/// "retry": read the plan again, or ""), whether a separate "Claim now instead" shows (beside Try
+/// again), and whether the cost line and the page note show.
+export function claimDelayControls(view) {
+    var v = view || {}
+    var unread = v.why === "unread" && v.hold === true
+    var waiting = v.on === true && v.hold === true
+    return { lineAction: unread ? "retry" : waiting ? "now" : "", nowLink: unread, cost: unread || waiting, note: waiting }
 }
 
 /// The home card's line for a receive whose claim time is planned (rfp-022 docs/PRIVACY-M5.md §1):

@@ -35,7 +35,18 @@ check("off: no row", D.claimDelayState({ features, row: null, plan: null, nowMs:
 const pubState = D.claimDelayState({ features, row: pub, plan: null, nowMs: now });
 check("off: a public account, with its reason", [pubState.on, pubState.hold, pubState.why, pubState.detail], [false, false, "public", D.CLAIM_DELAY_PUBLIC_LINE]);
 check("reading: the button waits for the plan", (({ hold, line, why }) => ({ hold, line, why }))(D.claimDelayState({ features, row: priv, plan: null, nowMs: now })), { hold: true, line: D.CLAIM_DELAY_READING, why: "reading" });
-check("off: the plan call failed (today's page)", D.claimDelayState({ features, row: priv, plan: { failed: true }, nowMs: now }).hold, false);
+// Review 4, finding 2: a failed plan call fails CLOSED: the claim waits, with a plain line and Try again.
+const unread = D.claimDelayState({ features, row: priv, plan: { failed: true }, nowMs: now });
+check("failed plan call: holds, says so, offers Try again", [unread.hold, unread.retry, unread.why, unread.line], [true, true, "unread", D.CLAIM_DELAY_UNREAD]);
+check("failed plan call: receive_status's plan is used instead", D.claimDelayState({ features, row: priv, plan: { failed: true }, fallback: plan(now + 2 * H), nowMs: now, offsetMin: 0 }).line, "Claiming at about 11:00 to hide which deposit is yours.");
+check("failed plan call, a public account: the plain button", D.claimDelayState({ features, row: pub, plan: { failed: true }, nowMs: now }).hold, false);
+check("features not read yet, a private receive: waits", [D.claimDelayState({ features: [], featuresKnown: false, row: priv, plan: null, nowMs: now }).hold, D.claimDelayState({ features: [], featuresKnown: false, row: priv, plan: null, nowMs: now }).why], [true, "reading"]);
+check("features read, no claim_delay: the plain button", D.claimDelayState({ features: ["receive"], featuresKnown: true, row: priv, plan: null, nowMs: now }).hold, false);
+check("controls, unread: Try again on the line, Claim now beside it, the cost", D.claimDelayControls(unread), { lineAction: "retry", nowLink: true, cost: true, note: false });
+// Review 4, finding 3: "Claim now instead" is page-local: it lifts the hold for this opening only.
+const over = D.claimDelayState({ features, row: priv, plan: plan(now + 20 * H), override: true, nowMs: now });
+check("claim now: the page claims now, the plan kept by the bridge", [over.on, over.hold, over.why], [false, false, "chose_now"]);
+check("claim now not pressed: the same plan holds again", D.claimDelayState({ features, row: priv, plan: plan(now + 20 * H), override: false, nowMs: now }).hold, true);
 const waiting = D.claimDelayState({ features, row: priv, plan: plan(now + 2 * H), nowMs: now, offsetMin: 0 });
 check("on, waiting", [waiting.on, waiting.due, waiting.hold, waiting.line, waiting.detail === D.CLAIM_DELAY_ON_DETAIL], [true, false, true, "Claiming at about 11:00 to hide which deposit is yours.", true]);
 const due = D.claimDelayState({ features, row: priv, plan: plan(now - 1000), nowMs: now });
@@ -55,7 +66,8 @@ check("not before the time", D.claimDelayAutoStart(Object.assign({}, base, { due
 check("not twice on one opening", D.claimDelayAutoStart(Object.assign({}, base, { started: true })), false);
 check("not while something else shows (a claim under way, an error)", [D.claimDelayAutoStart(Object.assign({}, base, { stage: "checking" })), D.claimDelayAutoStart(Object.assign({}, base, { error: "x" }))], [false, false]);
 check("not when the bridge can't claim", D.claimDelayAutoStart(Object.assign({}, base, { able: false })), false);
-check("not within 30 s of the last check", [D.claimDelayAutoStart(Object.assign({}, base, { lastAt: now - 29999 })), D.claimDelayAutoStart(Object.assign({}, base, { lastAt: now - 30000 }))], [false, true]);
+// Review 4, finding 4: a check made while the page was still looking does not hold the start back.
+check("a recent check does not delay the start", [D.claimDelayAutoStart(Object.assign({}, base, { lastAt: now - 10 })), D.claimDelayAutoStart(Object.assign({}, base, { lastAt: now - 29999 }))], [true, true]);
 check("off: no check at all", D.claimDelayWatching(Object.assign({}, base, { on: false })), false);
 check("watching only while open and in front", [D.claimDelayWatching(base), D.claimDelayWatching(Object.assign({}, base, { front: false })), D.claimDelayWatching(Object.assign({}, base, { open: false }))], [true, false, false]);
 
@@ -89,6 +101,12 @@ check("card: chose now", D.claimDelayCardLine({ features, row: priv, status: { c
 check("card: old bridge", D.claimDelayCardLine({ features: ["receive"], row: priv, status: cardStatus(now + H), nowMs: now }), "");
 check("card: no status yet", D.claimDelayCardLine({ features, row: priv, status: undefined, nowMs: now }), "");
 check("card words: no forbidden words", /official|lookup/i.test(D.CLAIM_DELAY_CARD_DUE), false);
+
+// Review 4 on the page itself (Main.qml).
+check("finding 3: Claim now writes nothing to the bridge before the claim", /function pcDelayClaimNow\(\) \{[\s\S]{0,300}?pcDelayOverride = true\s*\n\s*pcStart\(\)/.test(qml) && !/now: true/.test(qml), true);
+check("finding 4: the wallet's jobs answer ticks the claim time", (qml.match(/if \(pcDeposit === id\) pcDelayTick\(\)/g) || []).length, 2);
+check("finding 2: features read after the page opened read the plan", /onBridgeFeaturesChanged: if \(walletView === "pclaim"[^\n]*pcDelayLoad\(pcDeposit\)/.test(qml), true);
+check("finding 2: a failed read keeps receive_status's plan as the fallback", /fallback: pcDeposit !== "" && receiveStatuses\[pcDeposit\]/.test(qml), true);
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);
