@@ -1272,8 +1272,11 @@ Item {
     onReceiveTokenNowChanged: {
         receiveSwitched = Logic.receiveSwitchNote(receiveTokenList, receiveToken, receiveTokenNow, receivePressed)
         receiveDenom = -1
-        if (receiveTokenNow !== "" && receiveToken !== receiveTokenNow)
-            receiveToken = receiveTokenNow
+        // The replacement becomes the choice, once this change has been told: written here, inside
+        // receiveTokenNow's own change, receiveToken (which it is made from) is a binding loop.
+        var now = receiveTokenNow
+        if (now !== "" && receiveToken !== now)
+            Qt.callLater(function() { if (receiveTokenNow === now && receiveToken !== now) receiveToken = now })
     }
     // The amount pressed on this screen (-1: none yet, so the smallest: Logic.denomOrSmallest). Never
     // remembered: opening the screen, "Make another code" or another token starts on the smallest.

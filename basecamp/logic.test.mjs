@@ -1610,6 +1610,14 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("#3 the screen: any change of the token asked for resets the amount and keeps the reason on screen",
     [/onReceiveTokenNowChanged: \{\n\s*receiveSwitched = Logic\.receiveSwitchNote\(receiveTokenList, receiveToken, receiveTokenNow, receivePressed\)\n\s*receiveDenom = -1/.test(qml3),
      /StatusLine \{ visible: text !== ""; kind: ""; text: root\.receiveSwitched \}/.test(qml3)], [true, true]);
+  {
+    // Writing receiveToken (what receiveTokenNow is made from) inside receiveTokenNow's own change
+    // is a binding loop (Qt: "Binding loop detected for property receiveTokenNow", seen in the
+    // ERC-20 renders): the replacement is written after the change, through Qt.callLater.
+    const handler = (qml3.match(/onReceiveTokenNowChanged: \{[\s\S]*?\n    \}\n/) || [""])[0];
+    check("#3 the replacement token is written after its own change (no binding loop)",
+      [/Qt\.callLater\(function\(\) \{ if \(receiveTokenNow === now && receiveToken !== now\) receiveToken = now \}\)/.test(handler), /\n\s*receiveToken = receiveTokenNow/.test(handler)], [true, false]);
+  }
   check("#3 with the reset, the old index 2 (10,000 USDT) becomes ETH's smallest, not 1 ETH", L.denomOrSmallest(paused.filter((t) => t.key === ETH)[0].denoms, -1), 0);
   // #4: the table per token; Receive is the same table.
   const depList = [{ eth_token: ETH, symbol: "ETH", decimals: 18, definition: "E", denoms: [D(2, 16), D(2, 17)] }, { eth_token: USDT, symbol: "USDT", decimals: 6, definition: "U", denoms: [D(1, 8), D(1, 9)] }];
