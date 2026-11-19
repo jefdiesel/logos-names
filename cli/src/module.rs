@@ -78,7 +78,8 @@ pub enum Request {
     /// base_fee_exec, base_fee_stor, public_transfer: {about, at_most}, private_transfer}`.
     Fee,
     /// The values an app asked for with `app_secret` (Wallet Provider SDK), from the JSON on
-    /// standard input: `{app, account, scope, context, tag, first, count}`; prints `{account,
+    /// standard input: `{app, account, scope, context, tag, first, count, scheme?}` (`scheme`: the
+    /// one the module pinned for the account, which then always wins); prints `{account,
     /// values, scheme}` (`scheme`: `phrase` or `imported`). The Basecamp module checks the app and
     /// its grant first; see `app_secret.rs`.
     AppSecret,

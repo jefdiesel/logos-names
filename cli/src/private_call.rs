@@ -594,19 +594,45 @@ impl Client {
         } else {
             bail!("write the account as Public/<id> or Private/<id>");
         };
-        let (values, scheme) = match account_secret(&self.wallet, private, id).map_err(|why| anyhow!("{written}: {why}"))? {
-            AccountSecret::Phrase(mut secret) => {
-                let values = crate::app_secret::values(&secret, id.value(), &ask);
-                secret.fill(0);
-                (values, crate::app_secret::SCHEME_PHRASE)
-            }
-            AccountSecret::Imported => {
-                let mut root = imported_root(&self.wallet).map_err(|why| anyhow!("{written}: {why}"))?;
-                let values = crate::app_secret::imported_values(&root, id.value(), &ask);
-                root.fill(0);
-                (values, crate::app_secret::SCHEME_IMPORTED)
-            }
+        // The scheme the wallet pinned for this account at its first grant, when there is one: a
+        // later change in key-tree membership never changes an account's values.
+        let pinned = request["scheme"].as_str();
+        let make = |secret: &AccountSecret| -> Result<(Vec<[u8; 32]>, &'static str)> {
+            Ok(match secret {
+                AccountSecret::Phrase(secret) => (crate::app_secret::values(secret, id.value(), &ask), crate::app_secret::SCHEME_PHRASE),
+                AccountSecret::Imported => {
+                    let mut root = imported_root(&self.wallet).map_err(|why| anyhow!("{written}: {why}"))?;
+                    let values = crate::app_secret::imported_values(&root, id.value(), &ask);
+                    root.fill(0);
+                    (values, crate::app_secret::SCHEME_IMPORTED)
+                }
+            })
         };
+        let mut secret = account_secret_pinned(&self.wallet, private, id, pinned).map_err(|why| anyhow!("{written}: {why}"))?;
+        let (values, scheme) = make(&secret)?;
+        // `both` (a grant from before the scheme was pinned: which one made its values is unknown):
+        // the other scheme's values too, for the app to match against what it stored.
+        let other = if pinned == Some("both") {
+            let other = match &secret {
+                AccountSecret::Phrase(_) => AccountSecret::Imported,
+                AccountSecret::Imported => account_secret_pinned(&self.wallet, private, id, Some(crate::app_secret::SCHEME_PHRASE)).map_err(|why| anyhow!("{written}: {why}"))?,
+            };
+            let made = make(&other)?;
+            if let AccountSecret::Phrase(mut s) = other {
+                s.fill(0);
+            }
+            Some(made)
+        } else {
+            None
+        };
+        if let AccountSecret::Phrase(s) = &mut secret {
+            s.fill(0);
+        }
+        if let Some((other_values, other_scheme)) = other {
+            println!("{}", serde_json::json!({ "account": written, "values": values.iter().map(hex::encode).collect::<Vec<_>>(), "scheme": scheme,
+                "other_values": other_values.iter().map(hex::encode).collect::<Vec<_>>(), "other_scheme": other_scheme }));
+            return Ok(());
+        }
         println!("{}", serde_json::json!({ "account": written, "values": values.iter().map(hex::encode).collect::<Vec<_>>(), "scheme": scheme }));
         Ok(())
     }
@@ -652,35 +678,34 @@ impl std::fmt::Debug for AccountSecret {
     }
 }
 
-/// Which scheme `id` follows, by key-tree membership: an id the trees hold is a phrase account
-/// even when it was also imported (the imported entries are listed first, so a first match
-/// would misread it). Another wallet's account, and shared or group accounts, are refused.
+/// The classification shared with the bridge's CLI (byte-identical copies, shared vectors).
+#[path = "scheme_classify.rs"]
+pub mod scheme_classify;
+pub use scheme_classify::LOOK_AHEAD;
+
+/// [`account_secret_pinned`] with nothing pinned.
 pub fn account_secret<C: wallet::WalletSequencerClient>(wallet: &wallet::WalletCore<C>, private: bool, id: AccountId) -> Result<AccountSecret, String> {
+    account_secret_pinned(wallet, private, id, None)
+}
+
+/// Which scheme `id` follows. `pinned` (`phrase` or `imported`, what the module recorded at the
+/// account's first values) always wins: `phrase` = values from the account's own key, wherever the
+/// wallet holds it; `imported` = values from `R` and the id. With nothing pinned (or `both`, whose
+/// first answer is this one): [`scheme_classify::classify`]. Another wallet's account, and shared
+/// or group accounts, are refused.
+pub fn account_secret_pinned<C: wallet::WalletSequencerClient>(wallet: &wallet::WalletCore<C>, private: bool, id: AccountId, pinned: Option<&str>) -> Result<AccountSecret, String> {
     let key_chain = wallet.storage().key_chain();
-    if private {
-        let mut held = false;
-        for found in key_chain.private_accounts() {
-            if AccountId::for_private_account(&found.key_chain.nullifier_public_key, &found.key_chain.viewing_public_key, found.kind) != id {
-                continue;
-            }
-            held = true;
-            // A tree account: the tree itself has this account's key chain at that index (an imported
-            // account keeps the index it had in the wallet it came from).
-            let tree = found.chain_index.as_ref().and_then(|index| key_chain.private_account_key_chain_by_index(index));
-            if let Some(tree) = tree {
-                if AccountId::for_private_account(&tree.nullifier_public_key, &tree.viewing_public_key, found.kind) == id {
-                    return Ok(AccountSecret::Phrase(tree.private_key_holder.authorization_secret_key.0));
-                }
-            }
-        }
-        if held { Ok(AccountSecret::Imported) } else { Err("this wallet has no such private account".to_owned()) }
+    let held = scheme_classify::held(key_chain, private, id).ok_or(if private { "this wallet has no such private account" } else { "this wallet has no such public account" })?;
+    match pinned {
+        Some(crate::app_secret::SCHEME_PHRASE) => return Ok(AccountSecret::Phrase(held.own)),
+        Some(crate::app_secret::SCHEME_IMPORTED) => return Ok(AccountSecret::Imported),
+        Some("both") | None => {}
+        Some(other) => return Err(format!("{other:?} is not a scheme this tool knows")),
+    }
+    if held.in_tree || scheme_classify::phrase_gives(key_chain, private, id, held.kind.as_ref(), LOOK_AHEAD) {
+        Ok(AccountSecret::Phrase(held.own))
     } else {
-        let key = key_chain.pub_account_signing_key(id).ok_or("this wallet has no such public account")?;
-        if key_chain.public_account_ids().any(|(found, index)| found == id && index.is_some()) {
-            Ok(AccountSecret::Phrase(*key.value()))
-        } else {
-            Ok(AccountSecret::Imported)
-        }
+        Ok(AccountSecret::Imported)
     }
 }
 
@@ -776,6 +801,152 @@ mod tests {
         original.storage_mut().key_chain_mut().add_imported_private_account(chain, index, account);
         assert_eq!(account_secret(&original, true, other_private), Ok(AccountSecret::Imported));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Review 2026-11-18 (imported-secrets): an account's values never change with key-tree
+    /// membership. A key of this phrase imported into a restored wallet whose tree doesn't reach it
+    /// yet is a phrase account (values from its own key, as in the wallet it came from), public and
+    /// private; a pinned scheme holds whatever the tree does later.
+    #[test]
+    fn a_same_phrase_key_stays_a_phrase_account_and_a_pinned_scheme_holds() {
+        use sequencer_service_rpc::SequencerClient;
+        use wallet::WalletCore;
+        let root = std::env::temp_dir().join(format!("names-pin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let open = |name: &str| {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("wallet_config.json"), serde_json::to_vec(&wallet::config::WalletConfig::default()).unwrap()).unwrap();
+            WalletCore::<SequencerClient>::new_init_storage(dir.join("wallet_config.json"), dir.join("storage.json"), None, "").unwrap()
+        };
+        let ask = crate::app_secret::Ask::new("lez_bridge", "RFP022/exit", vec![9, 9], "RFP022/ek", 0, 2).unwrap();
+        let values_of = |w: &WalletCore<SequencerClient>, private: bool, id: AccountId, pinned: Option<&str>| match account_secret_pinned(w, private, id, pinned).unwrap() {
+            AccountSecret::Phrase(secret) => (crate::app_secret::SCHEME_PHRASE, crate::app_secret::values(&secret, id.value(), &ask)),
+            AccountSecret::Imported => (crate::app_secret::SCHEME_IMPORTED, crate::app_secret::imported_values(&imported_root(w).unwrap(), id.value(), &ask)),
+        };
+        let (mut original, phrase) = open("original");
+        let publics: Vec<AccountId> = (0..4).map(|_| original.create_new_account_public(None).0).collect();
+        let privates: Vec<AccountId> = (0..3).map(|_| original.create_new_account_private(None).0).collect();
+        let (far_public, far_private) = (publics[3], privates[2]);
+        let want_public = values_of(&original, false, far_public, None);
+        let want_private = values_of(&original, true, far_private, None);
+        assert_eq!(want_public.0, crate::app_secret::SCHEME_PHRASE);
+
+        // A restore that regenerated fewer accounts, then the far ones brought back by import.
+        let (mut restored, _) = open("restored");
+        restored.restore_storage(&phrase);
+        restored.create_new_account_public(None);
+        let key = original.storage().key_chain().pub_account_signing_key(far_public).unwrap().clone();
+        restored.storage_mut().key_chain_mut().add_imported_public_account(key);
+        let found = original.storage().key_chain().private_account(far_private).unwrap();
+        let (chain, index, account) = (found.key_chain.clone(), found.chain_index.clone(), found.account.clone());
+        restored.storage_mut().key_chain_mut().add_imported_private_account(chain, index, account);
+        assert_eq!(values_of(&restored, false, far_public, None), want_public, "a same-phrase public key imported: still its phrase values");
+        assert_eq!(values_of(&restored, true, far_private, None), want_private, "a same-phrase private key imported: still its phrase values");
+
+        // A foreign key pinned `imported` keeps its values after `New account` reaches any index,
+        // and a pin of `phrase` gives the own-key values.
+        let foreign = lee::PrivateKey::try_new([5u8; 32]).unwrap();
+        let foreign_id = AccountId::from(&lee::PublicKey::new_from_private_key(&foreign));
+        restored.storage_mut().key_chain_mut().add_imported_public_account(foreign.clone());
+        let pinned = values_of(&restored, false, foreign_id, Some(crate::app_secret::SCHEME_IMPORTED));
+        assert_eq!(pinned, values_of(&restored, false, foreign_id, None));
+        for _ in 0..6 {
+            restored.create_new_account_public(None);
+        }
+        assert_eq!(values_of(&restored, false, far_public, Some(crate::app_secret::SCHEME_PHRASE)), want_public);
+        assert_eq!(values_of(&restored, false, foreign_id, Some(crate::app_secret::SCHEME_IMPORTED)), pinned);
+        assert_eq!(values_of(&restored, false, foreign_id, Some(crate::app_secret::SCHEME_PHRASE)).1, crate::app_secret::values(foreign.value(), foreign_id.value(), &ask));
+        assert!(account_secret_pinned(&restored, false, foreign_id, Some("other")).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The shared classification (`scheme_classify.rs`, byte-identical in the bridge's CLI) against
+    /// the shared vectors `basecamp-module/rust-lib/testdata/scheme-classify-v1.json` (copied to the
+    /// bridge as `lez-bridge/client/tests/vectors/scheme-classify-v1.json`). With
+    /// `NAMES_WRITE_CLASSIFY_VECTORS=1` the test writes the file instead (the ids LEZ gives).
+    #[test]
+    fn the_shared_classification_matches_its_vectors() {
+        use sequencer_service_rpc::SequencerClient;
+        use wallet::WalletCore;
+        const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../basecamp-module/rust-lib/testdata/scheme-classify-v1.json");
+        let dir = std::env::temp_dir().join(format!("names-classify-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("wallet_config.json"), serde_json::to_vec(&wallet::config::WalletConfig::default()).unwrap()).unwrap();
+        let (mut w, _) = WalletCore::<SequencerClient>::new_init_storage(dir.join("wallet_config.json"), dir.join("storage.json"), None, "").unwrap();
+        w.restore_storage(&PHRASE.parse().unwrap());
+        // The ids the trees give, in order, from a fresh restore.
+        let mut copy = w.storage().key_chain().clone();
+        let public: Vec<String> = (0..30).map(|_| copy.generate_new_public_transaction_private_key(None).0.to_string()).collect();
+        let private: Vec<String> = (0..30).map(|_| copy.generate_new_privacy_preserving_transaction_key_chain(None).0.to_string()).collect();
+        // Cases: `made` accounts of the kind created, then the key of generation `nth` (1-based,
+        // from the restore) imported; or a foreign key.
+        let case = |private_kind: bool, made: usize, nth: usize| -> String {
+            let (mut w2, _) = {
+                let d = dir.join(format!("case-{private_kind}-{made}-{nth}"));
+                std::fs::create_dir_all(&d).unwrap();
+                std::fs::write(d.join("wallet_config.json"), serde_json::to_vec(&wallet::config::WalletConfig::default()).unwrap()).unwrap();
+                WalletCore::<SequencerClient>::new_init_storage(d.join("wallet_config.json"), d.join("storage.json"), None, "").unwrap()
+            };
+            w2.restore_storage(&PHRASE.parse().unwrap());
+            let mut trees = w2.storage().key_chain().clone();
+            let id = if private_kind {
+                let mut last = None;
+                for _ in 0..nth {
+                    last = Some(trees.generate_new_privacy_preserving_transaction_key_chain(None).0);
+                }
+                let id = last.unwrap();
+                let found = trees.private_account(id).unwrap();
+                let (chain, account) = (found.key_chain.clone(), found.account.clone());
+                for _ in 0..made {
+                    w2.create_new_account_private(None);
+                }
+                w2.storage_mut().key_chain_mut().add_imported_private_account(chain, None, account);
+                id
+            } else {
+                let mut last = None;
+                for _ in 0..nth {
+                    last = Some(trees.generate_new_public_transaction_private_key(None).0);
+                }
+                let id = last.unwrap();
+                let key = trees.pub_account_signing_key(id).unwrap().clone();
+                for _ in 0..made {
+                    w2.create_new_account_public(None);
+                }
+                w2.storage_mut().key_chain_mut().add_imported_public_account(key);
+                id
+            };
+            scheme_classify::classify(w2.storage().key_chain(), private_kind, id).unwrap().0.to_owned()
+        };
+        let cases: Vec<serde_json::Value> = [(false, 2, 7), (false, 2, 30), (false, 9, 7), (true, 1, 4), (true, 1, 25), (true, 3, 3)]
+            .iter()
+            .map(|&(p, made, nth)| serde_json::json!({ "private": p, "made": made, "nth": nth, "scheme": case(p, made, nth) }))
+            .collect();
+        // A key no tree of this phrase gives.
+        let foreign = lee::PrivateKey::try_new([5u8; 32]).unwrap();
+        let foreign_id = AccountId::from(&lee::PublicKey::new_from_private_key(&foreign));
+        w.storage_mut().key_chain_mut().add_imported_public_account(foreign);
+        let foreign_scheme = scheme_classify::classify(w.storage().key_chain(), false, foreign_id).unwrap().0;
+        let doc = serde_json::json!({
+            "spec": "cli/src/scheme_classify.rs (names) = lez-bridge/cli/src/scheme_classify.rs (bridge); look-ahead 20",
+            "phrase": PHRASE, "look_ahead": scheme_classify::LOOK_AHEAD, "public": public, "private": private, "cases": cases,
+            "foreign_public_key_7": { "secret": "0x05 x 32", "scheme": foreign_scheme },
+            // Both copies of the shared file hash to this (each repository's test checks its own).
+            "classify_sha256": hex::encode(Sha256::digest(include_str!("scheme_classify.rs").as_bytes())),
+        });
+        if std::env::var_os("NAMES_WRITE_CLASSIFY_VECTORS").is_some() {
+            std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap() + "\n").unwrap();
+        }
+        let want: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(doc, want, "the shared classification or LEZ's ids changed");
+        // What the cases mean.
+        let scheme_of = |i: usize| want["cases"][i]["scheme"].as_str().unwrap().to_owned();
+        assert_eq!((scheme_of(0), scheme_of(1), scheme_of(2)), ("phrase".into(), "imported".into(), "phrase".into()));
+        assert_eq!((scheme_of(3), scheme_of(4), scheme_of(5)), ("phrase".into(), "imported".into(), "phrase".into()));
+        assert_eq!(foreign_scheme, "imported");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// `R` from a wallet restored from the public BIP-39 test phrase is the Python generator's
