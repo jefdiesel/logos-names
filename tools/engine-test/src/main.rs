@@ -403,6 +403,16 @@ fn main() {
     println!("ok   N2: alice cannot use her old deed account through the NFT program either");
     assert_eq!(run.deed_balance(&definition, &bobs), Some(1), "the deed stayed with bob");
 
+    // Back to an earlier holder: alice's deed account is an emptied master of the same
+    // definition, which the NFT program takes again (InitializeHolding is a no-op there).
+    let mut back = run.name_actors(&jef);
+    back.extend(run.deed_actors(&definition, None, &[bobs, alices]));
+    run.send("bob hands the name back to alice", &mut bob, Instruction::Transfer { id: jef, new_owner: alices }, back.clone(), later);
+    assert_eq!(run.deed_balance(&definition, &alices), Some(1), "alice's old deed account holds it again");
+    assert_eq!(run.deed_balance(&definition, &bobs), Some(0));
+    run.send("and alice gives it to bob again", &mut alice, Instruction::Transfer { id: jef, new_owner: bobs }, back, later);
+    assert_eq!(run.deed_balance(&definition, &bobs), Some(1), "and bob's again");
+    println!("ok   A -> B -> A -> B: the deed lands again in an emptied deed account each time");
     let before = run.balance(bob.id);
     let mut actors = actors;
     actors.extend(run.deed_actors(&definition, None, &[bobs]));

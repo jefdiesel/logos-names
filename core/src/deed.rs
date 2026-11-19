@@ -1,4 +1,5 @@
-//! Deeds: each name of the normal tier has a 1-of-1 NFT of Logos's NFT program
+//! Deeds: a name of the normal tier can have a 1-of-1 NFT of Logos's NFT program, which its
+//! holder claims for free if they want it (`Instruction::ClaimDeed`); registering mints none
 //! (`logos-blockchain/lez-programs`, `programs/nft`, branch `refactor/lez-v0.4.x`
 //! at `dea23c22a47c728c9b6f925d0ef1677f99613f09`, used unmodified).
 //!

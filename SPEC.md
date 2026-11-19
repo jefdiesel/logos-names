@@ -1117,7 +1117,10 @@ stopped after 45 minutes, and finished jobs are forgotten after a week.
 ## 13. Versioning
 
 The `version` byte in each structure and the `v5` in each derivation string
-identify this version. A future version uses new strings, so its identifiers
+identify this version. Since deeds (§8.6) the registry writes version 7 in settings,
+pages, commitments and primary names (same layouts as version 6), and in a record that
+has a deed (which adds `deed` at the end); a record without a deed is still written as
+version 6. Readers must accept 6 and 7 and read a record's `deed` only at version 7. A future version uses new strings, so its identifiers
 and accounts never collide with this one's, and a client can support both.
 
 Record version 6 and the LEZ 0.4 transaction format keep every `v5` string, on
