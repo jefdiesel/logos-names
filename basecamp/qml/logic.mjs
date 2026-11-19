@@ -1141,6 +1141,66 @@ export function relayedSheet(sheet) {
              says: s.app_says ? clean(s.app_says) : "", why: list(s.why), refused: s.refused === true, hash: clean(s.hash) }
 }
 
+/// The burn a relayed call's sheet decoded (`sheet.burn`, provider_public.rs `burn_sheet`), or null.
+function decodedBurn(request) {
+    return request && request.kind === "relayed_call" && request.sheet && request.sheet.burn && typeof request.sheet.burn === "object" ? request.sheet.burn : null
+}
+
+/// Whether a decoded burn is the one this app's own Bridge to Ethereum screen shows: asked by the
+/// LEZ Bridge, drawn inline on that screen (`here`: {inline, view, focus}), and for the send-back
+/// on it, matched by its exit commitment (the LEZ Bridge names a send-back `sb-` and the first 16
+/// hex digits of E). Only there were its address and words read back and ticked at step 2.
+export function burnIsOwnSendBack(request, here) {
+    var burn = decodedBurn(request)
+    var h = here || {}
+    if (!burn || request.app !== "lez_bridge" || h.inline !== true || h.view !== "sendback")
+        return false
+    var e = String(burn.exit || "").toLowerCase().replace(/^0x/, "")
+    return /^[0-9a-f]{64}$/.test(e) && h.focus === "sb-" + e.substr(0, 16)
+}
+
+/// Whether the sheet's request needs the second, deliberate tick. An app whose publisher check
+/// failed may be a fake, whatever it asks (M-2). A decoded burn that isn't refused: only when it
+/// isn't this app's own send-back (`ownSendBack`, burnIsOwnSendBack): another app's burn shows no
+/// address the wallet checked. A call, private call, relayed call or declaration: when its sheet
+/// warns; a token transfer: when it warns.
+export function requestRisky(request, publisherFailed, ownSendBack) {
+    if (!request)
+        return false
+    if (publisherFailed)
+        return true
+    if (decodedBurn(request) && request.sheet.refused !== true)
+        return ownSendBack !== true
+    if (request.kind === "private_call" || request.kind === "relayed_call" || request.kind === "programs")
+        return !!request.sheet && (request.sheet.warnings || []).length > 0
+    var token = request.kind === "transfer" && request.asset_kind === "token"
+    return (request.kind === "call" || token) && (request.warnings || []).length > 0
+}
+
+/// Where a decoded burn goes, as far as the wallet can say: who asks, the bridge (label and
+/// program), the amount out of which account, and that the Ethereum address is sealed in the exit
+/// commitment (the call carries only E), so the wallet can neither show it nor check it. Each line
+/// cleaned. [] when it isn't a decoded burn.
+export function burnDestination(request) {
+    var burn = decodedBurn(request)
+    if (!burn)
+        return []
+    var e = clean(burn.exit)
+    var exitShort = e.length > 14 ? e.substr(0, 10) + "…" + e.substr(e.length - 4) : e
+    return [
+        "Asked by " + clean(request.app) + ".",
+        "Bridge: " + clean(burn.bridge_label || idShort(burn.bridge)) + " (" + clean(burn.bridge) + ").",
+        "Amount: " + clean(burn.amount_text) + " " + clean(burn.symbol) + ", out of your account " + idShort(clean(request.account)) + ".",
+        "Ethereum address: not in the call. It is sealed in the exit commitment " + exitShort + ", which the wallet can't open, so the wallet can't show or check it.",
+    ]
+}
+
+/// The tick of a burn that isn't this app's own send-back.
+export function burnTickText(request) {
+    var app = request && request.app === "lez_bridge" ? "the LEZ Bridge" : clean(request ? request.app : "")
+    return "The wallet can't check the Ethereum address. Tick only if you started this send-back in " + app + " and checked the address there; the burn can't be undone."
+}
+
 
 // ── Claim a bridge deposit (the lez_bridge module, called from names_ui) ──
 // The module's calls and replies: rfp-022 modules/NAMES-EMBED.md, Part A.

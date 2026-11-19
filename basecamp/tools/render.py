@@ -897,6 +897,19 @@ for _name, _js, _mock in [
     SCENARIOS[_name] = _js
     MOCKS[_name] = _mock
 
+# A decoded burn that is NOT this app's own send-back: another app's (to bridge v7 here), and the
+# LEZ Bridge's while Names is on its wallet page. Each needs the tick and shows where it goes.
+SB_BURN_SHEET_BRIDGE = SB_BURN_SHEET.replace('"bridge_label": "bridge v4"', '"bridge": "%s", "bridge_label": "bridge v4"' % V4)
+SB_BURN_SHEET_OTHER = (SB_BURN_SHEET_BRIDGE.replace('"app": "lez_bridge"', '"app": "other_app"').replace("lez_bridge asks your wallet", "other_app asks your wallet")
+                       .replace("bridge v4", "bridge v7").replace(V4, "CdijfhGnf1NjyCvYTZcGijQZzZ6soNJQ75Piex1ZTM93"))
+for _name, _js in [
+    ("approve-burn-other-app", SB_CARD % ('root.againAfter(150, function() { %s })' % SB_BURN_SHEET_OTHER)),
+    ("approve-burn-other-app-ticked", SB_CARD % ('root.againAfter(150, function() { %s; root.appChosenFor = "r9"; root.appUnderstood = true })' % SB_BURN_SHEET_OTHER)),
+    ("approve-burn-bridge-away", SB_CARD % ('root.againAfter(150, function() { %s })' % SB_BURN_SHEET_BRIDGE)),
+]:
+    SCENARIOS[_name] = _js
+    MOCKS[_name] = sb_mock()
+
 # Imported accounts (rfp-022 IMPORTED-ACCOUNTS-DESIGN.md): the first secret card for one, the
 # receive code and the send-back with the bridge's account_notice (module texts, word for word).
 _IMPORTED_LINE = ("This account was imported. Its bridge secrets come from this wallet's recovery phrase, so the phrase can finish a withdrawal; "
@@ -1270,6 +1283,7 @@ def _ago(text):
     return _re.sub(r'"@AGO:(\d+)@"', lambda m: str(int(_time.time() * 1000) - int(m.group(1)) * 1000), text)
 HEIGHTS = {name: 2100 for name in ("claim-private-approve", "claim-private-simulating", "claim-private-check-failed", "sendback-private-approve")}
 HEIGHTS.update({"card-private-proving": 1500, "card-arriving-private": 1500})
+HEIGHTS.update({name: 1500 for name in ("approve-burn-other-app", "approve-burn-other-app-ticked", "approve-burn-bridge-away")})
 HEIGHTS.update({name: 1700 for name, _j, _m in WALLET_NEXT if name.startswith("sendback-address") or name.startswith("sendback-approve")})
 HEIGHTS.update({name: 1800 for name, _j, _m in WALLET_NEXT if name.startswith("card-remove")})
 

@@ -6921,9 +6921,9 @@ Item {
         // unreadable.
         if (request.kind === "programs")
             return "Allow " + (request.app === "lez_bridge" ? "the LEZ Bridge's" : request.app + "'s") + " programs to ask this wallet to sign claims. Only allow programs you trust."
-        // A burn the wallet decoded: its one warning (it can't be undone).
-        if (request.kind === "relayed_call" && request.sheet && request.sheet.burn && (request.sheet.warnings || []).length > 0)
-            return String(request.sheet.warnings[0])
+        // A burn the wallet decoded that isn't this app's own send-back: the address can't be checked.
+        if (request.kind === "relayed_call" && request.sheet && request.sheet.burn && request.sheet.refused !== true)
+            return Logic.burnTickText(request)
         return "The wallet can't decode this call; it shows only its hash. Tick to approve it anyway, if you trust " + (request.app === "lez_bridge" ? "the bridge" : request.app) + "."
     }
     property bool appBusy: false          // an answer is on its way to the module
@@ -7036,18 +7036,16 @@ Item {
     }
 
     /// A program call, or a token transfer, with warnings: its program's
-    /// source isn't verified, it goes to the Names registry, the token has no name.
+    /// source isn't verified, it goes to the Names registry, the token has no name. A burn the
+    /// wallet decoded needs the tick unless it is this app's own send-back (Logic.requestRisky).
     function appRequestRisky(request) {
-        // An app whose publisher check failed may be a fake, whatever it asks (M-2).
-        if (appPublisherFailed(request))
-            return true
-        // A burn the wallet decoded (it says what it burns): its one warning is a line, not a tick.
-        if (request.kind === "relayed_call" && request.sheet && request.sheet.burn && request.sheet.refused !== true)
-            return false
-        // A declaration of a program the Program Registry doesn't vouch for needs the tick too.
-        if (request.kind === "private_call" || request.kind === "relayed_call" || request.kind === "programs")
-            return !!request.sheet && (request.sheet.warnings || []).length > 0
-        return (request.kind === "call" || appIsToken(request)) && ((request.warnings || []).length > 0)
+        return Logic.requestRisky(request, appPublisherFailed(request), appBurnOwn(request))
+    }
+
+    /// Whether a decoded burn is the one this app's own Bridge to Ethereum screen is showing, for
+    /// the send-back on it (whose address and words were read back and ticked at step 2).
+    function appBurnOwn(request) {
+        return Logic.burnIsOwnSendBack(request, { inline: appInline, view: walletView, focus: sbFocus })
     }
 
     /// Whether the app claims a publisher that doesn't vouch for it.
@@ -7926,6 +7924,12 @@ Item {
             wrapMode: Text.WordWrap
         }
         Hint { visible: root.appSheetCompact; color: root.ink; textFormat: Text.PlainText; text: root.appSheetLine(sheetBody.request) }
+        // Another app's decoded burn (or the LEZ Bridge's away from Bridge to Ethereum): where it
+        // goes, as far as the wallet can say, before its tick.
+        Repeater {
+            model: root.appSheetCompact && sheetBody.request !== null && !root.appBurnOwn(sheetBody.request) ? Logic.burnDestination(sheetBody.request) : []
+            Hint { required property var modelData; color: root.ink; textFormat: Text.PlainText; text: modelData }
+        }
         Hint { visible: root.appSheetCompact && root.publisherChecking(sheetBody.request); font.pixelSize: root.px(15); text: root.publisherShown(sheetBody.request) !== null ? root.publisherShown(sheetBody.request).text : "" }
         Tick {
             visible: root.appSheetCompact && root.appSheetWarning(sheetBody.request) !== ""
