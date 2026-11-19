@@ -6855,6 +6855,7 @@ Item {
     property var nftJob: null             // {id, kind, label, started, proves, asking}
     property string nftResult: ""
     property string nftResultKind: ""
+    property string nftResultCopy: ""     // the account an init made ready, to give the sender
     property var nftAppRequests: []       // pending_nft_requests
     property var nftListTicks: ({})       // an nft_list request's ticked accounts
     property string nftSendFor: ""        // "<program>|<account>" whose Send form is open
@@ -6942,7 +6943,7 @@ Item {
             var shown = Object.assign({}, sheet, { reply: value, digest: reply.digest || "", warnings: reply.warnings || [], label: reply.program_label || null, asking: false })
             nftSheet = shown
             var ticks = Object.assign({}, nftSheetTicks)
-            if (value.proven && !ticks.payer)
+            if (!ticks.payer)
                 ticks.payer = Nft.defaultPayer(value, sheet.from)
             nftSheetTicks = ticks
             nftSheetStatus = value.refusal ? sentence(value.refusal) : ""
@@ -6982,7 +6983,7 @@ Item {
         var model = nftSheetModel()
         if (s === null || model === null || model.refusal || Nft.approveWhy(model, nftSheetTicks) !== "" || nftJob !== null)
             return
-        var payer = model.proven ? nftSheetTicks.payer : ""
+        var payer = nftSheetTicks.payer || ""
         var label = s.title
         nftSheetStatus = "Checking…"
         nftSheetKind = "working"
@@ -6992,6 +6993,7 @@ Item {
             nftJob = job
             nftSheet = null
             nftResult = ""
+            nftResultCopy = ""
             clockTick = Date.now()
         }
         var failed = function(message) {
@@ -7012,22 +7014,12 @@ Item {
             nftRejectRequest(s.request.id)
     }
 
+    /// The credits waiting for private accounts: through the sheet like every action, so the
+    /// private payer is chosen there (never picked by the wallet).
     function nftReceive(program) {
         if (nftJob !== null)
             return
-        var payers = (nftRead ? nftRead.programs : []).reduce(function(all, p) { return all.concat((p.holdings || []).filter(function(r) { return r.account_kind === "private" }).map(function(r) { return r.account })) }, [])
-        if (payers.length === 0) {
-            nftResult = "Receiving is a private transaction, paid by one of your private accounts, and this wallet has none."
-            nftResultKind = "problem"
-            return
-        }
-        var payer = nftSheetTicks.payer || payers[0]
-        nftResult = "Checking…"
-        nftResultKind = "working"
-        askLater("nft_receive", [program, payer], function(value) {
-            nftJob = { id: value.id, kind: "nft_receive", label: "Receiving NFTs", started: Date.now(), proves: true, asking: false }
-            nftResult = ""
-        }, function(message) { nftResult = sentence(message); nftResultKind = Logic.noticeKind(nftResult, true) })
+        nftOpenSheet("Receiving the NFTs waiting for your private accounts", program, { action: "receive" }, null, null)
     }
 
     function nftCheckJob() {
@@ -7043,6 +7035,7 @@ Item {
             var ended = Nft.jobEnded(job, value)
             nftResult = sentence(ended.text)
             nftResultKind = ended.kind
+            nftResultCopy = ended.copy || ""
             loadNfts()
         }, function() { job.asking = false })
     }
@@ -9889,11 +9882,11 @@ Item {
                             visible: nftSheetBody.model !== null
                             text: nftSheetBody.model === null ? "" : nftSheetBody.model.proven
                                 ? "Fee: about " + root.grouped(nftSheetBody.model.fee.about || "0") + ", up to " + root.grouped(nftSheetBody.model.fee.at_most || "0") + " held while it runs, paid inside the proof by the private account you choose (in our test runs it was not named on the chain). Proving takes 7-12 minutes on this computer."
-                                : "Fee: paid by the sending account, about 30,000 gas. One block."
+                                : "Fee: about " + root.grouped(nftSheetBody.model.fee.about || "0") + ", at most " + root.grouped(nftSheetBody.model.fee.at_most || "0") + ", paid by the public account you choose. One block (about 30 seconds)."
                         }
-                        Part { visible: nftSheetBody.model !== null && nftSheetBody.model.proven; text: "Which private account pays" }
+                        Part { visible: nftSheetBody.model !== null && nftSheetBody.model.payers.length > 0; text: nftSheetBody.model !== null && nftSheetBody.model.proven ? "Which private account pays" : "Which account pays" }
                         Flow {
-                            visible: nftSheetBody.model !== null && nftSheetBody.model.proven
+                            visible: nftSheetBody.model !== null && nftSheetBody.model.payers.length > 0
                             Layout.fillWidth: true
                             spacing: 8
                             Repeater {
@@ -9921,7 +9914,7 @@ Item {
                 Item { visible: root.nftSheet !== null; Layout.preferredHeight: 6 }
                 // A job under way, and the last result: right under the sheet that started it.
                 StatusLine { visible: root.nftJob !== null; kind: "waiting"; text: root.nftJob !== null ? Nft.jobLine(root.nftJob, root.clockTick) : ""; actionLabel: "Check now"; onAct: root.nftCheckJob() }
-                StatusLine { visible: root.nftResult !== ""; kind: root.nftResultKind; text: root.nftResult }
+                StatusLine { visible: root.nftResult !== ""; kind: root.nftResultKind; text: root.nftResult; actionLabel: root.nftResultCopy !== "" ? "Copy the account" : ""; onAct: root.copy(root.nftResultCopy, "account") }
 
                 Part { visible: root.namesNet === "0.4"; text: "Collections" }
                 Hint { visible: root.namesNet === "0.4" && root.nftRead !== null && root.nftCollections.length === 0; text: "Your accounts hold no NFT under the listed programs." }
@@ -10030,6 +10023,20 @@ Item {
                         }
                     }
                 }
+
+                // Holdings ready to receive: what to give a sender.
+                Part { visible: Nft.readyRows(root.nftRead ? root.nftRead.programs : []).length > 0; text: "Ready to receive" }
+                Repeater {
+                    model: Nft.readyRows(root.nftRead ? root.nftRead.programs : [])
+                    RowLayout {
+                        required property var modelData
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Text { Layout.fillWidth: true; text: Nft.accountShown(modelData.account) + " takes " + modelData.title; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); wrapMode: Text.Wrap }
+                        Link { text: "Copy the account"; onPressed: root.copy(modelData.account, "account") }
+                    }
+                }
+                Hint { visible: Nft.readyRows(root.nftRead ? root.nftRead.programs : []).some(function(r) { return r.isPrivate }); text: "A private account takes NFTs from your own accounts. For someone else to send to it they need its receiving keys, which this page doesn't show yet: give them a public account instead." }
 
                 // Credits waiting for this wallet's private accounts.
                 Repeater {

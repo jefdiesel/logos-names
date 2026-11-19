@@ -283,6 +283,20 @@ impl Client {
                 Ok(())
             }
             NftCommand::Init { definition, account, new, fee_payer } => {
+                // Everything that can refuse is checked before a new account is made, so a
+                // refused try leaves no stray account behind.
+                if new.is_some() {
+                    self.nft_definition(program, definition).await.map_err(plain)?;
+                    match (new, fee_payer) {
+                        (Some(Kind::Private), Some(payer)) => drop(self.nft_check_payer(payer).await?),
+                        (Some(Kind::Private), None) => bail!("a new private account is made ready in a private transaction: give --fee-payer, one of this wallet's private accounts that holds the fee reserve"),
+                        (Some(Kind::Public), Some(payer)) if self.is_private(payer) || self.wallet.get_account_public_signing_key(payer).is_none() => {
+                            bail!("a public transaction's fee is paid by a public account of this wallet")
+                        }
+                        (Some(Kind::Public), None) => bail!("a new public account holds nothing to pay its fee with: give --fee-payer, a public account of this wallet with funds"),
+                        _ => {}
+                    }
+                }
                 let holder = match (account, new) {
                     (Some(account), _) => account,
                     (None, Some(Kind::Public)) => self.wallet.create_new_account_public(None).0,
@@ -743,16 +757,43 @@ impl Client {
                 }
                 named.push(if proven { "The collection is public; the private account is not named." } else { "The account, the collection and the burn are public." });
             }
+            "receive" => {
+                proven = true;
+                let waiting = self
+                    .wallet
+                    .owned_pending_messages()
+                    .await
+                    .context("cannot read pending messages")?
+                    .into_iter()
+                    .filter(|message| message.body.to.program_account_id == program && nft_wire::credit_of(&message.body.message).is_some())
+                    .count();
+                if waiting == 0 {
+                    refusal = Some("Nothing is waiting for your private accounts.".to_owned());
+                }
+                lines.push(format!("Takes the {waiting} NFT(s) waiting for your private accounts: one private transaction each, each with this fee."));
+                named.push("Expected: like the other private transactions, no account named (receiving an NFT was not observed in Job A).");
+            }
             other => bail!("no NFT action called {other}"),
         }
-        let reserve = self.nft_reserve().await?;
+        // Who can pay: a proven action from a private account holding the reserve; a public one
+        // from a public account of this wallet holding the most it may cost (NFT messages took
+        // 28-37k gas in Job A; priced here at 40k).
+        let reserve = if proven {
+            self.nft_reserve().await?
+        } else {
+            let quote = self.wallet.client().get_fee_state().await?;
+            crate::fees::public(&quote, 40_000, gas_limit_for(40_000), 128)
+        };
         let mut payers = Vec::new();
-        if proven {
-            let privates: Vec<AccountId> = self.wallet.storage().key_chain().private_account_ids().map(|(id, _)| id).collect();
-            for payer in privates {
-                let held = self.spendable(payer).await.unwrap_or(0);
-                payers.push(serde_json::json!({ "account": text(true, payer), "balance": held.to_string(), "enough": held >= reserve.at_most }));
-            }
+        let key_chain = self.wallet.storage().key_chain();
+        let candidates: Vec<(bool, AccountId)> = if proven {
+            key_chain.private_account_ids().map(|(id, _)| (true, id)).collect()
+        } else {
+            key_chain.public_account_ids().map(|(id, _)| (false, id)).collect()
+        };
+        for (private, payer) in candidates {
+            let held = self.spendable(payer).await.unwrap_or(0);
+            payers.push(serde_json::json!({ "account": text(private, payer), "balance": held.to_string(), "enough": held >= reserve.at_most }));
         }
         let collection = match collection {
             Some(Ok(found)) => Some(found),

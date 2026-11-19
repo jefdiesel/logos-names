@@ -1300,10 +1300,13 @@ NFT_READ = [{"program": NFT_P, "label": "Test chain NFTs", "registry": {"registr
 NFT_PAYERS = [{"account": "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", "balance": "250000000", "enough": True},
               {"account": "Private/2RHZhw9h534Zr3eq2RGhQete2Hh667foECzXPmSkGni2", "balance": "1000000", "enough": False}]
 NFT_LABEL_WARN = ["The Program Registry isn't installed, so who wrote this NFT program and whether its source is verified is unknown."]
+NFT_PUBLIC_PAYERS = [{"account": "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "balance": "1250000", "enough": True},
+                     {"account": "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", "balance": "0", "enough": False}]
 def nft_sheet(action, proven, public, private, lines, refusal=None):
     return {"action": action, "from": "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z" if proven else "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "collection": NFT_COLL,
             "lines": lines, "public": public, "private": private, "proven": proven,
-            "fee": {"about": "1601600", "at_most": "5070616", "inside_proof": proven}, "payers": NFT_PAYERS if proven else [], "refusal": refusal}
+            "fee": {"about": "1601600", "at_most": "5070616", "inside_proof": proven} if proven else {"about": "232000", "at_most": "640000", "inside_proof": False},
+            "payers": NFT_PAYERS if proven else NFT_PUBLIC_PAYERS, "refusal": refusal}
 NFT_BASE = {"programs": NFT_PROGRAMS, "read": NFT_READ}
 OPEN_NFT = 'root.setWalletNet("0.4"); Qt.callLater(function() { root.namesNet = "0.4"; root.openCollectibles(); %s })'
 SEND_ACTION = '{ action: "send", from: "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", to: "Private/2RHZhw9h534Zr3eq2RGhQete2Hh667foECzXPmSkGni2" }'
@@ -1319,6 +1322,8 @@ for key, mock, then in [
      'root.nftOpenSheet("Burning Harbour at dawn (copy)", "%s", { action: "burn", from: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk" }, null, { state: "copy" }); Qt.callLater(function() { root.nftTick("burn", true) })' % NFT_P),
     ("collectibles-receive", dict(NFT_BASE, sheet=nft_sheet("init", True, ["The collection is public; the private account is not named."], [], ["An account takes NFTs of one collection, after it says so in a small transaction."])),
      'root.nftOpenSheet("Getting an account ready for this collection", "%s", { action: "init", definition: "%s", "new": "private" }, null, null)' % (NFT_P, NFT_ART)),
+    ("collectibles-ready", dict(NFT_BASE, read=[dict(NFT_READ[0], holdings=NFT_READ[0]["holdings"] + [{"account": "Public/FaPur3GjBrXZoE5Yz6bNjLeqXJzEn6pzXEdE9MCJZsdg", "account_kind": "public", "state": "copy", "holds": False, "definition": NFT_ART, "owned": False, "collection": NFT_COLL}])]),
+     'root.nftResult = "Ready: Public FaPur3…Zsdg takes this collection now (block 2481). Give the sender this account."; root.nftResultKind = "done"; root.nftResultCopy = "Public/FaPur3GjBrXZoE5Yz6bNjLeqXJzEn6pzXEdE9MCJZsdg"'),
     ("collectibles-job", NFT_BASE, 'root.nftJob = { id: "-wallet-1", kind: "nft_send", label: "Sending Harbour at dawn (master)", started: Date.now() - 190000, proves: true, asking: false }'),
     ("collectibles-image", NFT_BASE, 'root.nftConsentFor = "%s|Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk|%s"; root.nftConsentUri = "https://img.example.com/harbour.png"' % (NFT_P, NFT_ART)),
     ("collectibles-image-shown", NFT_BASE, 'root.nftLoadImage("%s", "%s", "https://img.example.com/harbour.png")' % (NFT_P, NFT_ART)),

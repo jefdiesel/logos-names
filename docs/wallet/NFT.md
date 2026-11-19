@@ -119,9 +119,12 @@ takes: `InitializeHolding { definition }`, signed by that account (Job A §8: 37
 app explains it in one line: "An account takes NFTs of one collection, after it says so in a
 small transaction. This one will be ready for <collection>." Receive offers a **new account**
 (public or private) by default, or an account of this wallet whose state under the program is
-empty. A repeat for the same collection is a no-op and the wallet does not send it. After it, the
-app shows what the sender needs: the account (`Public/<id>`), or for a private account, its
-receiving keys.
+empty. A repeat for the same collection is a no-op and the wallet does not send it. A new
+account is made only after everything that can refuse was checked, and a new public account's
+fee is paid by another public account the person picks (it holds nothing yet). After it, the app
+shows the account with Copy, and lists every holding ready to receive. A private account's
+receiving keys are not shown yet: for a sender outside the wallet, the app suggests a public
+account.
 
 ## 7. Send, burn, print: what each reveals
 
@@ -134,8 +137,10 @@ nothing links):
 | public → public | both accounts, the collection, the NFT moved (events `Transferred`/`Printed` name both) | nothing |
 | public → private (this wallet's) | the sender, the collection, **the receiving private account's ID** | its other state |
 | private → public | the recipient, the collection | the sender |
-| private → private | only the NFT program | both accounts, the collection |
+| private → private (two accounts of one wallet) | only the NFT program | both accounts, the collection |
 | private initialise / burn | the collection | the holder |
+| public → someone else's private keys | expected: the sender, the collection | expected: the recipient (NOT observed) |
+| private → someone else's private keys | expected: only the NFT program | expected: both accounts (NOT observed) |
 
 The sheet shows the row that applies before Approve. Notes:
 
@@ -149,6 +154,8 @@ The sheet shows the row that applies before Approve. Notes:
   parties were in one wallet). The sheet says so and needs an extra tick.
 - **LNS names**: an NFT to a name goes to the name's public account and is checked there. The
   name's private keys are used only when the person picks them, with the warning above.
+- **Receive of waiting credits** goes through the same sheet: one private transaction per NFT,
+  each paid by the private account chosen there.
 - **Burn** (two steps): a copy burns exactly 1; a master burns all its print rights, and the NFT
   with it. The definition is declared, as the program needs (§8: without it, refused).
 - **Print** (a master holder only): one copy to a ready holding; the master keeps the rest.
@@ -165,7 +172,8 @@ print."
 
 ## 8. Fees, and the private fee payer
 
-- A public action is paid by its signing public account. Gas is about 28,000–37,000 (Job A §9).
+- A public action is paid by a public account the person picks on the sheet (by default the
+  signer when it can pay). Gas is about 28,000–37,000 (Job A §9); the sheet prices 40,000.
 - A **proven** action (any private account, or a public sender to someone's private keys) pays
   inside the proof from a **private** account that holds the reserve; Job A saw about 5.07M
   native reserved per private action on the throwaway chain, refunded later as a pending credit

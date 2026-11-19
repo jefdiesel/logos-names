@@ -123,8 +123,10 @@ export function approveWhy(sheet, ticks) {
   if (!sheet) return "Checking what this does…"
   if (sheet.refusal) return ""
   const t = ticks || {}
-  if (sheet.proven && !t.payer) return "Choose the private account that pays the fee."
-  if (sheet.proven && !(sheet.payers || []).some((p) => p.account === t.payer && p.enough)) return "That account can't cover the fee reserve; choose another."
+  const payers = sheet.payers || []
+  if (sheet.proven && !payers.some((p) => p.enough)) return "None of your private accounts holds the fee reserve. Move some LEZ to a private account first."
+  if (!t.payer && (sheet.proven || payers.length > 0)) return sheet.proven ? "Choose the private account that pays the fee." : "Choose the account that pays the fee."
+  if (t.payer && !payers.some((p) => p.account === t.payer && p.enough)) return "That account can't cover the fee; choose another."
   if ((sheet.warnings || []).length > 0 && !t.warnings) return "Tick the box above to go ahead."
   if (sheet.action === "burn" && !t.burn) return "Tick that you understand it can't be undone."
   return ""
@@ -149,12 +151,25 @@ export function jobLine(job, now) {
 
 /// The line an ended job leaves: done with its block, or the plain reason.
 export function jobEnded(job, state) {
+  if (state.state === "done" && job.kind === "nft_init" && state.account)
+    return { kind: "done", text: "Ready: " + accountShown(state.account) + " takes this collection now" + (state.block !== null && state.block !== undefined ? " (block " + state.block + ")" : "") + ". Give the sender this account.", copy: state.account }
   if (state.state === "done") {
     if (job.kind === "nft_receive") return { kind: "done", text: state.nothing ? "There was nothing to receive." : "Received " + (state.received === 1 ? "1 NFT" : state.received + " NFTs") + "." }
     return { kind: "done", text: job.label + ": done" + (state.block !== null && state.block !== undefined ? ", in block " + state.block : "") + "." }
   }
   const why = state.refusal || state.problem || "It didn't go through."
   return { kind: "problem", text: job.label + " didn't go through: " + why }
+}
+
+/// The holdings ready to receive (a holding of a collection that holds nothing): what to give a
+/// sender. `[{program, account, definition, title}]`.
+export function readyRows(programs) {
+  const out = []
+  for (const program of programs || [])
+    for (const r of program.holdings || [])
+      if (!r.holds && (r.state === "copy" || r.state === "master"))
+        out.push({ program: program.program, account: r.account, isPrivate: r.account_kind === "private", definition: r.definition, title: collectionTitle(r.collection, r.definition) })
+  return out
 }
 
 /// Whether only private accounts of this wallet hold `definition` under `program` (loading its

@@ -48,15 +48,17 @@ wallet is opened by the names CLI.
 
 4a. Make the throwaway wallet (its recovery phrase goes to a 0600 file in the folder, never shown):
 ssh minim4 'bash -c "umask 077; W=/Volumes/exos162/logos/lp0001/wallet-nft; mkdir -p \$W/w1; export LEE_WALLET_HOME_DIR=\$W/w1 LOGOS_NAMES_RPC=http://127.0.0.1:3310 NAMES_NFT_PROGRAM=ErycMYqXUUtducaYmpHZjRgdbLXchrMiV4NZRnmRDNmu; N=\$W/target/release/names; \$N --rpc http://127.0.0.1:3310 setup --shield 0 > \$W/w1/setup.txt 2>&1; grep -E \"^(public|private) account\" \$W/w1/setup.txt; for l in a2 a3 a4; do \$N --rpc http://127.0.0.1:3310 wallet account new public --label \$l 2>&1 | tail -1; done"'
-   # note the public account it prints (call it A1)
+   # note the public account it prints (call it A1); it is also in $W/w1/setup.txt
 
 4b. FUNDING (the one step that uses a wallet this worker did not make): Job A's chain's operator
     wallet (Job A's throwaway, NOT the owner's) pays A1 for fees. Conductor's decision; if not,
     stop here and report "public e2e not run: no funding".
-ssh minim4 'bash -c "J=/Volumes/exos162/logos/lp0001/job-a; LEE_WALLET_HOME_DIR=\$J/chain-home/wallets/operator \$J/chain-home/bin/wallet account list 2>&1 | head -3"'
+ssh minim4 'bash -c "J=/Volumes/exos162/logos/lp0001/job-a; LEE_WALLET_HOME_DIR=\$J/chain-home/wallets/operator \$J/chain-home/bin/wallet account list 2>&1 | grep -i operator"'
 ssh minim4 'bash -c "J=/Volumes/exos162/logos/lp0001/job-a; LEE_WALLET_HOME_DIR=\$J/chain-home/wallets/operator \$J/chain-home/bin/wallet auth-transfer send --from Public/<OPERATOR> --to Public/<A1> --amount 2000000000"'
    # then give a2, a3 a little from A1 for their own fees (each signs its own NFT messages):
-ssh minim4 'bash -c "W=/Volumes/exos162/logos/lp0001/wallet-nft; export LEE_WALLET_HOME_DIR=\$W/w1; N=\$W/target/release/names; for l in a2 a3; do \$N --rpc http://127.0.0.1:3310 wallet auth-transfer send --from <A1> --to \$l --amount 50000000; done"'
+ssh minim4 'bash -c "W=/Volumes/exos162/logos/lp0001/wallet-nft; export LEE_WALLET_HOME_DIR=\$W/w1; N=\$W/target/release/names; \$N --rpc http://127.0.0.1:3310 wallet account list"'
+   # read the ids of a2 and a3 from that list (call them A2, A3), then:
+ssh minim4 'bash -c "W=/Volumes/exos162/logos/lp0001/wallet-nft; export LEE_WALLET_HOME_DIR=\$W/w1; N=\$W/target/release/names; for to in <A2> <A3>; do \$N --rpc http://127.0.0.1:3310 wallet auth-transfer send --from Public/<A1> --to Public/\$to --amount 50000000; done"'
 
 4c. The flows (paste as one block; it stops at the first unexpected result and logs everything):
 ssh minim4 'bash -s' <<'E2E'
@@ -65,11 +67,11 @@ W=/Volumes/exos162/logos/lp0001/wallet-nft
 export LEE_WALLET_HOME_DIR=$W/w1 LOGOS_NAMES_RPC=http://127.0.0.1:3310 NAMES_NFT_PROGRAM=ErycMYqXUUtducaYmpHZjRgdbLXchrMiV4NZRnmRDNmu
 N="$W/target/release/names --rpc http://127.0.0.1:3310"
 LOG=$W/e2e-public-$(date -u +%Y%m%dT%H%MZ).log
-id() { $N wallet account list 2>/dev/null | grep "\[$1\]" | grep -o 'Public/[1-9A-HJ-NP-Za-km-z]*' | head -1 | cut -d/ -f2; }
+# A2..A4: paste the ids read in 4b (the wallet's listing is not in creation order).
+A2=<A2>; A3=<A3>; A4=<A4>
 run() { echo "\$ names $*" >> $LOG; $N "$@" >> $LOG 2>&1; c=$?; echo "[exit $c]" >> $LOG; return $c; }
 want_fail() { if run "$@"; then echo "UNEXPECTED SUCCESS: $*" | tee -a $LOG; exit 1; fi; }
-A1=$($N wallet account list 2>/dev/null | grep -o 'Public/[1-9A-HJ-NP-Za-km-z]*' | head -1 | cut -d/ -f2)
-A2=$(id a2); A3=$(id a3); A4=$(id a4)
+A1=$(grep '^public account' $W/w1/setup.txt | grep -o 'Public/[1-9A-HJ-NP-Za-km-z]*' | cut -d/ -f2)
 echo "A1=$A1 A2=$A2 A3=$A3 A4=$A4" | tee -a $LOG
 run nft create Gallery 3 --uri https://example.com/gallery.png --creators e2e --payer $A1 || exit 1
 D=$(grep '^collection ' $LOG | tail -1 | cut -d' ' -f2); M=$(grep '^master ' $LOG | tail -1 | cut -d' ' -f2)
@@ -79,10 +81,12 @@ run nft info $D --json || exit 1
 run nft init --definition $D --account $A2 || exit 1
 want_fail nft init --definition $D --account $A2                 # already ready: refused before sending
 want_fail nft send --from $A2 --to Public/$A3                     # holds no NFT
-run wallet auth-transfer send --from $A1 --to Public/$M --amount 50000000 || exit 1   # the master pays its print's fee
+run wallet auth-transfer send --from Public/$A1 --to Public/$M --amount 50000000 || exit 1   # the master pays its print's fee
 run nft print --from $M --to Public/$A2 || exit 1                  # master 3 -> 2, A2 owns a copy
 want_fail nft send --from $A2 --to Public/$A4                     # A4 not ready: refused before sending
 run nft init --definition $D --account $A3 || exit 1
+want_fail nft init --definition $D --new public                   # no payer for a new account: refused, no account made
+run nft init --definition $D --new public --fee-payer $A1 || exit 1   # a new public holding, A1 pays (prints "new account Public/<id>")
 run nft send --from $A2 --to Public/$A3 || exit 1                  # copy A2 -> A3
 run nft list --json || exit 1
 echo '{"action":"send","from":"Public/'$A3'","to":"Public/'$A2'"}' > $W/plan-in.json
@@ -112,10 +116,10 @@ unset RISC0_SERVER_PATH
 N="$W/target/release/names --rpc http://127.0.0.1:3310"
 LOG=$W/e2e-private-$(date -u +%Y%m%dT%H%MZ).log
 run() { echo "\$ names $*" >> $LOG; $N "$@" >> $LOG 2>&1; c=$?; echo "[exit $c]" >> $LOG; return $c; }
-A1=$($N wallet account list 2>/dev/null | grep -o 'Public/[1-9A-HJ-NP-Za-km-z]*' | head -1 | cut -d/ -f2)
+A1=$(grep '^public account' $W/w1/setup.txt | grep -o 'Public/[1-9A-HJ-NP-Za-km-z]*' | cut -d/ -f2)
 P1=$(grep '^private account' $W/w1/setup.txt | grep -o 'Private/[1-9A-HJ-NP-Za-km-z]*' | cut -d/ -f2)
 D=$(grep '^collection ' $W/e2e-public-*.log | tail -1 | awk '{print $NF}'); M=$(grep '^master ' $W/e2e-public-*.log | tail -1 | awk '{print $NF}')
-run wallet auth-transfer send --from $A1 --to Private/$P1 --amount 60000000 || exit 1      # fund the private payer (public -> own private)
+run wallet auth-transfer send --from Public/$A1 --to Private/$P1 --amount 60000000 || exit 1      # fund the private payer (public -> own private)
 run nft init --definition $D --new private --fee-payer $P1 || exit 1                         # a new private holding (prints "new account Private/<id>")
 H1=$(grep '^new account Private/' $LOG | tail -1 | cut -d/ -f2)
 run nft init --definition $D --new private --fee-payer $P1 || exit 1

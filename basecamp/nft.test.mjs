@@ -1,5 +1,5 @@
 // Checks Collectibles' rules (qml/nft.mjs). Run with: node basecamp/nft.test.mjs
-import { privateOnly, accountShown, idShown, tokenLine, collectionTitle, metadataRows, accountGroups, collectionCounts, receiveChoices, collectionLink, linkOf, toProblem, toTheirKeys, approveWhy, defaultPayer, jobLine, jobEnded, imageConsent, burnConfirm } from "./qml/nft.mjs";
+import { readyRows, privateOnly, accountShown, idShown, tokenLine, collectionTitle, metadataRows, accountGroups, collectionCounts, receiveChoices, collectionLink, linkOf, toProblem, toTheirKeys, approveWhy, defaultPayer, jobLine, jobEnded, imageConsent, burnConfirm } from "./qml/nft.mjs";
 import { readFileSync } from "node:fs";
 
 let failures = 0;
@@ -53,9 +53,11 @@ check("toTheirKeys", [toTheirKeys("ab".repeat(32) + ":cd"), toTheirKeys("alice")
 const sheet = { action: "send", proven: true, payers: [{ account: "Private/A", enough: false }, { account: "Private/B", enough: true }], warnings: ["x"] };
 check("approveWhy no sheet", approveWhy(null, {}), "Checking what this does…");
 check("approveWhy payer", approveWhy(sheet, {}), "Choose the private account that pays the fee.");
-check("approveWhy poor payer", approveWhy(sheet, { payer: "Private/A" }), "That account can't cover the fee reserve; choose another.");
+check("approveWhy poor payer", approveWhy(sheet, { payer: "Private/A" }), "That account can't cover the fee; choose another.");
 check("approveWhy warnings", approveWhy(sheet, { payer: "Private/B" }), "Tick the box above to go ahead.");
 check("approveWhy ready", approveWhy(sheet, { payer: "Private/B", warnings: true }), "");
+check("approveWhy no private payer at all", approveWhy({ proven: true, payers: [{ account: "Private/A", enough: false }] }, {}).includes("Move some LEZ"), true);
+check("approveWhy public payer", [approveWhy({ proven: false, payers: [{ account: "Public/A", enough: true }], warnings: [] }, {}), approveWhy({ proven: false, payers: [{ account: "Public/A", enough: true }], warnings: [] }, { payer: "Public/A" })], ["Choose the account that pays the fee.", ""]);
 check("approveWhy burn", approveWhy({ action: "burn", proven: false, warnings: [] }, {}), "Tick that you understand it can't be undone.");
 check("approveWhy refused shows the refusal instead", approveWhy({ refusal: "That account already holds an NFT of this collection." }, {}), "");
 check("defaultPayer", [defaultPayer(sheet, "Private/A"), defaultPayer(sheet, "Private/B"), defaultPayer({ payers: [] }, "")], ["Private/B", "Private/B", ""]);
@@ -64,6 +66,8 @@ check("jobLine public", jobLine({ label: "Sending Art", proves: false, started: 
 check("jobLine proven", jobLine({ label: "Sending Art", proves: true, started: 0 }, 180000).includes("7-12 minutes"), true);
 check("jobEnded done", jobEnded({ label: "Sending Art", kind: "nft_send" }, { state: "done", block: 7 }), { kind: "done", text: "Sending Art: done, in block 7." });
 check("jobEnded refused", jobEnded({ label: "Sending Art", kind: "nft_send" }, { state: "failed", refusal: "That account isn't ready for this collection: it has to receive a holding first." }).kind, "problem");
+check("jobEnded init gives the account to copy", jobEnded({ kind: "nft_init", label: "x" }, { state: "done", block: 4, account: "Public/" + BOB }), { kind: "done", text: "Ready: Public HLEwXN…eim2 takes this collection now (block 4). Give the sender this account.", copy: "Public/" + BOB });
+check("readyRows", readyRows(programs).map((r) => r.account), ["Public/X"]);
 check("jobEnded receive", [jobEnded({ kind: "nft_receive" }, { state: "done", nothing: true }).text, jobEnded({ kind: "nft_receive" }, { state: "done", received: 1 }).text], ["There was nothing to receive.", "Received 1 NFT."]);
 
 check("privateOnly", [privateOnly(programs, PROGRAM, ART), privateOnly([{ program: PROGRAM, holdings: [programs[0].holdings[1]] }], PROGRAM, ART)], [false, true]);
