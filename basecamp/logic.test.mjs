@@ -630,7 +630,8 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
 
 {
   const { receiveTokens, receiveReply, receivesFrom, receiveProgress, receiveSteps, RECEIVE_FALLBACK } = await import("./qml/logic.mjs");
-  check("receiveTokens from registry", receiveTokens({ tokens: [{ symbol: "ETH", denoms: [{ index: 0, value: "10000000000000000", text: "0.01" }] }] }), [{ symbol: "ETH", frozen: false, denoms: [{ index: 0, text: "0.01", value: "10000000000000000" }] }]);
+  check("receiveTokens from registry", receiveTokens({ tokens: [{ symbol: "ETH", eth_token: "0x0000000000000000000000000000000000000000", denoms: [{ index: 0, value: "10000000000000000", text: "0.01" }] }] }),
+    [{ key: "0x0000000000000000000000000000000000000000", ethToken: "0x0000000000000000000000000000000000000000", symbol: "ETH", frozen: false, delisted: false, denoms: [{ index: 0, text: "0.01", value: "10000000000000000" }] }]);
   check("receiveTokens fallback", receiveTokens(null), RECEIVE_FALLBACK);
   check("receiveReply", [receiveReply({ needs: "secret" }).kind, receiveReply({ request: "logosdep1qq" }).kind, receiveReply({ deposit: {} }).kind], ["needs", "code", "old"]);
   check("receivesFrom keeps the unclaimed receives",
@@ -966,7 +967,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     { account: "Public/D", viewOnly: true, assets: [{ symbol: "wETH", amount: "1", bridge: BRIDGE_V4_PROGRAM, base: "1000000000000000000" }] },
     { account: "Public/E", assets: [{ symbol: "dUSDC", amount: "100", bridge: BRIDGE_V4_PROGRAM, base: "100000000" }, { symbol: "wETH", amount: "0.001", bridge: BRIDGE_V4_PROGRAM, base: "1000000000000000" }] },
   ];
-  check("sources: own accounts with a v4 denomination, nothing else", sendBackSources(blocks).map((x) => x.key), ["Public/A|wETH", "Public/E|dUSDC"]);
+  check("sources: own accounts with a v4 denomination, nothing else", sendBackSources(blocks).map((x) => x.key), ["Public/A|sym:wETH", "Public/E|sym:dUSDC"]);
   check("sources: none", [sendBackSources([]).length, sendBackSources(null).length], [0, 0]);
   check("step 1 asks for the account and the amount", sendBackSteps({ stage: "choose" })[0].title, "Choose the account and the amount");
   check("card asset rows carry what Send back needs", [asset.bridge === BRIDGE_V4_PROGRAM, asset.base, asset.decimals, sendBackOffer(asset)], [true, "100000000000000000", 18, true]);
@@ -1483,16 +1484,17 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     fromDep.map((t) => [t.symbol, t.card, t.decimals, t.denoms.map((d) => d.text).join(" / ")]),
     [["ETH", "wETH", 18, "0.01 / 0.1 / 1"], ["USDT", "USDT", 6, "100 / 1,000 / 10,000"], ["DAI", "DAI", 18, "100 / 1,000 / 10,000"]]);
   const fromReg = L.bridgeTokens(reg, dep);
-  check("token table from the registry wins over the code, with its freeze", fromReg.map((t) => [t.symbol, t.frozen, t.denoms.length]), [["ETH", false, 1], ["USDT", true, 2]]);
+  check("token table from the registry wins over the code, with its freeze; a token the registry has no row for keeps the code's amounts",
+    fromReg.map((t) => [t.symbol, t.frozen, t.denoms.length]), [["ETH", false, 1], ["USDT", true, 2], ["DAI", false, 3]]);
   check("token table without either: the fixed ETH and dUSDC", L.bridgeTokens(null, null).map((t) => [t.symbol, t.card, t.ethToken === ETH || t.ethToken === DUSDC]), [["ETH", "wETH", true], ["dUSDC", "dUSDC", true]]);
   // Receive from Ethereum.
   check("receive tokens: the bridge code's list when the registry can't be read", L.receiveTokens(null, dep).map((t) => t.symbol + ":" + t.denoms.map((d) => d.text).join("/")),
     ["ETH:0.01/0.1/1", "USDT:100/1,000/10,000", "DAI:100/1,000/10,000"]);
   check("receive tokens: the old fixed list without either", L.receiveTokens(null, null), L.RECEIVE_FALLBACK);
   const recv = L.receiveTokens(reg);
-  check("receive token: the pressed one, a paused one falls back to ETH", [L.receiveTokenNow(recv, "ETH"), L.receiveTokenNow(recv, "USDT"), L.receiveTokenNow(L.receiveTokens(null, dep), "DAI")], ["ETH", "ETH", "DAI"]);
+  check("receive token: the pressed one, a paused one falls back to ETH", [L.receiveTokenNow(recv, ETH), L.receiveTokenNow(recv, USDT), L.receiveTokenNow(L.receiveTokens(null, dep), DAI)], [ETH, ETH, DAI]);
   check("receive token: a bridge without ETH starts on its first token; none: empty",
-    [L.receiveTokenNow(L.receiveTokens(null, dep.slice(1)), "ETH"), L.receiveTokenNow([], "ETH"), L.receiveTokenNow([{ symbol: "USDT", frozen: true, denoms: [] }], "USDT")], ["USDT", "", ""]);
+    [L.receiveTokenNow(L.receiveTokens(null, dep.slice(1)), ETH), L.receiveTokenNow([], ETH), L.receiveTokenNow([{ symbol: "USDT", ethToken: USDT, frozen: true, denoms: [] }], USDT)], [USDT, "", ""]);
   check("receive: paused tokens are not offered and one line names them", [L.receiveTokensOpen(recv).map((t) => t.symbol), L.receivePausedLine(recv), L.receivePausedLine(L.receiveTokens(null, dep))],
     [["ETH"], "Deposits of USDT are paused on this bridge for now.", ""]);
   check("receive: the smallest amount of an ERC-20 is pre-selected", L.denomOrSmallest(L.receiveTokens(null, dep)[2].denoms, -1), 0);
@@ -1532,15 +1534,95 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   // The screen uses the table (Main.qml can't run here; its bindings are checked as text).
   const qml2 = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
   check("screen: Receive asks for the token it shows (receiveTokenNow), never a fixed ETH",
-    [/var args = priv \? \[receiveTokenNow, /.test(qml2), /Logic\.receiveTokenNow\(receiveTokenList, receiveToken\)/.test(qml2), /model: Logic\.receiveTokensOpen\(root\.receiveTokenList\)/.test(qml2)], [true, true, true]);
+    [/var token = Logic\.receiveTokenArg\(receiveTokenList, receiveTokenNow\)\n\s*var args = priv \? \[token, /.test(qml2), /Logic\.receiveTokenNow\(receiveTokenList, receiveToken\)/.test(qml2), /model: Logic\.receiveTokensOpen\(root\.receiveTokenList\)/.test(qml2)], [true, true, true]);
   check("screen: Bridge to Ethereum and the card read the chosen bridge's table",
-    [/tokens: bridgeTokenTable \} : null/.test(qml2), /Logic\.sendBackSymbol\(sbAsset\.symbol, bridgeTokenTable\)/.test(qml2), /Logic\.sendBackAmounts\(receiveRegistry, sbAsset, bridgeTokenTable\)/.test(qml2),
+    [/tokens: bridgeTokenTable \} : null/.test(qml2), /Logic\.sendBackToken\(sbAsset, bridgeTokenTable\), String\(sbDenom\)/.test(qml2), /Logic\.sendBackAmounts\(receiveRegistry, sbAsset, bridgeTokenTable\)/.test(qml2),
      /Logic\.privateSendBackSources\(cliAccounts, bridgedHoldings, bridgeTokenTable\)/.test(qml2), /Logic\.bridgeNetRows\([^\n]*, bridgeTokenTable\)/.test(qml2)], [true, true, true, true, true]);
   check("screen: the deposit steps come from receiveDepositSteps", (qml2.match(/Logic\.receiveDepositSteps\(/g) || []).length, 2);
   const rows2 = L.privateSendBackSources(accts2, [], fromDep);
   check("private chips name their token, and only one is chosen at a time", [L.privateSourceLabel(rows2[1]), L.privateSourceLabel(L.privateSendBackSources(accts2, held2, fromDep)[0]),
-    /label: Logic\.privateSourceLabel\(modelData\)\n\s*chosen: root\.sbAsset !== null && root\.sbAccount === modelData\.account && root\.sbAsset\.symbol === modelData\.symbol/.test(qml2)],
+    /label: Logic\.privateSourceLabel\(modelData\)\n\s*chosen: Logic\.sameSource\(root\.sbAccount, root\.sbAsset, modelData\)/.test(qml2)],
     ["yGrPEb…fe4Z · USDT · private", "yGrPEb…fe4Z · 0.1 wETH · private", true]);
+}
+
+
+// review-branches-3, dimension erc20: tokens are known by their address or definition everywhere
+// (never by symbol), "shown == submitted" by construction, a replaced choice is said, and the
+// token table is built per token.
+{
+  const L = await import("./qml/logic.mjs");
+  const qml3 = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  const ETH = "0x0000000000000000000000000000000000000000", DUSDC = "0xac207b9bfebf3ef7c26297ea6abadeeccc4aa71e", WETH20 = "0x" + "c0".repeat(20), USDT = "0x" + "11".repeat(20);
+  const D = (n, k) => String(n) + "0".repeat(k);
+  // #1 (a): native ETH and an ERC-20 the bridge lists as "wETH": both arrive as card "wETH".
+  const twoWeth = L.bridgeTokens(null, [
+    { eth_token: ETH, symbol: "ETH", decimals: 18, definition: "DefNative", denoms: [D(1, 16), D(1, 17), D(1, 18)] },
+    { eth_token: WETH20, symbol: "wETH", decimals: 18, definition: "DefWeth20", denoms: [D(1, 17), D(1, 18), D(1, 19)] }]);
+  check("#1a both rows have the card wETH", twoWeth.map((t) => t.card), ["wETH", "wETH"]);
+  const erc = { symbol: "wETH", bridge: "B", base: D(1, 19), decimals: 18, definition: "DefWeth20", ethToken: WETH20 };
+  const native = { symbol: "wETH", bridge: "B", base: D(1, 18), decimals: 18, definition: "DefNative", ethToken: ETH };
+  check("#1a the ERC-20 row: its own amounts, and its own address is what is submitted",
+    [L.sendBackAmounts(null, erc, twoWeth).map((d) => d.text + "@" + d.index), L.sendBackToken(erc, twoWeth)], [["0.1@0", "1@1", "10@2"], WETH20]);
+  check("#1a the native row: its own amounts and the zero address", [L.sendBackAmounts(null, native, twoWeth).map((d) => d.text), L.sendBackToken(native, twoWeth)], [["0.01", "0.1", "1"], ETH]);
+  check("#1a the old symbol path sent ETH for both (the bug)", [L.sendBackSymbol("wETH", twoWeth), L.sendBackSymbol("wETH", twoWeth)], ["ETH", "ETH"]);
+  check("#1a a card symbol two rows share finds no token for an asset with no ids", L.sendBackKnown({ symbol: "wETH", base: D(1, 19) }, twoWeth), null);
+  // #1 (b): the bridge lists the demo USDC's address as "USDC"; the Names card calls it "dUSDC".
+  const relabelled = L.bridgeTokens(null, [{ eth_token: DUSDC, symbol: "USDC", decimals: 6, definition: "DefU", denoms: [D(1, 8), D(1, 9)] }]);
+  const named = { symbol: "dUSDC", bridge: "B", base: D(2, 8), decimals: 6, definition: "DefU", ethToken: DUSDC };
+  check("#1b offered, with the bridge's amounts, and submitted by its address (the old path sent dUSDC, which the module refuses)",
+    [L.sendBackOffer(named, { program: "B", release: "proof", tokens: relabelled }), L.sendBackAmounts(null, named, relabelled).map((d) => d.text), L.sendBackToken(named, relabelled), L.sendBackSymbol("dUSDC", relabelled)],
+    [true, ["100"], DUSDC, "dUSDC"]);
+  check("#1 an asset whose ids the table doesn't know is not offered (never matched by its symbol)",
+    [L.sendBackKnown({ symbol: "USDC", definition: "Other", ethToken: USDT }, relabelled), L.sendBackToken({ symbol: "USDC", definition: "Other", ethToken: USDT }, relabelled)], [null, ""]);
+  // #1: source rows and the chosen chip by token, not by card symbol.
+  const blocks3 = [{ account: "Public/A", assets: [native, erc] }];
+  const srcs3 = L.sendBackSources(blocks3, { program: "B", release: "proof", tokens: twoWeth });
+  check("#1 two sources with the same card are two keys", srcs3.map((x) => x.key), ["Public/A|def:DefNative", "Public/A|def:DefWeth20"]);
+  check("#1 only the pressed one is chosen", [L.sameSource("Public/A", erc, srcs3[1]), L.sameSource("Public/A", erc, srcs3[0]), L.sameSource("Public/B", erc, srcs3[1])], [true, false, false]);
+  const PRIV3 = "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z";
+  const held3 = [{ holdings: [{ account: PRIV3, symbol: "wETH", balance: D(1, 18), decimals: 18, definition: "DefNative" },
+                               { account: PRIV3, symbol: "wETH", balance: D(1, 19), decimals: 18, definition: "DefWeth20" }] }];
+  const priv3 = L.privateSendBackSources([{ account: PRIV3, kind: "private" }], held3, twoWeth);
+  check("#1 a private account keeps both tokens of a shared card, each with its address", priv3.map((r) => [r.key, r.asset.ethToken, r.amount]),
+    [[PRIV3 + "|def:DefNative", ETH, "1"], [PRIV3 + "|def:DefWeth20", WETH20, "10"]]);
+  check("#1 the screen submits the token the amounts came from and chooses chips by token",
+    [/bridgeCall\(Logic\.PRIVATE_BRIDGE\.sendBackPlan, \[Logic\.sendBackToken\(sbAsset, bridgeTokenTable\), /.test(qml3), (qml3.match(/chosen: Logic\.sameSource\(root\.sbAccount, root\.sbAsset, modelData\)/g) || []).length,
+     /sendBackSymbol\(/.test(qml3)], [true, 2, false]);
+  // #1 on Receive too: the deposit request is asked for by address; chips by key.
+  const rt = L.receiveTokens(null, [{ eth_token: ETH, symbol: "ETH", decimals: 18, denoms: [D(1, 16)] }, { eth_token: WETH20, symbol: "ETH", decimals: 18, denoms: [D(1, 17)] }]);
+  check("#1 Receive: two tokens with one symbol are two keys; the request names the address", [rt.map((t) => t.key), L.receiveTokenArg(rt, WETH20), L.receiveTokenArg(rt, ETH)], [[ETH, WETH20], WETH20, ETH]);
+  check("#1 Receive: the screen sends receiveTokenArg and chooses chips by key",
+    [/var token = Logic\.receiveTokenArg\(receiveTokenList, receiveTokenNow\)/.test(qml3), /chosen: root\.receiveTokenNow === Logic\.tokenKey\(modelData\)/.test(qml3), /\[receiveTokenNow, String\(receiveDenomNow\)/.test(qml3)], [true, true, false]);
+  check("#1 the deposit step reads the code's own token address", [L.receiveDepositSteps({ symbol: "ETH", deposit: { eth_token: WETH20 } }, rt)[2].indexOf("Approve") === 0, L.receiveDepositSteps({ symbol: "ETH", deposit: { eth_token: ETH } }, rt)], [true, L.RECEIVE_DEPOSIT_STEPS]);
+  // #3: a pressed token paused or dropped: the choice changes visibly, and the amount starts again.
+  const before = L.receiveTokens({ tokens: [{ symbol: "ETH", eth_token: ETH, decimals: 18, denoms: [{ value: D(1, 16) }, { value: D(1, 17) }, { value: D(1, 18) }] },
+                                            { symbol: "USDT", eth_token: USDT, decimals: 6, denoms: [{ value: D(1, 8) }, { value: D(1, 9) }, { value: D(1, 10) }] }] });
+  const paused = L.receiveTokens({ tokens: [{ symbol: "ETH", eth_token: ETH, decimals: 18, denoms: [{ value: D(1, 16) }, { value: D(1, 17) }, { value: D(1, 18) }] },
+                                            { symbol: "USDT", eth_token: USDT, decimals: 6, freeze: { eth_deposits: true }, denoms: [{ value: D(1, 8) }, { value: D(1, 9) }, { value: D(1, 10) }] }] });
+  const dropped = L.receiveTokens({ tokens: [{ symbol: "ETH", eth_token: ETH, decimals: 18, denoms: [{ value: D(1, 16) }] }] });
+  const delisted = L.receiveTokens({ tokens: [{ symbol: "ETH", eth_token: ETH, decimals: 18, denoms: [{ value: D(1, 16) }] }, { symbol: "USDT", eth_token: USDT, registered: false, decimals: 6, denoms: [{ value: D(1, 8) }] }] });
+  check("#3 the pressed USDT, then paused / dropped / delisted: ETH, with the reason said",
+    [L.receiveTokenNow(before, USDT), L.receiveTokenNow(paused, USDT), L.receiveSwitchNote(paused, USDT, ETH, true), L.receiveSwitchNote(dropped, USDT, ETH, true), L.receiveSwitchNote(delisted, USDT, ETH, true)],
+    [USDT, ETH, "USDT deposits are paused on this bridge for now, so ETH is chosen instead, at its smallest amount. Choose again if you want another.",
+     "The token you chose is no longer offered by this bridge, so ETH is chosen instead, at its smallest amount. Choose again if you want another.",
+     "USDT is no longer accepted by this bridge's vault, so ETH is chosen instead, at its smallest amount. Choose again if you want another."]);
+  check("#3 nothing said for the person's own press or when nothing was pressed", [L.receiveSwitchNote(paused, ETH, ETH, true), L.receiveSwitchNote(paused, USDT, ETH, false)], ["", ""]);
+  check("#3 the screen: any change of the token asked for resets the amount and keeps the reason on screen",
+    [/onReceiveTokenNowChanged: \{\n\s*receiveSwitched = Logic\.receiveSwitchNote\(receiveTokenList, receiveToken, receiveTokenNow, receivePressed\)\n\s*receiveDenom = -1/.test(qml3),
+     /StatusLine \{ visible: text !== ""; kind: ""; text: root\.receiveSwitched \}/.test(qml3)], [true, true]);
+  check("#3 with the reset, the old index 2 (10,000 USDT) becomes ETH's smallest, not 1 ETH", L.denomOrSmallest(paused.filter((t) => t.key === ETH)[0].denoms, -1), 0);
+  // #4: the table per token; Receive is the same table.
+  const depList = [{ eth_token: ETH, symbol: "ETH", decimals: 18, definition: "E", denoms: [D(2, 16), D(2, 17)] }, { eth_token: USDT, symbol: "USDT", decimals: 6, definition: "U", denoms: [D(1, 8), D(1, 9)] }];
+  const regAll = (registered) => ({ tokens: [{ symbol: "ETH", eth_token: ETH, decimals: 18, registered: registered, denoms: [] }, { symbol: "USDT", eth_token: USDT, decimals: 6, registered: registered, denoms: [] }] });
+  const names = (l) => l.map((t) => t.symbol + ":" + t.denoms.map((d) => d.text).join("/"));
+  check("#4 every registry row empty, the vault not read: the code's amounts, in the table and in Receive alike",
+    [names(L.bridgeTokens(regAll(null), depList)), names(L.receiveTokens(regAll(null), depList))], [["ETH:0.02/0.2", "USDT:100/1,000"], ["ETH:0.02/0.2", "USDT:100/1,000"]]);
+  check("#4 every row empty, the vault read (registered false): nothing offered, in both", [names(L.bridgeTokens(regAll(false), depList)), names(L.receiveTokens(regAll(false), depList))], [[], []]);
+  const oneEmpty = { tokens: [{ symbol: "ETH", eth_token: ETH, decimals: 18, registered: true, denoms: [{ value: D(2, 16) }] }, { symbol: "USDT", eth_token: USDT, decimals: 6, registered: true, denoms: [] }] };
+  check("#4 one row empty with the vault read: that token left out, the other from the registry, in both", [names(L.bridgeTokens(oneEmpty, depList)), names(L.receiveTokens(oneEmpty, depList))], [["ETH:0.02"], ["ETH:0.02"]]);
+  check("#4 the fixed list only with no registry and no bridge list", [names(L.bridgeTokens(null, null)), names(L.bridgeTokens(regAll(false), null)), names(L.bridgeTokens(null, []))],
+    [["ETH:0.01/0.1/1", "dUSDC:100/1,000/10,000"], ["ETH:0.01/0.1/1", "dUSDC:100/1,000/10,000"], []]);
+  check("#4 the screen derives Receive from the same inputs as the table", /readonly property var receiveTokenList: Logic\.receiveTokens\(receiveRegistry, bridgeDeploymentTokens\)/.test(qml3), true);
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");

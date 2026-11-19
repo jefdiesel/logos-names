@@ -1260,13 +1260,25 @@ Item {
     readonly property var bridgeDeploymentTokens: bridgeConfig !== null && bridgeConfig.deployment ? bridgeConfig.deployment.tokens : null
     readonly property var bridgeTokenTable: Logic.bridgeTokens(receiveRegistry, bridgeDeploymentTokens)
     readonly property var receiveTokenList: Logic.receiveTokens(receiveRegistry, bridgeDeploymentTokens)
-    property string receiveToken: "ETH"
+    // The token chosen, by its Ethereum address (Logic.tokenKey), never by its symbol.
+    property string receiveToken: Logic.ETH_ADDRESS
+    property bool receivePressed: false     // the person pressed a token chip on this screen
+    property string receiveSwitched: ""     // why the pressed token was replaced (paused, delisted, gone)
     // The token asked for: the one pressed when the bridge offers it, else ETH, else the first not paused.
     readonly property string receiveTokenNow: Logic.receiveTokenNow(receiveTokenList, receiveToken)
+    // Any change of the token asked for (a press, or a registry reply that paused or dropped the
+    // pressed one) starts on its smallest amount again and says why when it wasn't the person's
+    // own press (review-branches-3 erc20 #3).
+    onReceiveTokenNowChanged: {
+        receiveSwitched = Logic.receiveSwitchNote(receiveTokenList, receiveToken, receiveTokenNow, receivePressed)
+        receiveDenom = -1
+        if (receiveTokenNow !== "" && receiveToken !== receiveTokenNow)
+            receiveToken = receiveTokenNow
+    }
     // The amount pressed on this screen (-1: none yet, so the smallest: Logic.denomOrSmallest). Never
     // remembered: opening the screen, "Make another code" or another token starts on the smallest.
     property int receiveDenom: -1
-    readonly property int receiveDenomNow: Logic.denomOrSmallest((receiveTokenList.filter(function(t) { return t.symbol === receiveTokenNow })[0] || { denoms: [] }).denoms, receiveDenom)
+    readonly property int receiveDenomNow: Logic.denomOrSmallest((receiveTokenList.filter(function(t) { return Logic.tokenKey(t) === receiveTokenNow })[0] || { denoms: [] }).denoms, receiveDenom)
     property string receiveAccount: ""
     property bool receivePublicOk: false
     // Private or public: chosen by the person ("" until then: private, the privacy default, when
@@ -1485,7 +1497,8 @@ Item {
         // A private code: the bridge's private deposit request (Logic.PRIVATE_BRIDGE); a public one
         // only after the "Not private" tick (the bridge refuses it without "true").
         var method = priv ? Logic.PRIVATE_BRIDGE.receive : "make_public_deposit_request"
-        var args = priv ? [receiveTokenNow, String(receiveDenomNow), into] : [receiveTokenNow, String(receiveDenomNow), into, "true"]
+        var token = Logic.receiveTokenArg(receiveTokenList, receiveTokenNow)
+        var args = priv ? [token, String(receiveDenomNow), into] : [token, String(receiveDenomNow), into, "true"]
         bridgeCall(method, args, function(value) {
             receiveAsking = false
             var r = Logic.receiveReply(value)
@@ -2109,7 +2122,7 @@ Item {
         }
         sbAsking = true
         sbError = ""
-        bridgeCall(Logic.PRIVATE_BRIDGE.sendBackPlan, [Logic.sendBackSymbol(sbAsset.symbol, bridgeTokenTable), String(sbDenom), sbAccount, sbCheck.code], function(value) {
+        bridgeCall(Logic.PRIVATE_BRIDGE.sendBackPlan, [Logic.sendBackToken(sbAsset, bridgeTokenTable), String(sbDenom), sbAccount, sbCheck.code], function(value) {
             sbAsking = false
             if (value && value.needs) {
                 sbNeedsReply(value, "plan")
@@ -11417,17 +11430,19 @@ Item {
                             spacing: 8
                             Repeater {
                                 model: Logic.receiveTokensOpen(root.receiveTokenList)
-                                Choice { required property var modelData; label: modelData.symbol; chosen: root.receiveTokenNow === modelData.symbol; onPressed: { root.receiveToken = modelData.symbol; root.receiveDenom = -1 } }
+                                Choice { required property var modelData; label: modelData.symbol; chosen: root.receiveTokenNow === Logic.tokenKey(modelData); onPressed: { root.receivePressed = true; root.receiveSwitched = ""; root.receiveToken = Logic.tokenKey(modelData); root.receiveDenom = -1 } }
                             }
                         }
                         // A token the vault has paused is not offered; one plain line says which.
                         StatusLine { visible: text !== ""; kind: ""; text: Logic.receivePausedLine(root.receiveTokenList) }
+                        // The pressed token was replaced (paused or dropped after the bridge was read): said, never silent.
+                        StatusLine { visible: text !== ""; kind: ""; text: root.receiveSwitched }
                         Flow {
                             Layout.fillWidth: true
                             spacing: 8
                             Repeater {
-                                model: (root.receiveTokenList.filter(function(t) { return t.symbol === root.receiveTokenNow })[0] || { denoms: [] }).denoms
-                                Choice { required property var modelData; label: modelData.text + " " + root.receiveTokenNow; chosen: root.receiveDenomNow === modelData.index; onPressed: root.receiveDenom = modelData.index }
+                                model: (root.receiveTokenList.filter(function(t) { return Logic.tokenKey(t) === root.receiveTokenNow })[0] || { denoms: [] }).denoms
+                                Choice { required property var modelData; label: modelData.text + " " + Logic.receiveSymbolOf(root.receiveTokenList, root.receiveTokenNow); chosen: root.receiveDenomNow === modelData.index; onPressed: root.receiveDenom = modelData.index }
                             }
                         }
                         // Private or public (private first: the privacy default), with one line on what it means.
@@ -11499,7 +11514,7 @@ Item {
                             text: "This code is for an older vault. For the current one, make another code."
                         }
                         // What to do next, in order (owner, 2026-11-16): copy and open, compare, deposit and come back.
-                        NumberLine { text: "1. " + Logic.receiveDepositSteps(receiveScreen.result !== null ? receiveScreen.result.symbol : "", root.bridgeTokenTable)[0] }
+                        NumberLine { text: "1. " + Logic.receiveDepositSteps(receiveScreen.result, root.bridgeTokenTable)[0] }
                         Action { label: root.receiveLinkCopied ? "Copied." : "Copy the link"; strong: true; onPressed: root.copyDepositLink(receiveScreen.result.request_url) }
                         NumberLine { text: "2. " + Logic.compareLine(receiveScreen.result !== null ? receiveScreen.result.compare : null) }
                         Text {
@@ -11512,7 +11527,7 @@ Item {
                             font.weight: Font.Bold
                             wrapMode: Text.WordWrap
                         }
-                        NumberLine { text: "3. " + Logic.receiveDepositSteps(receiveScreen.result !== null ? receiveScreen.result.symbol : "", root.bridgeTokenTable)[2] }
+                        NumberLine { text: "3. " + Logic.receiveDepositSteps(receiveScreen.result, root.bridgeTokenTable)[2] }
                         Hint { font.pixelSize: root.px(15); text: "No file to save: this wallet keeps what it needs." }
                         RowLayout {
                             spacing: 14
@@ -11669,7 +11684,7 @@ Item {
                                 Choice {
                                     required property var modelData
                                     label: Logic.idShort(modelData.account) + " · " + modelData.amount + " " + modelData.symbol
-                                    chosen: root.sbAsset !== null && root.sbAccount === modelData.account && root.sbAsset.symbol === modelData.symbol
+                                    chosen: Logic.sameSource(root.sbAccount, root.sbAsset, modelData)
                                     onPressed: root.sbPick(modelData)
                                 }
                             }
@@ -11685,7 +11700,7 @@ Item {
                                 Choice {
                                     required property var modelData
                                     label: Logic.privateSourceLabel(modelData)
-                                    chosen: root.sbAsset !== null && root.sbAccount === modelData.account && root.sbAsset.symbol === modelData.symbol
+                                    chosen: Logic.sameSource(root.sbAccount, root.sbAsset, modelData)
                                     onPressed: root.sbPick(modelData)
                                 }
                             }
