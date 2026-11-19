@@ -1,0 +1,112 @@
+{
+  "cases": [
+    {
+      "made": 2,
+      "nth": 7,
+      "private": false,
+      "scheme": "phrase"
+    },
+    {
+      "made": 2,
+      "nth": 30,
+      "private": false,
+      "scheme": "imported"
+    },
+    {
+      "made": 9,
+      "nth": 7,
+      "private": false,
+      "scheme": "phrase"
+    },
+    {
+      "made": 1,
+      "nth": 4,
+      "private": true,
+      "scheme": "phrase"
+    },
+    {
+      "made": 1,
+      "nth": 25,
+      "private": true,
+      "scheme": "imported"
+    },
+    {
+      "made": 3,
+      "nth": 3,
+      "private": true,
+      "scheme": "phrase"
+    }
+  ],
+  "classify_sha256": "71a98ca5099515289a75a6a990024a547f76724a76ec5d76f963b19772430ecb",
+  "foreign_public_key_7": {
+    "scheme": "imported",
+    "secret": "0x05 x 32"
+  },
+  "look_ahead": 20,
+  "phrase": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+  "private": [
+    "Ezz73Y9kCtDTQTqBWAzFsRQVm4xvRZ4ZntqedNLFwKRW",
+    "6vMkXNV54YiEd2T3hzYoC9HwGQfx7dDwK1PQYBa8G5m3",
+    "CPsE9Pay8EuV8B62WKwxnmukFtEELvMuTqaMogR9VPQ6",
+    "ELwUXsVs2fjE7e4KyixHZCtRZzMkwA7ZR9omZxRn4Pu3",
+    "2VrKJVFfohsF95WAdFTHnYdrJB6nrx9KuxegvZnFnfEk",
+    "EU2oiXmtQBhfTG6HMwxDhDEH7t7zghhQpYgg36iZCyML",
+    "5BYZonxhjEXNbGzhFbdt3ktpyegcuuoaS3FjjSn3BFrc",
+    "4DEdStcX7EsZdCmeo9wffyroPkCUL8o1DtWknK2z124A",
+    "Evo4BuTS3C5GsetzyMFf1Azi7w9DVMUWaPeRyakcKzU",
+    "DJsrmbzz9rErNVHfSgErd2qwfo2G64ria4AEf8nyF2S",
+    "DcAfgXpuVRXsvf5uo36qQagJUh8dGwe7FVwgawxN2RLd",
+    "AMCz2c1JmnuEXBZjRDG9amimjQSerLv6uhSBac3nmCcZ",
+    "H5LMeKUkBakrPqD4iRZfEcZNV4Ye7nJRnn3W37Pop1pE",
+    "CyvChvUaJyN6Cs34gq1A1YRS3dtrc1fjf9ckAabpZEg2",
+    "7S3eGghHFMBCprjy7NzHQW8miGV2qrzoUK6SBCiE3koi",
+    "BmVsBFKdsdvHxFMsqZHRDFiP7mDWsduRVvTe464oaR5e",
+    "6Ec1u9hhe2eRTFnUue5vvzLpTfpddE4HF6JGGPe5G2Zk",
+    "HztyH8nf9gBLK16cYifaTNYa58Zm58SRH4sEJ6DSrkJd",
+    "6FZt64JLo1YNbHK5umYFX35T9yrAJETHtVXptmvPVnfu",
+    "A14NGjJL6HUu2C1R3xaJpZnVQPcsvpSBa448b1D33LjJ",
+    "Grkbtis2mRqk2uXRsvBb7QbZBPmDUGwUEkC6z9g3iCB9",
+    "CPrPAeRQVvqMFCsb5frxLhUaAtYaCie5f37LYWwXSzTZ",
+    "m3Uz7qaNHmJ9nkKFMMJpmR3SU6dm8fHXhqmSfP2QXdS",
+    "CpZYACYJtLjDZHnZWYLTU6ibu18arB7ty4u6CA24mFC8",
+    "Gj63Hcg93rycNCXbgeUaxxstuFz9TeWRP9kwySRdhSmb",
+    "7PaDehht29rexpJjeviHgiEubkZXCjsRuTxDygMDeeSj",
+    "GNonkKMUn4CHHf7Xgfz4J4DvjFrBUj8GEwfUQ3T9957V",
+    "2T7Ncpxb3SvyCaL5Giv59FjS9voa7qD5jZUjx5G2YpcA",
+    "4n7moHRwtsosVSEGjbjkivc4rYsev1QVYXh6cWyF3j9e",
+    "AHDZWgA9ZNWyygjffsrimDWk8DmkJyAXGeW1q72tLmar"
+  ],
+  "public": [
+    "AKRYNTU8c4MZ4fSr5FHcn6BGE6T4dfRCzn1ziQCNKFBu",
+    "DzN4xv4Z3MZhEACzb8nENnocedCNBKEEiUekVCEMNJqH",
+    "4VNhgxkiwx3EAjds48Q9G3aK9DrTQGKf6z2tHzHTarjo",
+    "CRyQXcodkqkZcmZHeCim4pwMWGNDQKpb3aNT8j1WUJqB",
+    "AKtsFSZQBzEDwQvqKxAhmZDSqgKFGxV1iuYmvkoZtttj",
+    "9n6qrq9JeM6WYNpY8w7uqvFxK4FNSuDayzbnBERTvPAV",
+    "3H11ys42PoiQVSUbSaYSNxvhM6nAk9KqrMfeEQ2TxqA5",
+    "4Z7YiyxbvwzJg4bTHJX5vRsrAoC9A4CdmYyJxd6G2fSE",
+    "4PbsHVCVAizasn47MpHrAKwfeB4CthukuQzFnMp1noWY",
+    "DsHPQ7D8CCukhXgnLf3DQYKpEM55779Lq1jseGF9fLiG",
+    "6QH65oMqFbzZqYHdyzLb2bM3DKQd5QU5n8dttC8Q5gUq",
+    "Ch23rt4uu5bH7yNSDkn8DPjex7P8TuJVxPZMDAzSmCWt",
+    "3SeL9o9BvczLXincCxk2mTwo6ZfwF1YpN5ny5RQBsyeM",
+    "83PUAHw1FhbtsZmsnoK32T2hkBKqW2MasKee11xxQ6N4",
+    "GjCqT57UfiUTqYj4MZwpWhMyDpsgrCPRKsgB8uSXbqqJ",
+    "DCJDCkQPhx7NGHv5spZDAFkNbnvY1HKMMFgEeJuD6AzE",
+    "Cm7EkmJVnv1vV46h6XVHcJr9BF5G2scQjjZ6Jw9LP78a",
+    "FCzj2ftYBp4h5C42y4sUYGHbLe9g3vkHvWTbKvKQhrXg",
+    "B5B73p747Qe9VnKnL85VSwxBjQghJJVCpZrvJbXLjt1X",
+    "26SdruCcuQMYbi3s3bxrateAs3iJKvsdp7HVEhLjNMVi",
+    "4bxbHrxoJauA6e8Kz7ruNzKxbov6wC6MMNpFXLD3BcZj",
+    "5m5w7GXK1f8iocPdyWN7eKybiadZaq16kDbNAyjADvBz",
+    "4FjcBU9XRxZNT5AT3N4nkU7PMf3PSSb1zBHnDErznUcq",
+    "4cQZzCATihCct1PZTsAjBqHaHnT5d2e9Dh3vnkmULYP7",
+    "BUamVBxCwFneLKHkhNhuTLTEQBnxvHqbSGoSBuTUVuSU",
+    "9cguM7R2pcGSKWZNdHzWUJYn7UQgFQgEUAh5uiwcNiBc",
+    "5pWwJM6pL3RR1qgtvpLzHuNKJJZTmSPe3U52r8oxzM7h",
+    "9UatsYMygAc5BM3CQ8JXhN7TJmGRA3H7RPW8pdjsymAm",
+    "2yAdndud4fFBVfJjfdYE1kcriKYjyXzRKxnVVbviLhy2",
+    "6RD9SmDrB5fYrc7wXnqShxtk1zm2LSB25X3pGNTz1fSJ"
+  ],
+  "spec": "cli/src/scheme_classify.rs (names) = lez-bridge/cli/src/scheme_classify.rs (bridge); look-ahead 20"
+}
