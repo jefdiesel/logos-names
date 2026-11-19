@@ -153,6 +153,8 @@ impl Gate {
     /// rules above); otherwise fails at once.
     pub fn call(&self, host: &dyn Host, module: &str, method: &str, args: &Value, wait: Duration) -> Result<Value, Failure> {
         self.admit(host, module)?;
+        // A wait on another module, on the thread the call came in on (the stall tests' tripwire).
+        crate::served::blocking("peer::call");
         let answer = host.call(module, method, args, wait);
         self.learn(module, &answer);
         answer
@@ -369,6 +371,26 @@ pub mod stand_in {
 
     thread_local! {
         static DOWN: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+        static SILENT: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    }
+
+    /// `module` is loaded but never answers (the owner's Basecamp, 2026-11-18: blockchain_module
+    /// loaded, its node busy), for the rest of this test thread: a call waits its whole `wait` and
+    /// gets no answer, as the host's waitForFinished would; an ask's `done` gets no answer once its
+    /// `wait` is over, from a thread of its own (the host's timer).
+    pub fn set_silent(module: &str, silent: bool) {
+        SILENT.with(|set| {
+            let mut set = set.borrow_mut();
+            if silent {
+                set.insert(module.to_owned());
+            } else {
+                set.remove(module);
+            }
+        });
+    }
+
+    fn silent(module: &str) -> bool {
+        SILENT.with(|set| set.borrow().contains(module))
     }
 
     /// From now on in this test thread a module that gave no answer is held, as in a module build.
@@ -403,15 +425,32 @@ pub mod stand_in {
             std::thread::current().name().is_some()
         }
 
-        fn call(&self, module: &str, method: &str, args: &Value, _wait: Duration) -> Result<Value, Failure> {
+        fn call(&self, module: &str, method: &str, args: &Value, wait: Duration) -> Result<Value, Failure> {
+            if silent(module) {
+                std::thread::sleep(wait);
+                return Err(Failure::NoAnswer(format!("{module} gave no answer within {wait:?}")));
+            }
             match module {
                 crate::chain::MODULE => crate::node::answer(method, args),
                 _ => Err(Failure::NoAnswer(format!("no stand-in for {module}"))),
             }
         }
 
-        fn ask(&self, module: &str, _method: &str, _args: &Value, _wait: Duration, done: Done) {
-            done(Err(Failure::NoAnswer(format!("no stand-in for {module}"))))
+        fn ask(&self, module: &str, method: &str, args: &Value, wait: Duration, done: Done) {
+            if silent(module) {
+                let module = module.to_owned();
+                std::thread::spawn(move || {
+                    std::thread::sleep(wait);
+                    done(Err(Failure::NoAnswer(format!("{module} gave no answer within {wait:?}"))));
+                });
+                return;
+            }
+            // The node answers an ask as it answers a call (`node::ANSWERS`), as soon as the
+            // host's event loop runs, which here is at once.
+            match module {
+                crate::chain::MODULE => done(crate::node::answer(method, args)),
+                _ => done(Err(Failure::NoAnswer(format!("no stand-in for {module}")))),
+            }
         }
     }
 }

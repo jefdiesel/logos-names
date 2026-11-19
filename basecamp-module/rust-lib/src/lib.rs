@@ -15238,6 +15238,153 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    // ── The third stall (2026-11-18, build 31153da on the owner's Basecamp) ──
+    //
+    // For about 40 s after the names host started, 11 calls got no answer within Basecamp's 20 s
+    // (app_grants, backup_status, pending_inscriptions, pending_requests, file_sha256), while
+    // wallet, cli_balance, cli_status and cli_accounts, asked just before them, were answered.
+    // That Basecamp has blockchain_module loaded, a real wallet and the bundled LEZ Bridge.
+
+    /// The calls the Names app makes as it opens (Main.qml `loadConfig` → `take`), in its order:
+    /// the zones, the wallet, My names, the balance, the CLI's state, the claims, the accounts,
+    /// the tokens, the watched tokens, the node (`loadChain`), the jobs, the grants, the shipped
+    /// bridge's check (`checkBundle`, one `file_sha256` per file), the backup, and the two 3 s polls.
+    fn opening_calls(bundled: std::path::PathBuf) -> Vec<(&'static str, Box<dyn Fn(&mut Names) -> String>)> {
+        vec![
+            ("get_config", Box::new(|n: &mut Names| n.get_config())),
+            ("zone_list", Box::new(|n: &mut Names| n.zone_list())),
+            ("wallet", Box::new(|n: &mut Names| n.wallet())),
+            ("cli_mine", Box::new(|n: &mut Names| n.cli_mine())),
+            ("anon_name", Box::new(|n: &mut Names| n.anon_name())),
+            ("board_likes", Box::new(|n: &mut Names| n.board_likes())),
+            ("cli_balance", Box::new(|n: &mut Names| n.cli_balance())),
+            ("cli_status", Box::new(|n: &mut Names| n.cli_status())),
+            ("settings", Box::new(|n: &mut Names| n.settings())),
+            ("cli_accounts", Box::new(|n: &mut Names| n.cli_accounts())),
+            ("token_source_holdings", Box::new(|n: &mut Names| n.token_source_holdings())),
+            ("cli_token_holdings", Box::new(|n: &mut Names| n.cli_token_holdings(String::new()))),
+            ("cli_token_pending", Box::new(|n: &mut Names| n.cli_token_pending())),
+            ("watched_tokens", Box::new(|n: &mut Names| n.watched_tokens())),
+            ("chain_status", Box::new(|n: &mut Names| n.chain_status())),
+            ("chain_accounts", Box::new(|n: &mut Names| n.chain_accounts())),
+            ("chain_stake", Box::new(|n: &mut Names| n.chain_stake())),
+            ("chain_claim", Box::new(|n: &mut Names| n.chain_claim(false))),
+            ("running_jobs", Box::new(|n: &mut Names| n.running_jobs())),
+            ("app_grants", Box::new(|n: &mut Names| n.app_grants())),
+            ("file_sha256", Box::new(move |n: &mut Names| n.file_sha256(bundled.to_string_lossy().into_owned()))),
+            ("backup_status", Box::new(|n: &mut Names| n.backup_status())),
+            ("pending_requests", Box::new(|n: &mut Names| n.pending_requests())),
+            ("pending_inscriptions", Box::new(|n: &mut Names| n.pending_inscriptions())),
+        ]
+    }
+
+    /// Makes `calls` one after the other, as the host dispatches a burst the app sent at once,
+    /// and returns how long the whole burst held the module (what the last call in it waited),
+    /// the longest single call, and the answers. No call may wait on the network, the CLI or
+    /// another module on its own thread.
+    fn burst(names: &mut Names, calls: &[(&'static str, Box<dyn Fn(&mut Names) -> String>)]) -> Burst {
+        let started = std::time::Instant::now();
+        let mut out = Burst { took: std::time::Duration::ZERO, longest: ("", std::time::Duration::ZERO), blocked: Vec::new(), answers: HashMap::new() };
+        for (what, call) in calls {
+            let at = std::time::Instant::now();
+            let (answer, blocking) = served::on_dispatch(|| call(names));
+            let took = at.elapsed();
+            if took >= std::time::Duration::from_millis(100) {
+                eprintln!("    {what} took {took:?}");
+            }
+            if !blocking.is_empty() {
+                out.blocked.push((*what, blocking));
+            }
+            if took > out.longest.1 {
+                out.longest = (*what, took);
+            }
+            out.answers.insert(*what, parsed(&answer));
+        }
+        out.took = started.elapsed();
+        out
+    }
+
+    /// One burst of calls (`burst`): how long it held the module, its longest call, the calls
+    /// that waited on the network, the CLI or another module on their own thread, the answers.
+    struct Burst {
+        took: std::time::Duration,
+        longest: (&'static str, std::time::Duration),
+        blocked: Vec<(&'static str, Vec<&'static str>)>,
+        answers: HashMap<&'static str, Value>,
+    }
+
+    /// The owner's Basecamp, as near as the stand-ins go: blockchain_module loaded and never
+    /// answering, a names CLI that takes 20 s for everything (`--version` too), the shipped
+    /// 10 MB lez_bridge.lgx to check, an endpoint that answers after 8 s, and the module new
+    /// (nothing read yet). The app's opening burst and then its polls (every call it makes while
+    /// a page is open, every 3 s) for the first 30 s: every burst is over within a second, so no
+    /// call in it waits a second, let alone Basecamp's 20 s. Then the reads end on their own
+    /// threads and the calls answer with them: the node's plain no-answer line (never busy for
+    /// good), the bundle's hash, the CLI's version.
+    #[test]
+    fn the_first_half_minute_on_the_owners_basecamp_answers_every_call_within_a_second() {
+        let (url, _) = bridge_endpoint(std::time::Duration::from_secs(8), Default::default(), 10);
+        let (mut names, dir) = as_the_host("stall-owner", &url, 0);
+        // Every run of the CLI takes 20 s, its version too.
+        let cli = std::path::PathBuf::from(names.cli.clone().unwrap());
+        std::fs::write(
+            &cli,
+            "#!/bin/sh\nsleep 20\ncase \"$*\" in\n *--version*) echo 'names 0.17.0 (LEZ v0.4.0-rc3)' ;;\n *--help*) exit 0 ;;\n *prover-status*) echo '{\"bare\": true}' ;;\n *) echo '{}' ;;\n esac\n",
+        )
+        .unwrap();
+        // The node: loaded, silent; held after its first no-answer, as in a module build.
+        peer::stand_in::hold_failures();
+        peer::stand_in::set_silent(chain::MODULE, true);
+        // The shipped bridge package, 10 MB.
+        let bundled = dir.join("lez_bridge.lgx");
+        let bytes: Vec<u8> = (0..10u32 << 20).map(|n| (n % 251) as u8).collect();
+        std::fs::write(&bundled, &bytes).unwrap();
+        let sha = {
+            use sha2::{Digest, Sha256};
+            Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect::<String>()
+        };
+        let opening = opening_calls(bundled.clone());
+        let mut polls = polled_calls();
+        polls.extend(opening_calls(bundled.clone()).into_iter().filter(|(what, _)| ["chain_claim", "file_sha256"].contains(what)));
+        let init = std::time::Instant::now();
+        let mut bursts = Vec::new();
+        let mut blocked = Vec::new();
+        let mut kind = "opening";
+        let mut calls = &opening;
+        while init.elapsed() < std::time::Duration::from_secs(30) {
+            let made = burst(&mut names, calls);
+            eprintln!("{:>5.1} s: {kind} burst of {} calls held the module {:?} (longest {} {:?})", init.elapsed().as_secs_f64(), calls.len(), made.took, made.longest.0, made.longest.1);
+            bursts.push((kind, made.took, made.longest));
+            blocked.extend(made.blocked);
+            std::thread::sleep(std::time::Duration::from_secs(3).saturating_sub(made.took));
+            (kind, calls) = ("polls", &polls);
+        }
+        let slow: Vec<_> = bursts.iter().filter(|(_, took, _)| *took >= std::time::Duration::from_secs(1)).collect();
+        assert!(slow.is_empty() && blocked.is_empty(), "bursts that held the module a second or more (burst, its length, its longest call): {slow:?}; calls that waited on their own thread: {blocked:?}");
+        // The reads end on their own threads (the node's asks are given up on after their wait).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            let answers = burst(&mut names, &polls).answers;
+            let node_said = ["chain_status", "chain_accounts", "chain_stake", "chain_claim"]
+                .iter()
+                .all(|what| answers[what]["busy"] != true && answers[what]["error"].as_str().is_some_and(|why| why.contains("node")));
+            let hashed = answers["file_sha256"]["value"] == json!(sha);
+            let version = names.cli_lines.lock().unwrap().get(&cli).map(|(_, line)| line.clone());
+            if node_said && hashed && version.as_deref() == Some("names 0.17.0 (LEZ v0.4.0-rc3)") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the reads never ended: node {} {} {} {}; hash {}; version {version:?}",
+                answers["chain_status"], answers["chain_accounts"], answers["chain_stake"], answers["chain_claim"], answers["file_sha256"]
+            );
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+        peer::stand_in::set_silent(chain::MODULE, false);
+        BRIDGE_HTTP.with(|on| on.set(false));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// A 429 on a background read is waited out (its Retry-After) and asked once more, so the read
     /// still ends with its value; on a call's own thread it is never waited for, and the endpoint
     /// isn't asked again until then.
