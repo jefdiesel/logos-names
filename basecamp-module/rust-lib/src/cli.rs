@@ -2764,6 +2764,16 @@ impl Jobs {
         self.start_process(id, name, kind, setup.command(command), &what, scratch)
     }
 
+    /// `start`, with `env` set for the CLI (`LOGOS_NAMES_DRY_RUN` for a check that sends nothing).
+    pub fn start_with_env(&self, setup: &Setup, id: &str, name: &str, kind: &str, command: Vec<String>, env: &[(&str, &str)]) -> Result<Value, String> {
+        let what = format!("the names CLI at {}", setup.program.display());
+        let mut process = setup.command(command);
+        for (key, value) in env {
+            process.env(key, value);
+        }
+        self.start_process(id, name, kind, process, &what, None)
+    }
+
     /// Starts `process` (`what` says what it runs) as job `id` for `name`, and
     /// returns at once, as `start` does.
     fn start_process(

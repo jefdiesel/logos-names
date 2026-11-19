@@ -1264,6 +1264,39 @@ for _name, _js, _mock in WALLET_NEXT:
     SCENARIOS[_name] = _js
     MOCKS[_name] = _mock
 
+# Move wrapped tokens on the bridge test network (roadmap 12): from the imported CCVd (0.1 wETH on
+# bridge v5) to the phrase account 7wx3, the case of 2026-11-18. The module's answers are set as state.
+_MV_FEAT = 'root.againAfter(150, function() { root.moduleFeatures = root.moduleFeatures.concat(["bridge_token_send"]) })'
+_MV_ASSET = {"symbol": "wETH", "name": "Wrapped Sepolia ETH (v5)", "amount": "0.1", "bridge": "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA", "bridgeLabel": "bridge v5",
+             "base": "100000000000000000", "decimals": 18, "definition": "DbPGo6FeRLp7NaUWxQGC1WXpJkSQe1jbAqYVMQkCuuPw"}
+_MV_TO = "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR"
+_MV_PLAN = {"bridge": _MV_ASSET["bridge"], "bridge_label": "bridge v5", "definition": _MV_ASSET["definition"], "symbol": "wETH", "decimals": 18,
+            "amount": "50000000000000000", "amount_shown": "0.05", "from": OWNER, "to": _MV_TO, "to_name": None, "fee_payer": OWNER, "relay_pays": False}
+def mv(js=""):
+    return (CARD_04 % ("[]", "({})", _MV_FEAT + '; root.againAfter(250, function() { root.openMove("%s", %s); root.againAfter(80, function() { %s }) })'
+                       % (OWNER, json.dumps(_MV_ASSET), js)))
+def mv_sheet(state, more=""):
+    check = {"id": "", "plan": _MV_PLAN, "args": [], "state": state, "fee": {"about": "2140", "at_most": "3000"} if state == "ready" else None, "problem": ""}
+    return mv('root.moveTo = "%s"; moveAmountField.text = "0.05"; root.againAfter(30, function() { root.moveCheck = %s; %s })' % (_MV_TO, json.dumps(check), more))
+MOVE = [
+    # The card: Move beside each wrapped token the wallet's own account holds.
+    ("card-move", CARD_04 % ("[]", "({})", _MV_FEAT)),
+    # The form, with the list of the wallet's accounts open (the imported one marked).
+    ("move-form", mv('root.moveToOpen = true')),
+    ("move-form-filled", mv('root.moveTo = "%s"; moveAmountField.text = "0.05"' % _MV_TO)),
+    ("move-too-much", mv('root.moveTo = "%s"; moveAmountField.text = "0.5"' % _MV_TO)),
+    ("move-checking", mv_sheet("checking")),
+    ("move-sheet", mv_sheet("ready")),
+    ("move-short", mv_sheet("failed", 'root.moveCheck = Object.assign({}, root.moveCheck, { problem: "CCVd76…pKnk has no test LEZ, and the fee needs about 3,000 test LEZ. Get test LEZ for it first (Get test LEZ, on the bridge test network card). Nothing was sent." })')),
+    ("move-old-tool", mv_sheet("failed", 'root.moveCheck = Object.assign({}, root.moveCheck, { problem: "This wallet\'s LEZ 0.4 names tool can\'t move wrapped tokens yet: it needs a newer tool. Nothing was sent." })')),
+    ("move-sending", mv_sheet("ready", 'root.moveSent = { id: "", plan: %s, state: "sending", block: null, tx: null, problem: "" }' % json.dumps(_MV_PLAN))),
+    ("move-done", mv('root.moveTo = "%s"; root.moveSent = { id: "", plan: %s, state: "done", block: 28512, tx: "ab12", problem: "" }' % (_MV_TO, json.dumps(_MV_PLAN)))),
+    # To an imported account: said before the review.
+    ("move-to-imported", mv('moveToField.text = "%s"; moveAmountField.text = "0.05"' % OWNER).replace('root.openMove("%s"' % OWNER, 'root.openMove("%s"' % _MV_TO)),
+]
+for _name, _js in MOVE:
+    SCENARIOS[_name] = _js
+
 def _ago(text):
     """A job's start in a mock ("@AGO:n@"): n seconds before this render, in ms."""
     import re as _re, time as _time
@@ -1272,6 +1305,7 @@ HEIGHTS = {name: 2100 for name in ("claim-private-approve", "claim-private-simul
 HEIGHTS.update({"card-private-proving": 1500, "card-arriving-private": 1500})
 HEIGHTS.update({name: 1700 for name, _j, _m in WALLET_NEXT if name.startswith("sendback-address") or name.startswith("sendback-approve")})
 HEIGHTS.update({name: 1800 for name, _j, _m in WALLET_NEXT if name.startswith("card-remove")})
+HEIGHTS.update({name: 1500 for name, _j in MOVE})
 
 def main():
     qml, out_dir = sys.argv[1], sys.argv[2]

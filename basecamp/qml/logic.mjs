@@ -3204,3 +3204,116 @@ export function removeReply(value, kind) {
     var kept = ["deposited", "in_flight", "with_wallet", "unknown"].indexOf(code) >= 0
     return { removed: false, line: line, kind: wait ? "waiting" : kept ? "" : "problem" }
 }
+
+// ── Move wrapped tokens between accounts on the bridge test network (LEZ 0.4; roadmap 12) ──
+//
+// The names module checks and sends (`bridge_token_send`, bridge_send.rs); these say what the
+// screen shows. Amounts stay decimal text all the way: no JS number holds 18 decimals exactly.
+
+/// `text` typed in the token's unit ("1.2") as base units for `decimals` (digits, no leading
+/// zeros), or null when it isn't an amount. The module reads it again, the same way.
+export function unitsText(text, decimals) {
+    var typed = String(text === null || text === undefined ? "" : text).trim()
+    var places = Number(decimals) || 0
+    var m = /^(\d*)(?:\.(\d*))?$/.exec(typed)
+    if (!m || (m[1] === "" && (m[2] === undefined || m[2] === "")))
+        return null
+    var fraction = m[2] || ""
+    if (fraction.length > places)
+        return null
+    var digits = (m[1] + fraction + "0".repeat(places - fraction.length)).replace(/^0+/, "")
+    return digits === "" ? null : digits
+}
+
+/// Whether decimal text `a` is more than `b` (both digits).
+function moreThan(a, b) {
+    var x = String(a || "0").replace(/^0+(?=\d)/, ""), y = String(b || "0").replace(/^0+(?=\d)/, "")
+    return x.length !== y.length ? x.length > y.length : x > y
+}
+
+/// Why the amount typed can't be moved, or "": `held` is the base units the account holds.
+export function moveAmountProblem(text, decimals, held, symbol) {
+    var typed = String(text || "").trim()
+    if (typed === "")
+        return ""
+    if (/^-/.test(typed))
+        return typed + " is negative. Enter an amount above 0."
+    if (!/^\d*\.?\d*$/.test(typed) || typed === ".")
+        return typed + " isn't an amount. Use digits and one point, such as 0.01."
+    var fraction = (typed.split(".")[1] || "")
+    if (fraction.length > (Number(decimals) || 0))
+        return typed + " has more than " + (Number(decimals) || 0) + " digits after the point, the smallest unit of " + (symbol || "this token") + "."
+    var base = unitsText(typed, decimals)
+    if (base === null)
+        return "Enter an amount above 0."
+    if (held !== null && held !== undefined && moreThan(base, held))
+        return "That's more than this account holds: " + decimalShown(held, decimals) + " " + (symbol || "") + "."
+    return ""
+}
+
+/// The accounts the tokens can go to: the wallet's own public accounts on LEZ 0.4 but the one they
+/// leave, each `{account, title, imported}`. `imported` lists the accounts imported into the wallet
+/// (backup_status of lez-0.4): an imported account can't bridge back to Ethereum from here, so it is
+/// marked; the phrase accounts come first.
+export function moveTargets(own, from, imported) {
+    var gone = String(from || "")
+    var marked = Array.isArray(imported) ? imported : []
+    var seen = {}
+    var rows = (own || []).map(function(a) { return String(a && a.account !== undefined ? a.account : a) })
+        .map(function(a) { return a.indexOf("/") < 0 ? "Public/" + a : a })
+        .filter(function(a) { if (seen[a] || a === gone || a.indexOf("Public/") !== 0) return false; seen[a] = true; return true })
+        .map(function(a) {
+            var imp = marked.indexOf(a) >= 0
+            return { account: a, title: "Public account " + keyShown(a.replace(/^Public\//, "")), imported: imp,
+                     sub: imp ? "Imported: can't bridge back to Ethereum from here" : "From your recovery phrase: can bridge back to Ethereum" }
+        })
+    return rows.filter(function(r) { return !r.imported }).concat(rows.filter(function(r) { return r.imported }))
+}
+
+/// The imported public accounts of the LEZ 0.4 wallet, from backup_status.
+export function importedAccounts(backup, net) {
+    var nets = backup && Array.isArray(backup.networks) ? backup.networks : []
+    var one = nets.filter(function(n) { return n && n.id === (net || "lez-0.4") })[0]
+    return one && Array.isArray(one.accounts) ? one.accounts.filter(function(a) { return a && a.imported === true && a.account }).map(function(a) { return String(a.account) }) : []
+}
+
+/// Where the tokens go, as typed: "" for nothing yet, else a problem or "".
+export function moveToProblem(text, from) {
+    var typed = String(text || "").trim()
+    if (typed === "")
+        return ""
+    if (/^Private\//.test(typed))
+        return "Moving wrapped tokens to a private account isn't in the wallet yet: choose a public account."
+    var bare = typed.replace(/^Public\//, "")
+    if ("Public/" + bare === String(from || ""))
+        return "That's the account the tokens leave from. Choose another one."
+    if (/^Public\//.test(typed) && !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(bare))
+        return "That isn't an account ID: it's Public/ and then letters and digits."
+    return ""
+}
+
+/// The fee line of the sheet: who pays and how much, from the check's ended job (`fee`) and the
+/// test LEZ the paying account holds (`native`, digits, or null when not read).
+export function moveFeeLine(plan, check, native) {
+    var payer = plan ? idShort(plan.fee_payer) : "the account"
+    if (!check || check.state === "checking")
+        return "Paid by " + payer + " in test LEZ. Checking how much…"
+    var about = check.fee && check.fee.about ? grouped(check.fee.about) : ""
+    var most = check.fee && check.fee.at_most ? grouped(check.fee.at_most) : ""
+    var held = native !== null && native !== undefined && native !== "" ? " (it holds " + grouped(native) + ")" : ""
+    if (about === "")
+        return "Paid by " + payer + " in test LEZ" + held + "."
+    return "About " + about + " test LEZ" + (most !== "" && most !== about ? ", at most " + most : "") + ", paid by " + payer + held + ". The bridge's relay pays only for claims and burns."
+}
+
+/// The line after the move ended: done with its block, or why not.
+export function moveResultLine(plan, ended) {
+    if (!ended)
+        return { kind: "", text: "" }
+    if (ended.state === "done" && !ended.problem) {
+        var what = plan ? plan.amount_shown + " " + plan.symbol + (plan.bridge_label ? " (" + plan.bridge_label + ")" : "") : "The tokens"
+        var to = plan ? (plan.to_name ? plan.to_name : idShort(plan.to)) : ""
+        return { kind: "done", text: "Moved " + what + " to " + to + (ended.block !== null && ended.block !== undefined ? ", in block " + ended.block : "") + "." }
+    }
+    return { kind: "problem", text: String(ended.problem || "The move didn't go through.") }
+}

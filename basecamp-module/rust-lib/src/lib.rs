@@ -36,6 +36,7 @@ mod activity;
 mod avatar;
 mod backup;
 mod bridge_net;
+mod bridge_send;
 mod chain;
 mod chain_keys;
 mod chain_fee;
@@ -1181,6 +1182,21 @@ pub trait NamesModule: Send + 'static {
     /// own token program. Names app only.
     fn cli_token_send_source(&mut self, token_program: String, definition: String, amount: String, to: String, from_private: bool, to_public: bool) -> String;
 
+    /// LEZ 0.4 (the bridge test network): moves `amount` (the token's own unit, such as `0.5`) of
+    /// the wrapped token `definition` of the bridge `bridge` (its program ID) from the wallet's
+    /// public account `from` (`Public/<id>`) to `to`: a public account (`Public/<id>`) or an LNS
+    /// name's public account. The token program and the decimals come from the bridge's Config,
+    /// which must list `definition`. The account the tokens leave pays the fee in test LEZ (the
+    /// bridge's relay pays only for claims and burns). Without `send` it is a CHECK: a wallet job
+    /// that prices the fee and sends nothing; its ended `job` state has `ready` (or `problem`, in
+    /// plain words) and `fee` `{about, at_most}`. With `send`, the move itself: one block; its
+    /// ended `job` state has `tx`, `block` or `problem`. The value is the job, with `plan`
+    /// `{bridge, bridge_label, definition, symbol, decimals, amount, amount_shown, from, to,
+    /// to_name, fee_payer, relay_pays}` for the sheet. Needs a LEZ 0.4 names tool with the
+    /// `bridge` token codec (an older one is said plainly). Names app only. get_config `features`
+    /// lists `bridge_token_send` (`bridge_send.rs`).
+    fn bridge_token_send(&mut self, bridge: String, definition: String, amount: String, from: String, to: String, send: bool) -> String;
+
     /// Forgets a token source. `{removed}`. Names app only.
     fn remove_token_source(&mut self, token_program: String) -> String;
 
@@ -1568,7 +1584,7 @@ const MODULE_VERSION: &str = "0.17.0";
 /// the app wasn't given is a request to add it to the app's grant, not "approved").
 /// `relayed_bridge_burn`: `propose_relayed_call` signs a burn of one denomination to a bridge whose
 /// vault releases by proof (`provider_public::burn_check`, privacy `bridge_public_burn`).
-const MODULE_FEATURES: [&str; 8] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "bundled_tool", "relayed_bridge_burn", "test_lez_faucet"];
+const MODULE_FEATURES: [&str; 9] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "bundled_tool", "relayed_bridge_burn", "test_lez_faucet", "bridge_token_send"];
 
 /// What a call that says it is a burn answers when it isn't one to a bridge a burn may go to.
 const NOT_A_BURN_BRIDGE: &str = "the wallet signs a burn only to a bridge whose vault releases by proof (bridge v4 or v5), and this call isn't one to its token program";
@@ -3329,6 +3345,40 @@ impl Names {
     /// an install that worked is put to use (`version`, `path`, `warning`),
     /// one that didn't says why (`problem`); a move to private says whether
     /// anything `moved`; a failed payment says why.
+    /// `bridge_token_send`: the bridge's Config (kept, or read for at most a few seconds), the
+    /// move checked against it, then a wallet job (`dry`: the check, which sends nothing).
+    fn bridge_send_start(&self, bridge: &str, definition: &str, amount: &str, from: &str, to: &str, send: bool) -> Result<Value, String> {
+        if self.net != Net::Lez04 {
+            return Err("Moving wrapped tokens runs on LEZ 0.4, the bridge test network; the wallet is on LEZ 0.3 now. Nothing was started.".to_owned());
+        }
+        let program = registry::bare_account(bridge.trim()).map_err(|_| "That isn't a bridge's program ID.".to_owned())?;
+        let gone = || "That bridge isn't on the bridge test network now. Nothing was started.".to_owned();
+        // Tests set the Config the chain would give (`BURN_CONFIGS`).
+        #[cfg(test)]
+        let said = tests::BURN_CONFIGS.with(|configs| configs.borrow().get(&registry::account_text(&program)).cloned());
+        #[cfg(not(test))]
+        let said: Option<Result<Option<bridge_net::BridgeConfig>, String>> = None;
+        let config = match said {
+            Some(said) => said.map_err(|why| format!("Couldn't read the bridge's token list ({why}). Nothing was started."))?.ok_or_else(gone)?,
+            None => match bridge_net::config_within(&self.bridge_url(), &program, bridge_net::CONFIG_FRESH, std::time::Duration::from_secs(4)) {
+                bridge_net::ConfigNow::Read(Some(bytes)) => bridge_net::decode_bridge_config(&bytes)?,
+                bridge_net::ConfigNow::Read(None) => return Err(gone()),
+                bridge_net::ConfigNow::Unread(why) => return Err(format!("Couldn't read the bridge's token list ({why}). Nothing was started.")),
+                bridge_net::ConfigNow::Reading => return Err("Still reading the bridge's token list. Try again in a moment; nothing was started.".to_owned()),
+            },
+        };
+        let it = bridge_send::checked(&config, program, definition, amount, from, to)?;
+        let setup = self.cli_setup()?;
+        setup.wallet_ready()?;
+        self.no_background_job()?;
+        chain_answers(&setup, None, &readable_account(&setup, self.program.as_ref()), &mut Start::new(&self.sequencer))?;
+        let jobs = self.jobs()?;
+        let id = jobs.prepare(cli::WALLET_JOB)?;
+        let (kind, env): (&str, &[(&str, &str)]) = if send { (bridge_send::SEND_KIND, &[]) } else { (bridge_send::CHECK_KIND, &[("LOGOS_NAMES_DRY_RUN", "1")]) };
+        let started = jobs.start_with_env(&setup, &id, cli::WALLET_JOB, kind, bridge_send::args(&it), env)?;
+        Ok(merged(started, &json!({ "plan": bridge_send::plan(&it) })))
+    }
+
     fn job_outcome(&mut self, state: &mut Value) {
         let running = state["state"] == "running";
         let done = state["state"] == "done";
@@ -3391,6 +3441,19 @@ impl Names {
                     state["problem"] = Value::from(format!("Claiming finished only in part: {}", cli::failure_cause(&log)));
                 }
             }
+            Some(kind @ (bridge_send::CHECK_KIND | bridge_send::SEND_KIND)) => {
+                let check = kind == bridge_send::CHECK_KIND;
+                let whole = state["id"].as_str().and_then(|id| self.jobs().ok().map(|jobs| jobs.whole_log(id))).unwrap_or_else(|| log.clone());
+                let fields = if check { bridge_send::check_outcome(&whole, running) } else { bridge_send::send_outcome(&whole, running, done) };
+                if let Some(fields) = fields.as_object() {
+                    for (key, value) in fields {
+                        state[key.as_str()] = value.clone();
+                    }
+                }
+                if !check && !running {
+                    self.forget_tokens();
+                }
+            }
             Some("token_send" | "token_receive") if !running => {
                 if let Some(fields) = cli::token_outcome(&log).as_object() {
                     for (key, value) in fields {
@@ -3404,7 +3467,8 @@ impl Names {
         }
         // Every job that failed says what didn't happen and why in one line, built from
         // the CLI's error, never its last cause line (transfer-failure-text-is-last-cause-line).
-        let failed = !running && !done && state["state"] != "unknown";
+        // A bridge move's check that priced it and stopped before sending is `ready`, not failed.
+        let failed = !running && !done && state["state"] != "unknown" && state["ready"] != true;
         if failed && !state["problem"].as_str().is_some_and(|problem| !problem.is_empty()) {
             let kind = state["kind"].as_str().unwrap_or_default().to_owned();
             state["problem"] = Value::from(cli::job_problem(&kind, &log));
@@ -7419,6 +7483,18 @@ impl NamesModule for Names {
             })
         })());
         self.log_started(&out, json!({ "kind": "token_send", "chain": "lez", "to": to.trim(), "amount": cli::amount_text(&amount).ok(), "token": definition.trim() }));
+        out
+    }
+
+    fn bridge_token_send(&mut self, bridge: String, definition: String, amount: String, from: String, to: String, send: bool) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let out = reply(self.bridge_send_start(&bridge, &definition, &amount, &from, &to, send));
+        if send {
+            let plan = serde_json::from_str::<Value>(&out).ok().map(|out| out["value"]["plan"].clone()).unwrap_or(Value::Null);
+            self.log_started(&out, json!({ "kind": "token_send", "chain": "lez", "network": "lez-0.4", "from": plan["from"], "to": plan["to"], "amount": plan["amount"], "token": plan["definition"] }));
+        }
         out
     }
 
@@ -13563,6 +13639,84 @@ mod tests {
         assert_eq!(ended["state"], "failed");
         assert_eq!(ended["problem"], "The token transfer didn't go through: Public/CCVd holds 0 Demo, less than 5");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Roadmap 12: wrapped tokens moved between public accounts on LEZ 0.4. Checked against the
+    /// bridge's Config (its token program and decimals, never the app's), priced first by a check
+    /// that sends nothing, then sent from the chosen account with the bridge codec.
+    #[test]
+    fn wrapped_tokens_move_between_accounts_checked_and_priced_first() {
+        let tail = "case \"$*\" in\n\
+                    *--version*) echo 'names 0.17.0 (LEZ v0.4.0-rc3)' ;;\n\
+                    *\"token send\"*) if [ -n \"$LOGOS_NAMES_DRY_RUN\" ]; then echo 'fee: about 2140, at most 3000 (gas: 9 cycles, limit 20)'; echo 'Error: LOGOS_NAMES_DRY_RUN is set, so nothing was sent' >&2; exit 1; fi; echo 'submitted ab12'; echo 'applied in block 7' ;;\n\
+                    esac";
+        let (mut names, dir) = with_wallet("bridge-send", tail);
+        let v5 = bridge_net::BRIDGE_V5_PROGRAM;
+        let demo = registry::account_text(&DEMO);
+        let from = format!("Public/{PUBLIC}");
+        let to = format!("Public/{OTHER}");
+        let config = bridge_net::BridgeConfig {
+            token_program: PROGRAM,
+            burn_frozen: false,
+            tokens: vec![bridge_net::Token { eth_token: "0x0000000000000000000000000000000000000000".into(), definition: DEMO, decimals: 18, denoms: vec![], registered: true, burn_frozen: false }],
+        };
+        BURN_CONFIGS.with(|configs| configs.borrow_mut().insert(v5.to_owned(), Ok(Some(config))));
+        assert!(parsed(&names.get_config())["features"].as_array().unwrap().contains(&json!("bridge_token_send")));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        // LEZ 0.3: refused; another app: refused.
+        assert!(parsed(&names.bridge_token_send(v5.into(), demo.clone(), "1".into(), from.clone(), to.clone(), false))["error"].as_str().unwrap().contains("LEZ 0.4"));
+        names.net = Net::Lez04;
+        as_caller(app("other_app"));
+        assert_eq!(parsed(&names.bridge_token_send(v5.into(), demo.clone(), "1".into(), from.clone(), to.clone(), false))["success"], false);
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        // Checked before anything runs.
+        for (definition, amount, from_, to_, words) in [
+            (registry::account_text(&[8; 32]), "1", from.clone(), to.clone(), "isn't one this bridge made"),
+            (demo.clone(), "0", from.clone(), to.clone(), "above 0"),
+            (demo.clone(), "1,5", from.clone(), to.clone(), "isn't an amount"),
+            (demo.clone(), "1", format!("Private/{PRIVATE}"), to.clone(), "private account"),
+            (demo.clone(), "1", from.clone(), format!("Private/{OTHER}"), "private account"),
+            (demo.clone(), "1", from.clone(), from.clone(), "leave from"),
+        ] {
+            let refused = parsed(&names.bridge_token_send(v5.into(), definition, amount.into(), from_, to_, false));
+            assert!(refused["error"].as_str().unwrap_or_default().contains(words), "{words}: {refused}");
+        }
+        assert!(parsed(&names.bridge_token_send(bridge_net::BRIDGE_V4_PROGRAM.into(), demo.clone(), "1".into(), from.clone(), to.clone(), false))["error"].as_str().unwrap().contains("isn't on the bridge test network"));
+        assert!(!dir.join("jobs").exists(), "nothing ran");
+
+        // The check: priced, nothing sent, ready.
+        let checked = parsed(&names.bridge_token_send(v5.into(), demo.clone(), "1.2".into(), from.clone(), to.clone(), false));
+        assert_eq!(checked["value"]["kind"], bridge_send::CHECK_KIND, "{checked}");
+        assert_eq!(checked["value"]["plan"]["amount"], "1200000000000000000");
+        assert_eq!(checked["value"]["plan"]["fee_payer"], from.as_str());
+        assert_eq!(checked["value"]["plan"]["bridge_label"], "bridge v5");
+        let ended = job_end(&mut names, checked["value"]["id"].as_str().unwrap());
+        assert_eq!((ended["state"].as_str(), ended["ready"].as_bool()), (Some("done"), Some(true)), "{ended}");
+        assert!(ended["problem"].is_null(), "{ended}");
+        assert_eq!(ended["fee"]["about"], "2140");
+        let program = registry::account_text(&PROGRAM);
+        assert!(ended["log_tail"].as_str().unwrap().contains(&format!("[--token-program={program}]\n[--token-codec=bridge]\n[token]\n[send]\n[--to={to}]\n[--from={from}]\n[--]\n[{demo}]\n[1200000000000000000]")), "{ended}");
+        // The move.
+        let sent = parsed(&names.bridge_token_send(v5.into(), demo.clone(), "1.2".into(), from.clone(), to.clone(), true));
+        assert_eq!(sent["value"]["kind"], bridge_send::SEND_KIND, "{sent}");
+        let ended = job_end(&mut names, sent["value"]["id"].as_str().unwrap());
+        assert_eq!((ended["state"].as_str(), ended["tx"].as_str(), ended["block"].as_u64()), (Some("done"), Some("ab12"), Some(7)), "{ended}");
+        let _ = std::fs::remove_dir_all(dir);
+
+        // A tool without the bridge codec, and an account short of the fee: plain words.
+        for (said, words) in [
+            ("echo 'Error: no token codec called bridge; known: prototype' >&2; exit 1", "needs a newer tool"),
+            ("echo 'fee: about 2140, at most 3000 (gas)'; echo 'Error: Public/AbC holds 0; about 3000 is held for the fee while this runs' >&2; exit 1", "has no test LEZ, and the fee needs about 3,000"),
+        ] {
+            let (mut names, dir) = with_wallet("bridge-send-refused", &format!("case \"$*\" in\n*--version*) echo 'names 0.17.0 (LEZ v0.4.0-rc3)' ;;\n*) {said} ;;\nesac"));
+            names.net = Net::Lez04;
+            let checked = parsed(&names.bridge_token_send(v5.into(), demo.clone(), "1".into(), from.clone(), to.clone(), false));
+            let ended = job_end(&mut names, checked["value"]["id"].as_str().unwrap());
+            assert_eq!((ended["state"].as_str(), ended["ready"].as_bool()), (Some("failed"), Some(false)), "{ended}");
+            assert!(ended["problem"].as_str().unwrap().contains(words), "{words}: {ended}");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        BURN_CONFIGS.with(|configs| configs.borrow_mut().clear());
     }
 
     #[test]

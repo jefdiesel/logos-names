@@ -180,12 +180,24 @@ flow (root signer, async `Credit`), the same limits (name 64, 32 holdings). Diff
 |---|---|---|
 | `MintBy { to, amount }` (tag 9): mint by any actor of the authority program | — | yes (the bridge mints through it) |
 | `BurnWithNotice { definition, amount, notify: Actor, memo }` (tag 10) and `BurnNotice` | — | yes (exit burns) |
-| Definition authority | an account | the bridge's **program** id |
+| Definition authority | `Option<AccountId>` | `Option<Authority>` (`Account(id)` or `Program(id)`, one byte longer): a wrapped token's definition is the bridge's **program** |
 | Decimals, symbol | none | none in the token; the bridge's `Config.tokens[i].decimals` |
 | Image | `wallet-tokens` guest | own image (`633555cc…`), immutable |
 
-So nothing must change on the bridge side, and the wallet's own token code reads and moves
-bridged tokens when pointed at the bridge token program. What the wallet adds:
+**Correction (2026-11-19):** "wire-compatible" holds for messages, holdings and credits, not for
+definitions. Since the bridge's 2026-11-14 fixes a definition's authority is typed, so the prototype
+codec reads a wrapped token's definition with one byte left over and calls it no token: `names
+token send` stopped at its first line for every bridged token. The CLI has a second codec for it,
+`--token-codec=bridge` (`cli/src/tokens.rs` `BridgeCodec`, tested on the v5 wETH definition's real
+bytes). The module's `bridge_token_send` (`basecamp-module/rust-lib/src/bridge_send.rs`) uses it to
+move wrapped tokens between public accounts on LEZ 0.4 (rfp-022 WALLET-ROADMAP item 12): token
+program and decimals from the bridge's Config, a dry run (`LOGOS_NAMES_DRY_RUN`) to price the fee
+before the sheet, the account the tokens leave paying the fee (the relay pays only claims and burns).
+It needs a LEZ 0.4 names tool built with that codec; an older tool is said plainly
+("needs a newer tool"). `cli_token_send_source` still uses the prototype codec.
+
+Before that correction this section said: nothing must change on the bridge side, and the wallet's
+own token code reads and moves bridged tokens when pointed at the bridge token program. What the wallet adds:
 - **Token sources** (`propose_token_source(program, definitions)`): an app registers a token
   program and its definitions with name, symbol, decimals and origin; the person approves; the
   holdings view lists them as "Bridged tokens" with decimals (`token_source_holdings`), and

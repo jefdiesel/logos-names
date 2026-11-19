@@ -6829,6 +6829,146 @@ Item {
         onTriggered: root.loadTokens()
     }
 
+    // ── Move wrapped tokens on the bridge test network (LEZ 0.4; rfp-022 WALLET-ROADMAP.md item 12) ──
+    //
+    // The names module checks the move against the bridge's Config, prices it with a check that
+    // sends nothing, then sends it from the chosen account (`bridge_token_send`, bridge_send.rs).
+    // Every press says something at once: "Checking the fee…", then the sheet; "Moving it…", then
+    // the block or why not.
+    property string moveFrom: ""          // Public/<id> the tokens leave
+    property var moveAsset: null          // the card's asset row: {symbol, name, amount, bridge, bridgeLabel, base, decimals, definition}
+    property string moveTo: ""            // one of the wallet's accounts, chosen from the list ("" while typed)
+    property bool moveToOpen: false
+    property int moveTurn: 0              // a review or a move asked since: answers to an older one are dropped
+    property var moveCheck: null          // {id, plan, args, state: "checking" | "ready" | "failed", fee, problem}
+    property var moveSent: null           // {id, plan, state: "sending" | "done" | "failed", block, tx, problem}
+    property string moveProblem: ""
+    readonly property bool moveCan: namesNet === "0.4" && moduleFeatures.indexOf("bridge_token_send") >= 0
+    readonly property var moveImported: Logic.importedAccounts(backupStatus, "lez-0.4")
+    readonly property var moveTargetsNow: Logic.moveTargets(bridgeNetAccounts, moveFrom, moveImported)
+
+    function openMove(account, asset) {
+        moveFrom = "Public/" + String(account || "").replace(/^Public\//, "")
+        moveAsset = asset
+        moveTo = ""
+        moveToOpen = false
+        moveTurn++
+        moveCheck = null
+        moveSent = null
+        moveProblem = ""
+        try { moveToField.text = ""; moveAmountField.text = "" } catch (e) {}
+        loadBackupStatus()
+        walletView = "bridgemove"
+    }
+    /// Where the tokens go: the account picked, else what was typed.
+    function moveToText() {
+        if (moveTo !== "")
+            return moveTo
+        try { return moveToField.text.trim() } catch (e) { return "" }
+    }
+    function moveAmountText() {
+        try { return moveAmountField.text.trim() } catch (e) { return "" }
+    }
+    /// What the account holds of the token now (base units), from the card's last read.
+    function moveHeld() {
+        return moveAsset !== null ? String(moveAsset.base || "0") : null
+    }
+    /// The test LEZ the paying account holds, from the card's last read, or null.
+    function moveNative() {
+        var read = bridgeNet && bridgeNet.read ? bridgeNet.read : null
+        var id = moveFrom.replace(/^Public\//, "")
+        var row = read && Array.isArray(read.accounts) ? read.accounts.filter(function(a) { return String(a.account || "").replace(/^Public\//, "") === id })[0] : null
+        return row && row.found ? String(row.native || "0") : null
+    }
+    function moveFormProblem() {
+        if (moveAsset === null)
+            return ""
+        var amount = Logic.moveAmountProblem(moveAmountText(), moveAsset.decimals, moveHeld(), moveAsset.symbol)
+        return amount !== "" ? amount : Logic.moveToProblem(moveToText(), moveFrom)
+    }
+    /// Anything edited after a check: the sheet goes, the next Review checks again.
+    function moveReset() {
+        if (moveSent !== null && moveSent.state === "sending")
+            return
+        moveTurn++
+        moveCheck = null
+        moveProblem = ""
+    }
+    /// Review: the module checks the move and starts the fee check; the sheet shows at once.
+    function moveReview() {
+        if (moveAsset === null || (moveCheck !== null && moveCheck.state === "checking") || (moveSent !== null && moveSent.state === "sending"))
+            return
+        var to = moveToText(), amount = moveAmountText()
+        if (to === "" || amount === "" || moveFormProblem() !== "")
+            return
+        var turn = ++moveTurn
+        var args = [String(moveAsset.bridge), String(moveAsset.definition), amount, moveFrom, to]
+        moveProblem = ""
+        moveSent = null
+        moveCheck = { id: "", plan: null, args: args, state: "checking", fee: null, problem: "" }
+        askLater("bridge_token_send", args.concat([false]), function(value) {
+            if (turn !== moveTurn)
+                return
+            moveCheck = { id: String(value.id || ""), plan: value.plan || null, args: args, state: "checking", fee: null, problem: "" }
+            moveFollowSoon()
+        }, function(message) {
+            if (turn !== moveTurn)
+                return
+            moveCheck = null
+            moveProblem = sentence(message)
+        })
+    }
+    /// Approve: the same move, sent. Only from a check that priced it.
+    function moveApprove() {
+        if (moveCheck === null || moveCheck.state !== "ready" || (moveSent !== null && moveSent.state === "sending"))
+            return
+        var plan = moveCheck.plan
+        var turn = moveTurn
+        moveSent = { id: "", plan: plan, state: "sending", block: null, tx: null, problem: "" }
+        askLater("bridge_token_send", moveCheck.args.concat([true]), function(value) {
+            if (turn !== moveTurn)
+                return
+            moveSent = { id: String(value.id || ""), plan: value.plan || plan, state: "sending", block: null, tx: null, problem: "" }
+            moveFollowSoon()
+        }, function(message) {
+            if (turn !== moveTurn)
+                return
+            moveSent = { id: "", plan: plan, state: "failed", block: null, tx: null, problem: sentence(message) }
+        })
+    }
+    /// Follows the check or the move until its job ends.
+    function moveFollow() {
+        var check = moveCheck, sent = moveSent, turn = moveTurn
+        var following = sent !== null && sent.state === "sending" && sent.id !== "" ? sent : check !== null && check.state === "checking" && check.id !== "" ? check : null
+        if (following === null || following.asking)
+            return
+        following.asking = true
+        askLater("job", [following.id], function(value) {
+            following.asking = false
+            if (turn !== moveTurn || value.state === "running")
+                return
+            if (following === sent) {
+                moveSent = { id: sent.id, plan: sent.plan, state: value.state === "done" && !value.problem ? "done" : "failed", block: value.block, tx: value.tx, problem: value.problem || "" }
+                moveCheck = null
+                try { if (moveSent.state === "done") moveAmountField.text = "" } catch (e) {}
+                loadBridgeNet()
+            } else {
+                moveCheck = { id: check.id, plan: check.plan, args: check.args, state: value.ready === true ? "ready" : "failed", fee: value.fee || null, problem: value.ready === true ? "" : String(value.problem || "The check didn't finish.") }
+            }
+        }, function() { following.asking = false })
+    }
+    /// Asks again in 1.5 s while the check or the move runs (no Timer of its own: `againAfter`).
+    function moveFollowSoon() {
+        var turn = moveTurn
+        againAfter(1500, function() {
+            var running = (moveCheck !== null && moveCheck.state === "checking") || (moveSent !== null && moveSent.state === "sending")
+            if (turn !== moveTurn || !running)
+                return
+            moveFollow()
+            moveFollowSoon()
+        })
+    }
+
     // ── Apps asking the wallet (Wallet Provider SDK) ────────────────────
     //
     // Other apps ask the names module for access, payments and program calls
@@ -10117,6 +10257,14 @@ Item {
                                             Text { text: netAsset.modelData.name; textFormat: Text.PlainText; color: root.dim; font.family: root.sans; font.pixelSize: root.px(13) }
                                         }
                                         Item { Layout.fillWidth: true }
+                                        // A wrapped token of the wallet's own account: moved to another account (roadmap 12).
+                                        Link {
+                                            visible: root.moveCan && !!netAsset.modelData.definition && netAsset.modelData.base !== "0" && !netAccount.modelData.viewOnly && !netAccount.modelData.watched
+                                            text: "Move"
+                                            color: root.dim
+                                            font.pixelSize: root.px(14)
+                                            onPressed: root.openMove(netAccount.modelData.account, netAsset.modelData)
+                                        }
                                         Text {
                                             text: root.walletHidden ? "••••••" : netAsset.modelData.amount
                                             color: root.ink
@@ -10172,7 +10320,7 @@ Item {
                         }
                         StatusLine { visible: root.bridgeNetWatchProblem !== ""; kind: Logic.noticeKind(root.bridgeNetWatchProblem, true); text: root.bridgeNetWatchProblem }
                         Hint { font.pixelSize: root.px(14); text: "Private balances on the bridge test network are not shown yet." }
-                        Hint { font.pixelSize: root.px(14); text: "Sending on the bridge test network isn't in the wallet yet, apart from paying a name and bridging to Ethereum." }
+                        Hint { font.pixelSize: root.px(14); text: root.moveCan ? "Move beside a wrapped token sends it to another account here. Sending test LEZ isn't in the wallet yet." : "Sending on the bridge test network isn't in the wallet yet, apart from paying a name and bridging to Ethereum." }
                     }
                     // What runs on LEZ 0.3 only, unavailable while LEZ 0.4 is shown.
                     ColumnLayout {
@@ -10623,6 +10771,136 @@ Item {
                         text: root.chainSent === null ? "" : "Sent " + root.grouped(root.chainSent.amount) + ": it's in a block." + (root.chainSent.fee ? " The fee was " + root.grouped(root.chainSent.fee) + "." : "")
                     }
                     StatusLine { visible: root.notice !== "" && root.noticeAt === "" && root.sendingLine() === ""; kind: root.noticeKind; text: root.notice }
+                }
+
+                // ── Move wrapped tokens (LEZ 0.4, between public accounts) ──
+                ColumnLayout {
+                    id: moveScreen
+                    visible: root.walletView === "bridgemove"
+                    Layout.fillWidth: true
+                    Layout.maximumWidth: root.pageWidth
+                    spacing: 12
+                    readonly property var asset: root.moveAsset
+                    readonly property bool checking: root.moveCheck !== null && root.moveCheck.state === "checking"
+                    readonly property bool sending: root.moveSent !== null && root.moveSent.state === "sending"
+                    readonly property string formProblem: root.moveFormProblem()
+                    readonly property bool importedTo: root.moveImported.indexOf(root.moveToText().indexOf("/") < 0 ? "Public/" + root.moveToText() : root.moveToText()) >= 0
+                    readonly property var result: Logic.moveResultLine(root.moveSent !== null ? root.moveSent.plan : null, root.moveSent !== null && root.moveSent.state !== "sending" ? root.moveSent : null)
+                    PageHeader { title: "Move wrapped tokens"; net: "0.4"; onBack: root.walletView = "home" }
+                    Hint { color: root.ink; text: "Moves wrapped tokens to another account on the bridge test network. Nothing goes to Ethereum: Bridge to Ethereum does that, from an account made from your recovery phrase." }
+                    StatusLine { visible: !root.moveCan; kind: "problem"; text: "This Names build can't move wrapped tokens. Update Names." }
+
+                    Part { text: "From" }
+                    PickRow {
+                        title: "Public account " + Logic.keyShown(root.moveFrom.replace(/^Public\//, "")) + (root.moveImported.indexOf(root.moveFrom) >= 0 ? " · imported" : "")
+                        sub: moveScreen.asset !== null ? moveScreen.asset.symbol + (moveScreen.asset.bridgeLabel !== "" ? " · " + moveScreen.asset.bridgeLabel : "") + " · pays the fee in test LEZ" : ""
+                        amount: moveScreen.asset !== null ? (root.walletHidden ? "••••••" : moveScreen.asset.amount + " " + moveScreen.asset.symbol) : ""
+                        current: true
+                    }
+
+                    Part { text: "To" }
+                    PickRow {
+                        title: root.moveTo !== "" ? "Public account " + Logic.keyShown(root.moveTo.replace(/^Public\//, "")) : "Choose one of your accounts"
+                        sub: root.moveTo !== "" ? (root.moveImported.indexOf(root.moveTo) >= 0 ? "Imported: can't bridge back to Ethereum from here" : "From your recovery phrase: can bridge back to Ethereum") : root.moveTargetsNow.length + (root.moveTargetsNow.length === 1 ? " account" : " accounts")
+                        dropdown: true
+                        open: root.moveToOpen
+                        enabledNow: !moveScreen.sending
+                        onPressed: root.moveToOpen = !root.moveToOpen
+                    }
+                    ColumnLayout {
+                        visible: root.moveToOpen
+                        Layout.fillWidth: true
+                        Layout.leftMargin: root.px(14)
+                        spacing: 4
+                        Repeater {
+                            model: root.moveTargetsNow
+                            PickRow {
+                                required property var modelData
+                                compact: true
+                                title: modelData.title + (modelData.imported ? " · imported" : "")
+                                sub: modelData.sub
+                                current: root.moveTo === modelData.account
+                                onPressed: { root.moveToOpen = false; moveToField.text = ""; root.moveTo = modelData.account; root.moveReset() }
+                            }
+                        }
+                        Hint { visible: root.moveTargetsNow.length === 0; font.pixelSize: root.px(15); text: "Your wallet has no other public account here. Make one in Accounts, or paste an account ID below." }
+                    }
+                    Field {
+                        id: moveToField
+                        Layout.fillWidth: true
+                        size: 17
+                        code: true
+                        hint: "Or paste an account ID (Public/…) or an LNS name"
+                        onTextChanged: { if (text.trim() !== "") root.moveTo = ""; root.moveReset() }
+                    }
+                    Hint {
+                        visible: moveScreen.importedTo
+                        color: root.ink
+                        font.pixelSize: root.px(15)
+                        text: "That account was imported: wrapped tokens there can't be bridged back to Ethereum from this wallet. To bridge back, choose an account made from your recovery phrase."
+                    }
+
+                    Part { text: "Amount" }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Field {
+                            id: moveAmountField
+                            Layout.fillWidth: true
+                            size: 19
+                            hint: "0.01"
+                            onTextChanged: root.moveReset()
+                        }
+                        Text { text: moveScreen.asset !== null ? moveScreen.asset.symbol : ""; color: root.dim; font.family: root.sans; font.pixelSize: root.px(17) }
+                        Link {
+                            visible: moveScreen.asset !== null && !moveScreen.sending
+                            text: "All"
+                            color: root.dim
+                            font.pixelSize: root.px(15)
+                            onPressed: moveAmountField.text = Logic.decimalShown(moveScreen.asset.base, moveScreen.asset.decimals).replace(/,/g, "")
+                        }
+                    }
+                    StatusLine {
+                        readonly property string problem: moveScreen.formProblem !== "" ? moveScreen.formProblem : root.moveProblem
+                        visible: problem !== ""
+                        kind: "problem"
+                        text: problem
+                    }
+                    Action {
+                        visible: root.moveCheck === null || moveScreen.checking && root.moveCheck.plan === null
+                        label: moveScreen.checking ? "Checking the fee…" : "Review"
+                        strong: true
+                        enabledNow: root.moveCan && !moveScreen.checking && !moveScreen.sending && root.moveToText() !== "" && root.moveAmountText() !== "" && moveScreen.formProblem === ""
+                        onPressed: root.moveReview()
+                    }
+
+                    // The sheet: what moves, from where to where, and who pays.
+                    Card {
+                        id: moveSheet
+                        visible: root.moveCheck !== null && root.moveCheck.plan !== null
+                        Layout.fillWidth: true
+                        readonly property var plan: root.moveCheck !== null ? root.moveCheck.plan : null
+                        Text { text: "Check it, then approve"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
+                        Fact { label: "Moves"; value: moveSheet.plan ? moveSheet.plan.amount_shown + " " + moveSheet.plan.symbol + (moveSheet.plan.bridge_label ? " (" + moveSheet.plan.bridge_label + ")" : "") : "" }
+                        Fact { label: "Token"; code: true; value: moveSheet.plan ? Logic.keyShown(moveSheet.plan.definition) : ""; full: moveSheet.plan ? String(moveSheet.plan.definition) : "" }
+                        Fact { label: "From"; value: moveSheet.plan ? Logic.idShort(moveSheet.plan.from) + ", which signs it" : "" }
+                        Fact { label: "To"; value: moveSheet.plan ? (moveSheet.plan.to_name ? moveSheet.plan.to_name + "'s public account" : Logic.idShort(moveSheet.plan.to)) + (moveScreen.importedTo ? " (imported)" : "") : "" }
+                        Fact { label: "Fee"; value: Logic.moveFeeLine(moveSheet.plan, root.moveCheck, root.moveNative()) }
+                        Hint { font.pixelSize: root.px(16); text: "Public: everyone can see both accounts and the amount. One block, about 30 seconds. It can't be undone." }
+                        StatusLine { visible: root.moveCheck !== null && root.moveCheck.state === "failed"; kind: "problem"; text: root.moveCheck !== null ? root.moveCheck.problem : "" }
+                        RowLayout {
+                            spacing: 10
+                            Action {
+                                label: moveScreen.sending ? "Moving…" : moveScreen.checking ? "Checking the fee…" : "Approve and move"
+                                strong: true
+                                enabledNow: root.moveCheck !== null && root.moveCheck.state === "ready" && !moveScreen.sending
+                                onPressed: root.moveApprove()
+                            }
+                            Action { label: "Change something"; enabledNow: !moveScreen.sending; onPressed: root.moveReset() }
+                        }
+                    }
+                    StatusLine { visible: moveScreen.sending; kind: "working"; text: "Moving it: one block, about 30 seconds." }
+                    StatusLine { visible: moveScreen.result.text !== ""; kind: moveScreen.result.kind; text: moveScreen.result.text }
                 }
 
                 // ── Receive ──

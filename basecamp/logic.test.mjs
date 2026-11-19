@@ -1458,6 +1458,40 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("private note: the screen uses the rule", /visible: Logic\.sendBackPrivateNoteShown\(root\.sbPrivateSources, root\.sbAccount, root\.sbFromPrivate\); color: root\.ink; text: Logic\.PRIVATE_SEND_BACK_NOTE/.test(qml), true);
 }
 
+// Roadmap 12: moving wrapped tokens between accounts on the bridge test network.
+{
+  const L = await import("./qml/logic.mjs");
+  const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  check("move units: 1.2 wETH, 0.01, .5, the smallest unit", [L.unitsText("1.2", 18), L.unitsText("0.01", 18), L.unitsText(".5", 18), L.unitsText("0.000000000000000001", 18)],
+    ["1200000000000000000", "10000000000000000", "500000000000000000", "1"]);
+  check("move units: not amounts", [L.unitsText("", 18), L.unitsText("0", 18), L.unitsText(".", 18), L.unitsText("1,5", 18), L.unitsText("1e3", 18), L.unitsText("0.0000000000000000001", 18), L.unitsText("-1", 18)],
+    [null, null, null, null, null, null, null]);
+  check("move units: past what a JS number holds, exactly", L.unitsText("123456789.123456789123456789", 18), "123456789123456789123456789");
+  check("move amount problems", [L.moveAmountProblem("", 18, "1", "wETH"), L.moveAmountProblem("0.05", 18, "100000000000000000", "wETH"), L.moveAmountProblem("0.1", 18, "100000000000000000", "wETH"),
+    L.moveAmountProblem("0.2", 18, "100000000000000000", "wETH"), L.moveAmountProblem("0", 18, "1", "wETH"), L.moveAmountProblem("-1", 18, "1", "wETH"),
+    L.moveAmountProblem("1,5", 18, "1", "wETH"), L.moveAmountProblem("0.0000000000000000001", 18, "1", "wETH")],
+    ["", "", "", "That's more than this account holds: 0.1 wETH.", "Enter an amount above 0.", "-1 is negative. Enter an amount above 0.",
+     "1,5 isn't an amount. Use digits and one point, such as 0.01.", "0.0000000000000000001 has more than 18 digits after the point, the smallest unit of wETH."]);
+  const own = [{ account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk" }, "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", "Private/yGrP", "Public/9vXeAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"];
+  const targets = L.moveTargets(own, "Public/9vXeAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", ["Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk"]);
+  check("move targets: own public accounts but the one they leave, phrase ones first, imported marked",
+    targets.map(function(t) { return [t.account.substr(7, 4), t.imported] }), [["7wx3", false], ["CCVd", true]]);
+  check("imported accounts from backup_status", L.importedAccounts({ networks: [{ id: "lez-0.3", accounts: [{ account: "Public/A", imported: true }] }, { id: "lez-0.4", accounts: [{ account: "Public/B", imported: true }, { account: "Public/C", imported: false }] }] }, "lez-0.4"), ["Public/B"]);
+  check("move to problems", [L.moveToProblem("", "Public/A"), L.moveToProblem("Private/X", "Public/A"), L.moveToProblem("Public/A", "Public/A"), L.moveToProblem("A", "Public/A"), L.moveToProblem("Public/nope!", "Public/B"), L.moveToProblem("alice", "Public/B")],
+    ["", "Moving wrapped tokens to a private account isn't in the wallet yet: choose a public account.", "That's the account the tokens leave from. Choose another one.", "That's the account the tokens leave from. Choose another one.", "That isn't an account ID: it's Public/ and then letters and digits.", ""]);
+  const plan = { amount_shown: "0.05", symbol: "wETH", bridge_label: "bridge v5", fee_payer: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", to: "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", to_name: null };
+  check("move fee line: checking, priced, held", [L.moveFeeLine(plan, { state: "checking" }, "5"), L.moveFeeLine(plan, { state: "ready", fee: { about: "2140", at_most: "3000" } }, "23786858")],
+    ["Paid by CCVd76…pKnk in test LEZ. Checking how much…", "About 2,140 test LEZ, at most 3,000, paid by CCVd76…pKnk (it holds 23,786,858). The bridge's relay pays only for claims and burns."]);
+  check("move result: done in a block / failed in words", [L.moveResultLine(plan, { state: "done", block: 28512 }), L.moveResultLine(plan, { state: "failed", problem: "Nothing was sent." }), L.moveResultLine(plan, null)],
+    [{ kind: "done", text: "Moved 0.05 wETH (bridge v5) to 7wx3U7…LznR, in block 28512." }, { kind: "problem", text: "Nothing was sent." }, { kind: "", text: "" }]);
+  // Every press gives feedback at once (the button's own words), and the screen ends in one plain result.
+  check("move: Review says Checking the fee… at once", /label: moveScreen\.checking \? "Checking the fee…" : "Review"/.test(qml), true);
+  check("move: Approve says Moving… at once", /label: moveScreen\.sending \? "Moving…"/.test(qml), true);
+  check("move: the result line is the shared status line", /StatusLine \{ visible: moveScreen\.result\.text !== ""; kind: moveScreen\.result\.kind; text: moveScreen\.result\.text \}/.test(qml), true);
+  check("move: offered only with the module's feature", /readonly property bool moveCan: namesNet === "0\.4" && moduleFeatures\.indexOf\("bridge_token_send"\) >= 0/.test(qml), true);
+  check("move: the old 'isn't in the wallet yet' line only without the feature", /text: root\.moveCan \? "Move beside a wrapped token/.test(qml), true);
+}
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);
 
