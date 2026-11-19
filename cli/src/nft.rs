@@ -193,9 +193,13 @@ pub struct Action {
     #[serde(default)]
     pub new: Option<String>,
     #[serde(default)]
-    pub fee_payer: Option<String>,
-    #[serde(default)]
     pub their_keys: bool,
+}
+
+/// Whether a private payer holding `held` can pay: at least the fee at head (`about`), the least
+/// the LEZ wallet reserves.
+pub fn payer_covers(held: u128, reserve: &crate::fees::Estimate) -> bool {
+    held >= reserve.about
 }
 
 fn text(private: bool, account: AccountId) -> String {
@@ -618,15 +622,18 @@ impl Client {
         Ok(crate::fees::private(&quote, self.wallet.config().fee_headroom_blocks))
     }
 
-    /// A private fee payer: one of this wallet's private accounts holding the reserve.
+    /// A private fee payer: one of this wallet's private accounts holding at least the fee at the
+    /// chain's head, which is the least the LEZ wallet reserves (it reserves up to `at_most`, never
+    /// more than the payer holds: `lez/wallet/src/lib.rs` reserve rule). One source for the
+    /// figure: `fees::private` (Job A's ~5,070,616 is its `about` at base fee 8).
     async fn nft_check_payer(&mut self, payer: AccountId) -> Result<crate::fees::Estimate> {
         if !self.is_private(payer) {
             bail!("the fee payer of a private transaction must be one of this wallet's private accounts (a public payer fails for a proven transaction)");
         }
         let reserve = self.nft_reserve().await?;
         let held = self.spendable(payer).await?;
-        if held < reserve.at_most {
-            bail!("Private/{payer} holds {held}; a private transaction reserves up to {} for its fee", reserve.at_most);
+        if !payer_covers(held, &reserve) {
+            bail!("Private/{payer} holds {held}; a private transaction needs at least {} for its fee (it holds up to {} while it runs)", reserve.about, reserve.at_most);
         }
         Ok(reserve)
     }
@@ -686,7 +693,7 @@ impl Client {
         self.wallet.sync_to_latest_block().await.context("cannot sync the private accounts")?;
         let from = action.from.as_deref().map(|text| parse_account(text.trim_start_matches("Public/").trim_start_matches("Private/"))).transpose().map_err(|error| anyhow!(error))?;
         let mut refusal: Option<String> = None;
-        let mut proven = false;
+        let proven;
         let mut lines: Vec<String> = Vec::new();
         let mut named: Vec<&str> = Vec::new();
         let mut hidden: Vec<&str> = Vec::new();
@@ -739,6 +746,9 @@ impl Client {
                         }
                         if reach == Reach::TheirPrivate {
                             lines.push("This wallet can't check that their account is ready for this collection. If it isn't, the NFT may never arrive.".to_owned());
+                            if !action.their_keys {
+                                refusal = Some("Tick that you accept that this wallet can't check their account.".to_owned());
+                            }
                         }
                     }
                 }
@@ -793,7 +803,7 @@ impl Client {
         };
         for (private, payer) in candidates {
             let held = self.spendable(payer).await.unwrap_or(0);
-            payers.push(serde_json::json!({ "account": text(private, payer), "balance": held.to_string(), "enough": held >= reserve.at_most }));
+            payers.push(serde_json::json!({ "account": text(private, payer), "balance": held.to_string(), "enough": if proven { payer_covers(held, &reserve) } else { held >= reserve.at_most } }));
         }
         let collection = match collection {
             Some(Ok(found)) => Some(found),
@@ -834,6 +844,27 @@ mod tests {
         assert!(parse_to(BOB).unwrap_err().contains("Public/"));
         assert!(parse_to("ab:cd").is_err());
         assert!(parse_to("two words").is_err());
+    }
+
+    #[test]
+    fn the_private_reserve_comes_from_the_wallets_own_fee_rule() {
+        // The throwaway chain's fee state on 2026-11-19 (getFeeState, height 3539).
+        let quote: sequencer_service_rpc::FeeStateQuote = serde_json::from_value(serde_json::json!({
+            "height": 3539, "base_fee_exec": 8, "base_fee_stor": 8,
+            "next_base_fee_exec_floor": 8, "next_base_fee_exec_ceiling": 9,
+            "next_base_fee_stor_floor": 8, "next_base_fee_stor_ceiling": 9,
+            "max_gas_exec": 10_000_000, "max_gas_stor": 1_000_000
+        }))
+        .unwrap();
+        // The LEZ wallet's default headroom is 5 blocks.
+        let reserve = crate::fees::private(&quote, 5);
+        // Job A's "~5,070,616 reserved per private action" is exactly the fee at head:
+        // (PRIVATE_VERIFY_GAS + PRIVATE_GAS_STOR) x 8 = 633,827 x 8.
+        assert_eq!(reserve.about, 5_070_616);
+        // Five full blocks lift both base fees 8 -> 13: the most the wallet holds while it runs.
+        assert_eq!(reserve.at_most, 8_239_751);
+        assert!(payer_covers(5_070_616, &reserve));
+        assert!(!payer_covers(5_070_615, &reserve));
     }
 
     #[test]

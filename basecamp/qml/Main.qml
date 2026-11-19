@@ -6868,6 +6868,7 @@ Item {
         go("collectibles")
         nftResult = ""
         loadNfts()
+        loadNftGrants()
     }
 
     function loadNfts() {
@@ -6887,6 +6888,79 @@ Item {
         askLater("pending_nft_requests", [], function(value) {
             nftAppRequests = Array.isArray(value) ? value : []
         }, function() {})
+    }
+
+    function loadNftRequests() {
+        askLater("pending_nft_requests", [], function(value) {
+            nftAppRequests = Array.isArray(value) ? value : []
+        }, function() {})
+    }
+
+    property var nftKeys: ({})            // account -> {keys, reveals} once shown
+    property string nftKeysAsking: ""
+    function nftShowKeys(account) {
+        nftKeysAsking = account
+        askLater("nft_receiving_keys", [account], function(value) {
+            nftKeysAsking = ""
+            var keys = Object.assign({}, nftKeys)
+            keys[account] = value
+            nftKeys = keys
+        }, function(message) {
+            if (waitAgain(message)) {
+                var again = Qt.createQmlObject('import QtQuick; Timer { repeat: false; interval: 1500 }', root, "nftKeysAgain")
+                again.triggered.connect(function() { again.destroy(); root.nftShowKeys(account) })
+                again.start()
+                return
+            }
+            nftKeysAsking = ""
+            nftResult = sentence(message)
+            nftResultKind = "problem"
+        })
+    }
+
+    // Membership proofs (provider_proof.rs): the sheet, the holding picked, the passes.
+    property var nftGrantsList: []
+    property var nftPasses: []
+    property var proofSheet: null         // membership_proof_sheet's answer
+    property string proofHolder: ""
+    property string proofStatus: ""
+    property string proofStatusKind: ""
+    function loadNftGrants() {
+        askLater("nft_grants", [], function(value) { nftGrantsList = Array.isArray(value) ? value : [] }, function() {})
+        askLater("membership_passes", [], function(value) { nftPasses = Array.isArray(value) ? value : [] }, function() {})
+    }
+    function openProofSheet(id) {
+        proofSheet = null
+        proofHolder = ""
+        proofStatus = "Checking…"
+        proofStatusKind = "working"
+        askLater("membership_proof_sheet", [id], function(value) {
+            proofSheet = value
+            proofHolder = (value.holdings || []).length === 1 ? value.holdings[0] : ""
+            proofStatus = value.public_only ? "Only a public account of yours holds this collection. A public holding already shows who holds what, so it can't make a private proof." : ""
+            proofStatusKind = value.public_only ? "problem" : ""
+        }, function(message) { proofStatus = sentence(message); proofStatusKind = Logic.noticeKind(proofStatus, true) })
+    }
+    function proveIt() {
+        if (proofSheet === null || proofHolder === "")
+            return
+        proofStatus = "Preparing…"
+        proofStatusKind = "working"
+        askLater("approve_membership_proof", [proofSheet.request, proofHolder], function(value) {
+            proofSheet = null
+            proofStatus = ""
+            nftResult = Nft.proofLine(value.status, 0)
+            nftResultKind = Nft.proofKind(value.status)
+            loadNftGrants()
+            loadNftRequests()
+        }, function(message) { proofStatus = sentence(message); proofStatusKind = Logic.noticeKind(proofStatus, true) })
+    }
+    function nftRevokeCapability(app, capability) {
+        askLater("revoke_nft_capability", [app, capability], function() {
+            nftResult = "Revoked. " + app + " can no longer " + Nft.capabilityVerb(capability) + "."
+            nftResultKind = "done"
+            loadNftGrants()
+        }, function(message) { nftResult = sentence(message); nftResultKind = "problem" })
     }
 
     function nftAddProgram(id, label) {
@@ -7065,15 +7139,15 @@ Item {
         }, 30000)
     }
 
-    function nftApproveList(id) {
-        var ticked = Object.keys(nftListTicks).filter(function(k) { return nftListTicks[k] })
-        if (ticked.length === 0)
+    function nftApproveList(id, capabilityOnly) {
+        var ticked = capabilityOnly ? [] : Object.keys(nftListTicks).filter(function(k) { return nftListTicks[k] })
+        if (!capabilityOnly && ticked.length === 0)
             return
         nftResult = "Checking…"
         nftResultKind = "working"
         askLater("approve_nft_request", [id, ticked.join(","), "", ""], function() {
             nftListTicks = ({})
-            nftResult = "Given. The app can now see the NFTs of " + (ticked.length === 1 ? "that account" : "those " + ticked.length + " accounts") + ", and nothing else of your wallet."
+            nftResult = capabilityOnly ? "Allowed. The app may now propose NFT transfers from the accounts it can see; you approve each one." : "Given. The app can now see the NFTs of " + (ticked.length === 1 ? "that account" : "those " + ticked.length + " accounts") + ", and nothing else of your wallet."
             nftResultKind = "done"
             loadNfts()
         }, function(message) { nftResult = sentence(message); nftResultKind = "problem" })
@@ -7089,7 +7163,7 @@ Item {
         interval: 30000
         repeat: true
         running: root.section === "collectibles" && root.nftOnView
-        onTriggered: { root.clockTick = Date.now(); root.loadNfts(); root.nftCheckJob() }
+        onTriggered: { root.clockTick = Date.now(); root.loadNfts(); root.nftCheckJob(); root.loadNftGrants() }
     }
     // ── end Collectibles
 
@@ -7236,6 +7310,10 @@ Item {
     function loadAppRequests() {
         askLater("pending_requests", [], function(value) {
             appRequests = Array.isArray(value) ? value : []
+            // NFT and membership-proof requests ride on this same read (no poll of their own):
+            // the Collectibles tab says when one waits, on every page (names-nft).
+            if (root.namesNet === "0.4")
+                root.loadNftRequests()
             var request = appRequest
             if (request === null) {
                 appChosenFor = ""
@@ -9530,7 +9608,7 @@ Item {
 
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Wallet"; current: root.section === "wallet" && root.walletView !== "names"; onPressed: root.openWallet("home") }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Activity"; current: root.section === "activity"; onPressed: { root.go("activity"); root.loadActivity() } }
-                Tab { visible: root.namesNet === "0.4"; Layout.fillWidth: true; alignLeft: true; label: "Collectibles"; current: root.section === "collectibles"; onPressed: root.openCollectibles() }
+                Tab { visible: root.namesNet === "0.4"; Layout.fillWidth: true; alignLeft: true; label: root.nftAppRequests.length > 0 ? "Collectibles · " + root.nftAppRequests.length + " waiting" : "Collectibles"; current: root.section === "collectibles"; onPressed: root.openCollectibles() }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Names"; current: root.section === "wallet" && root.walletView === "names"; onPressed: { root.openWallet("names"); root.loadCliMine() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Messages"; current: root.section === "messages"; onPressed: { root.go("messages"); root.chatLoad() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Profile"; current: root.section === "profile"; onPressed: { root.say("", false); root.openProfile() } }
@@ -9834,7 +9912,7 @@ Item {
                     model: root.nftAppRequests
                     Panel {
                         required property var modelData
-                        title: modelData.kind === "nft_list" ? modelData.app + " asks to see your NFTs" : modelData.app + " asks to send one of your NFTs"
+                        title: modelData.kind === "nft_list" ? modelData.app + " asks to see your NFTs" : modelData.kind === "nft_transfers" ? modelData.app + " asks to be able to propose NFT transfers" : modelData.kind === "membership_proof" ? modelData.app + " asks you to prove you hold an NFT" : modelData.app + " asks to send one of your NFTs"
                             Hint { visible: Logic.publisherLine(modelData.publisher) !== null; color: root.ink; text: Logic.publisherLine(modelData.publisher) !== null ? Logic.publisherLine(modelData.publisher).text : "" }
                             Hint { visible: (modelData.reason || modelData.summary || "") !== ""; text: "In its words: " + (modelData.reason || modelData.summary || "") }
                             Hint { visible: modelData.kind === "nft_list"; color: root.ink; text: "It would learn " + modelData.discloses + ", for the accounts you tick. Nothing else: not your balances, not your other accounts, and it can't send anything with this." }
@@ -9848,18 +9926,51 @@ Item {
                                 }
                             }
                             Hint { visible: modelData.kind === "nft_transfer"; color: root.ink; text: "From " + modelData.from + " to " + modelData.destination + ". Open it to see the collection, what becomes public and the fee before you decide." }
+                            Hint { visible: modelData.kind === "nft_transfers" || modelData.kind === "membership_proof"; color: root.ink; text: "It " + (modelData.discloses || "") + "." }
                             RowLayout {
                                 spacing: 10
                                 Action {
-                                    label: modelData.kind === "nft_list" ? "Give access" : "Open"
+                                    label: modelData.kind === "nft_list" ? "Give access" : modelData.kind === "nft_transfers" ? "Allow" : "Open"
                                     strong: true
                                     enabledNow: modelData.kind !== "nft_list" || Object.keys(root.nftListTicks).some(function(k) { return root.nftListTicks[k] })
-                                    onPressed: modelData.kind === "nft_list" ? root.nftApproveList(modelData.id) : root.nftOpenSheet("Sending an NFT for " + modelData.app, modelData.program, JSON.parse(modelData.action), modelData, null)
+                                    onPressed: modelData.kind === "nft_list" ? root.nftApproveList(modelData.id) : modelData.kind === "nft_transfers" ? root.nftApproveList(modelData.id, true) : modelData.kind === "membership_proof" ? root.openProofSheet(modelData.id) : root.nftOpenSheet("Sending an NFT for " + modelData.app, modelData.program, JSON.parse(modelData.action), modelData, null)
                                 }
                                 Action { label: "Reject"; onPressed: root.nftRejectRequest(modelData.id) }
                             }
                             WhyLine { text: modelData.kind === "nft_list" && !Object.keys(root.nftListTicks).some(function(k) { return root.nftListTicks[k] }) ? "Tick at least one account above." : "" }
                     }
+                }
+
+                // A membership proof: its own sheet, visibly not an access sheet (spec §4.2).
+                Panel {
+                    visible: root.proofSheet !== null || root.proofStatus !== ""
+                    title: root.proofSheet !== null ? root.proofSheet.title : "A membership proof"
+                    Hint { visible: root.proofSheet !== null && root.proofSheet.purpose !== ""; text: root.proofSheet !== null ? "In its words: " + root.proofSheet.purpose : "" }
+                    Hint { visible: root.proofSheet !== null && root.proofSheet.publisher && Logic.publisherLine(root.proofSheet.publisher) !== null; color: root.ink; text: root.proofSheet !== null && Logic.publisherLine(root.proofSheet.publisher) !== null ? Logic.publisherLine(root.proofSheet.publisher).text : "" }
+                    Hint { visible: root.proofSheet !== null && root.proofSheet.first_time; color: root.ink; text: "Approving lets this app ask you for proofs again. Each one still needs your yes, and it can't see your accounts or NFTs with it. You can take it back under Apps and your NFTs." }
+                    Part { visible: root.proofSheet !== null; text: "This becomes public on the chain" }
+                    Repeater { model: root.proofSheet !== null ? root.proofSheet["public"] : []; Hint { required property var modelData; text: "• " + Nft.proofPublicLine(modelData) } }
+                    Part { visible: root.proofSheet !== null; text: "This is not shown" }
+                    Hint { visible: root.proofSheet !== null; text: root.proofSheet !== null ? root.proofSheet.not_shown : "" }
+                    Part { visible: root.proofSheet !== null; text: "Good to know" }
+                    Repeater { model: root.proofSheet !== null ? Nft.proofGoodToKnow(root.proofSheet) : []; Hint { required property var modelData; text: "• " + modelData } }
+                    Part { visible: root.proofSheet !== null && root.proofSheet.holdings.length > 0; text: "Prove with" }
+                    Flow {
+                        visible: root.proofSheet !== null && root.proofSheet.holdings.length > 0
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Repeater { model: root.proofSheet !== null ? root.proofSheet.holdings : []; Choice { required property var modelData; label: Nft.accountShown(modelData); chosen: root.proofHolder === modelData; onPressed: root.proofHolder = modelData } }
+                    }
+                    Hint { visible: root.proofSheet !== null; color: root.ink; text: "Pay the fee from: this NFT's account (the only way tested so far)." }
+                    Hint { visible: root.proofSheet !== null; text: root.proofSheet !== null ? Nft.proofChecksLine(root.proofSheet.checks) : "" }
+                    StatusLine { visible: root.proofStatus !== ""; kind: root.proofStatusKind; text: root.proofStatus }
+                    RowLayout {
+                        visible: root.proofSheet !== null
+                        spacing: 10
+                        Action { label: root.proofStatus === "Preparing…" ? "Preparing…" : "Prove"; strong: true; enabledNow: root.proofHolder !== "" && root.proofStatusKind !== "working" && root.proofSheet !== null && !root.proofSheet.public_only && !!root.proofSheet.checks.gate; onPressed: root.proveIt() }
+                        Action { label: "Cancel"; onPressed: { var id = root.proofSheet.request; root.proofSheet = null; root.proofStatus = ""; root.nftRejectRequest(id) } }
+                    }
+                    WhyLine { text: root.proofSheet === null ? "" : !root.proofSheet.checks.gate ? "No membership gate is set up on this network yet, so no proof can be made here (GATE_NOT_PINNED). Nothing is sent." : root.proofHolder === "" && root.proofSheet.holdings.length > 0 ? "Pick the account to prove with." : "" }
                 }
 
                 // The one sheet: what an action does and shows, before anything is sent.
@@ -10033,10 +10144,21 @@ Item {
                         Layout.fillWidth: true
                         spacing: 10
                         Text { Layout.fillWidth: true; text: Nft.accountShown(modelData.account) + " takes " + modelData.title; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); wrapMode: Text.Wrap }
-                        Link { text: "Copy the account"; onPressed: root.copy(modelData.account, "account") }
+                        Link { visible: !modelData.isPrivate; text: "Copy the account"; onPressed: root.copy(modelData.account, "account") }
+                        Link { visible: modelData.isPrivate && !root.nftKeys[modelData.account]; text: root.nftKeysAsking === modelData.account ? "Checking…" : "Show its receiving keys"; onPressed: root.nftShowKeys(modelData.account) }
                     }
                 }
-                Hint { visible: Nft.readyRows(root.nftRead ? root.nftRead.programs : []).some(function(r) { return r.isPrivate }); text: "A private account takes NFTs from your own accounts. For someone else to send to it they need its receiving keys, which this page doesn't show yet: give them a public account instead." }
+                Repeater {
+                    model: Object.keys(root.nftKeys)
+                    ColumnLayout {
+                        required property var modelData
+                        Layout.fillWidth: true
+                        spacing: 4
+                        Fact { label: "Keys of"; value: Nft.accountShown(modelData) }
+                        Fact { label: "Receiving keys"; value: Nft.idShown(root.nftKeys[modelData].keys); full: root.nftKeys[modelData].keys; code: true }
+                        Hint { text: root.nftKeys[modelData].reveals }
+                    }
+                }
 
                 // Credits waiting for this wallet's private accounts.
                 Repeater {
@@ -10083,6 +10205,26 @@ Item {
                         }
                     }
                     WhyLine { text: root.nftJob !== null ? "Wait for the NFT job under way to end." : nftReceiveField.text.trim() === "" ? "Paste a collection link first." : "" }
+                }
+
+                // Passes: membership proofs made or under way (spec §4.5).
+                Part { visible: root.nftPasses.length > 0; text: "Passes" }
+                Repeater {
+                    model: root.nftPasses
+                    StatusLine { required property var modelData; kind: Nft.proofKind(modelData.status); text: modelData.app + ": " + Nft.proofLine(modelData.status, root.clockTick) }
+                }
+
+                // What each app may do with your NFTs, taken back one capability at a time.
+                Part { visible: root.nftGrantsList.length > 0; text: "Apps and your NFTs" }
+                Repeater {
+                    model: root.nftGrantsList
+                    RowLayout {
+                        required property var modelData
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Text { Layout.fillWidth: true; text: modelData.app + (modelData.capability === "nft_list" ? " can see " : " ") + modelData.discloses + (modelData.accounts ? " (" + modelData.accounts.map(Nft.accountShown).join(", ") + ")" : "") + "."; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); wrapMode: Text.Wrap }
+                        Link { text: "Revoke"; onPressed: root.nftRevokeCapability(modelData.app, modelData.capability) }
+                    }
                 }
 
                 // The NFT programs listed for this network.

@@ -1,5 +1,5 @@
 // Checks Collectibles' rules (qml/nft.mjs). Run with: node basecamp/nft.test.mjs
-import { readyRows, privateOnly, accountShown, idShown, tokenLine, collectionTitle, metadataRows, accountGroups, collectionCounts, receiveChoices, collectionLink, linkOf, toProblem, toTheirKeys, approveWhy, defaultPayer, jobLine, jobEnded, imageConsent, burnConfirm } from "./qml/nft.mjs";
+import { proofLine, proofKind, proofPublicLine, proofGoodToKnow, proofChecksLine, capabilityVerb, readyRows, privateOnly, accountShown, idShown, tokenLine, collectionTitle, metadataRows, accountGroups, collectionCounts, receiveChoices, collectionLink, linkOf, toProblem, toTheirKeys, approveWhy, defaultPayer, jobLine, jobEnded, imageConsent, burnConfirm } from "./qml/nft.mjs";
 import { readFileSync } from "node:fs";
 
 let failures = 0;
@@ -75,6 +75,16 @@ check("imageConsent non-https", imageConsent("ipfs://bafy", false).allowed, fals
 check("imageConsent https names the host", imageConsent("https://img.example.com/a.png", true).text.includes("img.example.com"), true);
 check("imageConsent private warns", imageConsent("https://img.example.com/a.png", true).text.includes("Only private accounts"), true);
 check("burnConfirm", [burnConfirm({ state: "copy" }).includes("this copy"), burnConfirm({ state: "master" }).includes("master")], [true, true]);
+
+// Membership proofs: the stages, with the time spent proving; named errors.
+check("proofLine proving", proofLine({ state: "proving", elapsed_seconds: 125 }), "Proving (about 10 minutes): 2 min 5 s so far.");
+check("proofLine failed", proofLine({ state: "failed", code: "GATE_NOT_PINNED", plain_message: "No gate." }), "Didn't go through: No gate. (GATE_NOT_PINNED)");
+check("proofLine ready", proofLine({ state: "ready", proof: { expires_at: Date.UTC(2026, 10, 19, 12, 0) } }), "Ready: the pass is valid until 2026-11-19 12:00 UTC.");
+check("proofKind", ["ready", "failed", "proving", "cancelled"].map((s) => proofKind({ state: s })), ["done", "problem", "waiting", ""]);
+check("proofPublicLine", proofPublicLine("When the pass starts and ends: until " + Date.UTC(2026, 10, 19, 13, 0) + "."), "When the pass starts and ends: until 2026-11-19 13:00 UTC.");
+check("proofGoodToKnow names the app", proofGoodToKnow({ good_to_know: ["a", "b"], live_passes: [{ app: "door_ui" }] })[1].includes("door_ui"), true);
+check("proofChecksLine", proofChecksLine({ gate: null, nft_program_label: { registry: false } }), "Program checks: gate none set up on this network yet, NFT program unknown (no Program Registry).");
+check("capabilityVerb", ["nft_list", "nft_transfers", "membership_proof"].map(capabilityVerb), ["see your NFTs", "propose NFT transfers", "ask you for membership proofs"]);
 
 // The words the wallet never uses, in the new code and the Collectibles block of Main.qml.
 const source = readFileSync(new URL("./qml/nft.mjs", import.meta.url), "utf8");

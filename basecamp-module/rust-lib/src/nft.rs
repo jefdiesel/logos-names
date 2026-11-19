@@ -97,7 +97,8 @@ pub fn remove_program(path: &Path, network: &str, program: &str) -> Result<Vec<V
 
 /// Whether the person allowed loading the image of `definition` of `program`.
 pub fn media_allowed(path: &Path, program: &str, definition: &str) -> bool {
-    load(path)["media"][format!("{program}:{definition}")] == true
+    let entry = &load(path)["media"][format!("{program}:{definition}")];
+    *entry == true || entry["allowed"] == true
 }
 
 pub fn set_media(path: &Path, program: &str, definition: &str, allow: bool) -> Result<bool, String> {
@@ -113,7 +114,7 @@ pub fn set_media(path: &Path, program: &str, definition: &str, allow: bool) -> R
         if media.len() >= MAX_MEDIA && !media.contains_key(&key) {
             return Err(format!("The wallet remembers at most {MAX_MEDIA} collections whose images load."));
         }
-        media.insert(key, json!(true));
+        media.insert(key, json!({ "allowed": true, "at": provider::now_ms() }));
     } else {
         media.remove(&key);
     }
@@ -390,48 +391,208 @@ pub fn outcome(log: &str) -> Value {
     json!({ "tx": tx, "block": blocks.last(), "received": blocks.len(), "nothing": log.contains("nothing to receive"), "refusal": refusal, "account": account })
 }
 
+/// What giving out a private account's receiving keys reveals, in plain words (the app shows it
+/// beside Copy).
+pub const KEYS_REVEAL: &str = "Whoever has these keys can send NFTs and payments to this private account, and can work out its account ID. They can't spend from it or see what it holds. Everything sent to these keys can be told apart as going to the same account, and the keys can be passed on.";
+
+/// `names module keys <id>` read back: the account's npk and vpk, checked, as one string.
+pub fn parse_keys(output: &str, id: &registry::AccountId) -> Result<Value, String> {
+    let answer: Value = serde_json::from_str(cli::last_line(output)).map_err(|_| "the names CLI's keys did not decode".to_owned())?;
+    let hex = |key: &str, exact: Option<usize>| {
+        answer[key].as_str().filter(|h| !h.is_empty() && h.len() % 2 == 0 && h.len() <= 512 && exact.is_none_or(|n| h.len() == n) && h.bytes().all(|b| b.is_ascii_hexdigit())).map(str::to_ascii_lowercase)
+    };
+    if answer["account"].as_str().and_then(|a| registry::parse_account(a).ok()) != Some(*id) {
+        return Err("the names CLI gave the keys of another account".to_owned());
+    }
+    let (Some(npk), Some(vpk)) = (hex("npk", Some(64)), hex("vpk", None)) else {
+        return Err("the names CLI gave no receiving keys".to_owned());
+    };
+    Ok(json!({ "account": format!("Private/{}", registry::account_text(id)), "keys": format!("{npk}:{vpk}"), "reveals": KEYS_REVEAL }))
+}
+
 // ── Media: a collection's image, only when allowed ──────────────────────
+//
+// A collection's `uri` is its maker's text, so fetching it is a request the wallet makes on a
+// stranger's say-so: to the person's own network (SSRF), to a slow or huge host, or for content
+// that isn't an image. The rules, all enforced here and tested below:
+// - https only, a plain host, no user part; at most `MAX_REDIRECTS` redirects, each one checked
+//   again as if it were the first address;
+// - every address the host name resolves to must be public (never loopback, private, link-local,
+//   shared, multicast, documentation or unspecified, v4 or v6, v4-mapped included): the check is
+//   the resolver ureq connects through, so the address checked is the address connected to;
+// - a connect limit, a whole-request limit, and at most `MAX_IMAGE_BYTES` read;
+// - `Content-Type: image/png` and the PNG signature, then the same PNG decoder as avatars, into
+//   pixels; nothing else (SVG included) is ever shown, and nothing is rendered as a page;
+// - no cookies (ureq's cookie store is not built in), no Referer (ureq sends none), a fixed
+//   User-Agent that names nothing of the person's;
+// - only after the person allowed it for that collection (`set_media`, recorded with when).
+
+/// Redirects followed, each checked again.
+pub const MAX_REDIRECTS: usize = 3;
+const CONNECT_LIMIT: Duration = Duration::from_secs(5);
+const REQUEST_LIMIT: Duration = Duration::from_secs(15);
 
 /// The URL a collection's `uri` may be fetched from, or why not: https only, a host name or a
 /// public address (never loopback, a private network or a link-local one), no user part.
 pub fn media_url(uri: &str) -> Result<String, String> {
     let uri = uri.trim();
     let rest = uri.strip_prefix("https://").ok_or("only an https address is loaded; this one isn't")?;
+    if uri.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("that address has spaces or control characters in it".to_owned());
+    }
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
     if authority.is_empty() || authority.contains('@') {
         return Err("that address has no plain host".to_owned());
     }
-    let host = authority.rsplit_once(':').filter(|(_, port)| port.bytes().all(|b| b.is_ascii_digit())).map_or(authority, |(host, _)| host).trim_matches(['[', ']']).to_ascii_lowercase();
+    let host = host_of(authority);
     if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") || host.ends_with(".internal") || !host.contains('.') && host.parse::<std::net::IpAddr>().is_err() {
         return Err("that address is on this computer or its network".to_owned());
     }
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        let local = match ip {
-            std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() || v4.is_broadcast() || v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1]),
-            std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified() || (v6.segments()[0] & 0xfe00) == 0xfc00 || (v6.segments()[0] & 0xffc0) == 0xfe80,
-        };
-        if local {
+        if !public_ip(&ip) {
             return Err("that address is on this computer or its network".to_owned());
         }
     }
     Ok(uri.to_owned())
 }
 
-/// Fetches a collection's image: no redirect, at most `MAX_IMAGE_BYTES`, a PNG decoded to pixels
-/// here (`avatar::png_pixels`); nothing else is shown.
-pub fn fetch_image(uri: &str) -> Result<Value, String> {
-    let url = media_url(uri)?;
-    let agent = ureq::AgentBuilder::new().redirects(0).timeout(Duration::from_secs(15)).build();
-    let response = agent.get(&url).call().map_err(|error| match error {
-        ureq::Error::Status(code, _) => format!("the image's host answered HTTP {code}"),
-        ureq::Error::Transport(_) => "the image's host couldn't be reached".to_owned(),
-    })?;
-    let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut std::io::Read::take(response.into_reader(), MAX_IMAGE_BYTES as u64 + 1), &mut bytes).map_err(|_| "the image couldn't be read".to_owned())?;
-    if bytes.len() > MAX_IMAGE_BYTES {
-        return Err(format!("the image is larger than {} KiB, so it isn't loaded", MAX_IMAGE_BYTES / 1024));
+/// The host of an authority (`host`, `host:port`, `[v6]:port`), lower case, brackets removed.
+fn host_of(authority: &str) -> String {
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        rest.split(']').next().unwrap_or_default()
+    } else {
+        authority.rsplit_once(':').filter(|(_, port)| port.bytes().all(|b| b.is_ascii_digit())).map_or(authority, |(host, _)| host)
+    };
+    host.to_ascii_lowercase()
+}
+
+/// Whether an address is on the public internet: none of loopback, private, link-local, shared
+/// (100.64/10), multicast, broadcast, documentation, benchmarking or unspecified, nor the v6
+/// forms of those (unique-local, link-local, v4-mapped and v4-compatible of a non-public v4).
+pub fn public_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let [a, b, c, _] = v4.octets();
+            !(v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.is_documentation()
+                || a == 0
+                || a == 100 && (64..128).contains(&b)
+                || a == 198 && (b == 18 || b == 19)
+                || a == 192 && b == 0 && c == 0
+                || a >= 240)
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return public_ip(&std::net::IpAddr::V4(v4));
+            }
+            let first = v6.segments()[0];
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (first & 0xfe00) == 0xfc00
+                || (first & 0xffc0) == 0xfe80
+                || first == 0x2001 && v6.segments()[1] == 0x0db8
+                || v6.segments()[..6].iter().all(|s| *s == 0))
+        }
     }
-    crate::avatar::png_pixels(&bytes).ok_or_else(|| "it isn't a PNG image this wallet can show".to_owned())
+}
+
+/// The addresses a host may be reached at: all of them public, or none at all. ureq connects only
+/// to what this returns, so a name that resolves to a private address is never connected to.
+pub fn checked_addresses(netloc: &str, resolve: &dyn Fn(&str) -> std::io::Result<Vec<std::net::SocketAddr>>) -> std::io::Result<Vec<std::net::SocketAddr>> {
+    let found = resolve(netloc)?;
+    if found.is_empty() {
+        return Err(std::io::Error::other("the image's host name has no address"));
+    }
+    if let Some(local) = found.iter().find(|addr| !public_ip(&addr.ip())) {
+        return Err(std::io::Error::other(format!("the image's host name points at {}, which is on this computer or its network", local.ip())));
+    }
+    Ok(found)
+}
+
+/// Where a redirect goes, checked as a first address would be: an absolute https URL, or a path
+/// on the same host.
+pub fn redirect_target(current: &str, location: &str) -> Result<String, String> {
+    let location = location.trim();
+    let next = if location.starts_with("https://") {
+        location.to_owned()
+    } else if location.starts_with('/') && !location.starts_with("//") {
+        let rest = current.strip_prefix("https://").ok_or("not an https address")?;
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        format!("https://{authority}{location}")
+    } else {
+        return Err("the image's host redirected somewhere that isn't an https address".to_owned());
+    };
+    media_url(&next)
+}
+
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+
+/// The pixels of a fetched body, only when it says it is a PNG and is one: `image/png`, the PNG
+/// signature, and the avatar decoder's limits. SVG, HTML and every other type are refused.
+pub fn png_payload(content_type: &str, bytes: &[u8]) -> Result<Value, String> {
+    let kind = content_type.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
+    if kind != "image/png" {
+        return Err(format!("the host sent {} rather than a PNG image, so it isn't shown", if kind.is_empty() { "no content type".to_owned() } else { provider::clean_text(&kind, 40) }));
+    }
+    if !bytes.starts_with(&PNG_SIGNATURE) {
+        return Err("the host said PNG but sent something else, so it isn't shown".to_owned());
+    }
+    crate::avatar::png_pixels(bytes).ok_or_else(|| "it isn't a PNG image this wallet can show (at most 1024 pixels a side)".to_owned())
+}
+
+/// Fetches a collection's image under the rules above, resolving names with `resolve`.
+pub fn fetch_image_with(uri: &str, resolve: impl Fn(&str) -> std::io::Result<Vec<std::net::SocketAddr>> + Send + Sync + 'static) -> Result<Value, String> {
+    let resolve = std::sync::Arc::new(resolve);
+    let checked = std::sync::Arc::clone(&resolve);
+    let agent = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout_connect(CONNECT_LIMIT)
+        .timeout(REQUEST_LIMIT)
+        .user_agent("names-wallet")
+        .resolver(move |netloc: &str| checked_addresses(netloc, &*checked))
+        .build();
+    let mut url = media_url(uri)?;
+    for _ in 0..=MAX_REDIRECTS {
+        let response = match agent.get(&url).set("Accept", "image/png").call() {
+            Ok(response) => response,
+            Err(ureq::Error::Status(code, _)) => return Err(format!("the image's host answered HTTP {code}")),
+            Err(ureq::Error::Transport(transport)) => {
+                let why = transport.to_string();
+                return Err(if why.contains("on this computer or its network") || why.contains("has no address") {
+                    "the image's host name points at this computer or its network, so it isn't loaded".to_owned()
+                } else {
+                    "the image's host couldn't be reached in time".to_owned()
+                });
+            }
+        };
+        if (300..400).contains(&response.status()) {
+            let location = response.header("Location").unwrap_or_default().to_owned();
+            url = redirect_target(&url, &location)?;
+            continue;
+        }
+        if response.header("Content-Length").and_then(|n| n.parse::<u64>().ok()).is_some_and(|n| n > MAX_IMAGE_BYTES as u64) {
+            return Err(format!("the image is larger than {} KiB, so it isn't loaded", MAX_IMAGE_BYTES / 1024));
+        }
+        let content_type = response.header("Content-Type").unwrap_or_default().to_owned();
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::Read::take(response.into_reader(), MAX_IMAGE_BYTES as u64 + 1), &mut bytes).map_err(|_| "the image couldn't be read in time".to_owned())?;
+        if bytes.len() > MAX_IMAGE_BYTES {
+            return Err(format!("the image is larger than {} KiB, so it isn't loaded", MAX_IMAGE_BYTES / 1024));
+        }
+        return png_payload(&content_type, &bytes);
+    }
+    Err(format!("the image's host redirected more than {MAX_REDIRECTS} times"))
+}
+
+/// Fetches a collection's image with the system's name resolution, checked.
+pub fn fetch_image(uri: &str) -> Result<Value, String> {
+    fetch_image_with(uri, |netloc: &str| std::net::ToSocketAddrs::to_socket_addrs(netloc).map(|found| found.collect()))
 }
 
 // ── Sheets shown, by wallet and digest ──────────────────────────────────
@@ -491,7 +652,7 @@ impl Names {
     }
 
     /// A program of the list in use, or why it isn't one.
-    fn nft_listed(&self, program: &str) -> Result<registry::AccountId, String> {
+    pub(crate) fn nft_listed(&self, program: &str) -> Result<registry::AccountId, String> {
         let id = program_id(program)?;
         let text = registry::account_text(&id);
         let path = list_path().ok_or("no home folder to keep the NFT programs in")?;
@@ -670,6 +831,28 @@ impl Names {
         }
     }
 
+    /// A private account's receiving keys, for a sender outside the wallet (`names module keys`),
+    /// read on a thread of its own: `{account, keys: "<npk hex>:<vpk hex>", reveals}`.
+    pub(crate) fn nft_keys_now(&mut self, account_text: &str) -> String {
+        let outcome = (|| {
+            let (private, id) = provider::account_ref(account_text)?;
+            if !private {
+                return Err("a public account is given as itself (Public/<id>); only a private one has receiving keys".to_owned());
+            }
+            let setup = self.cli_setup()?;
+            setup.wallet_ready()?;
+            let key = self.served_key(KEY, &format!("keys|{}|{}", registry::account_text(&id), setup.wallet.display()));
+            Ok(self.served.read(&key, Duration::from_secs(3600), served::Lane::Cli, move || {
+                let args = vec!["module".to_owned(), "keys".to_owned(), registry::account_text(&id)];
+                parse_keys(&cli::run_text(&setup, args, INFO_PATIENCE)?, &id)
+            }))
+        })();
+        match outcome {
+            Ok(snap) => served::reply_of(&snap, "The receiving keys", |_| Value::Null),
+            Err(why) => crate::reply(Err(why)),
+        }
+    }
+
     /// After an NFT job ends: its outcome in the job's state, and what the wallet holds read again.
     pub(crate) fn nft_job_ended(&mut self, state: &mut Value, log: &str) {
         if let Some(fields) = outcome(log).as_object() {
@@ -725,6 +908,7 @@ mod tests {
         assert!(!media_allowed(&path, PROGRAM, ART));
         set_media(&path, PROGRAM, ART, true).unwrap();
         assert!(media_allowed(&path, PROGRAM, ART));
+        assert!(load(&path)["media"][format!("{PROGRAM}:{ART}")]["at"].as_u64().is_some(), "the consent is recorded with when");
         assert!(!media_allowed(&path, PROGRAM, BOB));
         set_media(&path, PROGRAM, ART, false).unwrap();
         assert!(!media_allowed(&path, PROGRAM, ART));
@@ -817,6 +1001,61 @@ mod tests {
     }
 
     #[test]
+    fn a_host_name_is_reached_only_at_public_addresses_and_redirects_are_checked_again() {
+        use std::net::{IpAddr, SocketAddr};
+        let at = |ips: &'static [&'static str]| move |_: &str| Ok(ips.iter().map(|ip| SocketAddr::new(ip.parse::<IpAddr>().unwrap(), 443)).collect::<Vec<_>>());
+        assert!(checked_addresses("img.example.com:443", &at(&["93.184.216.34"])).is_ok());
+        for local in [&["127.0.0.1"][..], &["93.184.216.34", "10.1.2.3"], &["192.168.1.96"], &["169.254.169.254"], &["::1"], &["fd00::5"], &["fe80::1"], &["::ffff:127.0.0.1"], &["100.118.15.0"], &["0.0.0.0"]] {
+            let err = checked_addresses("evil.example.com:443", &at(local)).unwrap_err().to_string();
+            assert!(err.contains("on this computer or its network"), "{local:?}: {err}");
+        }
+        assert!(checked_addresses("nowhere.example:443", &at(&[])).is_err());
+        // A rebinding name fails before any connection: the fetch refuses on the resolver's word.
+        let refused = fetch_image_with("https://rebind.example.com/a.png", |_: &str| Ok(vec![SocketAddr::new("127.0.0.1".parse().unwrap(), 443)])).unwrap_err();
+        assert!(refused.contains("this computer or its network"), "{refused}");
+        // Redirects: absolute https or a same-host path, each checked again.
+        assert_eq!(redirect_target("https://img.example.com/a.png", "/b.png").unwrap(), "https://img.example.com/b.png");
+        assert_eq!(redirect_target("https://img.example.com/a.png", "https://cdn.example.org/c.png").unwrap(), "https://cdn.example.org/c.png");
+        for bad in ["http://img.example.com/x.png", "https://127.0.0.1/x", "//evil.example.com/x", "b.png", "file:///etc/passwd", "https://10.0.0.1/admin"] {
+            assert!(redirect_target("https://img.example.com/a.png", bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn receiving_keys_are_read_back_checked() {
+        let id = registry::parse_account(BOB).unwrap();
+        let out = format!("Latest block is 9\n{}", json!({ "account": BOB, "npk": "AB".repeat(32), "vpk": "cd".repeat(33), "fresh": false }));
+        let keys = parse_keys(&out, &id).unwrap();
+        assert_eq!(keys["keys"], format!("{}:{}", "ab".repeat(32), "cd".repeat(33)));
+        assert_eq!(keys["account"], format!("Private/{BOB}"));
+        assert!(keys["reveals"].as_str().unwrap().contains("can't spend"));
+        assert!(parse_keys(&json!({ "account": ART, "npk": "ab".repeat(32), "vpk": "cd" }).to_string(), &id).is_err(), "another account's keys");
+        assert!(parse_keys(&json!({ "account": BOB, "npk": "ab", "vpk": "cd" }).to_string(), &id).is_err(), "a short npk");
+    }
+
+    #[test]
+    fn only_a_real_png_is_shown() {
+        let png = {
+            let mut bytes = Vec::new();
+            let mut encoder = png::Encoder::new(&mut bytes, 2, 2);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.write_header().unwrap().write_image_data(&[255; 16]).unwrap();
+            bytes
+        };
+        assert_eq!(png_payload("image/png", &png).unwrap()["width"], 2);
+        assert_eq!(png_payload("image/PNG; charset=binary", &png).unwrap()["height"], 2);
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"/>"#;
+        assert!(png_payload("image/svg+xml", svg).unwrap_err().contains("rather than a PNG"));
+        assert!(png_payload("image/png", svg).unwrap_err().contains("said PNG"));
+        assert!(png_payload("text/html", &png).is_err());
+        assert!(png_payload("", &png).unwrap_err().contains("no content type"));
+        let mut truncated = png.clone();
+        truncated.truncate(20);
+        assert!(png_payload("image/png", &truncated).is_err());
+    }
+
+    #[test]
     fn images_load_only_from_public_https_hosts() {
         for good in ["https://example.com/a.png", "https://cdn.example.org:8443/x?y", "https://8.8.8.8/i.png"] {
             assert!(media_url(good).is_ok(), "{good}");
@@ -834,6 +1073,8 @@ mod tests {
             "https://user@example.com/x",
             "https://intranet/x",
             "https://100.118.15.0/x",
+            "https://[::ffff:10.0.0.1]/x",
+            "https://example.com/a b.png",
             "javascript:alert(1)",
         ] {
             assert!(media_url(bad).is_err(), "{bad}");

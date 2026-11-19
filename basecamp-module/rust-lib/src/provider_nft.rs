@@ -26,6 +26,13 @@ use std::path::Path;
 
 pub const NFT_LIST: &str = "nft_list";
 pub const NFT_TRANSFER: &str = "nft_transfer";
+/// A request for the transfer capability (`request_nft_transfers`).
+pub const NFT_TRANSFERS: &str = "nft_transfers";
+/// The membership-proof capability (provider_proof.rs): its own grant, kept here.
+pub const MEMBERSHIP_PROOF: &str = "membership_proof";
+/// What each capability lets the app learn or do, in the words the grants list uses.
+pub const TRANSFERS_DISCLOSES: &str = "may ask you to send an NFT from an account it can list; you approve each one";
+pub const PROOF_DISCLOSES: &str = "may ask you to prove you hold an NFT of a collection; learns a pass id, nothing about your accounts";
 /// What the NFT list discloses, in the words the grant is shown with.
 pub const LIST_DISCLOSES: &str = "which NFTs these accounts hold, with their collections and metadata";
 
@@ -38,6 +45,8 @@ fn path() -> Option<PathBuf> {
 pub struct Store {
     pub requests: Vec<Value>,
     pub grants: Map<String, Value>,
+    /// Capabilities besides the list, by app: `{app: {nft_transfers: {since}, membership_proof: {since}}}`.
+    pub capabilities: Map<String, Value>,
     path: Option<PathBuf>,
 }
 
@@ -47,6 +56,7 @@ impl Store {
         Store {
             requests: found["requests"].as_array().cloned().unwrap_or_default(),
             grants: found["grants"].as_object().cloned().unwrap_or_default(),
+            capabilities: found["capabilities"].as_object().cloned().unwrap_or_default(),
             path,
         }
     }
@@ -56,7 +66,7 @@ impl Store {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("can't keep NFT requests: {e}"))?;
         }
-        cli::write_private(path, json!({ "requests": self.requests, "grants": self.grants }).to_string().as_bytes()).map_err(|e| format!("can't keep NFT requests: {e}"))
+        cli::write_private(path, json!({ "requests": self.requests, "grants": self.grants, "capabilities": self.capabilities }).to_string().as_bytes()).map_err(|e| format!("can't keep NFT requests: {e}"))
     }
 
     /// Expires what waited too long, and forgets what was decided long ago.
@@ -65,6 +75,9 @@ impl Store {
             if request["state"] == "pending" && request["expires"].as_u64().is_some_and(|at| at <= now) {
                 request["state"] = json!("expired");
                 request["decided"] = json!(now);
+                if request["kind"] == MEMBERSHIP_PROOF {
+                    request["status"] = json!({ "state": "expired" });
+                }
             }
         }
         self.requests.retain(|request| request["state"] == "pending" || request["state"] == "running" || request["decided"].as_u64().is_none_or(|at| now.saturating_sub(at) < provider::KEEP_DECIDED_MS));
@@ -107,6 +120,33 @@ impl Store {
         self.grants.get(app).and_then(|grant| grant["accounts"].as_array()).map(|accounts| accounts.iter().filter_map(|a| a.as_str().map(str::to_owned)).collect()).unwrap_or_default()
     }
 
+    /// Whether `app` holds `capability` (`nft_transfers`, `membership_proof`).
+    pub fn has(&self, app: &str, capability: &str) -> bool {
+        self.capabilities.get(app).is_some_and(|caps| caps[capability].is_object())
+    }
+
+    pub fn give(&mut self, app: &str, capability: &str, now: u64) -> Result<(), String> {
+        if !self.capabilities.contains_key(app) && self.capabilities.len() >= provider::MAX_APPS {
+            return Err("too many apps hold NFT capabilities; revoke one first".to_owned());
+        }
+        let caps = self.capabilities.entry(app.to_owned()).or_insert_with(|| json!({}));
+        caps[capability] = json!({ "since": now });
+        Ok(())
+    }
+
+    /// Takes one capability away (`nft_list` is the list grant). Whether there was one.
+    pub fn take(&mut self, app: &str, capability: &str) -> bool {
+        if capability == NFT_LIST {
+            return self.grants.remove(app).is_some();
+        }
+        let Some(caps) = self.capabilities.get_mut(app).and_then(Value::as_object_mut) else { return false };
+        let had = caps.remove(capability).is_some();
+        if caps.is_empty() {
+            self.capabilities.remove(app);
+        }
+        had
+    }
+
     pub fn grant(&mut self, app: &str, accounts: &[String], now: u64) -> Result<(), String> {
         if accounts.is_empty() || accounts.len() > provider::MAX_GRANTED {
             return Err(format!("tick 1 to {} accounts", provider::MAX_GRANTED));
@@ -128,12 +168,24 @@ pub fn view(request: &Value) -> Value {
     });
     if request["kind"] == NFT_LIST {
         out["accounts"] = request["accounts"].clone();
+    } else if request["kind"] == NFT_TRANSFERS {
+    } else if request["kind"] == MEMBERSHIP_PROOF {
+        for key in ["collection", "program", "purpose", "status", "proof", "code"] {
+            out[key] = request[key].clone();
+        }
     } else {
         for key in ["program", "from", "destination", "definition", "tx"] {
             out[key] = request[key].clone();
         }
     }
     out
+}
+
+/// A request to be allowed to propose NFT transfers.
+pub fn transfers_request(app: &str, reason: &str, now: u64) -> Result<Value, String> {
+    let mut request = provider::base(app, NFT_TRANSFERS, now)?;
+    request.insert("reason".into(), json!(provider::clean_text(reason, provider::MAX_TEXT)));
+    Ok(Value::Object(request))
 }
 
 /// A request to list some accounts' NFTs.
@@ -215,6 +267,20 @@ impl Names {
         store.add(list_request(&app, reason, now)?, now)
     }
 
+    /// Asks for the transfer capability, apart from the list.
+    pub(crate) fn nft_transfers_ask(&mut self, reason: &str) -> Result<Value, String> {
+        let app = crate::asking_app()?;
+        let now = provider::now_ms();
+        let mut store = self.nft_store();
+        if store.has(&app, NFT_TRANSFERS) {
+            return Ok(json!({ "request": null, "state": "approved" }));
+        }
+        if let Some(waiting) = store.requests.iter().find(|r| r["app"] == app.as_str() && r["kind"] == NFT_TRANSFERS && r["state"] == "pending") {
+            return Ok(view(waiting));
+        }
+        store.add(transfers_request(&app, reason, now)?, now)
+    }
+
     /// The NFTs of the accounts the app was given for the list.
     pub(crate) fn nft_granted_list(&mut self) -> String {
         let app = match crate::asking_app() {
@@ -257,6 +323,9 @@ impl Names {
         if !store.granted(&app).iter().any(|account| request["from"] == account.as_str()) {
             return Err("ask to see that account's NFTs first (request_nft_access), then propose it".to_owned());
         }
+        if !store.has(&app, NFT_TRANSFERS) {
+            return Err("ask to propose NFT transfers first (request_nft_transfers); seeing NFTs doesn't allow it".to_owned());
+        }
         // The program must be one the person listed for this network.
         let path = crate::config_dir().map(|dir| dir.join("nft-programs.json")).ok_or("no home folder")?;
         if !nft::programs_in(&path, &self.nft_network()).iter().any(|entry| entry["program"] == request["program"]) {
@@ -290,7 +359,7 @@ impl Names {
     pub(crate) fn nft_drop(&mut self) -> Result<Value, String> {
         let app = crate::asking_app()?;
         let mut store = self.nft_store();
-        let revoked = store.grants.remove(&app).is_some();
+        let revoked = store.grants.remove(&app).is_some() | store.capabilities.remove(&app).is_some();
         store.save()?;
         Ok(json!({ "revoked": revoked }))
     }
@@ -333,6 +402,10 @@ impl Names {
             shown["publisher"] = json!(self.publisher_of(request["app"].as_str().unwrap_or_default()));
             if request["kind"] == NFT_LIST {
                 shown["discloses"] = json!(LIST_DISCLOSES);
+            } else if request["kind"] == NFT_TRANSFERS {
+                shown["discloses"] = json!(TRANSFERS_DISCLOSES);
+            } else if request["kind"] == MEMBERSHIP_PROOF {
+                shown["discloses"] = json!(PROOF_DISCLOSES);
             } else {
                 shown["action"] = json!(action_of(request));
                 shown["granted_for"] = json!(store.granted(request["app"].as_str().unwrap_or_default()));
@@ -374,9 +447,21 @@ impl Names {
             store.save()?;
             return Ok(out);
         }
+        if request["kind"] == NFT_TRANSFERS {
+            store.give(&app, NFT_TRANSFERS, now)?;
+            let entry = store.get_mut(id.trim()).expect("found above");
+            entry["state"] = json!("approved");
+            entry["decided"] = json!(now);
+            let out = view(entry);
+            store.save()?;
+            return Ok(out);
+        }
+        if request["kind"] == MEMBERSHIP_PROOF {
+            return Err("a membership proof is approved on its own sheet (approve_membership_proof)".to_owned());
+        }
         // A transfer: still within the access the app has now.
-        if !store.granted(&app).iter().any(|account| request["from"] == account.as_str()) {
-            return Err("the app no longer has access to that account's NFTs".to_owned());
+        if !store.granted(&app).iter().any(|account| request["from"] == account.as_str()) || !store.has(&app, NFT_TRANSFERS) {
+            return Err("the app no longer may propose NFT transfers from that account".to_owned());
         }
         let program = request["program"].as_str().unwrap_or_default().to_owned();
         let started = self.nft_start_now(&program, &action_of(&request), digest, fee_payer)?;
@@ -397,6 +482,9 @@ impl Names {
         }
         request["state"] = json!("rejected");
         request["decided"] = json!(provider::now_ms());
+        if request["kind"] == MEMBERSHIP_PROOF {
+            request["status"] = json!({ "state": "rejected" });
+        }
         let out = view(request);
         store.save()?;
         Ok(out)
@@ -404,12 +492,31 @@ impl Names {
 
     pub(crate) fn nft_grants_shown(&mut self) -> Value {
         let store = self.nft_store();
-        Value::from(store.grants.iter().map(|(app, grant)| json!({ "app": app, "accounts": grant["accounts"], "since": grant["since"], "capability": "nft_list", "discloses": LIST_DISCLOSES })).collect::<Vec<_>>())
+        let mut rows: Vec<Value> = store.grants.iter().map(|(app, grant)| json!({ "app": app, "accounts": grant["accounts"], "since": grant["since"], "capability": NFT_LIST, "discloses": LIST_DISCLOSES })).collect();
+        for (app, caps) in &store.capabilities {
+            for (capability, discloses) in [(NFT_TRANSFERS, TRANSFERS_DISCLOSES), (MEMBERSHIP_PROOF, PROOF_DISCLOSES)] {
+                if caps[capability].is_object() {
+                    rows.push(json!({ "app": app, "accounts": null, "since": caps[capability]["since"], "capability": capability, "discloses": discloses }));
+                }
+            }
+        }
+        Value::from(rows)
+    }
+
+    /// Takes one capability from an app (`nft_list`, `nft_transfers`, `membership_proof`).
+    pub(crate) fn nft_revoke_one(&mut self, app: &str, capability: &str) -> Result<Value, String> {
+        if ![NFT_LIST, NFT_TRANSFERS, MEMBERSHIP_PROOF].contains(&capability.trim()) {
+            return Err("a capability is nft_list, nft_transfers or membership_proof".to_owned());
+        }
+        let mut store = self.nft_store();
+        let revoked = store.take(app.trim(), capability.trim());
+        store.save()?;
+        Ok(json!({ "revoked": revoked }))
     }
 
     pub(crate) fn nft_revoke(&mut self, app: &str) -> Result<Value, String> {
         let mut store = self.nft_store();
-        let revoked = store.grants.remove(app.trim()).is_some();
+        let revoked = store.grants.remove(app.trim()).is_some() | store.capabilities.remove(app.trim()).is_some();
         store.save()?;
         Ok(json!({ "revoked": revoked }))
     }

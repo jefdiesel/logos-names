@@ -199,3 +199,49 @@ export function burnConfirm(row) {
     ? "This destroys the master and every print right it holds. The collection then has no master: nobody can print it again. This can't be undone."
     : "This destroys this copy. This can't be undone."
 }
+
+/// A membership proof's status as one line, with the minutes spent proving.
+export function proofLine(status, now) {
+  const st = status || {}
+  switch (st.state) {
+    case "awaiting-approval": return "waiting for your answer."
+    case "checking": return "Checking your NFT…"
+    case "proving": return "Proving (about 10 minutes): " + Math.floor((st.elapsed_seconds || 0) / 60) + " min " + ((st.elapsed_seconds || 0) % 60) + " s so far."
+    case "sending": return "Sending…"
+    case "waiting-for-block": return "Waiting for the block…"
+    case "ready": return "Ready: the pass is valid until " + (st.proof && st.proof.expires_at ? new Date(st.proof.expires_at).toISOString().replace("T", " ").substr(0, 16) + " UTC" : "its end") + "."
+    case "failed": return "Didn't go through: " + (st.plain_message || "") + " (" + (st.code || "") + ")"
+    case "cancelled": return "Cancelled. Nothing was sent."
+    default: return ""
+  }
+}
+
+export function proofKind(status) {
+  const state = (status || {}).state
+  return state === "ready" ? "done" : state === "failed" ? "problem" : state === "cancelled" ? "" : "waiting"
+}
+
+/// The sheet's "until [time]" line, its time written out.
+export function proofPublicLine(line) {
+  const m = /^When the pass starts and ends: until (\d+)\.$/.exec(String(line))
+  return m ? "When the pass starts and ends: until " + new Date(Number(m[1])).toISOString().replace("T", " ").substr(0, 16) + " UTC." : String(line)
+}
+
+/// "Good to know", with the earlier pass it replaces named when one is live.
+export function proofGoodToKnow(sheet) {
+  const lines = (sheet.good_to_know || []).slice()
+  const live = sheet.live_passes || []
+  if (live.length > 0) lines[1] = "It replaces your earlier pass for this NFT, made for " + live[0].app + ", if it was made from the same account."
+  return lines
+}
+
+export function proofChecksLine(checks) {
+  const c = checks || {}
+  const word = (label) => (!label || !label.registry ? "unknown (no Program Registry)" : label.verified ? "verified" : "not verified")
+  return "Program checks: gate " + (c.gate ? word(c.gate_label) : "none set up on this network yet") + ", NFT program " + word(c.nft_program_label) + "."
+}
+
+/// What an app can no longer do once a capability is taken back.
+export function capabilityVerb(capability) {
+  return capability === "nft_list" ? "see your NFTs" : capability === "nft_transfers" ? "propose NFT transfers" : capability === "membership_proof" ? "ask you for membership proofs" : "use that"
+}
