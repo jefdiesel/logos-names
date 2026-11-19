@@ -43,11 +43,15 @@ mod chain_inscribe;
 mod changes;
 mod cli;
 mod deposit;
+mod nft;
+#[allow(dead_code)] // shared with the names CLI, which uses the rest
+mod nft_wire;
 mod page_view;
 mod peer;
 mod app_secret;
 mod provider;
 mod provider_inscribe;
+mod provider_nft;
 mod provider_private;
 mod provider_public;
 mod spell;
@@ -1183,6 +1187,64 @@ pub trait NamesModule: Send + 'static {
 
     /// Forgets a token source. `{removed}`. Names app only.
     fn remove_token_source(&mut self, token_program: String) -> String;
+
+    // ── NFTs of the reference NFT program (docs/wallet/NFT.md, nft.rs) ──
+    //
+    // Every deployment of the NFT program is a different program, so the wallet keeps a list
+    // per network, empty to start. Reads come from a thread of their own (busy until the
+    // first is back); actions start only from a sheet's digest. Names app only, except the
+    // provider methods below.
+
+    /// The NFT programs listed for the network in use: `[{program, label, added, registry}]`.
+    fn nft_programs(&mut self) -> String;
+    /// Adds an NFT program (base58) with the person's label; the new list.
+    fn nft_program_add(&mut self, program_id: String, label: String) -> String;
+    /// Removes an NFT program; the new list.
+    fn nft_program_remove(&mut self, program_id: String) -> String;
+    /// Every account's NFT state under each listed program, the credits waiting for its
+    /// private accounts, and the collections held with how many of the accounts hold each:
+    /// `{programs: [{program, label, registry, holdings, pending, collections, read_at}]}`.
+    fn nft_holdings(&mut self) -> String;
+    /// A collection's fields: `{definition, name, printable_supply, standard, uri, creators}`.
+    fn nft_collection(&mut self, program_id: String, definition: String) -> String;
+    /// The sheet for an action (`{action: init|send|print|burn, from, to, definition, new,
+    /// their_keys}`): what it does, what becomes public, the fee and private payers, any
+    /// refusal, the program's registry label, and the `digest` an action must name.
+    fn nft_sheet(&mut self, program_id: String, action_json: String) -> String;
+    /// Starts the action of a sheet (`digest`) as a wallet job; `fee_payer` is the private
+    /// account that pays a proven one (empty for a public one). `{id, kind, state}`.
+    fn nft_start(&mut self, program_id: String, action_json: String, digest: String, fee_payer: String) -> String;
+    /// Takes the NFT credits waiting for this wallet's private accounts, as a wallet job.
+    fn nft_receive(&mut self, program_id: String, fee_payer: String) -> String;
+    /// Allows (or stops) loading a collection's image. `{allowed}`.
+    fn nft_media(&mut self, program_id: String, definition: String, allow: bool) -> String;
+    /// A collection's image as pixels, once allowed: `{allowed: false}` or `{width, height, pixels}`.
+    fn nft_image(&mut self, program_id: String, definition: String, uri: String) -> String;
+    /// The waiting NFT requests of other apps (`nft_list`, `nft_transfer`).
+    fn pending_nft_requests(&mut self) -> String;
+    /// Approves an NFT request: a list with the accounts ticked (comma-separated), a transfer
+    /// with its sheet's `digest` and the private `fee_payer` if it is proven.
+    fn approve_nft_request(&mut self, request_id: String, accounts: String, digest: String, fee_payer: String) -> String;
+    fn reject_nft_request(&mut self, request_id: String) -> String;
+    /// The apps that may list NFTs: `[{app, accounts, since, capability, discloses}]`.
+    fn nft_grants(&mut self) -> String;
+    fn revoke_nft_access(&mut self, app: String) -> String;
+
+    // Any app (provider_nft.rs).
+
+    /// Asks to see which NFTs some accounts hold; the person ticks the accounts. Separate from
+    /// `request_access`: neither gives the other.
+    fn request_nft_access(&mut self, reason: String) -> String;
+    /// The NFTs of the accounts the app was given: `{accounts, nfts: [{program, account,
+    /// account_kind, definition, token, print_balance, collection}]}`.
+    fn granted_nfts(&mut self) -> String;
+    /// Whether those accounts hold an NFT of a collection: `{member, count, accounts}`.
+    fn nft_membership(&mut self, program_id: String, definition: String) -> String;
+    /// Asks to send the NFT an account holds to an LNS name or `Public/<id>`.
+    fn propose_nft_transfer(&mut self, program_id: String, from: String, destination: String, summary: String) -> String;
+    fn nft_request_status(&mut self, request_id: String) -> String;
+    fn cancel_nft_request(&mut self, request_id: String) -> String;
+    fn drop_nft_access(&mut self) -> String;
 
     /// Inscribes a testimonial (`{"submission": "lp-0022:names-wallet", "text"}`, text
     /// 1-1024 bytes) on the Logos Blockchain from the node key `from_key`, which pays the
@@ -3391,6 +3453,7 @@ impl Names {
                     state["problem"] = Value::from(format!("Claiming finished only in part: {}", cli::failure_cause(&log)));
                 }
             }
+            Some(kind) if kind.starts_with("nft_") && !running => self.nft_job_ended(state, &log),
             Some("token_send" | "token_receive") if !running => {
                 if let Some(fields) = cli::token_outcome(&log).as_object() {
                     for (key, value) in fields {
@@ -7433,6 +7496,139 @@ impl NamesModule for Names {
         store.save();
         self.forget_tokens();
         reply(Ok(json!({ "removed": removed })))
+    }
+
+    fn nft_programs(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(self.nft_programs_listed().map(Value::from))
+    }
+
+    fn nft_program_add(&mut self, program_id: String, label: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(self.nft_program_change(&program_id, &label, true).map(Value::from))
+    }
+
+    fn nft_program_remove(&mut self, program_id: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(self.nft_program_change(&program_id, "", false).map(Value::from))
+    }
+
+    fn nft_holdings(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        self.nft_holdings_now()
+    }
+
+    fn nft_collection(&mut self, program_id: String, definition: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        self.nft_collection_now(&program_id, &definition)
+    }
+
+    fn nft_sheet(&mut self, program_id: String, action_json: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        self.nft_sheet_now(&program_id, &action_json)
+    }
+
+    fn nft_start(&mut self, program_id: String, action_json: String, digest: String, fee_payer: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(self.nft_start_now(&program_id, &action_json, &digest, &fee_payer))
+    }
+
+    fn nft_receive(&mut self, program_id: String, fee_payer: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(self.nft_receive_now(&program_id, &fee_payer))
+    }
+
+    fn nft_media(&mut self, program_id: String, definition: String, allow: bool) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(self.nft_media_set(&program_id, &definition, allow))
+    }
+
+    fn nft_image(&mut self, program_id: String, definition: String, uri: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        self.nft_image_now(&program_id, &definition, &uri)
+    }
+
+    fn pending_nft_requests(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(self.nft_pending())
+    }
+
+    fn approve_nft_request(&mut self, request_id: String, accounts: String, digest: String, fee_payer: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(self.nft_approve(&request_id, &accounts, &digest, &fee_payer))
+    }
+
+    fn reject_nft_request(&mut self, request_id: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(self.nft_reject(&request_id))
+    }
+
+    fn nft_grants(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(Ok(self.nft_grants_shown()))
+    }
+
+    fn revoke_nft_access(&mut self, app: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(self.nft_revoke(&app))
+    }
+
+    fn request_nft_access(&mut self, reason: String) -> String {
+        reply(self.nft_access_ask(&reason))
+    }
+
+    fn granted_nfts(&mut self) -> String {
+        self.nft_granted_list()
+    }
+
+    fn nft_membership(&mut self, program_id: String, definition: String) -> String {
+        self.nft_member(&program_id, &definition)
+    }
+
+    fn propose_nft_transfer(&mut self, program_id: String, from: String, destination: String, summary: String) -> String {
+        reply(self.nft_transfer_ask(&program_id, &from, &destination, &summary))
+    }
+
+    fn nft_request_status(&mut self, request_id: String) -> String {
+        reply(self.nft_status(&request_id))
+    }
+
+    fn cancel_nft_request(&mut self, request_id: String) -> String {
+        reply(self.nft_cancel(&request_id))
+    }
+
+    fn drop_nft_access(&mut self) -> String {
+        reply(self.nft_drop())
     }
 
     fn chain_inscribe(&mut self, from_key: String, text: String, send: bool) -> String {
@@ -15517,6 +15713,168 @@ mod tests {
         let after = parsed(&names.cli_accounts());
         assert!(after["busy"] == true || after["value"][0]["label"] == "new", "{after}");
         assert_eq!(label_now(&mut names).as_deref(), Some("new"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ── NFTs (nft.rs, provider_nft.rs) ──────────────────────────────────
+
+    const NFT_PROGRAM: &str = "ErycMYqXUUtducaYmpHZjRgdbLXchrMiV4NZRnmRDNmu";
+    const NFT_ART: &str = "HA47ERcmfSbDChGcYfBcC4SKaPQ8pJJnv4wxCLu1ejL5";
+
+    /// A fake names CLI that answers the NFT requests: holdings (one copy on the public
+    /// account, the private account empty), a plan (proven, the private account can pay, or a
+    /// refusal when `refuse`), and the sends.
+    fn nft_cli(label: &str, refuse: bool) -> (Names, std::path::PathBuf) {
+        let holdings = json!({
+            "holdings": [
+                { "account": format!("Public/{PUBLIC}"), "private": false, "state": "copy", "holds": true, "definition": NFT_ART, "owned": true, "collection": { "definition": NFT_ART, "name": "Art", "printable_supply": "3", "standard": "Simple", "uri": "https://img.example.com/art.png", "creators": "me" } },
+                { "account": format!("Private/{PRIVATE}"), "private": true, "state": "empty", "holds": false },
+            ],
+            "pending": [],
+        });
+        let plan = json!({
+            "action": "send", "from": format!("Public/{PUBLIC}"), "collection": { "definition": NFT_ART, "name": "Art" },
+            "lines": ["To alice (Public/x)"], "public": ["Both accounts, the collection and the NFT that moved are public."], "private": [],
+            "proven": true, "fee": { "about": "1", "at_most": "5070616", "inside_proof": true },
+            "payers": [{ "account": format!("Private/{PRIVATE}"), "balance": "9000000", "enough": true }],
+            "refusal": if refuse { json!("Guest panicked: recipient already holds an NFT") } else { Value::Null },
+        });
+        let tail = format!(
+            "case \"$*\" in\n\
+             *\"module nft holdings\"*) echo '{holdings}' ;;\n\
+             *\"module nft plan\"*) cat > /dev/null; echo '{plan}' ;;\n\
+             *\"nft send\"*) echo 'sending the NFT'; echo 'submitted ab12'; echo 'applied in block 9' ;;\n\
+             *\"nft burn\"*) echo 'Error: Guest panicked: holding holds no NFT'; exit 1 ;;\n\
+             esac"
+        );
+        let (names, dir) = with_wallet(label, &tail);
+        (names, dir)
+    }
+
+    fn send_action() -> String {
+        json!({ "action": "send", "from": format!("Public/{PUBLIC}"), "to": "alice" }).to_string()
+    }
+
+    #[test]
+    fn nft_calls_are_the_names_apps_and_need_a_listed_program() {
+        let (mut names, dir) = nft_cli("nft-guard", false);
+        as_caller(app("gallery_ui"));
+        for refused in [names.nft_programs(), names.nft_holdings(), names.nft_program_add(NFT_PROGRAM.into(), String::new()), names.nft_sheet(NFT_PROGRAM.into(), send_action()), names.pending_nft_requests(), names.nft_grants()] {
+            assert!(parsed(&refused)["error"].as_str().unwrap().contains("only the Names app"), "{refused}");
+        }
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        // The list ships empty; nothing is read or planned for a program not in it.
+        assert_eq!(parsed(&names.nft_programs())["value"], json!([]));
+        assert_eq!(parsed(&names.nft_holdings())["value"], json!({ "programs": [] }));
+        assert!(parsed(&names.nft_sheet(NFT_PROGRAM.into(), send_action()))["error"].as_str().unwrap().contains("isn't in this network's list"));
+        let added = parsed(&names.nft_program_add(NFT_PROGRAM.into(), "Throwaway".into()));
+        assert_eq!(added["value"][0]["program"], NFT_PROGRAM, "{added}");
+        assert_eq!(added["value"][0]["registry"]["registry"], false, "the registry's status is shown with it");
+        let read = parsed(&names.nft_holdings());
+        let program = &read["value"]["programs"][0];
+        assert_eq!(program["holdings"][0]["collection"]["name"], "Art", "{read}");
+        assert_eq!(program["collections"][0]["count"], 1);
+        let argv = std::fs::read_to_string(dir.join("argv")).unwrap_or_default();
+        let log = std::fs::read_dir(dir.join("jobs")).map(|_| String::new()).unwrap_or_default();
+        let _ = (argv, log);
+        assert!(parsed(&names.nft_program_remove(NFT_PROGRAM.into()))["value"].as_array().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_nft_action_starts_only_from_its_own_sheet_with_a_payer_it_named() {
+        let (mut names, dir) = nft_cli("nft-sheet", false);
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        names.nft_program_add(NFT_PROGRAM.into(), String::new());
+        // No sheet yet: refused.
+        let early = parsed(&names.nft_start(NFT_PROGRAM.into(), send_action(), "00".repeat(32), format!("Private/{PRIVATE}")));
+        assert!(early["error"].as_str().unwrap().contains("isn't the action the sheet showed"), "{early}");
+        let sheet = parsed(&names.nft_sheet(NFT_PROGRAM.into(), send_action()));
+        let digest = sheet["digest"].as_str().expect("a digest").to_owned();
+        assert_eq!(sheet["value"]["proven"], true, "{sheet}");
+        assert!(sheet["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("Program Registry")), "{sheet}");
+        // Another action with this digest, a public payer, no payer: refused, nothing runs.
+        let other = json!({ "action": "send", "from": format!("Public/{PUBLIC}"), "to": "bob" }).to_string();
+        assert!(parsed(&names.nft_start(NFT_PROGRAM.into(), other, digest.clone(), format!("Private/{PRIVATE}")))["success"] == false);
+        assert!(parsed(&names.nft_start(NFT_PROGRAM.into(), send_action(), digest.clone(), format!("Public/{PUBLIC}")))["error"].as_str().unwrap().contains("can't pay"));
+        assert!(parsed(&names.nft_start(NFT_PROGRAM.into(), send_action(), digest.clone(), String::new()))["error"].as_str().unwrap().contains("choose the private account"));
+        assert!(no_jobs(&dir), "nothing ran");
+        // The sheet's own action, with the payer it listed: a wallet job with that payer.
+        let started = parsed(&names.nft_start(NFT_PROGRAM.into(), send_action(), digest.clone(), format!("Private/{PRIVATE}")));
+        assert_eq!(started["value"]["kind"], "nft_send", "{started}");
+        let ended = job_end(&mut names, started["value"]["id"].as_str().unwrap());
+        assert_eq!((ended["state"].as_str(), ended["tx"].as_str(), ended["block"].as_u64()), (Some("done"), Some("ab12"), Some(9)), "{ended}");
+        let log = ended["log_tail"].as_str().unwrap();
+        assert!(log.contains(&format!("[--nft-program={NFT_PROGRAM}]\n[nft]\n[send]\n[--from={PUBLIC}]\n[--to=alice]\n[--fee-payer={PRIVATE}]")), "{log}");
+        // One sheet, one action: the same digest again is refused.
+        assert!(parsed(&names.nft_start(NFT_PROGRAM.into(), send_action(), digest, format!("Private/{PRIVATE}")))["error"].as_str().unwrap().contains("gone or old"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_refused_sheet_never_starts_and_a_failed_job_says_why_plainly() {
+        let (mut names, dir) = nft_cli("nft-refused", true);
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        names.nft_program_add(NFT_PROGRAM.into(), String::new());
+        let sheet = parsed(&names.nft_sheet(NFT_PROGRAM.into(), send_action()));
+        assert_eq!(sheet["value"]["refusal"], nft_wire::ALREADY_HOLDS, "{sheet}");
+        let refused = parsed(&names.nft_start(NFT_PROGRAM.into(), send_action(), sheet["digest"].as_str().unwrap().into(), format!("Private/{PRIVATE}")));
+        assert_eq!(refused["error"], nft_wire::ALREADY_HOLDS);
+        assert!(no_jobs(&dir));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_app_lists_nfts_and_proposes_a_transfer_only_through_its_own_grant_and_the_sheet() {
+        let (mut names, dir) = nft_cli("nft-provider", false);
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        names.nft_program_add(NFT_PROGRAM.into(), String::new());
+        as_caller(app("gallery_ui"));
+        // Nothing without the NFT grant; account access doesn't give it.
+        assert!(parsed(&names.granted_nfts())["error"].as_str().unwrap().contains("request_nft_access"));
+        assert!(parsed(&names.propose_nft_transfer(NFT_PROGRAM.into(), format!("Public/{PUBLIC}"), "alice".into(), String::new()))["success"] == false);
+        let asked = parsed(&names.request_nft_access("to show your art".into()));
+        let id = asked["value"]["request"].as_str().unwrap().to_owned();
+        assert_eq!(asked["value"]["kind"], "nft_list");
+        // The app can't decide.
+        assert!(parsed(&names.approve_nft_request(id.clone(), format!("Public/{PUBLIC}"), String::new(), String::new()))["error"].as_str().unwrap().contains("only the Names app"));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let pending = parsed(&names.pending_nft_requests());
+        assert_eq!(pending["value"][0]["discloses"], provider_nft::LIST_DISCLOSES, "{pending}");
+        // Only the wallet's own accounts can be ticked; the public one is.
+        assert!(parsed(&names.approve_nft_request(id.clone(), format!("Public/{NFT_ART}"), String::new(), String::new()))["error"].as_str().unwrap().contains("isn't an account of this wallet"));
+        assert_eq!(parsed(&names.approve_nft_request(id, format!("Public/{PUBLIC}"), String::new(), String::new()))["value"]["state"], "approved");
+        as_caller(app("gallery_ui"));
+        let listed = parsed(&names.granted_nfts());
+        assert_eq!(listed["value"]["nfts"].as_array().unwrap().len(), 1, "{listed}");
+        assert_eq!(listed["value"]["nfts"][0]["token"], "copy");
+        let member = parsed(&names.nft_membership(NFT_PROGRAM.into(), NFT_ART.into()));
+        assert_eq!((member["value"]["member"].as_bool(), member["value"]["count"].as_u64()), (Some(true), Some(1)), "{member}");
+        // Not from an account it wasn't given; not to someone's private keys.
+        assert!(parsed(&names.propose_nft_transfer(NFT_PROGRAM.into(), format!("Private/{PRIVATE}"), "alice".into(), String::new()))["error"].as_str().unwrap().contains("request_nft_access"));
+        assert!(parsed(&names.propose_nft_transfer(NFT_PROGRAM.into(), format!("Public/{PUBLIC}"), format!("{}:{}", "ab".repeat(32), "cd".repeat(8)), String::new()))["success"] == false);
+        let proposed = parsed(&names.propose_nft_transfer(NFT_PROGRAM.into(), format!("Public/{PUBLIC}"), "alice".into(), "a gift".into()));
+        let id = proposed["value"]["request"].as_str().unwrap().to_owned();
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let pending = parsed(&names.pending_nft_requests());
+        let action = pending["value"][0]["action"].as_str().unwrap().to_owned();
+        // Approving needs the digest of the sheet the person saw: the same sheet as in the app.
+        assert!(parsed(&names.approve_nft_request(id.clone(), String::new(), "00".repeat(32), format!("Private/{PRIVATE}")))["success"] == false);
+        let sheet = parsed(&names.nft_sheet(NFT_PROGRAM.into(), action));
+        let approved = parsed(&names.approve_nft_request(id.clone(), String::new(), sheet["digest"].as_str().unwrap().into(), format!("Private/{PRIVATE}")));
+        assert_eq!(approved["value"]["request"]["state"], "running", "{approved}");
+        let job = approved["value"]["job"]["id"].as_str().unwrap().to_owned();
+        let _ = job_end(&mut names, &job);
+        as_caller(app("gallery_ui"));
+        let status = parsed(&names.nft_request_status(id));
+        assert_eq!((status["value"]["state"].as_str(), status["value"]["tx"].as_str()), (Some("done"), Some("ab12")), "{status}");
+        assert!(status["value"].get("job").is_none(), "the app never sees the wallet's job");
+        // The grant is shown by what it discloses, and revoked on its own.
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert_eq!(parsed(&names.nft_grants())["value"][0]["discloses"], provider_nft::LIST_DISCLOSES);
+        assert_eq!(parsed(&names.revoke_nft_access("gallery_ui".into()))["value"]["revoked"], true);
+        as_caller(app("gallery_ui"));
+        assert!(parsed(&names.granted_nfts())["success"] == false);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

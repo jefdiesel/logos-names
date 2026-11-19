@@ -28,6 +28,14 @@ pub fn pixels(entry: &str) -> Option<Value> {
     Some(json!({ "width": width, "height": height, "pixels": base64_encode(&rgba) }))
 }
 
+/// The pixels of a PNG fetched from elsewhere (a collection's image, `nft.rs`), within the
+/// same limits as an avatar's, or None.
+pub fn png_pixels(bytes: &[u8]) -> Option<Value> {
+    let (width, height, rgba) = decode_png(bytes)?;
+    let (width, height, rgba) = fit(width, height, &rgba);
+    Some(json!({ "width": width, "height": height, "pixels": base64_encode(&rgba) }))
+}
+
 /// The entry decoded and scaled down: `(width, height, RGBA8 bytes)`.
 fn decode(entry: &str) -> Option<(u32, u32, Vec<u8>)> {
     let payload = entry.trim().strip_prefix("data:image/png;base64,")?;
