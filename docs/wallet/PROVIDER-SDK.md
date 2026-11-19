@@ -366,6 +366,16 @@ m_i   = HKDF-SHA256(ikm = the account's key, salt = "logos-names/app-secret/v1",
 value = SHA256(tag | m_i)        for i in first .. first + count
 ```
 
+- **Scope `RFP022/exit` names an Ethereum address.** Its context must be the LEZ Bridge's exit
+  layout, `cfgId(32) | token(20) | u256(denom) | ethDest(20) | u256(maxRelayFee)` (136 bytes);
+  anything else is refused, never granted. For an `ethDest` the person hasn't approved for your app
+  and that account, the answer is `{granted: false, request}` even when the scope is granted: the
+  sheet shows the address in full, the four words the wallet makes itself (the bridge page's
+  `logos-bridge/withdraw-to/v1` words, when the relay fee is 0) and the bridge (v4 to v7 by their
+  Config), and needs a tick. Approved addresses are kept per (app, account) in the network's wallet
+  folder (`app-secret-recipients.json`, no secret), and outlive taking the grant back. The Names
+  app's own Bridge to Ethereum approves the address the person reads back and ticks at step 2
+  (`approve_exit_recipient`, Names app only), so its own send-backs ask nothing more.
 - `app` is your module's name as Basecamp gives it, never an argument: another app gets other
   values. `m_i` never leaves the wallet; you get `SHA256(tag | m_i)` for a tag of your choice
   (1-32 printable ASCII). `scope` is 1-64 printable ASCII, `context_hex` up to 256 bytes, `count`

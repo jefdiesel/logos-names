@@ -1,0 +1,58 @@
+{
+ "about": "copied from rfp-022 web/deposit/test/vectors/withdraw-v1.json (withdrawTo.valid, first entries) at 5322a30",
+ "tag": "logos-bridge/withdraw-to/v1",
+ "valid": [
+  {
+   "name": "v4 vault, recipient A, no relay fee",
+   "fields": {
+    "version": 1,
+    "chainId": "11155111",
+    "vault": "0xc2c6a059eab928966b24fa5549d441a3b17b54ed",
+    "recipient": "0x3c2f2c4baec708aee232379eb00e9ecfa1b351f8",
+    "feeChoice": 0
+   },
+   "payloadHex": "010000000000aa36a7c2c6a059eab928966b24fa5549d441a3b17b54ed3c2f2c4baec708aee232379eb00e9ecfa1b351f800",
+   "digest": "0x7fa4e82745bba4da79b0fb628c99da06f871cb35949ead7eba0104aaa38b26c1",
+   "words_text": "myth \u00b7 nerve \u00b7 session \u00b7 until"
+  },
+  {
+   "name": "v4 vault, recipient A, relay fee menu 1",
+   "fields": {
+    "version": 1,
+    "chainId": "11155111",
+    "vault": "0xc2c6a059eab928966b24fa5549d441a3b17b54ed",
+    "recipient": "0x3c2f2c4baec708aee232379eb00e9ecfa1b351f8",
+    "feeChoice": 1
+   },
+   "payloadHex": "010000000000aa36a7c2c6a059eab928966b24fa5549d441a3b17b54ed3c2f2c4baec708aee232379eb00e9ecfa1b351f801",
+   "digest": "0xd14e70240024f8304d6f4aa44eee60b7268363a250dbce585d78cd9f22938d8d",
+   "words_text": "loop \u00b7 embark \u00b7 keen \u00b7 normal"
+  },
+  {
+   "name": "v4 vault, recipient B, menu 4",
+   "fields": {
+    "version": 1,
+    "chainId": "11155111",
+    "vault": "0xc2c6a059eab928966b24fa5549d441a3b17b54ed",
+    "recipient": "0xf7688cc67a7f0c9b36bc99390e401229b3a69e36",
+    "feeChoice": 4
+   },
+   "payloadHex": "010000000000aa36a7c2c6a059eab928966b24fa5549d441a3b17b54edf7688cc67a7f0c9b36bc99390e401229b3a69e3604",
+   "digest": "0xd964b422cf0bd92c048ab7bc3bf3f2a3aa43cef66c1d9525fd446448497f3858",
+   "words_text": "annual \u00b7 quit \u00b7 young \u00b7 receive"
+  },
+  {
+   "name": "anvil chain 31337, all-ff recipient",
+   "fields": {
+    "version": 1,
+    "chainId": "31337",
+    "vault": "0x4b302669bf6ec007e35bdb7fc32464dbed537a17",
+    "recipient": "0xffffffffffffffffffffffffffffffffffffffff",
+    "feeChoice": 0
+   },
+   "payloadHex": "010000000000007a694b302669bf6ec007e35bdb7fc32464dbed537a17ffffffffffffffffffffffffffffffffffffffff00",
+   "digest": "0x405be3684aa089fdb627cfd6daf6681595b25588b1569a95f5011a20929ff968",
+   "words_text": "employ \u00b7 salmon \u00b7 novel \u00b7 transfer"
+  }
+ ]
+}
