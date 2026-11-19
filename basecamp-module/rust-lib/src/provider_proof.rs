@@ -324,6 +324,9 @@ impl Names {
         if request["state"] != "pending" {
             return Err(format!("that request is {} already", request["state"].as_str().unwrap_or("decided")));
         }
+        if let Some(what) = self.still_checking(&request) {
+            return Err(format!("still checking {what} with the Program Registry; try again in a few seconds"));
+        }
         let sheet = self.proof_sheet(id)?;
         let (private, holder_id) = provider::account_ref(holder)?;
         let holder_text = provider::account_written(private, &holder_id);

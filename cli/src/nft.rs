@@ -113,6 +113,10 @@ pub enum NftCommand {
         /// The private account that pays a proven transaction's fee.
         #[arg(long, value_parser = parse_account)]
         fee_payer: Option<AccountId>,
+        /// The state digest the sheet was planned on (`names module nft plan`'s `pin`): refused
+        /// before anything is sent if the accounts' state is no longer what the sheet showed.
+        #[arg(long)]
+        expect_state: Option<String>,
     },
     /// Send the NFT `--from` holds (a copy, or the master with all its print rights).
     Send {
@@ -127,6 +131,10 @@ pub enum NftCommand {
         their_keys: bool,
         #[arg(long, value_parser = parse_account)]
         fee_payer: Option<AccountId>,
+        /// The state digest the sheet was planned on (`names module nft plan`'s `pin`): refused
+        /// before anything is sent if the accounts' state is no longer what the sheet showed.
+        #[arg(long)]
+        expect_state: Option<String>,
     },
     /// Destroy what `--from` holds: a copy, or the master and all its print rights.
     Burn {
@@ -134,6 +142,10 @@ pub enum NftCommand {
         from: AccountId,
         #[arg(long, value_parser = parse_account)]
         fee_payer: Option<AccountId>,
+        /// The state digest the sheet was planned on (`names module nft plan`'s `pin`): refused
+        /// before anything is sent if the accounts' state is no longer what the sheet showed.
+        #[arg(long)]
+        expect_state: Option<String>,
     },
     /// Print one copy from the master `--from` to a ready holding.
     Print {
@@ -145,12 +157,20 @@ pub enum NftCommand {
         their_keys: bool,
         #[arg(long, value_parser = parse_account)]
         fee_payer: Option<AccountId>,
+        /// The state digest the sheet was planned on (`names module nft plan`'s `pin`): refused
+        /// before anything is sent if the accounts' state is no longer what the sheet showed.
+        #[arg(long)]
+        expect_state: Option<String>,
     },
     /// Take the NFT credits waiting for this wallet's private accounts, one proven
     /// transaction each, paid by `--fee-payer`.
     Receive {
         #[arg(long, value_parser = parse_account)]
         fee_payer: AccountId,
+        /// The state digest the sheet was planned on (`names module nft plan`'s `pin`): refused
+        /// before anything is sent if the accounts' state is no longer what the sheet showed.
+        #[arg(long)]
+        expect_state: Option<String>,
     },
     /// Create a collection, for tests and demos: two new public accounts of this wallet
     /// become its definition and its master; `--payer` (public) pays.
@@ -194,6 +214,52 @@ pub struct Action {
     pub new: Option<String>,
     #[serde(default)]
     pub their_keys: bool,
+}
+
+/// What a sheet was planned on, as one digest: the program, the action and the state of each
+/// account it touches then. The CLI computes the same again just before it sends
+/// (`--expect-state`) and refuses on any difference (review finding: a stale sheet approved).
+pub fn pin_of(program: AccountId, parts: &[(&str, &[u8])]) -> String {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"names-nft-pin/v1");
+    hasher.update(program.value());
+    for (label, bytes) in parts {
+        hasher.update((label.len() as u32).to_le_bytes());
+        hasher.update(label.as_bytes());
+        hasher.update((bytes.len() as u32).to_le_bytes());
+        hasher.update(bytes);
+    }
+    hex::encode(hasher.finalize())
+}
+
+pub fn check_pin(expect: &Option<String>, pin: &str) -> Result<()> {
+    match expect {
+        Some(expected) if !expected.trim().eq_ignore_ascii_case(pin) => {
+            bail!("Things changed since the sheet was made (an account's NFT state, or where the name points). Nothing was sent: open the sheet again.")
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The recipient as the sheet names it: `Public/<id>`, `Private/<id>`, or `<npk hex>:<vpk hex>`.
+fn to_text(recipient: &AccountIdentity, reach: Reach) -> String {
+    match (recipient, reach) {
+        (AccountIdentity::PrivateForeign { npk, vpk, .. }, _) => format!("{}:{}", hex::encode(npk.0), hex::encode(vpk.to_bytes())),
+        (_, Reach::OwnPrivate) => format!("Private/{}", recipient.account_id()),
+        _ => format!("Public/{}", recipient.account_id()),
+    }
+}
+
+/// Why a waiting credit of `definition` can't land on an account in `state`, as the module's code
+/// and the plain sentence; `None` when it can.
+pub fn left_reason(state: &[u8], definition: &nft_wire::Id) -> Option<(&'static str, &'static str)> {
+    match nft_wire::readiness(state, definition) {
+        Readiness::Ready => None,
+        Readiness::NeedsHolding => Some(("not_ready", nft_wire::NOT_READY)),
+        Readiness::Refused(why) if why == nft_wire::ALREADY_HOLDS => Some(("already_holds", why)),
+        Readiness::Refused(why) => Some(("other_collection", why)),
+    }
 }
 
 /// Whether a private payer holding `held` can pay: at least the fee at head (`about`), the least
@@ -286,10 +352,12 @@ impl Client {
                 }
                 Ok(())
             }
-            NftCommand::Init { definition, account, new, fee_payer } => {
+            NftCommand::Init { definition, account, new, fee_payer, expect_state } => {
                 // Everything that can refuse is checked before a new account is made, so a
                 // refused try leaves no stray account behind.
-                if new.is_some() {
+                if let Some(kind) = new {
+                    // A new account has no state yet: the sheet was planned on "a new one".
+                    check_pin(&expect_state, &pin_of(program, &[("action", b"init".as_slice()), ("definition", definition.to_string().as_bytes()), ("holder", if kind == Kind::Private { b"new:private".as_slice() } else { b"new:public".as_slice() }), ("holder_state", b"".as_slice())]))?;
                     self.nft_definition(program, definition).await.map_err(plain)?;
                     match (new, fee_payer) {
                         (Some(Kind::Private), Some(payer)) => drop(self.nft_check_payer(payer).await?),
@@ -311,16 +379,17 @@ impl Client {
                     crate::save_wallet(&mut self.wallet)?;
                     println!("new account {}", text(new == Some(Kind::Private), holder));
                 }
-                self.nft_init(program, definition, holder, fee_payer).await.map_err(plain).map(drop)
+                let expect = if new.is_some() { None } else { expect_state };
+                self.nft_init(program, definition, holder, fee_payer, expect).await.map_err(plain).map(drop)
             }
-            NftCommand::Send { from, to, their_keys, fee_payer } => {
-                self.nft_move(program, false, from, &to, their_keys, fee_payer).await.map_err(plain).map(drop)
+            NftCommand::Send { from, to, their_keys, fee_payer, expect_state } => {
+                self.nft_move(program, false, from, &to, their_keys, fee_payer, expect_state).await.map_err(plain).map(drop)
             }
-            NftCommand::Print { from, to, their_keys, fee_payer } => {
-                self.nft_move(program, true, from, &to, their_keys, fee_payer).await.map_err(plain).map(drop)
+            NftCommand::Print { from, to, their_keys, fee_payer, expect_state } => {
+                self.nft_move(program, true, from, &to, their_keys, fee_payer, expect_state).await.map_err(plain).map(drop)
             }
-            NftCommand::Burn { from, fee_payer } => self.nft_burn(program, from, fee_payer).await.map_err(plain).map(drop),
-            NftCommand::Receive { fee_payer } => self.nft_receive(program, fee_payer).await.map_err(plain).map(drop),
+            NftCommand::Burn { from, fee_payer, expect_state } => self.nft_burn(program, from, fee_payer, expect_state).await.map_err(plain).map(drop),
+            NftCommand::Receive { fee_payer, expect_state } => self.nft_receive(program, fee_payer, expect_state).await.map_err(plain).map(drop),
             NftCommand::Create { name, supply, uri, creators, expanded, payer } => {
                 self.nft_create(program, name, supply, uri, creators, expanded, payer).await
             }
@@ -455,10 +524,14 @@ impl Client {
         Ok(nft_wire::readiness(&state, &definition))
     }
 
-    async fn nft_init(&mut self, program: AccountId, definition: AccountId, holder: AccountId, fee_payer: Option<AccountId>) -> Result<(HashType, u64)> {
+    async fn nft_init(&mut self, program: AccountId, definition: AccountId, holder: AccountId, fee_payer: Option<AccountId>, expect: Option<String>) -> Result<(HashType, u64)> {
         let signer = self.nft_signer(holder)?;
         if signer.is_private() {
             self.wallet.sync_to_latest_block().await.context("cannot sync the private accounts")?;
+        }
+        if expect.is_some() {
+            let state = self.nft_state(program, holder).await?;
+            check_pin(&expect, &pin_of(program, &[("action", b"init".as_slice()), ("definition", definition.to_string().as_bytes()), ("holder", text(signer.is_private(), holder).as_bytes()), ("holder_state", state.as_slice())]))?;
         }
         let collection = self.nft_definition(program, definition).await?;
         match nft_wire::readiness(&self.nft_state(program, holder).await?, &id(definition)) {
@@ -474,7 +547,8 @@ impl Client {
         self.nft_call(program, mentions, Message::InitializeHolding { definition: id(definition) }, AsyncDelivery::default(), fee_payer).await
     }
 
-    async fn nft_move(&mut self, program: AccountId, print: bool, from: AccountId, to: &To, their_keys: bool, fee_payer: Option<AccountId>) -> Result<(HashType, u64)> {
+    #[allow(clippy::too_many_arguments)]
+    async fn nft_move(&mut self, program: AccountId, print: bool, from: AccountId, to: &To, their_keys: bool, fee_payer: Option<AccountId>, expect: Option<String>) -> Result<(HashType, u64)> {
         let sender = self.nft_signer(from)?;
         if sender.is_private() {
             self.wallet.sync_to_latest_block().await.context("cannot sync the private accounts")?;
@@ -497,6 +571,9 @@ impl Client {
             Readiness::NeedsHolding => bail!(nft_wire::NOT_READY),
             Readiness::Refused(why) => bail!(why),
         }
+        let to_state = if reach == Reach::TheirPrivate { Vec::new() } else { self.nft_state(program, recipient.account_id()).await? };
+        let action: &[u8] = if print { b"print" } else { b"send" };
+        check_pin(&expect, &pin_of(program, &[("action", action), ("from", text(sender.is_private(), from).as_bytes()), ("from_state", state.as_slice()), ("to", to_text(&recipient, reach).as_bytes()), ("to_state", to_state.as_slice())]))?;
         let collection = self.nft_definition(program, account(definition)).await?;
         let (named, hidden) = nft_wire::reveals(sender.is_private(), reach);
         println!("{} {} of {} from {} to {shown}", if print { "printing a copy" } else { "sending" }, if print { "" } else { "the NFT" }, collection.name, text(sender.is_private(), from));
@@ -523,12 +600,13 @@ impl Client {
         self.nft_call(program, mentions, message, delivery, fee_payer).await
     }
 
-    async fn nft_burn(&mut self, program: AccountId, from: AccountId, fee_payer: Option<AccountId>) -> Result<(HashType, u64)> {
+    async fn nft_burn(&mut self, program: AccountId, from: AccountId, fee_payer: Option<AccountId>, expect: Option<String>) -> Result<(HashType, u64)> {
         let holder = self.nft_signer(from)?;
         if holder.is_private() {
             self.wallet.sync_to_latest_block().await.context("cannot sync the private accounts")?;
         }
         let state = self.nft_state(program, from).await?;
+        check_pin(&expect, &pin_of(program, &[("action", b"burn".as_slice()), ("from", text(holder.is_private(), from).as_bytes()), ("from_state", state.as_slice())]))?;
         let amount = nft_wire::burn_all(&state).map_err(|why| anyhow!(why))?;
         let definition = account(nft_wire::holding(&state).definition().expect("a holding that holds has a definition"));
         let collection = self.nft_definition(program, definition).await?;
@@ -541,7 +619,7 @@ impl Client {
         self.nft_call(program, mentions, Message::Burn { amount }, AsyncDelivery::default(), fee_payer).await
     }
 
-    async fn nft_receive(&mut self, program: AccountId, fee_payer: AccountId) -> Result<Vec<(HashType, u64)>> {
+    async fn nft_receive(&mut self, program: AccountId, fee_payer: AccountId, expect: Option<String>) -> Result<Vec<(HashType, u64)>> {
         let pending: Vec<_> = self
             .wallet
             .owned_pending_messages()
@@ -554,6 +632,8 @@ impl Client {
             println!("nothing to receive");
             return Ok(Vec::new());
         }
+        let positions: Vec<String> = pending.iter().map(|m| m.position.to_string()).collect();
+        check_pin(&expect, &pin_of(program, &[("action", b"receive".as_slice()), ("credits", positions.join(",").as_bytes())]))?;
         self.nft_check_payer(fee_payer).await?;
         let catalog = self.nft_catalog(program).await?;
         let mut fee = wallet::FeeParams::default();
@@ -565,12 +645,9 @@ impl Client {
             // A credit lands only on a holding of its collection that holds nothing; one that
             // can't land is left waiting rather than proven to fail.
             if let Some((definition, _)) = nft_wire::credit_of(&message.body.message) {
-                let why = match nft_wire::readiness(&self.nft_state(program, to).await?, &definition) {
-                    Readiness::Ready => None,
-                    Readiness::NeedsHolding => Some(nft_wire::NOT_READY),
-                    Readiness::Refused(why) => Some(why),
-                };
-                if let Some(why) = why {
+                if let Some((code, why)) = left_reason(&self.nft_state(program, to).await?, &definition) {
+                    // One line the module reads (`left: <account> <collection> <code>`), one for people.
+                    println!("left: Private/{to} {} {code}", account(definition));
                     println!("left waiting, the NFT for Private/{to}: {why}");
                     continue;
                 }
@@ -698,6 +775,10 @@ impl Client {
         let mut named: Vec<&str> = Vec::new();
         let mut hidden: Vec<&str> = Vec::new();
         let mut collection = None;
+        let pin: String;
+        let mut to_account: Option<String> = None;
+        let mut kind: Option<&str> = None;
+        let mut left: Vec<serde_json::Value> = Vec::new();
         let from_private = from.is_some_and(|from| self.is_private(from));
         match action.action.as_str() {
             "init" => {
@@ -705,6 +786,14 @@ impl Client {
                 collection = Some(self.nft_definition(program, definition).await.map(|found| collection_json(definition, &found)));
                 let new_private = action.new.as_deref() == Some("private");
                 proven = from_private || new_private;
+                pin = match (from, action.new.as_deref()) {
+                    (Some(from), _) => {
+                        let state = self.nft_state(program, from).await?;
+                        pin_of(program, &[("action", b"init".as_slice()), ("definition", definition.to_string().as_bytes()), ("holder", text(from_private, from).as_bytes()), ("holder_state", state.as_slice())])
+                    }
+                    (None, Some(new)) => pin_of(program, &[("action", b"init".as_slice()), ("definition", definition.to_string().as_bytes()), ("holder", format!("new:{new}").as_bytes()), ("holder_state", b"".as_slice())]),
+                    (None, None) => bail!("init needs an account or new"),
+                };
                 if let Some(from) = from {
                     refusal = match nft_wire::readiness(&self.nft_state(program, from).await?, &id(definition)) {
                         Readiness::NeedsHolding => None,
@@ -726,6 +815,11 @@ impl Client {
                 let to = parse_to(action.to.as_deref().unwrap_or_default()).map_err(|error| anyhow!(error))?;
                 let (recipient, shown, reach) = self.nft_recipient(&to).await?;
                 proven = from_private || reach != Reach::Public;
+                let to_state = if reach == Reach::TheirPrivate { Vec::new() } else { self.nft_state(program, recipient.account_id()).await? };
+                let resolved = to_text(&recipient, reach);
+                pin = pin_of(program, &[("action", action.action.as_bytes()), ("from", text(from_private, from).as_bytes()), ("from_state", state.as_slice()), ("to", resolved.as_bytes()), ("to_state", to_state.as_slice())]);
+                to_account = Some(resolved);
+                kind = nft_wire::holding(&state).kind();
                 (named, hidden) = nft_wire::reveals(from_private, reach);
                 // The asset leaving, as the prize's prompts must name it: there is no serial.
                 match (action.action.as_str(), nft_wire::can_send(&state)) {
@@ -757,6 +851,8 @@ impl Client {
                 let from = from.ok_or_else(|| anyhow!("burn needs from"))?;
                 let state = self.nft_state(program, from).await?;
                 proven = from_private;
+                pin = pin_of(program, &[("action", b"burn".as_slice()), ("from", text(from_private, from).as_bytes()), ("from_state", state.as_slice())]);
+                kind = nft_wire::holding(&state).kind();
                 match nft_wire::burn_all(&state) {
                     Err(why) => refusal = Some(why.to_owned()),
                     Ok(amount) => {
@@ -769,18 +865,36 @@ impl Client {
             }
             "receive" => {
                 proven = true;
-                let waiting = self
+                let pending: Vec<_> = self
                     .wallet
                     .owned_pending_messages()
                     .await
                     .context("cannot read pending messages")?
                     .into_iter()
                     .filter(|message| message.body.to.program_account_id == program && nft_wire::credit_of(&message.body.message).is_some())
-                    .count();
-                if waiting == 0 {
-                    refusal = Some("Nothing is waiting for your private accounts.".to_owned());
+                    .collect();
+                let positions: Vec<String> = pending.iter().map(|m| m.position.to_string()).collect();
+                pin = pin_of(program, &[("action", b"receive".as_slice()), ("credits", positions.join(",").as_bytes())]);
+                // Each credit checked as the receipt will check it: only what can land is counted,
+                // and each one that can't is named with its reason (review finding 3).
+                let mut landing = 0;
+                for message in &pending {
+                    let to = message.body.to.account_id;
+                    let (definition, _) = nft_wire::credit_of(&message.body.message).expect("filtered above");
+                    match left_reason(&self.nft_state(program, to).await?, &definition) {
+                        None => landing += 1,
+                        Some((code, why)) => {
+                            lines.push(format!("Waiting for Private/{to}, but it can't land there: {why}"));
+                            left.push(serde_json::json!({ "account": format!("Private/{to}"), "definition": account(definition).to_string(), "code": code }));
+                        }
+                    }
                 }
-                lines.push(format!("Takes the {waiting} NFT(s) waiting for your private accounts: one private transaction each, each with this fee."));
+                if pending.is_empty() {
+                    refusal = Some("Nothing is waiting for your private accounts.".to_owned());
+                } else if landing == 0 {
+                    refusal = Some("None of the waiting NFTs can land yet: see why above.".to_owned());
+                }
+                lines.insert(0, format!("Takes the {landing} NFT(s) that can land: one private transaction each, each with this fee."));
                 named.push("Expected: like the other private transactions, no account named (receiving an NFT was not observed in Job A).");
             }
             other => bail!("no NFT action called {other}"),
@@ -817,6 +931,10 @@ impl Client {
             "program": program.to_string(),
             "action": action.action,
             "from": from.map(|from| text(from_private, from)),
+            "pin": pin,
+            "to_account": to_account,
+            "kind": kind,
+            "left": left,
             "collection": collection,
             "lines": lines,
             "public": named,
@@ -865,6 +983,33 @@ mod tests {
         assert_eq!(reserve.at_most, 8_239_751);
         assert!(payer_covers(5_070_616, &reserve));
         assert!(!payer_covers(5_070_615, &reserve));
+    }
+
+    #[test]
+    fn a_sheet_pin_names_the_state_and_a_change_refuses() {
+        let program: AccountId = BOB.parse().unwrap();
+        let p = |from_state: &[u8], to: &[u8], to_state: &[u8]| pin_of(program, &[("action", b"send".as_slice()), ("from", b"Public/x".as_slice()), ("from_state", from_state), ("to", to), ("to_state", to_state)]);
+        let before = p(&[2, 1], b"Public/y", &[]);
+        assert_eq!(before.len(), 64);
+        assert!(check_pin(&Some(before.clone()), &before).is_ok());
+        assert!(check_pin(&None, &before).is_ok(), "no pin given: a terminal run");
+        // The recipient's holding changed, or the name points elsewhere, or the sender's: refused.
+        for changed in [p(&[2, 1], b"Public/y", &[2, 0]), p(&[2, 1], b"Public/z", &[]), p(&[2, 0], b"Public/y", &[])] {
+            assert!(check_pin(&Some(before.clone()), &changed).unwrap_err().to_string().contains("Nothing was sent"));
+        }
+        // Labels and lengths are in the digest: moving bytes between fields changes it.
+        assert_ne!(pin_of(program, &[("a", b"xy".as_slice()), ("b", b"".as_slice())]), pin_of(program, &[("a", b"x".as_slice()), ("b", b"y".as_slice())]));
+    }
+
+    #[test]
+    fn a_waiting_credit_that_cant_land_says_why() {
+        let art: nft_wire::Id = [7; 32];
+        assert_eq!(left_reason(&[], &art), Some(("not_ready", nft_wire::NOT_READY)));
+        let owned = nft_wire::State::Copy { definition: art, owned: true }.encode();
+        assert_eq!(left_reason(&owned, &art).unwrap().0, "already_holds");
+        let other = nft_wire::State::Copy { definition: [8; 32], owned: false }.encode();
+        assert_eq!(left_reason(&other, &art).unwrap().0, "other_collection");
+        assert_eq!(left_reason(&nft_wire::State::Copy { definition: art, owned: false }.encode(), &art), None);
     }
 
     #[test]

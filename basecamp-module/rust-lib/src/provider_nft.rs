@@ -20,6 +20,7 @@
 use crate::nft;
 use crate::{cli, provider, registry, Names};
 use serde_json::{json, Map, Value};
+use sha2::Digest as _;
 use std::path::PathBuf;
 #[cfg(test)]
 use std::path::Path;
@@ -47,6 +48,8 @@ pub struct Store {
     pub grants: Map<String, Value>,
     /// Capabilities besides the list, by app: `{app: {nft_transfers: {since}, membership_proof: {since}}}`.
     pub capabilities: Map<String, Value>,
+    /// The per-install secret that makes a private account's per-app handle (hex, 32 bytes).
+    handle_secret: Option<String>,
     path: Option<PathBuf>,
 }
 
@@ -57,6 +60,7 @@ impl Store {
             requests: found["requests"].as_array().cloned().unwrap_or_default(),
             grants: found["grants"].as_object().cloned().unwrap_or_default(),
             capabilities: found["capabilities"].as_object().cloned().unwrap_or_default(),
+            handle_secret: found["handle_secret"].as_str().map(str::to_owned),
             path,
         }
     }
@@ -66,7 +70,7 @@ impl Store {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("can't keep NFT requests: {e}"))?;
         }
-        cli::write_private(path, json!({ "requests": self.requests, "grants": self.grants, "capabilities": self.capabilities }).to_string().as_bytes()).map_err(|e| format!("can't keep NFT requests: {e}"))
+        cli::write_private(path, json!({ "requests": self.requests, "grants": self.grants, "capabilities": self.capabilities, "handle_secret": self.handle_secret }).to_string().as_bytes()).map_err(|e| format!("can't keep NFT requests: {e}"))
     }
 
     /// Expires what waited too long, and forgets what was decided long ago.
@@ -120,6 +124,44 @@ impl Store {
         self.grants.get(app).and_then(|grant| grant["accounts"].as_array()).map(|accounts| accounts.iter().filter_map(|a| a.as_str().map(str::to_owned)).collect()).unwrap_or_default()
     }
 
+    /// What `app` is told for one of the accounts it was given: a public account as itself, a
+    /// private one as an opaque handle (`Private/~<40 hex>`) made for this app alone, so the app
+    /// never learns the private account's ID, which other transactions may name on chain, and two
+    /// apps can't compare what they hold (review finding 11).
+    pub fn handle(&mut self, app: &str, account: &str) -> String {
+        if !account.starts_with("Private/") {
+            return account.to_owned();
+        }
+        if self.handle_secret.is_none() {
+            self.handle_secret = registry::fresh_bytes::<32>().ok().map(|b| registry::hex(&b));
+        }
+        let secret = self.handle_secret.clone().unwrap_or_default();
+        let mut hasher = sha2::Sha256::new();
+        for part in [b"names-nft-handle/v1".as_slice(), secret.as_bytes(), app.as_bytes(), account.as_bytes()] {
+            hasher.update((part.len() as u32).to_le_bytes());
+            hasher.update(part);
+        }
+        let digest = hasher.finalize();
+        format!("Private/~{}", &registry::hex(&digest)[..40])
+    }
+
+    /// The account a handle (or a public account) stands for, among those `app` was given.
+    pub fn unhandle(&mut self, app: &str, shown: &str) -> Option<String> {
+        let shown = shown.trim();
+        self.granted(app).into_iter().find(|account| self.handle(app, account) == shown)
+    }
+
+    /// Cancels `app`'s waiting requests of these kinds (a revoked capability leaves none behind).
+    pub fn cancel_pending(&mut self, app: &str, kinds: &[&str], now: u64) {
+        for request in self.requests.iter_mut().filter(|r| r["app"] == app && r["state"] == "pending" && kinds.iter().any(|k| r["kind"] == *k)) {
+            request["state"] = json!("cancelled");
+            request["decided"] = json!(now);
+            if request["kind"] == MEMBERSHIP_PROOF {
+                request["status"] = json!({ "state": "cancelled" });
+            }
+        }
+    }
+
     /// Whether `app` holds `capability` (`nft_transfers`, `membership_proof`).
     pub fn has(&self, app: &str, capability: &str) -> bool {
         self.capabilities.get(app).is_some_and(|caps| caps[capability].is_object())
@@ -167,16 +209,20 @@ pub fn view(request: &Value) -> Value {
         "error": request["error"],
     });
     if request["kind"] == NFT_LIST {
-        out["accounts"] = request["accounts"].clone();
-    } else if request["kind"] == NFT_TRANSFERS {
+        // Public accounts as themselves; private ones only counted (handles come from granted_nfts).
+        let given = request["accounts"].as_array().cloned().unwrap_or_default();
+        out["accounts"] = Value::from(given.iter().filter(|a| a.as_str().is_some_and(|a| a.starts_with("Public/"))).cloned().collect::<Vec<_>>());
+        out["private_accounts"] = json!(given.iter().filter(|a| a.as_str().is_some_and(|a| a.starts_with("Private/"))).count());
     } else if request["kind"] == MEMBERSHIP_PROOF {
         for key in ["collection", "program", "purpose", "status", "proof", "code"] {
             out[key] = request[key].clone();
         }
     } else {
-        for key in ["program", "from", "destination", "definition", "tx"] {
+        for key in ["program", "destination", "definition", "tx"] {
             out[key] = request[key].clone();
         }
+        // The account as the app named it (a private one by its handle), never the real ID.
+        out["from"] = if request["from_shown"].is_string() { request["from_shown"].clone() } else { request["from"].clone() };
     }
     out
 }
@@ -259,7 +305,9 @@ impl Names {
         let now = provider::now_ms();
         let mut store = self.nft_store();
         if !store.granted(&app).is_empty() {
-            return Ok(json!({ "request": null, "state": "approved", "accounts": store.granted(&app) }));
+            let shown: Vec<String> = store.granted(&app).iter().map(|a| store.handle(&app, a)).collect();
+            store.save()?;
+            return Ok(json!({ "request": null, "state": "approved", "accounts": shown }));
         }
         if let Some(waiting) = store.requests.iter().find(|r| r["app"] == app.as_str() && r["kind"] == NFT_LIST && r["state"] == "pending") {
             return Ok(view(waiting));
@@ -287,7 +335,8 @@ impl Names {
             Ok(app) => app,
             Err(why) => return crate::reply(Err(why)),
         };
-        let accounts = self.nft_store().granted(&app);
+        let mut store = self.nft_store();
+        let accounts = store.granted(&app);
         if accounts.is_empty() {
             return crate::reply(Err("ask to see NFTs first (request_nft_access)".to_owned()));
         }
@@ -297,7 +346,16 @@ impl Names {
             // Busy, or the read failed: said as it is, with nothing of the wallet's in it.
             return if parsed["busy"] == true { read } else { crate::reply(Err("the wallet couldn't read the NFTs just now".to_owned())) };
         }
-        crate::reply(Ok(json!({ "accounts": accounts, "nfts": nfts_of(&parsed["value"], &accounts) })))
+        let mut nfts = nfts_of(&parsed["value"], &accounts);
+        for nft in &mut nfts {
+            let shown = store.handle(&app, nft["account"].as_str().unwrap_or_default());
+            nft["account"] = json!(shown);
+        }
+        let shown: Vec<String> = accounts.iter().map(|a| store.handle(&app, a)).collect();
+        if store.save().is_err() {
+            return crate::reply(Err("the wallet couldn't keep its handles".to_owned()));
+        }
+        crate::reply(Ok(json!({ "accounts": shown, "nfts": nfts })))
     }
 
     /// Whether the accounts the app was given hold an NFT of `definition` under `program`.
@@ -311,15 +369,21 @@ impl Names {
             return crate::reply(Err("give the NFT program's and the collection's account IDs".to_owned()));
         };
         let (program, definition) = (registry::account_text(&program), registry::account_text(&definition));
-        let holding: Vec<Value> = parsed["value"]["nfts"].as_array().into_iter().flatten().filter(|nft| nft["program"] == program.as_str() && nft["definition"] == definition.as_str()).map(|nft| nft["account"].clone()).collect();
-        crate::reply(Ok(json!({ "member": !holding.is_empty(), "count": holding.len(), "accounts": holding })))
+        let count = parsed["value"]["nfts"].as_array().into_iter().flatten().filter(|nft| nft["program"] == program.as_str() && nft["definition"] == definition.as_str()).count();
+        crate::reply(Ok(json!({ "member": count > 0, "count": count })))
     }
 
     pub(crate) fn nft_transfer_ask(&mut self, program: &str, from: &str, destination: &str, summary: &str) -> Result<Value, String> {
         let app = crate::asking_app()?;
         let now = provider::now_ms();
-        let request = transfer_request(&app, program, from, destination, summary, now)?;
         let mut store = self.nft_store();
+        // The app names a private account by its handle: turned back into the account here.
+        let real = store.unhandle(&app, from).unwrap_or_else(|| from.trim().to_owned());
+        if real.starts_with("Private/~") {
+            return Err("ask to see that account's NFTs first (request_nft_access), then propose it".to_owned());
+        }
+        let mut request = transfer_request(&app, program, &real, destination, summary, now)?;
+        request["from_shown"] = json!(from.trim());
         if !store.granted(&app).iter().any(|account| request["from"] == account.as_str()) {
             return Err("ask to see that account's NFTs first (request_nft_access), then propose it".to_owned());
         }
@@ -400,6 +464,9 @@ impl Names {
         for request in store.requests.iter().filter(|r| r["state"] == "pending") {
             let mut shown = request.clone();
             shown["publisher"] = json!(self.publisher_of(request["app"].as_str().unwrap_or_default()));
+            let checking = self.still_checking(request);
+            shown["checking"] = json!(checking.is_some());
+            shown["checking_what"] = json!(checking);
             if request["kind"] == NFT_LIST {
                 shown["discloses"] = json!(LIST_DISCLOSES);
             } else if request["kind"] == NFT_TRANSFERS {
@@ -425,6 +492,11 @@ impl Names {
             return Err(format!("that request is {} already", request["state"].as_str().unwrap_or("decided")));
         }
         let app = request["app"].as_str().unwrap_or_default().to_owned();
+        // As every other request: never approved while the Program Registry is still asked who
+        // publishes the app (or about the program a transfer runs), rule M-2 (review finding 9).
+        if let Some(what) = self.still_checking(&request) {
+            return Err(format!("still checking {what} with the Program Registry; try again in a few seconds"));
+        }
         if request["kind"] == NFT_LIST {
             let mut ticked = Vec::new();
             for account in accounts.split(',').map(str::trim).filter(|a| !a.is_empty()) {
@@ -510,6 +582,12 @@ impl Names {
         }
         let mut store = self.nft_store();
         let revoked = store.take(app.trim(), capability.trim());
+        let kinds: &[&str] = match capability.trim() {
+            NFT_LIST => &[NFT_LIST],
+            NFT_TRANSFERS => &[NFT_TRANSFERS, NFT_TRANSFER],
+            _ => &[MEMBERSHIP_PROOF],
+        };
+        store.cancel_pending(app.trim(), kinds, provider::now_ms());
         store.save()?;
         Ok(json!({ "revoked": revoked }))
     }
@@ -517,6 +595,7 @@ impl Names {
     pub(crate) fn nft_revoke(&mut self, app: &str) -> Result<Value, String> {
         let mut store = self.nft_store();
         let revoked = store.grants.remove(app.trim()).is_some() | store.capabilities.remove(app.trim()).is_some();
+        store.cancel_pending(app.trim(), &[NFT_LIST, NFT_TRANSFERS, NFT_TRANSFER, MEMBERSHIP_PROOF], provider::now_ms());
         store.save()?;
         Ok(json!({ "revoked": revoked }))
     }

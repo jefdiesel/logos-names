@@ -3,6 +3,8 @@
 // Words: "LNS names", never "official", never "lookup".
 
 const ID = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/
+/// A viewing public key in hex: 1184 bytes.
+export const VPK_HEX = 2368
 
 /// An ID shortened in the middle for a row; the full one is copied.
 export function idShown(id) {
@@ -107,7 +109,8 @@ export function toProblem(text) {
   if (/^(Public|Private)\//.test(typed)) return ID.test(typed.split("/")[1]) ? "" : "After Public/ or Private/ comes the account's ID: letters and digits."
   if (typed.indexOf(":") >= 0) {
     const [npk, vpk] = typed.split(":")
-    return /^[0-9a-fA-F]{64}$/.test(npk) && /^([0-9a-fA-F]{2})+$/.test(vpk || "") ? "" : "Receiving keys are written <npk hex>:<vpk hex>."
+    // A real vpk is an ML-KEM-768 key: 1184 bytes, 2368 hex characters (the module's VPK_HEX).
+    return /^[0-9a-fA-F]{64}$/.test(npk) && new RegExp("^[0-9a-fA-F]{" + VPK_HEX + "}$").test(vpk || "") ? "" : "Receiving keys are written <npk hex>:<vpk hex>: 64 and 2368 hex characters."
   }
   if (ID.test(typed)) return "Write an account as Public/ and then its ID."
   return /^[a-z0-9][a-z0-9-]{0,62}(\.lez)?$/i.test(typed) ? "" : "That isn't an LNS name, an account or receiving keys."
@@ -145,12 +148,27 @@ export function defaultPayer(sheet, from) {
 /// one 7-12 minutes on a fast computer.
 export function jobLine(job, now) {
   const seconds = Math.max(0, Math.floor(((now || Date.now()) - job.started) / 1000))
+  // A job picked up after the app opened again: whether it proves isn't known.
+  if (job.proves === undefined) return job.label + ": under way, " + Math.floor(seconds / 60) + " min so far. You can keep using Names meanwhile."
   if (!job.proves) return job.label + ": sending it publicly, one block (about 30 seconds), " + seconds + "s so far."
   return job.label + ": proving it on this computer, so the chain never learns the private side. This takes 7-12 minutes on a fast computer; " + Math.floor(seconds / 60) + " min so far. You can keep using Names meanwhile."
 }
 
 /// The line an ended job leaves: done with its block, or the plain reason.
+/// The next step for a credit that waited and couldn't land, by its reason.
+export function leftLine(row) {
+  const who = accountShown(row.account)
+  if (row.code === "not_ready") return "1 is still waiting for " + who + ": that account isn't ready for its collection. Make " + who + " ready for it (Receive an NFT, that account), then Receive again."
+  if (row.code === "already_holds") return "1 is still waiting for " + who + ": that account already holds an NFT of its collection. Send or burn that one, then Receive again."
+  return "1 is still waiting for " + who + ", which is tied to another collection: it can never take this NFT."
+}
+
 export function jobEnded(job, state) {
+  const left = state.left || []
+  if (state.state === "done" && job.kind === "nft_receive" && left.length > 0) {
+    const got = state.received > 0 ? "Received " + (state.received === 1 ? "1 NFT" : state.received + " NFTs") + ". " : ""
+    return { kind: "problem", text: got + left.map(leftLine).join(" ") }
+  }
   if (state.state === "done" && job.kind === "nft_init" && state.account)
     return { kind: "done", text: "Ready: " + accountShown(state.account) + " takes this collection now" + (state.block !== null && state.block !== undefined ? " (block " + state.block + ")" : "") + ". Give the sender this account.", copy: state.account }
   if (state.state === "done") {
@@ -180,10 +198,12 @@ export function privateOnly(programs, program, definition) {
   return holders.length > 0 && holders.every((r) => r.account_kind === "private")
 }
 
-/// The words of the image consent for a collection, before anything is fetched.
+/// The words of the image consent for a collection, before anything is fetched. The host is
+/// named only when it is a plain host name: anything else isn't offered (its text could rewrite
+/// the sentence).
 export function imageConsent(uri, privateOnly) {
   let host = ""
-  const m = /^https:\/\/([^/?#@]+)/.exec(String(uri || ""))
+  const m = /^https:\/\/([A-Za-z0-9.-]+)(?::\d+)?(?=[\/?#]|$)/.exec(String(uri || ""))
   if (m) host = m[1]
   if (host === "") return { allowed: false, text: "This collection's URI isn't an https address, so the wallet doesn't load it." }
   return {
@@ -244,4 +264,61 @@ export function proofChecksLine(checks) {
 /// What an app can no longer do once a capability is taken back.
 export function capabilityVerb(capability) {
   return capability === "nft_list" ? "see your NFTs" : capability === "nft_transfers" ? "propose NFT transfers" : capability === "membership_proof" ? "ask you for membership proofs" : "use that"
+}
+
+/// Running jobs after the app opens again: an NFT job goes to Collectibles, never to the board
+/// (review finding 4). `{nft, rest}`.
+export function splitRunningJobs(all) {
+  const labels = { nft_send: "Your NFT send", nft_burn: "Your NFT burn", nft_print: "Your NFT print", nft_receive: "Receiving your NFTs", nft_init: "Getting the account ready" }
+  const jobs = all || []
+  const nft = jobs.find((job) => /^nft_/.test(job.kind || ""))
+  return {
+    nft: nft ? { id: nft.id, kind: nft.kind, label: labels[nft.kind] || "Your NFT action", started: nft.started || Date.now(), proves: undefined, asking: false } : null,
+    rest: jobs.filter((job) => !/^nft_/.test(job.kind || "")),
+  }
+}
+
+/// The line a public sheet adds when another account pays: the payer is named on chain, so
+/// anyone can see the two belong together (review finding 5).
+export function payerLinkLine(sheet, ticks, from) {
+  if (!sheet || sheet.proven || !ticks || !ticks.payer || ticks.payer === from) return ""
+  return "The account that pays the fee is named too, so anyone can see the two accounts belong together."
+}
+
+/// Every account of the wallet, once, from all listed programs' holdings (an app's NFT list
+/// offers these): `[{account, account_kind}]`.
+export function listAccounts(programs) {
+  const seen = {}
+  const out = []
+  for (const program of programs || [])
+    for (const row of program.holdings || [])
+      if (row.account && !seen[row.account]) {
+        seen[row.account] = true
+        out.push({ account: row.account, account_kind: row.account_kind })
+      }
+  return out
+}
+
+/// The accounts ticked for one request, among those shown: never another request's ticks.
+export function tickedFor(ticks, requestId, shown) {
+  const mine = (ticks || {})[requestId] || {}
+  const allowed = (shown || []).map((row) => row.account)
+  return Object.keys(mine).filter((account) => mine[account] && allowed.indexOf(account) >= 0)
+}
+
+/// Tick state with only the requests still waiting.
+export function pruneTicks(ticks, requests) {
+  const ids = (requests || []).map((r) => r.id)
+  const out = {}
+  for (const id of Object.keys(ticks || {})) if (ids.indexOf(id) >= 0) out[id] = ticks[id]
+  return out
+}
+
+/// A capability row under Connected apps: what it lets the app learn or do.
+export function capabilityTitle(grant) {
+  const g = grant || {}
+  if (g.capability === "nft_list") return "NFT list: " + (g.accounts || []).map(accountShown).join(", ")
+  if (g.capability === "nft_transfers") return "NFT transfers: it may ask; you approve each one"
+  if (g.capability === "membership_proof") return "Membership proofs: it learns a pass id, nothing about your accounts"
+  return String(g.capability || "")
 }

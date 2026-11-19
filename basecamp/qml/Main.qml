@@ -6516,7 +6516,11 @@ Item {
             if (tokenJob === null && tokens.length > 0)
                 tokenJob = { id: tokens[0].id, kind: tokens[0].kind, started: tokens[0].started || Date.now(), proves: true,
                              label: tokens[0].kind === "token_send" ? "Your token transfer" : "Receiving your tokens" }
-            var running = all.filter(function(job) { return job.kind !== "install" && job.kind !== "shield" && job.kind !== "token_send" && job.kind !== "token_receive" })
+            // An NFT job follows on Collectibles, never as a board job (names-nft review finding 4).
+            var split = Nft.splitRunningJobs(all)
+            if (nftJob === null && split.nft !== null)
+                nftJob = split.nft
+            var running = split.rest.filter(function(job) { return job.kind !== "install" && job.kind !== "shield" && job.kind !== "token_send" && job.kind !== "token_receive" })
             if (boardJob !== null || running.length === 0)
                 return
             var job = running[0]
@@ -6857,7 +6861,8 @@ Item {
     property string nftResultKind: ""
     property string nftResultCopy: ""     // the account an init made ready, to give the sender
     property var nftAppRequests: []       // pending_nft_requests
-    property var nftListTicks: ({})       // an nft_list request's ticked accounts
+    property var nftListTicks: ({})       // request id -> {account: ticked}: each request its own
+    property var nftUnderstood: ({})      // request id -> the publisher warning was ticked
     property string nftSendFor: ""        // "<program>|<account>" whose Send form is open
     property bool nftTheirKeys: false
     readonly property bool nftOnView: section === "collectibles" && namesNet === "0.4" && Qt.application.state === Qt.ApplicationActive
@@ -6869,6 +6874,7 @@ Item {
         nftResult = ""
         loadNfts()
         loadNftGrants()
+        loadRunningJobs()
     }
 
     function loadNfts() {
@@ -6885,14 +6891,15 @@ Item {
             // Busy until the module's first read is back: say it plainly, keep what is shown.
             nftReadNote = waitAgain(message) ? "Reading your NFTs… this updates in a moment." : sentence(readFailed(message))
         }, 60000)
-        askLater("pending_nft_requests", [], function(value) {
-            nftAppRequests = Array.isArray(value) ? value : []
-        }, function() {})
+        loadNftRequests()
     }
 
     function loadNftRequests() {
         askLater("pending_nft_requests", [], function(value) {
             nftAppRequests = Array.isArray(value) ? value : []
+            // Ticks of a request no longer waiting (answered, expired, withdrawn) are dropped.
+            nftListTicks = Nft.pruneTicks(nftListTicks, nftAppRequests)
+            nftUnderstood = Nft.pruneTicks(nftUnderstood, nftAppRequests)
         }, function() {})
     }
 
@@ -7002,7 +7009,9 @@ Item {
         nftSheetTicks = ({})
         nftSheetStatus = "Checking what this does…"
         nftSheetKind = "working"
-        nftLoadSheet()
+        // Every opening reads the chain afresh: a sheet kept from earlier is forgotten first.
+        var opened = nftSheet
+        askLater("nft_sheet_forget", [program, opened.actionJson], function() { if (nftSheet === opened) nftLoadSheet() }, function() { if (nftSheet === opened) nftLoadSheet() })
     }
 
     function nftLoadSheet() {
@@ -7073,6 +7082,9 @@ Item {
         var failed = function(message) {
             nftSheetStatus = sentence(message)
             nftSheetKind = Logic.noticeKind(nftSheetStatus, true)
+            // No answer, or busy: the job may have started all the same. Look, and follow it.
+            if (waitAgain(message))
+                loadRunningJobs()
         }
         if (s.request !== null)
             askLater("approve_nft_request", [s.request.id, "", s.digest, payer], function(value) { started(value.job) }, failed)
@@ -7084,6 +7096,8 @@ Item {
         var s = nftSheet
         nftSheet = null
         nftSheetStatus = ""
+        if (s !== null)
+            askLater("nft_sheet_forget", [s.program, s.actionJson], function() {}, function() {})
         if (s !== null && s.request !== null)
             nftRejectRequest(s.request.id)
     }
@@ -7139,14 +7153,16 @@ Item {
         }, 30000)
     }
 
-    function nftApproveList(id, capabilityOnly) {
-        var ticked = capabilityOnly ? [] : Object.keys(nftListTicks).filter(function(k) { return nftListTicks[k] })
+    function nftApproveList(id, capabilityOnly, ticked) {
+        ticked = ticked || []
         if (!capabilityOnly && ticked.length === 0)
             return
         nftResult = "Checking…"
         nftResultKind = "working"
         askLater("approve_nft_request", [id, ticked.join(","), "", ""], function() {
-            nftListTicks = ({})
+            var all = Object.assign({}, nftListTicks)
+            delete all[id]
+            nftListTicks = all
             nftResult = capabilityOnly ? "Allowed. The app may now propose NFT transfers from the accounts it can see; you approve each one." : "Given. The app can now see the NFTs of " + (ticked.length === 1 ? "that account" : "those " + ticked.length + " accounts") + ", and nothing else of your wallet."
             nftResultKind = "done"
             loadNfts()
@@ -7154,6 +7170,9 @@ Item {
     }
 
     function nftRejectRequest(id) {
+        var all = Object.assign({}, nftListTicks)
+        delete all[id]
+        nftListTicks = all
         askLater("reject_nft_request", [id], function() { loadNfts() }, function(message) { nftResult = sentence(message); nftResultKind = "problem" })
     }
 
@@ -7345,6 +7364,8 @@ Item {
     }
 
     function loadAppGrants() {
+        if (namesNet === "0.4")
+            loadNftGrants()
         askLater("app_grants", [], function(value) {
             appGrants = Array.isArray(value) ? value : []
         }, function(message) {
@@ -7903,6 +7924,7 @@ Item {
     component Link: Text {
         id: link
         signal pressed()
+        textFormat: Text.PlainText
         color: linkArea.containsMouse ? root.brass : root.ink
         font.family: root.sans
         font.pixelSize: root.px(17)
@@ -8028,7 +8050,10 @@ Item {
             anchors.margins: 18
             spacing: 12
             Text {
+                Layout.fillWidth: true
                 text: parent.parent.title
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
                 color: root.ink
                 font.family: root.sans
                 font.pixelSize: root.px(19)
@@ -9288,6 +9313,7 @@ Item {
         Text {
             id: choiceText
             anchors.centerIn: parent
+            textFormat: Text.PlainText
             text: (choice.chosen ? "● " : "") + choice.label
             color: root.ink
             font.family: root.sans
@@ -9342,6 +9368,8 @@ Item {
 
     component Hint: Text {
         Layout.fillWidth: true
+        // Plain text by default: an app's or a chain's words are never markup (names-nft review).
+        textFormat: Text.PlainText
         color: root.dim
         font.family: root.sans
         font.weight: Font.Medium
@@ -9364,6 +9392,7 @@ Item {
     /// The heading of one part of the edit panel.
     component Part: Text {
         Layout.topMargin: 10
+        textFormat: Text.PlainText
         color: root.ink
         font.family: root.sans
         font.pixelSize: root.px(18)
@@ -9911,18 +9940,29 @@ Item {
                 Repeater {
                     model: root.nftAppRequests
                     Panel {
+                        id: nftAskPanel
                         required property var modelData
+                        // This request's own ticks: never another request's (review finding 6).
+                        readonly property var ticked: Nft.tickedFor(root.nftListTicks, modelData.id, Nft.listAccounts(root.nftRead ? root.nftRead.programs : []))
+                        readonly property bool held: !!modelData.checking || (root.appPublisherFailed(modelData) && !root.nftUnderstood[modelData.id])
                         title: modelData.kind === "nft_list" ? modelData.app + " asks to see your NFTs" : modelData.kind === "nft_transfers" ? modelData.app + " asks to be able to propose NFT transfers" : modelData.kind === "membership_proof" ? modelData.app + " asks you to prove you hold an NFT" : modelData.app + " asks to send one of your NFTs"
-                            Hint { visible: Logic.publisherLine(modelData.publisher) !== null; color: root.ink; text: Logic.publisherLine(modelData.publisher) !== null ? Logic.publisherLine(modelData.publisher).text : "" }
-                            Hint { visible: (modelData.reason || modelData.summary || "") !== ""; text: "In its words: " + (modelData.reason || modelData.summary || "") }
+                            Hint { visible: Logic.publisherLine(modelData.publisher) !== null; color: root.appPublisherFailed(modelData) ? root.waitTone : root.ink; text: Logic.publisherLine(modelData.publisher) !== null ? Logic.publisherLine(modelData.publisher).text : "" }
+                            Tick { visible: root.appPublisherFailed(modelData); checked: !!root.nftUnderstood[modelData.id]; text: "I understand this app may not be who it says it is, and still want to answer it."; onToggled: { var u = Object.assign({}, root.nftUnderstood); u[modelData.id] = !checked; root.nftUnderstood = u } }
+                            Hint { visible: (modelData.reason || modelData.summary || "") !== ""; text: "The app describes it as: “" + (modelData.reason || modelData.summary || "") + "” (its own words, not checked)" }
                             Hint { visible: modelData.kind === "nft_list"; color: root.ink; text: "It would learn " + modelData.discloses + ", for the accounts you tick. Nothing else: not your balances, not your other accounts, and it can't send anything with this." }
                             Repeater {
-                                model: modelData.kind === "nft_list" ? (root.nftRead ? root.nftRead.programs[0] ? root.nftRead.programs[0].holdings : [] : []) : []
+                                model: nftAskPanel.modelData.kind === "nft_list" ? Nft.listAccounts(root.nftRead ? root.nftRead.programs : []) : []
                                 Tick {
                                     required property var modelData
-                                    checked: !!root.nftListTicks[modelData.account]
-                                    text: modelData.account + (modelData.account_kind === "private" ? " (private: the app would see what it holds)" : "")
-                                    onToggled: { var t = Object.assign({}, root.nftListTicks); t[modelData.account] = !checked; root.nftListTicks = t }
+                                    checked: nftAskPanel.ticked.indexOf(modelData.account) >= 0
+                                    text: modelData.account + (modelData.account_kind === "private" ? " (private: the app would see what it holds, by a name made for it alone)" : "")
+                                    onToggled: {
+                                        var all = Object.assign({}, root.nftListTicks)
+                                        var mine = Object.assign({}, all[nftAskPanel.modelData.id] || {})
+                                        mine[modelData.account] = !checked
+                                        all[nftAskPanel.modelData.id] = mine
+                                        root.nftListTicks = all
+                                    }
                                 }
                             }
                             Hint { visible: modelData.kind === "nft_transfer"; color: root.ink; text: "From " + modelData.from + " to " + modelData.destination + ". Open it to see the collection, what becomes public and the fee before you decide." }
@@ -9932,12 +9972,12 @@ Item {
                                 Action {
                                     label: modelData.kind === "nft_list" ? "Give access" : modelData.kind === "nft_transfers" ? "Allow" : "Open"
                                     strong: true
-                                    enabledNow: modelData.kind !== "nft_list" || Object.keys(root.nftListTicks).some(function(k) { return root.nftListTicks[k] })
-                                    onPressed: modelData.kind === "nft_list" ? root.nftApproveList(modelData.id) : modelData.kind === "nft_transfers" ? root.nftApproveList(modelData.id, true) : modelData.kind === "membership_proof" ? root.openProofSheet(modelData.id) : root.nftOpenSheet("Sending an NFT for " + modelData.app, modelData.program, JSON.parse(modelData.action), modelData, null)
+                                    enabledNow: !nftAskPanel.held && (modelData.kind !== "nft_list" || nftAskPanel.ticked.length > 0)
+                                    onPressed: modelData.kind === "nft_list" ? root.nftApproveList(modelData.id, false, nftAskPanel.ticked) : modelData.kind === "nft_transfers" ? root.nftApproveList(modelData.id, true, []) : modelData.kind === "membership_proof" ? root.openProofSheet(modelData.id) : root.nftOpenSheet("Sending an NFT for " + modelData.app, modelData.program, JSON.parse(modelData.action), modelData, null)
                                 }
                                 Action { label: "Reject"; onPressed: root.nftRejectRequest(modelData.id) }
                             }
-                            WhyLine { text: modelData.kind === "nft_list" && !Object.keys(root.nftListTicks).some(function(k) { return root.nftListTicks[k] }) ? "Tick at least one account above." : "" }
+                            WhyLine { text: modelData.checking ? "Checking who publishes " + modelData.app + "… a few seconds." : root.appPublisherFailed(modelData) && !root.nftUnderstood[modelData.id] ? "Tick the box above to answer it." : modelData.kind === "nft_list" && nftAskPanel.ticked.length === 0 ? "Tick at least one account above." : "" }
                     }
                 }
 
@@ -9977,6 +10017,9 @@ Item {
                 Panel {
                     id: nftSheetBody
                     readonly property var model: root.nftSheet !== null ? root.nftSheetModel() : null
+                    // The app's request as it stands now (its publisher check may have answered since).
+                    readonly property var appRequest: root.nftSheet === null || root.nftSheet.request === null ? null : (root.nftAppRequests.filter(function(r) { return r.id === root.nftSheet.request.id })[0] || root.nftSheet.request)
+                    readonly property bool held: appRequest !== null && (!!appRequest.checking || (root.appPublisherFailed(appRequest) && !root.nftUnderstood[appRequest.id]))
                     visible: root.nftSheet !== null
                     title: root.nftSheet !== null ? root.nftSheet.title : ""
                         Fact { visible: nftSheetBody.model !== null; label: "Collection"; value: nftSheetBody.model !== null && nftSheetBody.model.collection ? Nft.collectionTitle(nftSheetBody.model.collection, nftSheetBody.model.collection.definition) : "can't be read" }
@@ -9987,6 +10030,7 @@ Item {
                         Repeater { model: nftSheetBody.model !== null ? nftSheetBody.model.lines : []; Hint { required property var modelData; color: root.ink; text: modelData } }
                         Part { visible: nftSheetBody.model !== null; text: "On the chain, anyone can see" }
                         Repeater { model: nftSheetBody.model !== null ? nftSheetBody.model["public"] : []; Hint { required property var modelData; text: "• " + modelData } }
+                        Hint { visible: text !== ""; text: nftSheetBody.model !== null && root.nftSheet !== null && Nft.payerLinkLine(nftSheetBody.model, root.nftSheetTicks, root.nftSheet.from) !== "" ? "• " + Nft.payerLinkLine(nftSheetBody.model, root.nftSheetTicks, root.nftSheet.from) : "" }
                         Part { visible: nftSheetBody.model !== null && nftSheetBody.model["private"].length > 0; text: "Stays private" }
                         Repeater { model: nftSheetBody.model !== null ? nftSheetBody.model["private"] : []; Hint { required property var modelData; text: "• " + modelData } }
                         Hint {
@@ -10006,6 +10050,9 @@ Item {
                             }
                         }
                         Repeater { model: nftSheetBody.model !== null ? nftSheetBody.model.warnings : []; Hint { required property var modelData; color: root.waitTone; text: modelData } }
+                        // An app's transfer: who publishes it, as on every other request sheet (review finding 9).
+                        Hint { visible: nftSheetBody.appRequest !== null; color: nftSheetBody.appRequest !== null && root.appPublisherFailed(nftSheetBody.appRequest) ? root.waitTone : root.ink; text: nftSheetBody.appRequest !== null && Logic.publisherLine(nftSheetBody.appRequest.publisher) !== null ? Logic.publisherLine(nftSheetBody.appRequest.publisher).text : "" }
+                        Tick { visible: nftSheetBody.appRequest !== null && root.appPublisherFailed(nftSheetBody.appRequest); checked: nftSheetBody.appRequest !== null && !!root.nftUnderstood[nftSheetBody.appRequest.id]; text: "I understand this app may not be who it says it is, and still want to answer it."; onToggled: { var u = Object.assign({}, root.nftUnderstood); u[nftSheetBody.appRequest.id] = !checked; root.nftUnderstood = u } }
                         Tick { visible: nftSheetBody.model !== null && nftSheetBody.model.warnings.length > 0; checked: !!root.nftSheetTicks.warnings; text: "I've read the warnings above and want to go ahead."; onToggled: root.nftTick("warnings", !checked) }
                         Tick { visible: nftSheetBody.model !== null && nftSheetBody.model.action === "burn"; checked: !!root.nftSheetTicks.burn; text: Nft.burnConfirm(root.nftSheet !== null ? root.nftSheet.row : null); onToggled: root.nftTick("burn", !checked) }
                         StatusLine { visible: root.nftSheetStatus !== ""; kind: root.nftSheetKind; text: root.nftSheetStatus }
@@ -10014,12 +10061,12 @@ Item {
                             Action {
                                 label: root.nftSheetKind === "working" && root.nftSheetStatus === "Checking…" ? "Checking…" : root.nftSheet === null ? "" : root.nftSheet.request !== null ? "Approve" : root.nftSheet.action === "burn" ? "Burn it for good" : root.nftSheet.action === "init" ? "Get it ready" : root.nftSheet.action === "print" ? "Print the copy" : "Send"
                                 strong: true
-                                enabledNow: nftSheetBody.model !== null && !nftSheetBody.model.refusal && Nft.approveWhy(nftSheetBody.model, root.nftSheetTicks) === "" && root.nftJob === null && root.nftSheetKind !== "working"
+                                enabledNow: nftSheetBody.model !== null && !nftSheetBody.model.refusal && Nft.approveWhy(nftSheetBody.model, root.nftSheetTicks) === "" && root.nftJob === null && root.nftSheetKind !== "working" && !nftSheetBody.held
                                 onPressed: root.nftGo()
                             }
                             Action { label: root.nftSheet !== null && root.nftSheet.request !== null ? "Reject" : "Cancel"; onPressed: root.nftCloseSheet() }
                         }
-                        WhyLine { text: nftSheetBody.model === null || nftSheetBody.model.refusal ? "" : root.nftJob !== null ? "Wait for the NFT job under way to end." : Nft.approveWhy(nftSheetBody.model, root.nftSheetTicks) }
+                        WhyLine { text: nftSheetBody.model === null || nftSheetBody.model.refusal ? "" : root.nftJob !== null ? "Wait for the NFT job under way to end." : nftSheetBody.appRequest !== null && nftSheetBody.appRequest.checking ? "Checking who publishes " + nftSheetBody.appRequest.app + "… a few seconds." : nftSheetBody.held ? "Tick the box about who publishes the app to answer it." : Nft.approveWhy(nftSheetBody.model, root.nftSheetTicks) }
                 }
 
                 Item { visible: root.nftSheet !== null; Layout.preferredHeight: 6 }
@@ -10043,7 +10090,7 @@ Item {
                         required property var modelData
                         Layout.fillWidth: true
                         spacing: 6
-                        Text { text: Nft.accountShown(nftAccount.modelData.account); color: root.dim; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold }
+                        Text { text: Nft.accountShown(nftAccount.modelData.account); textFormat: Text.PlainText; color: root.dim; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold }
                         Repeater {
                             model: nftAccount.modelData.nfts
                             Card {
@@ -10068,7 +10115,7 @@ Item {
                                         Layout.fillWidth: true
                                         spacing: 4
                                         Text { Layout.fillWidth: true; text: Nft.collectionTitle(nftCard.modelData.collection, nftCard.modelData.definition); textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(19); font.weight: Font.DemiBold; wrapMode: Text.Wrap }
-                                        Text { text: nftCard.modelData.state === "unreadable" ? "Its state can't be read (" + nftCard.modelData.unreadable + ")" : Nft.tokenLine(nftCard.modelData); color: nftCard.modelData.state === "unreadable" ? root.waitTone : root.dim; font.family: root.sans; font.pixelSize: root.px(16) }
+                                        Text { text: nftCard.modelData.state === "unreadable" ? "Its state can't be read (" + nftCard.modelData.unreadable + ")" : Nft.tokenLine(nftCard.modelData); textFormat: Text.PlainText; color: nftCard.modelData.state === "unreadable" ? root.waitTone : root.dim; font.family: root.sans; font.pixelSize: root.px(16) }
                                         Fact { label: "Collection ID"; value: Nft.idShown(nftCard.modelData.definition); full: nftCard.modelData.definition || ""; code: true }
                                         Repeater { model: Nft.metadataRows(nftCard.modelData.collection); Fact { required property var modelData; label: modelData.label; value: modelData.value } }
                                         Fact { label: "Program"; value: nftCard.modelData.programLabel; full: nftCard.modelData.program }
@@ -10169,6 +10216,7 @@ Item {
                         spacing: 6
                         Part { text: "Waiting for your private accounts" }
                         Hint { text: (modelData.pending.length === 1 ? "1 NFT was sent" : modelData.pending.length + " NFTs were sent") + " to your private accounts. Taking each one in is a private transaction, proven on this computer (7-12 minutes) and paid by one of your private accounts." }
+                        Repeater { model: modelData.pending; Hint { required property var modelData; text: "• " + (modelData.value === "copy" ? "A copy" : "The master") + " of " + Nft.idShown(modelData.definition) + " for " + Nft.accountShown(modelData.to) } }
                         Action { label: "Receive"; strong: true; enabledNow: root.nftJob === null; onPressed: root.nftReceive(modelData.program) }
                         WhyLine { text: root.nftJob !== null ? "Wait for the NFT job under way to end." : "" }
                     }
@@ -10194,6 +10242,7 @@ Item {
                         Choice { label: "A new private account"; chosen: parent.parent.into === "new-private"; onPressed: parent.parent.into = "new-private" }
                         Repeater { model: parent.parent.choices.empty; Choice { required property var modelData; label: Nft.accountShown(modelData); chosen: parent.parent.parent.into === modelData; onPressed: parent.parent.parent.into = modelData } }
                     }
+                    Hint { text: "A new public account is tied on chain to the public account that pays its fee: anyone can see they belong together. A new private account isn't, but it needs a private account with funds and 7-12 minutes of proving." }
                     Action {
                         label: "Get an account ready…"
                         strong: root.nftGroups.length === 0
@@ -10240,7 +10289,7 @@ Item {
                             Layout.fillWidth: true
                             spacing: 2
                             Text { text: (modelData.label || "NFT program") + " · " + Nft.idShown(modelData.program); color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); textFormat: Text.PlainText }
-                            Text { text: modelData.registry && modelData.registry.registry ? (modelData.registry.verified ? "Source verified (Program Registry)" : "Source not verified (Program Registry)") : "The Program Registry isn't installed: its source is unknown."; color: modelData.registry && modelData.registry.verified ? root.good : root.dim; font.family: root.sans; font.pixelSize: root.px(15) }
+                            Text { text: modelData.registry && modelData.registry.registry ? (modelData.registry.verified ? "Source verified (Program Registry)" : "Source not verified (Program Registry)") : "The Program Registry isn't installed: its source is unknown."; textFormat: Text.PlainText; color: modelData.registry && modelData.registry.verified ? root.good : root.dim; font.family: root.sans; font.pixelSize: root.px(15) }
                         }
                         Link { text: "Copy"; onPressed: root.copy(modelData.program, "program ID") }
                         Link { text: "Remove"; onPressed: root.nftRemoveProgram(modelData.program) }
@@ -14209,6 +14258,19 @@ Item {
                                 elide: Text.ElideRight
                             }
                             Action { label: "Remove access"; onPressed: root.revokeApp(grantRow.modelData.app) }
+                        }
+                    }
+                    // NFT capabilities, one row each, apart from account access (names-nft review finding 8).
+                    Repeater {
+                        model: root.nftGrantsList
+                        RowLayout {
+                            id: nftGrantRow
+                            required property var modelData
+                            Layout.fillWidth: true
+                            spacing: 12
+                            Text { Layout.preferredWidth: 200; text: nftGrantRow.modelData.app; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); elide: Text.ElideRight }
+                            Text { Layout.fillWidth: true; text: Nft.capabilityTitle(nftGrantRow.modelData); textFormat: Text.PlainText; color: root.dim; font.family: root.sans; font.pixelSize: root.px(14); wrapMode: Text.Wrap }
+                            Action { label: "Remove"; onPressed: root.nftRevokeCapability(nftGrantRow.modelData.app, nftGrantRow.modelData.capability) }
                         }
                     }
                     Link {

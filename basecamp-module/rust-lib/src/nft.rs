@@ -24,7 +24,10 @@ pub const MAX_PROGRAMS: usize = 16;
 pub const MAX_LABEL: usize = 40;
 /// How often a page's NFT reads are made again while it is open (the app asks no faster).
 pub const NFT_EVERY: Duration = Duration::from_secs(30);
-/// A sheet's plan is read again after this, and an action starts only from one this fresh.
+/// How long a plan read is reused before a sheet asks the chain again: seconds, so a sheet
+/// opened again reads the state as it is now (review: a stale refusal or recipient).
+pub const PLAN_EVERY: Duration = Duration::from_secs(5);
+/// How long the person has to approve a sheet, measured from when its plan was read.
 pub const PLAN_VALID: Duration = Duration::from_secs(600);
 /// `names module nft holdings` catches the wallet up first.
 const LIST_PATIENCE: Duration = Duration::from_secs(150);
@@ -143,6 +146,12 @@ fn account(text: &str) -> Result<String, String> {
     Ok(provider::account_written(private, &id))
 }
 
+/// A nullifier public key, in hex: 32 bytes.
+pub const NPK_HEX: usize = 64;
+/// A viewing public key, in hex: an ML-KEM-768 encapsulation key of 1184 bytes
+/// (`MlKem768EncapsulationKey::LEN`, lee_core v0.4.0-rc3; Job A §8c A2.2 "its 1,184-byte vpk").
+pub const VPK_HEX: usize = 2 * 1184;
+
 /// Where an NFT goes: an LNS name, `Public/<id>`, this wallet's `Private/<id>`, or someone's
 /// receiving keys `<npk hex>:<vpk hex>`.
 pub fn destination(text: &str) -> Result<String, String> {
@@ -152,7 +161,7 @@ pub fn destination(text: &str) -> Result<String, String> {
     }
     if let Some((npk, vpk)) = text.split_once(':') {
         let hex = |part: &str| !part.is_empty() && part.len() % 2 == 0 && part.bytes().all(|b| b.is_ascii_hexdigit());
-        if npk.len() == 64 && hex(npk) && hex(vpk) && vpk.len() <= 512 {
+        if npk.len() == NPK_HEX && hex(npk) && vpk.len() == VPK_HEX && hex(vpk) {
             return Ok(format!("{}:{}", npk.to_ascii_lowercase(), vpk.to_ascii_lowercase()));
         }
         return Err("receiving keys are written <npk hex>:<vpk hex>".to_owned());
@@ -374,7 +383,29 @@ pub fn parse_plan(output: &str) -> Result<Value, String> {
         "fee": { "about": digits(&plan["fee"]["about"]), "at_most": digits(&plan["fee"]["at_most"]), "inside_proof": plan["fee"]["inside_proof"] == true },
         "payers": payers,
         "refusal": plan["refusal"].as_str().map(|why| provider::clean_text(nft_wire::refusal(why).unwrap_or(why), 240)),
+        "pin": plan["pin"].as_str().filter(|p| p.len() == 64 && p.bytes().all(|b| b.is_ascii_hexdigit())),
+        "to_account": plan["to_account"].as_str().and_then(|to| destination(to).ok()),
+        "kind": match plan["kind"].as_str() { Some(k @ ("copy" | "master")) => json!(k), _ => Value::Null },
+        "left": left_rows(&plan["left"]),
     }))
+}
+
+/// Waiting credits that can't land, checked: `[{account, definition, code}]`, `code` one of
+/// `not_ready`, `already_holds`, `other_collection`.
+fn left_rows(value: &Value) -> Value {
+    Value::from(
+        value
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .take(32)
+            .filter_map(|row| {
+                let code = row["code"].as_str().filter(|c| ["not_ready", "already_holds", "other_collection"].contains(c))?;
+                Some(json!({ "account": account(row["account"].as_str()?).ok()?, "definition": id_text(&row["definition"]), "code": code }))
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// What an ended NFT job says: its transaction and block, or the plain refusal.
@@ -388,7 +419,16 @@ pub fn outcome(log: &str) -> Value {
         line.strip_prefix("new account ").or_else(|| line.strip_prefix("making ").and_then(|rest| rest.split(" ready for ").next()))
     });
     let account = ready.and_then(|text| account(text.split_whitespace().next().unwrap_or_default()).ok());
-    json!({ "tx": tx, "block": blocks.last(), "received": blocks.len(), "nothing": log.contains("nothing to receive"), "refusal": refusal, "account": account })
+    // Credits a receipt left waiting, from the CLI's machine line `left: <account> <collection> <code>`.
+    let left: Vec<Value> = log
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.trim().strip_prefix("left: ")?.split_whitespace();
+            let (to, definition, code) = (parts.next()?, parts.next()?, parts.next()?);
+            Some(json!({ "account": to, "definition": definition, "code": code }))
+        })
+        .collect();
+    json!({ "tx": tx, "block": blocks.last(), "received": blocks.len(), "nothing": log.contains("nothing to receive"), "refusal": refusal, "account": account, "left": left_rows(&Value::from(left)) })
 }
 
 /// What giving out a private account's receiving keys reveals, in plain words (the app shows it
@@ -399,12 +439,12 @@ pub const KEYS_REVEAL: &str = "Whoever has these keys can send NFTs and payments
 pub fn parse_keys(output: &str, id: &registry::AccountId) -> Result<Value, String> {
     let answer: Value = serde_json::from_str(cli::last_line(output)).map_err(|_| "the names CLI's keys did not decode".to_owned())?;
     let hex = |key: &str, exact: Option<usize>| {
-        answer[key].as_str().filter(|h| !h.is_empty() && h.len() % 2 == 0 && h.len() <= 512 && exact.is_none_or(|n| h.len() == n) && h.bytes().all(|b| b.is_ascii_hexdigit())).map(str::to_ascii_lowercase)
+        answer[key].as_str().filter(|h| exact.is_none_or(|n| h.len() == n) && h.bytes().all(|b| b.is_ascii_hexdigit())).map(str::to_ascii_lowercase)
     };
     if answer["account"].as_str().and_then(|a| registry::parse_account(a).ok()) != Some(*id) {
         return Err("the names CLI gave the keys of another account".to_owned());
     }
-    let (Some(npk), Some(vpk)) = (hex("npk", Some(64)), hex("vpk", None)) else {
+    let (Some(npk), Some(vpk)) = (hex("npk", Some(NPK_HEX)), hex("vpk", Some(VPK_HEX))) else {
         return Err("the names CLI gave no receiving keys".to_owned());
     };
     Ok(json!({ "account": format!("Private/{}", registry::account_text(id)), "keys": format!("{npk}:{vpk}"), "reveals": KEYS_REVEAL }))
@@ -599,20 +639,40 @@ pub fn fetch_image(uri: &str) -> Result<Value, String> {
 
 /// The sheets this module planned, by `(wallet folder, digest)`, with when: an action starts only
 /// from one of these (a served read may be forgotten, or not kept at all in unit tests).
-static SHEETS: std::sync::Mutex<Vec<(String, String, Value, std::time::Instant)>> = std::sync::Mutex::new(Vec::new());
+/// Each is stamped with when its plan was READ (seconds since 1970), never when it was last shown.
+static SHEETS: std::sync::Mutex<Vec<(String, String, Value, u64)>> = std::sync::Mutex::new(Vec::new());
 
-fn remember_sheet(wallet: &str, digest: &str, plan: &Value) {
+fn fresh(read_at: u64) -> bool {
+    served::now_s().saturating_sub(read_at) < PLAN_VALID.as_secs()
+}
+
+fn remember_sheet(wallet: &str, digest: &str, plan: &Value, read_at: u64) {
     let mut sheets = SHEETS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    sheets.retain(|(w, d, _, at)| at.elapsed() < PLAN_VALID && !(w == wallet && d == digest));
+    sheets.retain(|(w, d, _, at)| fresh(*at) && !(w == wallet && d == digest));
     if sheets.len() >= 64 {
         sheets.remove(0);
     }
-    sheets.push((wallet.to_owned(), digest.to_owned(), plan.clone(), std::time::Instant::now()));
+    sheets.push((wallet.to_owned(), digest.to_owned(), plan.clone(), read_at));
 }
 
 fn sheet_planned(wallet: &str, digest: &str) -> Option<Value> {
     let sheets = SHEETS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    sheets.iter().find(|(w, d, _, at)| w == wallet && d == digest && at.elapsed() < PLAN_VALID).map(|(_, _, plan, _)| plan.clone())
+    sheets.iter().find(|(w, d, _, at)| w == wallet && d == digest && fresh(*at)).map(|(_, _, plan, _)| plan.clone())
+}
+
+/// Actions started, by wallet and pin, so a late answer and a second press can't start the same
+/// action twice (the token-move double-send class): a pin names the state it was planned on, so
+/// once the first one ran, only a new plan can start another.
+static STARTED: std::sync::Mutex<Vec<(String, String, u64)>> = std::sync::Mutex::new(Vec::new());
+
+fn started_before(wallet: &str, pin: &str) -> bool {
+    let mut started = STARTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    started.retain(|(_, _, at)| fresh(*at));
+    started.iter().any(|(w, p, _)| w == wallet && p == pin)
+}
+
+fn mark_started(wallet: &str, pin: &str) {
+    STARTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((wallet.to_owned(), pin.to_owned(), served::now_s()));
 }
 
 fn forget_sheet(wallet: &str, digest: &str) {
@@ -735,7 +795,7 @@ impl Names {
             let key = self.served_key(KEY, &format!("plan|{digest}"));
             let input = action.json().to_string();
             let wallet_key = setup.wallet.display().to_string();
-            let snap = self.served.read(&key, PLAN_VALID, served::Lane::Cli, move || {
+            let snap = self.served.read(&key, PLAN_EVERY, served::Lane::Cli, move || {
                 let args = vec![program_arg(&program), "module".to_owned(), "nft".to_owned(), "plan".to_owned()];
                 parse_plan(&cli::run_with_input(&setup, args, &input, PLAN_PATIENCE)?)
             });
@@ -744,8 +804,13 @@ impl Names {
         match outcome {
             Err(why) => crate::reply(Err(why)),
             Ok((program, action, digest, snap, wallet_key)) => {
-                if let Some(plan) = &snap.value {
-                    remember_sheet(&wallet_key, &digest, plan);
+                // Only a plan read now is shown and remembered: an old one while a newer read is on
+                // its way, or one whose last read failed, is never shown as current.
+                if snap.value.is_some() && (snap.updating || snap.error.is_some()) {
+                    return served::still_reading("the sheet");
+                }
+                if let (Some(plan), Some(read_at)) = (&snap.value, snap.read_at) {
+                    remember_sheet(&wallet_key, &digest, plan, read_at);
                 }
                 let label = crate::program_registry::label(&registry::account_text(&program));
                 served::reply_of(&snap, "The sheet", |plan| {
@@ -761,6 +826,17 @@ impl Names {
                 })
             }
         }
+    }
+
+    /// Forgets a sheet's plan, so the next opening plans afresh (called when a sheet opens and closes).
+    pub(crate) fn nft_sheet_forget(&mut self, program: &str, action: &str) -> Result<Value, String> {
+        let program = program_id(program)?;
+        let action = Action::parse(action)?;
+        let digest = digest(&program, &action);
+        let wallet_key = self.cli_setup()?.wallet.display().to_string();
+        forget_sheet(&wallet_key, &digest);
+        self.served.forget(&self.served_key(KEY, &format!("plan|{digest}")));
+        Ok(json!({ "forgot": true }))
     }
 
     /// Starts an action as a wallet job, only from a sheet planned for exactly it (`digest`)
@@ -793,9 +869,22 @@ impl Names {
                 Some(payer)
             }
         };
-        let args = action.args(&program, payer.as_deref())?;
+        // What the sheet showed is what runs: the recipient the plan resolved (a name is not read
+        // again), and the state it was planned on, which the CLI checks again just before it sends
+        // (`--expect-state`), refusing on any difference.
+        let pin = plan["pin"].as_str().filter(|p| p.len() == 64 && p.bytes().all(|b| b.is_ascii_hexdigit())).ok_or("the sheet didn't say what it was planned on; open it again")?.to_owned();
+        if started_before(&wallet_key, &pin) {
+            return Err("this was already started from this sheet; look at its result before doing it again".to_owned());
+        }
+        let mut pinned = action.clone();
+        if let Some(resolved) = plan["to_account"].as_str() {
+            pinned.to = Some(destination(resolved)?);
+        }
+        let mut args = pinned.args(&program, payer.as_deref())?;
+        args.push(format!("--expect-state={pin}"));
         let kind = format!("nft_{}", action.action);
         let started = self.wallet_job(&kind, |_| Ok(args))?;
+        mark_started(&wallet_key, &pin);
         // One sheet, one action: pressing again needs the sheet again.
         forget_sheet(&wallet_key, &digest);
         self.served.forget(&self.served_key(KEY, &format!("plan|{digest}")));
@@ -930,7 +1019,11 @@ mod tests {
         assert_eq!(receive.args(&[7; 32], Some(&format!("Private/{BOB}"))).unwrap()[2..], ["receive".to_owned(), format!("--fee-payer={BOB}")]);
         assert!(send.args(&[7; 32], Some(&format!("Public/{BOB}"))).unwrap().contains(&format!("--fee-payer={BOB}")));
         // Someone's keys need the tick.
-        let keys = format!("{}:{}", "ab".repeat(32), "cd".repeat(40));
+        let keys = format!("{}:{}", "ab".repeat(32), "cd".repeat(1184));
+        // A vpk of any other length is not one.
+        for short in [40, 256, 1183, 1185] {
+            assert!(destination(&format!("{}:{}", "ab".repeat(32), "cd".repeat(short))).is_err(), "{short}");
+        }
         let unticked = Action::parse(&format!(r#"{{"action":"send","from":"Private/{BOB}","to":"{keys}"}}"#)).unwrap();
         assert!(unticked.args(&[7; 32], None).unwrap_err().contains("can't check"));
         let ticked = Action::parse(&format!(r#"{{"action":"send","from":"Private/{BOB}","to":"{keys}","their_keys":true}}"#)).unwrap();
@@ -953,6 +1046,22 @@ mod tests {
         assert_ne!(digest(&[1; 32], &burn), digest(&[2; 32], &burn));
         assert_ne!(digest(&[1; 32], &burn), digest(&[1; 32], &send));
         assert_eq!(digest(&[1; 32], &burn), digest(&[1; 32], &Action::parse(&format!(r#"{{"from":" Public/{BOB} ","action":"burn"}}"#)).unwrap()));
+    }
+
+    #[test]
+    fn a_sheet_is_good_for_minutes_from_its_read_and_an_action_starts_once() {
+        let now = served::now_s();
+        remember_sheet("w-test", "d1", &json!({ "pin": "a" }), now - 30);
+        assert!(sheet_planned("w-test", "d1").is_some());
+        // Stamped with its read time: a plan read 11 minutes ago is gone, however recently shown.
+        remember_sheet("w-test", "d2", &json!({ "pin": "b" }), now - 660);
+        assert!(sheet_planned("w-test", "d2").is_none());
+        forget_sheet("w-test", "d1");
+        assert!(sheet_planned("w-test", "d1").is_none());
+        assert!(!started_before("w-test", "p1"));
+        mark_started("w-test", "p1");
+        assert!(started_before("w-test", "p1"));
+        assert!(!started_before("w-other", "p1"));
     }
 
     #[test]
@@ -995,6 +1104,10 @@ mod tests {
         let refused = outcome("Error: Program violated execution rules: A delivery named Actor { … }, which is neither a declared public actor nor private");
         assert_eq!(refused["refusal"], nft_wire::NOT_READY);
         assert_eq!(outcome("nothing to receive")["nothing"], true);
+        // A receipt that left a credit waiting says which and why, never a bare 0.
+        let left = outcome(&format!("left: Private/{BOB} {ART} not_ready\nleft waiting, the NFT for Private/{BOB}: That account isn't ready"));
+        assert_eq!((left["received"].as_u64(), left["left"][0]["code"].as_str()), (Some(0), Some("not_ready")), "{left}");
+        assert_eq!(left["left"][0]["account"], format!("Private/{BOB}"));
         // The account an init made ready, for the sender.
         assert_eq!(outcome(&format!("new account Private/{BOB}\nmaking Private/{BOB} ready for Art ({ART})\nsubmitted ab\napplied in block 3"))["account"], format!("Private/{BOB}"));
         assert_eq!(outcome(&format!("making Public/{BOB} ready for Art ({ART})\nsubmitted ab"))["account"], format!("Public/{BOB}"));
@@ -1024,9 +1137,11 @@ mod tests {
     #[test]
     fn receiving_keys_are_read_back_checked() {
         let id = registry::parse_account(BOB).unwrap();
-        let out = format!("Latest block is 9\n{}", json!({ "account": BOB, "npk": "AB".repeat(32), "vpk": "cd".repeat(33), "fresh": false }));
+        // Real sizes: a 32-byte npk and an ML-KEM-768 vpk of 1184 bytes.
+        let out = format!("Latest block is 9\n{}", json!({ "account": BOB, "npk": "AB".repeat(32), "vpk": "cd".repeat(1184), "fresh": false }));
         let keys = parse_keys(&out, &id).unwrap();
-        assert_eq!(keys["keys"], format!("{}:{}", "ab".repeat(32), "cd".repeat(33)));
+        assert_eq!(keys["keys"], format!("{}:{}", "ab".repeat(32), "cd".repeat(1184)));
+        assert!(parse_keys(&json!({ "account": BOB, "npk": "ab".repeat(32), "vpk": "cd".repeat(256) }).to_string(), &id).is_err(), "a short vpk");
         assert_eq!(keys["account"], format!("Private/{BOB}"));
         assert!(keys["reveals"].as_str().unwrap().contains("can't spend"));
         assert!(parse_keys(&json!({ "account": ART, "npk": "ab".repeat(32), "vpk": "cd" }).to_string(), &id).is_err(), "another account's keys");

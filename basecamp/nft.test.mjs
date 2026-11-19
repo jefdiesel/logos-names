@@ -1,5 +1,5 @@
 // Checks Collectibles' rules (qml/nft.mjs). Run with: node basecamp/nft.test.mjs
-import { proofLine, proofKind, proofPublicLine, proofGoodToKnow, proofChecksLine, capabilityVerb, readyRows, privateOnly, accountShown, idShown, tokenLine, collectionTitle, metadataRows, accountGroups, collectionCounts, receiveChoices, collectionLink, linkOf, toProblem, toTheirKeys, approveWhy, defaultPayer, jobLine, jobEnded, imageConsent, burnConfirm } from "./qml/nft.mjs";
+import { capabilityTitle, VPK_HEX, leftLine, splitRunningJobs, payerLinkLine, listAccounts, tickedFor, pruneTicks, proofLine, proofKind, proofPublicLine, proofGoodToKnow, proofChecksLine, capabilityVerb, readyRows, privateOnly, accountShown, idShown, tokenLine, collectionTitle, metadataRows, accountGroups, collectionCounts, receiveChoices, collectionLink, linkOf, toProblem, toTheirKeys, approveWhy, defaultPayer, jobLine, jobEnded, imageConsent, burnConfirm } from "./qml/nft.mjs";
 import { readFileSync } from "node:fs";
 
 let failures = 0;
@@ -45,7 +45,10 @@ check("collectionLink id", collectionLink(ART, PROGRAM), { program: PROGRAM, def
 check("collectionLink id without program", collectionLink(ART, "").problem !== undefined, true);
 check("collectionLink junk", collectionLink("https://x", PROGRAM).problem !== undefined, true);
 
-check("toProblem good", ["alice", "alice.lez", "Public/" + BOB, "Private/" + BOB, "ab".repeat(32) + ":" + "cd".repeat(10)].map(toProblem), ["", "", "", "", ""]);
+check("toProblem good", ["alice", "alice.lez", "Public/" + BOB, "Private/" + BOB, "ab".repeat(32) + ":" + "cd".repeat(1184)].map(toProblem), ["", "", "", "", ""]);
+// Real receiving keys: a 1184-byte vpk. Any other length is refused here as in the module.
+check("toProblem vpk length", [10, 256, 1183, 1185].map((n) => toProblem("ab".repeat(32) + ":" + "cd".repeat(n)) !== ""), [true, true, true, true]);
+check("VPK_HEX", VPK_HEX, 2368);
 check("toProblem bad", ["", BOB, "Public/x!", "ab:cd", "two words"].map((t) => toProblem(t) !== ""), [true, true, true, true, true]);
 check("toTheirKeys", [toTheirKeys("ab".repeat(32) + ":cd"), toTheirKeys("alice")], [true, false]);
 
@@ -86,6 +89,24 @@ check("proofGoodToKnow names the app", proofGoodToKnow({ good_to_know: ["a", "b"
 check("proofChecksLine", proofChecksLine({ gate: null, nft_program_label: { registry: false } }), "Program checks: gate none set up on this network yet, NFT program unknown (no Program Registry).");
 check("capabilityVerb", ["nft_list", "nft_transfers", "membership_proof"].map(capabilityVerb), ["see your NFTs", "propose NFT transfers", "ask you for membership proofs"]);
 
+// Review round 6.
+check("jobEnded receive with one left waiting", jobEnded({ kind: "nft_receive" }, { state: "done", received: 0, left: [{ account: "Private/" + BOB, code: "not_ready" }] }).kind, "problem");
+check("jobEnded says the next step", jobEnded({ kind: "nft_receive" }, { state: "done", received: 1, left: [{ account: "Private/" + BOB, code: "already_holds" }] }).text.startsWith("Received 1 NFT. 1 is still waiting for Private HLEwXN…eim2: that account already holds"), true);
+check("leftLine other collection offers no retry", leftLine({ account: "Private/" + BOB, code: "other_collection" }).includes("can never take"), true);
+check("leftLine not ready says make it ready", leftLine({ account: "Private/" + BOB, code: "not_ready" }).includes("Make Private HLEwXN…eim2 ready"), true);
+const split = splitRunningJobs([{ id: "-wallet-1", name: "-wallet", kind: "nft_send", started: 5 }, { id: "x", name: "jef", kind: "post" }]);
+check("splitRunningJobs: an NFT job goes to Collectibles", [split.nft.id, split.nft.label, split.rest.map((j) => j.id)], ["-wallet-1", "Your NFT send", ["x"]]);
+check("splitRunningJobs: none", splitRunningJobs([{ id: "x", kind: "post" }]).nft, null);
+check("jobLine of a picked-up job", jobLine({ label: "Your NFT send", proves: undefined, started: 0 }, 120000), "Your NFT send: under way, 2 min so far. You can keep using Names meanwhile.");
+check("payerLinkLine", [payerLinkLine({ proven: false }, { payer: "Public/F" }, ""), payerLinkLine({ proven: false }, { payer: "Public/F" }, "Public/F"), payerLinkLine({ proven: true }, { payer: "Private/P" }, "")].map((l) => l !== ""), [true, false, false]);
+check("listAccounts: the union over programs", listAccounts([{ program: "a", error: "x" }, { program: "b", holdings: [{ account: "Public/1", account_kind: "public" }, { account: "Private/2", account_kind: "private" }] }, { program: "c", holdings: [{ account: "Public/1" }] }]).map((r) => r.account), ["Public/1", "Private/2"]);
+check("tickedFor: only this request's, only those shown", tickedFor({ r1: { "Private/2": true, "Public/9": true }, r2: { "Public/1": true } }, "r1", [{ account: "Private/2" }, { account: "Public/1" }]), ["Private/2"]);
+check("tickedFor: a new request starts empty", tickedFor({ r1: { "Private/2": true } }, "r3", [{ account: "Private/2" }]), []);
+check("pruneTicks drops requests gone", pruneTicks({ r1: { a: true }, r2: { b: true } }, [{ id: "r2" }]), { r2: { b: true } });
+check("imageConsent host must be a plain name", [imageConsent("https://<b>x</b> y/", false).allowed, imageConsent("https://img.example.com:8443/a.png", false).allowed], [false, true]);
+
+check("capabilityTitle", [capabilityTitle({ capability: "nft_list", accounts: ["Public/" + BOB] }), capabilityTitle({ capability: "membership_proof" }).includes("nothing about your accounts")], ["NFT list: Public HLEwXN…eim2", true]);
+
 // The words the wallet never uses, in the new code and the Collectibles block of Main.qml.
 const source = readFileSync(new URL("./qml/nft.mjs", import.meta.url), "utf8");
 const main = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
@@ -94,6 +115,12 @@ check("Collectibles block present", block.length > 1000, true);
 for (const [label, text] of [["nft.mjs", source.split("\n").filter((l) => !l.startsWith("//")).join("\n")], ["Main.qml Collectibles", block]]) {
   check(label + ": no 'lookup' / 'official'", /\blook ?up\b|\bofficial\b/i.test(text), false);
 }
+// Every Text in the Collectibles blocks says its format (an app's or a chain's text is never markup).
+const texts = block.split(/\bText \{/).slice(1).map((t) => t.slice(0, 600));
+check("every Collectibles Text sets textFormat", texts.filter((t) => !/textFormat:/.test(t.split("\n")[0] + t)).length, 0);
+const hint = main.slice(main.indexOf("    component Hint: Text {"), main.indexOf("    component Hint: Text {") + 300);
+check("Hint is plain text by default", /textFormat: Text.PlainText/.test(hint), true);
+
 // No polling while the page is closed: every NFT timer runs only while Collectibles is open.
 const timers = block.split("Timer {").slice(1).map((t) => t.slice(0, 400)).filter((t) => /repeat: true/.test(t));
 check("every Collectibles timer needs the page open", timers.length > 0 && timers.every((t) => t.includes('root.section === "collectibles"')), true);
