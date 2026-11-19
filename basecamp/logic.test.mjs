@@ -1974,6 +1974,25 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("#4 the screen derives Receive from the same inputs as the table", /readonly property var receiveTokenList: Logic\.receiveTokens\(receiveRegistry, bridgeDeploymentTokens\)/.test(qml3), true);
 }
 
+// wallet-1120: the LEZ Bridge next-1119b pins the release prover; a changed one is refused with
+// code "prover_changed", and the Names app offers "Use this prover again" (same path, then one retry).
+{
+  const L = await import("./qml/logic.mjs");
+  const twice2 = (o) => JSON.stringify(JSON.stringify(o));
+  const r = L.bridgeReply(twice2({ success: false, value: null, error: "The release prover changed since it was set (/x/release-prover.sh), so this module didn't run it.", code: "prover_changed" }));
+  check("prover changed: the code is passed on", [r.ok, r.kind, r.code, /changed since it was set/.test(r.error)], [false, "error", "prover_changed", true]);
+  check("prover changed: no code is \"\"", L.bridgeReply(twice2({ success: false, value: null, error: "no" })).code, "");
+  check("prover again: the bridge's set path, else the installed one",
+    [L.proverAgainPath({ release_prover: ["/Volumes/x/release-prover.sh"] }), L.proverAgainPath({ release_prover: [] }), L.proverAgainPath(null), L.proverAgainPath({ release_prover: ["relative"] })],
+    ["/Volumes/x/release-prover.sh", L.RELEASE_PROVER, L.RELEASE_PROVER, L.RELEASE_PROVER]);
+  const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  check("prover changed: bridgeCall hands the code on; sbProve shows it; the button sets the config's path then proves once",
+    [/if \(failed\) failed\(r\.error, r\.kind, r\.code \|\| ""\)/.test(qml), /if \(code === Logic\.PROVER_CHANGED\)\n\s*sbProverChanged = sentence\(message\)/.test(qml),
+     /var path = Logic\.proverAgainPath\(cfg\)\n\s*bridgeCall\("set_release_prover", \[JSON\.stringify\(\[path\]\)\]/.test(qml), /sbProverChanged = ""\n\s*sbProve\(\)\n/.test(qml),
+     /onPressed: root\.sbProverAgain\(\)/.test(qml), /visible: root\.sbProverChanged !== ""/.test(qml)],
+    [true, true, true, true, true, true]);
+}
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);
 

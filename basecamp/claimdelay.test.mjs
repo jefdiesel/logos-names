@@ -108,5 +108,27 @@ check("finding 4: the wallet's jobs answer ticks the claim time", (qml.match(/if
 check("finding 2: features read after the page opened read the plan", /onBridgeFeaturesChanged: if \(walletView === "pclaim"[^\n]*pcDelayLoad\(pcDeposit\)/.test(qml), true);
 check("finding 2: a failed read keeps receive_status's plan as the fallback", /fallback: pcDeposit !== "" && receiveStatuses\[pcDeposit\]/.test(qml), true);
 
+// wallet-1120 bundles the LEZ Bridge next-1119b (27f7608), whose FEATURES has claim_delay: its
+// receive_claim_plan / receive_status `claim_delay` value as claim_delay.rs `view` writes it, every
+// field, read as the page and the card read it.
+{
+  const nowS = Math.floor(now / 1000);
+  const view = (delay, why, claimAt, extra) => Object.assign({ id: "dep-1", delay, why, text: "…", now: nowS, due: delay === "on" && claimAt !== null && nowS >= claimAt,
+    seen_claimable_at: nowS - 600, claim_at: claimAt, delay_s: claimAt === null ? null : claimAt - (nowS - 600), planned_claim_at: null, chose_now_at: null, min_s: 3600, max_s: 86400 }, extra || {});
+  const bundled = ["receive", "claim_delay", "release_fee_choice", "relay_list", "release_relayer", "burn_opening", "address_book"];
+  const waits = D.claimDelayState({ features: bundled, featuresKnown: true, row: priv, plan: view("on", "private", nowS + 7200), nowMs: now, offsetMin: 0 });
+  check("27f7608 view: a private receive waits for its time", [waits.on, waits.hold, waits.due, waits.line !== ""], [true, true, false, true]);
+  check("27f7608 view: due", D.claimDelayState({ features: bundled, row: priv, plan: view("on", "private", nowS - 1), nowMs: now }).due, true);
+  check("27f7608 view: pending (not claimable yet), public, claimed and chose_now are off",
+    [D.claimDelayState({ features: bundled, row: priv, plan: view("pending", "not_claimable", null), nowMs: now }).why, D.claimDelayState({ features: bundled, row: priv, plan: view("off", "public", null), nowMs: now }).why,
+     D.claimDelayState({ features: bundled, row: priv, plan: view("off", "claimed", nowS - 10), nowMs: now }).why, D.claimDelayState({ features: bundled, row: priv, plan: view("off", "chose_now", nowS, { chose_now_at: nowS }), nowMs: now }).why],
+    ["pending", "public", "claimed", "chose_now"]);
+  check("27f7608 view: the card's line from receive_status.claim_delay", D.claimDelayCardLine({ features: bundled, row: priv, status: { claim_delay: view("on", "private", nowS + 7200) }, nowMs: now, offsetMin: 0 }),
+    "Planned claim at about 11:00, to hide which deposit is yours. Open it then to claim.");
+  // The bundled bridge's pin (logic.mjs BUNDLED_BRIDGE) is the build whose FEATURES these are.
+  const logic = readFileSync(new URL("./qml/logic.mjs", import.meta.url), "utf8");
+  check("the bundled bridge is next-1119b 27f7608", /build: "27f7608" \}/.test(logic), true);
+}
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);

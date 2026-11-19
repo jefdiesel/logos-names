@@ -1293,8 +1293,9 @@ export function bridgeReply(reply) {
     for (var depth = 0; depth < 2 && typeof r === "string"; depth++) {
         try { r = JSON.parse(r) } catch (e) { return { ok: false, kind: "error", error: "The LEZ Bridge module answered something that isn't JSON." } }
     }
+    // A refusal may carry a code beside its words (`send_back_prove`'s "prover_changed"): passed on.
     if (r && typeof r === "object" && "success" in r)
-        return r.success ? { ok: true, value: r.value } : { ok: false, kind: "error", error: bridgeText(r.error || "The LEZ Bridge module did not say why.") }
+        return r.success ? { ok: true, value: r.value } : { ok: false, kind: "error", error: bridgeText(r.error || "The LEZ Bridge module did not say why."), code: typeof r.code === "string" ? r.code : "" }
     // Classified on the module's own words, shown cleaned and cut (bridgeText).
     var said = r && typeof r === "object" ? String(r.error || "") : String(r)
     if (/auth token|unauthori[sz]ed/i.test(said))
@@ -2788,6 +2789,22 @@ export function sendBackBurnHeld(value) {
 /// release-prover.sh): set in the LEZ Bridge (`set_release_prover`) the first time "Make the
 /// proof" finds none set, if it is there; the bridge refuses a path with no program.
 export const RELEASE_PROVER = "/Volumes/exos162/logos/rfp-022/v4/release-prover.sh"
+
+/// The LEZ Bridge (next-1119b on) pins the release prover it was given, and refuses to run it once
+/// the file, or a helper beside it, changed (`send_back_prove`: code "prover_changed"). The Names
+/// app says so and offers to set the same program again; nothing runs until the person does.
+export const PROVER_CHANGED = "prover_changed"
+export const PROVER_CHANGED_LINE = "The release prover on this computer changed since it was set up, so the LEZ Bridge didn't run it. If you updated it yourself, use it again. If you didn't, leave it and find out what changed it."
+export const PROVER_AGAIN_LABEL = "Use this prover again"
+export const PROVER_AGAIN_BUSY = "Setting it again…"
+
+/// The program to set again after "prover_changed": the one the bridge has set (its config's
+/// `release_prover`, the original's path), else the installed one this app sets by itself.
+export function proverAgainPath(config) {
+    var set = config && Array.isArray(config.release_prover) ? config.release_prover : []
+    var first = set.length > 0 ? String(set[0] || "") : ""
+    return /^\//.test(first) ? first : RELEASE_PROVER
+}
 
 /// A check that answered "too many requests" (the endpoint's 429, after the bridge's own retries):
 /// a wait, not a failure.

@@ -1036,7 +1036,7 @@ Item {
                 againAfter(2000 * (tries + 1), function() { bridgeCall(method, args, done, failed, timeout, retry, tries + 1) })
                 return
             }
-            if (failed) failed(r.error, r.kind)
+            if (failed) failed(r.error, r.kind, r.code || "")
         }, timeout || 120000)
     }
     /// A saved list of bridges without v4 (the bundled bridge's default since 0343cb0) gets it
@@ -2016,9 +2016,11 @@ Item {
     property bool sbNamesOld: false        // send_back_burn said this Names Wallet can't sign a burn
     property bool sbCommandCopied: false
     property bool sbProverTried: false     // set_release_prover tried once in this window
+    property string sbProverChanged: ""    // send_back_prove's "prover_changed" words, until set again
+    property bool sbProverAgainAsking: false
     property bool sbSettleAsking: false    // "Finish on Ethereum": the consent sentence is on screen
     property bool sbMoreOpen: false        // the by-hand path behind More, while the service is offered
-    onSbFocusChanged: { sbSettleAsking = false; sbMoreOpen = false }
+    onSbFocusChanged: { sbSettleAsking = false; sbMoreOpen = false; sbProverChanged = "" }
     readonly property bool sbCan: Logic.bridgeCan(bridgeFeatures, "send_back")
     readonly property var sbAmounts: Logic.sendBackAmounts(receiveRegistry, sbAsset, bridgeTokenTable)
     /// The bridge new send-backs are planned on (Settings → Bridge), from the LEZ Bridge's config;
@@ -2558,6 +2560,7 @@ Item {
             return
         sbAsking = true
         sbError = ""
+        sbProverChanged = ""
         var id = sbFocus
         bridgeCall("send_back_prove", [id], function(value) {
             // No prover set yet: the installed one, once (the bridge refuses a path with no program).
@@ -2595,11 +2598,39 @@ Item {
             sbStatuses = all
             sbStatusesChanged()
             sbScheduleNext()
-        }, function(message, kind) {
+        }, function(message, kind, code) {
             sbAsking = false
-            sbError = sentence(message)
-            console.log("names_ui: send back: send_back_prove:", kind, message)
+            // The pinned prover changed: said, with "Use this prover again" (sbProverAgain).
+            if (code === Logic.PROVER_CHANGED)
+                sbProverChanged = sentence(message)
+            else
+                sbError = sentence(message)
+            console.log("names_ui: send back: send_back_prove:", kind, code, message)
         }, 120000, false)
+    }
+    /// "Use this prover again": the LEZ Bridge's set program (its config's release_prover), set again
+    /// with set_release_prover, which pins the file as it is now; then the proof is asked once more.
+    function sbProverAgain() {
+        if (sbProverAgainAsking || sbAsking)
+            return
+        sbProverAgainAsking = true
+        sbError = ""
+        bridgeCall("config", [], function(cfg) {
+            var path = Logic.proverAgainPath(cfg)
+            bridgeCall("set_release_prover", [JSON.stringify([path])], function() {
+                console.log("names_ui: send back: release prover set again:", path)
+                sbProverAgainAsking = false
+                sbProverChanged = ""
+                sbProve()
+            }, function(message, kind) {
+                sbProverAgainAsking = false
+                sbError = sentence(message)
+                console.log("names_ui: send back: set_release_prover again:", kind, message)
+            }, 30000, false)
+        }, function(message) {
+            sbProverAgainAsking = false
+            sbError = sentence(message)
+        }, 15000)
     }
     /// "Finish on Ethereum" (rfp-022 NAMES-SEND-BACK.md §4a): the bridge's settlement service proves,
     /// wraps and releases it. Without a proof helper here the exit secret goes, so the module asks
@@ -13406,7 +13437,16 @@ Item {
                         Hint { visible: Logic.settleNotOffered(sendBackScreen.st) !== ""; font.pixelSize: root.px(15); text: root.sentence(Logic.settleNotOffered(sendBackScreen.st)) }
                         Action { visible: sendBackScreen.p.action === "settle" && (sendBackScreen.p.more || "") !== "" && !root.sbSettleAsking; label: root.sbMoreOpen ? "Less" : "More"; onPressed: root.sbMoreOpen = !root.sbMoreOpen }
                         // Recorded: the release proof on this computer.
-                        Action { visible: sendBackScreen.act === "prove" && root.sbWitness === null; label: root.sbAsking ? "Starting…" : "Make the proof"; strong: sendBackScreen.p.action !== "settle"; enabledNow: !root.sbAsking; onPressed: root.sbProve() }
+                        Action { visible: sendBackScreen.act === "prove" && root.sbWitness === null && root.sbProverChanged === ""; label: root.sbAsking ? "Starting…" : "Make the proof"; strong: sendBackScreen.p.action !== "settle"; enabledNow: !root.sbAsking; onPressed: root.sbProve() }
+                        // The release prover changed since it was set (the LEZ Bridge pins it): said, and set again only by the person.
+                        ColumnLayout {
+                            visible: root.sbProverChanged !== ""
+                            Layout.fillWidth: true
+                            spacing: 8
+                            StatusLine { Layout.fillWidth: true; kind: "problem"; text: Logic.PROVER_CHANGED_LINE }
+                            Hint { font.pixelSize: root.px(15); textFormat: Text.PlainText; text: "The LEZ Bridge says: " + root.sbProverChanged }
+                            Action { label: root.sbProverAgainAsking ? Logic.PROVER_AGAIN_BUSY : root.sbAsking ? "Starting…" : Logic.PROVER_AGAIN_LABEL; strong: true; enabledNow: !root.sbProverAgainAsking && !root.sbAsking; onPressed: root.sbProverAgain() }
+                        }
                         ColumnLayout {
                             visible: root.sbWitness !== null && (sendBackScreen.p.stage === "recorded" || sendBackScreen.p.stage === "proving")
                             Layout.fillWidth: true
