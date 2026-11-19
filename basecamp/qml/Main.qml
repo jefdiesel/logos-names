@@ -10464,6 +10464,16 @@ Item {
                                                 kind: pj !== null && pj.stage !== "done" ? Logic.toneKind(pj.tone) : Logic.toneKind(arrivingRow.p.tone)
                                                 text: pj !== null && pj.stage !== "done" && arrivingRow.p.claim ? "Claiming privately · " + pj.card : arrivingRow.p.card
                                             }
+                                            // PATCH privacy-m5 claim time on the card (rfp-022 docs/PRIVACY-M5.md §1): when the
+                                            // "Claim privately" page will claim; the card itself never starts one.
+                                            Hint {
+                                                readonly property string line: arrivingRow.p.claim && !root.privateClaimJobs[arrivingRow.modelData.id]
+                                                    ? ClaimDelay.claimDelayCardLine({ features: root.bridgeFeatures, row: arrivingRow.modelData, status: root.receiveStatuses[arrivingRow.modelData.id], nowMs: root.receiveNow }) : ""
+                                                visible: line !== ""
+                                                font.pixelSize: root.px(15)
+                                                text: line
+                                            }
+                                            // END PATCH
                                             Hint {
                                                 visible: arrivingRow.p.stage === "claimed"
                                                 font.pixelSize: root.px(15)
