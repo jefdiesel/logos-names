@@ -1,7 +1,7 @@
    Compiling names_methods v0.1.0 (/Volumes/exos162/logos/fix-1119/lns-deeds/src/methods)
    Compiling names_core v0.1.0 (/Volumes/exos162/logos/fix-1119/lns-deeds/src/core)
    Compiling names_engine_test v0.1.0 (/Volumes/exos162/logos/fix-1119/lns-deeds/src/tools/engine-test)
-    Finished `release` profile [optimized] target(s) in 5m 46s
+    Finished `release` profile [optimized] target(s) in 7m 32s
 warning: the following packages contain code that will be rejected by a future version of Rust: block v0.1.6
 note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
      Running `/Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names_engine_test`
@@ -57,6 +57,9 @@ thread 'main' (1) panicked at /Volumes/exos162/logos/lp0001/job-a/lez-programs/p
 holding account must authorize its initialization
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 ok   N2: alice cannot use her old deed account through the NFT program either
+ok   bob hands the name back to alice
+ok   and alice gives it to bob again
+ok   A -> B -> A -> B: the deed lands again in an emptied deed account each time
 ok   bob releases the name and collects the deposit
 ok   the refund moved atomically
 ok   the release burned the deed (supply 0)
