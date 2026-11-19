@@ -32,7 +32,8 @@ use names_core::{
     commitment_seed, deposit_address, name_seeds, settings_seed, shortlist,
     NameRecord, Page, Settings, commitment,
     normalize_name, owner_tag, page_address, record_address, settings_address,
-    validate_name,
+    validate_name, OwnerTag, TIER_NORMAL, decode_record, deed as lns_deed, deed_definition_address,
+    deed_definition_seed, deed_holding_address, deed_holding_seed, registration_nonce,
 };
 use names_seal::{
     Derived, PageContent, Profile, TextRecord, derive, open_page, open_profile, seal_page,
@@ -238,6 +239,22 @@ fn short_list() -> Result<&'static shortlist::ShortList> {
 }
 
 /// The proof of where `id` sits relative to the short-name list, and its tier.
+/// A name's deed (see `names_core::deed`).
+#[derive(Subcommand)]
+enum DeedCommand {
+    /// The deed's definition, the deed account holding it and what both hold.
+    Show {
+        #[arg(value_parser = parse_name)]
+        name: String,
+    },
+    /// Mint the deed of a name you hold that has none (one registered before deeds).
+    /// Locked, reserved and short names have no deed.
+    Mint {
+        #[arg(value_parser = parse_name)]
+        name: String,
+    },
+}
+
 fn length_proof(id: &NameId) -> Result<(LengthProof, u8)> {
     let list = short_list()?;
     let proof = list.prove(id).map_err(|reason| anyhow!("no length proof: {reason}"))?;
@@ -671,6 +688,10 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// A name's deed: the 1-of-1 NFT that goes with it. `names deed show <name>`,
+    /// `names deed mint <name>` (for a name registered before deeds).
+    #[command(subcommand)]
+    Deed(DeedCommand),
     /// The Logos Blockchain, through your own node: status, balances, sending to a
     /// key or a name, stake and leader rewards. Run `names chain help`.
     #[command(subcommand)]
@@ -1301,14 +1322,115 @@ impl Client {
         vec![self.own_actor(signer), self.registry_actor(record), self.registry_actor(page)]
     }
 
+    /// The NFT program's actor on the registry account behind `seed` (a deed's definition
+    /// or a deed account). The seed is what lets a transaction create it.
+    fn nft_on(&self, seed: PdaSeed) -> AccountMention {
+        AccountIdentity::PublicPda { program: self.program, seed }.select_program_actor_state(lns_deed::NFT_PROGRAM)
+    }
+
+    /// What a change to the deed of `id` minted with `nonce` reaches: its definition and
+    /// the deed accounts of `holders`, under the NFT program; for a mint, also the
+    /// registry's own actor on the first holder's deed account (the mint's first hop).
+    fn deed_mentions(&self, id: &NameId, nonce: &[u8; 32], holders: &[OwnerTag], minting: bool) -> Vec<AccountMention> {
+        let definition = deed_definition_address(&self.program, id, nonce);
+        let mut mentions = vec![self.nft_on(deed_definition_seed(id, nonce))];
+        for (index, holder) in holders.iter().enumerate() {
+            let seed = deed_holding_seed(&definition, holder);
+            mentions.push(self.nft_on(seed));
+            if minting && index == 0 {
+                mentions.push(self.registry_actor(seed));
+            }
+        }
+        mentions
+    }
+
+    /// The NFT program deeds are minted on, as deployed; refused unless it is the pinned image.
+    async fn nft_program(&self) -> Result<Program> {
+        let program = self
+            .program_at(lns_deed::NFT_PROGRAM, "LOGOS_NAMES_NFT_ELF", "lns-nft", "the NFT program deeds are minted on")
+            .await?;
+        if image_bytes(program.id()) != lns_deed::NFT_PROGRAM_IMAGE_ID {
+            bail!(
+                "the NFT program at {} is not the one deeds are pinned to (image {})",
+                lns_deed::NFT_PROGRAM,
+                hex::encode(lns_deed::NFT_PROGRAM_IMAGE_ID)
+            );
+        }
+        Ok(program)
+    }
+
+    /// The deed of `name`, what its definition and its holder's deed account hold, as JSON.
+    async fn deed_show(&self, name: &str) -> Result<serde_json::Value> {
+        let (Derived { id, .. }, record, _) = self.lookup_held(name).await?;
+        let Some(deed) = record.deed else {
+            let (_, tier) = length_proof(&id)?;
+            let why = if tier == TIER_NORMAL {
+                "registered before deeds: its holder can mint one with `names deed mint`"
+            } else {
+                "locked, reserved and short names have no deed"
+            };
+            return Ok(serde_json::json!({ "name": name, "deed": null, "why": why }));
+        };
+        let holding = deed_holding_address(&self.program, &deed.definition, &record.owner);
+        let definition_state = lns_deed::decode_state(&self.actor_state_of(deed.definition, lns_deed::NFT_PROGRAM).await?);
+        let holding_state = lns_deed::decode_state(&self.actor_state_of(holding, lns_deed::NFT_PROGRAM).await?);
+        let definition_json = match definition_state {
+            Some(lns_deed::NftState::Definition(found)) => serde_json::json!({
+                "name": found.name,
+                "printable_supply": found.printable_supply.to_string(),
+                "standard": format!("{:?}", found.metadata.standard),
+                "uri": found.metadata.uri,
+                "creators": found.metadata.creators,
+            }),
+            other => serde_json::json!({ "unexpected": format!("{other:?}") }),
+        };
+        let holding_json = match holding_state {
+            Some(lns_deed::NftState::Master(master)) => serde_json::json!({
+                "kind": "master",
+                "definition": master.definition_id.to_string(),
+                "balance": master.print_balance.to_string(),
+                "holds_the_deed": master.definition_id == deed.definition && master.print_balance == 1,
+            }),
+            other => serde_json::json!({ "unexpected": format!("{other:?}") }),
+        };
+        Ok(serde_json::json!({
+            "name": name,
+            "nft_program": lns_deed::NFT_PROGRAM.to_string(),
+            "definition": deed.definition.to_string(),
+            "nonce": hex::encode(deed.nonce),
+            "holding": holding.to_string(),
+            "holder_tag": hex::encode(record.owner),
+            "definition_state": definition_json,
+            "holding_state": holding_json,
+        }))
+    }
+
+    /// Mints the deed of `name`, held here, which has none (it was registered before deeds).
+    async fn deed_mint(&mut self, name: &str) -> Result<()> {
+        let (Derived { id, .. }, record, _) = self.lookup_held(name).await?;
+        if record.deed.is_some() {
+            bail!("{name}{NAME_SUFFIX} already has a deed (`names deed show {name}`)");
+        }
+        let (length, tier) = length_proof(&id)?;
+        if tier != TIER_NORMAL {
+            bail!("{name}{NAME_SUFFIX} is locked (one to four characters, or reserved), so it has no deed");
+        }
+        let holder = self.holder(name, &id, &record)?;
+        let mut nonce = [0u8; 32];
+        getrandom::fill(&mut nonce).map_err(|e| anyhow!("no randomness: {e}"))?;
+        let [record_seed, ..] = name_seeds(&id);
+        let mut mentions = vec![self.own_actor(holder), self.registry_actor(record_seed)];
+        mentions.extend(self.deed_mentions(&id, &nonce, &[record.owner], true));
+        println!("minting the deed of {name}{NAME_SUFFIX}: definition {}", deed_definition_address(&self.program, &id, &nonce));
+        self.send_with(mentions, &Instruction::MintDeed { id, nonce, length }, 0, true).await
+    }
+
     async fn record(&self, id: &NameId) -> Result<Option<NameRecord>> {
         let bytes = self.actor_state(record_address(&self.program, id)).await?;
         if bytes.is_empty() {
             return Ok(None);
         }
-        Ok(Some(
-            borsh::from_slice(&lez03_record(bytes)).context("the record does not hold a name record")?,
-        ))
+        Ok(Some(decode_record(&bytes).context("the record does not hold a name record")?))
     }
 
     async fn settings(&self) -> Result<Option<Settings>> {
@@ -1619,6 +1741,8 @@ impl Client {
         // within TIME_WINDOW_MS of that (`proving_lead`); a slow proof or chain can land it
         // outside. The commitment stays usable for MAX_COMMIT_AGE_MS, so try again.
         let expires_at = made.saturating_add(MAX_COMMIT_AGE_MS);
+        // A lapsed registration's deed is burned by this one.
+        let lapsed_deed = self.record(&id).await?.and_then(|old| old.deed.map(|deed| (deed, old.owner)));
         let mut attempt = 0;
         loop {
             attempt += 1;
@@ -1632,8 +1756,16 @@ impl Client {
             mentions.push(self.registry_actor(settings_seed()));
             mentions.push(self.registry_actor(commitment_seed(&promised)));
             mentions.extend(self.paying(&id, owner, &cost));
+            if let Some((deed, old_owner)) = &lapsed_deed {
+                mentions.extend(self.deed_mentions(&id, &deed.nonce, &[*old_owner], false));
+            }
+            // A name of the normal tier is minted its deed in this transaction.
+            if tier == TIER_NORMAL {
+                mentions.extend(self.deed_mentions(&id, &registration_nonce(&promised, claimed), &[holder], true));
+            }
+            let deeds = tier == TIER_NORMAL || lapsed_deed.is_some();
             let sent = self
-                .send(
+                .send_with(
                     mentions,
                     &Instruction::Register {
                         id,
@@ -1647,6 +1779,7 @@ impl Client {
                         length: length.clone(),
                     },
                     fee,
+                    deeds,
                 )
                 .await;
             let Err(error) = sent else {
@@ -1868,16 +2001,22 @@ impl Client {
                      public` until its ID appears); a private one does not, because LEZ 0.4 derives other private account IDs"
                 )
             })?;
+        let mut replaced_deed = None;
         if let Some(held) = self.record(&id).await? {
             if held.claimed {
                 bail!("{name}{NAME_SUFFIX} was already claimed");
             }
             println!("{name}{NAME_SUFFIX} was registered here since; this claim replaces that registration");
+            replaced_deed = held.deed.map(|deed| (deed, held.owner));
         }
         println!("claiming {name}{NAME_SUFFIX}, held by {holder} on the earlier chain");
         let mut mentions = self.on_record_and_page(&id, holder);
         mentions.push(self.registry_actor(settings_seed()));
-        self.send(mentions, &Instruction::Claim { id, sealed: record.sealed.clone(), now, proof }, 0).await?;
+        // The replaced registration's deed is burned.
+        if let Some((deed, owner)) = &replaced_deed {
+            mentions.extend(self.deed_mentions(&id, &deed.nonce, &[*owner], false));
+        }
+        self.send_with(mentions, &Instruction::Claim { id, sealed: record.sealed.clone(), now, proof }, 0, replaced_deed.is_some()).await?;
         let mut defaults = load_defaults();
         if !defaults.names.contains(&name.to_owned()) {
             defaults.names.push(name.to_owned());
@@ -1941,15 +2080,14 @@ impl Client {
             bail!("{new_owner} already holds {name}{NAME_SUFFIX}, so nothing was sent");
         }
         let holder = self.holder(name, &id, &record)?;
-        self.send(
-            self.on_record_and_page(&id, holder),
-            &Instruction::Transfer {
-                id,
-                new_owner: owner_tag(&id, &new_owner),
-            },
-            0,
-        )
-        .await
+        let new_tag = owner_tag(&id, &new_owner);
+        let mut mentions = self.on_record_and_page(&id, holder);
+        // The deed goes with the name, in the same transaction.
+        if let Some(deed) = &record.deed {
+            println!("its deed moves with it, to the new holder's deed account {}", deed_holding_address(&self.program, &deed.definition, &new_tag));
+            mentions.extend(self.deed_mentions(&id, &deed.nonce, &[record.owner, new_tag], false));
+        }
+        self.send_with(mentions, &Instruction::Transfer { id, new_owner: new_tag }, 0, record.deed.is_some()).await
     }
 
     /// Releases `name`, emptying its record and page.
@@ -1970,15 +2108,30 @@ impl Client {
             mentions.push(self.registry_balance(name_seeds(&id)[2]));
             mentions.push(self.signer(holder).balance());
         }
-        self.send(mentions, &Instruction::Release { id, refund }, 0).await
+        // Its deed is burned.
+        if let Some(deed) = &record.deed {
+            println!("its deed is burned");
+            mentions.extend(self.deed_mentions(&id, &deed.nonce, &[record.owner], false));
+        }
+        self.send_with(mentions, &Instruction::Release { id, refund }, 0, record.deed.is_some()).await
     }
 
     /// Sends `instruction` from the signer whose actor is `mentions[0]`; `spent` is
     /// what it moves out of the signer's balance besides the fee.
     async fn send(&mut self, mentions: Vec<AccountMention>, instruction: &Instruction, spent: u128) -> Result<()> {
+        self.send_with(mentions, instruction, spent, false).await
+    }
+
+    /// [`Self::send`], with the NFT program run too when the change reaches a deed (`deeds`).
+    async fn send_with(&mut self, mentions: Vec<AccountMention>, instruction: &Instruction, spent: u128, deeds: bool) -> Result<()> {
         let program = self.program().await?;
         let message = borsh::to_vec(&RegistryMessage::Instruction(instruction.clone()))?;
-        self.transact(mentions, message, vec![(self.program, program)], spent, call_cycles(instruction)).await
+        let mut programs = vec![(self.program, program)];
+        if deeds {
+            programs.push((lns_deed::NFT_PROGRAM, self.nft_program().await?));
+        }
+        let cycles = call_cycles(instruction) + if deeds { DEED_CYCLES } else { 0 };
+        self.transact(mentions, message, programs, spent, cycles).await
     }
 
     /// Sends `message` to the actor `mentions[0]` and confirms it applied. `mentions`
@@ -3133,10 +3286,23 @@ fn gas_limit_for(cycles: u64) -> u64 {
 fn call_cycles(instruction: &Instruction) -> u64 {
     match instruction {
         Instruction::Commit { .. } => COMMIT_CYCLES,
-        Instruction::Register { .. } | Instruction::Claim { .. } => REVEAL_CYCLES,
+        Instruction::Register { .. } | Instruction::Claim { .. } | Instruction::MintDeed { .. } => REVEAL_CYCLES,
         Instruction::Release { .. } => 51_322,
         _ => CHANGE_CYCLES,
     }
+}
+
+/// What a deed's messages add to a call's cycles (mint, move or burn: the NFT program's
+/// two or three steps, about 28,000 gas each on rc3, and the registry's hop), with room.
+const DEED_CYCLES: u64 = 150_000;
+
+/// An image id as the bytes a header stores (eight little-endian words).
+fn image_bytes(id: lee_core::program::ProgramId) -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    for (chunk, word) in bytes.chunks_exact_mut(4).zip(id) {
+        chunk.copy_from_slice(&word.to_le_bytes());
+    }
+    bytes
 }
 
 /// A commitment's cycles (see [`call_cycles`]).
@@ -3562,15 +3728,6 @@ fn lez03_actor_state(reply: &serde_json::Value, program: &str) -> Option<Vec<u8>
 
 /// The registry before version 6 (the one on the LEZ 0.3 testnet).
 const BEFORE_CLAIMS: u8 = 6;
-
-/// A name record as this build reads it: one written before version 6 ends at `sealed`
-/// and was never claimed, so it gets the `claimed` byte it lacks.
-fn lez03_record(mut bytes: Vec<u8>) -> Vec<u8> {
-    if bytes.first().is_some_and(|version| *version < BEFORE_CLAIMS) {
-        bytes.push(0);
-    }
-    bytes
-}
 
 /// The settings as this build reads them: ones written before version 6 have no claims
 /// list, so they get an empty one (root, end time and earlier registry, all zeros).
@@ -4394,6 +4551,11 @@ async fn main() -> Result<()> {
                 .await
         }
         Command::Transfer { name, new_owner } => client.transfer(&name, new_owner).await,
+        Command::Deed(DeedCommand::Show { name }) => {
+            println!("{}", serde_json::to_string_pretty(&client.deed_show(&name).await?)?);
+            Ok(())
+        }
+        Command::Deed(DeedCommand::Mint { name }) => client.deed_mint(&name).await,
         Command::Release { name } => client.release(&name).await,
         Command::Open { name, port, no_browser, storage } => {
             let name = client.following(&name).await?;
@@ -4715,7 +4877,7 @@ mod balance_tests {
 
 #[cfg(test)]
 mod lez03_tests {
-    use super::{lez03_actor_state, lez03_record, lez03_settings};
+    use super::{lez03_actor_state, lez03_settings};
     use names_core::{NameRecord, Settings};
     use serde_json::json;
 
@@ -4741,11 +4903,15 @@ mod lez03_tests {
     #[test]
     fn version_5_records_and_settings_decode() {
         let v5 = unhex(&format!("05{}{}01000000ab", "01".repeat(32), "ff".repeat(8)));
-        let record: NameRecord = borsh::from_slice(&lez03_record(v5)).expect("a v5 record decodes");
-        assert_eq!((record.version, record.owner, record.expires, record.sealed, record.claimed), (5, [1; 32], u64::MAX, vec![0xab], false));
+        let record: NameRecord = names_core::decode_record(&v5).expect("a v5 record decodes");
+        assert_eq!((record.owner, record.expires, record.sealed, record.claimed, record.deed), ([1; 32], u64::MAX, vec![0xab], false, None));
         let v6 = unhex(&format!("06{}{}01000000ab01", "01".repeat(32), "ff".repeat(8)));
-        let record: NameRecord = borsh::from_slice(&lez03_record(v6)).expect("a v6 record decodes");
-        assert!(record.claimed);
+        let record: NameRecord = names_core::decode_record(&v6).expect("a v6 record decodes");
+        assert!(record.claimed && record.deed.is_none());
+        // A version 7 record (deeds) reads too, with its deed.
+        let v7 = unhex(&format!("07{}{}01000000ab0001{}{}", "01".repeat(32), "ff".repeat(8), "22".repeat(32), "33".repeat(32)));
+        let record: NameRecord = names_core::decode_record(&v7).expect("a v7 record decodes");
+        assert_eq!(record.deed.map(|deed| (deed.definition, deed.nonce)), Some((lee_core::account::AccountId::new([0x22; 32]), [0x33; 32])));
 
         let admin = "b6b80d9b12a1f9e36d60476dd4e41b4a2d5412671592f7447827728f83557808";
         let live = unhex(&format!("05{admin}{admin}{}01{}{}", "00".repeat(48), "00e1f505000000000000000000000000", "00943577000000000000000000000000"));
