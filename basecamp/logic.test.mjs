@@ -472,8 +472,8 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     { line: "Can't read the bridge test network: it answered HTTP 502 instead of a reading", tone: "bad", reset: "" });
   check("bridgeNetStatus fresh", bridgeNetStatus({ read, error: null }, clock), { line: "Updated t100 · block 1,572", tone: "plain", reset: "" });
   check("bridgeNetStatus stale", bridgeNetStatus({ read, error: "can't reach" }, clock).line, "Can't reach the bridge test network now. Showing what it said at t100.");
-  check("bridgeNetStatus reset", bridgeNetStatus({ read: Object.assign({}, read, { reset_at: 90 }) }, clock).reset, "The bridge test network was reset at t90. What was held there before is gone; everything shown was read again.");
-  check("bridgeNetStatus reset, a custom network's name", bridgeNetStatus({ read: Object.assign({}, read, { reset_at: 90 }) }, clock, "Reset test chain").reset, "Reset test chain was reset at t90. What was held there before is gone; everything shown was read again.");
+  check("bridgeNetStatus reset", bridgeNetStatus({ read: Object.assign({}, read, { reset_at: 90 }) }, clock).reset, "The bridge test network was reset at t90. What was held there before is gone; everything shown was read again. Settings → Network says whether it has new ids.");
+  check("bridgeNetStatus reset, a custom network's name", bridgeNetStatus({ read: Object.assign({}, read, { reset_at: 90 }) }, clock, "Reset test chain").reset, "Reset test chain was reset at t90. What was held there before is gone; everything shown was read again. Settings → Network says whether it has new ids.");
   check("bridgeNetRows", bridgeNetRows(read).map((r) => [r.title, r.found, r.assets.map((a) => a.symbol + " " + a.amount)]),
     [["Public account CCVd76Tk…pKnk", true, ["LEZ 23,786,858", "dUSDC 0", "wETH 0.1"]], ["Public account BVDcg8Sb…yBnD", false, []]]);
   // A busy module is never an absent one.
@@ -2041,6 +2041,8 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
   check("the switch is in Settings only: no NetSwitch left, one network list", [/NetSwitch/.test(qml), (qml.match(/model: Logic\.NETWORK_CHOICES/g) || []).length], [false, 1]);
   check("our LEZ 0.4 is the app's default too", /property string namesNet: "0\.4"/.test(qml), true);
+  check("a cold start reads LEZ 0.4 only once the module said its network", /readonly property bool bridgeNetOnView: configKnown && walletNet === "0\.4"/.test(qml), true);
+  check("a reset seen by the balance read checks the network file too", /rereadAfterReset\(resetAt\)\n(\s*\/\/[^\n]*\n)*\s*checkNetworkNow\(\)/.test(qml), true);
   check("every network button says what it is doing at once",
     [/label: root\.customChecking \? "Checking…" : "Check"/.test(qml), /root\.customSwitching \? "Switching…"/.test(qml), /label: root\.netChecking \? "Checking…" : "Check the network now"/.test(qml),
      /askLater\("network_custom", \[rpc, chain, file, false\]/.test(qml), /askLater\("network_custom", \[found\.rpc, found\.chain_id, found\.file_url, true\]/.test(qml)],

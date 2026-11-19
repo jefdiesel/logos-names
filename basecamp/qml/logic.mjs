@@ -974,7 +974,7 @@ export function bridgeNetStatus(value, clock, name) {
     var v = value || {}, read = v.read || null, error = String(v.error || "")
     var out = { line: "", tone: "plain", reset: "" }
     if (read && read.reset_at)
-        out.reset = networkResetLine(read.reset_at, name, clock)
+        out.reset = networkResetLine(read.reset_at, name, clock) + " Settings → Network says whether it has new ids."
     if (!read) {
         out.line = error ? "Can't read the bridge test network: " + error.replace(/^can't reach the bridge test network: /, "") : "Reading the bridge test network…"
         out.tone = error ? "bad" : "plain"

@@ -950,6 +950,9 @@ Item {
             if (resetAt > resetSeenAt) {
                 networkResetAt = resetAt
                 rereadAfterReset(resetAt)
+                // A reset redeploys the registry and the bridges: the network's file is read again,
+                // and new ids in it are offered in Settings, Network ("Use the new ids").
+                checkNetworkNow()
             }
             // Read before a claim seen in the last 2 min: asked again shortly, so "now holds"
             // is said only from a read made after it.
@@ -3802,7 +3805,10 @@ Item {
 
     // Read when the bridge test network's balances come into view (and after the person's own
     // actions, and on Refresh): no timer ("if they ignore it, we ignore it").
-    readonly property bool bridgeNetOnView: walletNet === "0.4" && section === "wallet" && walletView === "home" && Qt.application.state === Qt.ApplicationActive
+    // Only once the module has said which network is in use (configKnown): the app starts on 0.4,
+    // and a cold start must not read LEZ 0.4 (or ask its faucet) before the features and the network
+    // are known (wallet-1121).
+    readonly property bool bridgeNetOnView: configKnown && walletNet === "0.4" && section === "wallet" && walletView === "home" && Qt.application.state === Qt.ApplicationActive
     onBridgeNetOnViewChanged: if (bridgeNetOnView) { loadBridgeNet(); loadFaucetInfo() }
     // A read under way: ask again shortly for its result (the module answers from memory).
     Timer { id: bridgeNetSoon; interval: 3000; onTriggered: root.loadBridgeNet() }
