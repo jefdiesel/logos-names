@@ -1458,6 +1458,16 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("private note: the screen uses the rule", /visible: Logic\.sendBackPrivateNoteShown\(root\.sbPrivateSources, root\.sbAccount, root\.sbFromPrivate\); color: root\.ink; text: Logic\.PRIVATE_SEND_BACK_NOTE/.test(qml), true);
 }
 
+{
+  const { SEND_BACK_FINISH_YOURSELF } = await import("./qml/logic.mjs");
+  // Finishing a send-back needs no service of ours; sending it yourself links your address (rfp-022 release relayer).
+  check("finish yourself: no service needed, anyone may send", [/without the bridge's service/.test(SEND_BACK_FINISH_YOURSELF), /anyone can send the release to the vault/.test(SEND_BACK_FINISH_YOURSELF)], [true, true]);
+  check("finish yourself: the cost in words", /links that address to this send-back; a relayer avoids that\.$/.test(SEND_BACK_FINISH_YOURSELF), true);
+  check("finish yourself: plain words", /official|lookup/i.test(SEND_BACK_FINISH_YOURSELF), false);
+  const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  check("finish yourself: under the release steps and beside the consent", [/SEND_BACK_RELEASE_STEPS\[1\] }\n\s*Hint {[^\n]*SEND_BACK_FINISH_YOURSELF/.test(qml), /SETTLE_CONSENT }\n\s*Hint {[^\n]*SEND_BACK_FINISH_YOURSELF/.test(qml)], [true, true]);
+}
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);
 

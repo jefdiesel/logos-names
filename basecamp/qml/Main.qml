@@ -11957,6 +11957,7 @@ Item {
                             Layout.fillWidth: true
                             spacing: 8
                             Hint { color: root.ink; text: Logic.SETTLE_CONSENT }
+                            Hint { font.pixelSize: root.px(15); text: Logic.SEND_BACK_FINISH_YOURSELF }
                             RowLayout {
                                 spacing: 10
                                 Action { label: root.sbAsking ? "Handing it over…" : "Continue"; strong: true; enabledNow: !root.sbAsking; onPressed: root.sbSettle(true) }
@@ -12007,6 +12008,7 @@ Item {
                             NumberLine { text: "1. " + Logic.SEND_BACK_RELEASE_STEPS[0] }
                             Action { label: root.sbLinkCopied ? "Copied." : root.sbAsking ? "Getting the link…" : "Copy the link"; strong: sendBackScreen.p.action !== "settle"; enabledNow: !root.sbAsking; onPressed: root.sbCopyRelease() }
                             NumberLine { text: "2. " + Logic.SEND_BACK_RELEASE_STEPS[1] }
+                            Hint { font.pixelSize: root.px(15); text: Logic.SEND_BACK_FINISH_YOURSELF }
                         }
                         StatusLine { visible: sendBackScreen.st !== null && !!sendBackScreen.st.note && sendBackScreen.p.detail !== String(sendBackScreen.st.note); kind: Logic.isWaitMessage(sendBackScreen.st !== null ? sendBackScreen.st.note : "") ? "waiting" : ""; text: sendBackScreen.st !== null && sendBackScreen.st.note ? root.sentence(String(sendBackScreen.st.note)) : "" }
                         SendBackCheckLine { visible: sendBackScreen.p.stage !== "released" }

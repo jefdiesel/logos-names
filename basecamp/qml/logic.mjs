@@ -2228,6 +2228,10 @@ export const SEND_BACK_RELEASE_STEPS = [
     "Copy the link and open it in the browser with your Ethereum wallet.",
     "Press Release there. Your Ethereum wallet pays a little Sepolia ETH for gas."
 ]
+/// Finishing needs no service of ours (the vault's `release` takes any sender), and what sending it
+/// yourself costs in privacy (rfp-022 docs/privacy-m5/release-relayer.md). Under the release steps
+/// and beside the settlement service's consent sentence.
+export const SEND_BACK_FINISH_YOURSELF = "You can finish this yourself, without the bridge's service: anyone can send the release to the vault, and the money still goes only to your address. Sending it from your own Ethereum address links that address to this send-back; a relayer avoids that."
 /// Numbered lines: ["1. …", "2. …"].
 export function numbered(lines) {
     return (Array.isArray(lines) ? lines : []).map(function(l, i) { return String(i + 1) + ". " + String(l) })
