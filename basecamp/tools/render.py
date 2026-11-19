@@ -8,6 +8,11 @@ QT_QPA_PLATFORM=offscreen to run without a display.
 import json, os, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# The build the shipped LEZ Bridge reports (logic.mjs BUNDLED_BRIDGE[0].build): a stand-in bridge that
+# is meant to be the current one says it, so the app never sees an older bridge and holds Receive
+# ("Update it first"). Read here, never copied: a copy went stale when Names shipped a new bridge.
+import re as _re_build
+SHIPPED_BUILD = _re_build.search(r'export const BUNDLED_BRIDGE = \[.*?build: "([0-9a-f]+)"', open(os.path.join(HERE, "..", "qml", "logic.mjs")).read(), _re_build.S).group(1)
 ALICE = "2RHZhw9h534Zr3eq2RGhQete2Hh667foECzXPmSkGni2"
 BOB = "CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r"
 CAROL = "9iHYqf77noB5oyGrxhL5GNVLSKcKQZeGBzp294fMi3Mv"
@@ -75,7 +80,7 @@ BRIDGE = r"""
                 }
                 if (answer && answer.__error) return JSON.stringify(JSON.stringify({ success: false, value: null, error: answer.__error }))
                 if (answer === undefined && method !== "config" && method !== "relayed_claims" && method !== "relayed_claim_forget" && method !== "receives") return JSON.stringify({ error: "Method not found" })
-                if (answer === undefined) answer = method === "config" ? { build: { commit: "c26a464" }, deployment: { name: "bridge-test-network-v5", bridge_program: "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA" }, features: ["relayed_claim", "relayed_claim_check_with", "relayed_claim_build", "relayed_claim_submit", "account_hint", "receive", "deposit_code", "public_receive", "receive_status", "receives", "receive_request", "relayed_claim_check_deposit", "send_back", "send_back_settle", "bridges"], notices: { release: (%(mock)s).release || null, not_private: { title: "Not private", text: "A public claim publishes the claim secret and links the Sepolia deposit to this account, for good. A private account keeps them apart (its claim needs a proof)." } } } : method === "relayed_claims" ? [] : method === "receives" ? { receives: [] } : null
+                if (answer === undefined) answer = method === "config" ? { build: { commit: "%(shipped_build)s" }, deployment: { name: "bridge-test-network-v5", bridge_program: "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA" }, features: ["relayed_claim", "relayed_claim_check_with", "relayed_claim_build", "relayed_claim_submit", "account_hint", "receive", "deposit_code", "public_receive", "receive_status", "receives", "receive_request", "relayed_claim_check_deposit", "send_back", "send_back_settle", "bridges"], notices: { release: (%(mock)s).release || null, not_private: { title: "Not private", text: "A public claim publishes the claim secret and links the Sepolia deposit to this account, for good. A private account keeps them apart (its claim needs a proof)." } } } : method === "relayed_claims" ? [] : method === "receives" ? { receives: [] } : null
                 return JSON.stringify(JSON.stringify({ success: true, value: answer, error: null }))
             }
             if (module === "chat_module") {
@@ -144,6 +149,8 @@ BRIDGE = r"""
             // The LEZ 0.4 test-LEZ faucet (faucet_info / faucet_claim), when a scenario gives it.
             if (method === "faucet_info" && mock.faucet) return ok(mock.faucet.info)
             if (method === "faucet_claim" && mock.faucet) return ok(mock.faucet.claim)
+            // The wallet adds the bridges it ships (Logic.bridgesToAdd); the module answers true.
+            if (method === "set_bridge_programs") return ok(true)
             if (method === "bridge_net_watch") return ok(args[1] ? [String(args[0])] : [])
             if (method === "activity") return ok(mock.activity || [
                 { id: "a1", at: Date.now() - 2 * 3600000, kind: "bridge", chain: "logos", from: "66ecf4bccaa13e4e03c3d5c0e3ebecb945c51bbf815e92727a9a4efa6b39a81b", to: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", amount: "1000000", state: "in_block" },
@@ -818,7 +825,7 @@ NET04_V4 = dict(NET04, read=dict(NET04_READ, tokens=_v4_tokens, bridges=[{"progr
     accounts=[{"account": OWNER, "found": True, "native": "0", "tokens": [dict(_v4_tokens[0], amount="0"), dict(_v4_tokens[1], amount="150000000000000000")], "other_tokens": 0},
               {"account": "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", "found": False, "native": "0", "tokens": [dict(_v4_tokens[0], amount="0"), dict(_v4_tokens[1], amount="0")], "other_tokens": 0}]))
 SB_FEATURES = ["relayed_claim", "relayed_claim_check_with", "relayed_claim_build", "relayed_claim_submit", "account_hint", "receive", "deposit_code", "public_receive", "receive_status", "receives", "receive_request", "relayed_claim_check_deposit", "send_back"]
-SB_CONFIG = {"build": {"commit": "c26a464"}, "deployment": {"name": "bridge-test-network-v4", "bridge_program": V4}, "features": SB_FEATURES, "notices": {}}
+SB_CONFIG = {"build": {"commit": SHIPPED_BUILD}, "deployment": {"name": "bridge-test-network-v4", "bridge_program": V4}, "features": SB_FEATURES, "notices": {}}
 SB_LINK = {"link": "https://nameswallet.app/bridge/#withdraw", "deployment": "bridge-test-network-v4", "vault": "0xC2c6A059eAB928966B24FA5549d441A3B17B54Ed", "chain_id": 11155111, "available": True, "why": None}
 SB_CODE = "logoswd1qyqqqqqqqqqzr7dm2wcgqnmxn3uq7c2yupx7qfguwl6zcw0d2ej8zhwpsa8x4a5xg9ws3xcqp"
 SB_RECIPIENT = "0xE2C4857976b346F8F9b3a7be714Cd92d0bF68680"
@@ -859,7 +866,8 @@ SB_BURN_SHEET = ('root.appRequests = [{"id": "r9", "kind": "relayed_call", "app"
                  '"publisher": null, "choices": [{"account": "%s", "account_kind": "public", "label": "Names wallet, main public account", "granted": true}]}]; root.appChosen = ["%s"]') % (OWNER, SB_RECIPIENT, OWNER, V4, OWNER, OWNER)
 for _name, _js, _mock in [
     ("card-sendback", SB_CARD % 'root.sendBacksLoaded = true; root.sendBacks = [{ id: "sb-e2ba7765d0fbf247", amount: "0.01 ETH", account: "%s", recipient: "%s", words: "", stage: "burned" }]; root.sbStatuses = { "sb-e2ba7765d0fbf247": { stage: "burned" } }' % (OWNER, SB_RECIPIENT), sb_mock(sb_view("burned"))),
-    ("sendback-amount", SB_OPEN % '', sb_mock()),
+    # Opening pre-selects the smallest amount (step 2); the amounts are step 1, after "Change".
+    ("sendback-amount", SB_OPEN % 'root.againAfter(300, function() { root.sbDenom = -1 })', sb_mock()),
     ("sendback-link", SB_OPEN % 'root.againAfter(200, function() { root.sbDenom = 0 })', sb_mock()),
     ("sendback-words", SB_OPEN % 'root.againAfter(200, function() { root.sbDenom = 0; root.sbSetBox("%s"); root.sbCheckCode() })' % SB_CODE, sb_mock()),
     ("sendback-bad-code", SB_OPEN % 'root.againAfter(200, function() { root.sbDenom = 0; root.sbSetBox("%s"); root.sbCheckCode() })' % SB_CODE, sb_mock(send_back_check={"ok": False, "error": {"code": "other_vault", "message": "This code is for another bridge vault: open the bridge page from this wallet's link again."}})),
@@ -958,7 +966,7 @@ _BR_V4 = dict(_BR_V5, id="bridge-test-network-v4", label="bridge v4", current=Fa
 _BR_V6 = dict(_BR_V5, id="added-3f2a91c07d55", label="bridge v6", kind="added", current=False, vault="0x6666666666666666666666666666666666666666", vault_short="0x6666…6666",
               bridge_program="Six6", words_text="maple · tiger · seven · lamp", endpoint_host="lez.example.org", items=0, removable=True)
 def _br_mock(**more):
-    b = {"config": {"build": {"commit": "c26a464"}, "deployment": {"name": "bridge-test-network-v5", "bridge_program": _BR_V5["bridge_program"]}, "features": _BR_FEATURES},
+    b = {"config": {"build": {"commit": SHIPPED_BUILD}, "deployment": {"name": "bridge-test-network-v5", "bridge_program": _BR_V5["bridge_program"]}, "features": _BR_FEATURES},
          "bridges": {"active": _BR_V5["id"], "active_row": _BR_V5, "list": [_BR_V5, _BR_V4, _BR_V6], "warning": "A bridge code decides where your deposits go. Take it only from the bridge's own page."}}
     b.update(more)
     return {"bridge": b}
@@ -1016,7 +1024,7 @@ _BR_FEATURES += ["send_back_address", "send_back_recipients"]
 V5 = "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA"
 PRIV = "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z"
 PV_FEATURES = SB_FEATURES + ["send_back_settle", "bridges", "private_claim_standin", "private_send_back"]
-PV_CONFIG = {"build": {"commit": "c26a464"}, "deployment": {"name": "bridge-test-network-v5", "bridge_program": V5, "release": "proof"}, "features": PV_FEATURES, "notices": {}}
+PV_CONFIG = {"build": {"commit": SHIPPED_BUILD}, "deployment": {"name": "bridge-test-network-v5", "bridge_program": V5, "release": "proof"}, "features": PV_FEATURES, "notices": {}}
 OLD_CONFIG = dict(PV_CONFIG, features=SB_FEATURES)
 PV_ARR = '[{ id: "dep-p1", symbol: "ETH", amount: "0.1", account: "%s", account_kind: "private" }]' % PRIV
 PV_REG = {"tokens": [{"symbol": "ETH", "decimals": 18, "denoms": [{"index": 0, "value": "10000000000000000", "text": "0.01"}, {"index": 1, "value": "100000000000000000", "text": "0.1"}, {"index": 2, "value": "1000000000000000000", "text": "1"}]}]}
@@ -1247,7 +1255,7 @@ WALLET_NEXT = [
     ("card-remove-last", wn_card('root.removeBridgeRow("receive", "dep-old")', arr='[{ id: "dep-old", symbol: "ETH", amount: "1", account: "%s" }]' % OWNER, st='({ "dep-old": { stage: "requested" } })', sbs='root.sendBacks = []'),
      wn_card_mock(receive_remove={"removed": True, "id": "dep-old", "code": "no_deposit"})),
     # Settings → Bridge: the address book, names and all, each with Remove.
-    ("settings-bridge-book", 'root.section = "settings"; root.loadBridges()', _br_mock(config={"build": {"commit": "c26a464"}, "deployment": {"name": "bridge-test-network-v5", "bridge_program": _BR_V5["bridge_program"]},
+    ("settings-bridge-book", 'root.section = "settings"; root.loadBridges()', _br_mock(config={"build": {"commit": SHIPPED_BUILD}, "deployment": {"name": "bridge-test-network-v5", "bridge_program": _BR_V5["bridge_program"]},
      "features": _BR_FEATURES + ["send_back_address", "send_back_recipients", "address_book"]}, address_book_list=WN_BOOK)),
     # Remove on a claimed receive and on a released send-back (both still shown on the card for a while).
     ("card-remove-finished", wn_card('root.receiveClaimedAt = { "dep-old": Date.now() - 60000 }; root.sbReceivedAt = { "sb-planned": Date.now() - 60000 }',
@@ -1275,11 +1283,12 @@ _E20_CONFIG = dict(SB_CONFIG, deployment={"name": "added-0e20", "label": "bridge
 _E20_CODE = _copy.deepcopy(MOCKS["receive-code-words"]["bridge"]["make_public_deposit_request"])
 _E20_CODE.update({"symbol": "USDT", "denom_text": "100", "total_text": "100", "bridge_fee": None, "amount_text": "100 USDT"})
 _E20_CODE["deposit"]["symbol"] = "USDT"
+_E20_CODE["deposit"]["eth_token"] = _E20_USDT
 _E20_REG_PAUSED = {"tokens": [dict(_E20_TOKENS[0], denoms=[{"index": 0, "value": "100000000", "text": "100"}, {"index": 1, "value": "1000000000", "text": "1,000"}], freeze={"eth_deposits": False}),
                               dict(_E20_TOKENS[1], denoms=[{"index": 0, "value": "100000000000000000000", "text": "100"}], freeze={"eth_deposits": True})]}
 _E20_RECEIVE = 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.bridgeConfig = %s; root.openEthReceive(); root.receivePublicOk = true; %s }) })' % (json.dumps(_E20_CONFIG), "%s")
 _E20_USDT_ASSET = '{ symbol: "USDT", name: "Wrapped USDT (demo)", amount: "1,500", bridge: "%s", base: "1500000000", decimals: 6, definition: "%s", ethToken: "%s" }' % (V4, _E20_TOKENS[0]["definition"], _E20_USDT)
-_E20_SB = 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.bridgeConfig = %s; root.loadBridgeNet(); root.openSendBack("%s", %s) }) })' % (json.dumps(_E20_CONFIG), OWNER, _E20_USDT_ASSET)
+_E20_SB = 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.bridgeConfig = %s; root.loadBridgeNet(); root.openSendBack("%s", %s); root.againAfter(300, function() { root.sbDenom = -1 }) }) })' % (json.dumps(_E20_CONFIG), OWNER, _E20_USDT_ASSET)
 for _name, _js, _mock in [
     # Receive on a bridge without ETH: USDT chosen, 100 USDT pre-selected.
     ("receive-erc20-choose", _E20_RECEIVE % "", {"bridge": {"config": _E20_CONFIG}}),
@@ -1287,7 +1296,8 @@ for _name, _js, _mock in [
     ("receive-erc20-code", _E20_RECEIVE % "root.againAfter(300, function() { root.makeReceive() })", {"bridge": {"config": _E20_CONFIG, "make_public_deposit_request": _E20_CODE}}),
     # The registry says DAI deposits are paused: DAI is not offered and one line says so.
     ("receive-erc20-paused", _E20_RECEIVE % "", {"bridge": {"config": _E20_CONFIG, "registry": _E20_REG_PAUSED}}),
-    # Bridge to Ethereum from a USDT balance: amounts in USDT's 6 decimals, the smallest pre-selected.
+    # Bridge to Ethereum from a USDT balance: amounts in USDT's 6 decimals (shown after "Change": opening
+    # pre-selects the smallest, 100 USDT, and lands on step 2).
     ("sendback-erc20-amount", _E20_SB, {"bridge": dict(sb_mock()["bridge"], config=_E20_CONFIG), "bridgeNet": NET04_V4}),
 ]:
     SCENARIOS[_name] = _js
@@ -1324,7 +1334,7 @@ def main():
             "registry": "null" if scenario == "unset" else json.dumps("DbYLkKwd2b13bQhceVj351mpPw7QmRzEjRT2EfU56CKH"),
             "mock": _ago(json.dumps(MOCKS.get(scenario, {}))).replace('"@SOON@"', str(int(__import__("time").time()) + 1500)).replace('"@HOUR@"', str(int(__import__("time").time()) + 3400)),
             "bridge_key": "" if scenario == "get-tokens" else "8e3b0f4a2c71d95e6a0b4c8d2f1e7a3954c6b0d8e2f4a6c8b0d2e4f6a8c0b2d4",
-            "home_channel": HOME_CHANNEL,
+            "home_channel": HOME_CHANNEL, "shipped_build": SHIPPED_BUILD,
             "bridge_net": json.dumps(NET04),
             "scenario": (SCENARIOS[scenario] % dict(filled, zone_request=zone_request(scenario == "approve-zone"))) if "%(zone" in SCENARIOS[scenario] else SCENARIOS[scenario], "out": out, "height": HEIGHTS[scenario] if scenario in HEIGHTS else 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "register-net04", "wallet-names-net04", "send-net04", "name", "settings-accounts", "settings-oldcli", "settings-account-new", "settings-network") or scenario.startswith("settings-zones") or scenario.startswith("settings-bridge") or scenario.startswith("backup") else 2000 if scenario.startswith("approve-private") or scenario.startswith("approve-relayed") else 1500 if scenario.startswith("card-sendback") or scenario.startswith("sendback-") else 1100 if scenario.startswith("approve-") and "zone" in scenario else 1500 if scenario.startswith("get-tokens") or scenario.startswith("wallet") or scenario.startswith("claim") or scenario.startswith("card-arriving") else 1100 if scenario.startswith("receive-") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1100 if scenario.startswith("inscribe") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
         }
