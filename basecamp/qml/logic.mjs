@@ -825,6 +825,100 @@ export function inscribeCanApprove(state) {
 export var NET_03 = { id: "0.3", version: "LEZ 0.3", name: "public Logos testnet" }
 export var NET_04 = { id: "0.4", version: "LEZ 0.4", name: "bridge test network" }
 
+// ── Settings, Network (wallet-1121): the one network switch, and a custom network ───────────
+
+/// The three choices in Settings, Network: `id` is get_config's `network_choice`.
+export const NETWORK_CHOICES = [
+    { id: "lez-0.4", version: "LEZ 0.4 · Bridge test network", note: "Our own chain, the default. Bridged Sepolia tokens arrive here." },
+    { id: "lez-0.3", version: "LEZ 0.3 · Logos testnet", note: "The public Logos testnet, with its own wallet and names." },
+    { id: "custom", version: "Custom network", note: "A LEZ 0.4 chain by its RPC URL and chain id: one that isn't built in, or ours after a reset." }
+]
+
+/// Where a chain's network file is published (docs/wallet/NETWORKS.md).
+export const NETWORK_FILE_BASE = "https://nameswallet.app/networks/"
+
+/// A chain id as typed (64 hex, `0x` allowed), in lower case, or "" when it isn't one.
+export function chainIdTyped(text) {
+    var t = String(text || "").trim().replace(/^0x/, "")
+    return /^[0-9a-fA-F]{64}$/.test(t) ? t.toLowerCase() : ""
+}
+
+/// A chain id shortened for a sentence: `2da7f7df…5374`.
+export function chainShort(id) {
+    var t = String(id || "")
+    return t.length > 12 ? t.substr(0, 8) + "…" + t.substr(t.length - 4) : t
+}
+
+/// The network file the wallet reads for `chainId` when no other address is given ("" while the
+/// chain id isn't one).
+export function defaultNetworkFile(chainId) {
+    var id = chainIdTyped(chainId)
+    return id === "" ? "" : NETWORK_FILE_BASE + id + ".json"
+}
+
+/// What's missing or wrong in a custom network typed in, said before the module is asked: ""
+/// when it can be checked. The module checks again (and asks the RPC).
+export function customNetworkProblem(rpc, chainId, fileUrl) {
+    var r = String(rpc || "").trim(), c = String(chainId || "").trim(), f = String(fileUrl || "").trim()
+    var url = function(u) { return /^https:\/\/[^\s@\/?#]+/.test(u) || /^http:\/\/(127\.0\.0\.1|localhost|\[::1\])([:\/?#]|$)/.test(u) }
+    if (r === "") return "Enter the network's RPC URL."
+    if (!url(r) || /\s/.test(r)) return "The RPC URL starts with https:// (http:// only for this computer)."
+    if (c === "") return "Enter the network's chain id."
+    if (chainIdTyped(c) === "") return "A chain id is 64 hex characters (0-9 and a-f)."
+    if (f !== "" && (!url(f) || /\s/.test(f))) return "The network file's address starts with https:// (http:// only for this computer)."
+    return ""
+}
+
+/// The name a network goes by on this screen and in the reset line: a custom network's own,
+/// else the built-in one's.
+export function networkName(choice, custom) {
+    if (choice === "custom" && custom && custom.name) return String(custom.name)
+    return choice === "lez-0.3" ? "the Logos testnet" : "the bridge test network"
+}
+
+/// What "Runs on" says for LEZ 0.4 (rich text): our network's words, or a custom network's own
+/// name, escaped (it comes from a network file).
+export function net04Html(choice, custom) {
+    var words = choice === "custom" && custom && custom.name ? String(custom.name).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") : "bridge test network"
+    return "<b>LEZ 0.4</b> · " + words
+}
+
+/// A reset of LEZ 0.4 seen at `resetAt` (seconds), in a sentence ("" with none).
+export function networkResetLine(resetAt, name, clock) {
+    if (!resetAt) return ""
+    var n = String(name || "the bridge test network")
+    return n.charAt(0).toUpperCase() + n.slice(1) + " was reset at " + clock(resetAt) + ". What was held there before is gone; everything shown was read again."
+}
+
+/// The details of a `network_custom` check, one line each, for the card that offers the switch.
+export function networkFoundLines(found) {
+    if (!found) return []
+    var out = ["Chain " + chainShort(found.chain_id) + " · block " + grouped(String(found.height || 0)) + " · RPC " + String(found.rpc || "")]
+    out.push(found.file_missing ? "No network file is published for it: our LEZ 0.4's built-in ids are used." : "Network file: " + String(found.file_url || ""))
+    out.push("LNS registry " + keyShown(String(found.registry || "")))
+    var bridges = Array.isArray(found.bridge_programs) ? found.bridge_programs.length : 0
+    out.push(bridges === 0 ? "No bridges" : bridges === 1 ? "1 bridge" : bridges + " bridges")
+    var file = found.file || {}
+    var nfts = Array.isArray(file.nft_programs) ? file.nft_programs.length : 0
+    if (nfts > 0) out.push(nfts === 1 ? "1 NFT program, added to Collectibles" : nfts + " NFT programs, added to Collectibles")
+    if (file.faucet) out.push("Test-LEZ faucet: " + String(file.faucet))
+    return out
+}
+
+/// The plain result of a `network_custom` check: `{line, kind, offer}`. `offer`: a switch makes
+/// sense (another network, or new ids for the one in use).
+export function networkCheckResult(found) {
+    if (!found) return { line: "", kind: "", offer: false }
+    var at = grouped(String(found.height || 0))
+    if (found.reset)
+        return { line: "This chain was reset: same chain id, but its block height went down (from " + grouped(String(found.reset.before)) + " to " + grouped(String(found.reset.now)) + "). Everything shown was read again." + (found.differs ? " Its network file lists new ids: switch to use them." : ""), kind: "waiting", offer: !!found.differs }
+    if (found.in_use && found.differs)
+        return { line: "Same chain, at block " + at + ", but its network file lists other ids than the ones in use. Switch to use them.", kind: "waiting", offer: true }
+    if (found.in_use)
+        return { line: "Same chain, at block " + at + ". Nothing has changed.", kind: "done", offer: false }
+    return { line: "The RPC serves chain " + chainShort(found.chain_id) + ", the one you entered. Check the details, then switch.", kind: "done", offer: true }
+}
+
 /// Every public account the wallet lists, as `Public/<id>`, once each, in order: from
 /// `cli_accounts`, else from `cli_balance` (its `accounts`, then its default public one).
 /// Empty accounts count too: what one holds on LEZ 0.3 says nothing about LEZ 0.4.
@@ -874,12 +968,13 @@ export function decimalShown(digits, decimals) {
 
 /// The status lines of a `bridge_net_balances` answer: `{line, tone, reset}`. `clock` turns
 /// seconds into a time of day. `tone` is "plain", "warn" or "bad"; `reset` is "" or the
-/// sentence telling the network was reset.
-export function bridgeNetStatus(value, clock) {
+/// sentence telling the network was reset. `name`: a custom network's name (Settings, Network),
+/// else the bridge test network.
+export function bridgeNetStatus(value, clock, name) {
     var v = value || {}, read = v.read || null, error = String(v.error || "")
     var out = { line: "", tone: "plain", reset: "" }
     if (read && read.reset_at)
-        out.reset = "The bridge test network was reset at " + clock(read.reset_at) + ". What was held there before is gone; balances start again."
+        out.reset = networkResetLine(read.reset_at, name, clock)
     if (!read) {
         out.line = error ? "Can't read the bridge test network: " + error.replace(/^can't reach the bridge test network: /, "") : "Reading the bridge test network…"
         out.tone = error ? "bad" : "plain"
@@ -1051,7 +1146,7 @@ export function cliOutdatedLine(net, line) {
     var tool = line !== "" ? " (" + line + ")" : ""
     if (net === "0.4")
         return "The names tool set for LEZ 0.4" + tool + " is too old for it. Give the path of a LEZ 0.4 names tool in Settings, App settings. LEZ 0.3 is unaffected."
-    return "The names tool this app uses for LEZ 0.3" + tool + " is too old for that network as it is now, so creating a wallet there doesn't work with it. LEZ 0.4 is unaffected: switch to it above."
+    return "The names tool this app uses for LEZ 0.3" + tool + " is too old for that network as it is now, so creating a wallet there doesn't work with it. LEZ 0.4 is unaffected: switch to it under Settings → Network."
 }
 
 export function bridgeNetRows(read, own, tokens) {
@@ -2322,9 +2417,9 @@ export function bridgeSetupState(s) {
 
 // ── What's new: three lines at the top of Settings after an update (change them with each build) ──
 export const WHATS_NEW = [
-    "Settings → Bridge: choose the bridge new receives use, or add a new one from its bridge code.",
-    "Receive from Ethereum and Bridge to Ethereum say what to do next, step by step.",
-    "Bridge to Ethereum: Finish on Ethereum hands the last steps to the bridge's service."
+    "Names now opens on LEZ 0.4, our bridge test network. Your LEZ 0.3 wallet is kept as it was.",
+    "Settings → Network: switch between LEZ 0.4 and LEZ 0.3 there; it is no longer on each screen.",
+    "Settings → Network → Custom network: add a chain by its RPC URL and chain id, checked first."
 ]
 
 /// Receive from Ethereum, the deposit step: what to do, in order (owner, 2026-11-16: "this page

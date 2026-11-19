@@ -497,7 +497,15 @@ Item {
                 return true
             }
             moduleOutdated = ""
-            namesNet = config.names_network && config.names_network.id === "lez-0.4" ? "0.4" : "0.3"
+            namesNet = config.names_network && config.names_network.id === "lez-0.3" ? "0.3" : "0.4"
+            networkChoice = config.network_choice ? String(config.network_choice) : (namesNet === "0.3" ? "lez-0.3" : "lez-0.4")
+            customNetwork = config.custom_network && config.custom_network.chain_id ? config.custom_network : null
+            customNetworkLast = config.custom_network_last && config.custom_network_last.chain_id ? config.custom_network_last : null
+            lez04Chain = config.lez04_chain ? String(config.lez04_chain) : ""
+            networkResetAt = Number(config.network_reset_at) || 0
+            // A reset the module already knew of was read again before this answer.
+            if (networkResetAt > resetSeenAt)
+                resetSeenAt = networkResetAt
             registry = config.registry ? config.registry : ""
             sequencer = config.sequencer ? config.sequencer : ""
             zoneId = config.zone && config.zone.id ? config.zone.id : "home"
@@ -831,10 +839,29 @@ Item {
 
     // ── Two networks: LEZ 0.3 (public Logos testnet) and LEZ 0.4 (bridge test network) ──
 
-    /// The names network the module is on: "0.3" (LEZ 0.3, the public Logos testnet, the
-    /// default) or "0.4" (LEZ 0.4, the bridge test network). Names are checked, registered
-    /// and paid there, with that network's own CLI and wallet (set_names_network).
-    property string namesNet: "0.3"
+    /// The names network the module is on: "0.4" (LEZ 0.4, our bridge test network, every
+    /// install's default since wallet-1121) or "0.3" (LEZ 0.3, the public Logos testnet). Names
+    /// are checked, registered and paid there, with that network's own CLI and wallet
+    /// (set_names_network). Chosen in Settings, Network, and nowhere else.
+    property string namesNet: "0.4"
+    // ── Settings, Network (wallet-1121) ──
+    /// get_config's `network_choice`: "lez-0.4" (ours), "lez-0.3" or "custom".
+    property string networkChoice: "lez-0.4"
+    property var customNetwork: null       // the custom network in use: {chain_id, rpc, file_url, name, height}
+    property var customNetworkLast: null   // the last one left, to offer again
+    property string lez04Chain: ""         // our LEZ 0.4's chain id (the module's constant)
+    property double networkResetAt: 0      // when LEZ 0.4 was last seen reset (seconds), for a day
+    property double resetSeenAt: 0         // the last reset this window read everything again for
+    readonly property string networkShownName: Logic.networkName(networkChoice, customNetwork)
+    property bool customOpen: false        // the custom network's form is open
+    property bool customChecking: false
+    property bool customSwitching: false
+    property var customFound: null         // network_custom's answer to a check
+    property string customProblem: ""
+    property string customDone: ""
+    property bool netChecking: false       // "Check the network now"
+    property var netCheckFound: null
+    property string netCheckProblem: ""
     /// Which network the Wallet shows: always the names network, so a balance, a name and a
     /// payment on one screen are on the same chain. One switch for both.
     readonly property string walletNet: namesNet
@@ -848,7 +875,7 @@ Item {
     readonly property var bridgeNetAccounts: Logic.mergedAccounts(Logic.publicAccounts(cliBalance, cliAccounts), namesNet === "0.4" ? accounts03 : [])
     // A newly read account list is asked about at once (the module answers from memory).
     onBridgeNetAccountsChanged: if (walletNet === "0.4") loadBridgeNet()
-    readonly property var bridgeNetStatusNow: Logic.bridgeNetStatus(bridgeNet, clockShown)
+    readonly property var bridgeNetStatusNow: Logic.bridgeNetStatus(bridgeNet, clockShown, networkChoice === "custom" ? networkShownName : "")
     // On LEZ 0.4 the rows know which accounts are the 0.4 wallet's own: a LEZ 0.3 one is view only.
     /// When the bridge network's balances shown were read (seconds; 0 before the first read).
     readonly property double bridgeNetReadAt: bridgeNet && bridgeNet.read ? Number(bridgeNet.read.read_at || 0) : 0
@@ -918,6 +945,12 @@ Item {
         askLater("bridge_net_balances", [asked], onNet(function(value) {
             bridgeNet = value
             bridgeNetProblem = ""
+            // A reset this read saw first (the module dropped its reads): everything read again.
+            var resetAt = value && value.read && value.read.reset_at ? Number(value.read.reset_at) : 0
+            if (resetAt > resetSeenAt) {
+                networkResetAt = resetAt
+                rereadAfterReset(resetAt)
+            }
             // Read before a claim seen in the last 2 min: asked again shortly, so "now holds"
             // is said only from a read made after it.
             var readAt = value && value.read ? value.read.read_at : 0
@@ -3622,45 +3655,149 @@ Item {
         })
     }
 
-    /// Switches the names network, and with it the Wallet, to `net` ("0.3" or "0.4"). The
-    /// module keeps each network's settings apart; everything shown is read again.
+    /// Switches the names network, and with it the Wallet, to `net` ("0.3" or "0.4", our own:
+    /// also from a custom network). The module keeps each network's settings apart; everything
+    /// shown is read again.
     function setWalletNet(net) {
-        if (net === namesNet || netSwitching)
+        if (netSwitching || (net === namesNet && !(net === "0.4" && networkChoice === "custom")))
             return
         if (namesNet === "0.3")
             accounts03 = Logic.publicAccounts(cliBalance, cliAccounts)
         netSwitching = true
         netProblem = ""
+        netCheckFound = null
+        netCheckProblem = ""
         askLater("set_names_network", ["lez-" + net], function(value) {
             netSwitching = false
-            walletRowOpen = ""
-            record = null
-            missing = ""
-            bridgeNet = null
-            // Nothing read on the network left is shown, or copyable, as this one's (S-A).
-            cliBalance = undefined
-            cliAccounts = null
-            cliStatus = null
-            cliNames = []
-            cliPending = []
-            cliKnown = false
-            // The registrations under way are the network's own: the reveal driver never sees the
-            // other network's (MF-2), and the module's reveal_name can't start one anyway.
-            myNames = []
-            pendingNames = []
-            revealing = false
-            tokenHoldings = null
-            walletAccount = null
-            if (walletView === "account")
-                walletView = "home"
-            namesNet = net
-            loadConfig()
-            if (net === "0.4")
-                loadBridgeNet()
+            afterNetChange(net)
         }, function(message) {
             netSwitching = false
             netProblem = sentence(message)
         })
+    }
+
+    /// Settings, Network: a choice pressed. The custom network opens its form (filled with the
+    /// one in use or the last one left); the others switch at once.
+    function pickNetwork(id) {
+        netProblem = ""
+        customProblem = ""
+        customDone = ""
+        if (id === "custom") {
+            customOpen = true
+            var from = customNetwork || customNetworkLast
+            if (from && customRpcField.text === "" && customChainField.text === "") {
+                customRpcField.text = from.rpc || ""
+                customChainField.text = from.chain_id || ""
+                customFileField.text = from.file_url && from.file_url !== Logic.defaultNetworkFile(from.chain_id) ? from.file_url : ""
+            }
+            return
+        }
+        customOpen = false
+        customFound = null
+        setWalletNet(id === "lez-0.3" ? "0.3" : "0.4")
+    }
+
+    /// Custom network, Check: asks the module whether the RPC serves the chain id typed, and
+    /// reads its network file. Nothing changes yet.
+    function checkCustom() {
+        var rpc = customRpcField.text.trim(), chain = customChainField.text.trim(), file = customFileField.text.trim()
+        customFound = null
+        customDone = ""
+        customProblem = Logic.customNetworkProblem(rpc, chain, file)
+        if (customProblem !== "" || customChecking)
+            return
+        customChecking = true
+        askLater("network_custom", [rpc, chain, file, false], function(value) {
+            customChecking = false
+            customFound = value
+        }, function(message) {
+            customChecking = false
+            customProblem = sentence(message)
+        }, 30000)
+    }
+
+    /// Switches to the network `found` (a check's answer): the module checks it all again first.
+    function switchCustom(found) {
+        if (!found || customSwitching || netSwitching)
+            return
+        if (namesNet === "0.3")
+            accounts03 = Logic.publicAccounts(cliBalance, cliAccounts)
+        customSwitching = true
+        customProblem = ""
+        netProblem = ""
+        netCheckProblem = ""
+        askLater("network_custom", [found.rpc, found.chain_id, found.file_url, true], function(value) {
+            customSwitching = false
+            customFound = null
+            netCheckFound = null
+            customOpen = false
+            customDone = "Now on " + (found.name || "the custom network") + " (chain " + Logic.chainShort(found.chain_id) + ", block " + Logic.grouped(String(found.height || 0)) + ")."
+            afterNetChange("0.4")
+        }, function(message) {
+            customSwitching = false
+            if (customOpen)
+                customProblem = sentence(message)
+            else
+                netCheckProblem = sentence(message)
+        }, 30000)
+    }
+
+    /// Settings, Network, "Check the network now": the network in use asked again (its chain id,
+    /// its height, its network file). A reset that kept the chain id is told and read again.
+    function checkNetworkNow() {
+        if (netChecking || namesNet !== "0.4")
+            return
+        var rpc = sequencer
+        var chain = customNetwork ? customNetwork.chain_id : lez04Chain
+        var file = customNetwork && customNetwork.file_url ? customNetwork.file_url : ""
+        netChecking = true
+        netCheckFound = null
+        netCheckProblem = ""
+        askLater("network_custom", [rpc, chain, file, false], function(value) {
+            netChecking = false
+            netCheckFound = value
+            if (value && value.reset)
+                rereadAfterReset(0)
+        }, function(message) {
+            netChecking = false
+            netCheckProblem = sentence(message)
+        }, 30000)
+    }
+
+    /// LEZ 0.4 was reset (seen at `at`, seconds; 0: just now): the module dropped what it had
+    /// read; everything shown is read again, once per reset.
+    function rereadAfterReset(at) {
+        resetSeenAt = at > 0 ? at : Date.now() / 1000
+        loadConfig()
+    }
+
+    /// After the network changed (a switch, a custom network): nothing read on the network left
+    /// is shown, and everything is read again.
+    function afterNetChange(net) {
+        walletRowOpen = ""
+        record = null
+        missing = ""
+        bridgeNet = null
+        // Nothing read on the network left is shown, or copyable, as this one's (S-A).
+        cliBalance = undefined
+        cliAccounts = null
+        cliStatus = null
+        cliNames = []
+        cliPending = []
+        cliKnown = false
+        // The registrations under way are the network's own: the reveal driver never sees the
+        // other network's (MF-2), and the module's reveal_name can't start one anyway.
+        myNames = []
+        pendingNames = []
+        revealing = false
+        tokenHoldings = null
+        walletAccount = null
+        if (walletView === "account")
+            walletView = "home"
+        namesNet = net
+        loadConfig()
+        if (net === "0.4")
+            loadBridgeNet()
     }
 
     // Read when the bridge test network's balances come into view (and after the person's own
@@ -4293,7 +4430,7 @@ Item {
         // On LEZ 0.4 a name is paid from the public account: paying privately isn't offered there.
         payFromPublic = (!sendFromPrivate && !sendToName()) || (namesNet === "0.4" && sendToName())
         if (namesNet === "0.4" && !sendToName()) {
-            say("Sending on LEZ 0.4 isn't in the wallet yet: only paying a name is. Switch to LEZ 0.3 to send.", true)
+            say("Sending on LEZ 0.4 isn't in the wallet yet: only paying a name is. Switch to LEZ 0.3 in Settings → Network to send.", true)
             return
         }
         payName()
@@ -6413,7 +6550,7 @@ Item {
         // On LEZ 0.4 only a name's public account is paid: a payment to its private keys
         // is proven on this computer, which isn't offered there yet.
         if (namesNet === "0.4" && recipient && !recipient["public"]) {
-            say((target !== "" ? target : to) + " takes only private payments, which stay off on LEZ 0.4 until real proofs have been run there. Switch to LEZ 0.3 to pay it privately.", true)
+            say((target !== "" ? target : to) + " takes only private payments, which stay off on LEZ 0.4 until real proofs have been run there. Switch to LEZ 0.3 in Settings → Network to pay it privately.", true)
             return
         }
         if (target !== "" && payForwardSeen !== to + "→" + target) {
@@ -9616,69 +9753,14 @@ Item {
         color: root.dim
         font.family: root.sans
         font.pixelSize: root.px(14)
-        text: prefix + " " + (net === "0.4" ? "<b>LEZ 0.4</b> · bridge test network"
+        text: prefix + " " + (net === "0.4" ? Logic.net04Html(root.networkChoice, root.customNetwork)
             : net === "chain" ? "<b>the Logos Blockchain</b>"
             : net === "both" ? "<b>the Logos Blockchain</b> and <b>LEZ 0.3</b> · public Logos testnet"
             : net === "0.3+chain" ? "<b>LEZ 0.3</b> · public Logos testnet, and on <b>the Logos Blockchain</b>"
-            : net === "messages" ? "<b>Logos Messaging</b>; LNS names are checked on " + (root.namesNet === "0.4" ? "<b>LEZ 0.4</b> · bridge test network" : "<b>LEZ 0.3</b> · public Logos testnet")
+            : net === "messages" ? "<b>Logos Messaging</b>; LNS names are checked on " + (root.namesNet === "0.4" ? Logic.net04Html(root.networkChoice, root.customNetwork) : "<b>LEZ 0.3</b> · public Logos testnet")
             : "<b>LEZ 0.3</b> · public Logos testnet")
     }
 
-    /// The names network switch: LEZ 0.3 | LEZ 0.4. Shown only beside actions that work on
-    /// both; everything else says the one it runs on (RunsOn).
-    component NetSwitch: ColumnLayout {
-        Layout.fillWidth: true
-        spacing: 6
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: 8
-            Accessible.name: "Network"
-            Repeater {
-                model: [Logic.NET_03, Logic.NET_04]
-                Rectangle {
-                    id: netChoice
-                    required property var modelData
-                    readonly property bool current: root.namesNet === modelData.id
-                    Layout.fillWidth: true
-                    implicitHeight: netChoiceText.implicitHeight + root.px(18)
-                    radius: 8
-                    color: current ? root.raised : netChoiceArea.containsMouse ? root.hover : "transparent"
-                    border.width: 1
-                    border.color: current ? root.ink : root.line
-                    opacity: root.netSwitching && !current ? 0.5 : 1
-                    Accessible.role: Accessible.RadioButton
-                    Accessible.name: modelData.version + ", " + modelData.name
-                    Accessible.checked: current
-                    Column {
-                        id: netChoiceText
-                        anchors.verticalCenter: parent.verticalCenter
-                        anchors.left: parent.left
-                        anchors.leftMargin: root.px(14)
-                        spacing: 1
-                        Text { textFormat: Text.PlainText; text: netChoice.modelData.version; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); font.weight: netChoice.current ? Font.DemiBold : Font.Normal }
-                        Text { textFormat: Text.PlainText; text: netChoice.modelData.name; color: root.dim; font.family: root.sans; font.pixelSize: root.px(13) }
-                    }
-                    MouseArea {
-                        id: netChoiceArea
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.setWalletNet(netChoice.modelData.id)
-                    }
-                }
-            }
-        }
-        Text {
-            visible: root.netProblem !== "" || root.netSwitching
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            textFormat: Text.PlainText
-            color: root.netProblem !== "" ? root.alarm : root.dim
-            font.family: root.sans
-            font.pixelSize: root.px(14)
-            text: root.netProblem !== "" ? root.netProblem : "Switching…"
-        }
-    }
 
     /// The mark at the start of a status line, drawn (no font has all four): working three dots,
     /// waiting a clock, problem a cross in a ring, done a tick; `caution` an "!" (STYLE.md).
@@ -10284,9 +10366,9 @@ Item {
                 spacing: 18
                 Text { textFormat: Text.PlainText; text: "Welcome"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(36); font.weight: Font.DemiBold }
                 Hint { font.pixelSize: root.px(18); text: "Get a name, then post, pay and be paid as it. " + (root.namesNet === "0.4" ? "Three" : "Four") + " steps, all here." }
-                // Which network these steps are for: switchable here, before anything else, so a
-                // wallet-less start on LEZ 0.3 never hides LEZ 0.4.
-                NetSwitch {}
+                // Which network these steps are for, and where it is changed (Settings, Network).
+                RunsOn { prefix: "These steps are for" }
+                Link { text: "Change the network in Settings"; font.pixelSize: root.px(15); onPressed: root.go("settings") }
 
                 // 1. Install the names program.
                 Card {
@@ -10537,7 +10619,7 @@ Item {
                 width: Math.min(parent.width - 64, 680)
                 spacing: 10
                 PageHeader { title: "Collectibles"; net: root.namesNet; onBack: root.openWallet("home") }
-                StatusLine { visible: root.namesNet !== "0.4"; kind: ""; text: "Collectibles work on LEZ 0.4. Switch the network under Settings to see them." }
+                StatusLine { visible: root.namesNet !== "0.4"; kind: ""; text: "Collectibles work on LEZ 0.4. Switch to it in Settings → Network to see them." }
                 Hint { visible: root.namesNet === "0.4"; text: "NFTs of the NFT programs listed below. Under each program an account holds one NFT, and takes NFTs of one collection only; a second NFT needs another account." }
 
                 // An app asking about NFTs: shown here, decided here.
@@ -11264,8 +11346,7 @@ Item {
                             }
                         }
                     }
-                    // Which network the balances below are on: the names network switch.
-                    NetSwitch {}
+                    // Which network the balances below are on (changed in Settings, Network).
                     RunsOn { net: root.walletNet === "0.4" ? "0.4" : "0.3+chain"; prefix: "Balances on" }
                     // Right after a switch (or at start), until the wallet answers: never Welcome or
                     // "Create my wallet" before the module says plainly there is no wallet.
@@ -11575,7 +11656,7 @@ Item {
                             Action { label: "Add a token"; enabledNow: false }
                         }
                         RunsOn { net: "0.4"; prefix: "LNS names run on" }
-                        Hint { font.pixelSize: root.px(15); text: "Send, Receive and Add a token run on LEZ 0.3 only, the public Logos testnet. Switch to LEZ 0.3 to use them. A name can be paid on LEZ 0.4 from its page (Pay)." }
+                        Hint { font.pixelSize: root.px(15); text: "Send, Receive and Add a token run on LEZ 0.3 only, the public Logos testnet. Switch to LEZ 0.3 in Settings → Network to use them. A name can be paid on LEZ 0.4 from its page (Pay)." }
                     }
 
                     // Which zone the LEZ balances below are on, once there is more than one.
@@ -12412,7 +12493,6 @@ Item {
                     Layout.maximumWidth: root.pageWidth
                     spacing: 14
                     PageHeader { title: "Names"; onBack: root.walletView = "home" }
-                    NetSwitch {}
                     RunsOn {}
                     // Public registrations under way: when each reveal goes out, and by when it must.
                     Repeater {
@@ -14405,9 +14485,8 @@ Item {
                 width: Math.min(parent.width - 112, root.tool === "settings" ? 1040 : 820)
                 spacing: 22
 
-                // Which network names are checked on: always reachable on Search, a result shown
-                // or not (switching clears the result).
-                NetSwitch { visible: root.section === "search" }
+                // Which network names are checked on (changed in Settings, Network; switching clears
+                // the result).
                 RunsOn { visible: root.section === "search" || root.section === "profile"; prefix: "LNS names and profiles: checked on" }
 
                 // Search: check any name.
@@ -14449,6 +14528,165 @@ Item {
                             Hint { required property var modelData; color: root.ink; text: "· " + modelData }
                         }
                         Link { text: "Got it"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.whatsNewDone() }
+                    }
+                    // Network (wallet-1121): the one network switch, for the whole app.
+                    Part { text: "Network" }
+                    Hint { text: "Names, balances, payments and the bridge all run on the network chosen here. Each keeps its own wallet and settings." }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: root.pageWidth
+                        spacing: 8
+                        Accessible.name: "Network"
+                        Repeater {
+                            model: Logic.NETWORK_CHOICES
+                            Rectangle {
+                                id: netPick
+                                required property var modelData
+                                readonly property bool current: root.networkChoice === modelData.id
+                                readonly property bool open: modelData.id === "custom" && root.customOpen
+                                Layout.fillWidth: true
+                                implicitHeight: netPickText.implicitHeight + root.px(20)
+                                radius: 8
+                                color: current ? root.raised : netPickArea.containsMouse ? root.hover : "transparent"
+                                border.width: 1
+                                border.color: current || open ? root.ink : root.line
+                                opacity: (root.netSwitching || root.customSwitching) && !current ? 0.5 : 1
+                                Accessible.role: Accessible.RadioButton
+                                Accessible.name: modelData.version
+                                Accessible.checked: current
+                                Column {
+                                    id: netPickText
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.leftMargin: root.px(14)
+                                    anchors.rightMargin: root.px(14)
+                                    spacing: 2
+                                    Text {
+                                        textFormat: Text.PlainText
+                                        text: netPick.modelData.version + (netPick.current ? "  ·  in use" : "")
+                                        color: root.ink
+                                        font.family: root.sans
+                                        font.pixelSize: root.px(16)
+                                        font.weight: netPick.current ? Font.DemiBold : Font.Normal
+                                    }
+                                    Text {
+                                        width: parent.width
+                                        textFormat: Text.PlainText
+                                        wrapMode: Text.Wrap
+                                        text: netPick.modelData.id === "custom" && netPick.current && root.customNetwork
+                                            ? root.customNetwork.name + " · chain " + Logic.chainShort(root.customNetwork.chain_id) + " · " + root.customNetwork.rpc
+                                            : netPick.modelData.note
+                                        color: root.dim
+                                        font.family: root.sans
+                                        font.pixelSize: root.px(13)
+                                    }
+                                }
+                                MouseArea {
+                                    id: netPickArea
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    enabled: !root.netSwitching && !root.customSwitching
+                                    onClicked: root.pickNetwork(netPick.modelData.id)
+                                }
+                            }
+                        }
+                        StatusLine {
+                            visible: root.netSwitching || root.netProblem !== ""
+                            kind: root.netProblem !== "" ? "problem" : "working"
+                            text: root.netProblem !== "" ? root.netProblem : "Switching…"
+                        }
+                        StatusLine {
+                            visible: root.namesNet === "0.4" && root.networkResetAt > 0
+                            kind: "waiting"
+                            text: Logic.networkResetLine(root.networkResetAt, root.networkShownName, root.clockShown)
+                        }
+                        StatusLine { visible: root.customDone !== ""; kind: "done"; text: root.customDone }
+                        // The network in use, asked again: a reset that kept the chain id shows here.
+                        RowLayout {
+                            visible: root.namesNet === "0.4" && !root.customOpen
+                            spacing: 12
+                            Action {
+                                label: root.netChecking ? "Checking…" : "Check the network now"
+                                enabledNow: !root.netChecking && !root.netSwitching && !root.customSwitching
+                                onPressed: root.checkNetworkNow()
+                            }
+                        }
+                        StatusLine {
+                            readonly property var result: Logic.networkCheckResult(root.netCheckFound)
+                            visible: !root.customOpen && (root.netCheckProblem !== "" || result.line !== "")
+                            kind: root.netCheckProblem !== "" ? "problem" : result.kind
+                            text: root.netCheckProblem !== "" ? root.netCheckProblem : result.line
+                            actionLabel: root.netCheckProblem === "" && result.offer ? (root.customSwitching ? "Switching…" : "Use the new ids") : ""
+                            actionStrong: true
+                            actionEnabled: !root.customSwitching
+                            onAct: root.switchCustom(root.netCheckFound)
+                        }
+                        // Custom network: an RPC URL and a chain id, checked before anything changes.
+                        ColumnLayout {
+                            visible: root.customOpen
+                            Layout.fillWidth: true
+                            Layout.topMargin: 6
+                            spacing: 8
+                            Hint { text: "Enter the network's RPC URL and its chain id, as the network publishes them. The wallet asks the RPC which chain it serves and switches only if it is the one you entered. The LNS registry, the bridges and the NFT programs come from the network's file." }
+                            Field { id: customRpcField; Layout.fillWidth: true; size: 17; hint: "RPC URL (https://…)"; onAccepted: root.checkCustom() }
+                            Field { id: customChainField; Layout.fillWidth: true; size: 15; code: true; hint: "Chain id (64 hex characters)"; onAccepted: root.checkCustom() }
+                            Field { id: customFileField; Layout.fillWidth: true; size: 15; hint: "Network file (optional)"; onAccepted: root.checkCustom() }
+                            Hint {
+                                font.pixelSize: root.px(13)
+                                text: "Leave the network file empty for " + (Logic.defaultNetworkFile(customChainField.text) !== "" ? Logic.defaultNetworkFile(customChainField.text) : Logic.NETWORK_FILE_BASE + "<chain id>.json") + "."
+                            }
+                            RowLayout {
+                                spacing: 12
+                                Action {
+                                    label: root.customChecking ? "Checking…" : "Check"
+                                    strong: root.customFound === null
+                                    enabledNow: !root.customChecking && !root.customSwitching
+                                    onPressed: root.checkCustom()
+                                }
+                                Link {
+                                    text: "Cancel"
+                                    font.pixelSize: root.px(15)
+                                    onPressed: { root.customOpen = false; root.customFound = null; root.customProblem = "" }
+                                }
+                            }
+                            StatusLine { visible: root.customProblem !== ""; kind: "problem"; text: root.customProblem }
+                            Card {
+                                id: customCard
+                                visible: root.customFound !== null
+                                Layout.fillWidth: true
+                                readonly property var result: Logic.networkCheckResult(root.customFound)
+                                StatusLine { kind: customCard.result.kind; text: customCard.result.line }
+                                Text {
+                                    textFormat: Text.PlainText
+                                    text: root.customFound ? root.customFound.name : ""
+                                    color: root.ink
+                                    font.family: root.sans
+                                    font.pixelSize: root.px(18)
+                                    font.weight: Font.DemiBold
+                                }
+                                Repeater {
+                                    model: Logic.networkFoundLines(root.customFound)
+                                    Hint { required property var modelData; Layout.fillWidth: true; font.pixelSize: root.px(14); text: modelData }
+                                }
+                                Hint { font.pixelSize: root.px(14); color: root.ink; text: "Only switch to a network you trust: names, payments and approvals then go there. Your LEZ 0.4 wallet and recovery phrase stay the same." }
+                                RowLayout {
+                                    spacing: 8
+                                    Action {
+                                        label: root.customSwitching ? "Switching…" : (root.customFound && root.customFound.in_use && !root.customFound.differs ? "Already in use" : "Switch to it")
+                                        strong: true
+                                        enabledNow: !root.customSwitching && !(root.customFound && root.customFound.in_use && !root.customFound.differs)
+                                        onPressed: root.switchCustom(root.customFound)
+                                    }
+                                    Action {
+                                        label: "Cancel"
+                                        enabledNow: !root.customSwitching
+                                        onPressed: { root.customFound = null }
+                                    }
+                                }
+                            }
+                        }
                     }
                     Part { text: "Main name" }
                     Hint { text: "Payments, messages and your profile are made as this name." }
@@ -15305,7 +15543,6 @@ Item {
                         font.weight: Font.DemiBold
                         font.pixelSize: root.px(36)
                     }
-                    NetSwitch {}
                     RunsOn {}
                     Hint {
                         font.pixelSize: root.px(18)
@@ -15448,7 +15685,7 @@ Item {
                     Hint {
                         visible: root.namesNet === "0.4"
                         color: root.ink
-                        text: "Registering privately stays off on LEZ 0.4 until real proofs have been run there. Register from a public account below, or switch to LEZ 0.3."
+                        text: "Registering privately stays off on LEZ 0.4 until real proofs have been run there. Register from a public account below, or switch to LEZ 0.3 in Settings → Network."
                     }
                     Card {
                         visible: root.namesNet === "0.3" && root.cliPath !== "" && !(root.deposit !== null && root.deposit.tier === "locked")

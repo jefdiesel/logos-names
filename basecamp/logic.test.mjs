@@ -472,7 +472,8 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     { line: "Can't read the bridge test network: it answered HTTP 502 instead of a reading", tone: "bad", reset: "" });
   check("bridgeNetStatus fresh", bridgeNetStatus({ read, error: null }, clock), { line: "Updated t100 · block 1,572", tone: "plain", reset: "" });
   check("bridgeNetStatus stale", bridgeNetStatus({ read, error: "can't reach" }, clock).line, "Can't reach the bridge test network now. Showing what it said at t100.");
-  check("bridgeNetStatus reset", bridgeNetStatus({ read: Object.assign({}, read, { reset_at: 90 }) }, clock).reset, "The bridge test network was reset at t90. What was held there before is gone; balances start again.");
+  check("bridgeNetStatus reset", bridgeNetStatus({ read: Object.assign({}, read, { reset_at: 90 }) }, clock).reset, "The bridge test network was reset at t90. What was held there before is gone; everything shown was read again.");
+  check("bridgeNetStatus reset, a custom network's name", bridgeNetStatus({ read: Object.assign({}, read, { reset_at: 90 }) }, clock, "Reset test chain").reset, "Reset test chain was reset at t90. What was held there before is gone; everything shown was read again.");
   check("bridgeNetRows", bridgeNetRows(read).map((r) => [r.title, r.found, r.assets.map((a) => a.symbol + " " + a.amount)]),
     [["Public account CCVd76Tk…pKnk", true, ["LEZ 23,786,858", "dUSDC 0", "wETH 0.1"]], ["Public account BVDcg8Sb…yBnD", false, []]]);
   // A busy module is never an absent one.
@@ -511,7 +512,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     "a: the reveal goes out at 15m (in 15 min); it can still be sent for 23 h.");
   check("revealLine near the end", revealLine({ name: "a", stage: "committed", ready_at: 0, reveal_by: 30 * 60000 }, 0, (ms) => String(Math.round(ms / 60000)) + "m"),
     "a: the reveal is due now and goes out while Names is open; it must be sent by 30m (30 min left).");
-  check("cliOutdatedLine 0.3", cliOutdatedLine("0.3", "names 0.1.0"), "The names tool this app uses for LEZ 0.3 (names 0.1.0) is too old for that network as it is now, so creating a wallet there doesn't work with it. LEZ 0.4 is unaffected: switch to it above.");
+  check("cliOutdatedLine 0.3", cliOutdatedLine("0.3", "names 0.1.0"), "The names tool this app uses for LEZ 0.3 (names 0.1.0) is too old for that network as it is now, so creating a wallet there doesn't work with it. LEZ 0.4 is unaffected: switch to it under Settings → Network.");
   check("cliOutdatedLine no reset, no install", ["0.3", "0.4"].map((n) => /reset|Install/.test(cliOutdatedLine(n, ""))), [false, false]);
   check("bridgeNetRows two bridges", bridgeNetRows({ bridges: [{ program: "A" }, { program: "B" }], accounts: [{ account: "Public/" + OTHER, found: true, native: "0",
     tokens: [{ bridge: "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", bridge_label: "bridge v2", symbol: "wETH", name: "Wrapped ETH", amount: "1", decimals: 0 }, { bridge: "7".repeat(44), symbol: "wETH", amount: "2", decimals: 0 }] }] })[0].assets.map((a) => a.name),
@@ -2004,6 +2005,47 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     [true, true, true, true, true, true]);
 }
 
+// Settings, Network (wallet-1121): the switch moved there, our LEZ 0.4 by default, a custom network
+// by RPC URL + chain id, checked first.
+{
+  const L = await import("./qml/logic.mjs");
+  const CHAIN = "2da7f7dfb6e51a28c942ea80391aa518253ec515e98d28cb4d83cc9e16ff5374";
+  check("network choices: ours first, then 0.3, then custom", L.NETWORK_CHOICES.map((c) => c.id), ["lez-0.4", "lez-0.3", "custom"]);
+  check("chain id typed: 0x and case", [L.chainIdTyped("  0x" + CHAIN.toUpperCase() + " "), L.chainIdTyped(CHAIN.slice(1)), L.chainIdTyped(""), L.chainIdTyped(CHAIN.slice(0, 63) + "g")], [CHAIN, "", "", ""]);
+  check("chain short", L.chainShort(CHAIN), "2da7f7df…5374");
+  check("default network file", [L.defaultNetworkFile(CHAIN), L.defaultNetworkFile("x")], ["https://nameswallet.app/networks/" + CHAIN + ".json", ""]);
+  check("custom network problems, in order", [
+    L.customNetworkProblem("", CHAIN, ""), L.customNetworkProblem("ftp://x", CHAIN, ""), L.customNetworkProblem("http://evil.example/", CHAIN, ""),
+    L.customNetworkProblem("https://lez.example/", "", ""), L.customNetworkProblem("https://lez.example/", "abc", ""),
+    L.customNetworkProblem("https://lez.example/", CHAIN, "file.json"), L.customNetworkProblem("https://lez.example/", CHAIN, ""),
+    L.customNetworkProblem("http://127.0.0.1:3290", CHAIN, "https://x.example/n.json"), L.customNetworkProblem("https://a b/", CHAIN, "")],
+    ["Enter the network's RPC URL.", "The RPC URL starts with https:// (http:// only for this computer).", "The RPC URL starts with https:// (http:// only for this computer).",
+     "Enter the network's chain id.", "A chain id is 64 hex characters (0-9 and a-f).",
+     "The network file's address starts with https:// (http:// only for this computer).", "", "", "The RPC URL starts with https:// (http:// only for this computer)."]);
+  check("network name", [L.networkName("lez-0.4", null), L.networkName("custom", { name: "Reset chain" }), L.networkName("custom", null), L.networkName("lez-0.3", null)],
+    ["the bridge test network", "Reset chain", "the bridge test network", "the Logos testnet"]);
+  check("runs on, LEZ 0.4", [L.net04Html("lez-0.4", null), L.net04Html("custom", { name: "<b>x</b> & y" })], ["<b>LEZ 0.4</b> · bridge test network", "<b>LEZ 0.4</b> · &lt;b&gt;x&lt;/b&gt; &amp; y"]);
+  check("reset line", [L.networkResetLine(0, "x", (t) => "t" + t), L.networkResetLine(90, "", (t) => "t" + t)], ["", "The bridge test network was reset at t90. What was held there before is gone; everything shown was read again."]);
+  const found = { chain_id: CHAIN, rpc: "https://lez.nameswallet.app/", height: 33727, file_url: "https://nameswallet.app/networks/" + CHAIN + ".json", file_missing: false,
+    registry: "6Yxj5k8AiuBSuMAYVQFGrYKjJGUSSaWWgoB9D9XXN3gA", bridge_programs: ["a", "b"], file: { nft_programs: [{ program: "p", label: "x" }], faucet: "https://lez.nameswallet.app/" }, in_use: false, differs: false, reset: null };
+  check("found lines", L.networkFoundLines(found), ["Chain 2da7f7df…5374 · block 33,727 · RPC https://lez.nameswallet.app/", "Network file: https://nameswallet.app/networks/" + CHAIN + ".json",
+    "LNS registry " + L.keyShown("6Yxj5k8AiuBSuMAYVQFGrYKjJGUSSaWWgoB9D9XXN3gA"), "2 bridges", "1 NFT program, added to Collectibles", "Test-LEZ faucet: https://lez.nameswallet.app/"]);
+  check("found lines, no file for our own chain", L.networkFoundLines(Object.assign({}, found, { file_missing: true, file: null, bridge_programs: [] })).slice(1, 4),
+    ["No network file is published for it: our LEZ 0.4's built-in ids are used.", "LNS registry " + L.keyShown("6Yxj5k8AiuBSuMAYVQFGrYKjJGUSSaWWgoB9D9XXN3gA"), "No bridges"]);
+  check("check result: another network is offered", L.networkCheckResult(found), { line: "The RPC serves chain 2da7f7df…5374, the one you entered. Check the details, then switch.", kind: "done", offer: true });
+  check("check result: the one in use, unchanged", L.networkCheckResult(Object.assign({}, found, { in_use: true })), { line: "Same chain, at block 33,727. Nothing has changed.", kind: "done", offer: false });
+  check("check result: new ids in the file", L.networkCheckResult(Object.assign({}, found, { in_use: true, differs: true })).offer, true);
+  check("check result: a reset that kept the chain id", L.networkCheckResult(Object.assign({}, found, { in_use: true, height: 12, reset: { before: 33727, now: 12 } })),
+    { line: "This chain was reset: same chain id, but its block height went down (from 33,727 to 12). Everything shown was read again.", kind: "waiting", offer: false });
+  check("nothing checked", L.networkCheckResult(null), { line: "", kind: "", offer: false });
+  const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  check("the switch is in Settings only: no NetSwitch left, one network list", [/NetSwitch/.test(qml), (qml.match(/model: Logic\.NETWORK_CHOICES/g) || []).length], [false, 1]);
+  check("our LEZ 0.4 is the app's default too", /property string namesNet: "0\.4"/.test(qml), true);
+  check("every network button says what it is doing at once",
+    [/label: root\.customChecking \? "Checking…" : "Check"/.test(qml), /root\.customSwitching \? "Switching…"/.test(qml), /label: root\.netChecking \? "Checking…" : "Check the network now"/.test(qml),
+     /askLater\("network_custom", \[rpc, chain, file, false\]/.test(qml), /askLater\("network_custom", \[found\.rpc, found\.chain_id, found\.file_url, true\]/.test(qml)],
+    [true, true, true, true, true]);
+}
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);
-

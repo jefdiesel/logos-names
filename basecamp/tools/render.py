@@ -114,9 +114,16 @@ BRIDGE = r"""
                         private_accounts: [{ account: "%(carol)s", balance: "2999000", funded: true }] })
                 return JSON.stringify({ success: false, value: null, error: "the LEZ wallet is not running; install LEZ Wallet and open it" })
             }
+            // Settings, Network, Custom network (the mock's `network_custom`: `check` and `apply`
+            // answers, or `{error}`).
+            if (method === "network_custom") {
+                var nc = (%(mock)s).network_custom || {}
+                var na = args[3] ? (nc.apply || nc.check) : nc.check
+                return na && na.error ? JSON.stringify({ success: false, value: null, error: na.error }) : ok(na || null)
+            }
             // The names network: set_names_network moves it, get_config says it.
             if (method === "set_names_network") { root.mockNet = String(args[0]); method = "get_config"; var wrapNet = true }
-            if (method === "get_config") return (function(c) { return wrapNet ? ok(c) : JSON.stringify(c) })({ features: ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "test_lez_faucet"], bridge_programs: ["JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr", "BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf", "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA"], names_network: { id: root.mockNet || "lez-0.3" }, zone: (%(mock)s).zone || { id: "home", name: "Home", channel: "%(home_channel)s", home: true }, names_sequencer: "http://127.0.0.1:3040", registry: %(registry)s, sequencer: (%(mock)s).zone ? "http://127.0.0.1:3041" : "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json", cli: "/Users/you/.local/bin/names", cli_wallet: "/Users/you/.lee/wallet", bridge_key: "%(bridge_key)s", bridge_node: null, module_version: root.neededModule })
+            if (method === "get_config") return (function(c) { return wrapNet ? ok(c) : JSON.stringify(c) })({ features: ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "test_lez_faucet"], bridge_programs: ["JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr", "BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf", "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA"], names_network: { id: root.mockNet || (%(mock)s).names_network || "lez-0.3" }, network_choice: (%(mock)s).network_choice || null, custom_network: (%(mock)s).custom_network || null, custom_network_last: (%(mock)s).custom_network_last || null, lez04_chain: "2da7f7dfb6e51a28c942ea80391aa518253ec515e98d28cb4d83cc9e16ff5374", network_reset_at: (%(mock)s).network_reset_at || 0, zone: (%(mock)s).zone || { id: "home", name: "Home", channel: "%(home_channel)s", home: true }, names_sequencer: "http://127.0.0.1:3040", registry: %(registry)s, sequencer: (%(mock)s).zone ? "http://127.0.0.1:3041" : "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json", cli: "/Users/you/.local/bin/names", cli_wallet: "/Users/you/.lee/wallet", bridge_key: "%(bridge_key)s", bridge_node: null, module_version: root.neededModule })
             if (method === "normalize") return String(args[0]).toLowerCase().replace(/\.lez$/, "")
             if (method === "mine") return ok({ names: names.filter(function(entry) { return !(%(mock)s).noNames && entry.owner === "%(alice)s" }).map(function(entry) {
                 return { name: entry.name, display: entry.name + ".lez", owner: entry.owner, expires: null, never: true, lapsed: false } }), pending: ((%(mock)s).pending || []).map(function(p) {
@@ -1533,6 +1540,40 @@ for key, mock, then in [
 MOCKS["settings-nft-grants"] = MOCKS["collectibles-passes"]
 SCENARIOS["settings-nft-grants"] = 'root.setWalletNet("0.4"); Qt.callLater(function() { root.namesNet = "0.4"; root.section = "settings"; root.loadAppGrants() })'
 HEIGHTS["settings-nft-grants"] = 2700
+
+# ── Settings, Network (wallet-1121): the one network switch, and a custom network ──
+_NET_CHAIN = "2da7f7dfb6e51a28c942ea80391aa518253ec515e98d28cb4d83cc9e16ff5374"
+_NET_FOUND = {"chain_id": _NET_CHAIN, "rpc": "https://lez.nameswallet.app/", "height": 33727,
+              "file_url": "https://nameswallet.app/networks/" + _NET_CHAIN + ".json", "file_missing": False, "name": "Bridge test network (after the reset)",
+              "file": {"name": "Bridge test network (after the reset)", "chain_id": _NET_CHAIN, "rpc": "https://lez.nameswallet.app/", "registry": "9W9huNeAds11pdGpMijrdhTkSQ8upNudRnrZJbNNWfoW",
+                       "bridge_programs": ["JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", "CdijfhGnf1NjyCvYTZcGijQZzZ6soNJQ75Piex1ZTM93"],
+                       "nft_programs": [{"program": "ErycMYqXUUtducaYmpHZjRgdbLXchrMiV4NZRnmRDNmu", "label": "Name cards"}], "faucet": "https://lez.nameswallet.app/"},
+              "registry": "9W9huNeAds11pdGpMijrdhTkSQ8upNudRnrZJbNNWfoW", "bridge_programs": ["JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", "CdijfhGnf1NjyCvYTZcGijQZzZ6soNJQ75Piex1ZTM93"],
+              "builtin": True, "in_use": False, "differs": False, "reset": None}
+_NET_CUSTOM = {"chain_id": _NET_CHAIN, "rpc": "https://lez.nameswallet.app/", "file_url": _NET_FOUND["file_url"], "name": "Bridge test network (after the reset)", "height": 33727, "faucet": None, "set_at": 1792000000}
+_NET_SETTINGS = 'root.section = "settings"; root.whatsNewSeen = "?"; '
+_NET_FORM = _NET_SETTINGS + 'root.pickNetwork("custom"); customRpcField.text = "https://lez.nameswallet.app/"; customChainField.text = "' + _NET_CHAIN + '"; '
+for _name, _js, _mock in [
+    ("net-settings", 'root.section = "settings"', {"names_network": "lez-0.4"}),
+    ("net-settings-03", _NET_SETTINGS, {"names_network": "lez-0.3"}),
+    ("net-settings-switching", _NET_SETTINGS + 'root.netSwitching = true', {"names_network": "lez-0.4"}),
+    ("net-custom-form", _NET_FORM, {"names_network": "lez-0.4"}),
+    ("net-custom-incomplete", _NET_SETTINGS + 'root.pickNetwork("custom"); customRpcField.text = "https://lez.nameswallet.app/"; customChainField.text = "2da7f7"; root.checkCustom()', {"names_network": "lez-0.4"}),
+    ("net-custom-checking", _NET_FORM + 'root.customChecking = true', {"names_network": "lez-0.4"}),
+    ("net-custom-mismatch", _NET_FORM + 'root.checkCustom()', {"names_network": "lez-0.4", "network_custom": {"check": {"error": "that RPC serves chain 11111111…1111, not the chain id you entered (2da7f7df…5374). Nothing was changed."}}}),
+    ("net-custom-found", _NET_FORM + 'root.checkCustom()', {"names_network": "lez-0.4", "network_custom": {"check": _NET_FOUND}}),
+    ("net-custom-switching", _NET_FORM + 'root.checkCustom(); root.againAfter(100, function() { root.customSwitching = true })', {"names_network": "lez-0.4", "network_custom": {"check": _NET_FOUND}}),
+    ("net-custom-in-use", _NET_SETTINGS + 'root.customDone = "Now on Bridge test network (after the reset) (chain 2da7f7df…5374, block 33,727)."', {"names_network": "lez-0.4", "network_choice": "custom", "custom_network": _NET_CUSTOM}),
+    ("net-check-same", _NET_SETTINGS + 'root.checkNetworkNow()', {"names_network": "lez-0.4", "network_custom": {"check": dict(_NET_FOUND, in_use=True, file_missing=True, file=None, name="Bridge test network")}}),
+    ("net-check-reset", _NET_SETTINGS + 'root.checkNetworkNow()', {"names_network": "lez-0.4", "network_reset_at": 1792000000,
+        "network_custom": {"check": dict(_NET_FOUND, in_use=True, differs=True, height=12, reset={"before": 33727, "now": 12})}}),
+    ("net-wallet-home", 'root.openWallet("home")', {"names_network": "lez-0.4"}),
+    ("net-welcome", 'root.cliPath = ""', {"names_network": "lez-0.4"}),
+]:
+    SCENARIOS[_name] = _js
+    MOCKS[_name] = _mock
+    HEIGHTS[_name] = 1700 if _name.startswith("net-welcome") else 1500
+
 
 def main():
     qml, out_dir = sys.argv[1], sys.argv[2]
