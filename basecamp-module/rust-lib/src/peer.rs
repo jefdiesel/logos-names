@@ -166,6 +166,13 @@ impl Gate {
     /// Asks `module` without waiting: `done` gets the answer later, from the host's event loop,
     /// or at once when it may not be asked. `done` must not need a lock its caller holds.
     pub fn ask(self: &Arc<Self>, host: &dyn Host, module: &str, method: &str, args: &Value, wait: Duration, done: Done) {
+        self.ask_learning(host, module, method, args, wait, true, done)
+    }
+
+    /// `ask`; with `hold_on_no_answer` false, an ask that got no answer within its `wait` doesn't
+    /// hold the module (a short first ask: its wait bounds the host acquiring the module's object,
+    /// and a healthy node may simply take longer to answer). An answer still clears a hold.
+    pub fn ask_learning(self: &Arc<Self>, host: &dyn Host, module: &str, method: &str, args: &Value, wait: Duration, hold_on_no_answer: bool, done: Done) {
         if let Err(failure) = self.admit(host, module) {
             return done(Err(failure));
         }
@@ -177,7 +184,9 @@ impl Gate {
             args,
             wait,
             Box::new(move |answer| {
-                gate.learn(&name, &answer);
+                if hold_on_no_answer || !matches!(answer, Err(Failure::NoAnswer(_))) {
+                    gate.learn(&name, &answer);
+                }
                 done(answer)
             }),
         );
@@ -199,6 +208,12 @@ pub fn call(module: &str, method: &str, args: &Value, wait: Duration) -> Result<
 pub fn ask(module: &str, method: &str, args: &Value, wait: Duration, done: Done) {
     let gate = with_gate(Arc::clone);
     gate.ask(host(), module, method, args, wait, done)
+}
+
+/// `ask` whose no-answer doesn't hold the module (`Gate::ask_learning`).
+pub fn ask_unheld(module: &str, method: &str, args: &Value, wait: Duration, done: Done) {
+    let gate = with_gate(Arc::clone);
+    gate.ask_learning(host(), module, method, args, wait, false, done)
 }
 
 /// Whether `module` is loaded, as far as can be told now (never waits).
@@ -416,6 +431,39 @@ pub mod stand_in {
         SLOW.with(|slow| slow.borrow().get(module).copied())
     }
 
+    thread_local! {
+        static DEFERRED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+        static QUEUED: RefCell<Vec<(Done, Result<Value, Failure>)>> = RefCell::new(Vec::new());
+    }
+
+    /// `module`'s answers to asks wait for `run_event_loop`, as the host's event loop delivers
+    /// them after the call that asked has returned (for the rest of this test thread).
+    pub fn set_deferred(module: &str, deferred: bool) {
+        DEFERRED.with(|set| {
+            if deferred {
+                set.borrow_mut().insert(module.to_owned());
+            } else {
+                set.borrow_mut().remove(module);
+            }
+        });
+    }
+
+    /// The host's event loop: delivers every answer waiting, and those the deliveries ask for, on
+    /// this thread (the call thread, as in the host). How many were delivered.
+    pub fn run_event_loop() -> usize {
+        let mut delivered = 0;
+        loop {
+            let queued: Vec<(Done, Result<Value, Failure>)> = QUEUED.with(|queue| std::mem::take(&mut *queue.borrow_mut()));
+            if queued.is_empty() || delivered > 100_000 {
+                return delivered;
+            }
+            for (done, answer) in queued {
+                delivered += 1;
+                done(answer);
+            }
+        }
+    }
+
     /// `module` is loaded but never answers (the owner's Basecamp, 2026-11-18: blockchain_module
     /// loaded, its node busy), for the rest of this test thread: a call waits its whole `wait` and
     /// gets no answer, as the host's waitForFinished would; an ask's `done` gets no answer once its
@@ -499,6 +547,10 @@ pub mod stand_in {
                 crate::chain::MODULE => crate::node::answer(method, args),
                 _ => Err(Failure::NoAnswer(format!("no stand-in for {module}"))),
             };
+            if DEFERRED.with(|set| set.borrow().contains(module)) {
+                QUEUED.with(|queue| queue.borrow_mut().push((done, answer)));
+                return;
+            }
             match slow(module) {
                 Some(after) => {
                     let module = module.to_owned();

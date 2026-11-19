@@ -1351,7 +1351,19 @@ struct BoardRead {
     fetched: Option<std::time::Instant>,
     /// When `value` was read: how old a list kept through failed reads is.
     read_at: Option<std::time::Instant>,
+    /// Which read is under way (`next_reading`): a read whose entry was forgotten, or started
+    /// again, since it began is dropped, never stored as the new state's.
+    reading: u64,
 }
+
+/// A number for each background read started (`BoardRead::reading`).
+fn next_reading() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The background reads of the bridge test network's balances (`bridge_net_balances`).
+const BRIDGE_NET_KEY: &str = "bridge-net:";
 
 /// How long the CLI is given to build or sign a relayed call: nonces from the chain, no proof.
 const PUBLIC_PLAN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(12);
@@ -2670,8 +2682,8 @@ impl Names {
     fn forget_all_reads(&mut self) {
         self.read_cache.clear();
         self.board_reads.lock().expect("the board reads lock").clear();
-        // The balance was read from the old network (CR-3).
-        cli::forget_balance();
+        // The balance was read from the old network (CR-3); a read of it under way is dropped.
+        cli::forget_balance_of(self.resolve_wallet(self.cli_wallet.as_deref()).as_deref());
         // Every served read too, and one under way is dropped when it ends.
         self.served.forget("");
     }
@@ -2736,7 +2748,7 @@ impl Names {
     /// renamed, another default): every read of it is made afresh, and a read under way is dropped
     /// when it ends (so a balance read before a send is never noted in the History after it).
     fn forget_balances(&self) {
-        cli::forget_balance();
+        cli::forget_balance_of(self.resolve_wallet(self.cli_wallet.as_deref()).as_deref());
         for kind in [LEZ_BALANCE_KEY, "receipts@", "cli_accounts@", "wallet@", "mine@", "first-cli_mine:"] {
             self.served.forget(kind);
         }
@@ -2766,12 +2778,14 @@ impl Names {
             let read = reads.entry(key.clone()).or_default();
             if !read.updating && fetching < MAX_BOARD_FETCHES {
                 read.updating = true;
+                let reading = next_reading();
+                read.reading = reading;
                 let reads = std::sync::Arc::clone(&self.board_reads);
                 let key = key.clone();
                 std::thread::spawn(move || {
                     let fetched = fetch();
                     let mut reads = reads.lock().expect("the board reads lock");
-                    let read = reads.entry(key).or_default();
+                    let Some(read) = reads.get_mut(&key).filter(|read| read.reading == reading) else { return };
                     read.updating = false;
                     match fetched {
                         Ok(value) => {
@@ -4141,7 +4155,10 @@ impl Names {
                             Err(error) if error == NOT_SENT_HERE => entry["from"].as_str().map_or(Err(error), |from| chain_landed_asked(hash, from)),
                             other => other,
                         };
-                        if landed == Ok(true) {
+                        if landed.as_ref().is_err_and(|why| is_busy(why)) {
+                            // The node's answer is still on its way (a poll never waits for it):
+                            // left sending, asked again on the next poll; never "unknown" unasked.
+                        } else if landed == Ok(true) {
                             settled = json!({ "state": "in_block" });
                         } else if now().saturating_sub(entry["at"].as_u64().unwrap_or(0)) >= activity::SENDING_WAIT_S {
                             // Not seen in a block for this long: whether it ever will be is unknown.
@@ -4152,13 +4169,19 @@ impl Names {
                         // made if the note is still there once nothing holds it any more.
                         if let Ok(notes) = node::call("wallet_get_notes", json!([from, ""]), node::QUICK).map(|reply| chain::notes_of(&reply)) {
                             if !notes.contains_key(note) {
-                                settled = json!({ "state": "in_block" });
                                 // Its transaction, found by the deposit's op id in the recent
                                 // blocks' events: its hash and the fee it paid
-                                // (bridge-settled-after-unload-has-no-hash-or-fee).
-                                if let Some((hash, fee)) = activity::bridge_op_id(&entry).and_then(|op| deposit_made(&op, from, note, &entry)) {
-                                    settled["hash"] = json!(hash);
-                                    settled["fee"] = fee.map_or(Value::Null, |fee| json!(fee.to_string()));
+                                // (bridge-settled-after-unload-has-no-hash-or-fee). While the walk
+                                // is still reading, the entry stays sending and is tried again.
+                                match activity::bridge_op_id(&entry).map(|op| deposit_made(&op, from, note, &entry)) {
+                                    Some(Err(_)) => {}
+                                    found => {
+                                        settled = json!({ "state": "in_block" });
+                                        if let Some(Ok(Some((hash, fee)))) = found {
+                                            settled["hash"] = json!(hash);
+                                            settled["fee"] = fee.map_or(Value::Null, |fee| json!(fee.to_string()));
+                                        }
+                                    }
                                 }
                             } else if now().saturating_sub(entry["at"].as_u64().unwrap_or(0)) >= NOTES_HELD_S {
                                 settled = json!({ "state": "failed" });
@@ -5770,6 +5793,15 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
+        // `{"accounts": [...], "fresh": true}` asks for a read made now (after a claim or a burn:
+        // the last one kept may be from before it); the plain list as before.
+        let (accounts, fresh) = match serde_json::from_str::<Value>(&accounts) {
+            Ok(Value::Object(asked)) => (asked.get("accounts").map_or_else(|| "[]".to_owned(), Value::to_string), asked.get("fresh") == Some(&Value::Bool(true))),
+            _ => (accounts, false),
+        };
+        if fresh {
+            self.refresh_reads(BRIDGE_NET_KEY);
+        }
         reply((|| {
             let (mut accounts, private) = bridge_net::accounts_asked(&accounts)?;
             let dir = config_dir().ok_or("no folder for the Wallet's files")?;
@@ -5790,7 +5822,7 @@ impl NamesModule for Names {
             let url = std::env::var("LOGOS_NAMES_BRIDGE_RPC").ok().filter(|url| !url.trim().is_empty()).unwrap_or_else(|| self.lez04_rpc());
             let programs = self.bridge_programs_now();
             let key = format!(
-                "bridge-net:{url}:{}:{}",
+                "{BRIDGE_NET_KEY}{url}:{}:{}",
                 programs.iter().map(registry::account_text).collect::<Vec<_>>().join("+"),
                 accounts.iter().map(registry::account_text).collect::<Vec<_>>().join(",")
             );
@@ -7405,7 +7437,13 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply(self.approve(request_id.trim(), &account))
+        let approved = self.approve(request_id.trim(), &account);
+        // A burn or a claim signed here changes what the bridge network holds: its next read
+        // is made afresh (a read under way is dropped).
+        if approved.is_ok() {
+            self.refresh_reads(BRIDGE_NET_KEY);
+        }
+        reply(approved)
     }
 
     fn reject_request(&mut self, request_id: String) -> String {
@@ -8175,6 +8213,18 @@ impl Names {
         })
     }
 
+    /// The background reads whose key starts with `prefix` are made afresh on their next call:
+    /// their values are kept (shown meanwhile), and a read under way is dropped when it ends.
+    fn refresh_reads(&self, prefix: &str) {
+        if let Ok(mut reads) = self.board_reads.lock() {
+            for (_, read) in reads.iter_mut().filter(|(key, _)| key.starts_with(prefix)) {
+                read.fetched = None;
+                read.updating = false;
+                read.reading = 0;
+            }
+        }
+    }
+
     /// Answers at once with the last value `fetch` gave for `key`, `{value,
     /// updating, error}`, and starts a newer read on its own thread unless
     /// one is on the way or the last ended less than `every` ago.
@@ -8183,11 +8233,14 @@ impl Names {
         let read = reads.entry(key.clone()).or_default();
         if !read.updating && read.fetched.is_none_or(|at| at.elapsed() >= every) {
             read.updating = true;
+            let reading = next_reading();
+            read.reading = reading;
             let reads = std::sync::Arc::clone(&self.board_reads);
             std::thread::spawn(move || {
                 let fetched = fetch();
                 let mut reads = reads.lock().expect("the board reads lock");
-                let read = reads.entry(key).or_default();
+                // Forgotten since it started (a send, a claim, another wallet): dropped.
+                let Some(read) = reads.get_mut(&key).filter(|read| read.reading == reading) else { return };
                 read.updating = false;
                 read.fetched = Some(std::time::Instant::now());
                 match fetched {
@@ -9648,25 +9701,44 @@ const DEPOSIT_SEARCH_BLOCKS: usize = 600;
 /// was cut off: its transaction's hash, found in the recent blocks' events, and the fee it
 /// paid, from what the key's notes held when it was sent (kept with its pending record).
 /// The hash is then kept like any send made here, so `chain_tx` can be asked of it.
-fn deposit_made(op_id: &[u8; 32], from: &str, note: &str, entry: &Value) -> Option<(String, Option<u128>)> {
-    let mut block = node::call("get_cryptarchia_info", json!([]), node::QUICK).ok()?["tip"].as_str()?.to_owned();
-    let mut found = None;
-    for _ in 0..DEPOSIT_SEARCH_BLOCKS {
-        let events = node::call("get_block_events", json!([block]), node::QUICK).ok()?;
-        if let Some(hash) = chain::deposit_in_events(&events, op_id) {
-            found = Some(hash);
-            break;
+/// `Err` (the busy mark) while the node's answers are still on their way (in a poll): the
+/// caller tries again on the next one; `Ok(None)` when it isn't in the blocks walked.
+fn deposit_made(op_id: &[u8; 32], from: &str, note: &str, entry: &Value) -> Result<Option<(String, Option<u128>)>, String> {
+    let found = if node::reads_kept_now() {
+        // A poll: the walk goes on by itself, each block asked from the last one's answer
+        // (node::deposit_walk), so it never waits here and is never a block a poll.
+        match node::deposit_walk(op_id, DEPOSIT_SEARCH_BLOCKS) {
+            node::Walk::Found(hash) => Some(hash),
+            node::Walk::Missing => None,
+            node::Walk::Walking | node::Walk::Failed(_) => return Err(still_reading("where the deposit landed")),
         }
-        block = node::call("get_block", json!([block]), node::QUICK).ok()?["header"]["parent_block"].as_str()?.to_owned();
-    }
-    let hash = found?;
+    } else {
+        (|| {
+            let mut block = node::call("get_cryptarchia_info", json!([]), node::QUICK).ok()?["tip"].as_str()?.to_owned();
+            for _ in 0..DEPOSIT_SEARCH_BLOCKS {
+                let events = node::call("get_block_events", json!([block]), node::QUICK).ok()?;
+                if let Some(hash) = chain::deposit_in_events(&events, op_id) {
+                    return Some(hash);
+                }
+                block = node::call("get_block", json!([block]), node::QUICK).ok()?["header"]["parent_block"].as_str()?.to_owned();
+            }
+            None
+        })()
+    };
+    let Some(hash) = found else { return Ok(None) };
     let sent = chain_sent();
     // Cut off after its record was kept: that has its fee already.
     if let Some(known) = sent.get(&hash) {
-        return Some((hash.clone(), known["fee"].as_str().and_then(|fee| fee.parse().ok())));
+        return Ok(Some((hash.clone(), known["fee"].as_str().and_then(|fee| fee.parse().ok()))));
     }
     let pending = sent.into_iter().find(|(key, sent)| key.starts_with("pending-") && sent["inputs"] == json!([note]) && sent["from"] == from);
-    let stored = node::call("get_transaction", json!([hash]), node::QUICK).ok();
+    // Its fee from the transaction: one still on its way is waited for on the next poll, so the
+    // record is never kept without it.
+    let stored = match node::call("get_transaction", json!([hash]), node::QUICK) {
+        Ok(tx) => Some(tx),
+        Err(why) if is_busy(&why) => return Err(why),
+        Err(_) => None,
+    };
     let amount = entry["amount"].as_str().and_then(|amount| amount.parse::<u128>().ok());
     let fee = match (&stored, &pending, amount) {
         (Some(tx), Some((_, sent)), Some(amount)) => sent["notes"].as_object().and_then(|notes| chain::deposit_fee(tx, notes, amount)),
@@ -9680,7 +9752,7 @@ fn deposit_made(op_id: &[u8; 32], from: &str, note: &str, entry: &Value) -> Opti
     if let Some((key, _)) = pending {
         chain_sent_remove(&key);
     }
-    Some((hash, fee))
+    Ok(Some((hash, fee)))
 }
 
 /// Forgets a record `chain_sent_add` made (a deposit's pending one, once it has its hash).
@@ -9830,6 +9902,88 @@ mod node {
         static POLLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
 
+    /// Whether a node read made now is a poll's kept read (`polled`, in a module build).
+    pub fn reads_kept_now() -> bool {
+        POLLED.with(std::cell::Cell::get) && kept_reads()
+    }
+
+    /// Where a cut-off deposit's walk down the chain is (`deposit_walk`).
+    #[derive(Clone, Debug, PartialEq)]
+    pub enum Walk {
+        Walking,
+        Found(String),
+        /// Not in the blocks walked.
+        Missing,
+        /// A read failed: the next call starts it again.
+        Failed(String),
+    }
+
+    /// The walk for deposit `op_id`, from the tip down `blocks` blocks, looking in each block's
+    /// events for it. Started by the first call; each step is asked from the last one's answer, on
+    /// the host's event loop, so it goes on between polls without any call waiting for it.
+    pub fn deposit_walk(op_id: &[u8; 32], blocks: usize) -> Walk {
+        let reads = store();
+        let key = super::registry::hex(op_id);
+        let generation = {
+            let mut store = lock(&reads);
+            match store.walks.get(&key) {
+                Some(Walk::Failed(_)) | None => {}
+                Some(walk) => return walk.clone(),
+            }
+            store.walks.insert(key.clone(), Walk::Walking);
+            store.generation
+        };
+        let (into, op) = (std::sync::Arc::clone(&reads), *op_id);
+        walk_ask(std::sync::Arc::clone(&reads), generation, key.clone(), "get_cryptarchia_info", serde_json::json!([]), move |info| match info["tip"].as_str() {
+            Some(tip) => walk_block(into, generation, op, tip.to_owned(), blocks),
+            None => walk_end(&into, generation, &super::registry::hex(&op), Walk::Failed("the node didn't say its tip".to_owned())),
+        });
+        let walk = lock(&reads).walks.get(&key).cloned().unwrap_or(Walk::Walking);
+        walk
+    }
+
+    fn walk_end(reads: &Reads, generation: u64, key: &str, walk: Walk) {
+        let mut store = lock(reads);
+        if store.generation == generation {
+            store.walks.insert(key.to_owned(), walk);
+        }
+    }
+
+    fn walk_block(reads: std::sync::Arc<Reads>, generation: u64, op: [u8; 32], block: String, left: usize) {
+        let key = super::registry::hex(&op);
+        let into = std::sync::Arc::clone(&reads);
+        walk_ask(reads, generation, key.clone(), "get_block_events", serde_json::json!([block.clone()]), move |events| {
+            if let Some(hash) = chain::deposit_in_events(&events, &op) {
+                return walk_end(&into, generation, &key, Walk::Found(hash));
+            }
+            if left <= 1 {
+                return walk_end(&into, generation, &key, Walk::Missing);
+            }
+            let next = std::sync::Arc::clone(&into);
+            walk_ask(into, generation, key.clone(), "get_block", serde_json::json!([block]), move |found| match found["header"]["parent_block"].as_str() {
+                Some(parent) => walk_block(next, generation, op, parent.to_owned(), left - 1),
+                None => walk_end(&next, generation, &key, Walk::Missing),
+            });
+        });
+    }
+
+    /// Asks the node `method(args)` for the walk; `then` gets its answer, a failure ends the walk.
+    fn walk_ask(reads: std::sync::Arc<Reads>, generation: u64, key: String, method: &'static str, args: Value, then: impl FnOnce(Value) + Send + 'static) {
+        if lock(&reads).generation != generation {
+            return;
+        }
+        peer::ask(
+            chain::MODULE,
+            method,
+            &args,
+            ASK_WAIT,
+            Box::new(move |answer| match answer_of(method, answer) {
+                Ok(value) => then(value),
+                Err(why) => walk_end(&reads, generation, &key, Walk::Failed(why)),
+            }),
+        );
+    }
+
     /// Runs `body`, a poll (chain_status, chain_accounts, …): its reads of the node never wait.
     pub fn polled<R>(body: impl FnOnce() -> R) -> R {
         let was = POLLED.with(|polled| polled.replace(true));
@@ -9872,6 +10026,8 @@ mod node {
         generation: u64,
         /// An ask was sent without the host acquiring the module's object first (QUICK_SEND).
         reached: bool,
+        /// Cut-off deposits' walks down the chain, by op id (`deposit_walk`).
+        walks: std::collections::HashMap<String, Walk>,
     }
 
     #[derive(Default)]
@@ -9887,7 +10043,6 @@ mod node {
     fn kept(method: &str, args: Value) -> Result<Value, String> {
         let reads = store();
         let key = format!("{method}\u{0}{args}");
-        let keep = if FIXED.contains(&method) { KEEP_FIXED } else { KEEP };
         let (generation, wait) = {
             let mut store = lock(&reads);
             let generation = store.generation;
@@ -9895,6 +10050,10 @@ mod node {
             let kept = &mut store.kept;
             if let Some(slot) = kept.get(&key) {
                 if let Some((answer, at)) = &slot.answer {
+                    // An hour only for a real answer that can't change (a block, a transaction);
+                    // a failure, or a transaction not stored yet (null), is asked again after
+                    // KEEP like any other read.
+                    let keep = if FIXED.contains(&method) && answer.as_ref().is_ok_and(|value| !value.is_null()) { KEEP_FIXED } else { KEEP };
                     if at.elapsed() < keep {
                         return answer.clone();
                     }
@@ -9918,23 +10077,34 @@ mod node {
         let (stored, asked_for) = (key.clone(), method.to_owned());
         let answered_at_once = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let at_once = std::sync::Arc::clone(&answered_at_once);
-        peer::ask(
-            chain::MODULE,
-            method,
-            &args,
-            wait,
-            Box::new(move |answer| {
-                at_once.store(true, std::sync::atomic::Ordering::SeqCst);
-                let answer = answer_of(&asked_for, answer);
-                let mut store = lock(&into);
-                if store.generation != generation {
-                    return;
+        // The short first ask's wait bounds the host acquiring the node's object, but the SDK has
+        // one timeout for the whole call: its running out says nothing about the node, so it
+        // neither holds the module nor is kept as "didn't answer"; the next poll asks again,
+        // with the full wait.
+        let short = wait == FIRST_ASK_WAIT;
+        let done: peer::Done = Box::new(move |answer| {
+            at_once.store(true, std::sync::atomic::Ordering::SeqCst);
+            let mut store = lock(&into);
+            if store.generation != generation {
+                return;
+            }
+            if short && matches!(answer, Err(peer::Failure::NoAnswer(_))) {
+                store.reached = true;
+                if let Some(slot) = store.kept.get_mut(&stored) {
+                    slot.asked = None;
                 }
-                let slot = store.kept.entry(stored).or_default();
-                slot.answer = Some((answer, std::time::Instant::now()));
-                slot.asked = None;
-            }),
-        );
+                return;
+            }
+            let answer = answer_of(&asked_for, answer);
+            let slot = store.kept.entry(stored).or_default();
+            slot.answer = Some((answer, std::time::Instant::now()));
+            slot.asked = None;
+        });
+        if short {
+            peer::ask_unheld(chain::MODULE, method, &args, wait, done);
+        } else {
+            peer::ask(chain::MODULE, method, &args, wait, done);
+        }
         let took = sending.elapsed();
         let mut store = lock(&reads);
         // Refused before it was sent (not loaded, held): nothing is learnt about the host.
@@ -9970,6 +10140,7 @@ mod node {
             let reads = store();
             let mut store = lock(&reads);
             store.kept.clear();
+            store.walks.clear();
             store.generation += 1;
         }
     }
@@ -11944,6 +12115,176 @@ mod tests {
         let refused = parsed(&names.activity(key.clone()))["value"].as_array().unwrap().iter().find(|e| e["amount"] == "700000").cloned().unwrap();
         assert_eq!(refused["state"], "failed", "{refused}");
         assert!(!chain_notes_in_use(&key).contains("b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7"));
+    }
+
+    // ── Review of names-stall-3 (2026-11-19): the polls' node reads, as in a module build ──
+
+    /// Review (2): a Logos send that landed is never written "unknown" because the node's answer
+    /// was still on its way: the host delivers an ask's answer after the call returned
+    /// (`stand_in::set_deferred`), so the first poll reads busy; the entry stays sending and
+    /// settles in_block once the answers are there.
+    #[test]
+    fn review_a_landed_logos_send_is_never_written_unknown_while_the_nodes_answer_is_on_its_way() {
+        let mut names = fresh();
+        node::reads_as_in_a_build();
+        peer::stand_in::set_deferred(chain::MODULE, true);
+        let dir = config_dir().unwrap();
+        let old = activity::add(&dir, now() - activity::SENDING_WAIT_S - 1, json!({ "kind": "send", "chain": "logos", "from": NODE_KEY, "to": "39".repeat(32), "amount": "700", "hash": "cc".repeat(32) }));
+        node_answers("get_transaction", json!({ "mantle_tx": { "ops": [{ "opcode": 0, "payload": { "inputs": ["n700"], "outputs": [{ "value": 700 }] } }] } }));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "n9", "value": "93798" }] }));
+        let state = |id: &str| activity::all(&dir).into_iter().find(|e| e["id"] == id).unwrap()["state"].clone();
+        let mut rounds = 0;
+        while state(&old) == "sending" && rounds < 5 {
+            names.activity(String::new());
+            assert_ne!(state(&old), "unknown", "written unknown on round {rounds} while the node's answer was on its way");
+            peer::stand_in::run_event_loop();
+            rounds += 1;
+        }
+        assert_eq!(state(&old), "in_block");
+        peer::stand_in::set_deferred(chain::MODULE, false);
+    }
+
+    /// Review (2): a deposit cut off mid-call settles with its hash and fee in a module build too:
+    /// while the node's answers are on their way it stays sending (never in_block without them),
+    /// and the walk down the chain goes on by itself between polls.
+    #[test]
+    fn review_a_cut_off_deposit_settles_with_its_hash_and_fee_when_the_nodes_answers_come_later() {
+        const A640: &str = "a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6";
+        let mut names = fresh();
+        let key = "4d".repeat(32);
+        let to = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": A640, "value": "640080" }, { "id": "fee1", "value": "5000000" }] }));
+        node_answers("get_channel_state", json!({ "configuration_threshold": 3 }));
+        node::ANSWERS.with(|answers| answers.borrow_mut().remove("channel_deposit_with_notes"));
+        assert_eq!(parsed(&names.chain_bridge(key.clone(), format!("Public/{to}"), "640,080".into(), true))["success"], false);
+        let mine = |names: &mut Names| parsed(&names.activity(key.clone()))["value"].as_array().unwrap().iter().find(|e| e["amount"] == "640080").cloned().unwrap();
+        let kept = mine(&mut names);
+        let op: Vec<u8> = registry::unhex(kept["op_id"].as_str().unwrap()).unwrap();
+        let hash = "7a".repeat(32);
+        // From here, as the host runs the module: the polls' reads are asks answered later.
+        node::reads_as_in_a_build();
+        peer::stand_in::set_deferred(chain::MODULE, true);
+        node_answers("get_cryptarchia_info", json!({ "tip": "b3", "height": 3 }));
+        node_answers("get_block", json!({ "header": { "parent_block": "b2" } }));
+        node_answers("get_block_events", json!([{ "Tx": { "tx_hash": hash, "op_id": op, "payload": { "Deposit": { "amount": 640080 } } } }]));
+        node_answers("get_transaction", json!({ "mantle_tx": { "ops": [
+            { "opcode": 18, "payload": { "inputs": [A640] } },
+            { "opcode": 0, "payload": { "inputs": ["fee1"], "outputs": [{ "value": 4998386 }] } }] } }));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "fee2", "value": "4998386" }] }));
+        let mut settled = mine(&mut names);
+        let mut rounds = 0;
+        while settled["state"] == "sending" && rounds < 8 {
+            peer::stand_in::run_event_loop();
+            settled = mine(&mut names);
+            assert!(settled["state"] == "sending" || settled["hash"].is_string(), "settled without its hash on round {rounds}: {settled}");
+            rounds += 1;
+        }
+        assert_eq!((settled["state"].as_str(), settled["hash"].as_str(), settled["fee"].as_str()), (Some("in_block"), Some(hash.as_str()), Some("1614")), "{settled}");
+        peer::stand_in::set_deferred(chain::MODULE, false);
+    }
+
+    /// Review (1): a failed read of a block or a transaction isn't kept for the hour a real one is:
+    /// after KEEP it is asked again, and the node's later answer is the one used.
+    #[test]
+    fn review_a_failed_read_of_a_transaction_is_asked_again_after_a_moment_not_kept_an_hour() {
+        node::reads_as_in_a_build();
+        peer::stand_in::set_deferred(chain::MODULE, true);
+        let ask = || node::polled(|| node::call("get_transaction", json!(["dd".repeat(32)]), node::QUICK));
+        // What the node's answer reads as, asked outside a poll (which also forgets what was kept).
+        let tx = json!({ "mantle_tx": { "ops": [] } });
+        node_answers("get_transaction", tx.clone());
+        let expected = node::call("get_transaction", json!(["dd".repeat(32)]), node::QUICK);
+        assert!(expected.is_ok(), "{expected:?}");
+        node_refuses("get_transaction", "No transaction found for hash");
+        assert!(ask().is_err_and(|why| is_busy(&why)));
+        peer::stand_in::run_event_loop();
+        let failed = ask();
+        assert!(failed.as_ref().is_err_and(|why| !is_busy(why)), "{failed:?}");
+        // The node stores it a moment later.
+        node_answers("get_transaction", tx);
+        std::thread::sleep(node::KEEP + std::time::Duration::from_millis(200));
+        let _ = ask();
+        peer::stand_in::run_event_loop();
+        assert_eq!(ask(), expected, "the node's later answer");
+        peer::stand_in::set_deferred(chain::MODULE, false);
+    }
+
+    /// Review (7): the first ask's short wait (1 s, to bound the host acquiring the node's object)
+    /// is also the SDK's whole-call timeout. A healthy node that takes 2 s to answer is not taken
+    /// for one that doesn't answer: no "didn't answer", no hold on a press meanwhile, and its
+    /// answer is shown once it comes.
+    #[test]
+    fn review_a_slow_healthy_node_is_not_held_or_said_not_to_answer_after_the_short_first_ask() {
+        let mut names = fresh();
+        node::reads_as_in_a_build();
+        peer::stand_in::hold_failures();
+        node_answers("get_cryptarchia_info", json!({ "tip": "ab", "height": 7, "slot": 9, "mode": "Online" }));
+        node_answers("get_time_info", json!({ "slot": 9, "epoch": 0 }));
+        peer::stand_in::set_slow(chain::MODULE, Some(std::time::Duration::from_secs(2)));
+        let started = std::time::Instant::now();
+        let shown = loop {
+            let status = parsed(&names.chain_status());
+            assert!(status["busy"] == true || status["success"] == true, "said at {:?}: {status}", started.elapsed());
+            if status["success"] == true {
+                break status;
+            }
+            if started.elapsed() > std::time::Duration::from_millis(1300) && started.elapsed() < std::time::Duration::from_millis(1600) {
+                // After the first ask's 1 s ran out: a press isn't refused as held.
+                let press = node::call("get_time_info", json!([]), node::QUICK);
+                assert!(press.as_ref().is_ok_and(|_| true) || !press.as_ref().unwrap_err().contains("isn't asked again"), "{press:?}");
+            }
+            assert!(started.elapsed() < std::time::Duration::from_secs(12), "the slow node's answer never came: {status}");
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        };
+        assert_eq!(shown["value"]["height"], 7, "{shown}");
+        peer::stand_in::set_slow(chain::MODULE, None);
+    }
+
+    /// Review (4): a background read under way when its value was forgotten (a claim or a burn
+    /// signed, another wallet) never puts its older value back afterwards; the next call reads
+    /// afresh and shows the new value.
+    #[test]
+    fn review_a_background_read_from_before_a_forget_never_comes_back_after_it() {
+        let names = fresh();
+        let key = format!("{BRIDGE_NET_KEY}test");
+        let every = std::time::Duration::from_secs(60);
+        let _ = names.read_in_background(key.clone(), every, || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            Ok(json!("before the claim"))
+        });
+        // The claim is signed while that read runs.
+        names.board_reads.lock().unwrap().clear();
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        let mut shown = Value::Null;
+        for _ in 0..40 {
+            shown = names.read_in_background(key.clone(), every, || Ok(json!("after the claim")))["value"].clone();
+            assert_ne!(shown, json!("before the claim"), "the read from before the claim came back");
+            if !shown.is_null() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(shown, json!("after the claim"));
+    }
+
+    /// Review (4): the app can ask for the bridge network's balances afresh
+    /// (`{"accounts": [...], "fresh": true}`, after a claim or a burn): the kept value stays shown
+    /// while a read made now runs; a read under way is dropped.
+    #[test]
+    fn review_the_bridge_network_balances_can_be_asked_afresh() {
+        let mut names = fresh();
+        let refused = parsed(&names.bridge_net_balances(json!({ "accounts": ["Public/abc"], "fresh": true }).to_string()));
+        assert!(refused["error"].as_str().unwrap_or_default().contains("public account"), "the object form is read: {refused}");
+        let key = format!("{BRIDGE_NET_KEY}test");
+        let every = std::time::Duration::from_secs(60);
+        let _ = names.read_in_background(key.clone(), every, || Ok(json!(1)));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(names.read_in_background(key.clone(), every, || Ok(json!(2)))["value"], json!(1), "kept within its age");
+        names.refresh_reads(BRIDGE_NET_KEY);
+        let asked = names.read_in_background(key.clone(), every, || Ok(json!(2)));
+        assert_eq!((asked["value"].clone(), asked["updating"].clone()), (json!(1), json!(true)), "the kept value shown while a read made now runs");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(names.read_in_background(key, every, || Ok(json!(3)))["value"], json!(2));
     }
 
     #[test]
