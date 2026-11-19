@@ -43,7 +43,7 @@ Item {
     // LEZ 0.4: a name registered from a public account publishes that account, so people can pay
     // it (the bridge page and `names pay` pay a name's published account). Ticked by default.
     property bool publishOnRegister: true
-    property string publishAsk: ""         // the name whose "Let people pay it" is being confirmed
+    property string publishAsk: ""         // the name whose account is being published ("Publishing…")
     // Get tokens: bridging from the person's Logos Blockchain node into LEZ (`cli_bridge`).
     property bool gettingTokens: false     // the "Get tokens" screen is open
     property string bridgeKey: ""          // the Logos Blockchain public key last bridged from, as the module keeps it
@@ -5190,10 +5190,12 @@ Item {
             return
         say("Publishing the account people pay " + name + " at…", "working", "publish:" + name)
         askLater("set_account", [name, account], function() {
+            if (publishAsk === name) publishAsk = ""
             say("People can pay " + name + " at your account " + Logic.idShort(account) + ".", false)
             loadMine()
         }, function(message) {
-            say("The account of " + name + " wasn't published: " + sentence(message) + " Use “Let people pay it…” beside the name to try again.", true)
+            if (publishAsk === name) publishAsk = ""
+            say("The account of " + name + " wasn't published: " + sentence(message) + " Press “Let people pay it” beside the name to try again.", true)
             loadMine()
         }, 180000)
     }
@@ -11613,9 +11615,7 @@ Item {
                                     elide: Text.ElideRight
                                 }
                                 Link { visible: myName.modelData["private"] !== false && root.namesNet !== "0.4"; text: "Make public…"; font.pixelSize: root.px(15); onPressed: { root.go("settings"); root.loadAccounts() } }
-                                Link { visible: root.namesNet === "0.4" && !myName.modelData.account && root.publishAsk !== myName.modelData.name; text: "Let people pay it…"; font.pixelSize: root.px(15); onPressed: root.publishAsk = myName.modelData.name }
-                                Link { visible: root.publishAsk === myName.modelData.name; text: "Publish " + Logic.idShort(myName.modelData.owner || ""); font.pixelSize: root.px(15); onPressed: { root.publishAsk = ""; root.publishAccount(myName.modelData.name, myName.modelData.owner || "") } }
-                                Link { visible: root.publishAsk === myName.modelData.name; text: "Cancel"; font.pixelSize: root.px(15); onPressed: root.publishAsk = "" }
+                                Link { visible: root.namesNet === "0.4" && !myName.modelData.account; text: root.publishAsk === myName.modelData.name ? "Publishing…" : "Let people pay it"; font.pixelSize: root.px(15); onPressed: { if (root.publishAsk === myName.modelData.name) return; root.publishAsk = myName.modelData.name; root.publishAccount(myName.modelData.name, myName.modelData.owner || "") } }
                                 Link { visible: myName.modelData.name !== root.mainName; text: "Make main"; font.pixelSize: root.px(15); onPressed: root.setMain(myName.modelData.name) }
                                 Link { text: "Open"; font.pixelSize: root.px(15); onPressed: { root.go("search"); root.show(myName.modelData.name) } }
                                 Link { text: "Copy"; font.pixelSize: root.px(15); onPressed: root.copy(myName.modelData.name, "Your name") }
