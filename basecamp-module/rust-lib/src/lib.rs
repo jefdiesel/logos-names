@@ -16191,8 +16191,17 @@ mod tests {
         let action = json!({ "action": "burn", "from": format!("Public/{PUBLIC}") }).to_string();
         // The first read is under way: busy, never an empty sheet.
         assert_eq!(parsed(&names.nft_sheet(NFT_PROGRAM.into(), action.clone()))["busy"], true);
-        std::thread::sleep(std::time::Duration::from_millis(2_200));
-        let fresh = parsed(&names.nft_sheet(NFT_PROGRAM.into(), action.clone()));
+        // The read takes its turn in the CLI lane, which is one per process: under `cargo test`
+        // other tests' slow fake CLIs (the stall tests' 3 s calls) can run before it, so wait for
+        // its end rather than a fixed 2.2 s (that failed on the Mini, 2026-11-19).
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(45);
+        let fresh = loop {
+            let reply = parsed(&names.nft_sheet(NFT_PROGRAM.into(), action.clone()));
+            if reply["busy"] != true || std::time::Instant::now() > until {
+                break reply;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        };
         assert_eq!(fresh["success"], true, "{fresh}");
         // Past the reuse limit a new read starts; while it runs, the old plan is not shown.
         std::thread::sleep(nft::PLAN_EVERY + std::time::Duration::from_millis(300));

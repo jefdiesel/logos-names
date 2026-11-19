@@ -55,7 +55,14 @@ ssh minim4 'bash -c "umask 077; W=/Volumes/exos162/logos/lp0001/wallet-nft; mkdi
     wallet (Job A's throwaway, NOT the owner's) pays A1 for fees. Conductor's decision; if not,
     stop here and report "public e2e not run: no funding".
 ssh minim4 'bash -c "J=/Volumes/exos162/logos/lp0001/job-a; LEE_WALLET_HOME_DIR=\$J/chain-home/wallets/operator \$J/chain-home/bin/wallet account list 2>&1 | grep -i operator"'
-ssh minim4 'bash -c "J=/Volumes/exos162/logos/lp0001/job-a; LEE_WALLET_HOME_DIR=\$J/chain-home/wallets/operator \$J/chain-home/bin/wallet auth-transfer send --from Public/<OPERATOR> --to Public/<A1> --amount 2000000000"'
+   # A1 has never been used and the operator's wallet holds no key for it, so LEZ 0.4 credits it
+   # only when the transfer carries A1's public key (--to-pk). With --to Public/<A1> the
+   # simulation reverts ("A delivery named Actor { account_id: <A1>, ... }, whose account is
+   # declared public but not admitted") and nothing is sent (2026-11-19 run). Read A1's key:
+ssh minim4 'bash -c "W=/Volumes/exos162/logos/lp0001/wallet-nft; LEE_WALLET_HOME_DIR=\$W/w1 \$W/target/release/names --rpc http://127.0.0.1:3310 wallet account get --account-id Public/<A1> --keys | sed -n \"s/^pk //p\""'
+   # (64 hex characters; call it A1PK), then:
+ssh minim4 'bash -c "J=/Volumes/exos162/logos/lp0001/job-a; LEE_WALLET_HOME_DIR=\$J/chain-home/wallets/operator \$J/chain-home/bin/wallet auth-transfer send --from Public/<OPERATOR> --to-pk <A1PK> --amount 2000000000"'
+   # A1 -> A2, A3 below can use --to: they are in A1's own wallet, which adds their keys itself.
    # then give a2, a3 a little from A1 for their own fees (each signs its own NFT messages):
 ssh minim4 'bash -c "W=/Volumes/exos162/logos/lp0001/wallet-nft; export LEE_WALLET_HOME_DIR=\$W/w1; N=\$W/target/release/names; \$N --rpc http://127.0.0.1:3310 wallet account list"'
    # read the ids of a2 and a3 from that list (call them A2, A3), then:
