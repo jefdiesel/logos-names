@@ -1287,6 +1287,12 @@ _E20_CODE["deposit"]["eth_token"] = _E20_USDT
 _E20_REG_PAUSED = {"tokens": [dict(_E20_TOKENS[0], denoms=[{"index": 0, "value": "100000000", "text": "100"}, {"index": 1, "value": "1000000000", "text": "1,000"}], freeze={"eth_deposits": False}),
                               dict(_E20_TOKENS[1], denoms=[{"index": 0, "value": "100000000000000000000", "text": "100"}], freeze={"eth_deposits": True})]}
 _E20_RECEIVE = 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.bridgeConfig = %s; root.openEthReceive(); root.receivePublicOk = true; %s }) })' % (json.dumps(_E20_CONFIG), "%s")
+# The bridge test network as read for this bridge: the account holds 1,500 USDT on it (so it is the
+# source chip, as wETH is on bridge v4 in sendback-amount).
+_E20_HELD = [{"definition": _E20_TOKENS[0]["definition"], "eth_token": _E20_USDT, "symbol": "USDT", "decimals": 6, "name": "Wrapped USDT (demo)", "bridge": V4, "bridge_label": "bridge e20"}]
+_E20_NET = dict(NET04_V4, read=dict(NET04_V4["read"], tokens=_E20_HELD, bridges=[dict(NET04_V4["read"]["bridges"][0], label="bridge e20")],
+    accounts=[{"account": OWNER, "found": True, "native": "0", "tokens": [dict(_E20_HELD[0], amount="1500000000")], "other_tokens": 0},
+              {"account": "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", "found": False, "native": "0", "tokens": [dict(_E20_HELD[0], amount="0")], "other_tokens": 0}]))
 _E20_USDT_ASSET = '{ symbol: "USDT", name: "Wrapped USDT (demo)", amount: "1,500", bridge: "%s", base: "1500000000", decimals: 6, definition: "%s", ethToken: "%s" }' % (V4, _E20_TOKENS[0]["definition"], _E20_USDT)
 _E20_SB = 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.bridgeConfig = %s; root.loadBridgeNet(); root.openSendBack("%s", %s); root.againAfter(300, function() { root.sbDenom = -1 }) }) })' % (json.dumps(_E20_CONFIG), OWNER, _E20_USDT_ASSET)
 for _name, _js, _mock in [
@@ -1298,7 +1304,7 @@ for _name, _js, _mock in [
     ("receive-erc20-paused", _E20_RECEIVE % "", {"bridge": {"config": _E20_CONFIG, "registry": _E20_REG_PAUSED}}),
     # Bridge to Ethereum from a USDT balance: amounts in USDT's 6 decimals (shown after "Change": opening
     # pre-selects the smallest, 100 USDT, and lands on step 2).
-    ("sendback-erc20-amount", _E20_SB, {"bridge": dict(sb_mock()["bridge"], config=_E20_CONFIG), "bridgeNet": NET04_V4}),
+    ("sendback-erc20-amount", _E20_SB, {"bridge": dict(sb_mock()["bridge"], config=_E20_CONFIG), "bridgeNet": _E20_NET}),
 ]:
     SCENARIOS[_name] = _js
     MOCKS[_name] = _mock
