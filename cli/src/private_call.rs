@@ -59,6 +59,11 @@ pub struct CallInput {
     fee_payer: Option<String>,
     #[serde(default)]
     expect_digest: Option<String>,
+    /// The fee's "at most" the person approved (the plan report's `fee.at_most`, which the
+    /// Basecamp module passes back on send). The send refuses before proving when the fee at
+    /// the chain's head is above it (rfp-022 docs/privacy-m5/repeat-claimers.md, review 4).
+    #[serde(default)]
+    approved_at_most: Option<String>,
     /// Programs whose actor states are read as the wallet's token program's (same messages and
     /// state as `wallet-tokens/`, which the RFP-022 bridge's token program shares).
     #[serde(default)]
@@ -103,6 +108,42 @@ fn native_program() -> AccountId {
 /// `docs/privacy-m5/repeat-claimers.md`). The cost is a first claim's: a base fee that rises
 /// before inclusion makes the wallet price and prove again (up to twice), or the call is dropped.
 pub const PRIVATE_CALL_FEE_HEADROOM_BLOCKS: u64 = 0;
+
+/// The "at most" a private call's sheet shows and the send holds to: the fee after the wallet's
+/// configured headroom of full blocks (`fees::private_running`, the wallet's own climb), never
+/// below what is reserved or the fee at the head.
+pub fn approved_ceiling(quote: &sequencer_service_rpc::FeeStateQuote, configured_blocks: u64, cycles: u64, reserve: u128, about: u128) -> u128 {
+    crate::fees::private_running(quote, configured_blocks, cycles).at_most.max(reserve).max(about)
+}
+
+/// Before proving: the fee at the chain's head now must still be within what the person
+/// approved. A plain refusal otherwise; nothing is proven, sent or spent, and no claim is used up.
+pub fn within_approved(approved: Option<&str>, head_now: u128) -> Result<(), String> {
+    let Some(text) = approved.map(str::trim).filter(|t| !t.is_empty()) else { return Ok(()) };
+    let cap: u128 = text.parse().map_err(|_| "refused: the approved fee is not a number; nothing was proven or sent. Ask again.".to_owned())?;
+    if head_now > cap {
+        return Err(format!(
+            "refused: the chain's fee rose to {head_now} since you approved at most {cap}; nothing was proven or sent, nothing was spent, and the claim or burn can be asked again."
+        ));
+    }
+    Ok(())
+}
+
+/// After the send: a plain line when the wallet reserved more than was approved (it priced again
+/// while the proof was made, because the chain's fee rose). The fee charged is the fee at
+/// inclusion; the rest of the reserve comes back.
+pub fn declared_fee_line(approved: Option<&str>, reserve: u128) -> Option<String> {
+    let cap: u128 = approved?.trim().parse().ok()?;
+    (reserve > cap).then(|| format!(
+        "note: the chain's fee rose while the proof was made, so the wallet proved it again and reserved {reserve}, more than the {cap} you approved; what isn't charged comes back"
+    ))
+}
+
+/// A private call that was sent but is in no block: most often the chain's fee rose past its
+/// reserve before a block took it, or another change from the account went first. Either way
+/// nothing was spent and no claim or nullifier was used up (a nullifier is spent only by an
+/// applied transaction).
+pub const PRIVATE_NOT_APPLIED: &str = "the transaction was not applied: it is in no block. Most often the chain's fee rose past what it reserved before a block took it, or another change from the same account went first. Nothing was spent and nothing was used up: ask again.";
 
 /// Puts the wallet's headroom back to its configured value after a private call. Only the
 /// headroom is touched, so a fee payer or refund target set on this wallet (`set_private_fee_payer`)
@@ -316,11 +357,15 @@ impl Client {
         let about = dry_number(&printed, "fee at head").ok_or_else(|| anyhow!("the wallet's dry run gave no fee"))?;
         let reserve = dry_number(&printed, "reserve").ok_or_else(|| anyhow!("the wallet's dry run gave no reserve"))?;
         let payer = dry_text(&printed, "fee payer").and_then(|text| parse_account(text).ok()).ok_or_else(|| anyhow!("the wallet's dry run named no fee payer"))?;
-        // The most the fee may take: the wallet holds `reserve` now and prices again, up to its
-        // headroom, if the base fees rise before inclusion.
-        let headroom = dry_text(&printed, "headroom")
-            .and_then(|text| text.rsplit_once('(').and_then(|(_, n)| n.trim_end_matches(')').trim().parse::<u128>().ok()))
-            .unwrap_or(reserve);
+        // The reserve is priced with no headroom (so a first and a repeat claim reserve the
+        // same), which makes the dry run's own "headroom" the fee at the head. The "at most" the
+        // person approves is the climb over the wallet's configured headroom instead, from a
+        // fresh fee quote: a ceiling the send checks again before it proves (`within_approved`).
+        // The rc3 wallet still reprices inside its proving loop when the fee rises during the
+        // proof (up to twice); it has no cap there, so a rise past this ceiling meanwhile is
+        // reported after the send (`declared_fee_line`), never charged in silence.
+        let quote = self.wallet.client().get_fee_state().await.context("could not read the chain's fee state")?;
+        let headroom = approved_ceiling(&quote, self.wallet.config().fee_headroom_blocks, cycles, reserve, about);
 
         // 2. The open replay.
         let own_account = self.wallet.get_account_private(call.account).map(|found| found.data).unwrap_or_default();
@@ -539,7 +584,7 @@ impl Client {
             "account": format!("Private/{}", call.account),
             "digest": digest,
             "public_cycles": cycles,
-            "fee": { "about": about.to_string(), "at_most": headroom.max(reserve).max(about).to_string(), "headroom": headroom.to_string(), "payer": format!("Private/{payer}") },
+            "fee": { "about": about.to_string(), "at_most": headroom.to_string(), "headroom": headroom.to_string(), "reserve": reserve.to_string(), "payer": format!("Private/{payer}") },
             "own": own_rows,
             "public": public_rows,
             "aliases": used_aliases.iter().map(ToString::to_string).collect::<Vec<_>>(),
@@ -566,6 +611,8 @@ impl Client {
         if plan.digest != expected {
             bail!("refused: what this call does has changed since it was approved (the chain moved, or the call isn't the one shown); nothing was proven or sent. Ask again.");
         }
+        let head_now = plan.report["fee"]["about"].as_str().and_then(|s| s.parse::<u128>().ok()).unwrap_or(0);
+        within_approved(input.approved_at_most.as_deref(), head_now).map_err(|why| anyhow!(why))?;
         crate::prover::to_prove()?;
         let call = self.checked_call(input)?;
         let catalog = self.call_catalog(&call.programs).await?;
@@ -599,8 +646,13 @@ impl Client {
         let (hash, _) = sent.map_err(|error| crate::refused_or(error, "the sequencer did not accept the transaction"))?;
         println!("phase: submit");
         println!("submitted {hash}");
+        if let Some(wallet::DeclaredFee::Private(fee)) = self.wallet.take_declared_fee() {
+            if let Some(line) = declared_fee_line(input.approved_at_most.as_deref(), fee.reserve) {
+                println!("{line}");
+            }
+        }
         println!("phase: confirm");
-        let (block, _) = self.finish_landed(hash).await.context("the transaction was not applied")?;
+        let (block, _) = self.finish_landed(hash).await.map_err(|_| anyhow!(PRIVATE_NOT_APPLIED))?;
         println!("applied in block {block}");
         Ok(())
     }
@@ -838,6 +890,45 @@ mod tests {
         let headroom = dry_text(printed, "headroom").and_then(|t| t.rsplit_once('(').and_then(|(_, n)| n.trim_end_matches(')').trim().parse::<u128>().ok()));
         assert_eq!(headroom, Some(9_300_135));
         assert!(contains(b"xxabcxx", b"abc") && !contains(b"xxabxx", b"abc") && !contains(b"x", b""));
+    }
+
+    fn fee_quote(exec: u64, stor: u64) -> sequencer_service_rpc::FeeStateQuote {
+        sequencer_service_rpc::FeeStateQuote {
+            height: 7,
+            base_fee_exec: exec,
+            base_fee_stor: stor,
+            next_base_fee_exec_floor: exec,
+            next_base_fee_exec_ceiling: exec + 1,
+            next_base_fee_stor_floor: stor,
+            next_base_fee_stor_ceiling: stor + 1,
+            max_gas_exec: fee_core::market::MAX_GAS_EXEC,
+            max_gas_stor: fee_core::market::MAX_GAS_STOR,
+        }
+    }
+
+    /// Review 4, finding 1: with the reserve priced at no headroom, the "at most" the person
+    /// approves is still a ceiling above the fee at the head (the configured 5 blocks' climb),
+    /// and the send refuses before proving once the head fee is past it.
+    #[test]
+    fn the_approved_at_most_is_a_ceiling_above_the_head_fee_and_the_send_holds_to_it() {
+        let q = fee_quote(8, 8);
+        let cycles = 81_568;
+        let about = crate::fees::private_running(&q, 0, cycles).about;
+        let reserve = about; // headroom 0: the reserve is the fee at the head
+        let ceiling = approved_ceiling(&q, 5, cycles, reserve, about);
+        assert!(ceiling > about, "the ceiling is above the head fee: {ceiling} vs {about}");
+        assert_eq!(ceiling, crate::fees::private_running(&q, 5, cycles).at_most);
+        // The send: within the ceiling passes; a head fee above it is refused before proving.
+        assert!(within_approved(Some(&ceiling.to_string()), about).is_ok());
+        assert!(within_approved(Some(&ceiling.to_string()), ceiling).is_ok());
+        let refused = within_approved(Some(&ceiling.to_string()), ceiling + 1).unwrap_err();
+        assert!(refused.starts_with("refused:") && refused.contains("nothing was spent"), "{refused}");
+        assert!(within_approved(None, u128::MAX).is_ok(), "no approved value: as before");
+        assert!(within_approved(Some("x"), 1).is_err());
+        // After the send: a reserve above the approved value is said plainly, never silent.
+        assert_eq!(declared_fee_line(Some(&ceiling.to_string()), ceiling), None);
+        assert!(declared_fee_line(Some(&ceiling.to_string()), ceiling + 1).unwrap().contains("more than the"));
+        assert!(PRIVATE_NOT_APPLIED.contains("Nothing was spent"));
     }
 
     /// rfp-022 `docs/privacy-m5/repeat-claimers.md`: a private call reserves the fee at the head,
