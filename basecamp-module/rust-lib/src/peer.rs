@@ -657,6 +657,15 @@ mod tests {
         assert!(matches!(classify_message("call blockchain_module.get_time_info timed out after 15000 ms"), Failure::NoAnswer(_)));
         assert!(matches!(classify_message(r#"{"code":"unknown_method","message":"no such method","origin":"x"}"#), Failure::Refused(_)));
         assert!(matches!(classify_message("expected string at arg0, got number"), Failure::Refused(_)));
+        // Its words are another module's: cleaned (after they are classified).
+        match classify_message(r#"{"code":"unknown_method","message":"no such\u202e method\n","origin":"x"}"#) {
+            Failure::Refused(text) => assert_eq!(text, "no such method"),
+            other => panic!("{other:?}"),
+        }
+        match classify_message("timed out\u{200B}\u{202E} here") {
+            Failure::NoAnswer(text) => assert_eq!(text, "timed out here"),
+            other => panic!("{other:?}"),
+        }
         let client = logos_rust_sdk::LogosError::Other("Failed to create protocol client for blockchain_module".into());
         assert!(matches!(classify(&client), Failure::NoAnswer(_)));
     }

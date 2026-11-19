@@ -3696,6 +3696,28 @@ mod tests {
         assert_eq!(job_problem("something_new", "Error: boom\n"), "It didn't go through: boom");
     }
 
+    /// What the CLI printed (its stderr, its log's `Error:` line) carries the sequencer's and the
+    /// chain's own words: cleaned before it is shown, after it is classified.
+    #[test]
+    fn the_cli_s_error_text_is_cleaned_before_it_is_shown() {
+        assert_eq!(failure_cause("Error: sent to\u{202E}evil\u{200B} name\n"), "sent to evil name");
+        assert_eq!(job_problem("pay", "Error: refused: \u{2066}x\u{2069}\n"), "The payment didn't go through: refused: x");
+        assert_eq!(failure("progress\nError: bad\u{202E}thing\u{7}\n", ""), "the names CLI failed: Error: bad thing");
+        assert_eq!(failure("", "\u{202E}only stdout"), "the names CLI failed: only stdout");
+        assert!(failure(&"y".repeat(3000), "").chars().count() < 400, "cut");
+        // Classified before cleaning: an older CLI still reads as one.
+        assert_eq!(failure("error: unrecognized subcommand 'x'\n\nFor more information, try '--help'.", ""), OLDER_CLI);
+    }
+
+    /// The faucet's refusal (its JSON `error`) is its own text: cleaned before it is shown.
+    #[test]
+    fn the_faucet_s_refusal_is_cleaned_before_it_is_shown() {
+        let body = "{\"error\":\"funded\\u202e today\\n\\u200bagain\"}";
+        let reply = format!("HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        let refusal = crate::registry::stub_http(reply.leak(), 1);
+        assert_eq!(request_faucet(&refusal, "acct"), Err("funded today again".to_owned()));
+    }
+
     #[test]
     fn a_move_to_private_says_whether_anything_moved() {
         let poor = "public account   Public/x\nPublic/x holds 1200; send it at least 5000000 testnet tokens from your LEZ wallet (or with `names bridge`), then run `names setup` again.\n";

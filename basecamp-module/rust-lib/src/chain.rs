@@ -350,6 +350,12 @@ mod tests {
     }
 
     #[test]
+    fn a_node_error_is_cleaned_before_it_is_shown() {
+        assert_eq!(problem("send", "refused\u{202E}gnihtemos\n\u{200B}x"), "the Logos Blockchain node refused send: refused gnihtemos x");
+        assert!(problem("send", &"z".repeat(3000)).chars().count() < 400, "cut");
+    }
+
+    #[test]
     fn module_errors_read_as_advice() {
         let down = json!({ "success": false, "value": null, "error": "The node is not running." });
         assert!(unwrap("wallet_get_balance", down).unwrap_err().contains("isn't running"));

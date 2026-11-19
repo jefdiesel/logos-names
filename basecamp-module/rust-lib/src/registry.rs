@@ -1559,6 +1559,20 @@ mod tests {
         assert_eq!(last_block_answer(r#"{"jsonrpc":"2.0","id":1,"result":5}"#), Ok(5));
     }
 
+    /// A sequencer's `error.message` is its own text: bidi marks, zero-width characters and
+    /// line breaks are taken out, and it is cut, before it is put in a sentence the person reads.
+    #[test]
+    fn a_sequencer_s_error_text_is_cleaned_before_it_is_shown() {
+        let body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-1,\"message\":\"paid\\u202e000,01\\u200b\\nnow\"}}";
+        assert_eq!(rpc_result(body.as_bytes()), Err("the sequencer refused the read: paid 000,01 now".to_owned()));
+        assert_eq!(last_block_answer(body), Err("it answered with an error: paid 000,01 now".to_owned()));
+        let long = format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{{\"code\":-1,\"message\":\"{}\"}}}}", "x".repeat(2000));
+        assert!(rpc_result(long.as_bytes()).unwrap_err().chars().count() < 400, "cut");
+        // An error with no message: its JSON, cleaned the same way.
+        let bare = "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":\"a\\u2066b\"}}";
+        assert!(!rpc_result(bare.as_bytes()).unwrap_err().contains('\u{2066}'));
+    }
+
     /// The public LEZ 0.3 testnet keeps its time in `…/0000001` (its reply, recorded on
     /// 2026-11-14, as `shards`); rc3 in `…/0000000`. Both read.
     #[test]

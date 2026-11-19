@@ -67,7 +67,10 @@ const ok = (problem) => problem === "";
 const downLog = "Error: failed to read the account from the sequencer\n\nCaused by:\n    0: client error (Connect)\n    1: tcp connect error\n    2: Connection refused (os error 61)\n";
 check("jobProblem", [jobProblem({ problem: "The payment didn't go through: boom", log_tail: downLog }, "x"), jobProblem({ log_tail: downLog }, "It didn't go through"), jobProblem({ log_tail: "killed\n" }, "It didn't go through"), jobProblem({}, "It didn't go through")],
   ["The payment didn't go through: boom", "It didn't go through: failed to read the account from the sequencer", "It didn't go through: killed", "It didn't go through: it stopped without saying why"]);
-const id = "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk";
+// The CLI's log and the module's problem carry the chain's own words: cleaned before they show.
+check("jobProblem cleans what the CLI printed", [jobProblem({ log_tail: "Error: paid ‮eman​ x\n" }, "It didn't go through"), jobProblem({ problem: "Failed: ⁦a⁩\u0007" }, "x"), jobProblem({ log_tail: "last ‮line" }, "y")],
+  ["It didn't go through: paid eman x", "Failed: a", "y: last line"]);
+const id ="CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk";
 check("tokenTo good", ["ada", "Jef.lez", "@ada", "Public/" + id, "Private/" + id].map((t) => ok(tokenToProblem(t))), [true, true, true, true, true]);
 check("tokenTo bad", ["", id, "Public/nope", "Public/" + id + "/x", "a b", "$(id)"].map((t) => ok(tokenToProblem(t))), [false, false, false, false, false, false]);
 check("tokenTo bare id says how", tokenToProblem(id).includes("Public/"), true);
