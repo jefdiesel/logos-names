@@ -904,7 +904,8 @@ fn request_problem(error: ureq::Error, deadline: Deadline) -> String {
             if text.contains("timed out") || text.contains("deadline") || text.contains("WouldBlock") {
                 deadline.too_slow()
             } else {
-                format!("could not reach the sequencer: {text}")
+                // The transport's words can carry a URL it was sent on to: cleaned like a reply.
+                format!("could not reach the sequencer: {}", crate::text::clean_text(&text, 300))
             }
         }
     }
@@ -1285,7 +1286,7 @@ pub fn deposit_minted(sequencer: &str, receipt: &AccountId, deadline: Deadline) 
 /// What a `getAccountView` reply for a receipt says (`deposit_minted`).
 pub fn minted_in(reply: &Value) -> Result<bool, String> {
     if let Some(error) = reply.get("error") {
-        return Err(format!("the sequencer refused the read: {error}"));
+        return Err(format!("the sequencer refused the read: {}", crate::text::clean_text(&error.to_string(), 300)));
     }
     match reply.get("result") {
         Some(Value::Null) => Ok(false),

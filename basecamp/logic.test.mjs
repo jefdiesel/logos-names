@@ -563,7 +563,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   const burnOf = (app, label, program) => ({ id: "r9", kind: "relayed_call", app, account: "Public/5DNyon1w3jf4Ai2ANzLz1bYnrkeFwuoNRmTL48FTGGb7",
     sheet: { warnings: ["This destroys the wrapped tokens on Logos and can't be undone; the ETH is released on Ethereum after the bridge's steps."], refused: false,
              burn: { bridge: program, bridge_label: label, amount_text: "0.01", symbol: "wETH", exit: E } } });
-  const own = { inline: true, view: "sendback", focus: "sb-e2ba7765d0fbf247" };
+  const own = { inline: true, view: "sendback", focus: "sb-e2ba7765d0fbf247", address: true };
   for (const [label, program] of bridges) {
     const theirs = burnOf("other_app", label, program), bridgeAway = burnOf("lez_bridge", label, program), ours = burnOf("lez_bridge", label, program);
     check(`burn to ${label}: another app's needs the tick`, requestRisky(theirs, false, burnIsOwnSendBack(theirs, own)), true);
@@ -576,8 +576,9 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
       "Ethereum address: not in the call. It is sealed in the exit commitment 0xe2ba7765…dfd5, which the wallet can't open, so the wallet can't show or check it."]);
   }
   const ours = burnOf("lez_bridge", "bridge v7", bridges[3][1]);
-  check("own screen, another send-back on it: the tick", requestRisky(ours, false, burnIsOwnSendBack(ours, { inline: true, view: "sendback", focus: "sb-0000000000000000" })), true);
-  check("own screen, not drawn there (a sheet over it): the tick", burnIsOwnSendBack(ours, { inline: false, view: "sendback", focus: "sb-e2ba7765d0fbf247" }), false);
+  check("own screen, another send-back on it: the tick", requestRisky(ours, false, burnIsOwnSendBack(ours, { inline: true, view: "sendback", focus: "sb-0000000000000000", address: true })), true);
+  check("own screen, not drawn there (a sheet over it): the tick", burnIsOwnSendBack(ours, { inline: false, view: "sendback", focus: "sb-e2ba7765d0fbf247", address: true }), false);
+  check("own screen, its address not drawn above (send-back row not read): the tick", burnIsOwnSendBack(ours, { inline: true, view: "sendback", focus: "sb-e2ba7765d0fbf247", address: false }), false);
   check("own screen, another app with the same exit: the tick", burnIsOwnSendBack(burnOf("other_app", "bridge v7", bridges[3][1]), own), false);
   check("an exit that isn't 32 bytes of hex matches no send-back", burnIsOwnSendBack({ ...ours, sheet: { ...ours.sheet, burn: { ...ours.sheet.burn, exit: "0xe2ba7765d0fbf247" } } }, own), false);
   check("a refused burn is no burn: its warnings decide", requestRisky({ ...ours, sheet: { ...ours.sheet, refused: true } }, false, true), true);

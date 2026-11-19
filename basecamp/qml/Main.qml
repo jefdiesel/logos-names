@@ -6922,8 +6922,9 @@ Item {
         if (request.kind === "programs")
             return "Allow " + (request.app === "lez_bridge" ? "the LEZ Bridge's" : request.app + "'s") + " programs to ask this wallet to sign claims. Only allow programs you trust."
         // A burn the wallet decoded that isn't this app's own send-back: the address can't be checked.
-        if (request.kind === "relayed_call" && request.sheet && request.sheet.burn && request.sheet.refused !== true)
-            return Logic.burnTickText(request)
+        // One the wallet refuses keeps the sheet's own warning (Approve stays dim anyway).
+        if (request.kind === "relayed_call" && request.sheet && request.sheet.burn)
+            return request.sheet.refused !== true ? Logic.burnTickText(request) : (request.sheet.warnings || []).length > 0 ? String(request.sheet.warnings[0]) : ""
         return "The wallet can't decode this call; it shows only its hash. Tick to approve it anyway, if you trust " + (request.app === "lez_bridge" ? "the bridge" : request.app) + "."
     }
     property bool appBusy: false          // an answer is on its way to the module
@@ -7043,9 +7044,10 @@ Item {
     }
 
     /// Whether a decoded burn is the one this app's own Bridge to Ethereum screen is showing, for
-    /// the send-back on it (whose address and words were read back and ticked at step 2).
+    /// the send-back on it, with its Ethereum address and words drawn above the sheet (read back
+    /// and ticked at step 2 when it was planned).
     function appBurnOwn(request) {
-        return Logic.burnIsOwnSendBack(request, { inline: appInline, view: walletView, focus: sbFocus })
+        return Logic.burnIsOwnSendBack(request, { inline: appInline, view: walletView, focus: sbFocus, address: sbFocusRow !== null && String(sbFocusRow.recipient || "") !== "" })
     }
 
     /// Whether the app claims a publisher that doesn't vouch for it.

@@ -1148,13 +1148,14 @@ function decodedBurn(request) {
 }
 
 /// Whether a decoded burn is the one this app's own Bridge to Ethereum screen shows: asked by the
-/// LEZ Bridge, drawn inline on that screen (`here`: {inline, view, focus}), and for the send-back
-/// on it, matched by its exit commitment (the LEZ Bridge names a send-back `sb-` and the first 16
-/// hex digits of E). Only there were its address and words read back and ticked at step 2.
+/// LEZ Bridge, drawn inline on that screen (`here`: {inline, view, focus, address}), for the
+/// send-back on it, matched by its exit commitment (the LEZ Bridge names a send-back `sb-` and the
+/// first 16 hex digits of E), with that send-back's Ethereum address drawn above the sheet
+/// (`address`). Its address and words were read back and ticked at step 2 when it was planned.
 export function burnIsOwnSendBack(request, here) {
     var burn = decodedBurn(request)
     var h = here || {}
-    if (!burn || request.app !== "lez_bridge" || h.inline !== true || h.view !== "sendback")
+    if (!burn || request.app !== "lez_bridge" || h.inline !== true || h.view !== "sendback" || h.address !== true)
         return false
     var e = String(burn.exit || "").toLowerCase().replace(/^0x/, "")
     return /^[0-9a-f]{64}$/.test(e) && h.focus === "sb-" + e.substr(0, 16)

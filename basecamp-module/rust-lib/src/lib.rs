@@ -8394,7 +8394,7 @@ impl Names {
         }
         // The signature binds no chain (rc3): after a reset of the bridge test network seen since
         // the call was asked, a new build is on a chain the person never saw it on.
-        let reset_at = config_dir().and_then(|dir| bridge_net::reset_seen(&dir, now()));
+        let reset_at = config_dir().and_then(|dir| bridge_net::reset_seen(&dir, now / 1000));
         if let Some(why) = provider_public::reset_refusal(reset_at, request["created"].as_u64().unwrap_or(decided)) {
             return Err(again(provider_public::ASK_AGAIN.replace("{why}", &why)));
         }
