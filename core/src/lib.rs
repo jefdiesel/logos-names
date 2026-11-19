@@ -67,8 +67,9 @@ use lee_core::{
 /// Version 5 records are laid out as version 3's; a name registered in deposit
 /// mode never lapses (`expires` is `u64::MAX`).
 /// Version 6 records add [`NameRecord::claimed`] and run on LEZ 0.4.
-/// Version 7 records add [`NameRecord::deed`]; every layout this program writes
-/// carries version 7, and version 6 records still decode ([`decode_record`]).
+/// Version 7 records add [`NameRecord::deed`]. A record without a deed is still
+/// written as version 6, so readers built before deeds keep reading it; one with a
+/// deed is version 7 ([`encode_record`], [`decode_record`]).
 pub const VERSION: u8 = 7;
 /// The first record version with [`NameRecord::deed`].
 pub const DEED_VERSION: u8 = 7;
@@ -183,16 +184,37 @@ struct RecordV6 {
     claimed: bool,
 }
 
+#[derive(BorshSerialize)]
+struct RecordV6Out<'a> {
+    version: u8,
+    owner: &'a OwnerTag,
+    expires: u64,
+    sealed: &'a [u8],
+    claimed: bool,
+}
+
+/// Encodes a record: version 7 with its deed, or, without one, version 6 exactly as
+/// the registry wrote before deeds, so that older readers (which refuse trailing
+/// bytes) still read every name that has no deed.
+#[must_use]
+pub fn encode_record(record: &NameRecord) -> Vec<u8> {
+    match record.deed {
+        Some(_) => to_bytes(&NameRecord { version: DEED_VERSION, ..record.clone() }),
+        None => to_bytes(&RecordV6Out {
+            version: 6,
+            owner: &record.owner,
+            expires: record.expires,
+            sealed: &record.sealed,
+            claimed: record.claimed,
+        }),
+    }
+}
+
 /// Decodes a record of any version this registry wrote: a version 6 record (or an
-/// older one, which ends at `sealed`) has no deed. The result is laid out as
-/// [`VERSION`], so writing it back upgrades it.
+/// older one, which ends at `sealed`) has no deed.
 pub fn decode_record(bytes: &[u8]) -> Result<NameRecord, borsh::io::Error> {
     match bytes.first() {
-        Some(version) if *version >= DEED_VERSION => {
-            let mut record: NameRecord = borsh::from_slice(bytes)?;
-            record.version = VERSION;
-            Ok(record)
-        }
+        Some(version) if *version >= DEED_VERSION => borsh::from_slice(bytes),
         Some(version) => {
             let mut bytes = bytes.to_vec();
             if *version < 6 {
@@ -201,7 +223,7 @@ pub fn decode_record(bytes: &[u8]) -> Result<NameRecord, borsh::io::Error> {
             let old: RecordV6 = borsh::from_slice(&bytes)?;
             let _ = old.version;
             Ok(NameRecord {
-                version: VERSION,
+                version: 6,
                 owner: old.owner,
                 expires: old.expires,
                 sealed: old.sealed,
@@ -1242,7 +1264,7 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
                     "name is already registered"
                 );
             }
-            Some(to_bytes(&NameRecord {
+            Some(encode_record(&NameRecord {
                 version: VERSION,
                 owner,
                 expires,
@@ -1260,7 +1282,7 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
                 "name has lapsed and must be registered again"
             );
             record.expires = after(record.expires.max(now), term_ms);
-            Some(to_bytes(&record))
+            Some(encode_record(&record))
         }
         Effect::RequirePrice {
             id,
@@ -1367,7 +1389,7 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
                 let held = load_record(pre_data);
                 assert!(!held.claimed, "this name was already claimed");
             }
-            Some(to_bytes(&NameRecord {
+            Some(encode_record(&NameRecord {
                 version: VERSION,
                 owner,
                 expires: u64::MAX,
@@ -1379,13 +1401,13 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
         Effect::Seal { signer, sealed } => {
             let mut record = load_owned(pre_data, &signer);
             record.sealed = sealed;
-            Some(to_bytes(&record))
+            Some(encode_record(&record))
         }
         Effect::Transfer { signer, new_owner } => {
             let mut record = load_owned(pre_data, &signer);
             record.owner = new_owner;
             record.sealed = Vec::new();
-            Some(to_bytes(&record))
+            Some(encode_record(&record))
         }
         Effect::Remove { signer } => {
             load_owned(pre_data, &signer);
@@ -1433,7 +1455,7 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
             let mut record = load_owned(pre_data, &signer);
             assert!(record.deed.is_none(), "this name already has a deed");
             record.deed = Some(Deed { definition: deed.definition, nonce: deed.nonce });
-            Some(to_bytes(&record))
+            Some(encode_record(&record))
         }
         // The deed account's own registry actor keeps no state.
         Effect::CreateDeed { .. } => None,
@@ -3352,12 +3374,12 @@ mod tests {
         v6.extend(b"old");
         v6.push(0);
         let old = decode_record(&v6).expect("a version 6 record decodes");
-        assert_eq!((old.owner, old.sealed.as_slice(), old.deed, old.version), (alice, &b"old"[..], None, VERSION));
+        assert_eq!((old.owner, old.sealed.as_slice(), old.deed, old.version), (alice, &b"old"[..], None, 6));
         let bob = owner_tag(&JEF, &BOB);
         let response = effect_at(record_address(&PROGRAM, &JEF), v6.clone(), Effect::Transfer { signer: alice, new_owner: bob });
         assert!(response.sync_messages.is_empty(), "no deed, nothing else moves");
         let written = response.post_state.expect("written");
-        assert_eq!(written.first(), Some(&VERSION), "written back as version 7");
+        assert_eq!(written.to_vec(), [&[6u8][..], &bob, &u64::MAX.to_le_bytes(), &[0, 0, 0, 0, 0]].concat(), "written back in the version 6 layout, which older readers read");
         assert_eq!(decode_record(&written).expect("decodes").owner, bob);
         // Release and RequireHolder read it too.
         let response = effect_at(record_address(&PROGRAM, &JEF), v6.clone(), Effect::Remove { signer: alice });
