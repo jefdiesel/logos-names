@@ -1,0 +1,505 @@
+=== upgrade the registry in place: header 6U6h3Re2CdWD5ioh2TvkNbpNF9uJmtbEZCNRcP3gqgGu, new image
+$ header 6U6h3Re2CdWD5ioh2TvkNbpNF9uJmtbEZCNRcP3gqgGu
+image 00ad457122dbd1c88b62d45a6aee5bd38167cc331d562459e1c8885bc76dd2dd immutable 0
+segments needed: 5
+$ asP /Volumes/exos162/logos/fix-1119/lns-deeds/rehearsal/bin/names wallet program-loader update --elf /Volumes/exos162/logos/fix-1119/lns-deeds/new_logos_names.bin --header Public/6U6h3Re2CdWD5ioh2TvkNbpNF9uJmtbEZCNRcP3gqgGu --segments Public/Cme7xUQN9uFVUUP6oY7Qg215JXZTmTAWgaWKTeyBpsEY Public/8WmnB4TM9aNCzxznYn8WNyP62FFtX8ccH5dbcLfnxF4J Public/K4SViz1MkR7pFx3SRVqxdNYwQMq5HRV8rxsmk7en3JB Public/B26VmoTMNAwEtk4SfdcJvzuHUCHS3uan5atKcvsFSv3p Public/FmsP5eEb4LpPXohYjWzGMojehNz9DwzM5ksbDmcbWJvB --payer Public/14pzMyWWmGVJb4zxha5MGoN1boiMRyALMdbXvifdcmSD
+Transaction hash is ea1b546beec562cfcddf6837b1caacdc3a46f1303cc077c57afd69bc6758c9d2
+Transaction is included in block 259
+Transaction hash is bd4254558f906fc4124e1a8b2738482bd48a2485c4a11060c7f5977671220d77
+Transaction is included in block 261
+Transaction hash is 84a148e84c9539f36ab1c8941e6552e972ef6f848e874513b3091e9256172a7f
+Transaction is included in block 263
+Transaction hash is 8d2089be11efe48d4834bc56d599953e10ca3fc96083075f2ae2efe2e786e0bc
+Transaction is included in block 266
+Transaction hash is 1b18340e6f47b25534653bf964ce1409a3b3669154b54858f64b3bc0caa86eb6
+Transaction is included in block 268
+Transaction hash is 56d9ca82558f70a4668175eb63665eaaacdd0150682771d4bff1dc814402076a
+Transaction is included in block 271
+Program 6U6h3Re2CdWD5ioh2TvkNbpNF9uJmtbEZCNRcP3gqgGu updated
+$ header 6U6h3Re2CdWD5ioh2TvkNbpNF9uJmtbEZCNRcP3gqgGu
+image c8514dd2bca6edccf0a4850a1e5b688640bdaa6b5081d2270e8f9897df1dae33 immutable 0
+$ header CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G
+image 4fbb28723a040e0f6da48d8c8c5f839f181086112673cb210fabb6047bbddf58 immutable 0
+=== start: new CLI registers lns-deeds-fresh for A (RegisterWithDeed); the deployed (old) CLI registers lns-deeds-oldclient for C (plain Register)
+=== second in-place update: the optional-claim image
+$ header 6U6h3Re2CdWD5ioh2TvkNbpNF9uJmtbEZCNRcP3gqgGu
+image c8514dd2bca6edccf0a4850a1e5b688640bdaa6b5081d2270e8f9897df1dae33 immutable 0
+segments needed: 5
+$ asP /Volumes/exos162/logos/fix-1119/lns-deeds/rehearsal/bin/names wallet program-loader update --elf /Volumes/exos162/logos/fix-1119/lns-deeds/new_logos_names.bin --header Public/6U6h3Re2CdWD5ioh2TvkNbpNF9uJmtbEZCNRcP3gqgGu --segments Public/4DhrYhqYcxu1eLvW22jf7Ysv2ygdHexCs4YRbXGw4vJC Public/fExvhZPbrLfer6v3mz5dDS58jPDtiFCSDf2Xu1rpoL8 Public/DDAqisjReChgG93sQGgtoGTL6nuKEr6qx7muAM8tuL7S Public/3dtAzyz86KSYUthnHVw3UYDc7LtN5vMekf6A2kw3sf4v Public/CzDNSn48vYAUHtDAbyitUruZkBasmCddREUWGx7mdK3u --payer Public/14pzMyWWmGVJb4zxha5MGoN1boiMRyALMdbXvifdcmSD
+Transaction hash is b5f5352ae0749b6a5c6f88d8c0c887acf1cbee92719f504c2a437cfa1e3836a9
+Transaction is included in block 481
+Transaction hash is 6534a8e8a070d9e223f9d4e61637adc5b3b43b53d099508785c4cab5fb9c35a3
+Transaction is included in block 483
+Transaction hash is af9421c26c61471e99ddc57467301d921393c25cf26b8ab02abbc6705793fc9d
+Transaction is included in block 485
+Transaction hash is d56b62d8abe0769a49fc05604b2aee019c28cf02070eced5e78ec94dd30a15ff
+Transaction is included in block 488
+Transaction hash is c8e59ad81e37d5e283ec9f78172b7044938418f90f83e07efe4ca8744af1c666
+Transaction is included in block 490
+Transaction hash is db6fc36415b40160db7ce5c25f0f72bfea3545c78e303e5c3f030e9cbfad678d
+Transaction is included in block 493
+Program 6U6h3Re2CdWD5ioh2TvkNbpNF9uJmtbEZCNRcP3gqgGu updated
+$ header 6U6h3Re2CdWD5ioh2TvkNbpNF9uJmtbEZCNRcP3gqgGu
+image 52a22df2cc078867a3478a3296b9327d224373cddde01086b386a990dc4fa5cc immutable 0
+=== R1. register lns-deeds-fresh (A, new CLI): no deed is minted
+$ asA /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names register lns-deeds-fresh --owner Public/C91uSdUuQPxeM2ZyfUKzmcjuNWSAsGXZUci35f9kb7NU --wait
+lns-deeds-fresh takes a deposit of 1000000, held for as long as you keep the name and refunded when you release it
+(the deposit stops name squatting: holding many names ties up many deposits; nobody keeps it)
+resuming the commitment to lns-deeds-fresh made earlier
+payments to lns-deeds-fresh will arrive privately at Private/FDNeZCSnzC3TXk9XBGLTJi3QFnanbPv1bqkRyfvaM8Zt
+step 2 of 2: registering lns-deeds-fresh at 1795118523590 for a deposit of 1000000
+reading the registry's bytecode from the chain
+fee: about 1440624, at most 2413827 (gas: 176250 cycles, limit 264375)
+submitted b284082028ab9b9e4737d360b3fae480de6622c82597f910457bc3593aa0c053
+applied in block 495
+fee paid: 1440440
+lns-deeds-fresh is registered
+$ asA /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed show lns-deeds-fresh
+{
+  "deed": null,
+  "name": "lns-deeds-fresh",
+  "why": "no deed claimed: its holder can claim one for free with `names deed claim`"
+}
+=== F1. the deployed CLI still reads the name registered before the update
+$ asU /Volumes/exos162/logos/fix-1119/lns-deeds/rehearsal/bin/names resolve lns-deeds-preexisting
+{
+  "expires": null,
+  "expires_date": "never",
+  "held_by": "EJrQzdPxfRDDjPn2AasqEkSP9iCw2v1Ej9yvc1xFPeTh",
+  "lapsed": false,
+  "name": "lns-deeds-preexisting",
+  "page": null,
+  "payable_privately": true,
+  "public_account": null,
+  "texts": {}
+}
+=== F2. transfer with no deed (A -> B, new CLI): as today
+$ asA /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names transfer lns-deeds-fresh Public/8kvDuEQSKFetuDuY2FdHJhE6xRDhb9DRcTzu55S5oz9C
+fee: about 423696, at most 710190 (gas: 51896 cycles, limit 77844)
+submitted 185539242c4bb1eb1ff7280dada60732238a11f1eeab92b5a2c0d6dd33c00c50
+applied in block 499
+fee paid: 419904
+$ asB /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed show lns-deeds-fresh
+{
+  "deed": null,
+  "name": "lns-deeds-fresh",
+  "why": "no deed claimed: its holder can claim one for free with `names deed claim`"
+}
+=== F3. B (the holder) claims the deed, free
+$ asB /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed claim lns-deeds-fresh
+claiming the deed of lns-deeds-fresh (free): definition GqXNGWj6NZXb38YHCFbPfRetxaq6Rc5L2PQEXFwmVyvT
+reading the registry's bytecode from the chain
+reading the NFT program deeds are minted on's bytecode from the chain
+fee: about 1212032, at most 2034108 (gas: 149015 cycles, limit 223523)
+submitted 752d4ceeda3a8df9d9d921b27864c2035cd09d2c5d8fb2cddb3e0ad5ce40a10c
+applied in block 502
+fee paid: 1210304
+B's balance 2000000000 -> 1998789696 (the difference is the gas fee only)
+$ asB /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed show lns-deeds-fresh
+{
+  "definition": "GqXNGWj6NZXb38YHCFbPfRetxaq6Rc5L2PQEXFwmVyvT",
+  "definition_state": {
+    "creators": "LNS registry",
+    "name": "LNS name deed",
+    "printable_supply": "1",
+    "standard": "Simple",
+    "uri": "https://nameswallet.app/lns/deed.png"
+  },
+  "holder_tag": "7283266f18cfde998e2d04706a358414c6407a03c9c4d61880f91a01b46ff3f6",
+  "holding": "EYgtsfjakUosgVXJCckmajvyCqnGEJcRJ8WzoiFsr9m6",
+  "holding_state": {
+    "balance": "1",
+    "definition": "GqXNGWj6NZXb38YHCFbPfRetxaq6Rc5L2PQEXFwmVyvT",
+    "holds_the_deed": true,
+    "kind": "master"
+  },
+  "name": "lns-deeds-fresh",
+  "nft_program": "CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G",
+  "nonce": "58ab98f1d74ca04b821efd19f1e3a2f7411a1758b4a1bc919dc6339cb6d42531"
+}
+=== F4. a second claim is refused
+$ (expect refusal) asB /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed claim lns-deeds-fresh
+Error: lns-deeds-fresh already has a deed (`names deed show lns-deeds-fresh`)
+refused, as expected
+=== F5. a claim by someone who doesn't hold the name is refused (A signs; the CLI's own holder check skipped with --signer, so the program refuses)
+$ (expect refusal) asA /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed claim lns-deeds-fresh --signer Public/C91uSdUuQPxeM2ZyfUKzmcjuNWSAsGXZUci35f9kb7NU
+
+  tip: to pass '--signer' as a value, use '-- --signer'
+
+Usage: names deed claim <NAME>
+
+For more information, try '--help'.
+refused, as expected
+=== F6. transfer with the deed, public -> public (B -> A): the deed moves
+$ asB /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names transfer lns-deeds-fresh Public/C91uSdUuQPxeM2ZyfUKzmcjuNWSAsGXZUci35f9kb7NU
+its deed moves with it, to the new holder's deed account EH3ABwiNUkP8sRQNqHduM1i7in7CpFGfzBbuuvxBh5UR
+fee: about 867816, at most 1459647 (gas: 107411 cycles, limit 161117)
+submitted 53fa787cd3e5430406e9c2ffcba06c6d3a7be5687c483aaeb85ad43d84f74feb
+applied in block 505
+fee paid: 866080
+$ asA /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed show lns-deeds-fresh
+{
+  "definition": "GqXNGWj6NZXb38YHCFbPfRetxaq6Rc5L2PQEXFwmVyvT",
+  "definition_state": {
+    "creators": "LNS registry",
+    "name": "LNS name deed",
+    "printable_supply": "1",
+    "standard": "Simple",
+    "uri": "https://nameswallet.app/lns/deed.png"
+  },
+  "holder_tag": "2a8fbb715724aae0351fd37f4d7200e87287efcbaef343fe3d23c6c68bf2e861",
+  "holding": "EH3ABwiNUkP8sRQNqHduM1i7in7CpFGfzBbuuvxBh5UR",
+  "holding_state": {
+    "balance": "1",
+    "definition": "GqXNGWj6NZXb38YHCFbPfRetxaq6Rc5L2PQEXFwmVyvT",
+    "holds_the_deed": true,
+    "kind": "master"
+  },
+  "name": "lns-deeds-fresh",
+  "nft_program": "CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G",
+  "nonce": "58ab98f1d74ca04b821efd19f1e3a2f7411a1758b4a1bc919dc6339cb6d42531"
+}
+A's deed account EH3ABwiNUkP8sRQNqHduM1i7in7CpFGfzBbuuvxBh5UR, definition GqXNGWj6NZXb38YHCFbPfRetxaq6Rc5L2PQEXFwmVyvT
+=== F7. the deployed CLI cannot transfer a deeded name (it doesn't declare the deed)
+$ (expect refusal) asA /Volumes/exos162/logos/fix-1119/lns-deeds/rehearsal/bin/names transfer lns-deeds-fresh Public/8kvDuEQSKFetuDuY2FdHJhE6xRDhb9DRcTzu55S5oz9C
+Error: the record does not hold a name record
+
+Caused by:
+    Not all bytes read
+refused, as expected
+=== F8. moving or burning the deed directly through the NFT program is refused (holder A, and B)
+$ (expect refusal) raw /Volumes/exos162/logos/fix-1119/lns-deeds/users/a C91uSdUuQPxeM2ZyfUKzmcjuNWSAsGXZUci35f9kb7NU EH3ABwiNUkP8sRQNqHduM1i7in7CpFGfzBbuuvxBh5UR 02a57e399a544347ce90c104e6ba4027cf66fccbd1a3f5e18bf8fdf08673769335
+raw 33 bytes to (EH3ABwiNUkP8sRQNqHduM1i7in7CpFGfzBbuuvxBh5UR, CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G)
+Error: The transaction reverts when simulated and would still pay its fee, so it was not sent: Failed to execute program: No such file or directory (os error 2)
+refused, as expected
+$ (expect refusal) raw /Volumes/exos162/logos/fix-1119/lns-deeds/users/a C91uSdUuQPxeM2ZyfUKzmcjuNWSAsGXZUci35f9kb7NU EH3ABwiNUkP8sRQNqHduM1i7in7CpFGfzBbuuvxBh5UR 0401000000000000000000000000000000
+raw 17 bytes to (EH3ABwiNUkP8sRQNqHduM1i7in7CpFGfzBbuuvxBh5UR, CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G)
+Error: The transaction reverts when simulated and would still pay its fee, so it was not sent: Failed to execute program: No such file or directory (os error 2)
+refused, as expected
+$ (expect refusal) raw /Volumes/exos162/logos/fix-1119/lns-deeds/users/b 8kvDuEQSKFetuDuY2FdHJhE6xRDhb9DRcTzu55S5oz9C EH3ABwiNUkP8sRQNqHduM1i7in7CpFGfzBbuuvxBh5UR 027341f64995137ab235fc0837dbc1d07d426163c4f19e2f48624ff99358e313ef
+raw 33 bytes to (EH3ABwiNUkP8sRQNqHduM1i7in7CpFGfzBbuuvxBh5UR, CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G)
+Error: The transaction reverts when simulated and would still pay its fee, so it was not sent: Failed to execute program: No such file or directory (os error 2)
+refused, as expected
+$ state_of EH3ABwiNUkP8sRQNqHduM1i7in7CpFGfzBbuuvxBh5UR CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G
+49 01eb4d84b8dc8592a5880f6d927e89ddd6a37a09023411ae348f0c02d662fc3c5c01000000000000000000000000000000
+=== F9. transfer with the deed, public -> private (A -> Private/6jiscjZDTBMJCeE3mKpjc7grieGEuk4FuZv3w9czsMjd in B's wallet): the deed moves
+$ asA /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names transfer lns-deeds-fresh Private/6jiscjZDTBMJCeE3mKpjc7grieGEuk4FuZv3w9czsMjd
+its deed moves with it, to the new holder's deed account DU8SmLE5QhD1czXCySDSa4xtBCVXpAFxe2dWEwLEbBda
+reading the NFT program deeds are minted on's bytecode from the chain
+fee: about 867816, at most 1459647 (gas: 107411 cycles, limit 161117)
+submitted 914e47af82cf90e8319fcb8f9a844980fd9c962b69e6255c761ab879a7a113f7
+applied in block 507
+fee paid: 866080
+$ asB /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed show lns-deeds-fresh
+{
+  "definition": "GqXNGWj6NZXb38YHCFbPfRetxaq6Rc5L2PQEXFwmVyvT",
+  "definition_state": {
+    "creators": "LNS registry",
+    "name": "LNS name deed",
+    "printable_supply": "1",
+    "standard": "Simple",
+    "uri": "https://nameswallet.app/lns/deed.png"
+  },
+  "holder_tag": "4220a4f2348744758bfd42d3a1c451cc0aa1b83d1c51b6f1894228f44dc4dda7",
+  "holding": "DU8SmLE5QhD1czXCySDSa4xtBCVXpAFxe2dWEwLEbBda",
+  "holding_state": {
+    "balance": "1",
+    "definition": "GqXNGWj6NZXb38YHCFbPfRetxaq6Rc5L2PQEXFwmVyvT",
+    "holds_the_deed": true,
+    "kind": "master"
+  },
+  "name": "lns-deeds-fresh",
+  "nft_program": "CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G",
+  "nonce": "58ab98f1d74ca04b821efd19f1e3a2f7411a1758b4a1bc919dc6339cb6d42531"
+}
+=== F10. the private holder releases (private transaction, dev receipts): the deed burns
+$ asB /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names wallet auth-transfer send --from Public/8kvDuEQSKFetuDuY2FdHJhE6xRDhb9DRcTzu55S5oz9C --to Private/6jiscjZDTBMJCeE3mKpjc7grieGEuk4FuZv3w9czsMjd --amount 200000000
+WARNING: proving in dev mode. This will not generate valid, secure proofs.
+WARNING: Proving in dev mode does not generate a valid receipt. Receipts generated from this process are invalid and should never be used in production.
+Transaction hash is 631d5b454a66591fd25100d318e7fe0c636c91268b72a581d0e2262b9cd31d5a
+Transaction is included in block 510
+fee paid: 5070616
+$ asB /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names release lns-deeds-fresh
+releasing lns-deeds-fresh; its deposit of 1000000 comes back to you
+its deed is burned
+Latest block is 511
+Syncing to block 511. Blocks to sync: 442
+Synced to block 511 in 27.532299958s
+Latest block is 517
+Syncing to block 517. Blocks to sync: 6
+Synced to block 517 in 245.580875ms
+Latest block is 517
+Latest block is 517
+fee: about 6681192, at most 10856937 (paid inside the proof, from Private/6jiscjZDTBMJCeE3mKpjc7grieGEuk4FuZv3w9czsMjd)
+acting privately; proving it on this computer (a few minutes), so the chain never learns your account
+WARNING: proving in dev mode. This will not generate valid, secure proofs.
+WARNING: Proving in dev mode does not generate a valid receipt. Receipts generated from this process are invalid and should never be used in production.
+WARNING: proving in dev mode. This will not generate valid, secure proofs.
+WARNING: Proving in dev mode does not generate a valid receipt. Receipts generated from this process are invalid and should never be used in production.
+submitted 12dab2620dd265ca933a329ca453435c9cb2e1625af314d5c9935ab67d7968a5
+applied in block 518
+Latest block is 519
+Syncing to block 519. Blocks to sync: 2
+Synced to block 519 in 62.100209ms
+Latest block is 519
+fee paid: 5498816
+$ asB /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names resolve lns-deeds-fresh
+Error: lns-deeds-fresh is not registered
+definition GqXNGWj6NZXb38YHCFbPfRetxaq6Rc5L2PQEXFwmVyvT and the private holder's deed account DU8SmLE5QhD1czXCySDSa4xtBCVXpAFxe2dWEwLEbBda after the release:
+$ state_of GqXNGWj6NZXb38YHCFbPfRetxaq6Rc5L2PQEXFwmVyvT CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G
+91 000d0000004c4e53206e616d65206465656400000000000000000000000000000000002400000068747470733a2f2f6e616d657377616c6c65742e6170702f6c6e732f646565642e706e670c0000004c4e53207265676973747279
+$ state_of DU8SmLE5QhD1czXCySDSa4xtBCVXpAFxe2dWEwLEbBda CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G
+49 01eb4d84b8dc8592a5880f6d927e89ddd6a37a09023411ae348f0c02d662fc3c5c00000000000000000000000000000000
+=== F11. the name registered before deeds: its holder claims one on the updated registry
+$ asU /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed show lns-deeds-preexisting
+{
+  "deed": null,
+  "name": "lns-deeds-preexisting",
+  "why": "no deed claimed: its holder can claim one for free with `names deed claim`"
+}
+$ asU /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed claim lns-deeds-preexisting
+claiming the deed of lns-deeds-preexisting (free): definition 6ckXPq8rVmaXpY11TUv6Vd4EkfnUBnM7YSmFSpxtLBY9
+reading the registry's bytecode from the chain
+reading the NFT program deeds are minted on's bytecode from the chain
+fee: about 1339240, at most 2248767 (gas: 164916 cycles, limit 247374)
+submitted 9df2ce73ab9e4712966549e37073709facd4fc362aed18812ea631fa31451832
+applied in block 521
+fee paid: 1337512
+$ asU /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed show lns-deeds-preexisting
+{
+  "definition": "6ckXPq8rVmaXpY11TUv6Vd4EkfnUBnM7YSmFSpxtLBY9",
+  "definition_state": {
+    "creators": "LNS registry",
+    "name": "LNS name deed",
+    "printable_supply": "1",
+    "standard": "Simple",
+    "uri": "https://nameswallet.app/lns/deed.png"
+  },
+  "holder_tag": "6bd8165fed9264117d1e68e2220df1349a30b750eb8e96358871b99d0f233093",
+  "holding": "4xGErYyb8WDshJBYJRHADYtZFEU1ATdLDesMM3fAEi1H",
+  "holding_state": {
+    "balance": "1",
+    "definition": "6ckXPq8rVmaXpY11TUv6Vd4EkfnUBnM7YSmFSpxtLBY9",
+    "holds_the_deed": true,
+    "kind": "master"
+  },
+  "name": "lns-deeds-preexisting",
+  "nft_program": "CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G",
+  "nonce": "ef4d84e4c1b4db87e25737587157005b0934bdb0d30df1445d7bbac7f98b1d8b"
+}
+=== F12. the deployed CLI's plain registration (made against the update) is a deedless v6 record
+fee: about 1447664, at most 2425707 (gas: 177130 cycles, limit 265695)
+submitted 93d802240ab4063f0653d0cd70dfe570ec650d492e28ebf61b98e2cb127ffa57
+applied in block 455
+fee paid: 1447480
+lns-deeds-oldclient is registered
+exit 0
+$ asC /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed show lns-deeds-oldclient
+{
+  "deed": null,
+  "name": "lns-deeds-oldclient",
+  "why": "no deed claimed: its holder can claim one for free with `names deed claim`"
+}
+$ state_of 6U6h3Re2CdWD5ioh2TvkNbpNF9uJmtbEZCNRcP3gqgGu
+/Volumes/exos162/logos/fix-1119/lns-deeds/flows.sh: line 34: $2: unbound variable
+$ asC /Volumes/exos162/logos/fix-1119/lns-deeds/rehearsal/bin/names transfer lns-deeds-oldclient Public/C91uSdUuQPxeM2ZyfUKzmcjuNWSAsGXZUci35f9kb7NU
+reading the registry's bytecode from the chain
+fee: about 423696, at most 710190 (gas: 51896 cycles, limit 77844)
+submitted d115eda7abcb8179b6ad61a3bbadc1f61d3590bec31cb0aa560712bf93659428
+applied in block 524
+fee paid: 419904
+$ asA /Volumes/exos162/logos/fix-1119/lns-deeds/rehearsal/bin/names resolve lns-deeds-oldclient
+{
+  "expires": null,
+  "expires_date": "never",
+  "held_by": "C91uSdUuQPxeM2ZyfUKzmcjuNWSAsGXZUci35f9kb7NU",
+  "lapsed": false,
+  "name": "lns-deeds-oldclient",
+  "page": null,
+  "payable_privately": false,
+  "public_account": null,
+  "texts": {}
+}
+=== M1. the deployed CLI transfers a deedless name after the update (C -> A)
+$ asC /Volumes/exos162/logos/fix-1119/lns-deeds/rehearsal/bin/names transfer lns-deeds-oldclient Public/C91uSdUuQPxeM2ZyfUKzmcjuNWSAsGXZUci35f9kb7NU
+Error: C91uSdUuQPxeM2ZyfUKzmcjuNWSAsGXZUci35f9kb7NU already holds lns-deeds-oldclient, so nothing was sent
+$ asA /Volumes/exos162/logos/fix-1119/lns-deeds/rehearsal/bin/names resolve lns-deeds-oldclient
+{
+  "expires": null,
+  "expires_date": "never",
+  "held_by": "C91uSdUuQPxeM2ZyfUKzmcjuNWSAsGXZUci35f9kb7NU",
+  "lapsed": false,
+  "name": "lns-deeds-oldclient",
+  "page": null,
+  "payable_privately": false,
+  "public_account": null,
+  "texts": {}
+}
+=== M2. a claim by someone who doesn't hold the name is refused by the program (B signs for A's name)
+$ (expect refusal) asB /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed claim lns-deeds-oldclient --signer Public/8kvDuEQSKFetuDuY2FdHJhE6xRDhb9DRcTzu55S5oz9C
+claiming the deed of lns-deeds-oldclient (free): definition 887wGYvbbJS7N2YzzxAgHwKqVq635DYnFc4ouP7fYLHJ
+
+thread 'main' (1) panicked at core/src/lib.rs:1220:5:
+signer does not own this name
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+Error: refused: Failed to execute program: Guest panicked: signer does not own this name
+refused, as expected
+$ asA /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed show lns-deeds-oldclient
+{
+  "deed": null,
+  "name": "lns-deeds-oldclient",
+  "why": "no deed claimed: its holder can claim one for free with `names deed claim`"
+}
+=== M3. the holder (A) claims it; a second claim is refused
+$ asA /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed claim lns-deeds-oldclient
+claiming the deed of lns-deeds-oldclient (free): definition 6y7psn7bx1HagQ7C6ZzQADDrPMFpwwG54tkwPYc6LvJj
+fee: about 1211992, at most 2034036 (gas: 149010 cycles, limit 223515)
+submitted deb8a5b7f2efd520100fab39f35ccbc8ed09a72b74bad476e4e3ede8cdd26a33
+applied in block 549
+fee paid: 1210264
+$ (expect refusal) asA /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed claim lns-deeds-oldclient
+Error: lns-deeds-oldclient already has a deed (`names deed show lns-deeds-oldclient`)
+refused, as expected
+$ asA /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed show lns-deeds-oldclient
+{
+  "definition": "6y7psn7bx1HagQ7C6ZzQADDrPMFpwwG54tkwPYc6LvJj",
+  "definition_state": {
+    "creators": "LNS registry",
+    "name": "LNS name deed",
+    "printable_supply": "1",
+    "standard": "Simple",
+    "uri": "https://nameswallet.app/lns/deed.png"
+  },
+  "holder_tag": "21faf0a4262dc012685d5723589f5c70ff72ea124fbd942c46acfdeeaea8cbd9",
+  "holding": "HoF2FvZRJ5UfeD5a96BS732w7rP4B1v1enPPSRxR1ymi",
+  "holding_state": {
+    "balance": "1",
+    "definition": "6y7psn7bx1HagQ7C6ZzQADDrPMFpwwG54tkwPYc6LvJj",
+    "holds_the_deed": true,
+    "kind": "master"
+  },
+  "name": "lns-deeds-oldclient",
+  "nft_program": "CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G",
+  "nonce": "0e794e47eb10c0a438928a7c32e535a2cde2212be55508644dad249917468926"
+}
+=== M4. the holder moves or burns the deed directly through the NFT program: refused by the NFT program
+$ (expect refusal) asA /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed probe-direct lns-deeds-oldclient
+sending the NFT program's Transfer to the deed account HoF2FvZRJ5UfeD5a96BS732w7rP4B1v1enPPSRxR1ymi directly, signed by C91uSdUuQPxeM2ZyfUKzmcjuNWSAsGXZUci35f9kb7NU
+
+thread 'main' (1) panicked at /Volumes/exos162/logos/lp0001/job-a/lez-programs/programs/nft/src/transfer.rs:17:5:
+sender holding must authorize the transfer
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+Error: refused: Failed to execute program: Guest panicked: sender holding must authorize the transfer
+refused, as expected
+$ (expect refusal) asA /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed probe-direct lns-deeds-oldclient --burn
+sending the NFT program's Burn to the deed account HoF2FvZRJ5UfeD5a96BS732w7rP4B1v1enPPSRxR1ymi directly, signed by C91uSdUuQPxeM2ZyfUKzmcjuNWSAsGXZUci35f9kb7NU
+
+thread 'main' (1) panicked at /Volumes/exos162/logos/lp0001/job-a/lez-programs/programs/nft/src/burn.rs:17:5:
+holding must authorize the burn
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+Error: refused: Failed to execute program: Guest panicked: holding must authorize the burn
+refused, as expected
+$ asA /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed show lns-deeds-oldclient
+{
+  "definition": "6y7psn7bx1HagQ7C6ZzQADDrPMFpwwG54tkwPYc6LvJj",
+  "definition_state": {
+    "creators": "LNS registry",
+    "name": "LNS name deed",
+    "printable_supply": "1",
+    "standard": "Simple",
+    "uri": "https://nameswallet.app/lns/deed.png"
+  },
+  "holder_tag": "21faf0a4262dc012685d5723589f5c70ff72ea124fbd942c46acfdeeaea8cbd9",
+  "holding": "HoF2FvZRJ5UfeD5a96BS732w7rP4B1v1enPPSRxR1ymi",
+  "holding_state": {
+    "balance": "1",
+    "definition": "6y7psn7bx1HagQ7C6ZzQADDrPMFpwwG54tkwPYc6LvJj",
+    "holds_the_deed": true,
+    "kind": "master"
+  },
+  "name": "lns-deeds-oldclient",
+  "nft_program": "CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G",
+  "nonce": "0e794e47eb10c0a438928a7c32e535a2cde2212be55508644dad249917468926"
+}
+=== R2. lns-deeds-fresh registered again (A) and a fresh deed claimed: new definition
+$ asA /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names register lns-deeds-fresh --owner Public/C91uSdUuQPxeM2ZyfUKzmcjuNWSAsGXZUci35f9kb7NU --wait
+lns-deeds-fresh takes a deposit of 1000000, held for as long as you keep the name and refunded when you release it
+(the deposit stops name squatting: holding many names ties up many deposits; nobody keeps it)
+step 1 of 2: committing to lns-deeds-fresh
+fee: about 178440, at most 296433 (gas: 21263 cycles, limit 31895)
+submitted d8da3a3b0472e17abc3b257214429bf089d1bbf213e79adb3dfe3d3328d48500
+applied in block 553
+fee paid: 174656
+waiting 885s before revealing (the commitment must be 15 minutes old)
+waiting 855s before revealing (the commitment must be 15 minutes old)
+waiting 826s before revealing (the commitment must be 15 minutes old)
+waiting 795s before revealing (the commitment must be 15 minutes old)
+waiting 765s before revealing (the commitment must be 15 minutes old)
+waiting 735s before revealing (the commitment must be 15 minutes old)
+waiting 705s before revealing (the commitment must be 15 minutes old)
+waiting 675s before revealing (the commitment must be 15 minutes old)
+waiting 645s before revealing (the commitment must be 15 minutes old)
+waiting 615s before revealing (the commitment must be 15 minutes old)
+waiting 585s before revealing (the commitment must be 15 minutes old)
+waiting 555s before revealing (the commitment must be 15 minutes old)
+waiting 525s before revealing (the commitment must be 15 minutes old)
+waiting 495s before revealing (the commitment must be 15 minutes old)
+waiting 465s before revealing (the commitment must be 15 minutes old)
+waiting 435s before revealing (the commitment must be 15 minutes old)
+waiting 405s before revealing (the commitment must be 15 minutes old)
+waiting 375s before revealing (the commitment must be 15 minutes old)
+waiting 345s before revealing (the commitment must be 15 minutes old)
+waiting 315s before revealing (the commitment must be 15 minutes old)
+waiting 285s before revealing (the commitment must be 15 minutes old)
+waiting 255s before revealing (the commitment must be 15 minutes old)
+waiting 225s before revealing (the commitment must be 15 minutes old)
+waiting 195s before revealing (the commitment must be 15 minutes old)
+waiting 165s before revealing (the commitment must be 15 minutes old)
+waiting 135s before revealing (the commitment must be 15 minutes old)
+waiting 105s before revealing (the commitment must be 15 minutes old)
+waiting 75s before revealing (the commitment must be 15 minutes old)
+waiting 45s before revealing (the commitment must be 15 minutes old)
+waiting 15s before revealing (the commitment must be 15 minutes old)
+payments to lns-deeds-fresh will arrive privately at Private/6rso4Y8oxZQ6Y5Phee4A4A4a8FYcBfK9Cpo8W5ettQnr
+step 2 of 2: registering lns-deeds-fresh at 1795119713657 for a deposit of 1000000
+fee: about 1440624, at most 2413827 (gas: 176250 cycles, limit 264375)
+submitted 6d471588b02e54a417ecfc12f3dc3e8800e687c77d404c8d3b4349eaa2fac7c6
+applied in block 733
+fee paid: 1438880
+lns-deeds-fresh is registered
+$ asA /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed show lns-deeds-fresh
+{
+  "deed": null,
+  "name": "lns-deeds-fresh",
+  "why": "no deed claimed: its holder can claim one for free with `names deed claim`"
+}
+$ asA /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed claim lns-deeds-fresh
+claiming the deed of lns-deeds-fresh (free): definition B9WDoQv9Xhdgcc9bjDZF42RqRr2dLdAwf7ir4khnLgU9
+fee: about 1339352, at most 2248956 (gas: 164930 cycles, limit 247395)
+submitted 96623cfd6f167421c7235b816528e467ada76bd063d6fcac5df7ef6fed71c9f8
+applied in block 736
+fee paid: 1337624
+$ asA /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed show lns-deeds-fresh
+{
+  "definition": "B9WDoQv9Xhdgcc9bjDZF42RqRr2dLdAwf7ir4khnLgU9",
+  "definition_state": {
+    "creators": "LNS registry",
+    "name": "LNS name deed",
+    "printable_supply": "1",
+    "standard": "Simple",
+    "uri": "https://nameswallet.app/lns/deed.png"
+  },
+  "holder_tag": "2a8fbb715724aae0351fd37f4d7200e87287efcbaef343fe3d23c6c68bf2e861",
+  "holding": "HxKnf46EjSefeTDqLWZ5PpTcxZm6tkemZaxiA8XY9cAh",
+  "holding_state": {
+    "balance": "1",
+    "definition": "B9WDoQv9Xhdgcc9bjDZF42RqRr2dLdAwf7ir4khnLgU9",
+    "holds_the_deed": true,
+    "kind": "master"
+  },
+  "name": "lns-deeds-fresh",
+  "nft_program": "CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G",
+  "nonce": "ea9776060931c2166aae132ae3be11a9f3fa855fab73f5a98871743228592e0c"
+}
+first definition GqXNGWj6NZXb38YHCFbPfRetxaq6Rc5L2PQEXFwmVyvT, second B9WDoQv9Xhdgcc9bjDZF42RqRr2dLdAwf7ir4khnLgU9
+new definition: OK
