@@ -3297,8 +3297,10 @@ Item {
         pcDelayStarted = false
         pcDelayCheckedAt = 0
         pcDelayClock = Date.now()
-        if (!ClaimDelay.claimDelayCan(bridgeFeatures))
+        if (!ClaimDelay.claimDelayCan(bridgeFeatures)) {
+            pcDelay = { failed: true }   // not asked: stays off even if the features arrive later
             return
+        }
         bridgeCall(ClaimDelay.CLAIM_DELAY_CALL, [id, "{}"], function(value) {
             if (pcDeposit !== id) return
             pcDelay = value || { failed: true }
