@@ -442,7 +442,8 @@ pub fn request_faucet(url: &str, account: &str) -> Result<Value, String> {
         Ok(reply) => reply,
         Err(ureq::Error::Status(_, reply)) => {
             let body: Value = reply.into_json().unwrap_or(Value::Null);
-            return Err(body["error"].as_str().unwrap_or("the faucet refused").to_owned());
+            // The faucet's own words: cleaned, as `bridge_net::faucet_shown` cleans its endpoint's.
+            return Err(crate::text::clean_text(body["error"].as_str().unwrap_or("the faucet refused"), 200));
         }
         Err(_) => return Err("could not reach the faucet; check your internet and try again".to_owned()),
     };
@@ -484,8 +485,13 @@ pub fn parse_bridge(output: &str, sent: bool) -> Value {
     json!({ "sent": sent, "lines": lines, "hash": hash, "total": total, "notes": notes, "fee": fee, "to": to })
 }
 
-/// Why `names bridge` failed, in plain words, from what it wrote.
+/// Why `names bridge` failed, in plain words, from what it wrote. What it wrote carries the node's
+/// and the sequencer's words: read as they are, shown cleaned.
 pub fn bridge_problem(output: &str, node: &str) -> String {
+    crate::text::clean_text(&bridge_problem_raw(output, node), 300)
+}
+
+fn bridge_problem_raw(output: &str, node: &str) -> String {
     let text = output;
     // A refusal from the deposit's metadata (`deposit::Refusal`, `deposit::UNKNOWN_LEZ`) is
     // already in plain words.
@@ -1761,8 +1767,9 @@ pub fn failure_cause(log: &str) -> String {
     if told.iter().any(|line| UNREACHABLE.iter().any(|mark| line.contains(mark))) {
         return "couldn't reach the sequencer. Check that it is running and reachable, then try again".to_owned();
     }
-    let first = told.first().map_or("", |line| line.trim_start_matches("Error:").trim());
-    if first.is_empty() { "it stopped without saying why".to_owned() } else { first.to_owned() }
+    // What the CLI printed carries the sequencer's and the chain's words: cleaned once classified.
+    let first = crate::text::clean_text(told.first().map_or("", |line| line.trim_start_matches("Error:").trim()), 300);
+    if first.is_empty() { "it stopped without saying why".to_owned() } else { first }
 }
 
 /// What a CLI job of `kind` that failed says: what didn't happen, then why
@@ -2315,7 +2322,7 @@ fn failure(err: &str, out: &str) -> String {
         return OLDER_CLI.to_owned();
     }
     let why = if last_line(err).is_empty() { last_line(out) } else { last_line(err) };
-    format!("the names CLI failed: {why}")
+    format!("the names CLI failed: {}", crate::text::clean_text(why, 300))
 }
 
 /// What a names CLI too old for the command asked of it means to the person.
@@ -3704,6 +3711,8 @@ mod tests {
         assert_eq!(job_problem("pay", "Error: refused: \u{2066}x\u{2069}\n"), "The payment didn't go through: refused: x");
         assert_eq!(failure("progress\nError: bad\u{202E}thing\u{7}\n", ""), "the names CLI failed: Error: bad thing");
         assert_eq!(failure("", "\u{202E}only stdout"), "the names CLI failed: only stdout");
+        assert_eq!(bridge_problem("Error: bad\u{202E}x\n", "http://node"), "the names CLI failed: bad x");
+        assert_eq!(bridge_problem("Error: the node refused the deposit: no\u{2066}pe\n", "http://node"), "Your node refused the deposit: no pe");
         assert!(failure(&"y".repeat(3000), "").chars().count() < 400, "cut");
         // Classified before cleaning: an older CLI still reads as one.
         assert_eq!(failure("error: unrecognized subcommand 'x'\n\nFor more information, try '--help'.", ""), OLDER_CLI);

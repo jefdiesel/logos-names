@@ -241,12 +241,14 @@ pub fn classify(error: &logos_rust_sdk::LogosError) -> Failure {
 pub fn classify_message(message: &str) -> Failure {
     let parsed = serde_json::from_str::<Value>(message).ok();
     let code = parsed.as_ref().and_then(|value| value["code"].as_str()).unwrap_or_default().to_owned();
-    let text = parsed.as_ref().and_then(|value| value["message"].as_str()).unwrap_or(message).to_owned();
+    let raw = parsed.as_ref().and_then(|value| value["message"].as_str()).unwrap_or(message);
+    // Another module's words: classified as they are, shown cleaned.
+    let text = crate::text::clean_text(raw, 300);
     if ["dispatch_failed", "invalid_args", "unknown_method", "unauthorized"].contains(&code.as_str()) {
         return Failure::Refused(text);
     }
     // The SDK's own argument checks, as a provider's dispatch words them.
-    let lower = text.to_ascii_lowercase();
+    let lower = raw.to_ascii_lowercase();
     let unreachable = ["unavailable", "acquire", "timed out", "timeout", "not loaded", "transport", "unreachable", "no listener"];
     let refusal = ["expected ", "unknown method", "invalid arg", "wrong number of arg"];
     if code.is_empty() && !unreachable.iter().any(|word| lower.contains(word)) && refusal.iter().any(|word| lower.contains(word)) {

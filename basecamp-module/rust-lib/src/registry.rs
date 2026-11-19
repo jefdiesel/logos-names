@@ -916,8 +916,9 @@ fn request_problem(error: ureq::Error, deadline: Deadline) -> String {
 pub fn rpc_result(body: &[u8]) -> Result<Value, String> {
     let reply: Value = serde_json::from_slice(body).map_err(|_| "could not reach the sequencer: it sent a reply that isn't JSON-RPC".to_owned())?;
     if let Some(error) = reply.get("error").filter(|error| !error.is_null()) {
+        // The sequencer's own text: cleaned before it is put in front of the person.
         let message = error["message"].as_str().map_or_else(|| error.to_string(), str::to_owned);
-        return Err(format!("the sequencer refused the read: {message}"));
+        return Err(format!("the sequencer refused the read: {}", crate::text::clean_text(&message, 300)));
     }
     reply.get("result").cloned().ok_or_else(|| "could not reach the sequencer: its reply carries no result".to_owned())
 }
@@ -1044,7 +1045,7 @@ pub fn last_block_answer(body: &str) -> Result<u64, String> {
         .map_err(|_| "it sent a reply that isn't JSON-RPC".to_owned())?;
     if let Some(error) = reply.get("error").filter(|error| !error.is_null()) {
         let message = error["message"].as_str().map_or_else(|| error.to_string(), str::to_owned);
-        return Err(format!("it answered with an error: {message}"));
+        return Err(format!("it answered with an error: {}", crate::text::clean_text(&message, 300)));
     }
     reply["result"].as_u64().ok_or_else(|| "it sent no block number".to_owned())
 }

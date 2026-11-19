@@ -66,7 +66,7 @@ pub fn problem(method: &str, error: &str) -> String {
     if lower.contains("no transaction found") {
         return "Your node has no record of that transaction, and it wasn't sent from the Names app: check the hash.".to_owned();
     }
-    format!("the Logos Blockchain node refused {method}: {error}")
+    format!("the Logos Blockchain node refused {method}: {}", crate::text::clean_text(error, 300))
 }
 
 /// A JSON number or decimal text, as the node writes values.

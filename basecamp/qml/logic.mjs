@@ -140,9 +140,10 @@ export function feePaid(fee) {
 /// ("2: Connection refused (os error 61)", transfer-failure-text-is-last-cause-line).
 export function jobProblem(job, lead) {
     var value = job || {}
+    // The module's problem and the CLI's log carry the chain's own words: cleaned before they show.
     if (value.problem)
-        return String(value.problem)
-    var lines = String(value.log_tail || "").split("\n").map(function(line) { return line.trim() }).filter(function(line) { return line !== "" })
+        return clean(value.problem)
+    var lines = String(value.log_tail || "").split("\n").map(function(line) { return clean(line).trim() }).filter(function(line) { return line !== "" })
     var error = lines.filter(function(line) { return /^Error:/.test(line) })[0]
     var why = error !== undefined ? error.replace(/^Error:\s*/, "") : lines.length > 0 ? lines[lines.length - 1] : ""
     return lead + ": " + (why !== "" ? why : "it stopped without saying why")
