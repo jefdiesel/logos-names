@@ -114,6 +114,7 @@ fn restore_fee_headroom<C: wallet::WalletSequencerClient>(wallet: &mut wallet::W
 
 /// The fee settings a private call is priced with, as `FeeParams` (the test below checks that only
 /// the headroom differs from the defaults; the calls above set just the headroom).
+#[cfg(test)]
 fn private_call_fee_params() -> wallet::FeeParams {
     wallet::FeeParams { headroom_blocks: Some(PRIVATE_CALL_FEE_HEADROOM_BLOCKS), ..wallet::FeeParams::default() }
 }
