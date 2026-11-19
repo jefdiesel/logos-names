@@ -2282,7 +2282,9 @@ Item {
     // The private accounts' holdings, with the send-backs' burns (wallet-1120): a holding with a
     // burn on its way, or a landed one while it can't be read, isn't offered; a read not made
     // yet is asked again every 3 s while this screen shows (sbHoldingsSoon).
-    readonly property var sbPrivateView: sbPrivateAble ? Logic.privateSendBackView(cliAccounts, bridgedHoldings, bridgeTokenTable, Logic.sendBackBurns(sendBacks, sbStatuses)) : ({ rows: [], reading: false, held: [] })
+    // null until the bridge's send-backs are read: the private chips wait for them.
+    readonly property var sbBurns: sbCan && !sendBacksLoaded ? null : Logic.sendBackBurns(sendBacks, sbStatuses)
+    readonly property var sbPrivateView: sbPrivateAble ? Logic.privateSendBackView(cliAccounts, bridgedHoldings, bridgeTokenTable, sbBurns) : ({ rows: [], reading: false, held: [] })
     readonly property var sbPrivateSources: sbPrivateView.rows
     property bool sbHoldingsAgain: false
     onSbPrivateViewChanged: sbHoldingsSoon()
@@ -2303,7 +2305,7 @@ Item {
     function sbPrivateRecheck(value, go, tries) {
         askLater("token_source_holdings", [], onNet(function(v) {
             bridgedHoldings = Array.isArray(v) ? v : []
-            var view = Logic.privateSendBackView(cliAccounts, bridgedHoldings, bridgeTokenTable, Logic.sendBackBurns(sendBacks, sbStatuses))
+            var view = Logic.privateSendBackView(cliAccounts, bridgedHoldings, bridgeTokenTable, sbBurns)
             var now = Logic.privateHoldingCheck(view, sbAccount, sbAsset, value)
             if (now.wait && (tries || 0) < 10) {
                 againAfter(3000, function() { sbPrivateRecheck(value, go, (tries || 0) + 1) })
@@ -7010,7 +7012,8 @@ Item {
     property string tokenProgram: ""     // the token program the module uses, "" if none
     property bool tokenProgramEditing: false
     property var tokenHoldings: null     // [{account, account_kind, definition, name, balance}]; null until first read
-    property var bridgedHoldings: []     // token_source_holdings: [{token_program, app, holdings, updating, error}]
+    property var bridgedHoldings: []     // token_source_holdings: [{token_program, app, definitions, read, holdings, updating, error}]
+    property bool bridgedAgain: false    // a re-ask of token_source_holdings is waiting (loadTokens)
     property var tokenPending: []        // [{position, definition, name, amount, to}]
     property bool tokenUpdating: false   // a newer read is on its way
     property string tokenError: ""       // why the last read failed
@@ -7031,6 +7034,12 @@ Item {
         // Tokens of the token sources apps registered (bridged tokens), whatever the wallet's own program.
         askLater("token_source_holdings", [], onNet(function(value) {
             bridgedHoldings = Array.isArray(value) ? value : []
+            // A read dropped after a private call or a token job is being made again: asked again
+            // in 3 s (one at a time), so the card fills in without a press (wallet-1120).
+            if (Logic.bridgedReading(value) && !bridgedAgain) {
+                bridgedAgain = true
+                againAfter(3000, function() { bridgedAgain = false; loadTokens() })
+            }
         }), function(message) {
             console.log("names_ui: token sources:", message)
         })

@@ -3267,6 +3267,10 @@ function burnOf(burns, account, names) {
 /// "reading" (the wallet is reading it), "burning" (a burn from it is on its way), "unread" (a burn
 /// landed and what it holds can't be read). `burns`: sendBackBurns.
 export function privateSendBackView(accounts, holdings, tokens, burns) {
+    // The bridge's send-backs not read yet (`burns` null): nothing offered until they are, so a
+    // burned holding is never offered in the meantime.
+    if (burns === null)
+        return { rows: [], reading: true, held: privateAccounts(accounts).map(function(a) { return { account: a, symbol: "", why: "reading" } }) }
     if (Array.isArray(tokens) && tokens.length > 0)
         return privateSendBackSourcesOf(accounts, holdings, tokens, burns)
     var out = [], held = []
@@ -3293,6 +3297,11 @@ export function privateSendBackView(accounts, holdings, tokens, burns) {
     return { rows: out, reading: false, held: held }
 }
 
+/// Whether a token_source_holdings answer has a read being made with none made yet (ask again).
+export function bridgedReading(value) {
+    return (Array.isArray(value) ? value : []).some(function(src) { return src && src.read === false && src.updating === true })
+}
+
 /// The line under the private chips for what is held back, "" for nothing.
 export function privateHeldLine(held) {
     var list = Array.isArray(held) ? held : []
@@ -3314,7 +3323,7 @@ export function privateHoldingCheck(view, account, asset, value) {
         if (row.asset.anyAmount === true || atLeast(String(row.asset.base || "0"), String(value || "0"))) return { ok: true }
         return { error: "This account holds " + row.asset.amount + " " + sym + " now, less than that amount. Choose the amount again. Nothing was done." }
     }
-    var h = (v.held || []).filter(function(x) { return x.account === String(account || "") && x.symbol === sym })[0]
+    var h = (v.held || []).filter(function(x) { return x.account === String(account || "") && (x.symbol === sym || x.symbol === "") })[0]
     if (h && h.why === "reading") return { wait: true, error: "Names is still reading what this account holds. Try again in a moment. Nothing was done." }
     if (h && h.why === "burning") return { error: "A send-back's burn from this account is on its way; send this one once it lands. Nothing was done." }
     if (h) return { error: "A send-back already burned from this account, and Names can't read what it holds now. Nothing was done." }
@@ -3974,8 +3983,12 @@ function privateSendBackSourcesOf(accounts, holdings, tokens, burns) {
     // The token sources that list a token's definition (a module that says which it lists:
     // `definitions`, and whether its read was made: `read`). What they read is what the account
     // holds of it, none included; a token none lists is one the wallet can't read.
+    // A source whose read failed and isn't being made again (`read: false`, not `updating`) can't
+    // be read: it counts as not listing the token.
     var covering = function(t) {
-        return t.definition === "" ? [] : sources.filter(function(src) { return src && Array.isArray(src.definitions) && src.definitions.indexOf(t.definition) >= 0 })
+        return t.definition === "" ? [] : sources.filter(function(src) {
+            return src && Array.isArray(src.definitions) && src.definitions.indexOf(t.definition) >= 0 && !(src.read === false && src.updating !== true)
+        })
     }
     privateAccounts(accounts).forEach(function(acct) {
         var id = acct.replace(/^Private\//, "")

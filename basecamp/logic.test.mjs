@@ -1883,7 +1883,18 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     [L.listingAskedLine({ token_source: { accepted: true } }), L.listingAskedLine({ needs: "connect", token_source: { accepted: false } }), L.listingAskedLine({ token_source: { accepted: false, request: "r1" } }), L.listingAskedLine(null)],
     ["The token listing is accepted; reading what the account holds…", "Connect the LEZ Bridge to this wallet first (its app asks for that).", "The LEZ Bridge asked to list its tokens in this wallet: approve it in the sheet.", "The LEZ Bridge didn't ask to list its tokens. Nothing changed."]);
   check("screen: the private chips read the send-backs' burns, and the screen asks again while a read is being made",
-    [/Logic\.privateSendBackView\(cliAccounts, bridgedHoldings, bridgeTokenTable, Logic\.sendBackBurns\(sendBacks, sbStatuses\)\)/.test(qml2), /sbPrivateView\.reading/.test(qml2), /Logic\.privateHeldLine\(root\.sbPrivateView\.held\)/.test(qml2)], [true, true, true]);
+    [/Logic\.privateSendBackView\(cliAccounts, bridgedHoldings, bridgeTokenTable, sbBurns\)/.test(qml2), /sbPrivateView\.reading/.test(qml2), /Logic\.privateHeldLine\(root\.sbPrivateView\.held\)/.test(qml2),
+     /readonly property var sbBurns: sbCan && !sendBacksLoaded \? null : Logic\.sendBackBurns\(sendBacks, sbStatuses\)/.test(qml2), /if \(Logic\.bridgedReading\(value\) && !bridgedAgain\)/.test(qml2)], [true, true, true, true, true]);
+  // The send-backs not read yet: nothing offered (the burned holding can't slip through meanwhile).
+  const notYet = L.privateSendBackView(accts2, [], fromDep, null);
+  check("plan check while the send-backs aren't read yet: wait", L.privateHoldingCheck(notYet, PRIV2, chosenEth.asset, D(1, 16)).wait, true);
+  check("send-backs not read yet: nothing offered, reading", [notYet.rows.length, notYet.reading, L.privateHeldLine(notYet.held)], [0, true, "Reading what your private accounts hold…"]);
+  // A listed source whose read failed and isn't being made again: can't be read (not "reading" for ever).
+  const failedRead = [{ token_program: "T", definitions: ["DefEth", "DefUsdt", "DefDai"], read: false, updating: false, error: "the names CLI timed out", holdings: [] }];
+  check("a failed read is unreadable, not reading: the landed-burn token held back, the rest at every amount",
+    [L.privateSendBackView(accts2, failedRead, fromDep, burns).reading, L.privateSendBackView(accts2, failedRead, fromDep, burns).rows.map((r) => r.symbol), L.privateSendBackView(accts2, failedRead, fromDep, burns).held.map((h) => h.why)],
+    [false, ["USDT", "DAI"], ["unread"]]);
+  check("bridgedReading: only a read under way with none made", [L.bridgedReading(listing(false, [])), L.bridgedReading(failedRead), L.bridgedReading(listing(true, [])), L.bridgedReading(null)], [true, false, false, false]);
 }
 
 
