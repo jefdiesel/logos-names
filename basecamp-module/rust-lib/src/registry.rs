@@ -905,7 +905,7 @@ fn request_problem(error: ureq::Error, deadline: Deadline) -> String {
                 deadline.too_slow()
             } else {
                 // The transport's words can carry a URL it was sent on to: cleaned like a reply.
-                format!("could not reach the sequencer: {}", crate::text::clean_text(&text, 300))
+                format!("could not reach the sequencer: {}", crate::text::clean_remote(&text, 300))
             }
         }
     }
@@ -919,7 +919,7 @@ pub fn rpc_result(body: &[u8]) -> Result<Value, String> {
     if let Some(error) = reply.get("error").filter(|error| !error.is_null()) {
         // The sequencer's own text: cleaned before it is put in front of the person.
         let message = error["message"].as_str().map_or_else(|| error.to_string(), str::to_owned);
-        return Err(format!("the sequencer refused the read: {}", crate::text::clean_text(&message, 300)));
+        return Err(format!("the sequencer refused the read: {}", crate::text::clean_remote(&message, 300)));
     }
     reply.get("result").cloned().ok_or_else(|| "could not reach the sequencer: its reply carries no result".to_owned())
 }
@@ -1046,7 +1046,7 @@ pub fn last_block_answer(body: &str) -> Result<u64, String> {
         .map_err(|_| "it sent a reply that isn't JSON-RPC".to_owned())?;
     if let Some(error) = reply.get("error").filter(|error| !error.is_null()) {
         let message = error["message"].as_str().map_or_else(|| error.to_string(), str::to_owned);
-        return Err(format!("it answered with an error: {}", crate::text::clean_text(&message, 300)));
+        return Err(format!("it answered with an error: {}", crate::text::clean_remote(&message, 300)));
     }
     reply["result"].as_u64().ok_or_else(|| "it sent no block number".to_owned())
 }
@@ -1286,7 +1286,7 @@ pub fn deposit_minted(sequencer: &str, receipt: &AccountId, deadline: Deadline) 
 /// What a `getAccountView` reply for a receipt says (`deposit_minted`).
 pub fn minted_in(reply: &Value) -> Result<bool, String> {
     if let Some(error) = reply.get("error") {
-        return Err(format!("the sequencer refused the read: {}", crate::text::clean_text(&error.to_string(), 300)));
+        return Err(format!("the sequencer refused the read: {}", crate::text::clean_remote(&error.to_string(), 300)));
     }
     match reply.get("result") {
         Some(Value::Null) => Ok(false),
@@ -1571,6 +1571,9 @@ mod tests {
         let long = format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{{\"code\":-1,\"message\":\"{}\"}}}}", "x".repeat(2000));
         assert!(rpc_result(long.as_bytes()).unwrap_err().chars().count() < 400, "cut");
         // An error with no message: its JSON, cleaned the same way.
+        // Review 2026-11-19, finding 3: tags don't survive either (the app draws plain text too).
+        let tags = "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-1,\"message\":\"<b>Your wallet is locked.</b><br>Send &amp; pay\"}}";
+        assert_eq!(rpc_result(tags.as_bytes()), Err("the sequencer refused the read: bYour wallet is locked./bbrSend amp; pay".to_owned()));
         let bare = "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":\"a\\u2066b\"}}";
         assert!(!rpc_result(bare.as_bytes()).unwrap_err().contains('\u{2066}'));
     }

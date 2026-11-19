@@ -7881,7 +7881,7 @@ impl Names {
                 Some(state) if state["state"] == "done" => Some((true, String::new())),
                 Some(state) if state["state"] == "failed" => {
                     let log = state["log_tail"].as_str().unwrap_or_default();
-                    Some((false, provider::clean_text(&cli::failure_cause(log), 300)))
+                    Some((false, crate::text::clean_remote(&cli::failure_cause(log), 300)))
                 }
                 _ => None,
             };
@@ -8188,7 +8188,7 @@ impl Names {
                 }
                 Err(why) => {
                     request["check"] = json!("failed");
-                    request["check_problem"] = json!(provider::clean_text(&why, 400));
+                    request["check_problem"] = json!(crate::text::clean_remote(&why, 400));
                 }
             }
             changed = true;
@@ -13952,6 +13952,19 @@ mod tests {
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(config_dir().unwrap());
+    }
+
+    /// Review 2026-11-19, finding 5 (its disputed half): a zone switch never moves the bridge test
+    /// network the reset record (bridge-net.json) follows, so it can't stamp a reset. Zones are
+    /// LEZ 0.3's; the bridge network is the configured LEZ 0.4 one.
+    #[test]
+    fn a_zone_switch_never_moves_the_bridge_network_the_reset_record_follows() {
+        let (mut names, dir, second) = with_two_zones("zones-bridge-net", "exit 0");
+        let before = names.lez04_rpc();
+        use_zone(&mut names, &second);
+        assert_eq!(names.lez04_rpc(), before);
+        assert_ne!(names.lez04_rpc(), ZONE_B);
+        zone_test_end(dir);
     }
 
     #[test]

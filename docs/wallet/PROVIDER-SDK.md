@@ -535,7 +535,7 @@ afterwards.
    `unchanged` (the payer's nonce hasn't moved; send what you have), `landed_or_used` (your
    account's nonce moved: the call may have landed; check the chain first), `ask_again` (propose
    it again) or `refused`. A re-sign is also `ask_again` when the wallet has seen the bridge test
-   network reset since 10 minutes before the call was asked (`bridge-net.json`'s `reset_at`): a
+   network reset since 30 s before the call was asked (`bridge-net.json`'s `reset_at`; a read stamps it up to 25 s early): a
    new build after a reset is on a chain the person never saw the call on.
 
 **What the account's signature covers (LEZ v0.4.0-rc3).** The SHA-256 of the whole borsh message

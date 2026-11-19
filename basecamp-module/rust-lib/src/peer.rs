@@ -242,8 +242,10 @@ pub fn classify_message(message: &str) -> Failure {
     let parsed = serde_json::from_str::<Value>(message).ok();
     let code = parsed.as_ref().and_then(|value| value["code"].as_str()).unwrap_or_default().to_owned();
     let raw = parsed.as_ref().and_then(|value| value["message"].as_str()).unwrap_or(message);
-    // Another module's words: classified as they are, shown cleaned.
-    let text = crate::text::clean_text(raw, 300);
+    // Another module's words: classified as they are, carried cleaned and NOT cut short (only a
+    // bound against a flood): `chain::problem` reads advice from words anywhere in it, then cuts
+    // what it shows.
+    let text = crate::text::clean_remote(raw, 4096);
     if ["dispatch_failed", "invalid_args", "unknown_method", "unauthorized"].contains(&code.as_str()) {
         return Failure::Refused(text);
     }

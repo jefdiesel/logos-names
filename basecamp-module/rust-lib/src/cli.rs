@@ -443,7 +443,7 @@ pub fn request_faucet(url: &str, account: &str) -> Result<Value, String> {
         Err(ureq::Error::Status(_, reply)) => {
             let body: Value = reply.into_json().unwrap_or(Value::Null);
             // The faucet's own words: cleaned, as `bridge_net::faucet_shown` cleans its endpoint's.
-            return Err(crate::text::clean_text(body["error"].as_str().unwrap_or("the faucet refused"), 200));
+            return Err(crate::text::clean_remote(body["error"].as_str().unwrap_or("the faucet refused"), 200));
         }
         Err(_) => return Err("could not reach the faucet; check your internet and try again".to_owned()),
     };
@@ -488,7 +488,7 @@ pub fn parse_bridge(output: &str, sent: bool) -> Value {
 /// Why `names bridge` failed, in plain words, from what it wrote. What it wrote carries the node's
 /// and the sequencer's words: read as they are, shown cleaned.
 pub fn bridge_problem(output: &str, node: &str) -> String {
-    crate::text::clean_text(&bridge_problem_raw(output, node), 300)
+    crate::text::clean_remote(&bridge_problem_raw(output, node), 300)
 }
 
 fn bridge_problem_raw(output: &str, node: &str) -> String {
@@ -1768,7 +1768,7 @@ pub fn failure_cause(log: &str) -> String {
         return "couldn't reach the sequencer. Check that it is running and reachable, then try again".to_owned();
     }
     // What the CLI printed carries the sequencer's and the chain's words: cleaned once classified.
-    let first = crate::text::clean_text(told.first().map_or("", |line| line.trim_start_matches("Error:").trim()), 300);
+    let first = crate::text::clean_remote(told.first().map_or("", |line| line.trim_start_matches("Error:").trim()), 300);
     if first.is_empty() { "it stopped without saying why".to_owned() } else { first }
 }
 
@@ -2322,7 +2322,7 @@ fn failure(err: &str, out: &str) -> String {
         return OLDER_CLI.to_owned();
     }
     let why = if last_line(err).is_empty() { last_line(out) } else { last_line(err) };
-    format!("the names CLI failed: {}", crate::text::clean_text(why, 300))
+    format!("the names CLI failed: {}", crate::text::clean_remote(why, 300))
 }
 
 /// What a names CLI too old for the command asked of it means to the person.
@@ -3712,6 +3712,8 @@ mod tests {
         assert_eq!(failure("progress\nError: bad\u{202E}thing\u{7}\n", ""), "the names CLI failed: Error: bad thing");
         assert_eq!(failure("", "\u{202E}only stdout"), "the names CLI failed: only stdout");
         assert_eq!(bridge_problem("Error: bad\u{202E}x\n", "http://node"), "the names CLI failed: bad x");
+        assert_eq!(failure("Error: <font color='green'>done</font> & paid\n", ""), "the names CLI failed: Error: font color='green'done/font paid");
+        assert_eq!(failure_cause("Error: <img src=x>refused\n"), "img src=xrefused");
         assert_eq!(bridge_problem("Error: the node refused the deposit: no\u{2066}pe\n", "http://node"), "Your node refused the deposit: no pe");
         assert!(failure(&"y".repeat(3000), "").chars().count() < 400, "cut");
         // Classified before cleaning: an older CLI still reads as one.
