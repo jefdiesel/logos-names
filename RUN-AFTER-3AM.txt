@@ -1,0 +1,14 @@
+RUN-AFTER-3AM.txt: branch names-privacy-m5 (RFP-022 M5, the Names side), 2026-11-18. NOT RUN.
+The full ordered list is in the bridge repository's privacy-m5 worktree: /Users/jef/logos/rfp-022-wt-privm5/RUN-AFTER-3AM.txt.
+Names-only steps, on the build host (ssh minim4), through the shared build lock:
+
+1. Names CLI test (private calls reserve the fee at the head; cli/src/private_call.rs):
+   cd <checkout of names-privacy-m5>
+   /Volumes/exos162/logos/dev/fix-names/mini-lock.sh nice -n 19 cargo test --release -j 4 -p names_cli --features local-prove private_call::
+   Pass: compiles; a_private_call_prices_no_headroom_and_sets_nothing_else and the existing private_call:: tests pass.
+2. Render the two changed screens offscreen (basecamp/tools/render.py, as the wallet sessions do) for
+   "Claim privately" with a planned claim time, and a send-back with "Sent by <relay>" and the finish-yourself
+   line. Pass: the lines show, no QML warning about ClaimDelay or RelayLine.
+
+Already run on the MacBook (2026-11-18): node basecamp/logic.test.mjs (ALL PASS), node basecamp/claimdelay.test.mjs
+(ALL PASS, 38 checks), node basecamp/relayline.test.mjs (7 passed).
