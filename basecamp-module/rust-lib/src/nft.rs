@@ -1132,7 +1132,7 @@ mod tests {
         use std::net::{IpAddr, SocketAddr};
         let at = |ips: &'static [&'static str]| move |_: &str| Ok(ips.iter().map(|ip| SocketAddr::new(ip.parse::<IpAddr>().unwrap(), 443)).collect::<Vec<_>>());
         assert!(checked_addresses("img.example.com:443", &at(&["93.184.216.34"])).is_ok());
-        for local in [&["127.0.0.1"][..], &["93.184.216.34", "10.1.2.3"], &["192.168.1.96"], &["169.254.169.254"], &["::1"], &["fd00::5"], &["fe80::1"], &["::ffff:127.0.0.1"], &["100.118.15.0"], &["0.0.0.0"]] {
+        for local in [&["127.0.0.1"][..], &["93.184.216.34", "10.1.2.3"], &["192.168.0.10"], &["169.254.169.254"], &["::1"], &["fd00::5"], &["fe80::1"], &["::ffff:127.0.0.1"], &["100.64.0.7"], &["0.0.0.0"]] {
             let err = checked_addresses("evil.example.com:443", &at(local)).unwrap_err().to_string();
             assert!(err.contains("on this computer or its network"), "{local:?}: {err}");
         }
@@ -1195,13 +1195,13 @@ mod tests {
             "https://localhost/x",
             "https://127.0.0.1:3040/rpc",
             "https://10.0.0.5/x",
-            "https://192.168.1.96/x",
+            "https://192.168.0.10/x",
             "https://169.254.1.1/x",
             "https://[::1]/x",
             "https://[fd00::1]/x",
             "https://user@example.com/x",
             "https://intranet/x",
-            "https://100.118.15.0/x",
+            "https://100.64.0.7/x",
             "https://[::ffff:10.0.0.1]/x",
             "https://example.com/a b.png",
             "javascript:alert(1)",
