@@ -13681,7 +13681,11 @@ mod tests {
             let refused = parsed(&names.bridge_token_send(v5.into(), definition, amount.into(), from_, to_, false));
             assert!(refused["error"].as_str().unwrap_or_default().contains(words), "{words}: {refused}");
         }
+        // A bridge with no Config on the chain, and one whose Config can't be read: nothing starts.
+        BURN_CONFIGS.with(|configs| configs.borrow_mut().insert(bridge_net::BRIDGE_V4_PROGRAM.to_owned(), Ok(None)));
         assert!(parsed(&names.bridge_token_send(bridge_net::BRIDGE_V4_PROGRAM.into(), demo.clone(), "1".into(), from.clone(), to.clone(), false))["error"].as_str().unwrap().contains("isn't on the bridge test network"));
+        BURN_CONFIGS.with(|configs| configs.borrow_mut().insert(bridge_net::BRIDGE_V4_PROGRAM.to_owned(), Err("timed out".to_owned())));
+        assert!(parsed(&names.bridge_token_send(bridge_net::BRIDGE_V4_PROGRAM.into(), demo.clone(), "1".into(), from.clone(), to.clone(), false))["error"].as_str().unwrap().contains("Couldn't read the bridge's token list"));
         assert!(!dir.join("jobs").exists(), "nothing ran");
 
         // The check: priced, nothing sent, ready.
