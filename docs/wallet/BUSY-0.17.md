@@ -22,7 +22,9 @@ one is under way, and the balance, accounts and wallet loaders ask again for it)
 read is back (600 ms at most; also when a kept read is past its age) such a call answers busy, and
 the app asks again: the name lookups (`read`, the board's, `keep`) now do too. A change to the
 wallet (a send logged, a job ended, an account made or renamed) drops the kept reads of it. `faucet_claim` answers `code: "pending"` while the faucet is asked, and
-the app asks again for its answer (never a second ask of the faucet).
+the app asks again for its answer (never a second ask of the faucet). It answers `pending` too, asking
+nothing yet, while the names CLI's version is still being read ("Getting ready to ask the faucet…"):
+the app's next ask goes on with the press once the version is known (wallet-1119-stallfix).
 
 Since `names-stall-3` (2026-11-19), also as Names opens on a Basecamp that has the Logos
 Blockchain node loaded: the node reads the app polls (`chain_status`, `chain_accounts`,
@@ -289,7 +291,7 @@ read (not a press) holds the thread a second or waits on the network, the CLI or
 | `deposit` | As `served`; for the Names app only. Another app's call reads on the spot: up to 10 s per registry request (`REQUEST_CAP`) plus about 1 s of Argon2 for a name not seen yet. |  | 0 ms |
 | `dm_names` | < 50 ms. Local files and memory only. |  | 0 ms |
 | `drop_access` | < 50 ms. Local files and memory only. |  | 13 ms |
-| `faucet_claim` | 600 ms (first ask), then about 0. | The faucet is asked on a thread of its own; the app asks again for the answer. | 401 ms |
+| `faucet_claim` | 600 ms (first ask), then about 0. | The faucet is asked on a thread of its own; the app asks again for the answer. While the CLI's version is still being read it is `pending` and asks nothing yet. | 401 ms |
 | `faucet_info` | 600 ms at most, 400 ms for a whole burst (`served::WAIT_BUDGET`). Read on a thread of its own; busy until the first read is back. |  | 1 ms |
 | `file_sha256` | 600 ms at most, 400 ms for a whole burst (`served::WAIT_BUDGET`). Read on a thread of its own; busy until the first read is back. |  | 2 ms |
 | `get_config` | < 50 ms. Local files and memory only. |  | 2 ms |
