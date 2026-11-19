@@ -2107,8 +2107,6 @@ Item {
         }
         sbAsking = true
         sbError = ""
-        // The address the person read back and ticked, kept for the burn's sheet (sbOwnPlans).
-        var ticked = String(sbCheck.recipient || "")
         bridgeCall(Logic.PRIVATE_BRIDGE.sendBackPlan, [Logic.sendBackSymbol(sbAsset.symbol), String(sbDenom), sbAccount, sbCheck.code], function(value) {
             sbAsking = false
             if (value && value.needs) {
@@ -2125,7 +2123,9 @@ Item {
                 return
             }
             var id = String(value.id)
-            // Only when the LEZ Bridge planned it to the very address ticked here.
+            // Kept for the burn's sheet (sbOwnPlans): only when the LEZ Bridge planned it to the very
+            // address read back and ticked in the box (a box changed meanwhile matches nothing).
+            var ticked = sbTicked && sbCheck !== null ? String(sbCheck.recipient || "") : ""
             if (ticked !== "" && String(value.recipient || "").toLowerCase() === ticked.toLowerCase()) {
                 var plans = sbOwnPlans
                 plans[id] = ticked
