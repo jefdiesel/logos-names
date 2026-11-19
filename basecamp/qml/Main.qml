@@ -17,6 +17,7 @@ import QtQuick
 import QtQuick.Layouts
 import Logos.Theme
 import "logic.mjs" as Logic
+import "relayline.mjs" as RelayLine
 
 Item {
     id: root
@@ -11171,6 +11172,7 @@ Item {
                         kind: "done"
                         text: (root.depositClaimJob !== null && root.depositClaimJob.block !== undefined ? "Claimed in block " + root.depositClaimJob.block : "Claimed")
                             + (root.depositClaimJob !== null && root.depositClaimJob.result && root.depositClaimJob.result.balance_text ? " · Now in the account: " + root.depositClaimJob.result.balance_text + " (wrapped)." : ".")
+                            + RelayLine.relayUsedLine(root.depositClaimJob !== null ? root.depositClaimJob.relay : null)
                     }
                     // A refusal (the check) or a failure (the claim): one line in its kind, and its one
                     // next action (Logic.claimNext): Check again only where it can change anything.
@@ -11976,6 +11978,7 @@ Item {
                         Hint { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.privacy; font.pixelSize: root.px(15); text: root.sbFocusStatus !== null && root.sbFocusStatus.privacy ? String(root.sbFocusStatus.privacy) : "" }
                         Fact { visible: root.sbFocusRow !== null; label: "To"; code: true; value: root.sbFocusRow !== null ? root.sbFocusRow.recipient : ""; full: root.sbFocusRow !== null ? root.sbFocusRow.recipient : "" }
                         Fact { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.exit_commitment; label: "Exit"; code: true; value: root.sbFocusStatus !== null ? String(root.sbFocusStatus.exit_commitment || "") : ""; full: root.sbFocusStatus !== null ? String(root.sbFocusStatus.exit_commitment || "") : "" }
+                        Fact { visible: root.sbFocusStatus !== null && RelayLine.relayUsed(root.sbFocusStatus.relay) !== ""; label: "Relay"; value: root.sbFocusStatus !== null ? RelayLine.relayUsed(root.sbFocusStatus.relay) : "" }
                         Fact { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.burn_tx; label: "Burn"; code: true; value: root.sbFocusStatus !== null ? String(root.sbFocusStatus.burn_tx || "") : ""; full: root.sbFocusStatus !== null ? String(root.sbFocusStatus.burn_tx || "") : "" }
                         Fact { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.released_tx; label: "Released"; code: true; value: root.sbFocusStatus !== null ? String(root.sbFocusStatus.released_tx || "") : ""; full: root.sbFocusStatus !== null ? String(root.sbFocusStatus.released_tx || "") : "" }
                         Hint { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.text; font.pixelSize: root.px(15); text: root.sbFocusStatus !== null && root.sbFocusStatus.text ? "The bridge says: " + String(root.sbFocusStatus.text) : "" }
