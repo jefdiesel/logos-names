@@ -257,6 +257,16 @@ enum DeedCommand {
         #[arg(long, hide = true, value_parser = parse_new_owner)]
         signer: Option<AccountId>,
     },
+    /// Try to move (or with --burn, burn) a name's deed directly through the NFT
+    /// program, signed by its holder, bypassing LNS. The NFT program refuses it: only
+    /// the registry can authorize a deed account. For testing that refusal.
+    #[command(hide = true)]
+    ProbeDirect {
+        #[arg(value_parser = parse_name)]
+        name: String,
+        #[arg(long)]
+        burn: bool,
+    },
 }
 
 fn length_proof(id: &NameId) -> Result<(LengthProof, u8)> {
@@ -1407,6 +1417,33 @@ impl Client {
             "definition_state": definition_json,
             "holding_state": holding_json,
         }))
+    }
+
+    /// Sends the NFT program's own Transfer (to the holder's account) or Burn straight to
+    /// the deed account of `name`, signed by its holder here: what a marketplace would do.
+    /// The NFT program refuses it, since no signature authorizes a registry PDA.
+    async fn deed_probe_direct(&mut self, name: &str, burn: bool) -> Result<()> {
+        let (Derived { id, .. }, record, _) = self.lookup_held(name).await?;
+        let deed = record.deed.ok_or_else(|| anyhow!("{name}{NAME_SUFFIX} has no deed"))?;
+        let holder = self.holder(name, &id, &record)?;
+        let seed = deed_holding_seed(&deed.definition, &record.owner);
+        let message = if burn {
+            lns_deed::NftMessage::Burn { amount: 1 }
+        } else {
+            lns_deed::NftMessage::Transfer { to: holder }
+        };
+        let mentions = vec![
+            self.nft_on(seed),
+            self.signer(holder).select_program_actor_state(lns_deed::NFT_PROGRAM),
+            self.nft_on(deed_definition_seed(&id, &deed.nonce)),
+        ];
+        println!(
+            "sending the NFT program's {} to the deed account {} directly, signed by {holder}",
+            if burn { "Burn" } else { "Transfer" },
+            deed_holding_address(&self.program, &deed.definition, &record.owner)
+        );
+        let programs = vec![(lns_deed::NFT_PROGRAM, self.nft_program().await?)];
+        self.transact(mentions, borsh::to_vec(&message)?, programs, 0, DEED_CYCLES).await
     }
 
     /// Claims the deed of `name`, held here: free, optional, once while it is held.
@@ -4553,6 +4590,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Deed(DeedCommand::Claim { name, signer }) => client.deed_claim(&name, signer).await,
+        Command::Deed(DeedCommand::ProbeDirect { name, burn }) => client.deed_probe_direct(&name, burn).await,
         Command::Release { name } => client.release(&name).await,
         Command::Open { name, port, no_browser, storage } => {
             let name = client.following(&name).await?;
