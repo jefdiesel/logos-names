@@ -1,3 +1,6 @@
+Two branches' notes, kept one after the other by the wallet-1120 merge (2026-11-19).
+
+PART 1 (names-privacy-m5)
 RUN-AFTER-3AM.txt: branch names-privacy-m5 (RFP-022 M5, the Names side), 2026-11-18. NOT RUN.
 The full ordered list is in the bridge repository's privacy-m5 worktree: /Users/jef/logos/rfp-022-wt-privm5/RUN-AFTER-3AM.txt.
 Names-only steps, on the build host (ssh minim4), through the shared build lock:
@@ -20,3 +23,159 @@ repository's RUN-AFTER-3AM.txt part F for the command. Node, already run: claimd
 2026-11-19, after the first build-host run: the compile errors in cli/src/private_call.rs (RpcClient import; cycles as u64) are
 fixed, and the whole names_cli suite was compiled and run on the MacBook: 111 passed, 0 failed
 (RISC0_SKIP_BUILD_KERNELS=1 cargo test -j 4 -p names_cli --features local-prove).
+
+
+PART 2 (names-nft)
+names-nft (LP-0001 wallet NFTs): commands for the build host, in order. Written 2026-11-19.
+Nothing here deploys anything, touches the public chain, a Basecamp, or anyone's wallet. Every
+CLI call names the throwaway chain (--rpc http://127.0.0.1:3310). No real proof is made.
+
+WHO RUNS IT: the conductor (or the owner). Paste each block from the laptop.
+WHERE: /Volumes/exos162/logos/lp0001/wallet-nft/ (this worker's folder; created already, holds
+tools/golden.py, render-src/, renders/).
+
+------------------------------------------------------------------------------------------
+0. Before anything (all must hold; stop if one doesn't)
+------------------------------------------------------------------------------------------
+ssh minim4 'df -h / | tail -1; pgrep -fl "prove-seqsig|outbound_host|r0vm" || echo "no prover running"'
+   # internal disk must have more than 15 GB free; nothing proving
+ssh minim4 'curl -s -X POST http://127.0.0.1:3310/ -H "Content-Type: application/json" -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getLastBlockId\",\"params\":[]}"'
+   # Job A's throwaway chain must answer (it did on 2026-11-19 ~02:40Z: block 2450)
+
+------------------------------------------------------------------------------------------
+1. Copy the branch to the build host (source only)
+------------------------------------------------------------------------------------------
+rsync -a --delete --exclude target --exclude .git /Users/jef/logos/logos-names-nft/ minim4:/Volumes/exos162/logos/lp0001/wallet-nft/names-nft/
+   # includes basecamp-module/logos-rust-sdk-src (git-ignored, needed by the module tests)
+
+------------------------------------------------------------------------------------------
+2. Compile and test the names CLI on the build host (it compiles and its 12 NFT tests pass on
+   the laptop since 2026-11-19, with RISC0_SKIP_BUILD_KERNELS=1; this builds the binary the e2e uses)
+------------------------------------------------------------------------------------------
+ssh minim4 'bash -c ". /Volumes/exos162/logos/tools/sccache-env.sh; export PATH=\$HOME/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin CARGO_TARGET_DIR=/Volumes/exos162/logos/lp0001/wallet-nft/target TMPDIR=/Volumes/exos162/logos/lp0001/wallet-nft/tmp CARGO_BUILD_JOBS=4; mkdir -p \$TMPDIR; cd /Volumes/exos162/logos/lp0001/wallet-nft/names-nft && /Volumes/exos162/logos/dev/fix-names/mini-lock.sh nice -n 15 cargo test --locked -p names_cli nft > /Volumes/exos162/logos/lp0001/wallet-nft/cli-test.log 2>&1; echo exit \$? >> /Volumes/exos162/logos/lp0001/wallet-nft/cli-test.log"'
+ssh minim4 'grep -E "^error|test result|FAILED|panicked|^exit" -A5 /Volumes/exos162/logos/lp0001/wallet-nft/cli-test.log | head -60'
+   # Expect: nft::tests (2) and nft_wire::tests (7, the shared file) pass. If it does not
+   # compile, the errors are in cli/src/nft.rs (written against the rc3 wallet crate API as
+   # tokens.rs and Job A's nft-drive use it); send them back to the worker.
+
+Then the binary, with in-process execution (no r0vm; `local-prove`, as the CLI's own note says,
+"for testing on a shared machine only"):
+ssh minim4 'bash -c ". /Volumes/exos162/logos/tools/sccache-env.sh; export PATH=\$HOME/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin CARGO_TARGET_DIR=/Volumes/exos162/logos/lp0001/wallet-nft/target TMPDIR=/Volumes/exos162/logos/lp0001/wallet-nft/tmp CARGO_BUILD_JOBS=4; cd /Volumes/exos162/logos/lp0001/wallet-nft/names-nft && /Volumes/exos162/logos/dev/fix-names/mini-lock.sh nice -n 15 cargo build --locked --release -p names_cli --features local-prove > /Volumes/exos162/logos/lp0001/wallet-nft/cli-build.log 2>&1; echo exit \$? >> /Volumes/exos162/logos/lp0001/wallet-nft/cli-build.log; tail -3 /Volumes/exos162/logos/lp0001/wallet-nft/cli-build.log"'
+   # the binary: /Volumes/exos162/logos/lp0001/wallet-nft/target/release/names
+
+------------------------------------------------------------------------------------------
+3. Module unit tests on the build host (they passed on the laptop: 469 passed, 3 ignored)
+------------------------------------------------------------------------------------------
+ssh minim4 'bash -c "export PATH=\$HOME/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin CARGO_TARGET_DIR=/Volumes/exos162/logos/lp0001/wallet-nft/target-module; cd /Volumes/exos162/logos/lp0001/wallet-nft/names-nft/basecamp-module/rust-lib && /Volumes/exos162/logos/dev/fix-names/mini-lock.sh nice -n 15 cargo test 2>&1 | grep -E \"test result|FAILED|panicked\""'
+
+------------------------------------------------------------------------------------------
+4. End-to-end, PUBLIC, against the throwaway chain (no proof of any kind)
+------------------------------------------------------------------------------------------
+The reference program is already there: ErycMYqXUUtducaYmpHZjRgdbLXchrMiV4NZRnmRDNmu (Job A's
+native build, development receipts). Two NEW throwaway wallets in this worker's folder; no other
+wallet is opened by the names CLI.
+
+4a. Make the throwaway wallet (its recovery phrase goes to a 0600 file in the folder, never shown):
+ssh minim4 'bash -c "umask 077; W=/Volumes/exos162/logos/lp0001/wallet-nft; mkdir -p \$W/w1; export LEE_WALLET_HOME_DIR=\$W/w1 LOGOS_NAMES_RPC=http://127.0.0.1:3310 NAMES_NFT_PROGRAM=ErycMYqXUUtducaYmpHZjRgdbLXchrMiV4NZRnmRDNmu; N=\$W/target/release/names; \$N --rpc http://127.0.0.1:3310 setup --shield 0 > \$W/w1/setup.txt 2>&1; grep -E \"^(public|private) account\" \$W/w1/setup.txt; for l in a2 a3 a4; do \$N --rpc http://127.0.0.1:3310 wallet account new public --label \$l 2>&1 | tail -1; done"'
+   # note the public account it prints (call it A1); it is also in $W/w1/setup.txt
+
+4b. FUNDING (the one step that uses a wallet this worker did not make): Job A's chain's operator
+    wallet (Job A's throwaway, NOT the owner's) pays A1 for fees. Conductor's decision; if not,
+    stop here and report "public e2e not run: no funding".
+ssh minim4 'bash -c "J=/Volumes/exos162/logos/lp0001/job-a; LEE_WALLET_HOME_DIR=\$J/chain-home/wallets/operator \$J/chain-home/bin/wallet account list 2>&1 | grep -i operator"'
+   # A1 has never been used and the operator's wallet holds no key for it, so LEZ 0.4 credits it
+   # only when the transfer carries A1's public key (--to-pk). With --to Public/<A1> the
+   # simulation reverts ("A delivery named Actor { account_id: <A1>, ... }, whose account is
+   # declared public but not admitted") and nothing is sent (2026-11-19 run). Read A1's key:
+ssh minim4 'bash -c "W=/Volumes/exos162/logos/lp0001/wallet-nft; LEE_WALLET_HOME_DIR=\$W/w1 \$W/target/release/names --rpc http://127.0.0.1:3310 wallet account get --account-id Public/<A1> --keys | sed -n \"s/^pk //p\""'
+   # (64 hex characters; call it A1PK), then:
+ssh minim4 'bash -c "J=/Volumes/exos162/logos/lp0001/job-a; LEE_WALLET_HOME_DIR=\$J/chain-home/wallets/operator \$J/chain-home/bin/wallet auth-transfer send --from Public/<OPERATOR> --to-pk <A1PK> --amount 2000000000"'
+   # A1 -> A2, A3 below can use --to: they are in A1's own wallet, which adds their keys itself.
+   # then give a2, a3 a little from A1 for their own fees (each signs its own NFT messages):
+ssh minim4 'bash -c "W=/Volumes/exos162/logos/lp0001/wallet-nft; export LEE_WALLET_HOME_DIR=\$W/w1; N=\$W/target/release/names; \$N --rpc http://127.0.0.1:3310 wallet account list"'
+   # read the ids of a2 and a3 from that list (call them A2, A3), then:
+ssh minim4 'bash -c "W=/Volumes/exos162/logos/lp0001/wallet-nft; export LEE_WALLET_HOME_DIR=\$W/w1; N=\$W/target/release/names; for to in <A2> <A3>; do \$N --rpc http://127.0.0.1:3310 wallet auth-transfer send --from Public/<A1> --to Public/\$to --amount 50000000; done"'
+
+4c. The flows (paste as one block; it stops at the first unexpected result and logs everything):
+ssh minim4 'bash -s' <<'E2E'
+set -u
+W=/Volumes/exos162/logos/lp0001/wallet-nft
+export LEE_WALLET_HOME_DIR=$W/w1 LOGOS_NAMES_RPC=http://127.0.0.1:3310 NAMES_NFT_PROGRAM=ErycMYqXUUtducaYmpHZjRgdbLXchrMiV4NZRnmRDNmu
+N="$W/target/release/names --rpc http://127.0.0.1:3310"
+LOG=$W/e2e-public-$(date -u +%Y%m%dT%H%MZ).log
+# A2..A4: paste the ids read in 4b (the wallet's listing is not in creation order).
+A2=<A2>; A3=<A3>; A4=<A4>
+run() { echo "\$ names $*" >> $LOG; $N "$@" >> $LOG 2>&1; c=$?; echo "[exit $c]" >> $LOG; return $c; }
+want_fail() { if run "$@"; then echo "UNEXPECTED SUCCESS: $*" | tee -a $LOG; exit 1; fi; }
+A1=$(grep '^public account' $W/w1/setup.txt | grep -o 'Public/[1-9A-HJ-NP-Za-km-z]*' | cut -d/ -f2)
+echo "A1=$A1 A2=$A2 A3=$A3 A4=$A4" | tee -a $LOG
+run nft create Gallery 3 --uri https://example.com/gallery.png --creators e2e --payer $A1 || exit 1
+D=$(grep '^collection ' $LOG | tail -1 | cut -d' ' -f2); M=$(grep '^master ' $LOG | tail -1 | cut -d' ' -f2)
+echo "D=$D M=$M" | tee -a $LOG
+# the new definition and master accounts pay their own creation? No: --payer A1 pays.
+run nft info $D --json || exit 1
+run nft init --definition $D --account $A2 || exit 1
+want_fail nft init --definition $D --account $A2                 # already ready: refused before sending
+want_fail nft send --from $A2 --to Public/$A3                     # holds no NFT
+run wallet auth-transfer send --from Public/$A1 --to Public/$M --amount 50000000 || exit 1   # the master pays its print's fee
+run nft print --from $M --to Public/$A2 || exit 1                  # master 3 -> 2, A2 owns a copy
+want_fail nft send --from $A2 --to Public/$A4                     # A4 not ready: refused before sending
+run nft init --definition $D --account $A3 || exit 1
+want_fail nft init --definition $D --new public                   # no payer for a new account: refused, no account made
+run nft init --definition $D --new public --fee-payer $A1 || exit 1   # a new public holding, A1 pays (prints "new account Public/<id>")
+run nft send --from $A2 --to Public/$A3 || exit 1                  # copy A2 -> A3
+run nft list --json || exit 1
+echo '{"action":"send","from":"Public/'$A3'","to":"Public/'$A2'"}' > $W/plan-in.json
+$N module nft plan < $W/plan-in.json >> $LOG 2>&1; echo "[exit $?] (plan)" >> $LOG
+run nft burn --from $A3 || exit 1                                  # the copy is gone; supply 3 -> 2
+run nft list --json || exit 1
+$N module nft holdings >> $LOG 2>&1; echo "[exit $?] (module holdings)" >> $LOG
+echo "PUBLIC E2E DONE" | tee -a $LOG
+E2E
+   # Read the log: ssh minim4 'tail -80 /Volumes/exos162/logos/lp0001/wallet-nft/e2e-public-*.log'
+   # Expected refusals, in plain words: "That account is already ready for this collection",
+   # "This account holds no NFT to send.", "That account isn't ready for this collection: it has
+   # to receive a holding first."
+
+------------------------------------------------------------------------------------------
+5. OPTIONAL, DEV MODE ONLY: the private directions (no real proof: RISC0_DEV_MODE=1 makes fake
+   receipts, which this throwaway chain's sequencer accepts). Run only if the owner's "no
+   proofs" rule is read as allowing dev-mode receipts; otherwise skip and report "private
+   directions not run". Never on any other chain.
+------------------------------------------------------------------------------------------
+ssh minim4 'bash -s' <<'E2EP'
+set -u
+W=/Volumes/exos162/logos/lp0001/wallet-nft
+export LEE_WALLET_HOME_DIR=$W/w1 LOGOS_NAMES_RPC=http://127.0.0.1:3310 NAMES_NFT_PROGRAM=ErycMYqXUUtducaYmpHZjRgdbLXchrMiV4NZRnmRDNmu
+export RISC0_DEV_MODE=1 RISC0_PROVER=local RAYON_NUM_THREADS=4
+unset RISC0_SERVER_PATH
+N="$W/target/release/names --rpc http://127.0.0.1:3310"
+LOG=$W/e2e-private-$(date -u +%Y%m%dT%H%MZ).log
+run() { echo "\$ names $*" >> $LOG; $N "$@" >> $LOG 2>&1; c=$?; echo "[exit $c]" >> $LOG; return $c; }
+A1=$(grep '^public account' $W/w1/setup.txt | grep -o 'Public/[1-9A-HJ-NP-Za-km-z]*' | cut -d/ -f2)
+P1=$(grep '^private account' $W/w1/setup.txt | grep -o 'Private/[1-9A-HJ-NP-Za-km-z]*' | cut -d/ -f2)
+D=$(grep '^collection ' $W/e2e-public-*.log | tail -1 | awk '{print $NF}'); M=$(grep '^master ' $W/e2e-public-*.log | tail -1 | awk '{print $NF}')
+run wallet auth-transfer send --from Public/$A1 --to Private/$P1 --amount 60000000 || exit 1      # fund the private payer (public -> own private)
+run nft init --definition $D --new private --fee-payer $P1 || exit 1                         # a new private holding (prints "new account Private/<id>")
+H1=$(grep '^new account Private/' $LOG | tail -1 | cut -d/ -f2)
+run nft init --definition $D --new private --fee-payer $P1 || exit 1
+H2=$(grep '^new account Private/' $LOG | tail -1 | cut -d/ -f2)
+run nft print --from $M --to Private/$H1 --fee-payer $P1 || exit 1                           # public -> own private (names H1 on chain)
+run nft send --from $H1 --to Private/$H2 --fee-payer $P1 || exit 1                           # private -> private (names no account)
+run nft send --from $H2 --to Public/$(grep -o 'A3=[^ ]*' $W/e2e-public-*.log | tail -1 | cut -d= -f2) --fee-payer $P1 || exit 1   # private -> public (A3 was burnt empty, still ready)
+run nft send --from $H2 --to Public/x --fee-payer $P1; echo "(expected refusal above)" >> $LOG
+run nft list --json
+echo "PRIVATE E2E DONE (development receipts)" | tee -a $LOG
+E2EP
+   # Not covered even here: a send to SOMEONE ELSE's private keys (a second wallet), and its
+   # `names nft receive`: the risky case NFT.md section 7 describes (the sender empties at once;
+   # an unready recipient can't take it). Worth one dev-mode run with a second wallet w2 before
+   # any release; the commands are the same with --to <npk hex>:<vpk hex> --their-keys, the keys
+   # from `names module keys Private/<id>` in w2, then `names nft receive --fee-payer <w2 private>`
+   # with LEE_WALLET_HOME_DIR=$W/w2.
+
+------------------------------------------------------------------------------------------
+6. After
+------------------------------------------------------------------------------------------
+Nothing to stop: this worker started no chain or service. The throwaway wallets stay in
+/Volumes/exos162/logos/lp0001/wallet-nft/w1 (and w2) until the chain is torn down with Job A's.

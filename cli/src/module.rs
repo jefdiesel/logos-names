@@ -46,6 +46,9 @@ pub enum Request {
     /// pending credit for a private recipient.
     #[command(subcommand)]
     Token(crate::tokens::TokenRequest),
+    /// NFT requests (`holdings`, `info`, `plan`); see `nft.rs`. Sends are `names nft …` jobs.
+    #[command(subcommand)]
+    Nft(crate::nft::NftRequest),
     /// Print every account of this wallet as JSON: `[{account, kind, label, balance,
     /// default, public_key}]`. `balance` is decimal text, read from the chain for a public
     /// account and as the wallet last synced it for a private one. `default` marks the
@@ -181,6 +184,7 @@ impl Client {
             Request::Send => self.module_send().await,
             Request::Restore { .. } | Request::LengthProof { .. } => unreachable!("handled before the wallet is opened"),
             Request::Token(_) => unreachable!("handled with the token program chosen, in main"),
+            Request::Nft(_) => unreachable!("handled with the NFT program chosen, in main"),
             Request::AccountList => self.module_account_list().await,
             Request::AccountNew { kind, label } => self.module_account_new(&kind, &label).await,
             Request::AccountLabel { account, label } => self.module_account_label(&account, &label),

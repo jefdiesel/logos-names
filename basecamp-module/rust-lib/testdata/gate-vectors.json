@@ -1,0 +1,497 @@
+{
+ "generator": "tools/gen_vectors.py (Python standard library only)",
+ "spec": "LP0001-OWNERSHIP-PROOF-SPEC.md 2026-11-18, sections 2.2-2.4, 3.3",
+ "constants": {
+  "QUANT_MS": "600000",
+  "TTL_MS": [
+   "3600000",
+   "21600000",
+   "86400000"
+  ],
+  "DOMAIN_SLOT": "6c70303030312d676174652f76312f736c6f74",
+  "DOMAIN_CTX": "6c70303030312d676174652f76312f637478",
+  "DOMAIN_BIND": "6c70303030312d676174652f76312f62696e64",
+  "LEE_PDA_PREFIX": "2f4c45452f76302e322f4163636f756e7449642f5044412f0000000000000000",
+  "KIND_ONCHAIN": 1,
+  "KIND_OFFCHAIN": 2,
+  "codes": [
+   "OK",
+   "NO_FACT",
+   "MALFORMED",
+   "BINDING_MISMATCH",
+   "NOT_YET_VALID",
+   "EXPIRED",
+   "NOT_AUTHORIZED",
+   "RPC_UNAVAILABLE",
+   "NOT_A_MEMBER"
+  ]
+ },
+ "derivations": [
+  {
+   "name": "slot-0",
+   "secret": "3c14a09b2136480b7f479c9baa46e5c2bc8924667c34dd5c040e4756abcebf97",
+   "gate": "75182fd2293cac614b9d8477d70e624dff84328bacf133de3377571c96af5901",
+   "slot": "b06945d6206cd3eb73ce0e3c4ca2fc134167752113eb1faaf78285dde3a5c781",
+   "pda": "dec21f44de279d29e4cf895213025b656c6bea64ade419a32ae46a4e4ce4c66b",
+   "pda_b58": "FzZC7FExfZSH5F6ngYR8aWVkRdxqBv8Bqb4tvdTzYwMc"
+  },
+  {
+   "name": "slot-1",
+   "secret": "479e8699594b0724e11ed3f411fd8f5c79567c1615b02d6ca4c8f6a94e1736b7",
+   "gate": "75182fd2293cac614b9d8477d70e624dff84328bacf133de3377571c96af5901",
+   "slot": "28f800fa6e805f923fd5ce54d1834f33635094e779e392d06b2840634794d639",
+   "pda": "b2e99bc571158b180b97bc924e6729436e53685dcb1724d7ce377652a86d0fe7",
+   "pda_b58": "D3QB8nHkPqzY56i1u56um5x3N7MdDw4e92eFyYSGX9Hg"
+  },
+  {
+   "name": "slot-2",
+   "secret": "0000000000000000000000000000000000000000000000000000000000000000",
+   "gate": "75182fd2293cac614b9d8477d70e624dff84328bacf133de3377571c96af5901",
+   "slot": "78695a7150ac73fc9abc9f64329abe41d0d48ab15561ab31e9c82e9cd4e0cc73",
+   "pda": "da4bb269c03b74ff872a8ae75e83ec416aa2653c0aae484bf1469c9172cf7087",
+   "pda_b58": "Fh8pqpXjid1oSVVW9TGi5NEwcvh79fvLXk6QFxrMfhdp"
+  },
+  {
+   "name": "slot-3",
+   "secret": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+   "gate": "75182fd2293cac614b9d8477d70e624dff84328bacf133de3377571c96af5901",
+   "slot": "204a05db7283cddfb8a350a24162ee016581f94203103fd2ec09b241085ef073",
+   "pda": "57a1b164bce373d4371675c8b75ca8d3944ee7007a020a0f290dbf80a6614bc6",
+   "pda_b58": "6u5UN1puqr4VZHJbLDCgBbYNZPDt3NP7rVwtqfnaFVNu"
+  },
+  {
+   "name": "onchain-nonce-0",
+   "zone_id": "baf0480a2a2fed3fbf5e681da665c64b1144211debae12aedd7ee81d7f4db530",
+   "gate": "75182fd2293cac614b9d8477d70e624dff84328bacf133de3377571c96af5901",
+   "consumer": "32e36988769189ec4eadd08b288b455783adefe2f9c0ef74d702307b64af35a0",
+   "submission_id": "38877ee6e1d7e2d21518795c69fa0a6dda4d16c95c1219c0726ba08d864c953b",
+   "actor": "2dddb721c14fb880151ea8b0d0988797fd01322298337f18fb02b97a366309cb",
+   "nonce": "0",
+   "payload": "49be16667afdebd693570e043f79a95a3c42dbabe491fe24ff1d652a6925d067",
+   "context": "712f92e13adfc1cb5dbd9adc2ad0cada9ad11ff73757784e4d8ec2d55ff60c94",
+   "binding": "f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e4",
+   "nft_program": "c90880bdbb04a4fc48360f219ce261cb68380d94c25d1ba3fe4670877fcdb031",
+   "collection": "b5a101c987df5c0554afa2f785e35d243c050f29057afa4297a5ee2f4454724d"
+  },
+  {
+   "name": "onchain-nonce-1",
+   "zone_id": "baf0480a2a2fed3fbf5e681da665c64b1144211debae12aedd7ee81d7f4db530",
+   "gate": "75182fd2293cac614b9d8477d70e624dff84328bacf133de3377571c96af5901",
+   "consumer": "32e36988769189ec4eadd08b288b455783adefe2f9c0ef74d702307b64af35a0",
+   "submission_id": "38877ee6e1d7e2d21518795c69fa0a6dda4d16c95c1219c0726ba08d864c953b",
+   "actor": "2dddb721c14fb880151ea8b0d0988797fd01322298337f18fb02b97a366309cb",
+   "nonce": "1",
+   "payload": "1c166a958e1992e00c1c337196da01d46da8a20e5574f54fa9913ddafffd4fc2",
+   "context": "d7d4bdd7824cb278717cd3e05f0295233788984c8a35217847663675f38b01e6",
+   "binding": "8cf3ffde7543f5a9926a55b32fb413d5fe19db0b89bcfa97224cd4b4e9bd4e42",
+   "nft_program": "c90880bdbb04a4fc48360f219ce261cb68380d94c25d1ba3fe4670877fcdb031",
+   "collection": "b5a101c987df5c0554afa2f785e35d243c050f29057afa4297a5ee2f4454724d"
+  },
+  {
+   "name": "onchain-nonce-4294967296",
+   "zone_id": "baf0480a2a2fed3fbf5e681da665c64b1144211debae12aedd7ee81d7f4db530",
+   "gate": "75182fd2293cac614b9d8477d70e624dff84328bacf133de3377571c96af5901",
+   "consumer": "32e36988769189ec4eadd08b288b455783adefe2f9c0ef74d702307b64af35a0",
+   "submission_id": "38877ee6e1d7e2d21518795c69fa0a6dda4d16c95c1219c0726ba08d864c953b",
+   "actor": "2dddb721c14fb880151ea8b0d0988797fd01322298337f18fb02b97a366309cb",
+   "nonce": "4294967296",
+   "payload": "7811a31773e798359ab13d09b15049febd04ba505d95fdcce3107432475699e9",
+   "context": "ce081d0dbcbdce9497054386fa2c5e4b8f2cfce424138a62457e57adfa767f09",
+   "binding": "415fa58605dc5d198c2a4c5338fcde96d579edf18834277e7bb708e4ab457e2f",
+   "nft_program": "c90880bdbb04a4fc48360f219ce261cb68380d94c25d1ba3fe4670877fcdb031",
+   "collection": "b5a101c987df5c0554afa2f785e35d243c050f29057afa4297a5ee2f4454724d"
+  },
+  {
+   "name": "onchain-nonce-18446744073709551615",
+   "zone_id": "baf0480a2a2fed3fbf5e681da665c64b1144211debae12aedd7ee81d7f4db530",
+   "gate": "75182fd2293cac614b9d8477d70e624dff84328bacf133de3377571c96af5901",
+   "consumer": "32e36988769189ec4eadd08b288b455783adefe2f9c0ef74d702307b64af35a0",
+   "submission_id": "38877ee6e1d7e2d21518795c69fa0a6dda4d16c95c1219c0726ba08d864c953b",
+   "actor": "2dddb721c14fb880151ea8b0d0988797fd01322298337f18fb02b97a366309cb",
+   "nonce": "18446744073709551615",
+   "payload": "a1b50004e44da1743262cbc9e7f29457d5b97fe64edf0c0d16d32f0c731004aa",
+   "context": "f3c3d5ff147507f0f0ca3927228f15ab2a73f1566dcb1fb5b5f050f822aae202",
+   "binding": "7b7f41adaacccdef183cf8550429e9894002e07cea1d0ad7fe590faf182364f4",
+   "nft_program": "c90880bdbb04a4fc48360f219ce261cb68380d94c25d1ba3fe4670877fcdb031",
+   "collection": "b5a101c987df5c0554afa2f785e35d243c050f29057afa4297a5ee2f4454724d"
+  },
+  {
+   "name": "offchain-1",
+   "zone_id": "baf0480a2a2fed3fbf5e681da665c64b1144211debae12aedd7ee81d7f4db530",
+   "gate": "75182fd2293cac614b9d8477d70e624dff84328bacf133de3377571c96af5901",
+   "caller_identity": "6261736563616d703a6d656d626572732d646f6f72",
+   "purpose": "436865636b20696e207468697320617070",
+   "app_nonce": "a28df39cd77a2655623e0664097f68ca3261d1f7b765c1eb51ccf72594bebbfd",
+   "audience": "e78379b89fd88c9e1a2d13abdc9d535e55395c7163ad30c417d855d4ab5571cd",
+   "payload": "f2afb680fb6b99ec777b6ddfcea4968f16a0fbeb61889ef7570c289ff767970e",
+   "context": "98dc4a67804986a76f6e5610a1acdb30d934b33c951e05dbb6798d67035efd1a",
+   "nft_program": "c90880bdbb04a4fc48360f219ce261cb68380d94c25d1ba3fe4670877fcdb031",
+   "collection": "b5a101c987df5c0554afa2f785e35d243c050f29057afa4297a5ee2f4454724d",
+   "binding": "40d30a463123180a5450e676bb16d15bd2f8907866af9eb9b8bb3af426f59545"
+  },
+  {
+   "name": "offchain-empty-purpose",
+   "zone_id": "baf0480a2a2fed3fbf5e681da665c64b1144211debae12aedd7ee81d7f4db530",
+   "gate": "75182fd2293cac614b9d8477d70e624dff84328bacf133de3377571c96af5901",
+   "caller_identity": "6261736563616d703a6d656d626572732d646f6f72",
+   "purpose": "",
+   "app_nonce": "a28df39cd77a2655623e0664097f68ca3261d1f7b765c1eb51ccf72594bebbfd",
+   "audience": "e78379b89fd88c9e1a2d13abdc9d535e55395c7163ad30c417d855d4ab5571cd",
+   "payload": "6d372317f09b5eb0f8f3633d2f2284cb435a7e51a799930f1e6ccd4821a3de8e",
+   "context": "cfa98642a1aa85bdeae36bf69df9f184fcdace5145820ac6f6bee71ad5c5a16a",
+   "nft_program": "c90880bdbb04a4fc48360f219ce261cb68380d94c25d1ba3fe4670877fcdb031",
+   "collection": "b5a101c987df5c0554afa2f785e35d243c050f29057afa4297a5ee2f4454724d",
+   "binding": "cc40b9d7673805b3004c5c8eeb6de92e3c74c63098e4d2014f18cf9c1122cf29"
+  }
+ ],
+ "observed_pda": {
+  "source": "OBSERVED, LP0001-JOB-A-FINDINGS.md A2.4 case 1 (probe v2 AskPublish, block 2506)",
+  "program_b58": "6BZokuzhSs2Lex3PCDfUJX1reNZpCnEg1cZ79vhz3gbm",
+  "program": "4cff563619cdc3e0f6905bf95a0766bfc84371af498a21e2dbe6dcb61700e77c",
+  "seed": "369f07526e6dd8d672e9839d86cc2b8dc02f54a2dcaef6b5ccdb29b78c91ff49",
+  "pda": "1a645ef31f082c43bc3fe51630fd762208f5140a1736a5b1f835a2583cc936f9",
+  "pda_b58": "2n2NPDMdqV6XDUwXaGnYcjKnUnsm5Dbx4ovUPhReRQxx"
+ },
+ "states": [
+  {
+   "name": "fact-ttl0",
+   "kind": "fact",
+   "binding": "f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e4",
+   "not_before": "1763500200000",
+   "expires_at": "1763503800000",
+   "bytes": "0101f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e44090cd989a010000c07e04999a010000"
+  },
+  {
+   "name": "fact-ttl2",
+   "kind": "fact",
+   "binding": "f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e4",
+   "not_before": "1763500200000",
+   "expires_at": "1763586600000",
+   "bytes": "0101f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e44090cd989a01000040ecf39d9a010000"
+  },
+  {
+   "name": "holder-idle",
+   "kind": "holder",
+   "secret": "3c14a09b2136480b7f479c9baa46e5c2bc8924667c34dd5c040e4756abcebf97",
+   "bytes": "00013c14a09b2136480b7f479c9baa46e5c2bc8924667c34dd5c040e4756abcebf9700"
+  },
+  {
+   "name": "holder-pending",
+   "kind": "holder",
+   "secret": "3c14a09b2136480b7f479c9baa46e5c2bc8924667c34dd5c040e4756abcebf97",
+   "collection": "b5a101c987df5c0554afa2f785e35d243c050f29057afa4297a5ee2f4454724d",
+   "binding": "f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e4",
+   "not_before": "1763500200000",
+   "expires_at": "1763521800000",
+   "bytes": "00013c14a09b2136480b7f479c9baa46e5c2bc8924667c34dd5c040e4756abcebf9701b5a101c987df5c0554afa2f785e35d243c050f29057afa4297a5ee2f4454724df28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e44090cd989a0100004027179a9a010000"
+  }
+ ],
+ "check_cases": [
+  {
+   "name": "ok-mid",
+   "state": "0101f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e44090cd989a010000c07e04999a010000",
+   "expected_binding": "f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e4",
+   "now": "1763500201000",
+   "outcome": "OK",
+   "onchain_outcome": "OK",
+   "why": "current fact, right binding"
+  },
+  {
+   "name": "ok-at-start",
+   "state": "0101f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e44090cd989a010000c07e04999a010000",
+   "expected_binding": "f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e4",
+   "now": "1763500200000",
+   "outcome": "OK",
+   "onchain_outcome": "OK",
+   "why": "window is [not_before, expires_at): start included"
+  },
+  {
+   "name": "ok-last-ms",
+   "state": "0101f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e44090cd989a010000c07e04999a010000",
+   "expected_binding": "f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e4",
+   "now": "1763503799999",
+   "outcome": "OK",
+   "onchain_outcome": "OK",
+   "why": "last millisecond inside"
+  },
+  {
+   "name": "ok-no-time",
+   "state": "0101f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e44090cd989a010000c07e04999a010000",
+   "expected_binding": "f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e4",
+   "now": null,
+   "outcome": "OK",
+   "onchain_outcome": "OK",
+   "why": "on-chain form: no clock"
+  },
+  {
+   "name": "expired-at-end",
+   "state": "0101f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e44090cd989a010000c07e04999a010000",
+   "expected_binding": "f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e4",
+   "now": "1763503800000",
+   "outcome": "EXPIRED",
+   "onchain_outcome": "OK",
+   "why": "end excluded"
+  },
+  {
+   "name": "expired-later",
+   "state": "0101f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e44090cd989a010000c07e04999a010000",
+   "expected_binding": "f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e4",
+   "now": "1764503800000",
+   "outcome": "EXPIRED",
+   "onchain_outcome": "OK",
+   "why": "long after"
+  },
+  {
+   "name": "not-yet-valid",
+   "state": "0101f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e44090cd989a010000c07e04999a010000",
+   "expected_binding": "f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e4",
+   "now": "1763500199999",
+   "outcome": "NOT_YET_VALID",
+   "onchain_outcome": "OK",
+   "why": "one ms early"
+  },
+  {
+   "name": "no-fact",
+   "state": "",
+   "expected_binding": "f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e4",
+   "now": "1763500200000",
+   "outcome": "NO_FACT",
+   "onchain_outcome": "NO_FACT",
+   "why": "empty slot"
+  },
+  {
+   "name": "no-fact-no-time",
+   "state": "",
+   "expected_binding": "f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e4",
+   "now": null,
+   "outcome": "NO_FACT",
+   "onchain_outcome": "NO_FACT",
+   "why": "empty slot on chain"
+  },
+  {
+   "name": "mismatch-other-collection",
+   "state": "0101f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e44090cd989a010000c07e04999a010000",
+   "expected_binding": "79d1a701c8bf03eb29bb74eb3f33d4db60364e2820935e9c8a072de35b776d24",
+   "now": "1763500200000",
+   "outcome": "BINDING_MISMATCH",
+   "onchain_outcome": "BINDING_MISMATCH",
+   "why": "verifier gates on collection D"
+  },
+  {
+   "name": "mismatch-other-context-nonce",
+   "state": "0101f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e44090cd989a010000c07e04999a010000",
+   "expected_binding": "8cf3ffde7543f5a9926a55b32fb413d5fe19db0b89bcfa97224cd4b4e9bd4e42",
+   "now": "1763500200000",
+   "outcome": "BINDING_MISMATCH",
+   "onchain_outcome": "BINDING_MISMATCH",
+   "why": "verifier's nonce moved on (Act again)"
+  },
+  {
+   "name": "mismatch-other-actor",
+   "state": "0101f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e44090cd989a010000c07e04999a010000",
+   "expected_binding": "095818605ed54091e692e3e22061f1515635e8b9190b153b1cc4ef02ae70285b",
+   "now": "1763500200000",
+   "outcome": "BINDING_MISMATCH",
+   "onchain_outcome": "BINDING_MISMATCH",
+   "why": "another account points the consumer at the fact"
+  },
+  {
+   "name": "mismatch-other-zone",
+   "state": "0101f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e44090cd989a010000c07e04999a010000",
+   "expected_binding": "4a5224d7baecb78d6e70b63262561d1c2fd26af41dab9e3139852f9ccf7c39bf",
+   "now": "1763500200000",
+   "outcome": "BINDING_MISMATCH",
+   "onchain_outcome": "BINDING_MISMATCH",
+   "why": "zone reset / other zone"
+  },
+  {
+   "name": "mismatch-offchain-vs-onchain",
+   "state": "0101f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e44090cd989a010000c07e04999a010000",
+   "expected_binding": "43107ad0ae3beb6ae920d671b98b5af50c83ae5d5092cf37c521a221d3daed93",
+   "now": "1763500200000",
+   "outcome": "BINDING_MISMATCH",
+   "onchain_outcome": "BINDING_MISMATCH",
+   "why": "kind byte differs"
+  },
+  {
+   "name": "mismatch-other-nft-program",
+   "state": "0101f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e44090cd989a010000c07e04999a010000",
+   "expected_binding": "d5df9cdf5d99be49b4397c449bca6f56264c9a240041831b98c28d05b3113db9",
+   "now": "1763500200000",
+   "outcome": "BINDING_MISMATCH",
+   "onchain_outcome": "BINDING_MISMATCH",
+   "why": "look-alike NFT program"
+  },
+  {
+   "name": "mismatch-superseded",
+   "state": "01018cf3ffde7543f5a9926a55b32fb413d5fe19db0b89bcfa97224cd4b4e9bd4e424090cd989a010000c07e04999a010000",
+   "expected_binding": "f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e4",
+   "now": "1763500200001",
+   "outcome": "BINDING_MISMATCH",
+   "onchain_outcome": "BINDING_MISMATCH",
+   "why": "a newer proof for another context overwrote the slot"
+  },
+  {
+   "name": "mismatch-beats-expired",
+   "state": "01018cf3ffde7543f5a9926a55b32fb413d5fe19db0b89bcfa97224cd4b4e9bd4e424090cd989a010000c07e04999a010000",
+   "expected_binding": "f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e4",
+   "now": "1763503800005",
+   "outcome": "BINDING_MISMATCH",
+   "onchain_outcome": "BINDING_MISMATCH",
+   "why": "binding is checked before time"
+  },
+  {
+   "name": "malformed-holder-state",
+   "state": "00013c14a09b2136480b7f479c9baa46e5c2bc8924667c34dd5c040e4756abcebf9700",
+   "expected_binding": "f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e4",
+   "now": "1763500200000",
+   "outcome": "MALFORMED",
+   "onchain_outcome": "MALFORMED",
+   "why": "a Holder state is not a Fact"
+  },
+  {
+   "name": "malformed-truncated",
+   "state": "0101f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e44090cd989a010000c07e04999a0100",
+   "expected_binding": "f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e4",
+   "now": "1763500200000",
+   "outcome": "MALFORMED",
+   "onchain_outcome": "MALFORMED",
+   "why": "49 bytes"
+  },
+  {
+   "name": "malformed-extended",
+   "state": "0101f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e44090cd989a010000c07e04999a01000000",
+   "expected_binding": "f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e4",
+   "now": "1763500200000",
+   "outcome": "MALFORMED",
+   "onchain_outcome": "MALFORMED",
+   "why": "51 bytes"
+  },
+  {
+   "name": "malformed-tag",
+   "state": "0201f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e44090cd989a010000c07e04999a010000",
+   "expected_binding": "f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e4",
+   "now": "1763500200000",
+   "outcome": "MALFORMED",
+   "onchain_outcome": "MALFORMED",
+   "why": "unknown tag"
+  },
+  {
+   "name": "malformed-version",
+   "state": "0102f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e44090cd989a010000c07e04999a010000",
+   "expected_binding": "f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e4",
+   "now": "1763500200000",
+   "outcome": "MALFORMED",
+   "onchain_outcome": "MALFORMED",
+   "why": "version 2"
+  },
+  {
+   "name": "malformed-off-grid",
+   "state": "0101f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e44190cd989a010000c17e04999a010000",
+   "expected_binding": "f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e4",
+   "now": "1763500200002",
+   "outcome": "MALFORMED",
+   "onchain_outcome": "MALFORMED",
+   "why": "not_before off the grid"
+  },
+  {
+   "name": "malformed-bad-ttl",
+   "state": "0101f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e44090cd989a0100002894cd989a010000",
+   "expected_binding": "f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e4",
+   "now": "1763500200001",
+   "outcome": "MALFORMED",
+   "onchain_outcome": "MALFORMED",
+   "why": "window not one of the menu"
+  },
+  {
+   "name": "malformed-reversed",
+   "state": "0101f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e4c07e04999a0100004090cd989a010000",
+   "expected_binding": "f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e4",
+   "now": "1763500200000",
+   "outcome": "MALFORMED",
+   "onchain_outcome": "MALFORMED",
+   "why": "expires before it starts"
+  },
+  {
+   "name": "malformed-one-byte",
+   "state": "01",
+   "expected_binding": "f28a29f45e7959dbcea32b80af61c2f2de41f830bb2b068d334772bc53cd55e4",
+   "now": null,
+   "outcome": "MALFORMED",
+   "onchain_outcome": "MALFORMED",
+   "why": "one byte"
+  }
+ ],
+ "consumer_cases": [
+  {
+   "name": "ok",
+   "state": "0101c1386b30ef4bc4dd407067ed6122f3bd96472e08d5946ac15813927b32ae1d914090cd989a010000c07e04999a010000",
+   "expected_binding": "c1386b30ef4bc4dd407067ed6122f3bd96472e08d5946ac15813927b32ae1d91",
+   "onchain_outcome": "OK",
+   "why": "the fact for A at nonce 0"
+  },
+  {
+   "name": "ok-ttl1",
+   "state": "0101c1386b30ef4bc4dd407067ed6122f3bd96472e08d5946ac15813927b32ae1d914090cd989a0100004027179a9a010000",
+   "expected_binding": "c1386b30ef4bc4dd407067ed6122f3bd96472e08d5946ac15813927b32ae1d91",
+   "onchain_outcome": "OK",
+   "why": "other TTL"
+  },
+  {
+   "name": "no-fact",
+   "state": "",
+   "expected_binding": "c1386b30ef4bc4dd407067ed6122f3bd96472e08d5946ac15813927b32ae1d91",
+   "onchain_outcome": "NO_FACT",
+   "why": "empty slot"
+  },
+  {
+   "name": "mismatch-nonce-1",
+   "state": "0101fb144c0cfcef174bce16f59ebeb5bac55480a9cd807365b608a852bbffa784cb4090cd989a010000c07e04999a010000",
+   "expected_binding": "c1386b30ef4bc4dd407067ed6122f3bd96472e08d5946ac15813927b32ae1d91",
+   "onchain_outcome": "BINDING_MISMATCH",
+   "why": "a fact for nonce 1"
+  },
+  {
+   "name": "mismatch-actor-b",
+   "state": "01017659c7e71bc19037e2669bf7bf7c6f4d9167e5c2fbdd5dabc4d3fc49febea2034090cd989a010000c07e04999a010000",
+   "expected_binding": "c1386b30ef4bc4dd407067ed6122f3bd96472e08d5946ac15813927b32ae1d91",
+   "onchain_outcome": "BINDING_MISMATCH",
+   "why": "a fact for account B"
+  },
+  {
+   "name": "mismatch-collection",
+   "state": "0101aed3902e3836f4b47cbc150aed8a0e08c8a8929dd91bc5ead8d5ca36027bc2494090cd989a010000c07e04999a010000",
+   "expected_binding": "c1386b30ef4bc4dd407067ed6122f3bd96472e08d5946ac15813927b32ae1d91",
+   "onchain_outcome": "BINDING_MISMATCH",
+   "why": "a fact for another collection"
+  },
+  {
+   "name": "malformed-holder",
+   "state": "00013c14a09b2136480b7f479c9baa46e5c2bc8924667c34dd5c040e4756abcebf9700",
+   "expected_binding": "c1386b30ef4bc4dd407067ed6122f3bd96472e08d5946ac15813927b32ae1d91",
+   "onchain_outcome": "MALFORMED",
+   "why": "a Holder state"
+  },
+  {
+   "name": "malformed-short",
+   "state": "0101c1386b30ef4bc4dd407067ed6122f3bd96472e08d5946ac15813927b32ae1d914090cd989a01",
+   "expected_binding": "c1386b30ef4bc4dd407067ed6122f3bd96472e08d5946ac15813927b32ae1d91",
+   "onchain_outcome": "MALFORMED",
+   "why": "40 bytes"
+  },
+  {
+   "name": "malformed-version",
+   "state": "0100c1386b30ef4bc4dd407067ed6122f3bd96472e08d5946ac15813927b32ae1d914090cd989a010000c07e04999a010000",
+   "expected_binding": "c1386b30ef4bc4dd407067ed6122f3bd96472e08d5946ac15813927b32ae1d91",
+   "onchain_outcome": "MALFORMED",
+   "why": "version 0"
+  },
+  {
+   "name": "malformed-bad-ttl",
+   "state": "0101c1386b30ef4bc4dd407067ed6122f3bd96472e08d5946ac15813927b32ae1d914090cd989a0100004790cd989a010000",
+   "expected_binding": "c1386b30ef4bc4dd407067ed6122f3bd96472e08d5946ac15813927b32ae1d91",
+   "onchain_outcome": "MALFORMED",
+   "why": "window not on the menu"
+  }
+ ]
+}

@@ -1512,7 +1512,8 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
   check("wallet-next: the bridge's new calls only through the adapter", (qml.match(/bridgeCall\("(address_book_list|address_book_save|address_book_remove|receive_remove|send_back_remove|send_back_check|send_back_plan)"/g) || []).length, 0);
   // 44 Timers in Main.qml at 0520887: none added (the box is checked once per change, never repeated).
-  check("wallet-next: no new timer", (qml.match(/^\s*Timer \{/gm) || []).length, 44);
+  // +1 on names-nft: Collectibles' read, only while that page is open and in front, every 30 s (nft.test.mjs).
+  check("wallet-next: no new timer", (qml.match(/^\s*Timer \{/gm) || []).length, 45);
   check("address step: the box is always shown, nothing pre-filled", [/Field \{ id: sbCodeField; Layout\.fillWidth: true; size: 15; code: true;/.test(qml), /Send to " \+ root\.sbSaved/.test(qml), /\(used before\)/.test(qml)], [true, false, false]);
   check("address step: the button is the tick's", /Action \{ label: root\.sbAsking \? "Getting it ready…" : Logic\.ADDRESS_CONTINUE; strong: true; enabledNow: sbAddressStep\.a\.canContinue; onPressed: root\.sbContinue\(\) \}/.test(qml), true);
   check("address step: the plan refuses an unticked or other value, and says so", /if \(!sbTicked \|\| sbCheck\.key !== Logic\.addressBoxKey\(sbCodeInput\)\) \{\s*\n\s*sbError = /.test(qml), true);

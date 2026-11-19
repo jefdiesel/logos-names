@@ -328,6 +328,11 @@ struct Cli {
     #[arg(long, env = "LOGOS_NAMES_ZONE", global = true)]
     zone: Option<String>,
 
+    /// Account ID of the NFT program `names nft` uses (Logos's reference NFT program). None
+    /// is built in: every deployment is a different program (docs/wallet/NFT.md).
+    #[arg(long, env = "NAMES_NFT_PROGRAM", global = true, value_parser = parse_account)]
+    nft_program: Option<AccountId>,
+
     /// How to speak to the token program: `prototype` is the one in `wallet-tokens/`.
     #[arg(long, env = "NAMES_TOKEN_CODEC", global = true, default_value = "prototype", value_parser = tokens::CODECS)]
     token_codec: String,
@@ -685,6 +690,10 @@ enum Command {
     /// receive private credits. Needs `--token-program` (or NAMES_TOKEN_PROGRAM).
     #[command(subcommand)]
     Token(tokens::TokenCommand),
+    /// NFTs of the reference NFT program: list, make an account ready for a collection,
+    /// send, burn, print, receive. Needs `--nft-program` (or NAMES_NFT_PROGRAM).
+    #[command(subcommand)]
+    Nft(nft::NftCommand),
     /// The LEZ wallet's own commands: make accounts, check balances, sync private
     /// accounts and more. Run `names wallet help` for the list.
     #[command(disable_help_flag = true)]
@@ -829,6 +838,11 @@ mod app_secret;
 #[allow(dead_code)] // the module's own parts
 mod text;
 mod tokens;
+mod nft;
+/// The NFT program's wire format, one file shared with the Basecamp module (as `deposit.rs` is).
+#[path = "../../basecamp-module/rust-lib/src/nft_wire.rs"]
+#[allow(dead_code)]
+mod nft_wire;
 mod zone;
 #[path = "../../basecamp-module/rust-lib/src/zones.rs"]
 #[allow(dead_code)] // the module's own parts
@@ -4015,6 +4029,7 @@ async fn main() -> Result<()> {
                     | Command::Settings
                     | Command::VerifyAccount { .. }
                     | Command::Token(tokens::TokenCommand::Info { .. })
+                    | Command::Nft(nft::NftCommand::Info { .. })
                     | Command::Module(
                         module::Request::AccountNew { .. }
                             | module::Request::AccountLabel { .. }
@@ -4055,6 +4070,8 @@ async fn main() -> Result<()> {
             let tokens = tokens::Tokens::select(cli.token_program, &cli.token_codec)?;
             client.module_token(&tokens, request).await
         }
+        Command::Nft(command) => client.nft(nft::program(cli.nft_program)?, command).await,
+        Command::Module(module::Request::Nft(request)) => client.module_nft(nft::program(cli.nft_program)?, request).await,
         Command::Module(request) => client.module(request).await,
         Command::Balance => {
             // The sync saves the whole storage after every block: under the wallet's lock, with what

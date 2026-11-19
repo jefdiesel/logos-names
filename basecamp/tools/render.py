@@ -250,6 +250,20 @@ BRIDGE = r"""
                 { id: "Hop3x", parent_id: null, post: "hopper/3", name: "hopper", n: 3, parent: null, time: Date.now() - 10800000, text: "A ship in port is safe, but that is not what ships are built for.", cids: [], likes: 0, hidden: false, block: 29800 }] })
             if (method === "board_post" || method === "board_like" || method === "board_hide")
                 return ok({ id: args[0] + "-1792000000000", state: "running", started: Date.now() - 95000 })
+            // Collectibles (NFTs, nft.rs): stand-ins from the scenario's mock.nft; nothing is sent.
+            if (method === "pending_nft_requests") return ok(mock.nft ? mock.nft.requests || [] : [])
+            if (method === "membership_passes") return ok(mock.nft ? mock.nft.passes || [] : [])
+            if (method === "membership_proof_sheet") return mock.nft && mock.nft.proofSheet ? ok(mock.nft.proofSheet) : JSON.stringify({ success: false, value: null, error: "there is no such proof request" })
+            if (/^nft_/.test(method)) {
+                var nm = mock.nft || {}
+                if (method === "nft_programs") return ok(nm.programs || [])
+                if (method === "nft_holdings") return nm.readError ? JSON.stringify({ success: false, busy: true, value: null, error: "still reading your nfts; this updates in a moment" }) : ok({ programs: nm.read || [] })
+                if (method === "nft_sheet") return JSON.stringify({ success: true, value: nm.sheet, error: null, digest: "ab".repeat(32), warnings: nm.warnings || [], program_label: nm.label || null })
+                if (method === "nft_image") return ok(%(avatar)s)
+                if (method === "nft_grants") return ok(nm.grants || [])
+                if (method === "nft_receiving_keys") return ok({ account: args[0], keys: "ab".repeat(32) + ":" + "cd".repeat(33), reveals: "Whoever has these keys can send NFTs and payments to this private account, and can work out its account ID. They can't spend from it or see what it holds. Everything sent to these keys can be told apart as going to the same account, and the keys can be passed on." })
+                return ok(null)
+            }
             if (method === "job") return ok(%(job)s)
             if (method === "set_cli" || method === "set_cli_wallet") return true
             if (method === "settings") return ok({ mode: "deposit", deposits: { normal: "100000000", three: "2000000000" }, admin: "%(bob)s", treasury: "%(bob)s", prices: null })
@@ -1418,6 +1432,79 @@ HEIGHTS.update({name: 1700 for name, _j, _m in WALLET_NEXT if name.startswith("s
 HEIGHTS.update({name: 1800 for name, _j, _m in WALLET_NEXT if name.startswith("card-remove")})
 HEIGHTS.update({name: 1500 for name, _j in MOVE})
 HEIGHTS.update(HEIGHTS_EXTRA)
+
+# Collectibles (NFTs): one program on a throwaway chain, a copy on the public account, the master
+# on a private one, a pending credit, and the sheets the module answers.
+NFT_P = "ErycMYqXUUtducaYmpHZjRgdbLXchrMiV4NZRnmRDNmu"
+NFT_ART = "HA47ERcmfSbDChGcYfBcC4SKaPQ8pJJnv4wxCLu1ejL5"
+NFT_COLL = {"definition": NFT_ART, "name": "Harbour at dawn", "printable_supply": "3", "standard": "Simple", "uri": "https://img.example.com/harbour.png", "creators": "ada.lez"}
+NFT_PROGRAMS = [{"program": NFT_P, "label": "Test chain NFTs", "added": 1, "registry": {"registry": False}}]
+NFT_READ = [{"program": NFT_P, "label": "Test chain NFTs", "registry": {"registry": False}, "read_at": 1792000000,
+             "holdings": [{"account": "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "account_kind": "public", "state": "copy", "holds": True, "definition": NFT_ART, "owned": True, "collection": NFT_COLL},
+                          {"account": "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", "account_kind": "private", "state": "master", "holds": True, "definition": NFT_ART, "print_balance": "2", "collection": NFT_COLL},
+                          {"account": "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", "account_kind": "public", "state": "copy", "holds": True, "definition": "9iHYqf77noB5oyGrxhL5GNVLSKcKQZeGBzp294fMi3Mv", "owned": True, "collection": None},
+                          {"account": "Private/2RHZhw9h534Zr3eq2RGhQete2Hh667foECzXPmSkGni2", "account_kind": "private", "state": "empty", "holds": False}],
+             "pending": [{"position": 161, "definition": NFT_ART, "value": "copy", "to": "Private/2RHZhw9h534Zr3eq2RGhQete2Hh667foECzXPmSkGni2"}],
+             "collections": [{"definition": NFT_ART, "name": "Harbour at dawn", "readable": True, "count": 2, "accounts": []},
+                             {"definition": "9iHYqf77noB5oyGrxhL5GNVLSKcKQZeGBzp294fMi3Mv", "name": None, "readable": False, "count": 1, "accounts": []}]}]
+NFT_PAYERS = [{"account": "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", "balance": "250000000", "enough": True},
+              {"account": "Private/2RHZhw9h534Zr3eq2RGhQete2Hh667foECzXPmSkGni2", "balance": "1000000", "enough": False}]
+NFT_LABEL_WARN = ["The Program Registry isn't installed, so who wrote this NFT program and whether its source is verified is unknown."]
+NFT_PUBLIC_PAYERS = [{"account": "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "balance": "1250000", "enough": True},
+                     {"account": "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", "balance": "0", "enough": False}]
+def nft_sheet(action, proven, public, private, lines, refusal=None):
+    return {"action": action, "from": "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z" if proven else "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "collection": NFT_COLL,
+            "lines": lines, "public": public, "private": private, "proven": proven,
+            "fee": {"about": "1601600", "at_most": "5070616", "inside_proof": proven} if proven else {"about": "232000", "at_most": "640000", "inside_proof": False},
+            "payers": NFT_PAYERS if proven else NFT_PUBLIC_PAYERS, "refusal": refusal}
+NFT_BASE = {"programs": NFT_PROGRAMS, "read": NFT_READ}
+PROOF_REQ = {"id": "p1", "kind": "membership_proof", "app": "door_ui", "collection": NFT_ART, "program": NFT_P, "discloses": "may ask you to prove you hold an NFT of a collection; learns a pass id, nothing about your accounts"}
+PROOF_SHEET = {"request": "p1", "app": "door_ui", "publisher": None, "first_time": True, "title": "door_ui asks you to prove you hold an NFT of Harbour at dawn.", "purpose": "Check in to the members' room",
+               "public": ["That someone made a membership proof now. Not which collection, and not for which app.", "A pass id. It stays the same for this NFT's account. Apps you show it to can tell it is the same holder as before. They cannot tell who you are.", "When the pass starts and ends: until 1795003200000."],
+               "not_shown": "Which NFT, which account holds it, your balances, your other NFTs.",
+               "good_to_know": ["It takes about 10 minutes on this computer and uses most of its memory.", "It replaces your earlier pass for this NFT, if one is live.", "This account can't send anything until it is done.", "A fee reserve is held while it runs and mostly returned."],
+               "holdings": ["Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z"], "public_only": False, "live_passes": [], "fee_payer": "this NFT's account",
+               "checks": {"gate": None, "gate_label": None, "nft_program": NFT_P, "nft_program_label": {"registry": False}}}
+OPEN_NFT = 'root.setWalletNet("0.4"); Qt.callLater(function() { root.namesNet = "0.4"; root.openCollectibles(); %s })'
+SEND_ACTION = '{ action: "send", from: "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", to: "Private/2RHZhw9h534Zr3eq2RGhQete2Hh667foECzXPmSkGni2" }'
+for key, mock, then in [
+    ("collectibles-empty", {"programs": [], "read": []}, ""),
+    ("collectibles", NFT_BASE, ""),
+    ("collectibles-reading", {"programs": NFT_PROGRAMS, "readError": True}, ""),
+    ("collectibles-send-private", dict(NFT_BASE, warnings=NFT_LABEL_WARN, sheet=nft_sheet("send", True, ["Only that the NFT program ran is public."], ["Neither account and not the collection are named: no link between sender and recipient."], ["To Private/2RHZhw9h534Zr3eq2RGhQete2Hh667foECzXPmSkGni2"])),
+     'root.nftOpenSheet("Sending Harbour at dawn (master)", "%s", %s, null, null)' % (NFT_P, SEND_ACTION)),
+    ("collectibles-send-refused", dict(NFT_BASE, sheet=nft_sheet("send", False, ["Both accounts, the collection and the NFT that moved are public."], [], ["To alice (Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR)"], "That account isn't ready for this collection: it has to receive a holding first.")),
+     'root.nftOpenSheet("Sending Harbour at dawn (copy)", "%s", { action: "send", from: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", to: "alice" }, null, null)' % NFT_P),
+    ("collectibles-burn", dict(NFT_BASE, sheet=nft_sheet("burn", False, ["The account, the collection and the burn are public."], [], ["Destroys this copy for good."])),
+     'root.nftOpenSheet("Burning Harbour at dawn (copy)", "%s", { action: "burn", from: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk" }, null, { state: "copy" }); Qt.callLater(function() { root.nftTick("burn", true) })' % NFT_P),
+    ("collectibles-receive", dict(NFT_BASE, sheet=nft_sheet("init", True, ["The collection is public; the private account is not named."], [], ["An account takes NFTs of one collection, after it says so in a small transaction."])),
+     'root.nftOpenSheet("Getting an account ready for this collection", "%s", { action: "init", definition: "%s", "new": "private" }, null, null)' % (NFT_P, NFT_ART)),
+    ("collectibles-ready", dict(NFT_BASE, read=[dict(NFT_READ[0], holdings=NFT_READ[0]["holdings"] + [{"account": "Public/FaPur3GjBrXZoE5Yz6bNjLeqXJzEn6pzXEdE9MCJZsdg", "account_kind": "public", "state": "copy", "holds": False, "definition": NFT_ART, "owned": False, "collection": NFT_COLL}])]),
+     'root.nftResult = "Ready: Public FaPur3…Zsdg takes this collection now (block 2481). Give the sender this account."; root.nftResultKind = "done"; root.nftResultCopy = "Public/FaPur3GjBrXZoE5Yz6bNjLeqXJzEn6pzXEdE9MCJZsdg"'),
+    ("collectibles-job", NFT_BASE, 'root.nftJob = { id: "-wallet-1", kind: "nft_send", label: "Sending Harbour at dawn (master)", started: Date.now() - 190000, proves: true, asking: false }'),
+    ("collectibles-image", NFT_BASE, 'root.nftConsentFor = "%s|Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk|%s"; root.nftConsentUri = "https://img.example.com/harbour.png"' % (NFT_P, NFT_ART)),
+    ("collectibles-image-shown", NFT_BASE, 'root.nftLoadImage("%s", "%s", "https://img.example.com/harbour.png")' % (NFT_P, NFT_ART)),
+    ("collectibles-proof-sheet", dict(NFT_BASE, requests=[PROOF_REQ], proofSheet=PROOF_SHEET), 'root.openProofSheet("p1")'),
+    ("collectibles-proof-public-only", dict(NFT_BASE, requests=[PROOF_REQ], proofSheet=dict(PROOF_SHEET, holdings=[], public_only=True)), 'root.openProofSheet("p1")'),
+    ("collectibles-passes", dict(NFT_BASE, passes=[{"request": "p1", "app": "door_ui", "status": {"state": "proving", "elapsed_seconds": 245}},
+                                                   {"request": "p2", "app": "door_ui", "status": {"state": "failed", "code": "GATE_NOT_PINNED", "plain_message": "The membership gate on this network isn't the pinned, unchangeable one (or none is set up yet). Nothing was sent."}}],
+                                 grants=[{"app": "gallery_ui", "accounts": ["Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk"], "capability": "nft_list", "discloses": "which NFTs these accounts hold, with their collections and metadata"},
+                                         {"app": "gallery_ui", "accounts": None, "capability": "nft_transfers", "discloses": "may ask you to send an NFT from an account it can list; you approve each one"},
+                                         {"app": "door_ui", "accounts": None, "capability": "membership_proof", "discloses": "may ask you to prove you hold an NFT of a collection; learns a pass id, nothing about your accounts"}]), ""),
+    ("collectibles-keys", dict(NFT_BASE, read=[dict(NFT_READ[0], holdings=NFT_READ[0]["holdings"] + [{"account": "Private/HqRvXf9Lw3jQm5nYc2KpT8sDzV6bR4aE1uGhJ7kNoP2x", "account_kind": "private", "state": "copy", "holds": False, "definition": NFT_ART, "owned": False, "collection": NFT_COLL}])]),
+     'root.nftShowKeys("Private/HqRvXf9Lw3jQm5nYc2KpT8sDzV6bR4aE1uGhJ7kNoP2x")'),
+    ("collectibles-app-list", dict(NFT_BASE, requests=[{"id": "q1", "kind": "nft_list", "app": "gallery_ui", "reason": "to show your art on your profile", "discloses": "which NFTs these accounts hold, with their collections and metadata"}]), ""),
+    ("collectibles-app-send", dict(NFT_BASE, warnings=NFT_LABEL_WARN, requests=[{"id": "q2", "kind": "nft_transfer", "app": "gallery_ui", "summary": "a gift for ada", "program": NFT_P, "from": "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", "destination": "ada", "action": '{"action":"send","from":"Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk","to":"ada"}'}],
+         sheet=nft_sheet("send", False, ["Both accounts, the collection and the NFT that moved are public."], [], ["Leaving: a copy of this collection.", "To ada (Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR)"])),
+     'root.nftOpenSheet("Sending an NFT for gallery_ui", "%s", { action: "send", from: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", to: "ada" }, { id: "q2", app: "gallery_ui" }, null)' % NFT_P),
+]:
+    MOCKS[key] = {"nft": mock}
+    SCENARIOS[key] = OPEN_NFT % (("Qt.callLater(function() { " + then + " })") if then else "")
+    HEIGHTS[key] = 2600
+# Settings, Connected apps, with NFT capabilities (one row each, with Remove).
+MOCKS["settings-nft-grants"] = MOCKS["collectibles-passes"]
+SCENARIOS["settings-nft-grants"] = 'root.setWalletNet("0.4"); Qt.callLater(function() { root.namesNet = "0.4"; root.section = "settings"; root.loadAppGrants() })'
+HEIGHTS["settings-nft-grants"] = 2700
 
 def main():
     qml, out_dir = sys.argv[1], sys.argv[2]
