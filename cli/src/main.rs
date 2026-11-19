@@ -252,6 +252,10 @@ enum DeedCommand {
     Claim {
         #[arg(value_parser = parse_name)]
         name: String,
+        /// Sign from this account of the wallet even if it doesn't hold the name (the
+        /// program refuses it: for testing that refusal on a chain).
+        #[arg(long, hide = true, value_parser = parse_new_owner)]
+        signer: Option<AccountId>,
     },
 }
 
@@ -1406,7 +1410,7 @@ impl Client {
     }
 
     /// Claims the deed of `name`, held here: free, optional, once while it is held.
-    async fn deed_claim(&mut self, name: &str) -> Result<()> {
+    async fn deed_claim(&mut self, name: &str, signer: Option<AccountId>) -> Result<()> {
         let (Derived { id, .. }, record, _) = self.lookup_held(name).await?;
         if record.deed.is_some() {
             bail!("{name}{NAME_SUFFIX} already has a deed (`names deed show {name}`)");
@@ -1415,12 +1419,15 @@ impl Client {
         if tier != TIER_NORMAL {
             bail!("{name}{NAME_SUFFIX} is locked (one to four characters, or reserved), so it has no deed");
         }
-        let holder = self.holder(name, &id, &record)?;
+        let holder = match signer {
+            Some(signer) => signer,
+            None => self.holder(name, &id, &record)?,
+        };
         let mut nonce = [0u8; 32];
         getrandom::fill(&mut nonce).map_err(|e| anyhow!("no randomness: {e}"))?;
         let [record_seed, ..] = name_seeds(&id);
         let mut mentions = vec![self.own_actor(holder), self.registry_actor(record_seed)];
-        mentions.extend(self.deed_mentions(&id, &nonce, &[record.owner], true));
+        mentions.extend(self.deed_mentions(&id, &nonce, &[owner_tag(&id, &holder)], true));
         println!("claiming the deed of {name}{NAME_SUFFIX} (free): definition {}", deed_definition_address(&self.program, &id, &nonce));
         self.send_with(mentions, &Instruction::ClaimDeed { id, nonce, length }, 0, true).await
     }
@@ -4545,7 +4552,7 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&client.deed_show(&name).await?)?);
             Ok(())
         }
-        Command::Deed(DeedCommand::Claim { name }) => client.deed_claim(&name).await,
+        Command::Deed(DeedCommand::Claim { name, signer }) => client.deed_claim(&name, signer).await,
         Command::Release { name } => client.release(&name).await,
         Command::Open { name, port, no_browser, storage } => {
             let name = client.following(&name).await?;
