@@ -129,7 +129,7 @@ BRIDGE = r"""
             if (method === "get_config") return (function(c) { return wrapNet ? ok(c) : JSON.stringify(c) })({ features: ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "test_lez_faucet"], bridge_programs: ["JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr", "BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf", "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA"], names_network: { id: root.mockNet || (%(mock)s).names_network || "lez-0.3" }, network_choice: (%(mock)s).network_choice || null, custom_network: (%(mock)s).custom_network || null, custom_network_last: (%(mock)s).custom_network_last || null, lez04_chain: "2da7f7dfb6e51a28c942ea80391aa518253ec515e98d28cb4d83cc9e16ff5374", network_reset_at: (%(mock)s).network_reset_at || 0, zone: (%(mock)s).zone || { id: "home", name: "Home", channel: "%(home_channel)s", home: true }, names_sequencer: "http://127.0.0.1:3040", registry: %(registry)s, sequencer: (%(mock)s).zone ? "http://127.0.0.1:3041" : "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json", cli: "/Users/you/.local/bin/names", cli_wallet: "/Users/you/.lee/wallet", bridge_key: "%(bridge_key)s", bridge_node: null, module_version: root.neededModule })
             if (method === "normalize") return String(args[0]).toLowerCase().replace(/\.lez$/, "")
             if (method === "mine") return ok({ names: names.filter(function(entry) { return !(%(mock)s).noNames && entry.owner === "%(alice)s" }).map(function(entry) {
-                return { name: entry.name, display: entry.name + ".lez", owner: entry.owner, expires: null, never: true, lapsed: false } }), pending: ((%(mock)s).pending || []).map(function(p) {
+                return { name: entry.name, display: entry.name + ".lez", owner: entry.owner, expires: null, never: true, lapsed: false } }).concat((%(mock)s).extraMine || []), pending: ((%(mock)s).pending || []).map(function(p) {
                     return Object.assign({}, p, { ready_at: Date.now() + p.ready_in * 60000, reveal_by: Date.now() + p.by_in * 60000 }) }) })
             if (method === "keep") return ok(String(args[0]))
             // hopper.lez and ada.lez are held privately by the names CLI's wallet.
@@ -287,6 +287,9 @@ BRIDGE = r"""
             if (method === "page_view" || method === "page") { var pages = %(pages)s; return ok(pages[args[0]] || null) }
             if (method === "resolve") {
                 var name = String(args[0]).toLowerCase().replace(/\.lez$/, "")
+                var md = ((%(mock)s).deeds || {})[name]
+                if (md && !names.some(function(n) { return n.name === name }))
+                    return ok({ name: name, display: name + ".lez", owner_tag: "c0ffee", expires: null, never: true, lapsed: false, deposit: "1000000", account: null, texts: {}, deed: md })
                 for (var i = 0; i < names.length; i++) {
                     if (names[i].name !== name) continue
                     var records = %(records)s
@@ -1587,7 +1590,8 @@ for _name, _js, _mock in [
     ("deed-claiming", _ON04 % 'root.openWallet("names"); root.againAfter(150, function() { root.claimDeed("turing") })', {"names_network": "lez-0.4"}),
     ("deed-claimed", _ON04 % 'root.openWallet("names"); root.againAfter(150, function() { root.deedLineName = "grace"; root.deedLine = "grace\'s NFT is yours: its card is in Collectibles. It moves with the name when you transfer it." })', {"names_network": "lez-0.4", "deeds": {"grace": _DEED}}),
     ("deed-collectibles", _ON04 % ('root.openCollectibles(); root.againAfter(150, function() { ' + _LONG + ' })'), {"names_network": "lez-0.4", "deeds": {"turing": _DEED, "grace": _DEED}}),
-    ("deed-card-long", _ON04 % ('root.openCollectibles(); root.againAfter(400, function() { ' + _LONG + ' })'), {"names_network": "lez-0.4", "deeds": {"turing": _DEED}}),
+    ("deed-card-long", _ON04 % 'root.openCollectibles()', {"names_network": "lez-0.4", "deeds": {"turing": _DEED, "thirtytwocharacterlongname-lns32": _DEED},
+        "extraMine": [{"name": "thirtytwocharacterlongname-lns32", "display": "thirtytwocharacterlongname-lns32.lez", "owner": ALICE, "expires": None, "never": True, "lapsed": False}]}),
     ("deed-collectibles-none", _ON04 % 'root.openCollectibles()', {"names_network": "lez-0.4"}),
     ("deed-transfer", _ON04 % 'root.openWallet("names"); root.againAfter(150, function() { root.openTransfer("grace"); transferToField.text = "Public/%s"; root.transferConfirm = true })' % BOB, {"names_network": "lez-0.4", "deeds": {"grace": _DEED}}),
 ]:
