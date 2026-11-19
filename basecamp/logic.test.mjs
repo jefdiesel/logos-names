@@ -1531,6 +1531,29 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("bridge text: the claim's phases are plain and cleaned", /textFormat: Text\.PlainText\n[^\n]*\n[^\n]*\n[^\n]*Logic\.clean\(modelData\.hint\)/.test(qml), true);
 }
 
+// F: another app's burn shows a CHECKED Ethereum address when the names module could open its exit.
+{
+  const L = await import("./qml/logic.mjs");
+  const checked = { burn_opening: { v: 1, checked: true, recipient: "0xb0275f9e94b2a437c834bf7dea5699f0b8707ec2", recipient_halves: ["0xb0275f9e94b2a437c834", "bf7dea5699f0b8707ec2"], words_text: "a · b · c · d" } };
+  check("burn address: checked", L.burnAddressLine(checked), "Ethereum address: 0xb0275f9e94b2a437c834bf7dea5699f0b8707ec2, checked by this wallet against the burn's exit commitment. Its four words: a · b · c · d. Compare them on the bridge page with that Ethereum wallet connected.");
+  check("burn address: halves only when checked", [L.burnAddressHalves(checked), L.burnAddressHalves({ burn_opening: { checked: false } }), L.burnAddressHalves({})], [["0xb0275f9e94b2a437c834", "bf7dea5699f0b8707ec2"], [], []]);
+  check("burn address: unchecked says so, the module's why cleaned", L.burnAddressLine({ burn_opening: { v: 1, checked: false, why: "No opening.\u202e" } }), "Ethereum address: sealed in the burn's exit commitment; the wallet can't check it here. No opening.");
+  check("burn address: an older request keeps the sheet's own line", [L.burnAddressLine({}), L.burnAddressLine(null)], ["", ""]);
+}
+
+// D: Import account.
+{
+  const L = await import("./qml/logic.mjs");
+  const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  check("import: the result line", [L.importResultLine({ account: "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", label: "Shop", notice: "Imported. Keep its key." }),
+    L.importResultLine({ account: "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", notice: "" }), L.importResultLine(null)],
+    ["Imported Shop (7wx3U7…LznR). Imported. Keep its key.", "Imported public account 7wx3U7…LznR. ", "Imported."]);
+  check("import: the key field shows dots and is emptied as the import starts", /Field \{ id: importKeyField;[^}]*secret: true/.test(qml) && /try \{ importKeyField\.text = "" \} catch \(e\) \{\}\n        accountChange\("cli_account_import"/.test(qml), true);
+  check("import: nothing pasted is logged by the app", /console\.log\([^)]*(importKeyField|asked|textOrFile)/.test(qml), false);
+  check("import: the press says Importing… at once", /label: root\.accountsBusy \? "Importing…" : "Import it"/.test(qml), true);
+  check("import: the warning and the recovery-phrase line are fixed words", [L.IMPORT_WARNING.indexOf("Anyone who sees it") > 0, L.IMPORT_COVER_LINE.indexOf("recovery phrase won't bring") > 0], [true, true]);
+}
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);
 

@@ -1301,6 +1301,13 @@ SCENARIOS["receive-code-imported-card"] = ('root.cliNames = []; root.cliPending 
     'root.againAfter(300, function() { root.receiveResult = Object.assign({}, %s, { account_notice: %s }); root.receiveDetails = true }) }) })'
     % (json.dumps(MOCKS["receive-code"]["bridge"]["make_public_deposit_request"]), json.dumps(_IMPORTED_LINE)))
 HEIGHTS_EXTRA = {"receive-code-imported-card": 1700}
+# Import account (item D): the form with the key pasted (shown as dots), and the line after an import.
+_IMP = 'root.section = "settings"; root.loadAccounts(); root.againAfter(150, function() { root.moduleFeatures = root.moduleFeatures.concat(["account_import"]); root.againAfter(50, function() { %s }) })'
+SCENARIOS["settings-account-import"] = _IMP % 'root.accountImportOpen = true; importKeyField.text = "5ec2e7e1c0ffee5ec2e7e1c0ffee5ec2e7e1c0ffee5ec2e7e1c0ffee5ec2e7e1"; importLabelField.text = "Old wallet"'
+SCENARIOS["settings-account-imported"] = _IMP % ('root.accountImportKind = "done"; root.accountImportLine = Logic.importResultLine({ account: "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", label: "Old wallet", notice: %s })'
+                                                 % json.dumps("Your recovery phrase does not bring this account back: keep its key (or a backup of this wallet) safe. Bridged ETH claimed into it can be moved to an account of your recovery phrase with Move."))
+SCENARIOS["settings-account-import-refused"] = _IMP % 'root.accountImportOpen = true; root.accountsError = "This wallet has that account already. Nothing was imported."'
+HEIGHTS_EXTRA.update({"settings-account-import": 2700, "settings-account-imported": 2700, "settings-account-import-refused": 2700})
 # Signed withdraw-to codes (roadmap 9): the bridge says the code is signed by its recipient, or not.
 SCENARIOS["sendback-words-signed"] = SCENARIOS["sendback-words"]
 MOCKS["sendback-words-signed"] = sb_mock(send_back_check=dict(SB_CHECK, signed=True, signed_by=SB_RECIPIENT, signature_line="(the module's line is not shown)"))

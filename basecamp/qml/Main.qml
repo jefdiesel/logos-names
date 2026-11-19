@@ -3447,6 +3447,39 @@ Item {
         accountChange("cli_account_label", [account, label], function() { accountRenaming = "" })
     }
 
+    // ── Import account (item D; account_import.rs): one public account from its key or key-chain
+    //    JSON, pasted or picked from a file. The text goes to the module once and the field is
+    //    emptied at once, whatever the answer; nothing of it is ever shown or logged here. ──
+    property bool accountImportOpen: false
+    property string accountImportLine: ""
+    property string accountImportKind: ""
+    readonly property bool accountImportCan: moduleFeatures.indexOf("account_import") >= 0
+    function importAccount(textOrFile, label) {
+        if (accountsBusy || String(textOrFile || "").trim() === "")
+            return
+        accountImportLine = ""
+        accountImportKind = ""
+        var asked = String(textOrFile)
+        try { importKeyField.text = "" } catch (e) {}
+        accountChange("cli_account_import", [asked, label], function(value) {
+            accountImportOpen = false
+            accountImportKind = "done"
+            accountImportLine = Logic.importResultLine(value)
+        })
+        asked = ""
+    }
+    function pickImportFile() {
+        try {
+            var d = Qt.createQmlObject('import QtQuick.Dialogs; FileDialog { title: "Choose the account\'s key file"; nameFilters: ["Key files (*.json *.txt *.key)", "All files (*)"] }', root, "importPicker")
+            d.accepted.connect(function() { root.importAccount(String(d.selectedFile), importLabelField.text); d.destroy() })
+            d.rejected.connect(function() { d.destroy() })
+            d.open()
+        } catch (e) {
+            accountImportKind = "problem"
+            accountImportLine = "This Basecamp can't open a file picker here. Paste the key instead."
+        }
+    }
+
     function newAccount(kind, label) {
         accountChange("cli_account_new", [kind, label], function(value) {
             accountNewKind = ""
@@ -13373,7 +13406,27 @@ Item {
                         spacing: 10
                         Action { label: "+  New private account"; enabledNow: !root.accountsBusy; onPressed: { root.accountNewKind = "private"; newAccountField.text = "" } }
                         Action { label: "+  New public account"; enabledNow: !root.accountsBusy; onPressed: { root.accountNewKind = "public"; newAccountField.text = "" } }
+                        Action { visible: root.accountImportCan; label: "+  Import a public account"; enabledNow: !root.accountsBusy; onPressed: { root.accountImportOpen = true; root.accountImportLine = ""; importKeyField.text = ""; importLabelField.text = "" } }
                     }
+                    // Import account (item D): the key is pasted (shown as dots) or picked from a file.
+                    ColumnLayout {
+                        visible: root.accountImportOpen && root.accountImportCan
+                        Layout.fillWidth: true
+                        spacing: 6
+                        StatusLine { kind: "waiting"; text: Logic.IMPORT_WARNING }
+                        Hint { font.pixelSize: root.px(15); text: Logic.IMPORT_COVER_LINE }
+                        Field { id: importKeyField; Layout.fillWidth: true; size: 16; secret: true; code: true; hint: "The account's signing key (64 hex digits) or its key-chain JSON" }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Field { id: importLabelField; Layout.fillWidth: true; size: 16; hint: "Nickname (optional)" }
+                            Action { label: root.accountsBusy ? "Importing…" : "Import it"; strong: true; enabledNow: !root.accountsBusy && importKeyField.text.trim() !== ""; onPressed: root.importAccount(importKeyField.text, importLabelField.text) }
+                            Action { label: "Choose a file…"; enabledNow: !root.accountsBusy; onPressed: root.pickImportFile() }
+                            Action { label: "Cancel"; enabledNow: !root.accountsBusy; onPressed: { importKeyField.text = ""; root.accountImportOpen = false } }
+                        }
+                        StatusLine { visible: root.accountsBusy; kind: "working"; text: "Importing it into this wallet…" }
+                    }
+                    StatusLine { visible: root.accountImportLine !== ""; kind: root.accountImportKind; text: root.accountImportLine }
                     ColumnLayout {
                         visible: root.accountNewKind !== ""
                         Layout.fillWidth: true

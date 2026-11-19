@@ -3350,3 +3350,39 @@ export function receiveSecretLine(result) {
                      : "The wallet makes this deposit's secret from your account's own key; this app never sees it.")
         + " The page gets only a code: the amount, the vault and a commitment that hides which account receives it."
 }
+
+// ── A burn's Ethereum address, checked (F; the names module's burn_opening.rs) ──
+
+/// The approval sheet's address line for a burn, from the request's `burn_opening` (the names module
+/// recomputed the exit commitment from the LEZ Bridge's opening and its own key): "" when the request
+/// has none (an older LEZ Bridge or names module: the sheet keeps its "sealed" line). Fixed words
+/// around values the module checked; every value cleaned.
+export function burnAddressLine(request) {
+    var o = request && request.burn_opening ? request.burn_opening : null
+    if (!o)
+        return ""
+    if (o.checked === true)
+        return "Ethereum address: " + clean(o.recipient) + ", checked by this wallet against the burn's exit commitment. Its four words: "
+            + clean(o.words_text) + ". Compare them on the bridge page with that Ethereum wallet connected."
+    return "Ethereum address: sealed in the burn's exit commitment; the wallet can't check it here. " + clean(o.why || "")
+}
+
+/// The checked address in two halves (to read back), or [] when it isn't checked.
+export function burnAddressHalves(request) {
+    var o = request && request.burn_opening ? request.burn_opening : null
+    return o && o.checked === true && Array.isArray(o.recipient_halves) ? o.recipient_halves.map(clean) : []
+}
+
+// ── Import account (item D; the names module's account_import.rs) ──
+
+export const IMPORT_WARNING = "Paste a key only from a wallet you own, on this computer. Anyone who sees it can spend from that account."
+export const IMPORT_COVER_LINE = "Your recovery phrase won't bring an imported account back: keep its key or a backup of this wallet. Bridged ETH claimed into it can't be bridged back to Ethereum from here; move it to an account of your recovery phrase first (Move)."
+
+/// The line after an import: the account and the module's one-time notice, in fixed words around it.
+export function importResultLine(value) {
+    var v = value || {}
+    var account = clean(v.account)
+    if (!/^Public\//.test(account))
+        return "Imported."
+    return "Imported " + (v.label ? clean(v.label) + " (" + idShort(account) + ")" : "public account " + idShort(account)) + ". " + clean(v.notice || "")
+}

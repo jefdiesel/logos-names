@@ -283,3 +283,17 @@ message 6,595 bytes, byte-identical in encoding to the on-chain public claim of 
 2853) apart from the opening. Planning twice gives the same digest; a send with another digest
 stops before `phase: prove`. The drain (V's 100,000,000 dUSDC to P, nothing declared) shows as
 "pays 100 dUSDC" with P's holding +100,000,000 and is refused. Nothing was proven or sent.
+
+## 7. A burn's address, checked (`burn_opening`, 2026-11-19)
+
+`propose_relayed_call` takes an `opening` beside a burn's call (rfp-022 `modules/NAMES-SEND-BACK.md`
+§3.3a). The module (`basecamp-module/rust-lib/src/burn_opening.rs`) strips it before the call is read,
+makes k' with the names CLI (`module app-secret`, scope `RFP022/exit`, tag `RFP022/ek`, the opening's
+index and context; only when the asking app holds that grant, counted in its hourly secret calls),
+recomputes E and sets the request's `burn_opening`: `{checked: true, recipient, recipient_halves,
+words_text}` when E equals the burn's memo, a refusal when it doesn't, `{checked: false, why}` without
+an opening or a grant. `get_config` `features` lists `burn_opening`. The app's line is
+`Logic.burnAddressLine`; the sheet itself lives on branch `names-safety-b`, so its wiring is the patch
+`docs/wallet/burn-opening-sheet.patch` (one line of its `burnDestination`), applied at merge.
+Golden vector `basecamp-module/rust-lib/testdata/burn-opening-v1.json` (rfp-022's, byte for byte). Unit
+tests only.

@@ -32,11 +32,13 @@
 //! a job (`cli_*` and `job`; see `cli.rs`): its changes are proven on this
 //! machine with the CLI's own keys.
 
+mod account_import;
 mod activity;
 mod avatar;
 mod backup;
 mod bridge_net;
 mod bridge_send;
+mod burn_opening;
 mod chain;
 mod chain_keys;
 mod chain_fee;
@@ -866,6 +868,16 @@ pub trait NamesModule: Send + 'static {
     /// Refused while a CLI job runs, since a job saves the wallet when it ends.
     fn cli_account_new(&mut self, kind: String, label: String) -> String;
 
+    /// Imports ONE public account into the wallet in use from `text`: its signing key (64 hex
+    /// digits) or its key-chain JSON (`{"Public": …}`, `{"ImportedPublic": …}`, `{private_key,
+    /// account?}`), with an optional nickname. The names tool reads the key on standard input
+    /// (`names module account-import`), never on a command line; nothing of `text` is ever in a
+    /// reply, an error, a log or the history, and this module's copies are overwritten after use.
+    /// `{account, imported: true, notice, label}`. The recovery phrase does not cover the account.
+    /// A private account's key chain is refused. Names app only. get_config `features` lists
+    /// `account_import` (`account_import.rs`).
+    fn cli_account_import(&mut self, text: String, label: String) -> String;
+
     /// Gives the wallet's `account` (`Public/<id>` or `Private/<id>`) the
     /// nickname `label`; an empty one clears it. `{account, label}`.
     fn cli_account_label(&mut self, account: String, label: String) -> String;
@@ -1584,7 +1596,7 @@ const MODULE_VERSION: &str = "0.17.0";
 /// the app wasn't given is a request to add it to the app's grant, not "approved").
 /// `relayed_bridge_burn`: `propose_relayed_call` signs a burn of one denomination to a bridge whose
 /// vault releases by proof (`provider_public::burn_check`, privacy `bridge_public_burn`).
-const MODULE_FEATURES: [&str; 9] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "bundled_tool", "relayed_bridge_burn", "test_lez_faucet", "bridge_token_send"];
+const MODULE_FEATURES: [&str; 11] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "bundled_tool", "relayed_bridge_burn", "test_lez_faucet", "bridge_token_send", "burn_opening", "account_import"];
 
 /// What a call that says it is a burn answers when it isn't one to a bridge a burn may go to.
 const NOT_A_BURN_BRIDGE: &str = "the wallet signs a burn only to a bridge whose vault releases by proof (bridge v4 or v5), and this call isn't one to its token program";
@@ -3345,6 +3357,55 @@ impl Names {
     /// an install that worked is put to use (`version`, `path`, `warning`),
     /// one that didn't says why (`problem`); a move to private says whether
     /// anything `moved`; a failed payment says why.
+    /// `propose_relayed_call`'s `burn_opening` for a burn (`burn_opening::for_burn`): k' made by the
+    /// names CLI as `app_secret` would make it for `app` (only when `app` holds that grant; counted in
+    /// its hourly secret calls). The tool's words never reach the sheet.
+    fn burn_opening_of(&mut self, app: &str, account: &str, opening: Option<&Value>, asked: &Value) -> Result<Value, String> {
+        let message = asked["message"].as_str().and_then(|m| registry::unhex(m.trim().trim_start_matches("0x")).ok()).unwrap_or_default();
+        let memo = bridge_net::decode_burn(&message).map(|b| b.memo).map_err(|_| "the burn's message can't be read, so the wallet doesn't sign it".to_owned())?;
+        let granted = self.store().private.has_secret(app, account, burn_opening::SCOPE);
+        let setup = self.cli_setup();
+        let now = provider::now_ms();
+        let calls = self.secret_calls.entry(app.to_owned()).or_default();
+        burn_opening::for_burn(opening, &memo, |o| {
+            if !granted {
+                return Ok(None);
+            }
+            calls.retain(|at| now.saturating_sub(*at) < 60 * 60 * 1000);
+            if calls.len() >= provider_private::MAX_SECRET_CALLS_PER_HOUR {
+                return Err("this app has asked for secrets too often in the last hour; try again later".to_owned());
+            }
+            calls.push(now);
+            let setup = setup?;
+            setup.wallet_ready()?;
+            let input = json!({ "app": app, "account": account, "scope": burn_opening::SCOPE, "context": registry::hex(&burn_opening::context(o)),
+                                "tag": burn_opening::TAG, "first": o.index, "count": 1 });
+            let unreadable = || "the wallet couldn't make the values to check the burn's address with; nothing was shown to approve".to_owned();
+            let output = cli::run_with_input(&setup, vec!["module".into(), "app-secret".into()], &input.to_string(), SECRET_PATIENCE).map_err(|_| unreadable())?;
+            let answer: Value = serde_json::from_str(cli::last_line(&output)).map_err(|_| unreadable())?;
+            let value = answer["values"][0].as_str().filter(|v| answer["account"] == account && v.len() == 64).ok_or_else(unreadable)?;
+            let k: [u8; 32] = registry::unhex(value).ok().and_then(|b| b.try_into().ok()).ok_or_else(unreadable)?;
+            Ok(Some(k))
+        })
+    }
+
+    /// `cli_account_import`, once the key is read: the names tool imports it from standard input.
+    fn account_import_with(&mut self, key: &str, account: Option<&str>, label: &str) -> Result<Value, String> {
+        let setup = self.cli_setup()?;
+        setup.wallet_ready()?;
+        self.no_job_running()?;
+        let mut input = account_import::request(key, account, label);
+        let ran = cli::run_with_input(&setup, vec!["module".into(), "account-import".into()], &input, SECRET_PATIENCE);
+        account_import::wipe(&mut input);
+        let output = ran.map_err(|why| account_import::refusal(&why).to_owned())?;
+        let entry: Value = serde_json::from_str(cli::last_line(&output)).map_err(|_| "The import didn't go through. Nothing was imported.".to_owned())?;
+        let imported = entry["account"].as_str().filter(|a| a.starts_with("Public/") && registry::parse_account(&a["Public/".len()..]).is_ok()).map(str::to_owned);
+        let imported = imported.ok_or_else(|| "The import didn't go through. Nothing was imported.".to_owned())?;
+        // The accounts the app reads next include it.
+        self.forget_balances();
+        Ok(json!({ "account": imported, "imported": true, "notice": account_import::IMPORTED_NOTICE, "label": entry["label"] }))
+    }
+
     /// `bridge_token_send`: the bridge's Config (kept, or read for at most a few seconds), the
     /// move checked against it, then a wallet job (`dry`: the check, which sends nothing).
     fn bridge_send_start(&self, bridge: &str, definition: &str, amount: &str, from: &str, to: &str, send: bool) -> Result<Value, String> {
@@ -6508,6 +6569,33 @@ impl NamesModule for Names {
         })())
     }
 
+    fn cli_account_import(&mut self, text: String, label: String) -> String {
+        let mut text = text;
+        let out = match only_the_names_app() {
+            Err(refused) => Err(refused),
+            Ok(()) => match account_import::content(&text) {
+                Err(why) => Err(why.to_owned()),
+                Ok(file) => {
+                    let mut file = file;
+                    let done = match account_import::key_of(file.as_deref().unwrap_or(&text)) {
+                        Err(why) => Err(why.to_owned()),
+                        Ok((mut key, account)) => {
+                            let done = self.account_import_with(&key, account.as_deref(), &label);
+                            account_import::wipe(&mut key);
+                            done
+                        }
+                    };
+                    if let Some(file) = file.as_mut() {
+                        account_import::wipe(file);
+                    }
+                    done
+                }
+            },
+        };
+        account_import::wipe(&mut text);
+        reply(out)
+    }
+
     fn cli_account_label(&mut self, account: String, label: String) -> String {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
@@ -7343,6 +7431,8 @@ impl NamesModule for Names {
         reply((|| {
             let app = asking_app()?;
             let now = provider::now_ms();
+            // A burn's opening (burn_opening.rs) is read here; the call itself goes on without it.
+            let (call_json, opening) = burn_opening::split(&call_json);
             if self.net != Net::Lez04 {
                 return Err("calls someone else pays for are signed on LEZ 0.4 (the bridge test network) only; the wallet is on LEZ 0.3 now".to_owned());
             }
@@ -7403,6 +7493,11 @@ impl NamesModule for Names {
             }
             request["report"] = report;
             request["check"] = json!("ready");
+            // The burn's Ethereum address, checked against its exit commitment when the app opened it.
+            if asks_burn {
+                let written = request["account"].as_str().unwrap_or_default().to_owned();
+                request["burn_opening"] = self.burn_opening_of(&app, &written, opening.as_ref(), &asked)?;
+            }
             self.queue_any(&app, request, now)
         })())
     }
@@ -12927,6 +13022,71 @@ mod tests {
 
     /// The LEZ 0.4 faucet through the module: the Names app only, LEZ 0.4 only, the endpoint's
     /// answer kept plain; the feature is published.
+    /// Import account (item D): the key goes to the names tool on standard input only, and never
+    /// comes back in a reply, an error, the argv, a log or the history, on success or failure.
+    #[test]
+    fn an_imported_key_never_shows_anywhere_but_the_tool_s_stdin() {
+        let marker = "5ec2e7e1c0ffee5ec2e7e1c0ffee5ec2e7e1c0ffee5ec2e7e1c0ffee5ec2e7e1";
+        let scan = |dir: &std::path::Path, said: &str| {
+            assert!(!said.contains(marker) && !said.contains("5ec2e7"), "{said}");
+            for entry in walk(dir) {
+                if entry.ends_with("stdin.txt") {
+                    continue;
+                }
+                let text = String::from_utf8_lossy(&std::fs::read(&entry).unwrap_or_default()).into_owned();
+                assert!(!text.contains(marker), "{} holds the key", entry.display());
+            }
+            let history = config_dir().map(|d| std::fs::read_to_string(d.join("activity.json")).unwrap_or_default()).unwrap_or_default();
+            assert!(!history.contains(marker), "the history holds the key");
+        };
+        let ok_tail = format!("printf '%s\\n' \"$*\" > \"$(dirname \"$0\")/argv.txt\"\ncase \"$*\" in\n *account-import*) cat > \"$(dirname \"$0\")/stdin.txt\"; echo '{{\"account\":\"Public/{OTHER}\",\"label\":\"Shop\"}}' ;;\n esac");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let (mut names, dir) = with_wallet("import-ok", &ok_tail);
+        let json_entry = json!({ "ImportedPublic": { "account_id": OTHER, "pub_sign_key": marker } }).to_string();
+        let said = names.cli_account_import(json_entry, "Shop".into());
+        let v = parsed(&said);
+        assert_eq!((v["value"]["account"].as_str(), v["value"]["imported"].as_bool()), (Some(format!("Public/{OTHER}").as_str()), Some(true)), "{said}");
+        assert!(v["value"]["notice"].as_str().unwrap().contains("recovery phrase does not bring this account back"));
+        let stdin = std::fs::read_to_string(dir.join("stdin.txt")).unwrap();
+        assert!(stdin.contains(marker), "the key reached the tool, on standard input");
+        assert!(!std::fs::read_to_string(dir.join("argv.txt")).unwrap().contains(marker), "never on the command line");
+        let _ = std::fs::remove_file(dir.join("stdin.txt"));
+        scan(&dir, &said);
+        let _ = std::fs::remove_dir_all(&dir);
+        // The tool refuses and echoes what it read: none of it comes back.
+        let (mut names, dir) = with_wallet("import-refused", "case \"$*\" in\n *account-import*) cat >&2; echo 'Error: this wallet has that account already; nothing was imported' >&2; exit 1 ;;\n esac");
+        let said = names.cli_account_import(marker.into(), String::new());
+        assert_eq!(parsed(&said)["error"], "This wallet has that account already. Nothing was imported.");
+        scan(&dir, &said);
+        let (mut names, dir2) = with_wallet("import-odd", "cat >&2; exit 1");
+        let said = names.cli_account_import(format!("0x{marker}"), String::new());
+        assert_eq!(parsed(&said)["error"], "The import didn't go through. Nothing was imported.");
+        scan(&dir2, &said);
+        // Not a key, a private key chain, another app: refused before anything runs, in fixed words.
+        for (text, words) in [("hello", "isn't a signing key"), ("{\"Private\":{}}", "private account")] {
+            let said = names.cli_account_import(text.into(), String::new());
+            assert!(parsed(&said)["error"].as_str().unwrap().contains(words), "{said}");
+        }
+        as_caller(app("other_app"));
+        let said = names.cli_account_import(marker.into(), String::new());
+        assert_eq!(parsed(&said)["success"], false);
+        assert!(!said.contains(marker));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert!(parsed(&names.get_config())["features"].as_array().unwrap().contains(&json!("account_import")));
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(dir2);
+    }
+
+    /// Every file under `dir`.
+    fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() { out.extend(walk(&path)) } else { out.push(path) }
+        }
+        out
+    }
+
     #[test]
     fn the_test_lez_faucet_is_asked_on_lez_0_4_only() {
         let url = registry::stub_rpc(|request| match request["method"].as_str().unwrap_or_default() {
